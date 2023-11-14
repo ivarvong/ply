@@ -45,9 +45,11 @@ export function validateIdent({ name, email, time, tz = '+0000' }: IdentInput = 
 }
 
 // A pkt-line field. CR, LF, or NUL ends the line or the command the way a header injection does.
-export function validateWire(value: unknown, what: string): string {
+// The return is WireText: the same characters, branded, so a later field cannot skip this check.
+export function validateWire(value: unknown, what: string): WireText {
   if (typeof value !== 'string' || /[\0\r\n]/u.test(value)) throw bad(what, 'must be a string without NUL, CR, or LF');
-  return value;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the check above is what the brand means
+  return value as WireText;
 }
 
 export function validateRef(ref: unknown): string {
@@ -224,4 +226,8 @@ export function validateMessage(message: unknown): string {
   encodeBytes(message, 'message');
   return message;
 }
+
+// A pkt-line field that has been through validateWire. The brand is a type, like Oid: a raw string is not one.
+declare const wireTextBrand: unique symbol;
+export type WireText = string & { readonly [wireTextBrand]: typeof wireTextBrand };
 
