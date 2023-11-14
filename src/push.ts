@@ -14,6 +14,7 @@ import { frames, coded, clientSpan, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePushRef, validateWire } from './validate.js';
+import type { RefName } from './validate.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -32,6 +33,9 @@ export { ZERO_OID };
 export type Command = { readonly ref: string; readonly oldOid: string; readonly newOid: string };
 // At least one: push reads the first command for its span (an empty list is refused there, by a TypeError coded 'protocol').
 export type Commands = readonly [Command, ...Command[]];
+// A command after planPush. `ref` is the RefName validatePushRef returned; the input Command is still a raw string.
+export type CheckedCommand = { readonly ref: RefName; readonly oldOid: string; readonly newOid: string };
+export type CheckedCommands = readonly [CheckedCommand, ...CheckedCommand[]];
 // A pkt-line frame as pktStep and the transports' frames() yield it.
 export type { Frame } from './transport.js';
 import type { Frame, Transport } from './transport.js';
@@ -318,7 +322,7 @@ export type PushOptions = {
 export type PushResult = { readonly report: PushReport | null; readonly packBytes: number; readonly entries: readonly PackEntry[]; readonly hookOutput: string };
 
 // The request, planned before anything is built or sent (pure): every refusal here happens with nothing on the wire.
-export type PushPlan = { readonly commands: Commands; readonly caps: readonly string[]; readonly checked: CheckedCaps | undefined; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number };
+export type PushPlan = { readonly commands: CheckedCommands; readonly caps: readonly string[]; readonly checked: CheckedCaps | undefined; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number };
 // The capabilities a push asks for; atomic and push-options only from a CheckedCaps.
 export const requestCaps = (commands: readonly Command[], { sideband = true, reportV2 = false }: { readonly sideband?: boolean; readonly reportV2?: boolean }, checked?: CheckedCaps): string[] =>
   [reportV2 ? 'report-status-v2' : 'report-status', ...(sideband ? ['side-band-64k'] : []), ...(checked?.atomic === true ? ['atomic'] : []), ...(commands.some(c => c.newOid === ZERO_OID) ? ['delete-refs'] : []), ...((checked?.pushOptions.length ?? 0) > 0 ? ['push-options'] : []), `agent=${UA.replace(/ .*/u, '')}`];
@@ -333,17 +337,23 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null | undefi
   const maxRefs = readLimit(limits, 'maxRefs');
   if (!maxRefs.ok) return maxRefs;
   if (commands.length > maxRefs.value) return err(limitExceeded('push commands', commands.length, maxRefs.value));
+  const checked: CheckedCommand[] = [];
   for (const c of commands) {
-    validatePushRef(c.ref, c.newOid === ZERO_OID); // throws bad_request until validate.ts returns Result (A2)
+    // throws bad_request until validate.ts returns Result (A2). The brand is what the rest of the push sends.
+    const ref = validatePushRef(c.ref, c.newOid === ZERO_OID);
     if (!OID.test(c.oldOid) || !OID.test(c.newOid)) return fail('bad_request', 'push: oids must be 40-hex');
+    checked.push({ ref, oldOid: c.oldOid, newOid: c.newOid });
   }
+  // An empty list is not a CheckedCommands. push still fails it as a protocol error, the same as an empty Commands.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- length is the whole difference, and it is checked above when the caller typed Commands
+  const planned = checked as unknown as CheckedCommands;
   for (const p of o.checked?.pushOptions ?? []) validateWire(p, 'push option'); // as validatePushRef
   // read once, before anything is built or sent: the same values bound the pack and the report
   const maxReportLines = readLimit(limits, 'maxReportLines');
   if (!maxReportLines.ok) return maxReportLines;
   const maxPack = readLimit(limits, 'maxPackBytes');
   if (!maxPack.ok) return maxPack;
-  return ok({ commands, caps: requestCaps(commands, o, o.checked), checked: o.checked, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value });
+  return ok({ commands: planned, caps: requestCaps(planned, o, o.checked), checked: o.checked, needPack: planned.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Uint8Array<ArrayBuffer> => {

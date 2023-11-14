@@ -39,7 +39,7 @@ import { KIND } from './otel.js';
 import type { Span } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateRef, validatePath } from './validate.js';
+import { validateRef, validatePath, type RefName } from './validate.js';
 import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
@@ -56,7 +56,8 @@ const OID = /^[0-9a-f]{40}$/;
 
 // Pure: what to ask ls-refs for, and which answer wins. git's ref_rev_parse_rules minus the remote-tracking forms.
 // `ref` is the caller's, checked here: anything but null, undefined or a string is bad_request.
-export function refCandidates(ref: unknown): string[] {
+// A full ref comes back as a RefName. HEAD is not a ref name (validateRef refuses it); it is its own alternative.
+export function refCandidates(ref: unknown): ReadonlyArray<RefName | 'HEAD'> {
   if (ref === null || ref === undefined || ref === '' || ref === 'HEAD') return ['HEAD'];
   if (typeof ref !== 'string') throw fail('bad_request', 'ref must be a string');
   if (OID.test(ref)) return [];

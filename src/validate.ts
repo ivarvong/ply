@@ -44,13 +44,19 @@ export function validateIdent({ name, email, time, tz = '+0000' }: IdentInput = 
   return Object.freeze(person) as ValidatedIdent;
 }
 
+// A ref name that has been through validateRef. The brand is a type, like Oid: a raw string is not one.
+declare const refNameBrand: unique symbol;
+export type RefName = string & { readonly [refNameBrand]: typeof refNameBrand };
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the checks above are what the brand means
+const refName = (ref: string): RefName => ref as RefName;
+
 // A pkt-line field. CR, LF, or NUL ends the line or the command the way a header injection does.
 export function validateWire(value: unknown, what: string): string {
   if (typeof value !== 'string' || /[\0\r\n]/u.test(value)) throw bad(what, 'must be a string without NUL, CR, or LF');
   return value;
 }
 
-export function validateRef(ref: unknown): string {
+export function validateRef(ref: unknown): RefName {
   if (typeof ref !== 'string' || !ref.startsWith('refs/')) throw bad('ref', 'must be a full ref name starting with refs/');
   // git check-ref-format rules that matter for injection and server acceptance
   // (NUL, CR, LF and the other controls are one class: check-ref-format refuses all of them)
@@ -59,7 +65,7 @@ export function validateRef(ref: unknown): string {
   if (ref.length > 1024) throw bad('ref', 'too long');
   // a lone surrogate would be written as U+FFFD (TextEncoder); only an escaped byte from a read maps back (#43)
   encodeBytes(ref, 'ref');
-  return ref;
+  return refName(ref);
 }
 
 // A ref a push may name: git v2.50.0 receive-pack.c update() refuses anything else as "funny refname", checking the name
@@ -67,11 +73,12 @@ export function validateRef(ref: unknown): string {
 // full name to check_refname_format, so every component passes; what is left is the part after refs/ as a refname of its
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
-// The ref is typed string (push.js's callers pass one); validateRef still refuses a non-string at run time.
-export function validatePushRef(ref: string, deleting: boolean): string {
-  const name = validateRef(ref).slice(5); // after "refs/"
+// Callers pass a string. The return is the same characters, branded, so a later command cannot skip this check.
+export function validatePushRef(ref: string, deleting: boolean): RefName {
+  const full = validateRef(ref);
+  const name = full.slice(5); // after "refs/"
   if (name === '@' || (!deleting && !name.includes('/'))) throw bad('ref', 'receive-pack refuses it (funny refname)');
-  return ref;
+  return full;
 }
 
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
