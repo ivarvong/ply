@@ -23,7 +23,7 @@ import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TY
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { HEADS_MAIN, validateIdent, validateRef, validatePushRef, validatePath, validateMessage, type RefName } from './validate.js';
 import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
@@ -165,16 +165,16 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
 }
 
 export type TreeSpec = {
-  readonly ref?: string;
-  readonly base?: string;
+  readonly ref?: RefName;
+  readonly base?: RefName;
   readonly files: TreeFiles;
   readonly author: Author;
   readonly message: string;
   readonly time?: number;
 };
 export type TreePlan = {
-  readonly ref: string;
-  readonly base: string;
+  readonly ref: RefName;
+  readonly base: RefName;
   readonly create: boolean;
   readonly built: BuiltTree;
   readonly files: number;
@@ -185,14 +185,15 @@ export type TreePlan = {
 // Pure: every caller-controlled field, checked before any I/O. `base` as in editFile: the ref whose head is the
 // parent (default `ref`); base ≠ ref creates `ref` (zero old oid). base = ref and the ref absent: the first commit of a
 // new ref, no parent, zero old oid — a deploy's first push.
-export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, author, message, time = Math.floor(Date.now() / 1000) }: TreeSpec, limits: Limits, head: string | null = null): TreePlan {
-  validatePushRef(ref, false); validateRef(base);
+export function validateTreeSpec({ ref = HEADS_MAIN, base = ref, files, author, message, time = Math.floor(Date.now() / 1000) }: TreeSpec, limits: Limits, head: string | null = null): TreePlan {
+  const named = validatePushRef(ref, false);
+  const baseName = validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
   const entries = fileEntries(files, limits);
   const built = buildTree(entries, limits);
-  return Object.freeze({ ref, base, create: base !== ref, built, files: entries.length, author: person, message, head });
+  return Object.freeze({ ref: named, base: baseName, create: baseName !== named, built, files: entries.length, author: person, message, head });
 }
 
 export type PushTreeResult = {

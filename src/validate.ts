@@ -73,13 +73,16 @@ export function validateRef(ref: unknown): RefName {
 // full name to check_refname_format, so every component passes; what is left is the part after refs/ as a refname of its
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
-// Callers pass a string. The return is the same characters, branded, so a later command cannot skip this check.
+// The parser takes a raw string. push, and every operation that updates a ref, takes the RefName this returns.
 export function validatePushRef(ref: string, deleting: boolean): RefName {
   const full = validateRef(ref);
   const name = full.slice(5); // after "refs/"
   if (name === '@' || (!deleting && !name.includes('/'))) throw bad('ref', 'receive-pack refuses it (funny refname)');
   return full;
 }
+
+// The branch git writes, and these operations update, when the caller omits the ref.
+export const HEADS_MAIN: RefName = validateRef('refs/heads/main');
 
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
 // Ported line by line, because the edges are where a name gets through: `git~1` but not `git~2`; `.git:x` (an NTFS

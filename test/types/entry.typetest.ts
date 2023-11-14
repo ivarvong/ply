@@ -1,7 +1,7 @@
 // The package entry (#100): a consumer imports values and types from index.js, with no casts.
 // tsconfig.isolated.json excludes this file (allowJs is false there; index.js is the entry).
 import {
-  fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs,
+  fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs, validateRef,
   fetchObject, packStream, spInit, spStep, spFinish, inflate, commitView, entryType, lsMode, refCandidates,
   isFilterRejection, isPlyCode, DEFAULT_LIMITS,
   type Transport, type ExportLine, type Exporter, type Limits, type FetchOpts, type SpState, type PackObject, type OperationOpts,
@@ -41,7 +41,7 @@ const fetchOpts: FetchOpts = { wants: ['a'.repeat(40)], filter: 'blob:none' };
 const consumer = async (): Promise<void> => {
   const fetched = await fetchPack(transport, fetchOpts);
   const objects: PackObject[] = [...(fetched.objects?.values() ?? [])].map(o => ({ type: o.type, data: o.data }));
-  await push(transport, { ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'b'.repeat(40), objects });
+  await push(transport, { ref: validateRef('refs/heads/x'), oldOid: '0'.repeat(40), newOid: 'b'.repeat(40), objects });
   const { delta } = spliceDelta({ baseLen: 8, off: 0, oldLen: 1, insert: anyBytes });
   const deflated: Uint8Array<ArrayBuffer> = await zlibDeflate(delta);
   await zlibDeflate(shared);

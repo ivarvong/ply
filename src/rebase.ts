@@ -10,14 +10,13 @@
 //   revert      commit tree          target      commit's parent tree parent [target]
 //               (a root's parent is the empty tree)
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
-import type { ValidatedIdent } from './validate.js';
+import { HEADS_MAIN, validatePushRef, validateMessage, type RefName, type ValidatedIdent } from './validate.js';
 import { thrown as fail, type Extra, type Miss } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
@@ -25,7 +24,7 @@ import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 
 // The unconverted modules' functions as this module calls them (see merge.ts).
-type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Push = (t: Transport, o: { readonly ref: RefName; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
 type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array<ArrayBuffer>;
 
@@ -91,7 +90,7 @@ async function transplant(t: Transport, cache: TreeCache, { base, ours, theirs }
 }
 
 export type RebaseSpec = {
-  readonly ref: string;
+  readonly ref: RefName;
   readonly onto?: string;
   readonly committer?: Author;
   readonly author?: Author | null;
@@ -194,7 +193,7 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
 // commit it would write is what `git commit --allow-empty --no-edit` writes from the message revert prepared.
 export type EmptyPolicy = 'stop' | 'keep';
 export type PickSpec = {
-  readonly ref?: string;
+  readonly ref?: RefName;
   readonly commit: string;
   readonly committer?: Author;
   // a revert's author (git: the one reverting); defaults to the committer. A cherry-pick keeps the commit's author.
@@ -247,7 +246,7 @@ function writtenKind(sameTree: boolean, empty: EmptyPolicy): 'empty' | 'kept_emp
 export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
 export function pickCommit(url: string, spec: PickSpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
 export function pickCommit(url: string, spec: PickSpec, opts?: RebaseOptions): Promise<PickOutcome>;
-export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time = Math.floor(Date.now() / 1000), revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
+export async function pickCommit(url: string, { ref = HEADS_MAIN, commit, committer, author, time = Math.floor(Date.now() / 1000), revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
   validateAttributes(attributes); validatePushRef(ref, false);
   const empty = emptyPolicy(emptyGiven);
   const committerPerson: ValidatedIdent = stamp(committer, time);

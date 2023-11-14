@@ -18,7 +18,7 @@ import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { HEADS_MAIN, validateIdent, validateRef, validatePushRef, validatePath, validateMessage, type RefName } from './validate.js';
 import { signCommit } from './sign.js';
 import type { OperationOpts } from './operation.js';
 import type { FetchedObject as Fetched, SpState } from './fetch.js';
@@ -96,8 +96,8 @@ export const scanAttrs = (st: ScanState): Attrs => ({
 const OID = /^[0-9a-f]{40}$/;
 
 export type EditSpec = {
-  readonly ref?: string;
-  readonly base?: string;
+  readonly ref?: RefName;
+  readonly base?: RefName;
   readonly path: string;
   readonly find: string | Uint8Array;
   readonly replace: string | Uint8Array;
@@ -106,8 +106,8 @@ export type EditSpec = {
   readonly time?: number;
 };
 export type EditPlan = {
-  readonly ref: string;
-  readonly base: string;
+  readonly ref: RefName;
+  readonly base: RefName;
   readonly create: boolean;
   readonly path: string;
   readonly comps: readonly string[];
@@ -121,8 +121,9 @@ export type EditPlan = {
 // Pure: everything the caller controls, checked before any I/O. None of these strings can be escaped once inside git.
 // `base`: the ref whose head the commit is built on (default: `ref` itself). With base ≠ ref the push *creates* `ref`
 // (old oid = zeros), the way a pull-request branch is made; the CAS then means "the branch must not exist yet".
-export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
-  validatePushRef(ref, false); validateRef(base);
+export function validateSpec({ ref = HEADS_MAIN, base = ref, path, find: findIn, replace: replaceIn, author, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
+  const named = validatePushRef(ref, false);
+  const baseName = validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
   const comps = validatePath(path, limits);
@@ -130,7 +131,7 @@ export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: 
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
   if (!find.length) throw fail('bad_request', 'find must be non-empty');
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
-  return Object.freeze({ ref, base, create: base !== ref, path, comps, find, replace, author: person, message, time: person.time, head });
+  return Object.freeze({ ref: named, base: baseName, create: baseName !== named, path, comps, find, replace, author: person, message, time: person.time, head });
 }
 
 // Pure: which oid is the parent, and what the hint turned out to be. ls-refs always wins; the hint only decides

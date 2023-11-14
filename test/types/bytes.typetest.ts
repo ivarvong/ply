@@ -3,6 +3,7 @@
 // functions with no casts. `tsc --noEmit` must pass; every @ts-expect-error must still be an error.
 import { fetchPack } from '../../src/fetchpack.js';
 import { push, type PackObject } from '../../src/push.js';
+import { validateRef } from '../../src/validate.js';
 import { spliceDelta, zlibDeflate, buildPack } from '../../src/pack.js';
 import { concat, bufferSource } from '../../src/bytes.js';
 import { signCommit, withGpgsig, type Signer } from '../../src/sign.js';
@@ -22,7 +23,7 @@ declare const shared: Uint8Array<SharedArrayBuffer>;
 const consumerFetchThenPush = async (): Promise<void> => {
   const r = await fetchPack(t, { wants: ['0'.repeat(40)] });
   const objects: PackObject[] = [...(r.objects?.values() ?? [])].map(o => ({ type: o.type, data: o.data }));
-  await push(t, { ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: '1'.repeat(40), objects });
+  await push(t, { ref: validateRef('refs/heads/x'), oldOid: '0'.repeat(40), newOid: '1'.repeat(40), objects });
 };
 void consumerFetchThenPush;
 
@@ -42,7 +43,7 @@ const consumerInputs = async (): Promise<void> => {
   await signCommit(shared, signer);
   void withGpgsig(anyBytes, 'sig');
   for await (const f of frames(t, 'git-upload-pack', anyBytes, span)) void f;
-  await push(t, { ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: '1'.repeat(40), objects: [{ type: 3, data: shared }] });
+  await push(t, { ref: validateRef('refs/heads/x'), oldOid: '0'.repeat(40), newOid: '1'.repeat(40), objects: [{ type: 3, data: shared }] });
 };
 void consumerInputs;
 

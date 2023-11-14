@@ -1,10 +1,12 @@
 // Compile-time checks for the push cluster: `tsc --noEmit` must pass; every @ts-expect-error must still be an error.
 import { assertNever } from '../../src/result.js';
-import { push, decideOutcome, outcomeResult, type CheckedCaps, type Outcome, type PushError, type PushOptions, type PushTransport } from '../../src/push.js';
+import { push, decideOutcome, outcomeResult, type CheckedCaps, type Command, type Outcome, type PushError, type PushOptions, type PushTransport } from '../../src/push.js';
 import { checkPushCaps } from '../../src/receivecaps.js';
+import { validatePushRef } from '../../src/validate.js';
 
 declare const t: PushTransport;
-const del = { commands: [{ ref: 'refs/heads/a', oldOid: '0'.repeat(40), newOid: '0'.repeat(40) }] } as const;
+const one: Command = { ref: validatePushRef('refs/heads/a', true), oldOid: '0'.repeat(40), newOid: '0'.repeat(40) };
+const del = { commands: [one] as const };
 
 // atomic and push options reach the request only as capabilities checked against the advertisement
 // @ts-expect-error raw atomic is not a push option

@@ -14,7 +14,7 @@
 // The pure parts: threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits), uniqueObjects; linemerge.js. The effects: lsRefs, fetchObject, push.
 /* oxlint-disable import/max-dependencies -- a merge drives ls-refs, fetch, push, the object codecs and the line merge */
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
-import type { ValidatedIdent } from './validate.js';
+import { HEADS_MAIN, validateRef, validatePushRef, validateMessage, type RefName, type ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import type { Extra, Miss } from './errors.js';
@@ -25,7 +25,6 @@ import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
@@ -72,7 +71,7 @@ export type PushObject = { readonly type: number; readonly data: Uint8Array };
 // (`expectType = null` reads as null, `parents = []` as never[]), which no caller satisfies. Each call casts to the
 // signature here (a type-only cast: an alias `const f = g as F` would cost bundle bytes). These go as they convert.
 type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<Fetched>;
-type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Push = (t: Transport, o: { readonly ref: RefName; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
 type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array<ArrayBuffer>;
 
@@ -497,18 +496,18 @@ export async function attributeTree(t: Transport, attributes: AttributeSource | 
 }
 
 // Fast-forward `ref` to `to`, expecting it to be at `from` (CAS). Empty pack: the server already has the objects.
-export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: string; readonly from: string; readonly to: string }): Promise<PushResult> {
+export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: RefName; readonly from: string; readonly to: string }): Promise<PushResult> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (push as unknown as Push)(t, { ref, oldOid: from, newOid: to, objects: [] });
 }
 
-export async function deleteBranch(t: Transport, { ref, oid }: { readonly ref: string; readonly oid: string }): Promise<PushResult> {
+export async function deleteBranch(t: Transport, { ref, oid }: { readonly ref: RefName; readonly oid: string }): Promise<PushResult> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (push as unknown as Push)(t, { ref, oldOid: oid, newOid: ZERO_OID, objects: [] });
 }
 
 export type MergeSpec = {
-  readonly ref?: string;
+  readonly ref?: RefName;
   readonly from: string;
   readonly author?: Author | null;
   // defaults to the author (one identity, one time, as before)
@@ -533,7 +532,7 @@ export type MergeOutcome =
   | Sides & { readonly outcome: 'merge'; readonly tree: string; readonly base: string; readonly pushBytes: number; readonly newTrees: number; readonly contentMerged: number };
 
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
-export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
+export async function mergeBranch(url: string, { ref = HEADS_MAIN, from, author, committer, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
   validatePushRef(ref, false); const fromOid = givenOid(from, 'from');
   const person: ValidatedIdent | null = author ? stamp(author, time) : null;
   const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;
