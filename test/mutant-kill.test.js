@@ -1438,6 +1438,15 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(lsRefs(framesOf([]), ['refs/heads/a\nb']), e => e.code === 'bad_request' && e.what === 'ref prefix');
   const payload = te.encode(refLine);
   await assert.rejects(lsRefs({ ...framesOf([{ kind: 'data', payload }, { kind: 'flush' }]), limits: withLimits({ maxLsRefsBytes: payload.length - 1 }) }), e => e.code === 'limit_exceeded' && e.what === 'ls-refs bytes');
+  // HEAD does not consume maxRefs (#143). refs/heads/HEAD does. A duplicate name is skipped before the count.
+  const refFrame = name => ({ kind: 'data', payload: te.encode(`${oid(4)} ${name}\n`) });
+  const capped = (maxRefs, frames) => lsRefs({ ...framesOf([...frames, { kind: 'flush' }]), limits: withLimits({ maxRefs }) });
+  assert.equal((await capped(0, [refFrame('HEAD')])).refs.size, 1, 'HEAD alone fits in maxRefs 0');
+  assert.equal((await capped(1, [refFrame('HEAD'), refFrame('refs/heads/main')])).refs.size, 2);
+  assert.equal((await capped(1, [refFrame('refs/heads/main'), refFrame('refs/heads/main')])).refs.size, 1, 'a duplicate is not a second ref');
+  await assert.rejects(capped(0, [refFrame('HEAD'), refFrame('refs/heads/main')]), e => e.code === 'limit_exceeded' && e.what === 'ls-refs lines' && e.got === 1 && e.max === 0);
+  await assert.rejects(capped(0, [refFrame('refs/heads/HEAD')]), e => e.code === 'limit_exceeded' && e.got === 1 && e.max === 0);
+  await assert.rejects(capped(1, [refFrame('refs/heads/main'), refFrame('HEAD'), refFrame('refs/heads/other')]), e => e.got === 2 && e.max === 1);
 
   // unborn (issue #103): the reader, the request argument, and the advertisement check that gates it
   const M = { name: 'HEAD', target: 'refs/heads/main' };
