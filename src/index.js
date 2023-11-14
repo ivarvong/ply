@@ -77,6 +77,6 @@ export { operation, verifyRef } from './operation.js';
 export { createTransport, redactUrl } from './http.js';
 export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcache.js';
 export { isFilterRejection } from './fetch.js';
-export { validateIdent, validateRef, validatePath } from './validate.js';
+export { validateIdent, validateRef, validatePath, validateWire } from './validate.js';
 export { compareVersionRefnames } from './refs.js';
 export { concat } from './bytes.js';

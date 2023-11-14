@@ -8,10 +8,9 @@ import type { HttpOptions } from './http.js';
 import type { FetchOpts, ObjectWant, FetchedObject, PackFetch } from './fetch.js';
 import type { FetchPackExtra, FetchPackResult } from './fetchpack.js';
 import type { NegotiateOpts, NegotiateResult } from './negotiate.js';
-import type { LsRefsResult } from './lsrefs.js';
 import type { DiscoverInfo } from './discover.js';
 import { createTransport } from './http.js';
-import { lsRefs as lsRefsWire, parseUnbornLine } from './lsrefs.js';
+import { lsRefs as lsRefsWire, parseUnbornLine, type LsRefsResult, type WireText } from './lsrefs.js';
 import { packStream, fetchObject } from './fetch.js';
 import { fetchPack } from './fetchpack.js';
 import { negotiate } from './negotiate.js';
@@ -41,7 +40,7 @@ export type LsRefsOptions = { readonly unborn?: boolean; readonly info?: Pick<Di
 
 // ls-refs over `t`. The edit and read paths call the wire exchange (lsrefs.ts) directly: they never ask for the unborn
 // HEAD, so the advertisement parser stays out of their bundles.
-export async function lsRefs(t: Transport, prefixes: readonly string[] = [], { unborn = false, info }: LsRefsOptions = {}): Promise<LsRefsResult> {
+export async function lsRefs(t: Transport, prefixes: readonly WireText[] = [], { unborn = false, info }: LsRefsOptions = {}): Promise<LsRefsResult> {
   const ask = unborn && (info ?? await discover(t)).lsRefsUnborn;
   return lsRefsWire(t, prefixes, ask ? { unborn: parseUnbornLine } : {});
 }
@@ -59,7 +58,7 @@ export class GitHttp {
   public get limits(): Limits { return this.t.limits; }
   public get tracer(): Tracer { return this.t.tracer; }
   public get parent(): Span | null { return this.t.parent; }
-  public lsRefs(prefixes?: readonly string[], opts?: LsRefsOptions): Promise<LsRefsResult> { return lsRefs(this.t, prefixes, opts); }
+  public lsRefs(prefixes?: readonly WireText[], opts?: LsRefsOptions): Promise<LsRefsResult> { return lsRefs(this.t, prefixes, opts); }
   public packStream(opts: FetchOpts, span: Span): PackFetch { return packStream(this.t, opts, span); }
   public fetchObject(opts: ObjectWant): Promise<FetchedObject> { return fetchObject(this.t, opts); }
   public fetchPack(opts: FetchOpts, extra?: FetchPackExtra): Promise<FetchPackResult> { return fetchPack(this.t, opts, extra); }

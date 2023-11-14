@@ -15,6 +15,7 @@ import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
 import { withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
+import { validateWire } from './validate.js';
 import { thrown as fail } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 
@@ -61,7 +62,7 @@ export async function operation<R>(op: string, url: string | URL, { auth, tracer
 // 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root`.
 export async function verifyRef(t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<string> {
   let seen;
-  try { seen = (await lsRefs(t, [ref])).refs.get(ref)?.oid; }
+  try { seen = (await lsRefs(t, [validateWire(ref, 'ref prefix')])).refs.get(ref)?.oid; }
   catch (e) {
     // A thrown null or undefined has no `.message`. Reading it threw TypeError and the acknowledged push escaped
     // unclassified (I25: any failure to read the ref back is `ambiguous`). The same loose read as ambiguousAfterPush.

@@ -23,7 +23,7 @@ import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TY
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage, validateWire } from './validate.js';
 import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
@@ -275,7 +275,7 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     try {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => refs.get(s.base)?.oid ?? null), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
+    const [resolved, speculative] = await Promise.all([lsRefs(t, [validateWire(s.base, 'ref prefix')]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => refs.get(s.base)?.oid ?? null), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
     if (resolved === null && s.create) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } });
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas ?? decided.hint;

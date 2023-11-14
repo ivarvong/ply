@@ -18,7 +18,7 @@ import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage, validateWire } from './validate.js';
 import { signCommit } from './sign.js';
 import type { OperationOpts } from './operation.js';
 import type { FetchedObject as Fetched, SpState } from './fetch.js';
@@ -377,7 +377,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // oxlint-disable-next-line promise-function-async -- bundle budget: the JS's own .then chain, byte for byte
-    const resolve = (): Promise<string> => lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => { const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } }); return r.oid; });
+    const resolve = (): Promise<string> => lsRefs(t, [validateWire(s.base, 'ref prefix')]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => { const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } }); return r.oid; });
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
     const [resolved, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e) : null]);
     const decided = decideHead({ hint: head, resolved });

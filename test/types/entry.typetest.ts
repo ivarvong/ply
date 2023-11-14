@@ -1,7 +1,7 @@
 // The package entry (#100): a consumer imports values and types from index.js, with no casts.
 // tsconfig.isolated.json excludes this file (allowJs is false there; index.js is the entry).
 import {
-  fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs,
+  fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs, validateWire,
   fetchObject, packStream, spInit, spStep, spFinish, inflate, commitView, entryType, lsMode, refCandidates,
   isFilterRejection, isPlyCode, DEFAULT_LIMITS,
   type Transport, type ExportLine, type Exporter, type Limits, type FetchOpts, type SpState, type PackObject, type OperationOpts,
@@ -50,7 +50,7 @@ const consumer = async (): Promise<void> => {
   const info = await discover(transport);
   const caps: ReadonlyMap<string, string> | Map<string, string> = info.caps;
   void caps;
-  const listed = await lsRefs(transport, ['refs/heads/']);
+  const listed = await lsRefs(transport, [validateWire('refs/heads/', 'ref prefix')]);
   const head: string | null = listed.head;
   void head;
   const object = await fetchObject(transport, { oid: 'c'.repeat(40), filter: 'blob:none' });

@@ -39,7 +39,7 @@ import { KIND } from './otel.js';
 import type { Span } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateRef, validatePath } from './validate.js';
+import { validateRef, validatePath, validateWire } from './validate.js';
 import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
@@ -85,7 +85,7 @@ const sameBranch = (requested: unknown, full: string): boolean => {
 async function unbornTarget(t: Transport): Promise<string | null> {
   const info = await discover(t);
   if (!info.lsRefsUnborn) return null;
-  const listed = await lsRefs(t, ['HEAD'], { unborn: parseUnbornLine });
+  const listed = await lsRefs(t, [validateWire('HEAD', 'ref prefix')], { unborn: parseUnbornLine });
   const target = listed.unborn?.target;
   return target === undefined || target === '' ? null : target;
 }
@@ -140,7 +140,8 @@ async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promis
   if (cands.length === 0 && typeof ref === 'string') return { hit: { name: ref, commit: ref } };
   // null: this call is a name. A string: the prefix, and the listing is wide enough to answer it.
   const prefix = abbrev === 'advertised' && typeof ref === 'string' && ABBREV.test(ref) ? ref : null;
-  const listed = await lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']);
+  const names = prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/'];
+  const listed = await lsRefs(t, names.map(p => validateWire(p, 'ref prefix')));
   for (const name of cands) {
     const r = listed.refs.get(name);
     if (r) return { hit: { name: name === 'HEAD' ? (listed.head ?? 'HEAD') : name, commit: r.peeled ?? r.oid } };

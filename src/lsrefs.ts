@@ -6,7 +6,8 @@ import { thrown as fail } from './errors.js';
 import { pkts } from './pktline.js';
 import { decodeBytes } from './bytes.js';
 import { limitError, requireLimit } from './limits.js';
-import { validateWire } from './validate.js';
+import { validateWire, type WireText } from './validate.js';
+export type { WireText };
 import { frames, coded, clientSpan, proto } from './transport.js';
 import { OID_HEX_CHARS, SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 
@@ -82,7 +83,7 @@ export function parseUnbornLine(line: string, prev: LsRefsUnborn | null = null):
 
 // The request, in git's order (connect.c get_remote_refs): peel, symrefs, unborn, then the prefixes. `unborn` is sent
 // only to a server whose advertisement lists `ls-refs=unborn` (git: server_supports_feature("ls-refs", "unborn")).
-export const lsRefsBody = (prefixes: readonly string[] = [], { peel = true, symrefs = true, unborn = false }: { readonly peel?: boolean; readonly symrefs?: boolean; readonly unborn?: boolean } = {}): Uint8Array<ArrayBuffer> =>
+export const lsRefsBody = (prefixes: readonly WireText[] = [], { peel = true, symrefs = true, unborn = false }: { readonly peel?: boolean; readonly symrefs?: boolean; readonly unborn?: boolean } = {}): Uint8Array<ArrayBuffer> =>
   pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n', unborn && 'unborn\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
 
 // The ls-refs exchange. `unborn` asks for the unborn HEAD and reads each unborn line (parseUnbornLine): the caller has
@@ -90,7 +91,7 @@ export const lsRefsBody = (prefixes: readonly string[] = [], { peel = true, symr
 // imported, so a bundle that never asks (edit, read) carries no unborn reader. Without it an unborn line is skipped.
 // async: a synchronous failure (a bad prefix, a missing limit) is a rejection, as it always was
 // oxlint-disable-next-line require-await -- see above
-export async function lsRefs(t: Transport, prefixes: readonly string[] = [], { unborn }: { readonly unborn?: typeof parseUnbornLine } = {}): Promise<LsRefsResult> {
+export async function lsRefs(t: Transport, prefixes: readonly WireText[] = [], { unborn }: { readonly unborn?: typeof parseUnbornLine } = {}): Promise<LsRefsResult> {
   for (const p of prefixes) validateWire(p, 'ref prefix');
   const maxBytes = requireLimit(t.limits, 'maxLsRefsBytes');
   const maxRefs = requireLimit(t.limits, 'maxRefs');

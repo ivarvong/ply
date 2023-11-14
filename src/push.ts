@@ -13,7 +13,7 @@ import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
-import { validatePushRef, validateWire } from './validate.js';
+import { validatePushRef, validateWire, type WireText } from './validate.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -45,7 +45,7 @@ import type { Span } from './otel.js';
 // and reads unadvertised option lines as the pack, so the request builder takes these only from a CheckedCaps, which
 // only receivecaps.ts checkPushCaps makes (from the server's advertisement). The brand is a type: nothing at run time.
 declare const CHECKED: unique symbol;
-export type CheckedCaps = { readonly atomic: boolean; readonly pushOptions: readonly string[]; readonly [CHECKED]: true };
+export type CheckedCaps = { readonly atomic: boolean; readonly pushOptions: readonly WireText[]; readonly [CHECKED]: true };
 
 // commands: [{ ref, oldOid, newOid }] (create: oldOid = zeros; delete: newOid = zeros). A push with only deletes sends no
 // pack. The wire encoder: `caps` is sent as given (push builds it with requestCaps).

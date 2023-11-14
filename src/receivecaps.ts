@@ -11,6 +11,7 @@ import { parseCapabilitiesV2 } from './discover.js';
 import { coded, clientSpan, advertise } from './transport.js';
 import { push } from './push.js';
 import type { CheckedCaps, PushOptions, PushResult, PushTransport } from './push.js';
+import type { WireText } from './validate.js';
 
 // A pkt-line frame as pktStep returns it (payload only on a data frame).
 import type { Frame } from './transport.js';
@@ -94,7 +95,7 @@ export async function receiveCaps(t: CapsTransport): Promise<Set<string>> {
 // not support push options"). receive-pack ignores an `atomic` or `push-options` capability it did not advertise
 // (builtin/receive-pack.c), so an unchecked atomic push lands ref by ref, and unchecked option lines are read as the
 // pack ("unpacker error"): push takes them only as the CheckedCaps this makes.
-export type PushWants = { readonly atomic?: boolean; readonly pushOptions?: readonly string[] };
+export type PushWants = { readonly atomic?: boolean; readonly pushOptions?: readonly WireText[] };
 export type CapsProblem = { readonly tag: 'objectFormat'; readonly format: string } | { readonly tag: 'noAtomic' } | { readonly tag: 'noPushOptions' };
 // Pure: the first unmet need, or null.
 export function capsProblem(caps: ReadonlySet<string>, { atomic = false, pushOptions = [] }: PushWants = {}): CapsProblem | null {

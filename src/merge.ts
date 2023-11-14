@@ -25,7 +25,7 @@ import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validatePushRef, validateMessage } from './validate.js';
+import { validateRef, validatePushRef, validateMessage, validateWire } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
@@ -489,7 +489,7 @@ export async function attributeTree(t: Transport, attributes: AttributeSource | 
   let oid: string | undefined = attributes;
   if (!isOid(attributes)) {
     validateRef(attributes);
-    const refs: Refs = await lsRefs(t, [attributes]);
+    const refs: Refs = await lsRefs(t, [validateWire(attributes, 'ref prefix')]);
     oid = refs.refs.get(attributes)?.oid;
     if (oid === undefined) throw fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
   }
@@ -540,7 +540,8 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
   if (message !== undefined && message !== null && message !== '') validateMessage(message); validateAttributes(attributes);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
-    const { refs }: Refs = await lsRefs(t, fromOid === null ? [ref, from] : [ref]);
+    const asked = fromOid === null ? [ref, from] : [ref];
+    const { refs }: Refs = await lsRefs(t, asked.map(p => validateWire(p, 'ref prefix')));
     const ours = refs.get(ref)?.oid;
     const theirs = fromOid ?? refs.get(from)?.oid;
     if (ours === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) }); if (theirs === undefined) throw fail('not_found', `ref ${from} not found`, { miss: refMiss(from) });

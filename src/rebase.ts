@@ -17,7 +17,7 @@ import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validatePushRef, validateMessage } from './validate.js';
+import { validatePushRef, validateMessage, validateWire } from './validate.js';
 import { signCommit } from './sign.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
@@ -132,7 +132,8 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
   if (message !== null) validateMessage(message);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
-    const { refs }: Refs = await lsRefs(t, ontoOid === null ? [ref, onto] : [ref]);
+    const asked = ontoOid === null ? [ref, onto] : [ref];
+    const { refs }: Refs = await lsRefs(t, asked.map(p => validateWire(p, 'ref prefix')));
     const tip = refs.get(ref)?.oid;
     const target = ontoOid ?? refs.get(onto)?.oid;
     if (tip === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) }); if (target === undefined) throw fail('not_found', `ref ${onto} not found`, { miss: refMiss(onto) });
@@ -258,7 +259,7 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
   const name = `git.${op}`;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty } }, async ({ t, outcome }): Promise<PickOutcome> => {
-    const { refs }: Refs = await lsRefs(t, [ref]);
+    const { refs }: Refs = await lsRefs(t, [validateWire(ref, 'ref prefix')]);
     const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const [cT, cC] = await Promise.all([target, commit].map(oid => commitBytesAt(t, oid)));
     const tInfo: Commit = parseCommit(cT?.data ?? new Uint8Array(0), t.limits);
