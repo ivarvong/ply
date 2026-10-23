@@ -1,0 +1,1 @@
+13906 non-trivial cases (seed 42): {"agree-clean":8354,"agree-conflict":5493,"conservative":59,"WRONG":0}  conservative by reason: {"undecided: compaction needs the classic-diff fallback":59}

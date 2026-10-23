@@ -1,0 +1,26 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  // ply.ivar.workers.dev — stateless; no bindings. PLY_TOKEN is a secret (wrangler secret put PLY_TOKEN).
+  "name": "ply",
+  "main": "index.js",
+  // newest date the pinned toolchain supports (wrangler 4.152 → workerd 1.20261019.1); no nodejs_compat: ply is Web APIs only
+  "compatibility_date": "2026-10-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    // "on" enables the POST/DELETE endpoints; anything else → 501
+    "WRITES": "on",
+    "PACK_CACHE": "on"
+  },
+  // merge/rebase line merges are CPU-bound; the paid plan's ceiling for an HTTP request is 300,000 ms (5 min)
+  // (developers.cloudflare.com/workers/platform/limits, checked 2026-10-23)
+  "limits": { "cpu_ms": 300000 },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    // remote URLs carry the repo name and path in the query string; keep them out of the platform's request logs
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": true },
+    "traces": { "enabled": true, "head_sampling_rate": 1 }
+  }
+}

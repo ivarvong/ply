@@ -1,0 +1,1207 @@
+
+> ply@0.1.0 coverage
+> rm -rf /tmp/ply-cov && NODE_V8_COVERAGE=/tmp/ply-cov node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/packcache.test.js test/pure.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/run.mjs --n 60 --seed 11 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/hostile.mjs --n 60 --seed 12 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/protocol.mjs --n 80 --seed 32 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/packs.mjs --n 30 --seed 5; NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 200 --runs && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 200 --rediff undecided && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/diffscript.mjs --n 40 --snake && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/diffscript.mjs --n 3 --huge && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/attributes.mjs --n 40 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 200 --driver union && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 50 --driver binary; node test/coverage.mjs /tmp/ply-cov --lines
+
+TAP version 13
+# Subtest: HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, empty
+ok 1 - HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, empty
+  ---
+  duration_ms: 43968.891887
+  type: 'test'
+  ...
+# Subtest: byte-level chunking stress: 1-byte and 7-byte chunks at every stage must succeed
+ok 2 - byte-level chunking stress: 1-byte and 7-byte chunks at every stage must succeed
+  ---
+  duration_ms: 6619.929736
+  type: 'test'
+  ...
+#   mutation outcomes: {"ls-refs:protocol":39,"ls-refs:not_found":6,"ls-refs:ok":37,"ls-refs:remote_error":5,"fetch:protocol":153,"fetch:pack_corrupt":141,"fetch:ok":18,"fetch:remote_error":20,"fetch:limit_exceeded":16,"receive-pack:ambiguous":52,"receive-pack:ok":35}
+# Subtest: every protocol-aware mutator × every stage: typed error or git-verified success, never silent corruption
+ok 3 - every protocol-aware mutator × every stage: typed error or git-verified success, never silent corruption
+  ---
+  duration_ms: 206448.077346
+  type: 'test'
+  ...
+# Subtest: I4 limits: hostile sizes are rejected before allocation; memory does not grow
+ok 4 - I4 limits: hostile sizes are rejected before allocation; memory does not grow
+  ---
+  duration_ms: 2303.259075
+  type: 'test'
+  ...
+# Subtest: I5 caller input validation happens before any I/O
+ok 5 - I5 caller input validation happens before any I/O
+  ---
+  duration_ms: 393.577342
+  type: 'test'
+  ...
+# Subtest: I6 secrets never reach telemetry: token in auth, token in URL userinfo
+ok 6 - I6 secrets never reach telemetry: token in auth, token in URL userinfo
+  ---
+  duration_ms: 448.397181
+  type: 'test'
+  ...
+# Subtest: ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct
+ok 7 - ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct
+  ---
+  duration_ms: 563.987814
+  type: 'test'
+  ...
+# Subtest: external AbortSignal mid-stream → aborted, ref unchanged
+ok 8 - external AbortSignal mid-stream → aborted, ref unchanged
+  ---
+  duration_ms: 1261.022859
+  type: 'test'
+  ...
+#   idents: 4767 cases, 0 disagreements
+#   refs: 1431 cases, 0 disagreements
+#   paths: 924 components, 0 disagreements
+#   trees: 600 pairs, all equal to git mktree
+#   commits: 10 shapes parsed consistently with git log
+# Subtest: ident validation == git fsck --strict (exhaustive over an alphabet, name and email independently)
+ok 9 - ident validation == git fsck --strict (exhaustive over an alphabet, name and email independently)
+  ---
+  duration_ms: 346705.002473
+  type: 'test'
+  ...
+# Subtest: ref validation == git check-ref-format (exhaustive over an alphabet)
+ok 10 - ref validation == git check-ref-format (exhaustive over an alphabet)
+  ---
+  duration_ms: 5319.066849
+  type: 'test'
+  ...
+# Subtest: path validation == git tree acceptance + fsck --strict (components over an alphabet, .git variants, NTFS/HFS)
+ok 11 - path validation == git tree acceptance + fsck --strict (components over an alphabet, .git variants, NTFS/HFS)
+  ---
+  duration_ms: 126059.039675
+  type: 'test'
+  ...
+# Subtest: tree encoding == git write-tree over all name pairs × {file, dir} (sort order with dir-as-slash)
+ok 12 - tree encoding == git write-tree over all name pairs × {file, dir} (sort order with dir-as-slash)
+  ---
+  duration_ms: 10819.094211
+  type: 'test'
+  ...
+# Subtest: parseCommit recovers tree/parents/author/committer/message from every commit shape git writes
+ok 13 - parseCommit recovers tree/parents/author/committer/message from every commit shape git writes
+  ---
+  duration_ms: 720.613802
+  type: 'test'
+  ...
+# Subtest: concurrent CAS writers converge; conflicts are observed and retried, never lost
+ok 14 - concurrent CAS writers converge; conflicts are observed and retried, never lost
+  ---
+  duration_ms: 3900.209189
+  type: 'test'
+  ...
+# Subtest: path depth 100 (limit 128): one tree fetch per level, push = commit + 100 tree deltas + blob delta
+ok 15 - path depth 100 (limit 128): one tree fetch per level, push = commit + 100 tree deltas + blob delta
+  ---
+  duration_ms: 1930.071111
+  type: 'test'
+  ...
+# Subtest: wide tree: 20k siblings (tree ≈ 700 KB, multi-pkt, multi-block zlib) and maxTreeEntries enforcement
+ok 16 - wide tree: 20k siblings (tree ≈ 700 KB, multi-pkt, multi-block zlib) and maxTreeEntries enforcement
+  ---
+  duration_ms: 3185.250535
+  type: 'test'
+  ...
+# Subtest: modes: symlink and submodule along the path are refused; executable preserved; names with every odd byte
+ok 17 - modes: symlink and submodule along the path are refused; executable preserved; names with every odd byte
+  ---
+  duration_ms: 1927.762111
+  type: 'test'
+  ...
+# Subtest: refs: missing ref, non-main branch, unborn HEAD repo, ref pointing at a tag
+ok 18 - refs: missing ref, non-main branch, unborn HEAD repo, ref pointing at a tag
+  ---
+  duration_ms: 366.839712
+  type: 'test'
+  ...
+# Subtest: REF_DELTA packs (server without ofs-delta) resolve identically; thin-pack fetch with have resolves against external base
+ok 19 - REF_DELTA packs (server without ofs-delta) resolve identically; thin-pack fetch with have resolves against external base
+  ---
+  duration_ms: 405.509911
+  type: 'test'
+  ...
+#   24MB edit in 3453ms, push 1013B, max alloc 16384
+# Subtest: large blob (24 MB): max single allocation stays at one inflate chunk; push is a few hundred bytes
+ok 20 - large blob (24 MB): max single allocation stays at one inflate chunk; push is a few hundred bytes
+  ---
+  duration_ms: 4482.15875
+  type: 'test'
+  ...
+# Subtest: find at exact chunk boundaries of a 16384-aligned stream and a find longer than one chunk
+ok 21 - find at exact chunk boundaries of a 16384-aligned stream and a find longer than one chunk
+  ---
+  duration_ms: 1228.279459
+  type: 'test'
+  ...
+# Subtest: whole-file replace, replace with empty on 1-byte file, and empty find rejected
+ok 22 - whole-file replace, replace with empty on 1-byte file, and empty find rejected
+  ---
+  duration_ms: 400.529598
+  type: 'test'
+  ...
+# Subtest: empty blob: find on a 0-byte file is match_count (0 matches), never a push; edit the empty→nonempty neighbour works
+ok 23 - empty blob: find on a 0-byte file is match_count (0 matches), never a push; edit the empty→nonempty neighbour works
+  ---
+  duration_ms: 444.356243
+  type: 'test'
+  ...
+# Subtest: histogram hash-chain limit: 64 colliding lines merge (== git), 65 make git fail and us answer undecided
+ok 24 - histogram hash-chain limit: 64 colliding lines merge (== git), 65 make git fail and us answer undecided
+  ---
+  duration_ms: 231.406069
+  type: 'test'
+  ...
+# Subtest: edges, each decided by git
+ok 25 - edges, each decided by git
+  ---
+  duration_ms: 699.623304
+  type: 'test'
+  ...
+# Subtest: the size cap is ours (a Worker's memory), reported as a reason, never a wrong merge
+ok 26 - the size cap is ours (a Worker's memory), reported as a reason, never a wrong merge
+  ---
+  duration_ms: 0.488268
+  type: 'test'
+  ...
+# Subtest: git 2.54 changed compaction: the smallest input that separates the two modes, each pinned to its git
+ok 27 - git 2.54 changed compaction: the smallest input that separates the two modes, each pinned to its git
+  ---
+  duration_ms: 5.566696
+  type: 'test'
+  ...
+# Subtest: threeWay: the trivial-merge rules, one directory
+ok 28 - threeWay: the trivial-merge rules, one directory
+  ---
+  duration_ms: 11.898456
+  type: 'test'
+  ...
+# Subtest: outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict — each equal to git
+ok 29 - outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, clean merge, conflict — each equal to git
+  ---
+  duration_ms: 1851.340952
+  type: 'test'
+  ...
+# Subtest: line merge and renames, judged by git: disjoint edits to one file merge to git's bytes; same-line edits, binary, and rename shapes conflict
+ok 30 - line merge and renames, judged by git: disjoint edits to one file merge to git's bytes; same-line edits, binary, and rename shapes conflict
+  ---
+  duration_ms: 3565.54092
+  type: 'test'
+  ...
+# Subtest: limits: a file over maxMergeBlobBytes is a conflict with that reason (git would merge it: the cap is ours); merge-base search depth is bounded
+ok 31 - limits: a file over maxMergeBlobBytes is a conflict with that reason (git would merge it: the cap is ours); merge-base search depth is bounded
+  ---
+  duration_ms: 1920.111744
+  type: 'test'
+  ...
+# Subtest: merge bases decided by git: criss-cross refuses (git builds a virtual base we do not), the summed-distance trap now picks git's base
+ok 32 - merge bases decided by git: criss-cross refuses (git builds a virtual base we do not), the summed-distance trap now picks git's base
+  ---
+  duration_ms: 639.764756
+  type: 'test'
+  ...
+# Subtest: .gitattributes merge drivers, judged by git (attr.tree): union, -merge, binary macro, nested override; each attribute source
+ok 33 - .gitattributes merge drivers, judged by git (attr.tree): union, -merge, binary macro, nested override; each attribute source
+  ---
+  duration_ms: 3296.054674
+  type: 'test'
+  ...
+# Subtest: branch workflow: editFile creates the branch from main (CAS: must not exist), merge lands it, delete removes it
+ok 34 - branch workflow: editFile creates the branch from main (CAS: must not exist), merge lands it, delete removes it
+  ---
+  duration_ms: 638.667015
+  type: 'test'
+  ...
+#   24 cases (shapes plain/merged/criss-cross 5/12/7): clean=2 conflict=15 criss-cross refused=7 attr-source cases=12 (union-resolved files=0, merge-attribute binary conflicts=0) (conservative: 1, not from a rename guard: 0) files line-merged: 12
+# Subtest: property: random three-way tree edits — clean merges equal git merge-tree; our conflicts ⊇ git's, and never a wrong tree
+ok 35 - property: random three-way tree edits — clean merges equal git merge-tree; our conflicts ⊇ git's, and never a wrong tree
+  ---
+  duration_ms: 15416.229158
+  type: 'test'
+  ...
+# Subtest: tree encoding: our tree oid == git write-tree for sort-edge names, modes, symlinks
+ok 36 - tree encoding: our tree oid == git write-tree for sort-edge names, modes, symlinks
+  ---
+  duration_ms: 647.365062
+  type: 'test'
+  ...
+# Subtest: blob/commit oids == git hash-object
+ok 37 - blob/commit oids == git hash-object
+  ---
+  duration_ms: 29.750491
+  type: 'test'
+  ...
+# Subtest: git pack-objects (ofs-delta, varied window/depth/compression) parses and resolves to git cat-file truth
+ok 38 - git pack-objects (ofs-delta, varied window/depth/compression) parses and resolves to git cat-file truth
+  ---
+  duration_ms: 2576.688937
+  type: 'test'
+  ...
+# Subtest: thin pack from our buildPack is accepted by git index-pack --fix-thin and yields the expected oid
+ok 39 - thin pack from our buildPack is accepted by git index-pack --fix-thin and yields the expected oid
+  ---
+  duration_ms: 49.017642
+  type: 'test'
+  ...
+# Subtest: v2 fetch filter=blob:none deepen=1 returns exactly git rev-list --objects --filter=blob:none set; tree:0 returns one
+ok 40 - v2 fetch filter=blob:none deepen=1 returns exactly git rev-list --objects --filter=blob:none set; tree:0 returns one
+  ---
+  duration_ms: 460.279335
+  type: 'test'
+  ...
+# Subtest: isCacheableFetch: wants-only filtered fetches only
+ok 41 - isCacheableFetch: wants-only filtered fetches only
+  ---
+  duration_ms: 259.918636
+  type: 'test'
+  ...
+# Subtest: cacheKey: url, credential and body all separate entries
+ok 42 - cacheKey: url, credential and body all separate entries
+  ---
+  duration_ms: 7.042206
+  type: 'test'
+  ...
+# Subtest: pack cache: second edit at the same tree serves commit+trees from cache; server sees only ls-refs, blob, push
+ok 43 - pack cache: second edit at the same tree serves commit+trees from cache; server sees only ls-refs, blob, push
+  ---
+  duration_ms: 672.799211
+  type: 'test'
+  ...
+# Subtest: pack cache: a corrupt live response is not retried (bust only follows a HIT)
+ok 44 - pack cache: a corrupt live response is not retried (bust only follows a HIT)
+  ---
+  duration_ms: 36.991799
+  type: 'test'
+  ...
+# Subtest: head hint (parallel, default): ls-refs overlaps the speculative commit fetch; stale hint corrected before any push; bogus hint harmless
+ok 45 - head hint (parallel, default): ls-refs overlaps the speculative commit fetch; stale hint corrected before any push; bogus hint harmless
+  ---
+  duration_ms: 710.537852
+  type: 'test'
+  ...
+# Subtest: push: sideband on by default; hook stderr lands in git.push.remote.messages
+ok 46 - push: sideband on by default; hook stderr lands in git.push.remote.messages
+  ---
+  duration_ms: 306.001002
+  type: 'test'
+  ...
+# Subtest: discover: v2 capability canary against real git
+ok 47 - discover: v2 capability canary against real git
+  ---
+  duration_ms: 18.843447
+  type: 'test'
+  ...
+# Subtest: tracer: isolate invocation attrs, event cap, cache put stats surface on the edit root
+ok 48 - tracer: isolate invocation attrs, event cap, cache put stats surface on the edit root
+  ---
+  duration_ms: 149.564239
+  type: 'test'
+  ...
+# Subtest: verify: the post-push ls-refs must show our commit; a lying answer is ambiguous, not success
+ok 49 - verify: the post-push ls-refs must show our commit; a lying answer is ambiguous, not success
+  ---
+  duration_ms: 331.830898
+  type: 'test'
+  ...
+# Subtest: buffered fetchPack (general client): poisoned cache entry → one bust → repaired
+ok 50 - buffered fetchPack (general client): poisoned cache entry → one bust → repaired
+  ---
+  duration_ms: 146.521127
+  type: 'test'
+  ...
+# Subtest: LFS pointer: refused by default (the content is not in git), editable only with allowLfsPointer
+ok 51 - LFS pointer: refused by default (the content is not in git), editable only with allowLfsPointer
+  ---
+  duration_ms: 494.89545
+  type: 'test'
+  ...
+# Subtest: agent: we identify as ply, not git
+ok 52 - agent: we identify as ply, not git
+  ---
+  duration_ms: 110.208607
+  type: 'test'
+  ...
+# Subtest: negotiation, deterministic: haves in rounds — NAK rounds of unknown oids, then ACKs of shared history, ready, and a pack of only what is new
+ok 53 - negotiation, deterministic: haves in rounds — NAK rounds of unknown oids, then ACKs of shared history, ready, and a pack of only what is new
+  ---
+  duration_ms: 4386.920074
+  type: 'test'
+  ...
+# Subtest: sha1: chunked == node crypto
+ok 54 - sha1: chunked == node crypto
+  ---
+  duration_ms: 75.152505
+  type: 'test'
+  ...
+# Subtest: inflate: consumed exact, content equal, any level, trailing junk ignored
+ok 55 - inflate: consumed exact, content equal, any level, trailing junk ignored
+  ---
+  duration_ms: 1235.328804
+  type: 'test'
+  ...
+# Subtest: inflate: raw deflate
+ok 56 - inflate: raw deflate
+  ---
+  duration_ms: 62.174464
+  type: 'test'
+  ...
+# Subtest: pkt-line: decode is chunking-invariant and inverts encode
+ok 57 - pkt-line: decode is chunking-invariant and inverts encode
+  ---
+  duration_ms: 6211.996374
+  type: 'test'
+  ...
+# Subtest: pkt-line: garbage throws
+ok 58 - pkt-line: garbage throws
+  ---
+  duration_ms: 0.463999
+  type: 'test'
+  ...
+# Subtest: objHeader: encode/parse roundtrip incl. huge sizes
+ok 59 - objHeader: encode/parse roundtrip incl. huge sizes
+  ---
+  duration_ms: 1.989866
+  type: 'test'
+  ...
+# Subtest: delta: spliceDelta/makeDelta ∘ applyDelta == reference splice
+ok 60 - delta: spliceDelta/makeDelta ∘ applyDelta == reference splice
+  ---
+  duration_ms: 1055.288739
+  type: 'test'
+  ...
+# Subtest: delta: 64K copy boundary and 0x10000 encoding
+ok 61 - delta: 64K copy boundary and 0x10000 encoding
+  ---
+  duration_ms: 3.826951
+  type: 'test'
+  ...
+# Subtest: scan: chunking-invariant, equals replace-all, offsets exact, carry bounded
+ok 62 - scan: chunking-invariant, equals replace-all, offsets exact, carry bounded
+  ---
+  duration_ms: 592.40056
+  type: 'test'
+  ...
+# Subtest: single-object pack stream: chunking-invariant, trailer verified, zlib bytes exact
+ok 63 - single-object pack stream: chunking-invariant, trailer verified, zlib bytes exact
+  ---
+  duration_ms: 359.058146
+  type: 'test'
+  ...
+# Subtest: pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-delta + thin)
+ok 64 - pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-delta + thin)
+  ---
+  duration_ms: 753.571523
+  type: 'test'
+  ...
+# Subtest: tree: parse ∘ encode roundtrip and sort is total order with dir-as-slash rule
+ok 65 - tree: parse ∘ encode roundtrip and sort is total order with dir-as-slash rule
+  ---
+  duration_ms: 40.500343
+  type: 'test'
+  ...
+# Subtest: commit: parse ∘ encode
+ok 66 - commit: parse ∘ encode
+  ---
+  duration_ms: 6.672431
+  type: 'test'
+  ...
+# Subtest: v2 fetch state machine: sections → sideband → flush; band 3 throws; ERR throws
+ok 67 - v2 fetch state machine: sections → sideband → flush; band 3 throws; ERR throws
+  ---
+  duration_ms: 1.321032
+  type: 'test'
+  ...
+# Subtest: ls-refs: sha256 object ids are rejected as unsupported before any fetch
+ok 68 - ls-refs: sha256 object ids are rejected as unsupported before any fetch
+  ---
+  duration_ms: 9.78288
+  type: 'test'
+  ...
+# Subtest: decideHead: every branch
+ok 69 - decideHead: every branch
+  ---
+  duration_ms: 4.236916
+  type: 'test'
+  ...
+# Subtest: validateSpec: rejects before any I/O, freezes the plan
+ok 70 - validateSpec: rejects before any I/O, freezes the plan
+  ---
+  duration_ms: 2.919248
+  type: 'test'
+  ...
+# Subtest: lookupEntry: found/dir/file/mode rules and the entries limit, with attrs on every outcome
+ok 71 - lookupEntry: found/dir/file/mode rules and the entries limit, with attrs on every outcome
+  ---
+  duration_ms: 1.693148
+  type: 'test'
+  ...
+# Subtest: buildCommitObjects ≡ git: trees and commit hash to what git computes, delta list is thin and minimal
+ok 72 - buildCommitObjects ≡ git: trees and commit hash to what git computes, delta list is thin and minimal
+  ---
+  duration_ms: 91.441999
+  type: 'test'
+  ...
+# Subtest: deflate only: a stored-block zlib stream never beats CompressionStream (the reason buildPack has no stored path)
+ok 73 - deflate only: a stored-block zlib stream never beats CompressionStream (the reason buildPack has no stored path)
+  ---
+  duration_ms: 804.217253
+  type: 'test'
+  ...
+# Subtest: memFromScan/memAttrs: whole-edit accounting from what was held
+ok 74 - memFromScan/memAttrs: whole-edit accounting from what was held
+  ---
+  duration_ms: 2.038605
+  type: 'test'
+  ...
+# Subtest: otel: links, event cap, isolate counter, flatten round-trip
+ok 75 - otel: links, event cap, isolate counter, flatten round-trip
+  ---
+  duration_ms: 5.121407
+  type: 'test'
+  ...
+# Subtest: inflate: an incomplete huffman table with a hole is rejected (invalid huffman code), and zlib agrees
+ok 76 - inflate: an incomplete huffman table with a hole is rejected (invalid huffman code), and zlib agrees
+  ---
+  duration_ms: 2.224811
+  type: 'test'
+  ...
+# Subtest: parsePack: reserved object types 0 and 5 are rejected
+ok 77 - parsePack: reserved object types 0 and 5 are rejected
+  ---
+  duration_ms: 10.380636
+  type: 'test'
+  ...
+# Subtest: otel: anyValue stringifies objects, fromAny reads bytes
+ok 78 - otel: anyValue stringifies objects, fromAny reads bytes
+  ---
+  duration_ms: 0.534084
+  type: 'test'
+  ...
+# Subtest: streamingSha1: uses crypto.DigestStream when the platform has one (shimmed here), same digest as pure JS
+ok 79 - streamingSha1: uses crypto.DigestStream when the platform has one (shimmed here), same digest as pure JS
+  ---
+  duration_ms: 2.253526
+  type: 'test'
+  ...
+# Subtest: span naming convention: every span and attribute key in a trace follows the written rules
+ok 80 - span naming convention: every span and attribute key in a trace follows the written rules
+  ---
+  duration_ms: 418.979298
+  type: 'test'
+  ...
+# Subtest: error taxonomy: runtime table and documentation agree; fail refuses unknown codes
+ok 81 - error taxonomy: runtime table and documentation agree; fail refuses unknown codes
+  ---
+  duration_ms: 1.381281
+  type: 'test'
+  ...
+# Subtest: error taxonomy: every fail('code') literal in src/ is in the table (static)
+ok 82 - error taxonomy: every fail('code') literal in src/ is in the table (static)
+  ---
+  duration_ms: 1.437607
+  type: 'test'
+  ...
+# Subtest: pure: linearChain and carriedExtra
+ok 83 - pure: linearChain and carriedExtra
+  ---
+  duration_ms: 10.020957
+  type: 'test'
+  ...
+# Subtest: rebase: three commits onto a moved main — trees, authors, messages equal git rebase; committer is ours; CAS on the old tip
+ok 84 - rebase: three commits onto a moved main — trees, authors, messages equal git rebase; committer is ours; CAS on the old tip
+  ---
+  duration_ms: 980.363219
+  type: 'test'
+  ...
+# Subtest: rebase: conflict where git conflicts; branch untouched; squash produces one commit with the merged tree; branch behind → fast-forward
+ok 85 - rebase: conflict where git conflicts; branch untouched; squash produces one commit with the merged tree; branch behind → fast-forward
+  ---
+  duration_ms: 1037.348409
+  type: 'test'
+  ...
+# Subtest: cherry-pick and revert: trees equal git; signature not carried; signed result verifies
+ok 86 - cherry-pick and revert: trees equal git; signature not carried; signed result verifies
+  ---
+  duration_ms: 1201.231009
+  type: 'test'
+  ...
+#   12 cases: {"rebased":7,"conflict":5,"conservative":0,"picked":11}
+# Subtest: property: line-level edits to the same files on both sides — rebase and cherry-pick equal git, or conflict where git does
+ok 87 - property: line-level edits to the same files on both sides — rebase and cherry-pick equal git, or conflict where git does
+  ---
+  duration_ms: 12532.670732
+  type: 'test'
+  ...
+# Subtest: attributes in cherry-pick and rebase: 'ours' is the tree being built on, as a worktree cherry-pick/rebase reads it
+ok 88 - attributes in cherry-pick and rebase: 'ours' is the tree being built on, as a worktree cherry-pick/rebase reads it
+  ---
+  duration_ms: 1253.321096
+  type: 'test'
+  ...
+# Subtest: end to end: edit on a branch, main moves, rebase, fast-forward land, delete — all git operations
+ok 89 - end to end: edit on a branch, main moves, rebase, fast-forward land, delete — all git operations
+  ---
+  duration_ms: 551.010184
+  type: 'test'
+  ...
+# Subtest: editFile with a signer: git verify-commit accepts the commit; ssh-keygen verifies the raw signature; tampering is caught
+ok 90 - editFile with a signer: git verify-commit accepts the commit; ssh-keygen verifies the raw signature; tampering is caught
+  ---
+  duration_ms: 468.934623
+  type: 'test'
+  ...
+# Subtest: withCommitData keeps trees/blob objects and recomputes identity; armor wraps at 70 like ssh-keygen
+ok 91 - withCommitData keeps trees/blob objects and recomputes identity; armor wraps at 70 like ssh-keygen
+  ---
+  duration_ms: 5.316631
+  type: 'test'
+  ...
+# Subtest: pure: url forms, host key line codec, packet padding, mpint, KEXINIT round-trip
+ok 92 - pure: url forms, host key line codec, packet padding, mpint, KEXINIT round-trip
+  ---
+  duration_ms: 95.822921
+  type: 'test'
+  ...
+#   12 git processes, 317 ssh packets, 21231 B in / 12103 B out
+# Subtest: one connection: ls-refs, discover, receive caps, edits with hint + verify + signer, merge, rebase — git-verified
+ok 93 - one connection: ls-refs, discover, receive caps, edits with hint + verify + signer, merge, rebase — git-verified
+  ---
+  duration_ms: 1554.012502
+  type: 'test'
+  ...
+# Subtest: parity with git over ssh: a clone through OpenSSH sees exactly what we pushed; git push through OpenSSH is visible to us
+ok 94 - parity with git over ssh: a clone through OpenSSH sees exactly what we pushed; git push through OpenSSH is visible to us
+  ---
+  duration_ms: 1492.988299
+  type: 'test'
+  ...
+# Subtest: failures are typed: host key mismatch (before auth), unauthorized key, no AcceptEnv, missing repo, scp-like url
+ok 95 - failures are typed: host key mismatch (before auth), unauthorized key, no AcceptEnv, missing repo, scp-like url
+  ---
+  duration_ms: 1046.624416
+  type: 'test'
+  ...
+#   25 flips: {"ssh":11,"ok":5,"ambiguous":7,"timeout":2}
+# Subtest: mutating the encrypted stream fails closed: every flipped byte after NEWKEYS is a bad tag, never a wrong answer
+ok 96 - mutating the encrypted stream fails closed: every flipped byte after NEWKEYS is a bad tag, never a wrong answer
+  ---
+  duration_ms: 129672.36916
+  type: 'test'
+  ...
+# Subtest: userauth: a message outside the protocol (not SUCCESS, BANNER or FAILURE) fails typed, after a banner is recorded
+ok 97 - userauth: a message outside the protocol (not SUCCESS, BANNER or FAILURE) fails typed, after a banner is recorded
+  ---
+  duration_ms: 7.414046
+  type: 'test'
+  ...
+1..97
+# tests 97
+# suites 0
+# pass 97
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 983997.265011
+ok   #  0 seed=87109 match_count     157ms blob=  16414 push=    -   NEW:outcome.match_count,depth.2,cache_hits.0,mem.max_single.2^8,fetch.filter.tree:0,inflate.dynamic,http.multi_chunk,fetch.shallow,pack.objects.2^0,inflate.fixed,tree.entries.2^1,tree.mode.40000,tree.entries.2^0,tree.mode.100644,fetch.filter.none,blob.base_len.2^14,scan.multi_chunk,scan.matches.2,error.match_count
+ok   #  1 seed=191838 ok              411ms blob=  15838 push=  548   NEW:outcome.cas_conflict,depth.6,mem.max_single.2^12,inflate.stored,blob.base_len.2^13,scan.matches.1,delta.insert_ops=0,blob.shrinks,push.objects.8,push.bytes.2^9,push.ng,error.cas_conflict,tree.cache_hit
+ok   #  2 seed=296567 not_found        48ms blob= 230323 push=    -   NEW:outcome.not_found,depth.1,tree.entries.2^2,error.not_found
+ok   #  3 seed=401296 match_count      94ms blob=  35974 push=    - ← tree.entries.2^4  NEW:depth.3,mem.max_single.2^9,tree.entries.2^4,tree.entries.2^3,blob.base_len.2^15
+ok   #  4 seed=506025 not_found        82ms blob= 956677 push=    - ← mutate:296567:depth  NEW:depth.5
+ok   #  5 seed=610754 match_count      91ms blob=    256 push=    -   NEW:tree.mode.100755,blob.base_len.2^8,scan.matches.0
+ok   #  6 seed=715483 ok              674ms blob= 456120 push=  626 ← scan.match_crosses_chunk  NEW:mem.max_single.2^14,blob.base_len.2^18,scan.many_chunks,delta.copy_ops>=3,delta.insert_ops>=2,push.objects.5,pkt.carry
+ok   #  7 seed=820212 ok              516ms blob= 131102 push=  481 ← depth.4  NEW:depth.4,blob.base_len.2^17,push.objects.6,push.bytes.2^8
+ok   #  8 seed=924941 noop             70ms blob=  44272 push=    0   NEW:outcome.noop,mem.max_single.2^13
+ok   #  9 seed=1029670 ok              361ms blob=    103 push=23641 ← push.ratio.ge10  NEW:blob.base_len.2^6,push.bytes.2^14
+ok   # 10 seed=1134399 match_count     187ms blob=      0 push=    - ← depth.10  NEW:depth.10,blob.base_len.0,blob.empty
+ok   # 11 seed=1239128 match_count     361ms blob=1456184 push=    - ← scan.match_crosses_chunk  NEW:blob.base_len.2^20
+ok   # 12 seed=1343857 match_count      92ms blob=  32801 push=    - ← mutate:87109:pos
+ok   # 13 seed=1448586 not_found        47ms blob=     98 push=    - ← push.ratio.ge10
+ok   # 14 seed=1553315 match_count      72ms blob= 117757 push=    -   NEW:blob.base_len.2^16
+ok   # 15 seed=1658044 ok              450ms blob=1173116 push=  755 ← scan.match_crosses_chunk  NEW:outcome.ok,push.ratio.lt1,pkt.max_payload
+ok   # 16 seed=1762773 ok              349ms blob=      1 push=  238   NEW:blob.base_len.2^0,scan.match_crosses_chunk,blob.new_empty,push.objects.3,push.bytes.2^7
+ok   # 17 seed=1867502 ok              374ms blob=    453 push=  642 ← mutate:820212:find
+ok   # 18 seed=1972231 match_count      58ms blob=      8 push=    - ← server.packed  NEW:error.ERR_INVALID_STATE,blob.base_len.2^3
+ok   # 19 seed=2076960 ok              388ms blob=     65 push=41838 ← mutate:1029670:compression  NEW:push.bytes.2^15
+ok   # 20 seed=2181689 ok              109ms blob=    134 push=  420   NEW:push.ratio.lt10,blob.base_len.2^7,push.objects.4
+ok   # 21 seed=2286418 ok              449ms blob=    240 push=48671 ← push.ratio.ge10
+ok   # 22 seed=2391147 match_count     197ms blob=  30301 push=    - ← depth.10  NEW:scan.matches.3
+ok   # 23 seed=2495876 ok              178ms blob=    175 push=  519 ← blob.new_empty  NEW:push.ratio.ge10
+ok   # 24 seed=2600605 match_count     342ms blob= 573888 push=    - ← mutate:2391147:blob  NEW:blob.base_len.2^19
+ok   # 25 seed=2705334 not_found       103ms blob= 230619 push=    - ← mutate:506025:compression
+ok   # 26 seed=2810063 ok              230ms blob= 473774 push=  686 ← mutate:1658044:compression
+ok   # 27 seed=2914792 noop             65ms blob=   8505 push=    0 ← outcome.noop
+ok   # 28 seed=3019521 ok              695ms blob= 910951 push=  895 ← pkt.max_payload  NEW:push.bytes.2^10
+ok   # 29 seed=3124250 ok              312ms blob=      1 push=  240 ← mutate:1762773:blob
+ok   # 30 seed=3228979 ok              420ms blob=  25366 push=  572 
+ok   # 31 seed=3333708 noop             91ms blob=  22346 push=    0 ← outcome.noop
+ok   # 32 seed=3438437 ok             1105ms blob=1274308 push=  345 ← scan.match_crosses_chunk
+ok   # 33 seed=3543166 match_count      53ms blob=     21 push=    - ← push.ratio.ge10  NEW:blob.base_len.2^4
+ok   # 34 seed=3647895 ok              311ms blob=    446 push=  720 ← tree.entries.2^4  NEW:mem.max_single.2^10,tree.entries.2^5
+ok   # 35 seed=3752624 ok               87ms blob=    692 push=  470 ← mutate:1972231:outcome  NEW:blob.base_len.2^9
+ok   # 36 seed=3857353 ok              802ms blob= 890454 push=  546 
+ok   # 37 seed=3962082 not_found        72ms blob=   8831 push=    - ← tree.entries.2^4
+ok   # 38 seed=4066811 not_found       144ms blob=  25863 push=    -   NEW:depth.9
+ok   # 39 seed=4171540 ok              109ms blob=     20 push=  391 
+ok   # 40 seed=4276269 match_count     272ms blob=1136032 push=    - ← scan.match_crosses_chunk
+ok   # 41 seed=4380998 ok              104ms blob=    156 push=  448 ← mutate:2181689:siblings
+ok   # 42 seed=4485727 ok              451ms blob=  57844 push=  559 ← mutate:191838:history
+ok   # 43 seed=4590456 match_count      74ms blob=  66319 push=    - ← mutate:1553315:server
+ok   # 44 seed=4695185 ok              150ms blob=  56887 push=  758 ← depth.4
+ok   # 45 seed=4799914 noop            155ms blob=   1800 push=    0 ← outcome.noop  NEW:blob.base_len.2^10
+ok   # 46 seed=4904643 ok              922ms blob=1455282 push=  727 ← pkt.max_payload
+ok   # 47 seed=5009372 ok              126ms blob=      6 push=  345 ← blob.new_empty  NEW:blob.base_len.2^2
+ok   # 48 seed=5114101 not_found        87ms blob=   4482 push=    - 
+ok   # 49 seed=5218830 ok              166ms blob=      8 push=18802 ← blob.empty
+ok   # 50 seed=5323559 ok              128ms blob=      1 push=  441 ← blob.empty
+ok   # 51 seed=5428288 ok              130ms blob=     62 push=  419 ← blob.new_empty  NEW:blob.base_len.2^5
+ok   # 52 seed=5533017 ok              227ms blob=   5927 push=  772   NEW:blob.base_len.2^12,push.objects.12
+ok   # 53 seed=5637746 not_found       103ms blob=     62 push=    - ← push.ratio.ge10
+ok   # 54 seed=5742475 match_count      91ms blob=  27287 push=    - ← scan.matches.2
+ok   # 55 seed=5847204 ok              490ms blob=   1739 push= 2530   NEW:push.bytes.2^11
+ok   # 56 seed=5951933 match_count     127ms blob=  16385 push=    - ← scan.matches.2
+ok   # 57 seed=6056662 match_count     347ms blob=1415943 push=    - ← scan.match_crosses_chunk
+ok   # 58 seed=6161391 match_count      93ms blob=  34497 push=    - ← scan.matches.2
+ok   # 59 seed=6266120 match_count      49ms blob=   9956 push=    - ← tree.entries.2^5
+
+60 cases, 15.1s edit time, 0 failures. Coverage (102 buckets):
+   1 blob.base_len.0
+   1 blob.base_len.2^12
+   1 blob.base_len.2^17
+   1 blob.base_len.2^2
+   1 blob.base_len.2^5
+   1 blob.base_len.2^9
+   1 blob.empty
+   1 depth.9
+   1 error.ERR_INVALID_STATE
+   1 push.bytes.2^11
+   1 tree.entries.2^5
+   2 blob.base_len.2^10
+   2 blob.base_len.2^16
+   2 blob.base_len.2^18
+   2 blob.base_len.2^3
+   2 blob.base_len.2^4
+   2 blob.base_len.2^6
+   2 mem.max_single.2^12
+   2 push.bytes.2^14
+   2 push.bytes.2^15
+   2 push.bytes.2^7
+   2 push.objects.12
+   3 blob.base_len.2^0
+   3 blob.base_len.2^13
+   3 blob.base_len.2^19
+   3 blob.base_len.2^8
+   3 mem.max_single.2^10
+   3 scan.matches.3
+   4 depth.5
+   4 mem.max_single.2^13
+   4 outcome.noop
+   4 push.bytes.2^10
+   4 push.objects.4
+   4 push.ratio.lt1
+   4 push.ratio.lt10
+   4 scan.match_crosses_chunk
+   5 blob.base_len.2^7
+   5 blob.new_empty
+   5 push.objects.5
+   5 push.ratio.ge10
+   6 blob.base_len.2^20
+   6 depth.10
+   6 mem.max_single.2^9
+   6 push.objects.3
+   6 push.objects.8
+   6 scan.matches.2
+   6 tree.entries.2^4
+   7 pkt.max_payload
+   7 push.objects.6
+   8 blob.base_len.2^14
+   8 blob.base_len.2^15
+   8 delta.copy_ops>=3
+   8 depth.4
+   8 error.not_found
+   8 outcome.not_found
+   9 compression.9
+   9 delta.insert_ops=0
+   9 depth.3
+   9 depth.6
+   9 scan.matches.0
+  10 depth.2
+  10 mem.max_single.2^14
+  11 push.bytes.2^8
+  11 server.mixed
+  11 server.packed
+  12 server.bitmap
+  12 server.loose
+  13 depth.1
+  13 outcome.ok
+  13 sortedge
+  14 inflate.stored
+  14 scan.many_chunks
+  14 server.midx-bitmap
+  15 tree.entries.2^3
+  16 compression.1
+  17 delta.insert_ops>=2
+  17 error.cas_conflict
+  17 outcome.cas_conflict
+  17 push.bytes.2^9
+  17 push.ng
+  18 error.match_count
+  18 outcome.match_count
+  20 pkt.carry
+  22 tree.mode.100755
+  23 tree.cache_hit
+  26 tree.entries.2^1
+  30 blob.shrinks
+  30 tree.mode.100644
+  31 tree.entries.2^0
+  34 scan.matches.1
+  34 scan.multi_chunk
+  35 mem.max_single.2^8
+  36 tree.entries.2^2
+  48 inflate.dynamic
+  48 inflate.fixed
+  48 tree.mode.40000
+  52 fetch.filter.none
+  60 cache_hits.0
+  60 fetch.filter.tree:0
+  60 fetch.shallow
+  60 http.multi_chunk
+  60 pack.objects.2^0
+ok   #  0 seed=95028 fetch#2 pkt_inject_band3+flip_byte+zero_run → protocol         128ms
+ok   #  1 seed=199757 fetch#2 pkt_drop                         → pack_corrupt      64ms
+ok   #  2 seed=304486 push-sb#0 truncate_tail                    → ambiguous        251ms
+ok   #  3 seed=409215 fetch#3 pkt_shallow_flood+band_swap      → limit_exceeded    89ms
+ok   #  4 seed=513944 fetch#3 pack_version                     → pack_corrupt      78ms
+ok   #  5 seed=618673 push-sb#0 pkt_inject_band2                 → ok               284ms
+ok   #  6 seed=723402 fetch#4 pack_objsize+pack_trailer        → pack_corrupt      97ms
+ok   #  7 seed=828131 fetch#0 flip_bit                         → pack_corrupt      34ms
+ok   #  8 seed=932860 fetch#1 band_swap+pack_objsize           → protocol          44ms
+ok   #  9 seed=1037589 ls-refs#0 delete_run+pkt_drop              → protocol          12ms
+ok   # 10 seed=1142318 fetch#1 zlib_bomb                        → pack_corrupt      55ms
+ok   # 11 seed=1247047 fetch#3 pkt_inject_err+pack_version      → pack_corrupt      76ms
+ok   # 12 seed=1351776 fetch#2 append_junk+pkt_dup+truncate_tail → protocol          69ms
+ok   # 13 seed=1456505 fetch#1 zlib_header+flip_bit+pkt_inject_band3 → remote_error      46ms
+ok   # 14 seed=1561234 receive-pack#0 zlib_header+pack_trailer+delete_run → ambiguous        159ms
+ok   # 15 seed=1665963 fetch#1 zlib_header                      → pack_corrupt      45ms
+ok   # 16 seed=1770692 push-sb#0 pack_objsize+zero_run+pack_objsize → ambiguous        239ms
+ok   # 17 seed=1875421 fetch#4 pack_count                       → pack_corrupt     102ms
+ok   # 18 seed=1980150 receive-pack#0 pack_objsize+zlib_header         → ok               155ms
+ok   # 19 seed=2084879 fetch#0 pkt_dup                          → pack_corrupt      33ms
+ok   # 20 seed=2189608 fetch#1 duplicate_run                    → protocol          40ms
+ok   # 21 seed=2294337 fetch#2 flip_byte+delete_run+duplicate_run → protocol          63ms
+ok   # 22 seed=2399066 fetch#2 pkt_drop                         → protocol          61ms
+ok   # 23 seed=2503795 receive-pack#0 pkt_drop                         → ambiguous        148ms
+ok   # 24 seed=2608524 fetch#2 pack_version+zero_run+flip_byte  → protocol          62ms
+ok   # 25 seed=2713253 fetch#1 pack_objtype                     → pack_corrupt      45ms
+ok   # 26 seed=2817982 fetch#4 flip_bit+pack_objtype            → protocol          92ms
+ok   # 27 seed=2922711 fetch#0 flip_byte+insert_junk+pack_sig   → protocol          25ms
+ok   # 28 seed=3027440 ls-refs#0 delete_run                       → not_found         14ms
+ok   # 29 seed=3132169 fetch#1 empty                            → protocol          40ms
+ok   # 30 seed=3236898 fetch#3 pkt_dup+pkt_dup                  → protocol          59ms
+ok   # 31 seed=3341627 receive-pack#0 pkt_inject_err                   → ambiguous        128ms
+ok   # 32 seed=3446356 ls-refs#0 pack_trailer+pack_objtype+pkt_inject_band3 → protocol          18ms
+ok   # 33 seed=3551085 ls-refs#0 pkt_inject_err                   → remote_error      15ms
+ok   # 34 seed=3655814 fetch#3 zlib_bomb+duplicate_run          → protocol          65ms
+ok   # 35 seed=3760543 receive-pack#0 truncate_tail+insert_junk+pack_trailer → ambiguous        131ms
+ok   # 36 seed=3865272 ls-refs#0 pkt_shallow_flood+pkt_inject_band2 → protocol          21ms
+ok   # 37 seed=3970001 fetch#4 zlib_header                      → pack_corrupt      95ms
+ok   # 38 seed=4074730 fetch#2 pkt_len+pkt_drop                 → protocol          56ms
+ok   # 39 seed=4179459 fetch#0 pack_objsize+pkt_inject_band2+pack_trailer → limit_exceeded    33ms
+ok   # 40 seed=4284188 fetch#3 zlib_bomb+pack_count+delete_run  → protocol          77ms
+ok   # 41 seed=4388917 push-sb#0 append_flush+swap_runs           → ambiguous        254ms
+ok   # 42 seed=4493646 fetch#0 pack_version+pack_version        → pack_corrupt      29ms
+ok   # 43 seed=4598375 fetch#1 truncate_tail+truncate+flip_byte → protocol          39ms
+ok   # 44 seed=4703104 receive-pack#0 pkt_inject_band2+pack_sig+pack_count → ok               132ms
+ok   # 45 seed=4807833 ls-refs#0 truncate+pkt_inject_band2+flip_bit → protocol          14ms
+ok   # 46 seed=4912562 ls-refs#0 delete_run+zlib_header+pkt_drop  → protocol          15ms
+ok   # 47 seed=5017291 fetch#0 zlib_bomb+append_junk            → protocol          32ms
+ok   # 48 seed=5122020 fetch#1 empty                            → protocol          44ms
+ok   # 49 seed=5226749 fetch#1 zlib_body+pack_trailer+insert_junk → protocol          49ms
+ok   # 50 seed=5331478 fetch#3 insert_junk                      → protocol          66ms
+ok   # 51 seed=5436207 fetch#1 truncate_tail+flip_byte+empty    → protocol          44ms
+ok   # 52 seed=5540936 fetch#0 band_swap                        → remote_error      25ms
+ok   # 53 seed=5645665 fetch#0 insert_junk                      → protocol          28ms
+ok   # 54 seed=5750394 fetch#2 zlib_header+append_flush+pack_objsize → limit_exceeded    65ms
+ok   # 55 seed=5855123 fetch#1 append_flush                     → protocol          40ms
+ok   # 56 seed=5959852 fetch#3 pkt_inject_band3+pack_objtype+pkt_drop → protocol          67ms
+ok   # 57 seed=6064581 fetch#1 pkt_shallow_flood+append_flush+pkt_inject_band2 → limit_exceeded    50ms
+ok   # 58 seed=6169310 ls-refs#0 truncate                         → protocol          13ms
+ok   # 59 seed=6274039 fetch#2 zlib_body+delete_run             → protocol          60ms
+
+60 cases, 0 failures, 3 git-verified successes (mutation hit nothing we read)
+
+outcomes:
+  30 protocol
+  12 pack_corrupt
+   7 ambiguous
+   4 limit_exceeded
+   3 ok
+   3 remote_error
+   1 not_found
+
+detection site:
+  20 pkt
+  11 v2
+   6 pack_hdr
+   6 trailer
+   4 remote
+   3 ls_refs
+   2 limit
+   2 ambiguous
+   2 size
+   1 tree
+
+mutator → outcome:
+   6 flip_byte:protocol
+   5 delete_run:protocol
+   5 pkt_drop:protocol
+   4 pack_version:pack_corrupt
+   4 insert_junk:protocol
+   3 pkt_inject_band3:protocol
+   3 pkt_dup:protocol
+   3 truncate_tail:protocol
+   3 duplicate_run:protocol
+   3 pack_objtype:protocol
+   3 empty:protocol
+   3 zlib_bomb:protocol
+   3 truncate:protocol
+   2 zero_run:protocol
+   2 truncate_tail:ambiguous
+   2 pkt_shallow_flood:limit_exceeded
+   2 pkt_inject_band2:ok
+   2 append_junk:protocol
+   2 pack_trailer:ambiguous
+   2 zlib_header:pack_corrupt
+   2 pack_objsize:ambiguous
+   2 flip_bit:protocol
+   2 pack_trailer:protocol
+   2 pkt_inject_band2:protocol
+   2 pack_objsize:limit_exceeded
+   2 pkt_inject_band2:limit_exceeded
+   2 zlib_body:protocol
+   2 append_flush:limit_exceeded
+   1 pkt_drop:pack_corrupt
+   1 band_swap:limit_exceeded
+   1 pack_objsize:pack_corrupt
+   1 pack_trailer:pack_corrupt
+   1 flip_bit:pack_corrupt
+   1 band_swap:protocol
+   1 pack_objsize:protocol
+   1 zlib_bomb:pack_corrupt
+   1 pkt_inject_err:pack_corrupt
+   1 zlib_header:remote_error
+   1 flip_bit:remote_error
+   1 pkt_inject_band3:remote_error
+   1 zlib_header:ambiguous
+   1 delete_run:ambiguous
+   1 zero_run:ambiguous
+   1 pack_count:pack_corrupt
+   1 pack_objsize:ok
+   1 zlib_header:ok
+   1 pkt_dup:pack_corrupt
+   1 pkt_drop:ambiguous
+   1 pack_version:protocol
+   1 pack_objtype:pack_corrupt
+   1 pack_sig:protocol
+   1 delete_run:not_found
+   1 pkt_inject_err:ambiguous
+   1 pkt_inject_err:remote_error
+   1 insert_junk:ambiguous
+   1 pkt_shallow_flood:protocol
+   1 pkt_len:protocol
+   1 pack_trailer:limit_exceeded
+   1 pack_count:protocol
+   1 append_flush:ambiguous
+   1 swap_runs:ambiguous
+   1 pack_sig:ok
+   1 pack_count:ok
+   1 zlib_header:protocol
+   1 band_swap:remote_error
+   1 zlib_header:limit_exceeded
+   1 append_flush:protocol
+ok   #  0 seed=253408 repo=0B w=1c h=2 d5 blob:limit=5000            thin ofs nego     → 0 obj   62ms
+ok   #  1 seed=358137 repo=2L w=3ctc h=0    -                               ref done     → 156 obj   63ms
+ok   #  2 seed=462866 repo=0B w=1c h=2    blob:limit=5000                 ref done     → 0 obj   18ms
+ok   #  3 seed=567595 repo=1L w=1c h=0 d1 -                               ref done     → 15 obj   19ms
+ok   #  4 seed=672324 repo=2L w=1c h=1 d3 tree:3                          ref nego     → 34 obj   31ms
+ok   #  5 seed=777053 repo=5P w=1c h=0 since combine:blob:none+blob:limit=0      ofs nego     → - obj   21ms
+ok   #  6 seed=881782 repo=0B w=1c h=4 d50 blob:none                       ofs done     → 8 obj   17ms
+ok   #  7 seed=986511 repo=4B w=1c h=1 since combine:blob:none+blob:none thin ofs done     → 10 obj   19ms
+ok   #  8 seed=1091240 repo=4B w=3ccb h=0 d1 tree:4                          ofs done     → 49 obj   26ms
+ok   #  9 seed=1195969 repo=4B w=1c h=4    blob:none                       ofs done     → 9 obj   18ms
+ok   # 10 seed=1300698 repo=4B w=1t h=1 d50 -                               ref done     → 0 obj   16ms
+ok   # 11 seed=1405427 repo=5P w=1c h=4 not blob:none                       ofs done     → - obj   10ms
+ok   # 12 seed=1510156 repo=0B w=1c h=0 d1 tree:1                     thin ofs nego     → 2 obj   18ms
+ok   # 13 seed=1614885 repo=1L w=1c h=2    -                          thin ofs nego     → 0 obj   25ms
+ok   # 14 seed=1719614 repo=4B w=1c h=2 d50 combine:blob:none+blob:limit=5000 thin ofs done     → 0 obj   15ms
+ok   # 15 seed=1824343 repo=2L w=2ct h=1 d2 blob:none                       ofs nego     → 45 obj   23ms
+ok   # 16 seed=1929072 repo=1L w=1t h=1    blob:limit=100             thin ofs nego     → 0 obj   36ms
+ok   # 17 seed=2033801 repo=2L w=1c h=1    -                               ofs done     → 143 obj   32ms
+ok   # 18 seed=2138530 repo=2L w=1b h=0 d2 tree:2                          ofs done     → 1 obj   15ms
+ok   # 19 seed=2243259 repo=0B w=1t h=0 d2 -                               ofs nego     → 28 obj   20ms
+ok   # 20 seed=2347988 repo=4B w=1c h=2 not -                               ofs done sh2 → - obj   12ms
+ok   # 21 seed=2452717 repo=3B w=1b h=4 d5 -                               ofs done sh1 → 1 obj   17ms
+ok   # 22 seed=2557446 repo=3B w=1c h=0    -                          thin ofs nego     → 76 obj   23ms
+ok   # 23 seed=2662175 repo=0B w=2bc h=2 d1 blob:limit=100                  ofs done     → 1 obj   26ms
+ok   # 24 seed=2766904 repo=3B w=1c h=1 d2 -                          thin ofs nego     → 0 obj   29ms
+ok   # 25 seed=2871633 repo=2L w=1c h=0    -                               ofs done     → 51 obj   24ms
+ok   # 26 seed=2976362 repo=3B w=1c h=1    -                               ref done     → 0 obj   19ms
+ok   # 27 seed=3081091 repo=2L w=2tc h=0 d1 blob:none                       ref done     → 20 obj   26ms
+ok   # 28 seed=3185820 repo=2L w=2cc h=2    combine:blob:none+blob:limit=0      ofs done     → 9 obj   17ms
+ok   # 29 seed=3290549 repo=3B w=1c h=1 d1 -                               ofs done sh1 → 17 obj   21ms
+ok   # 30 seed=3395278 repo=5P w=1c h=5    -                               ofs done sh2 → 0 obj   21ms
+ok   # 31 seed=3500007 repo=1L w=1c h=0    combine:blob:limit=100+blob:limit=100      ofs nego     → 63 obj   33ms
+ok   # 32 seed=3604736 repo=1L w=1b h=1    blob:none                       ofs done     → 1 obj   17ms
+ok   # 33 seed=3709465 repo=5P w=2tc h=2 d50 -                               ref done     → 12 obj   17ms
+ok   # 34 seed=3814194 repo=0B w=1c h=0    tree:2                          ofs done     → 71 obj   27ms
+ok   # 35 seed=3918923 repo=2L w=1c h=6    tree:0                          ofs done sh2 → 0 obj   18ms
+ok   # 36 seed=4023652 repo=0B w=1t h=2    -                          thin ref done     → 0 obj   15ms
+ok   # 37 seed=4128381 repo=3B w=2cc h=2 d5 -                               ref done sh1 → 76 obj   28ms
+ok   # 38 seed=4233110 repo=5P w=2cc h=1 d1 blob:limit=1               thin ofs nego sh1 → 16 obj   17ms
+ok   # 39 seed=4337839 repo=5P w=1c h=0 d1 blob:limit=1000                 ref nego     → 16 obj   21ms
+ok   # 40 seed=4442568 repo=2L w=1t h=0 d1 -                               ofs nego     → 20 obj   22ms
+ok   # 41 seed=4547297 repo=5P w=1c h=2    blob:none                  thin ofs nego     → 0 obj   16ms
+ok   # 42 seed=4652026 repo=4B w=1t h=3    -                               ofs done sh1 → 6 obj   18ms
+ok   # 43 seed=4756755 repo=4B w=1c h=7 d2 tree:3                          ofs nego sh1 → 0 obj   19ms
+ok   # 44 seed=4861484 repo=5P w=1t h=1    blob:limit=100                  ref done sh1 → 1 obj   14ms
+ok   # 45 seed=4966213 repo=3B w=3cct h=0    blob:limit=0               thin ofs done     → 28 obj   17ms
+ok   # 46 seed=5070942 repo=2L w=1b h=0 d5 tree:0                          ofs nego     → 1 obj   19ms
+ok   # 47 seed=5175671 repo=1L w=1c h=0    tree:0                     thin ofs done     → 4 obj   17ms
+ok   # 48 seed=5280400 repo=1L w=2ct h=1 d1 blob:none                       ofs done     → 15 obj   16ms
+ok   # 49 seed=5385129 repo=3B w=2cc h=1    -                          thin ofs done     → 0 obj   14ms
+ok   # 50 seed=5489858 repo=5P w=1t h=1    blob:limit=1000                 ofs done     → 2 obj   14ms
+ok   # 51 seed=5594587 repo=4B w=1c h=2    -                               ref done sh1 → 0 obj   17ms
+ok   # 52 seed=5699316 repo=4B w=1c h=4 d2 -                               ref done     → 0 obj   17ms
+ok   # 53 seed=5804045 repo=4B w=1t h=3 d1 -                               ofs done sh1 → 0 obj   17ms
+ok   # 54 seed=5908774 repo=5P w=1c h=0 since -                               ofs done     → - obj   11ms
+ok   # 55 seed=6013503 repo=2L w=1b h=0 d1 combine:blob:limit=1000+blob:limit=1000      ref done     → 1 obj   19ms
+ok   # 56 seed=6118232 repo=5P w=1c h=1 not blob:none                  thin ofs done     → - obj   11ms
+ok   # 57 seed=6222961 repo=4B w=1c h=6 d3 -                               ofs done sh2 → 0 obj   17ms
+ok   # 58 seed=6327690 repo=5P w=3ccb h=7    combine:tree:1+blob:limit=0      ofs done sh1 → 3 obj   17ms
+ok   # 59 seed=6432419 repo=2L w=1c h=2 d2 blob:none                  thin ref done     → 8 obj   19ms
+ok   # 60 seed=6537148 repo=2L w=1b h=1 d2 -                               ref nego     → 0 obj   19ms
+ok   # 61 seed=6641877 repo=5P w=3ccc h=0 d5 -                               ofs done     → 54 obj   31ms
+ok   # 62 seed=6746606 repo=5P w=1c h=0    -                               ofs done     → 54 obj   27ms
+ok   # 63 seed=6851335 repo=0B w=1t h=0    -                          thin ofs done     → 14 obj   20ms
+ok   # 64 seed=6956064 repo=1L w=3cct h=0 d5 -                               ofs nego     → 72 obj   32ms
+ok   # 65 seed=7060793 repo=2L w=1t h=0 d1 -                          thin ref done     → 2 obj   18ms
+ok   # 66 seed=7165522 repo=0B w=1c h=2    -                          thin ref done     → 0 obj   18ms
+ok   # 67 seed=7270251 repo=4B w=1c h=0    -                               ofs nego     → 45 obj   26ms
+ok   # 68 seed=7374980 repo=2L w=1c h=1 d1 -                          thin ref done     → 21 obj   34ms
+ok   # 69 seed=7479709 repo=0B w=1c h=0 d50 blob:none                       ref nego     → 32 obj   22ms
+ok   # 70 seed=7584438 repo=3B w=1c h=2 since -                          thin ref nego     → 0 obj   15ms
+ok   # 71 seed=7689167 repo=1L w=1c h=3 d5 combine:blob:none+blob:none thin ref done sh1 → 0 obj   17ms
+ok   # 72 seed=7793896 repo=3B w=2tc h=0    combine:tree:3+blob:limit=1      ref done     → 26 obj   22ms
+ok   # 73 seed=7898625 repo=5P w=1c h=2    -                               ofs done     → 0 obj   20ms
+ok   # 74 seed=8003354 repo=0B w=1c h=1 d1 -                               ref done     → 15 obj   23ms
+ok   # 75 seed=8108083 repo=4B w=1c h=3    tree:3                          ofs done     → 0 obj   21ms
+ok   # 76 seed=8212812 repo=0B w=2cc h=0 d2 blob:none                  thin ofs done     → 31 obj   24ms
+ok   # 77 seed=8317541 repo=4B w=2cc h=0    blob:limit=5000            thin ofs done     → 148 obj   36ms
+ok   # 78 seed=8422270 repo=0B w=1t h=1 d3 -                               ofs done sh1 → 2 obj   17ms
+ok   # 79 seed=8526999 repo=0B w=1b h=1 d3 combine:tree:0+blob:limit=1000      ofs nego sh1 → 1 obj   19ms
+
+80 cases, 0 failures. Coverage (83 buckets):
+   1 chain.3
+   1 ext_bases.true
+   1 filter.combine:blob:limit+blob:limit=100
+   1 filter.combine:blob:limit+blob:limit=1000
+   1 model.bitmap.approx
+   1 want_types.commit+tree
+   2 deepen.since
+   2 filter.combine:blob:none+blob:limit
+   2 filter.combine:blob:none+blob:none
+   2 objects.4
+   2 unshallow_lines.true
+   3 chain.4
+   3 filter.combine:tree:N+blob:limit
+   3 objects.128
+   3 want_types.blob+commit
+   4 deepen.3
+   4 haves.3
+   4 objects.64
+   5 chain.2
+   5 deepen.50
+   5 objects.2
+   5 server_crash.deepen_since+shallow
+   5 want_types.tag
+   6 wants.3
+   7 deepen.5
+   7 want_types.blob
+   7 want_types.commit+tag
+   7 want_types.tree
+   8 objects.1
+   8 ready.true
+   9 deepen.2
+   9 haves.4
+   9 objects.32
+   9 pack.depth.50
+   9 pack.window.250
+  10 filter.blob:limit
+  10 filter.blob:none
+  10 filter.tree:N
+  10 objects.16
+  10 objects.8
+  10 rounds.0
+  11 pack.depth.1
+  11 server.packed
+  12 model.bitmap.exact
+  12 rounds.1
+  12 wants.2
+  13 chain.1
+  13 mode.bitmap
+  13 oracle.exact.bitmap
+  14 pack.window.0
+  14 ready.false
+  15 deepen.1
+  15 haves.2
+  16 shallow.true
+  20 haves.1
+  22 done.false
+  22 nak.false
+  23 thin.true
+  24 objects.0
+  25 ofs.false
+  25 server.loose
+  25 shallow_lines.true
+  26 pack.window.1
+  26 pack.window.10
+  27 haves.0
+  33 deepen.none
+  36 filter.none
+  39 server.bitmap
+  45 want_types.commit
+  50 ofs.true
+  50 shallow_lines.false
+  52 thin.false
+  53 chain.0
+  53 done.true
+  55 pack.depth.5
+  57 wants.1
+  59 shallow.false
+  62 mode.traversal
+  62 model.traversal.exact
+  62 oracle.exact.traversal
+  73 unshallow_lines.false
+  74 ext_bases.false
+  75 invocation.exact
+ok   # 0 seed=39595 objs=154 chain=5 {"window":50,"depth":50,"compression":6,"reuseDelta":true,"reuseObject":false,"sparse":false,"ofs":false,"thin":false,"bigFile":1024}
+ok   # 1 seed=144324 objs=88 chain=3 {"window":10,"depth":5,"compression":9,"reuseDelta":true,"reuseObject":true,"sparse":false,"ofs":true,"thin":false,"bigFile":1024}
+ok   # 2 seed=249053 objs=64 chain=0 {"window":10,"depth":0,"compression":6,"reuseDelta":false,"reuseObject":false,"sparse":false,"ofs":true,"thin":true,"bigFile":0}
+ok   # 3 seed=353782 objs=153 chain=6 {"window":1,"depth":50,"compression":9,"reuseDelta":true,"reuseObject":true,"sparse":false,"ofs":false,"thin":false,"bigFile":1024}
+ok   # 4 seed=458511 objs=204 chain=1 {"window":250,"depth":1,"compression":6,"reuseDelta":true,"reuseObject":true,"sparse":false,"ofs":false,"thin":false,"bigFile":0}
+ok   # 5 seed=563240 objs=188 chain=1 {"window":10,"depth":1,"compression":-1,"reuseDelta":true,"reuseObject":true,"sparse":false,"ofs":true,"thin":false,"bigFile":1024}
+ok   # 6 seed=667969 objs=119 chain=3 {"window":250,"depth":50,"compression":0,"reuseDelta":false,"reuseObject":true,"sparse":false,"ofs":false,"thin":false,"bigFile":1048576}
+ok   # 7 seed=772698 objs=1 chain=0 {"window":250,"depth":250,"compression":9,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":true,"bigFile":1048576}
+ok   # 8 seed=877427 objs=129 chain=0 {"window":0,"depth":0,"compression":9,"reuseDelta":true,"reuseObject":true,"sparse":false,"ofs":true,"thin":false,"bigFile":1048576}
+ok   # 9 seed=982156 objs=120 chain=0 {"window":0,"depth":0,"compression":0,"reuseDelta":false,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":1048576}
+ok   #10 seed=1086885 objs=213 chain=0 {"window":0,"depth":0,"compression":9,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":false,"thin":false,"bigFile":1048576}
+ok   #11 seed=1191614 objs=216 chain=0 {"window":250,"depth":0,"compression":0,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":1048576}
+ok   #12 seed=1296343 objs=33 chain=1 {"window":250,"depth":50,"compression":6,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":false,"thin":true,"bigFile":0}
+ok   #13 seed=1401072 objs=143 chain=3 {"window":50,"depth":50,"compression":1,"reuseDelta":false,"reuseObject":false,"sparse":true,"ofs":false,"thin":false,"bigFile":0}
+ok   #14 seed=1505801 objs=150 chain=1 {"window":1,"depth":5,"compression":9,"reuseDelta":true,"reuseObject":false,"sparse":false,"ofs":true,"thin":false,"bigFile":0}
+ok   #15 seed=1610530 objs=116 chain=1 {"window":50,"depth":1,"compression":1,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":1048576}
+ok   #16 seed=1715259 objs=208 chain=3 {"window":10,"depth":5,"compression":9,"reuseDelta":false,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":1048576}
+ok   #17 seed=1819988 objs=67 chain=0 {"window":0,"depth":0,"compression":-1,"reuseDelta":false,"reuseObject":true,"sparse":false,"ofs":false,"thin":false,"bigFile":1048576}
+ok   #18 seed=1924717 objs=288 chain=0 {"window":250,"depth":0,"compression":6,"reuseDelta":false,"reuseObject":false,"sparse":false,"ofs":true,"thin":false,"bigFile":0}
+ok   #19 seed=2029446 objs=119 chain=5 {"window":250,"depth":5,"compression":6,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":1024}
+ok   #20 seed=2134175 objs=246 chain=5 {"window":10,"depth":250,"compression":0,"reuseDelta":false,"reuseObject":true,"sparse":false,"ofs":false,"thin":false,"bigFile":1024}
+ok   #21 seed=2238904 objs=213 chain=1 {"window":1,"depth":250,"compression":6,"reuseDelta":true,"reuseObject":false,"sparse":false,"ofs":false,"thin":false,"bigFile":0}
+ok   #22 seed=2343633 objs=68 chain=0 {"window":0,"depth":5,"compression":6,"reuseDelta":false,"reuseObject":false,"sparse":true,"ofs":true,"thin":true,"bigFile":1048576}
+ok   #23 seed=2448362 objs=1 chain=0 {"window":50,"depth":0,"compression":1,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":true,"bigFile":1048576}
+ok   #24 seed=2553091 objs=133 chain=4 {"window":50,"depth":50,"compression":6,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":1048576}
+ok   #25 seed=2657820 objs=142 chain=4 {"window":50,"depth":250,"compression":1,"reuseDelta":false,"reuseObject":true,"sparse":true,"ofs":true,"thin":true,"bigFile":0}
+ok   #26 seed=2762549 objs=260 chain=0 {"window":0,"depth":0,"compression":9,"reuseDelta":true,"reuseObject":true,"sparse":true,"ofs":true,"thin":false,"bigFile":0}
+ok   #27 seed=2867278 objs=47 chain=1 {"window":50,"depth":250,"compression":6,"reuseDelta":true,"reuseObject":false,"sparse":true,"ofs":true,"thin":true,"bigFile":1024}
+ok   #28 seed=2972007 objs=45 chain=3 {"window":50,"depth":50,"compression":0,"reuseDelta":false,"reuseObject":false,"sparse":false,"ofs":true,"thin":false,"bigFile":0}
+ok   #29 seed=3076736 objs=134 chain=1 {"window":250,"depth":1,"compression":6,"reuseDelta":false,"reuseObject":true,"sparse":false,"ofs":true,"thin":false,"bigFile":0}
+
+30 packs, 0 failures. Coverage:
+   1 chain.6
+   2 chain.4
+   2 comp.-1
+   2 objects.1
+   2 objects.256
+   3 chain.5
+   3 objects.32
+   3 window.1
+   4 comp.1
+   4 depth.1
+   5 chain.3
+   5 comp.0
+   5 depth.250
+   5 depth.5
+   5 window.10
+   6 window.0
+   7 bigFile.1024
+   7 depth.50
+   7 thin.true
+   8 chain.1
+   8 comp.9
+   8 objects.64
+   8 window.250
+   8 window.50
+   9 depth.0
+   9 reuseObject.false
+  10 ofs.false
+  10 ref_delta.true
+  11 bigFile.0
+  11 chain.0
+  11 comp.6
+  11 ofs_delta.true
+  12 bigFile.1048576
+  12 reuseDelta.false
+  15 objects.128
+  15 sparse.false
+  15 sparse.true
+  15 stored.false
+  15 stored.true
+  18 reuseDelta.true
+  19 ofs_delta.false
+  20 ofs.true
+  20 ref_delta.false
+  21 reuseObject.true
+  23 thin.false
+137 non-trivial cases (seed 1, rediff skip, driver text): {"agree-clean":121,"agree-conflict":16,"conservative":0,"WRONG":0}  conservative by reason: {}
+141 non-trivial cases (seed 1, rediff undecided, driver text): {"agree-clean":94,"agree-conflict":46,"conservative":1,"WRONG":0}  conservative by reason: {"undecided: compaction needs the classic-diff fallback":1}
+40 diffs (seed 1, rediff skip): {"same":40,"differ":0,"undecided":0}
+3 diffs (seed 1, rediff skip): {"same":3,"differ":0,"undecided":0}
+40 trees, 2400 paths (seed 1): 2400 equal to git check-attr, 0 different; exercised {"withAttrs":589,"mergeSet":154,"mergeUnset":103,"mergeValue":116,"fromMacro":95}
+141 non-trivial cases (seed 1, rediff skip, driver union): {"agree-clean":141,"agree-conflict":0,"conservative":0,"WRONG":0}  conservative by reason: {}
+33 non-trivial cases (seed 1, rediff skip, driver binary): {"agree-clean":0,"agree-conflict":33,"conservative":0,"WRONG":0}  conservative by reason: {}
+file            lines    cov     pct
+attributes.js     192    192  100.0% 
+bytes.js           20     20  100.0% 
+client.js          14     14  100.0% 
+discover.js        18     18  100.0% 
+edit.js           184    184  100.0% 
+errors-doc.js      29     29  100.0% 
+errors.js          37     37  100.0% 
+fetch.js          128    128  100.0% 
+fetchpack.js       33     33  100.0% 
+http.js            60     60  100.0% 
+inflate.js        111    111  100.0% 
+limits.js          15     15  100.0% 
+linemerge.js      313    313  100.0% 
+lsrefs.js          21     21  100.0% 
+merge.js          186    186  100.0% 
+negotiate.js       13     13  100.0% 
+objects.js         54     54  100.0% 
+operation.js       20     20  100.0% 
+otel.js            92     92  100.0% 
+pack.js            61     61  100.0% 
+packcache.js       45     45  100.0% 
+packresolve.js    132    132  100.0% 
+pktline.js         55     55  100.0% 
+push.js            65     65  100.0% 
+rebase.js          85     85  100.0% 
+receivecaps.js     12     12  100.0% 
+sha1.js            73     73  100.0% 
+sign.js            36     36  100.0% 
+ssh-node.js        15     15  100.0% 
+ssh.js            220    220  100.0% 
+sshgit.js          82     82  100.0% 
+transport.js       10     10  100.0% 
+validate.js        30     30  100.0% 
+TOTAL            2461   2461  100.0%

@@ -1,0 +1,6 @@
+node_modules/
+fuzz-out/
+coverage/
+.DS_Store
+.wrangler/
+.cloudflare/

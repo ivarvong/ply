@@ -1,0 +1,2 @@
+myers regions: 5
+2151 non-trivial cases (seed 43): {"agree-clean":2040,"agree-conflict":102,"conservative":9,"WRONG":0}  conservative by reason: {"undecided: compaction needs the classic-diff fallback":9}

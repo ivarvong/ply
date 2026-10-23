@@ -1,0 +1,23 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path';
+import { mergeLines } from '/home/claude/ply/src/linemerge.js';
+const K = +(process.argv[2] ?? 70);
+const P = Array.from({ length: 10000 }, (_, i) => `p${i}\n`);
+const xs = Array.from({ length: K }, (_, k) => { const q = k + 1; return q * 128 + ((128 - (q % 128)) % 128); });
+const R = xs.map(x => P[x]);
+const X = Array.from({ length: K }, (_, i) => `x${i}\n`);
+const base = [...P, 'ANCHOR1\n', ...R, 'ANCHOR2\n', 'tail\n'].join('');
+const ours = [...P, 'ANCHOR1\n', ...X, 'ANCHOR2\n', 'tail\n'].join('');
+const theirs = [...P, 'ANCHOR1\n', ...R, 'ANCHOR2\n', 'tail changed\n'].join('');
+const dir = mkdtempSync(join(tmpdir(), 'ch-'));
+const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x' };
+const git = (a, input) => spawnSync('git', ['-C', dir, ...a], { input, env: ENV });
+git(['init', '-q', '--bare']);
+const commit = (t, p) => { const b = git(['hash-object', '-w', '--stdin'], t).stdout.toString().trim(); const tr = git(['mktree'], `100644 blob ${b}\tf.txt\n`).stdout.toString().trim(); return git(['commit-tree', tr, ...(p ? ['-p', p] : []), '-m', 'c']).stdout.toString().trim(); };
+const cb = commit(base), co = commit(ours, cb), ct = commit(theirs, cb);
+const g = git(['merge-tree', '--write-tree', '--name-only', co, ct]);
+console.log(`K=${K} git exit ${g.status}: ${g.stdout.toString().split('\n').slice(0, 3).join(' | ')} ${g.stderr.toString().slice(0, 200)}`);
+const enc = s => new TextEncoder().encode(s);
+const m = mergeLines(enc(base), enc(ours), enc(theirs));
+console.log(`ours: ${m.clean ? 'clean' : m.reason + ' ' + (m.detail ?? '')}`);
+if (m.clean && g.status === 0) { const gb = git(['cat-file', 'blob', `${g.stdout.toString().split('\n')[0]}:f.txt`]).stdout; console.log('bytes equal:', Buffer.compare(gb, Buffer.from(m.data)) === 0); }
