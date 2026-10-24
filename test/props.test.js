@@ -156,6 +156,18 @@ forAll('tree: parse ∘ encode roundtrip and sort is total order with dir-as-sla
   parsed.forEach(e => assert.equal(toHex(enc.subarray(e.oidOffset, e.oidOffset + 20)), e.oid));
 });
 
+test('tree: rejects truncated OIDs, including a missing final byte', () => {
+  assert.deepEqual(parseTree(new Uint8Array(0)), []);
+  const entries = ['a', 'b'].map(name => ({ mode: '100644', name, oid: 'ab'.repeat(20) }));
+  for (const count of [1, 2]) {
+    const data = encodeTree(entries.slice(0, count));
+    assert.deepEqual(parseTree(data).map(({ mode, name, oid }) => ({ mode, name, oid })), entries.slice(0, count));
+    for (let missing = 1; missing <= 20; missing++) {
+      assert.throws(() => parseTree(data.subarray(0, data.length - missing)), { code: 'pack_corrupt' }, `${count} entries, missing ${missing} OID bytes`);
+    }
+  }
+});
+
 forAll('commit: parse ∘ encode', rng => {
   const c = { tree: toHex(rng.bytes(20)), parents: Array.from({ length: rng.int(0, 3) }, () => toHex(rng.bytes(20))), author: 'A <a@x> 1700000000 +0000', committer: 'B <b@x> 1700000001 -0500', message: rng.pick(['m', 'multi\nline\n', 'no newline', '']) };
   const p = parseCommit(encodeCommit(c));

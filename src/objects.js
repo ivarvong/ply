@@ -21,7 +21,7 @@ export function parseTree(data) {
   while (p < data.length) {
     const sp = data.indexOf(0x20, p);
     const nul = data.indexOf(0, sp);
-    if (sp < 0 || nul < 0 || nul + 20 > data.length) throw fail('pack_corrupt', 'tree: malformed entry');
+    if (sp < 0 || nul < 0 || nul + 21 > data.length) throw fail('pack_corrupt', 'tree: malformed entry');
     entries.push({
       mode: td.decode(data.subarray(p, sp)),
       name: td.decode(data.subarray(sp + 1, nul)),
