@@ -170,6 +170,20 @@ Same 314-byte push pack, byte-identical, in all three. Wall time here is a node 
 - `fuzz/protocol.mjs`: seeds 32 (400), 33 (500), 52 (150) — 0 failures; every non-degenerate case pack-objects-exact and invocation-exact.
 - `compliance` 5/5, `parity` 3/3, `push` 1/1 (768 cells), `fuzz/packs.mjs` seed 5 (80) — 0 disagreements.
 
+## Mutation testing
+
+`npm run test:mutate` runs Stryker (command runner) over every module in `src/`. The test command is the pure suite (`props`, `pure`, `prefix-closure`, `format-facts`) with `PROP_N=20`, which is fast enough to rerun per mutant. CI job `mutate` runs that on every push to `main`. On a pull request it mutates only the `src/` files the PR changed, and passes without a run when the PR does not touch `src/`. CI job `test` runs oxlint and the unit tests, including the below-hash fuzzer at `--n 20`.
+
+`thresholds.break` in `stryker.conf.json` is the score the full run reached. Dropping below it fails the build. Independently of that score, a mutant that **survives** or is **uncovered** inside a parser (`parseTree`, `readObjHeader`, `applyDelta`, `inflate`, `pktStep`, `take`, …) or in `src/bytes.js` / `src/format.js` fails the build. `scripts/mutate.mjs` is what enforces both.
+
+An equivalent mutant is justified on the line it mutates:
+
+```js
+// Stryker disable next-line EqualityOperator: both sides are the length we just checked
+```
+
+The comment names the mutator and gives a reason. `Stryker disable all`, and removing a parser file from `mutate`, are rejected by the same script. A constant nobody reads is not equivalent — pin it from `test/format-facts.test.js`, where the literals live outside `src/` so a mutated definition fails.
+
 ## Explicitly not proven here
 
 - **GitHub itself: fetch side now exercised, push side not.** `test/live-prepare.mjs` ran the full pipeline minus receive-pack against `github.com/elixir-ai-tools/just_bash`: ls-refs, `tree:0` commit want, bare tree want, bare blob want all honored (GitHub allows any-SHA wants), no band-2 progress, 426 ms for 4 roundtrips, 314-byte thin pack for a 15.9 KB README edit. That pack was then taken through real git locally — `index-pack --fix-thin --strict` on a `git clone --bare` of the same repo (2 deltas resolved against GitHub-origin bases), `verify-pack`, oid-for-oid agreement, `git diff` = one line, strict fsck, and a real `receive-pack` on a mirror with fsck/denyNonFastForwards/index-pack path, which accepted it and then rejected a replay on the stale `old`. What remains unverified is only GitHub's policy layer on receive-pack (their fsck settings, protected branches, size caps). A Worker carrying the same code was deployed to a temporary Cloudflare account (`test/deploy/`), but preview accounts sit behind a managed bot challenge and allow no cron triggers, so the edge run itself could not be observed; the same code ran under local `workerd` (above). Differences to check with `test/live.mjs`: band-2 progress despite `no-progress`, User-Agent requirements, whether `allowAnySHA1InWant` covers tree/blob wants (it does for partial-clone lazy fetch), receive-pack `ng` reason wording for the `cas_conflict` classifier (`/failed to update ref|fetch first|non-fast-forward|lock/`).

@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "PROP_N=20 node --test test/props.test.js test/pure.test.js test/prefix-closure.test.js test/format-facts.test.js"
+  },
+  "coverageAnalysis": "off",
+  "mutate": ["src/**/*.js"],
+  "ignorePatterns": ["reports", ".stryker-tmp", "fuzz-out", "coverage", "worker"],
+  "tempDirName": ".stryker-tmp",
+  "reporters": ["clear-text", "json", "progress"],
+  "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
+  "thresholds": { "high": 80, "low": 60, "break": null },
+  "timeoutMS": 8000,
+  "timeoutFactor": 2,
+  "concurrency": 4
+}
