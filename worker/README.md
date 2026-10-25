@@ -143,7 +143,7 @@ SHA-256 of `CF-Connecting-IP` (clients with no header share one shard). Each sha
 timestamps per bucket, not addresses.
 Immutable upload-pack responses are cached in the Workers Cache by SHA-256 of url + body; the viewer sends no
 `Authorization`, so it cannot read a pack `/v1` cached under a credential. Cache hits do not spend the subrequest
-budget. HTML is `no-store`, escaped, and served with `Content-Security-Policy: default-src 'none'; style-src 'self'; script-src 'none'` and `X-Content-Type-Options: nosniff`.
+budget. HTML is `no-store` and escaped. CSP is `default-src 'none'; style-src 'self'; script-src` the sha256 of the one inline viewer script; `img-src 'none'`, plus `X-Content-Type-Options: nosniff`. The script contains no user data, and `unsafe-inline` is not allowed.
 
 Deploying this Worker creates the `ViewerRateLimit` migration. This change does not deploy it.
 
