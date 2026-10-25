@@ -1,6 +1,7 @@
 {
   "$schema": "../node_modules/wrangler/config-schema.json",
-  // ply.ivar.workers.dev — stateless; no bindings. PLY_TOKEN is a secret (wrangler secret put PLY_TOKEN).
+  // ply.ivar.workers.dev. /v1 has no bindings (PLY_TOKEN is a secret: wrangler secret put PLY_TOKEN).
+  // /view rate limits use one SQLite Durable Object class. Deploying this config creates that class.
   "name": "ply",
   "main": "index.js",
   // newest date the pinned toolchain supports (wrangler 4.152 → workerd 1.20261019.1); no nodejs_compat: ply is Web APIs only
@@ -12,6 +13,12 @@
     "WRITES": "on",
     "PACK_CACHE": "on"
   },
+  "durable_objects": {
+    "bindings": [{ "name": "VIEWER_RATE", "class_name": "ViewerRateLimit" }]
+  },
+  "migrations": [
+    { "tag": "v1-viewer-rate", "new_sqlite_classes": ["ViewerRateLimit"] }
+  ],
   // merge/rebase line merges are CPU-bound; the paid plan's ceiling for an HTTP request is 300,000 ms (5 min)
   // (developers.cloudflare.com/workers/platform/limits, checked 2026-10-23)
   "limits": { "cpu_ms": 300000 },

@@ -20,11 +20,17 @@ function readVarint(buf, p) {
 // ---- parse ----
 
 // ---- parse ----
-export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) {
+// Optional tighter caps live on the caller's limits object. Absent means unlimited, which is what every
+// existing caller (including the authenticated /v1 Worker) already observed.
+export const packParseOpts = (limits = DEFAULT_LIMITS) => ({ limits, maxObjects: limits.maxPackObjects ?? Infinity, maxInflatedTotal: limits.maxInflatedTotal ?? Infinity });
+
+export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS, maxObjects = Infinity, maxInflatedTotal = Infinity } = {}) {
   if (buf.length < 32 || buf[0] !== 0x50 || buf[1] !== 0x41 || buf[2] !== 0x43 || buf[3] !== 0x4b) throw corrupt('pack: bad signature');
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const version = dv.getUint32(4), count = dv.getUint32(8);
   if (version !== 2) throw corrupt(`pack: unsupported version ${version}`);
+  // A hostile count must fail before the loop allocates. Defaults preserve every existing caller.
+  if (count > maxObjects) throw limitError('pack objects', count, maxObjects);
   const objects = [];
   const stats = { version, count, full: 0, ofsDelta: 0, refDelta: 0, byType: {}, compressed: 0, inflated: 0, inflate: { blocks: 0, stored: 0, fixed: 0, dynamic: 0 } };
   let p = 12;
@@ -47,6 +53,8 @@ export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) 
     } else if (type >= 1 && type <= 4) stats.full++;
     else throw corrupt(`pack: bad object type ${type} at ${offset}`);
     if (size > limits.maxObjectSize) throw limitError('pack object size', size, limits.maxObjectSize);
+    // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
+    if (stats.inflated + size > maxInflatedTotal) throw limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal);
     const { out, consumed, stats: is } = inflate(buf, p, { expectedSize: size, maxOutput: limits.maxObjectSize });
     stats.compressed += consumed; stats.inflated += size;
     stats.inflate.blocks += is.blocks; stats.inflate.stored += is.stored; stats.inflate.fixed += is.fixed; stats.inflate.dynamic += is.dynamic;

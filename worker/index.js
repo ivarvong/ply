@@ -1,5 +1,7 @@
-// ply as an HTTP API: a stateless Worker that runs ply's git client against any smart-HTTP git host (Cloudflare
+// ply as an HTTP API: a Worker that runs ply's git client against any smart-HTTP git host (Cloudflare
 // Artifacts, GitHub, GitLab, …) with the caller's git credential. See worker/README.md for the API.
+// /v1 stays stateless. /view is a public read-only repo viewer with its own SQLite Durable Object rate limit
+// (ViewerRateLimit). It is dispatched before the PLY_TOKEN gate and never forwards a credential.
 //
 // Two credentials, never confused:
 //   Authorization: Bearer <PLY_TOKEN>   gates this Worker (secret; constant-time compare)
@@ -22,6 +24,9 @@ import { RETRY, isPlyCode, fail } from '../src/errors.js';
 import { withLimits } from '../src/limits.js';
 import { cachingFetch } from '../src/packcache.js';
 import { validateRef, validateIdent } from '../src/validate.js';
+import { handleViewer } from './viewer/handle.ts';
+
+export { ViewerRateLimit } from './viewer/rate.ts';
 
 // A Worker isolate has 128 MB: keep every buffered pack well under it (the blob is streamed and never counts).
 const LIMITS = withLimits({ maxPackBytes: 32 << 20, maxObjectSize: 16 << 20, maxHarvestBytes: 16 << 20, requestTimeoutMs: 30_000 });
@@ -64,6 +69,8 @@ ref= defaults to the remote's HEAD. Short names resolve like git rev-parse (tags
 
 Errors: {code, message, retry} with retry in yes|fresh|no|read. ?trace=1 adds ply's spans to JSON responses
 (and an x-ply-trace timing summary header on /v1/read).
+
+Public read-only viewer (no token, no git credential):  GET /view   and   GET /view/<host>/<owner>/<repo>?ref=&path=
 `;
 
 // ---- pure helpers ----
@@ -246,6 +253,20 @@ export default {
     const record = { msg: 'ply.request', id, method: req.method, path: url.pathname, colo: req.cf?.colo ?? '' };
     const log = extra => console.log(scrub(JSON.stringify({ ...record, ...extra })));
     const done = (res, extra = {}) => { res.headers.set('x-ply-request-id', id); log({ status: res.status, ms: Date.now() - t0, ...extra }); return res; };
+    // Public viewer. Before the token gate, and it never reads Authorization / Git-Token / Cookie.
+    if (url.pathname === '/view.css' || url.pathname === '/view' || url.pathname.startsWith('/view/')) {
+      if (url.pathname.includes('@') || url.pathname.toLowerCase().includes('%40')) record.path = '/view/redacted';
+      try {
+        const res = await handleViewer(req, env, ctx, { requestId: id, note: extra => Object.assign(record, extra) });
+        return done(res, { viewer: 1 });
+      } catch (e) {
+        const code = isPlyCode(e?.code) ? e.code : 'internal';
+        const message = code === 'internal' ? 'The viewer hit an internal error.' : String(e?.message ?? e).slice(0, 500);
+        const safe = message.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+        const res = new Response(`<!doctype html><meta charset="utf-8"><title>${code}</title><p>${safe}</p>`, { status: STATUS[code] ?? 500, headers: { 'content-type': 'text/html; charset=utf-8', 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' } });
+        return done(res, { viewer: 1, code });
+      }
+    }
     // gate
     const token = env.PLY_TOKEN;
     if (!token) return done(json(500, { code: 'internal', message: 'PLY_TOKEN is not configured', retry: 'no' }, scrub));

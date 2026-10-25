@@ -7,7 +7,7 @@ import { td, concat } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';
 import { inflate } from './inflate.js';
-import { parsePack, resolvePack } from './packresolve.js';
+import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { DEFAULT_LIMITS, limitError } from './limits.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
 
@@ -217,7 +217,7 @@ async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
         total += chunk.length; if (total > t.limits.maxPackBytes) throw limitError('pack bytes', total, t.limits.maxPackBytes);
         parts.push(chunk);
       }
-      const parsed = parsePack(concat(parts), { limits: t.limits });
+      const parsed = parsePack(concat(parts), packParseOpts(t.limits));
       const { objects } = resolvePack(parsed, undefined, t.limits);
       const want = objects.get(oid);
       if (!want) throw fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);

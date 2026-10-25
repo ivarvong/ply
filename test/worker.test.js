@@ -49,7 +49,7 @@ before(async () => {
   const filterOf = b => /filter ([^\n]+)\n/.exec(Buffer.from(b).toString('latin1'))?.[1] ?? null;
   artProxy = await startProxy(srv.url, ctx => (ctx.stage === 'fetch' && filterOf(ctx.reqBody) && filterOf(ctx.reqBody) !== 'blob:none' ? { type: 'status', status: 400, contentType: 'text/plain', body: 'Unsupported Git fetch filter; only blob:none is supported.' } : { type: 'pass' }));
   const out = join(root, 'wk'); mkdirSync(out, { recursive: true });
-  await build({ entryPoints: [fileURLToPath(new URL('../worker/index.js', import.meta.url))], bundle: true, format: 'esm', outfile: join(out, 'worker.mjs'), logLevel: 'silent' });
+  await build({ entryPoints: [fileURLToPath(new URL('../worker/index.js', import.meta.url))], bundle: true, format: 'esm', outfile: join(out, 'worker.mjs'), logLevel: 'silent', external: ['cloudflare:workers'] });
   const allow = [srv.url, authSrv.url, echoSrv.url, artProxy.url].join(',');
   const worker = writes => `(modules = [ (name = "worker.mjs", esModule = embed "worker.mjs") ], compatibilityDate = "2026-10-18", globalOutbound = "internet",
     bindings = [ (name = "PLY_TOKEN", text = "${PLY}"), (name = "WRITES", text = "${writes}"), (name = "ALLOW_REMOTE_ORIGINS", text = "${allow}") ])`;

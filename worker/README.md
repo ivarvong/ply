@@ -1,7 +1,8 @@
 # ply Worker — `https://ply.ivar.workers.dev`
 
-A stateless Cloudflare Worker that exposes ply as an HTTP API against any smart-HTTP git host. No bindings, no
-storage. Everything is in `worker/index.js`, and `GET /` prints the usage text.
+A Cloudflare Worker that exposes ply as an HTTP API against any smart-HTTP git host. The `/v1` API has no
+bindings and no storage. `GET /view` is a public repository viewer; its only binding is a SQLite Durable Object
+that rate-limits by client. `GET /` prints the usage text.
 
 ## Auth
 
@@ -87,6 +88,64 @@ back first). Merge conflicts add `conflicts` and `reasons`. `match_count` adds `
 Cloudflare Artifacts refuses `filter tree:0`. ply learns this from the 400 and falls back to `blob:none`, which
 brings more trees per fetch (see ply's README). The Worker keeps what it learned per origin for the life of the
 isolate, so only the first request on an isolate pays for the 400.
+
+## Public viewer (`/view`)
+
+`GET /view` is a server-rendered browser for a **public** smart-HTTP repository. It does not use `PLY_TOKEN` and it
+never reads `Authorization`, `Git-Token`, `Git-Authorization`, or `Cookie`. A URL with userinfo is rejected, not
+turned into a credential. `/v1` is unchanged: same gate, same credential headers, same isolate-wide `quirks` map.
+The viewer keeps a fresh `quirks` object per request, so a server that rejects `filter tree:0` shows that 400 and
+the `blob:none` retry on every page (the `/v1` path still learns it once per isolate).
+
+Shareable URLs: `/view/<host>/<repo path>?ref=&path=`. `?raw=1` returns the file as `text/plain` or
+`application/octet-stream` (never `text/html`). `?want=<oid>&filter=tree:0|blob:none&offset=` is the pack map.
+Every HTML page includes a waterfall of the git round trips that produced it (method, filter, wants, HTTP status,
+cache HIT/MISS, server agent, pkt-line counters) plus the `cf-ray` when the platform sends one. The Workers trace
+id is not readable inside the isolate.
+
+**Allowlist.** An unauthenticated Worker that will `fetch` a caller-supplied URL is an SSRF proxy, so the viewer
+accepts https URLs whose hostname is an exact, case-insensitive match for `github.com`, `gitlab.com`,
+`codeberg.org`, `bitbucket.org`, or `git.sr.ht`. No suffix, no wildcard, no userinfo, default port only. A
+trailing dot (`github.com.`) does not match. Lookalikes (`github.com.evil.com`, `evilgithub.com`, punycode)
+do not match. Everything else is rejected before a fetch, and the error lists the supported hosts.
+`VIEWER_EXTRA_HOSTS` appends exact hostnames (comma-separated). A token with a scheme, port, userinfo, wildcard,
+or trailing dot is skipped, not treated as a suffix. Cloudflare Artifacts is off unless that variable names the
+exact public git host. `ALLOW_REMOTE_ORIGINS` is a `/v1` test hook and does not apply to `/view`. Redirects are
+manual, re-checked against the same allowlist, and limited to that repo's `info/refs` and `git-upload-pack`
+paths (plus a `.git` suffix). A redirect to any other host is not followed. Upstream `User-Agent` is
+`ply-viewer/0.1.0`.
+
+**Caps** (not raised by environment; rate limits can be lowered and are clamped to 1…1000):
+
+| Cap | Value |
+|---|---|
+| upstream bytes / page | 4 MiB |
+| pack bytes mapped | 2 MiB |
+| pack objects mapped | 400 |
+| inflated bytes / pack | 4 MiB |
+| one object | 1 MiB |
+| file shown or returned raw | 256 KiB |
+| delta chain | 32 |
+| delta result | 1 MiB |
+| upstream calls / page | 16 |
+| redirects / upstream call | 2 |
+| per-call timeout | 12 s |
+| page timeout | 20 s |
+| refs retained | 2000 (200 branches shown) |
+| tree entries retained / shown | 2000 / 500 |
+| parent commits shown | 5 |
+| page rate | 60 / minute / client |
+| pack-map rate | 20 / minute / client |
+
+Over any cap the response is an HTML error (413 for a limit, 504 for a timeout), with the trace of the calls that
+did finish. Rate limiting is a Durable Object, `ViewerRateLimit`, declared as a SQLite class. It is sharded by the
+SHA-256 of `CF-Connecting-IP` (clients with no header share one shard). Each shard stores a short list of
+timestamps per bucket, not addresses.
+Immutable upload-pack responses are cached in the Workers Cache by SHA-256 of url + body; the viewer sends no
+`Authorization`, so it cannot read a pack `/v1` cached under a credential. Cache hits do not spend the subrequest
+budget. HTML is `no-store`, escaped, and served with `Content-Security-Policy: default-src 'none'; style-src 'self'; script-src 'none'` and `X-Content-Type-Options: nosniff`.
+
+Deploying this Worker creates the `ViewerRateLimit` migration. This change does not deploy it.
 
 ## Develop / deploy
 
