@@ -2,6 +2,7 @@
 // a local git http-backend, the SQLite rate-limit object under workerd, and (when reachable) GitHub.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, copyFileSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +23,11 @@ import { handleViewer } from '../worker/viewer/handle.ts';
 import { renderLoaded } from '../worker/viewer/html.ts';
 import { VIEWER_CAPS, VIEWER_GIT_LIMITS, VIEWER_UA, rateLimitFor } from '../worker/viewer/limits.ts';
 import type { Loaded, RateNamespace, TraceModel } from '../worker/viewer/model.ts';
+import { renderMarkdown } from '../worker/viewer/markdown.ts';
 import { mapPack } from '../worker/viewer/packmap.ts';
+import { interpretRemote } from '../worker/viewer/paste.ts';
+import { parseViewerRoute, routeOptsFromEnv } from '../worker/viewer/route.ts';
+import { VIEWER_JS, VIEWER_SCRIPT_HASH } from '../worker/viewer/script.ts';
 import { ALLOWED_HOSTS, allowlistFromEnv, assertUpstreamUrl, validatePublicRepoUrl, type AllowedHost, type RepoLocation } from '../worker/viewer/url.ts';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/viewer/small.pack', import.meta.url));
@@ -86,6 +91,28 @@ test('public repo URLs: exact allowlist, case, trailing dot, lookalikes, credent
   assert.throws(() => assertUpstreamUrl('https://github.com/octocat/Hello-World/git-upload-pack?x=1', repo.url, repo.allowedHosts), /query/);
 });
 
+test('paste parsing stays inside the allowlist', () => {
+  assert.equal(interpretRemote('octocat/Hello-World').remote, 'https://github.com/octocat/Hello-World');
+  assert.equal(interpretRemote('github.com/sindresorhus/is').remote, 'https://github.com/sindresorhus/is');
+  assert.equal(interpretRemote('git@github.com:tj/commander.js.git').remote, 'https://github.com/tj/commander.js.git');
+  const web = interpretRemote('https://github.com/octocat/Hello-World/blob/master/README');
+  assert.equal(web.remote, 'https://github.com/octocat/Hello-World');
+  assert.equal(web.ref, 'master');
+  assert.equal(web.path, 'README');
+  const route = parseViewerRoute(new URL('https://ply.example/view?remote=octocat/Hello-World'), routeOptsFromEnv({}));
+  assert.equal(route.kind, 'redirect');
+  if (route.kind === 'redirect') assert.equal(route.location, '/view/github.com/octocat/Hello-World');
+  assert.throws(() => parseViewerRoute(new URL('https://ply.example/view?remote=evil.example/a/b'), routeOptsFromEnv({})), /Supported hosts/);
+  assert.throws(() => parseViewerRoute(new URL('https://ply.example/view?remote=' + encodeURIComponent('https://user:super-secret-token@github.com/a/b')), routeOptsFromEnv({})), (err: { message?: string }) => /credentials/.test(String(err?.message)) && !String(err?.message).includes('super-secret-token'));
+  const md = renderMarkdown('# Hi\n\n<script>alert(1)</script>\n\n[x](javascript:alert(1))\n\n[ok](https://github.com/octocat/Hello-World)\n');
+  assert.equal(md.includes('<script'), false);
+  assert.match(md, /&lt;script&gt;/);
+  assert.equal(md.includes('javascript:'), true);
+  assert.equal(/href="javascript:/.test(md), false);
+  assert.match(md, /href="https:\/\/github.com\/octocat\/Hello-World"/);
+  assert.equal(VIEWER_SCRIPT_HASH, `sha256-${createHash('sha256').update(VIEWER_JS).digest('base64')}`);
+});
+
 test('rate and byte caps clamp and fail closed', () => {
   assert.equal(rateLimitFor('page', undefined), 60);
   assert.equal(rateLimitFor('pack', ''), 20);
@@ -118,9 +145,10 @@ test('escapeHtml and the page renderer keep repository text out of HTML', () => 
     log: [], logStopped: false,
     branches: [{ name: 'refs/heads/main', oid: 'a'.repeat(40), head: true }], branchesTruncated: 0,
     entries: [{ name: '<script>.txt', mode: '100644', oid: 'c'.repeat(40), type: 'blob' }], entriesTruncated: 0,
+    readme: null,
   };
   const html = renderLoaded(loaded, trace);
-  assert.equal(/<script/i.test(html), false);
+  assert.equal(html.includes('<script>alert'), false);
   assert.equal(html.includes('style='), false);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(html, /&lt;script&gt;\.txt/);
@@ -342,14 +370,15 @@ test('viewer reads a local public repo, escapes hostile names, and never forward
     assert.equal(page.status, 200, await page.clone().text());
     const html = await page.text();
     assert.match(html, /README\.md/);
-    assert.equal(html.includes('hello viewer'), false);
+    assert.match(html, /hello viewer/);
     assert.equal(html.includes('127.0.0.1'), false);
     assert.match(html, /refs\/heads\/main/);
-    assert.match(html, /git\.upload-pack/);
+    assert.match(html, /upload-pack/);
     assert.match(html, /ray-test/);
-    assert.equal(/<script/i.test(html), false);
+    assert.equal(html.includes('<script>alert'), false);
     assert.match(html, /&lt;script&gt;/);
-    assert.match(page.headers.get('content-security-policy') ?? '', /script-src 'none'/);
+    assert.match(page.headers.get('content-security-policy') ?? '', /script-src 'sha256-/);
+    assert.equal((page.headers.get('content-security-policy') ?? '').includes('unsafe-inline'), false);
     assert.match(page.headers.get('content-security-policy') ?? '', /style-src 'self'/);
     assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(page.headers.get('cache-control'), 'no-store');
@@ -365,7 +394,8 @@ test('viewer reads a local public repo, escapes hostile names, and never forward
     const file = await handleViewer(new Request(`https://ply.ivar.workers.dev${repoPath}?ref=main&path=README.md`), env, {}, { fetchImpl });
     assert.equal(file.status, 200);
     const fileHtml = await file.text();
-    assert.match(fileHtml, /class="ln">1</);
+    assert.match(fileHtml, /class="ln"/);
+    assert.match(fileHtml, /id="L1"/);
     assert.match(fileHtml, /hello viewer/);
     const raw = await handleViewer(new Request(`https://ply.ivar.workers.dev${repoPath}?path=README.md&raw=1`), env, {}, { fetchImpl });
     assert.equal(raw.status, 200);
@@ -411,7 +441,7 @@ test('viewer reads a local public repo, escapes hostile names, and never forward
     const hostile = await handleViewer(new Request(`https://ply.ivar.workers.dev${repoPath}?path=${encodeURIComponent('<script>alert(1)</script>')}`), env, {}, { fetchImpl });
     assert.equal(hostile.status, 404);
     const hostileHtml = await hostile.text();
-    assert.equal(/<script/i.test(hostileHtml), false);
+    assert.equal(hostileHtml.includes('<script>alert'), false);
     assert.match(hostileHtml, /&lt;script&gt;/);
   } finally {
     await srv.close();
@@ -519,7 +549,8 @@ const config :Workerd.Config = (
     await new Promise(r => setTimeout(r, 200));
     assert.equal(logs.includes('super-secret-token'), false);
   } finally {
-    try { process.kill(-proc.pid, 'SIGKILL'); } catch { proc.kill('SIGKILL'); }
+    if (proc.pid) { try { process.kill(-proc.pid, 'SIGKILL'); } catch { proc.kill('SIGKILL'); } }
+    else proc.kill('SIGKILL');
     cleanup();
   }
 });
@@ -539,9 +570,10 @@ test('a public GitHub repository renders when the network can reach it', { timeo
   assert.equal(res.status, 200, await res.clone().text());
   const html = await res.text();
   assert.match(html, /Hello-World/);
-  assert.match(html, /git\.upload-pack/);
+  assert.match(html, /upload-pack/);
   assert.match(html, /github-ray/);
-  assert.match(res.headers.get('content-security-policy') ?? '', /script-src 'none'/);
+  assert.match(res.headers.get('content-security-policy') ?? '', /script-src 'sha256-/);
+  assert.equal((res.headers.get('content-security-policy') ?? '').includes('unsafe-inline'), false);
   const want = /[0-9a-f]{40}/.exec(html)?.[0];
   assert.ok(want);
   const pack = await handleViewer(new Request(`https://ply.ivar.workers.dev/view/github.com/octocat/Hello-World?want=${want}&filter=blob:none`), env, {});

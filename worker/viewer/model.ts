@@ -68,6 +68,7 @@ export type Loaded =
       branchesTruncated: number;
       entries: TreeEntry[];
       entriesTruncated: number;
+      readme: { name: string; text: string } | { name: string; tooBig: true } | null;
     }
   | {
       kind: 'file';

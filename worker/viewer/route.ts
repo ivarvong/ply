@@ -2,6 +2,7 @@ import { fail } from '../../src/errors.js';
 import { validatePath } from '../../src/validate.js';
 import { VIEWER_CAPS, VIEWER_GIT_LIMITS } from './limits.ts';
 import type { FilterName } from './model.ts';
+import { interpretRemote } from './paste.ts';
 import { allowlistFromEnv, validatePublicRepoUrl, viewerPathFor, type AllowedHost, type RepoLocation } from './url.ts';
 
 export type ViewerRoute =
@@ -73,9 +74,11 @@ export function parseViewerRoute(url: URL, opts: RouteOpts): ViewerRoute {
   if (url.pathname === '/view' || url.pathname === '/view/') {
     const remote = url.searchParams.get('remote');
     if (!remote) return { kind: 'home' };
-    const loc = validatePublicRepoUrl(remote, { allowedHosts: opts.allowedHosts, maxLength: VIEWER_CAPS.maxUrlLength });
-    const ref = parseRef(url.searchParams.get('ref'));
-    return { kind: 'redirect', location: viewerPathFor(loc, { ref: ref ?? undefined }) };
+    const pasted = interpretRemote(remote);
+    const loc = validatePublicRepoUrl(pasted.remote, { allowedHosts: opts.allowedHosts, maxLength: VIEWER_CAPS.maxUrlLength });
+    const explicit = url.searchParams.get('ref');
+    const ref = parseRef(explicit !== null && explicit !== '' ? explicit : pasted.ref ?? null);
+    return { kind: 'redirect', location: viewerPathFor(loc, { ref: ref ?? undefined, path: pasted.path || undefined }) };
   }
   if (!url.pathname.startsWith('/view/')) bad('not a viewer route');
   let decoded: string;

@@ -97,7 +97,7 @@ turned into a credential. `/v1` is unchanged: same gate, same credential headers
 The viewer keeps a fresh `quirks` object per request, so a server that rejects `filter tree:0` shows that 400 and
 the `blob:none` retry on every page (the `/v1` path still learns it once per isolate).
 
-Shareable URLs: `/view/<host>/<repo path>?ref=&path=`. `?raw=1` returns the file as `text/plain` or
+The home form accepts an https URL, `github.com/owner/repo`, `owner/repo` (github.com), or `git@host:path` (the ssh user is dropped, then the allowlist runs). Shareable URLs: `/view/<host>/<repo path>?ref=&path=`. `?raw=1` returns the file as `text/plain` or
 `application/octet-stream` (never `text/html`). `?want=<oid>&filter=tree:0|blob:none&offset=` is the pack map.
 Every HTML page includes a waterfall of the git round trips that produced it (method, filter, wants, HTTP status,
 cache HIT/MISS, server agent, pkt-line counters) plus the `cf-ray` when the platform sends one. The Workers trace

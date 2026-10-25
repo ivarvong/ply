@@ -9,6 +9,7 @@ import { VIEWER_CAPS, rateLimitFor, type RateBucket } from './limits.ts';
 import type { RateDecision, TraceModel, ViewerEnv } from './model.ts';
 import { parseViewerRoute, routeOptsFromEnv, type ViewerRoute } from './route.ts';
 import { cachedFetch, makeTracer, plyCode, spanCollector } from './ply.ts';
+import { VIEWER_CSP } from './script.ts';
 import { loadRepo } from './session.ts';
 import { buildTrace, traceHeader } from './traceview.ts';
 
@@ -19,7 +20,7 @@ const STATUS: Record<string, number> = {
   merge_conflict: 409, not_fast_forward: 409, not_linear: 422, unrelated_histories: 422, ambiguous: 502, internal: 500,
 };
 
-const CSP = "default-src 'none'; style-src 'self'; script-src 'none'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const CSP = VIEWER_CSP;
 
 const SECURITY = {
   'x-content-type-options': 'nosniff',

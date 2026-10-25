@@ -6,7 +6,7 @@ import { fail } from '../../src/errors.js';
 import { limitError } from '../../src/limits.js';
 import { TYPE, hashObject, parseTree } from '../../src/objects.js';
 import type { Budget } from './budget.ts';
-import { safeFilename } from './escape.ts';
+import { clampText, safeFilename } from './escape.ts';
 import type { FetchLike } from './fetchguard.ts';
 import { VIEWER_CAPS, VIEWER_GIT_LIMITS, VIEWER_UA } from './limits.ts';
 import { mapParsed } from './packmap.ts';
@@ -224,7 +224,26 @@ async function loadTree(transport: GitTransport, route: Extract<ViewerRoute, { k
   }
   if (route.raw) throw fail('bad_request', 'raw is a file view');
   const data = await loadTreeBytes(transport, treeOid, cache);
-  const entries = listed(parseTree(data));
+  const parsed = parseTree(data);
+  const entries = listed(parsed);
+  let readme: { name: string; text: string } | { name: string; tooBig: true } | null = null;
+  if (!route.path && budget.canSpend()) {
+    const hit = parsed.find((entry: { name: string; mode: string; oid: string }) => (entry.name === 'README.md' || entry.name === 'README') && entry.mode !== '40000' && entry.mode !== '160000');
+    if (hit) {
+      try {
+        const blob = await readBlob(transport, tracer, hit.oid);
+        if (blob.tooBig || !blob.bytes) readme = { name: hit.name, tooBig: true };
+        else {
+          const text = asText(blob.bytes);
+          readme = text === null ? { name: hit.name, tooBig: true } : { name: hit.name, text: clampText(text, 20_000) };
+        }
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === 'limit_exceeded' || code === 'timeout' || code === 'aborted') throw err;
+        readme = null;
+      }
+    }
+  }
   const heads = [];
   for (const [name, rec] of listedRefs.refs) {
     if (!name.startsWith('refs/heads/')) continue;
@@ -238,6 +257,7 @@ async function loadTree(transport: GitTransport, route: Extract<ViewerRoute, { k
     branchesTruncated: heads.length - branches.length,
     entries: entries.shown,
     entriesTruncated: entries.truncated,
+    readme,
   };
 }
 
