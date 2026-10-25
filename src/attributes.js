@@ -196,6 +196,7 @@ function parseStates(s, reserved) { // → [[name, value]] or null (any invalid 
   }
   return out;
 }
+// @decoder parseLine prefix=attr-line
 export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   const reserved = reservedIn(reserveBuiltin);
   let cp = span(line, 0, BLANK, true);
@@ -219,6 +220,7 @@ export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   if (pat.negative) return null; // negative patterns are ignored in attributes
   return { pat, states: parsed };
 }
+// @decoder parseFile prefix=attr-file
 export function parseFile(text, { macrosOk = false, reserveBuiltin = true } = {}) {
   if (text.length >= MAX_FILE) return [];
   const nul = text.indexOf('\0'); if (nul >= 0) text = text.slice(0, nul); // C string

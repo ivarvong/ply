@@ -7,44 +7,94 @@ import { inflate } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';
 import { DEFAULT_LIMITS, limitError } from './limits.js';
-import { encodeVarint, copyOps, insertOps, spliceDelta } from './pack.js';
+import { spliceDelta } from './pack.js';
+import { take } from './bytes.js';
+import {
+  PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, OID_BYTES, UINT32_BYTES,
+  DELTA_SIZE_MIN, DELTA_COPY, DELTA_COPY_MAX, DELTA_OFF4_FACTOR, DELTA_OFF_SHIFT,
+  DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
+  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_BYTE2_SHIFT,
+  OBJ_TYPE_SHIFT, OBJ_TYPE_MASK, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
+  OBJ_SIZE_NEXT_BASE, VARINT_BITS, varintScale, BE32_SHIFTS,
+} from './format.js';
 
 const corrupt = msg => fail('pack_corrupt', msg);
 
 function readVarint(buf, p) {
   let n = 0, shift = 0, c;
-  do { c = buf[p++]; n += (c & 0x7f) * 2 ** shift; shift += 7; } while (c & 0x80);
+  do {
+    c = take(buf, p, 1)[0];
+    p += 1;
+    n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
+    shift += VARINT_BITS;
+  } while (c & OBJ_CONTINUE);
   return [n, p];
+}
+
+export function readUint32BE(buf, off) {
+  const b = take(buf, off, BE32_SHIFTS.length);
+  return ((b[0] << BE32_SHIFTS[0]) | (b[1] << BE32_SHIFTS[1]) | (b[2] << BE32_SHIFTS[2]) | b[BE32_SHIFTS.length - 1]) >>> 0;
+}
+
+// @decoder readObjHeader prefix=obj-header
+export function readObjHeader(buf, p) {
+  let c = take(buf, p, 1)[0];
+  const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
+  let size = c & OBJ_SIZE_FIRST_MASK;
+  let shift = OBJ_TYPE_SHIFT;
+  p += 1;
+  while (c & OBJ_CONTINUE) {
+    c = take(buf, p, 1)[0];
+    p += 1;
+    size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
+    shift += VARINT_BITS;
+  }
+  return { type, size, next: p };
+}
+
+// @decoder readOfsDelta prefix=ofs-delta
+export function readOfsDelta(buf, p) {
+  let c = take(buf, p, 1)[0];
+  p += 1;
+  let off = c & OBJ_SIZE_NEXT_MASK;
+  while (c & OBJ_CONTINUE) {
+    c = take(buf, p, 1)[0];
+    p += 1;
+    off = ((off + 1) * OBJ_SIZE_NEXT_BASE) + (c & OBJ_SIZE_NEXT_MASK);
+  }
+  return { off, next: p };
 }
 
 // ---- parse ----
 
 // ---- parse ----
+// @decoder parsePack prefix=pack
 export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) {
-  if (buf.length < 32 || buf[0] !== 0x50 || buf[1] !== 0x41 || buf[2] !== 0x43 || buf[3] !== 0x4b) throw corrupt('pack: bad signature');
-  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const version = dv.getUint32(4), count = dv.getUint32(8);
-  if (version !== 2) throw corrupt(`pack: unsupported version ${version}`);
+  const minPack = PACK_HEADER_BYTES + PACK_TRAILER_BYTES;
+  if (buf.length < minPack || !take(buf, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw corrupt('pack: bad signature');
+  const version = readUint32BE(buf, PACK_SIGNATURE.length);
+  const count = readUint32BE(buf, PACK_SIGNATURE.length + UINT32_BYTES);
+  if (version !== PACK_VERSION) throw corrupt(`pack: unsupported version ${version}`);
   const objects = [];
   const stats = { version, count, full: 0, ofsDelta: 0, refDelta: 0, byType: {}, compressed: 0, inflated: 0, inflate: { blocks: 0, stored: 0, fixed: 0, dynamic: 0 } };
-  let p = 12;
+  let p = PACK_HEADER_BYTES;
   for (let i = 0; i < count; i++) {
     const offset = p;
-    let c = buf[p++];
-    const type = (c >> 4) & 7;
-    let size = c & 15, shift = 4;
-    while (c & 0x80) { c = buf[p++]; size += (c & 0x7f) * 2 ** shift; shift += 7; }
+    const header = readObjHeader(buf, p);
+    const type = header.type;
+    const size = header.size;
+    p = header.next;
     let baseOffset, baseOid;
     if (type === TYPE.OFS_DELTA) {
-      c = buf[p++]; let off = c & 0x7f;
-      while (c & 0x80) { c = buf[p++]; off = ((off + 1) * 128) + (c & 0x7f); }
-      baseOffset = offset - off;
-      if (baseOffset < 12) throw corrupt(`pack: ofs delta base before pack start at ${offset}`);
+      const ofs = readOfsDelta(buf, p);
+      p = ofs.next;
+      baseOffset = offset - ofs.off;
+      if (baseOffset < PACK_HEADER_BYTES) throw corrupt(`pack: ofs delta base before pack start at ${offset}`);
       stats.ofsDelta++;
     } else if (type === TYPE.REF_DELTA) {
-      baseOid = toHex(buf.subarray(p, p + 20)); p += 20;
+      baseOid = toHex(take(buf, p, OID_BYTES)); p += OID_BYTES;
       stats.refDelta++;
-    } else if (type >= 1 && type <= 4) stats.full++;
+    } else if (type >= TYPE.COMMIT && type <= TYPE.TAG) stats.full++;
     else throw corrupt(`pack: bad object type ${type} at ${offset}`);
     if (size > limits.maxObjectSize) throw limitError('pack object size', size, limits.maxObjectSize);
     const { out, consumed, stats: is } = inflate(buf, p, { expectedSize: size, maxOutput: limits.maxObjectSize });
@@ -54,9 +104,9 @@ export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) 
     objects.push({ offset, headerBytes: p - offset, type, size, compressed: consumed, data: out, baseOffset, baseOid, inflate: is });
     p += consumed;
   }
-  if (p + 20 !== buf.length) throw corrupt(`pack: expected trailer at ${p}, pack length ${buf.length}`);
-  const trailer = toHex(buf.subarray(p));
-  const computed = verify ? new Sha1().update(buf.subarray(0, p)).hex() : null;
+  if (p + PACK_TRAILER_BYTES !== buf.length) throw corrupt(`pack: expected trailer at ${p}, pack length ${buf.length}`);
+  const trailer = toHex(take(buf, p, PACK_TRAILER_BYTES));
+  const computed = verify ? new Sha1().update(take(buf, 0, p)).hex() : null;
   if (verify && computed !== trailer) throw corrupt(`pack: trailer sha mismatch ${trailer} != ${computed}`);
   return { objects, stats, trailer, bytes: buf.length };
 }
@@ -64,8 +114,11 @@ export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) 
 // ---- delta ----
 
 // ---- delta ----
+const deltaByte = (delta, p) => ({ b: take(delta, p, 1)[0], p: p + 1 });
+
+// @decoder applyDelta prefix=delta
 export function applyDelta(base, delta, { maxResult = DEFAULT_LIMITS.maxDeltaResult } = {}) {
-  if (delta.length < 4) throw corrupt('delta: shorter than DELTA_SIZE_MIN');
+  if (delta.length < DELTA_SIZE_MIN) throw corrupt('delta: shorter than DELTA_SIZE_MIN');
   let p = 0, baseSize, resultSize;
   [baseSize, p] = readVarint(delta, p);
   if (p > delta.length) throw corrupt('delta: truncated header');
@@ -77,23 +130,24 @@ export function applyDelta(base, delta, { maxResult = DEFAULT_LIMITS.maxDeltaRes
   let o = 0;
   const ops = { copy: 0, insert: 0, copyBytes: 0, insertBytes: 0 };
   while (p < delta.length) {
-    const c = delta[p++];
-    if (c & 0x80) {
+    let c;
+    ({ b: c, p } = deltaByte(delta, p));
+    if (c & DELTA_COPY) {
       let off = 0, len = 0;
-      if (c & 0x01) off |= delta[p++];
-      if (c & 0x02) off |= delta[p++] << 8;
-      if (c & 0x04) off |= delta[p++] << 16;
-      if (c & 0x08) off += delta[p++] * 0x1000000;
-      if (c & 0x10) len |= delta[p++];
-      if (c & 0x20) len |= delta[p++] << 8;
-      if (c & 0x40) len |= delta[p++] << 16;
-      if (len === 0) len = 0x10000;
+      if (c & DELTA_COPY_OFF1) { const r = deltaByte(delta, p); off |= r.b; p = r.p; }
+      if (c & DELTA_COPY_OFF2) { const r = deltaByte(delta, p); off |= r.b << DELTA_OFF_SHIFT; p = r.p; }
+      if (c & DELTA_COPY_OFF3) { const r = deltaByte(delta, p); off |= r.b << DELTA_BYTE2_SHIFT; p = r.p; }
+      if (c & DELTA_COPY_OFF4) { const r = deltaByte(delta, p); off += r.b * DELTA_OFF4_FACTOR; p = r.p; }
+      if (c & DELTA_COPY_LEN1) { const r = deltaByte(delta, p); len |= r.b; p = r.p; }
+      if (c & DELTA_COPY_LEN2) { const r = deltaByte(delta, p); len |= r.b << DELTA_OFF_SHIFT; p = r.p; }
+      if (c & DELTA_COPY_LEN3) { const r = deltaByte(delta, p); len |= r.b << DELTA_BYTE2_SHIFT; p = r.p; }
+      if (len === 0) len = DELTA_COPY_MAX;
       if (off + len > base.length || o + len > resultSize) throw corrupt('delta: copy out of range');
-      out.set(base.subarray(off, off + len), o); o += len;
+      out.set(take(base, off, len), o); o += len;
       ops.copy++; ops.copyBytes += len;
     } else if (c) {
       if (p + c > delta.length || o + c > resultSize) throw corrupt('delta: insert out of range');
-      out.set(delta.subarray(p, p + c), o); o += c; p += c;
+      out.set(take(delta, p, c), o); o += c; p += c;
       ops.insert++; ops.insertBytes += c;
     } else throw corrupt('delta: reserved opcode 0');
   }
@@ -109,7 +163,7 @@ export function makeDelta(base, target) {
   while (p < max && base[p] === target[p]) p++;
   let s = 0;
   while (s < max - p && base[base.length - 1 - s] === target[target.length - 1 - s]) s++;
-  return spliceDelta({ baseLen: base.length, off: p, oldLen: base.length - p - s, insert: target.subarray(p, target.length - s) });
+  return spliceDelta({ baseLen: base.length, off: p, oldLen: base.length - p - s, insert: take(target, p, target.length - s - p) });
 }
 
 // ---- resolve ----
@@ -160,7 +214,9 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
   const byDeltaOid = new Map();
   let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) resolveObj(o);
-  for (let pass = 0; pending.length && pass < 64; pass++) {
+  // oxlint-disable-next-line no-magic-numbers -- fixpoint iterations, not a pack field width
+  const RESOLVE_PASSES = 64;
+  for (let pass = 0; pending.length && pass < RESOLVE_PASSES; pass++) {
     const next = [];
     for (const o of pending) {
       try { const r = resolveObj(o); byDeltaOid.set(r.oid, o); }

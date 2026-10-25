@@ -1,43 +1,48 @@
 // Packfile v2: parse, delta resolve/apply/generate, build. Pure except buildPack (async zlib).
-import { fail } from './errors.js';
-import { Sha1, toHex, fromHex } from './sha1.js';
+import { Sha1, fromHex } from './sha1.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { concat } from './bytes.js';
-const corrupt = msg => fail('pack_corrupt', msg);
-
+import {
+  PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, OID_BYTES, BYTE_MASK,
+  OBJ_TYPE_SHIFT, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
+  OBJ_SIZE_FIRST_BASE, OBJ_SIZE_NEXT_BASE, BE32_SHIFTS,
+  DELTA_COPY, DELTA_COPY_MAX, DELTA_INSERT_MAX, DELTA_OFF_SHIFT,
+  DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
+  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3,
+} from './format.js';
 // ---- varints ----
 export function encodeObjHeader(type, size) {
-  const out = [(type << 4) | (size & 0x0f)];
-  size = Math.floor(size / 16);
-  while (size > 0) { out[out.length - 1] |= 0x80; out.push(size & 0x7f); size = Math.floor(size / 128); }
+  const out = [(type << OBJ_TYPE_SHIFT) | (size & OBJ_SIZE_FIRST_MASK)];
+  size = Math.floor(size / OBJ_SIZE_FIRST_BASE);
+  while (size > 0) { out[out.length - 1] |= OBJ_CONTINUE; out.push(size & OBJ_SIZE_NEXT_MASK); size = Math.floor(size / OBJ_SIZE_NEXT_BASE); }
   return Uint8Array.from(out);
 }
 export function encodeVarint(n) { // delta header style: 7-bit LE groups
   const out = [];
-  do { let b = n & 0x7f; n = Math.floor(n / 128); if (n > 0) b |= 0x80; out.push(b); } while (n > 0);
+  do { let b = n & OBJ_SIZE_NEXT_MASK; n = Math.floor(n / OBJ_SIZE_NEXT_BASE); if (n > 0) b |= OBJ_CONTINUE; out.push(b); } while (n > 0);
   return Uint8Array.from(out);
 }
 export const copyOp = (off, len) => {
-  const b = [0x80];
-  let o = off, l = len === 0x10000 ? 0 : len;
-  if (o & 0xff) { b[0] |= 0x01; b.push(o & 0xff); } o >>>= 8;
-  if (o & 0xff) { b[0] |= 0x02; b.push(o & 0xff); } o >>>= 8;
-  if (o & 0xff) { b[0] |= 0x04; b.push(o & 0xff); } o >>>= 8;
-  if (o & 0xff) { b[0] |= 0x08; b.push(o & 0xff); }
-  if (l & 0xff) { b[0] |= 0x10; b.push(l & 0xff); } l >>>= 8;
-  if (l & 0xff) { b[0] |= 0x20; b.push(l & 0xff); } l >>>= 8;
-  if (l & 0xff) { b[0] |= 0x40; b.push(l & 0xff); }
+  const b = [DELTA_COPY];
+  let o = off, l = len === DELTA_COPY_MAX ? 0 : len;
+  if (o & BYTE_MASK) { b[0] |= DELTA_COPY_OFF1; b.push(o & BYTE_MASK); } o >>>= DELTA_OFF_SHIFT;
+  if (o & BYTE_MASK) { b[0] |= DELTA_COPY_OFF2; b.push(o & BYTE_MASK); } o >>>= DELTA_OFF_SHIFT;
+  if (o & BYTE_MASK) { b[0] |= DELTA_COPY_OFF3; b.push(o & BYTE_MASK); } o >>>= DELTA_OFF_SHIFT;
+  if (o & BYTE_MASK) { b[0] |= DELTA_COPY_OFF4; b.push(o & BYTE_MASK); }
+  if (l & BYTE_MASK) { b[0] |= DELTA_COPY_LEN1; b.push(l & BYTE_MASK); } l >>>= DELTA_OFF_SHIFT;
+  if (l & BYTE_MASK) { b[0] |= DELTA_COPY_LEN2; b.push(l & BYTE_MASK); } l >>>= DELTA_OFF_SHIFT;
+  if (l & BYTE_MASK) { b[0] |= DELTA_COPY_LEN3; b.push(l & BYTE_MASK); }
   return Uint8Array.from(b);
 };
 export const copyOps = (off, len) => {
   const parts = [];
-  while (len > 0) { const n = Math.min(len, 0x10000); parts.push(copyOp(off, n)); off += n; len -= n; }
+  while (len > 0) { const n = Math.min(len, DELTA_COPY_MAX); parts.push(copyOp(off, n)); off += n; len -= n; }
   return parts;
 };
 export const insertOps = bytes => {
   const parts = [];
-  for (let i = 0; i < bytes.length; i += 127) {
-    const chunk = bytes.subarray(i, Math.min(i + 127, bytes.length));
+  for (let i = 0; i < bytes.length; i += DELTA_INSERT_MAX) {
+    const chunk = bytes.subarray(i, Math.min(i + DELTA_INSERT_MAX, bytes.length));
     parts.push(Uint8Array.of(chunk.length), chunk);
   }
   return parts;
@@ -51,7 +56,7 @@ export function spliceDelta({ baseLen, off, oldLen, insert }) {
   if (off > 0) parts.push(...copyOps(0, off));
   if (insert.length) parts.push(...insertOps(insert));
   if (tail > 0) parts.push(...copyOps(off + oldLen, tail));
-  return { delta: concat(parts), resultLen, ops: { copy: (off > 0 ? Math.ceil(off / 0x10000) : 0) + (tail > 0 ? Math.ceil(tail / 0x10000) : 0), insert: Math.ceil(insert.length / 127) } };
+  return { delta: concat(parts), resultLen, ops: { copy: (off > 0 ? Math.ceil(off / DELTA_COPY_MAX) : 0) + (tail > 0 ? Math.ceil(tail / DELTA_COPY_MAX) : 0), insert: Math.ceil(insert.length / DELTA_INSERT_MAX) } };
 }
 
 // ---- build ----
@@ -65,10 +70,10 @@ export async function zlibDeflate(bytes) {
 // already emits stored blocks for incompressible input and ties at ≥32 bytes, and loses by 3 bytes below. So: deflate only.
 export async function buildPack(objects) {
   const parts = [];
-  const hdr = new Uint8Array(12);
-  hdr.set([0x50, 0x41, 0x43, 0x4b]);
-  new DataView(hdr.buffer).setUint32(4, 2);
-  new DataView(hdr.buffer).setUint32(8, objects.length);
+  const hdr = new Uint8Array(PACK_HEADER_BYTES);
+  hdr.set(PACK_SIGNATURE);
+  new DataView(hdr.buffer).setUint32(PACK_SIGNATURE.length, PACK_VERSION);
+  new DataView(hdr.buffer).setUint32(PACK_SIGNATURE.length + BE32_SHIFTS.length, objects.length);
   parts.push(hdr);
   const entries = [];
   for (const o of objects) {
@@ -78,7 +83,7 @@ export async function buildPack(objects) {
     parts.push(h);
     if (o.baseOid) parts.push(fromHex(o.baseOid));
     parts.push(z);
-    entries.push({ type, typeName: TYPE_NAME[type], size: o.data.length, compressed: z.length, baseOid: o.baseOid ?? null, bytes: h.length + (o.baseOid ? 20 : 0) + z.length });
+    entries.push({ type, typeName: TYPE_NAME[type], size: o.data.length, compressed: z.length, baseOid: o.baseOid ?? null, bytes: h.length + (o.baseOid ? OID_BYTES : 0) + z.length });
   }
   const body = concat(parts);
   const pack = concat([body, new Sha1().update(body).digest()]);
@@ -87,4 +92,4 @@ export async function buildPack(objects) {
 
 
 // General-purpose parsing/resolution, kept out of this module so bundles of the edit path do not carry it.
-export { parsePack, applyDelta, makeDelta, resolvePack } from './packresolve.js';
+export { parsePack, applyDelta, makeDelta, resolvePack, readObjHeader, readOfsDelta, readUint32BE } from './packresolve.js';

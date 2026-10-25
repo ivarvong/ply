@@ -38,6 +38,7 @@ export const ALGS = Object.freeze({ kex: ['curve25519-sha256', 'curve25519-sha25
 export function kexInit(cookie) {
   return concat([Uint8Array.from([MSG.KEXINIT]), cookie, nameList(ALGS.kex), nameList(ALGS.hostKey), nameList(ALGS.cipher), nameList(ALGS.cipher), nameList(ALGS.mac), nameList(ALGS.mac), nameList(ALGS.comp), nameList(ALGS.comp), nameList([]), nameList([]), bool(false), u32(0)]);
 }
+// @decoder parseKexInit prefix=kex
 export function parseKexInit(payload) {
   const r = new Reader(payload); if (r.byte() !== MSG.KEXINIT) throw sshErr('ssh: expected KEXINIT');
   r.bytes(16);
