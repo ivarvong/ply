@@ -66,15 +66,19 @@ export function readOfsDelta(buf, p) {
 }
 
 // ---- parse ----
+// Optional tighter caps live on the caller's limits object. Absent means unlimited, which is what every
+// existing caller already observed.
+export const packParseOpts = (limits = DEFAULT_LIMITS) => ({ limits, maxObjects: limits.maxPackObjects ?? Infinity, maxInflatedTotal: limits.maxInflatedTotal ?? Infinity });
 
-// ---- parse ----
 // @decoder parsePack prefix=pack
-export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) {
+export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS, maxObjects = Infinity, maxInflatedTotal = Infinity } = {}) {
   const minPack = PACK_HEADER_BYTES + PACK_TRAILER_BYTES;
   if (buf.length < minPack || !take(buf, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw corrupt('pack: bad signature');
   const version = readUint32BE(buf, PACK_SIGNATURE.length);
   const count = readUint32BE(buf, PACK_SIGNATURE.length + UINT32_BYTES);
   if (version !== PACK_VERSION) throw corrupt(`pack: unsupported version ${version}`);
+  // A hostile count must fail before the loop allocates. Defaults preserve every existing caller.
+  if (count > maxObjects) throw limitError('pack objects', count, maxObjects);
   const objects = [];
   const stats = { version, count, full: 0, ofsDelta: 0, refDelta: 0, byType: {}, compressed: 0, inflated: 0, inflate: { blocks: 0, stored: 0, fixed: 0, dynamic: 0 } };
   let p = PACK_HEADER_BYTES;
@@ -97,6 +101,8 @@ export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS } = {}) 
     } else if (type >= TYPE.COMMIT && type <= TYPE.TAG) stats.full++;
     else throw corrupt(`pack: bad object type ${type} at ${offset}`);
     if (size > limits.maxObjectSize) throw limitError('pack object size', size, limits.maxObjectSize);
+    // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
+    if (stats.inflated + size > maxInflatedTotal) throw limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal);
     const { out, consumed, stats: is } = inflate(buf, p, { expectedSize: size, maxOutput: limits.maxObjectSize });
     stats.compressed += consumed; stats.inflated += size;
     stats.inflate.blocks += is.blocks; stats.inflate.stored += is.stored; stats.inflate.fixed += is.fixed; stats.inflate.dynamic += is.dynamic;
