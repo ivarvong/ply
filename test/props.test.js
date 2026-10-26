@@ -122,7 +122,7 @@ forAll('single-object pack stream: chunking-invariant, trailer verified, zlib by
   // corrupt one byte → must throw
   const bad = pack.slice(); bad[rng.int(0, bad.length - 1)] ^= 0x01;
   assert.throws(() => { let s = spInit(); const r = spStep(s, bad); s = r.state; spFinish(s); });
-}, 60);
+}, Math.min(60, N));
 
 forAll('pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-delta + thin)', async rng => {
   const base = genBlob(rng, rng.pick(['tiny', 'text', 'random']));
@@ -139,7 +139,7 @@ forAll('pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-de
   assert.equal(r.stats.externalBases, inPack ? 0 : 1);
   // trailer corruption
   const bad = pack.slice(); bad[bad.length - 1] ^= 1; assert.throws(() => parsePack(bad));
-}, 60);
+}, Math.min(60, N));
 
 forAll('tree: parse ∘ encode roundtrip and sort is total order with dir-as-slash rule', rng => {
   const names = ['a', 'a-b', 'a.b', 'a0', 'a_b', 'ab', 'A', 'a~', 'z', 'é', 'a b', 'a--', '-a', '.h', 'ä', '한', '🚀', 'b', 'a.', 'a/'.slice(0, 1)];
