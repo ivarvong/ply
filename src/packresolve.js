@@ -120,10 +120,9 @@ const deltaByte = (delta, p) => ({ b: take(delta, p, 1)[0], p: p + 1 });
 export function applyDelta(base, delta, { maxResult = DEFAULT_LIMITS.maxDeltaResult } = {}) {
   if (delta.length < DELTA_SIZE_MIN) throw corrupt('delta: shorter than DELTA_SIZE_MIN');
   let p = 0, baseSize, resultSize;
+  // readVarint uses take(), so a header that runs past the buffer throws a short read before p can pass the end.
   [baseSize, p] = readVarint(delta, p);
-  if (p > delta.length) throw corrupt('delta: truncated header');
   [resultSize, p] = readVarint(delta, p);
-  if (p > delta.length) throw corrupt('delta: truncated header');
   if (resultSize > maxResult) throw limitError('delta result size', resultSize, maxResult);
   if (baseSize !== base.length) throw corrupt(`delta: base size ${baseSize} != ${base.length}`);
   const out = new Uint8Array(resultSize);
