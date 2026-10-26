@@ -221,8 +221,10 @@ export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   return { pat, states: parsed };
 }
 // @decoder parseFile prefix=attr-file
-export function parseFile(text, { macrosOk = false, reserveBuiltin = true } = {}) {
-  if (text.length >= MAX_FILE) return [];
+// maxFile defaults to git's 100MiB attribute-file cap. Tests pass a smaller cap so the boundary is reachable
+// without allocating that buffer on every run.
+export function parseFile(text, { macrosOk = false, reserveBuiltin = true, maxFile = MAX_FILE } = {}) {
+  if (text.length >= maxFile) return [];
   const nul = text.indexOf('\0'); if (nul >= 0) text = text.slice(0, nul); // C string
   const lines = []; let sp = 0;
   while (sp < text.length) { let ep = text.indexOf('\n', sp); const more = ep >= 0; if (!more) ep = text.length; const l = parseLine(text.slice(sp, ep), { macrosOk, reserveBuiltin }); if (l) lines.push(l); sp = ep + (more ? 1 : 0); }

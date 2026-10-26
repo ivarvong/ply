@@ -32,7 +32,10 @@ function functions(file) {
   const lines = readFileSync(file, 'utf8').split('\n');
   const fns = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(?:export )?(?:async )?function (\w+)/);
+    // A top-level const starts a new owner. Otherwise pktAttrs, sitting under pktFinish, would be
+    // scored as a parser survivor.
+    const m = lines[i].match(/^(?:export )?(?:async )?function (\w+)/)
+      || lines[i].match(/^(?:export )?const (\w+)\s*=/);
     if (m) fns.push({ name: m[1], line: i + 1 });
   }
   return fns;
