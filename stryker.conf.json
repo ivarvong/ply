@@ -10,7 +10,7 @@
   "tempDirName": ".stryker-tmp",
   "reporters": ["clear-text", "json", "progress"],
   "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
-  "thresholds": { "high": 80, "low": 60, "break": null },
+  "thresholds": { "high": 80, "low": 60, "break": 23.54 },
   "timeoutMS": 8000,
   "timeoutFactor": 2,
   "concurrency": 4

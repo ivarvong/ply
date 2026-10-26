@@ -127,13 +127,16 @@ if (!checkOnly) {
 
 const { rows, violations, score, detected, survived, ignored } = summarize(loadReport());
 const breakAt = JSON.parse(readFileSync('stryker.conf.json', 'utf8')).thresholds?.break;
+// A pull request mutates only the files it changed. That subset's percentage is not
+// comparable to the full-library break, so the threshold applies to a full run.
+const fullRun = process.env.GITHUB_EVENT_NAME !== 'pull_request';
 console.log('\nper-file mutation score');
 console.log('file                         score   killed  timeout  survived  uncovered  ignored');
 for (const r of rows) {
   console.log(`${r.file.padEnd(28)} ${r.score.toFixed(1).padStart(5)}  ${String(r.killed).padStart(6)}  ${String(r.timeout).padStart(7)}  ${String(r.survived).padStart(8)}  ${String(r.noCoverage).padStart(9)}  ${String(r.ignored).padStart(7)}`);
 }
 console.log(`\nscore ${score.toFixed(2)}  (${detected} detected, ${survived} survived/uncovered, ${ignored} ignored)`);
-if (breakAt !== null && breakAt !== undefined && score + 1e-9 < breakAt) {
+if (fullRun && breakAt !== null && breakAt !== undefined && score + 1e-9 < breakAt) {
   console.error(`mutation score ${score.toFixed(2)} is below the break threshold ${breakAt}`);
   process.exit(1);
 }
