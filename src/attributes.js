@@ -190,13 +190,17 @@ function parseStates(s, reserved) { // → [[name, value]] or null (any invalid 
     let eq = s.indexOf('=', i);
     // Stryker disable next-line EqualityOperator,ConditionalExpression: indexOf is -1 or past the token start, and a token that starts with '=' is rejected either way
     if (eq < 0) eq = -1;
+    // The else-if form is one statement, so a disable comment between the branches does not apply.
     // Stryker disable next-line EqualityOperator: '=' is not blank, so it cannot sit on the exclusive end of the token
-    else if (ep < eq) eq = -1;
-    // Stryker disable next-line EqualityOperator: an '=' at index 0 makes the name empty or invalid, so '>' and '>=' reject the same line
-    let name = s.slice(i, eq >= 0 ? eq : ep), value;
+    if (ep < eq) eq = -1;
+    // Stryker disable next-line EqualityOperator: an '=' at index 0 makes the name empty or invalid, so both comparisons reject the line
+    let name = s.slice(i, eq >= 0 ? eq : ep);
+    let value;
     if (name[0] === '-' || name[0] === '!') { value = name[0] === '-' ? false : UNSET; name = name.slice(1); }
-    // Stryker disable next-line EqualityOperator: an '=' at index 0 fails validName before this value is read, so '>' and '>=' reject the same line
-    else value = eq >= 0 ? s.slice(eq + 1, ep) : true;
+    else {
+      // Stryker disable next-line EqualityOperator: an '=' at index 0 fails validName before this value is read, so both comparisons reject the line
+      value = eq >= 0 ? s.slice(eq + 1, ep) : true;
+    }
     if (!validName(name) || reserved(name)) return null;
     out.push([name, value]);
     i = span(s, ep, BLANK, true);

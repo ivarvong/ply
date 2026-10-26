@@ -773,6 +773,7 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   const no = { macrosOk: false };
   assert.equal(parseLine('  "*.c" text', no).pat.pattern, '*.c');
   assert.equal(parseLine('a"b text', no).pat.pattern, 'a"b');
+  assert.deepEqual(parseLine('*.c text more=v', no).states, [['text', true], ['more', 'v']]);
   assert.equal(parseFile('*.c text')[0].states[0][0], 'text');
   assert.equal(parseFile('\n*.c text\n*.h text').length, 2);
 

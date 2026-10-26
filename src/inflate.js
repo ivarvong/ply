@@ -70,8 +70,9 @@ export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = 
     if (o + n <= out.length) return;
     if (expectedSize !== undefined) throw bad(`inflate: output exceeds expected ${expectedSize}`);
     if (o + n > maxOutput) throw fail('limit_exceeded', `inflate: output exceeds limit ${maxOutput}`);
-    // oxlint-disable-next-line no-magic-numbers -- output-buffer growth, not a wire-format fact
-    let cap = Math.min(maxOutput, out.length * 2); while (cap < o + n) cap = Math.min(maxOutput, cap * 2);
+    // Stryker disable next-line ArithmeticOperator: a smaller starting capacity is doubled until it holds the output, so the bytes do not change
+    let cap = Math.min(maxOutput, out.length * 2); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
+    while (cap < o + n) cap = Math.min(maxOutput, cap * 2); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
     const nb = new Uint8Array(cap); nb.set(out.subarray(0, o)); out = nb;
   };
 
