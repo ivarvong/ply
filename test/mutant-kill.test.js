@@ -768,3 +768,131 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   const cut = concat([zhead, Uint8Array.of(1, 0, 0, 255, 255)]);
   throws(() => inflate(cut), 'pack_corrupt', 'inflate: truncated adler32');
 });
+
+test('parser edges a symmetric or unreachable fixture left alive', async () => {
+  const no = { macrosOk: false };
+  assert.equal(parseLine('  "*.c" text', no).pat.pattern, '*.c');
+  assert.equal(parseLine('a"b text', no).pat.pattern, 'a"b');
+  assert.equal(parseFile('*.c text')[0].states[0][0], 'text');
+  assert.equal(parseFile('\n*.c text\n*.h text').length, 2);
+
+  const carriedHex = pktStep(pktInit(), te.encode('00')).state;
+  throws(() => pktStep(carriedHex, te.encode('00zzzz')), 'protocol', 'bad pkt-line length at byte 4');
+
+  const hello = te.encode('hello hello hello hello');
+  const helloZ = new Uint8Array(zlib.deflateSync(hello));
+  throws(() => inflate(helloZ, 0, { expectedSize: hello.length + 10 }), 'pack_corrupt', `inflate: size ${hello.length} != expected ${hello.length + 10}`);
+
+  const { Sha1 } = await import('../src/sha1.js');
+  const blob = te.encode('hello-hello-hello');
+  const storedZ = new Uint8Array(zlib.deflateSync(blob, { level: 0 }));
+  const objHeader = encodeObjHeader(TYPE.BLOB, blob.length);
+  const head = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), objHeader]);
+  const unsigned = concat([head, storedZ]);
+  const whole = concat([unsigned, new Sha1().update(unsigned).digest()]);
+  const opened = spStep(spInit(), whole.subarray(0, head.length));
+  assert.equal(opened.state.phase, 'body');
+  assert.equal(opened.state.lag.length, 0);
+  const chunk = whole.slice(head.length);
+  const streamed = spStep(opened.state, chunk);
+  const lagByte = streamed.state.lag[streamed.state.lag.length - 1];
+  chunk[chunk.length - 1] ^= 0xff;
+  assert.equal(streamed.state.lag[streamed.state.lag.length - 1], lagByte);
+
+  // RFC 1951 §3.2.6 fixed Huffman codes, built the same way inflate does, then emitted MSB first.
+  const litTab = huffCodes(huffBuild(Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8))));
+  const distTab = huffCodes(huffBuild(Array.from({ length: 30 }, () => 5)));
+  const fixed = (...ops) => {
+    const bits = [];
+    const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+    const putCode = rec => { for (let i = rec.len - 1; i >= 0; i--) bits.push((rec.code >> i) & 1); };
+    put(1, 1); put(1, 2);
+    for (const op of ops) {
+      if (op.lit !== undefined) putCode(litTab.get(op.lit));
+      else if (op.len) { putCode(litTab.get(op.sym)); if (op.extra) put(op.extra, op.extraBits); putCode(distTab.get(op.dist)); if (op.distExtra !== undefined) put(op.distExtra, op.distExtraBits); }
+      else putCode(litTab.get(256));
+    }
+    return packBits(bits);
+  };
+
+  // 11 bits: final fixed block, one literal, no end-of-block. The padded high bits of the last byte are zeros.
+  throws(() => inflate(fixed({ lit: 97 }), 0, { raw: true }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(fixed({ sym: 286, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 }), 'pack_corrupt', 'inflate: bad length symbol');
+  throws(() => inflate(fixed({ sym: 257, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 }), 'pack_corrupt', 'inflate: distance too far back');
+  const overlapped = inflate(fixed({ lit: 97 }, { sym: 257, len: true, dist: 0 }, {}), 0, { raw: true });
+  assert.deepEqual([...overlapped.out], [97, 97, 97, 97]);
+  const distances = inflate(fixed(
+    ...[...'abcdef'].map(ch => ({ lit: ch.charCodeAt(0) })),
+    { sym: 257, len: true, dist: 4, distExtra: 1, distExtraBits: 1 },
+    { sym: 257, len: true, dist: 0 },
+    {},
+  ), 0, { raw: true });
+  assert.equal(distances.stats.maxDist, 6);
+  assert.equal(distances.out.length, 12);
+
+  // One literal plus a 256-byte match is 257 bytes. The initial buffer is 256 and the limit is the exact size,
+  // so growing onto the limit is legal and stopping one short of it is not.
+  const onto = inflate(fixed({ lit: 97 }, { sym: 284, len: true, extra: 29, extraBits: 5, dist: 0 }, {}), 0, { raw: true, maxOutput: 257 });
+  assert.equal(onto.out.length, 257);
+  // A second match asks for more than twice the current buffer, so the growth loop has to run.
+  const grown = inflate(fixed(
+    { lit: 97 },
+    { sym: 284, len: true, extra: 27, extraBits: 5, dist: 0 },
+    { sym: 285, len: true, dist: 0 },
+    {},
+  ), 0, { raw: true });
+  assert.equal(grown.out.length, 513);
+
+  const stored = new Uint8Array(305);
+  stored[0] = 1; stored[1] = 300 & 255; stored[2] = 300 >> 8;
+  const nlen = (~300) & 0xffff; stored[3] = nlen & 255; stored[4] = nlen >> 8;
+  stored.fill(7, 5);
+  throws(() => inflate(stored, 0, { raw: true, maxOutput: 100 }), 'limit_exceeded', 'inflate: output exceeds limit 100');
+
+  const dyn = (hlit, hdist) => {
+    const bits = [];
+    const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+    put(1, 1); put(2, 2); put(hlit, 5); put(hdist, 5); put(0, 4);
+    return packBits(bits);
+  };
+  throws(() => inflate(dyn(30, 0), 0, { raw: true }), 'pack_corrupt', 'inflate: bad dynamic counts');
+  throws(() => inflate(dyn(0, 30), 0, { raw: true }), 'pack_corrupt', 'inflate: bad dynamic counts');
+
+  // Code-length symbol 16 as the first length, and symbol 18 repeated past the 258 length slots.
+  const repeat = extras => {
+    const bits = [];
+    const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+    put(1, 1); put(2, 2); put(0, 5); put(0, 5); put(0, 4);
+    for (const n of extras.head) put(n, 3);
+    for (const [v, n] of extras.body) put(v, n);
+    return packBits(bits);
+  };
+  throws(() => inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: repeat with no previous');
+  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: repeat overflow');
+  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: no end-of-block code');
+
+  // 15 data bits end on the last bit of the buffer, so one more Huffman step has nothing to read.
+  const hole = [];
+  const putHole = (v, n) => { for (let i = 0; i < n; i++) hole.push((v >> i) & 1); };
+  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(6, 4);
+  for (const n of [0, 0, 0, 1, 1, 0, 0, 0, 0, 0]) putHole(n, 3);
+  for (let i = 0; i < 256; i++) putHole(0, 1);
+  putHole(1, 1); putHole(0, 1);
+  for (let i = 0; i < 15; i++) putHole(1, 1);
+  assert.equal(hole.length % 8, 0);
+  throws(() => inflate(packBits(hole), 0, { raw: true, maxOutput: 32 }), 'pack_corrupt', 'inflate: invalid huffman code');
+});
+
+function huffCodes(h) {
+  const map = new Map();
+  let code = 0, index = 0;
+  for (let len = 1; len < 16; len++) {
+    for (let i = 0; i < h.count[len]; i++) { map.set(h.symbol[index + i], { len, code }); code++; }
+    index += h.count[len];
+    code <<= 1;
+  }
+  return map;
+}
+function packBits(bits) {
+  return Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
+}
