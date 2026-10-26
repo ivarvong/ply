@@ -2,7 +2,7 @@
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 import { concat } from './bytes.js';
 import { TYPE_NAME } from './objects.js';
-import { parsePack, resolvePack } from './packresolve.js';
+import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { limitError } from './limits.js';
 import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest } from './fetch.js';
@@ -52,7 +52,7 @@ export async function fetchPackOnce(t, opts, { external, resolve = true, attrs =
     const acks = { acks: st.acks.filter(a => a.startsWith('ACK ')).map(a => a.slice(4)), nak: st.acks.includes('NAK'), ready: st.ready, shallow: st.shallow, unshallow: st.unshallow };
     if (st.phase !== 'pack') { span.set({ 'git.fetch.pack': false }); return { parsed: null, objects: null, resolved: null, ...acks }; }
     const buf = concat(parts);
-    const parsed = parsePack(buf, { limits: t.limits });
+    const parsed = parsePack(buf, packParseOpts(t.limits));
     for (const o of parsed.objects) span.event('git.pack.object', {
       'git.object.offset': o.offset, 'git.object.type': TYPE_NAME[o.type], 'git.object.size': o.size, 'git.object.compressed': o.compressed,
       'git.object.header_bytes': o.headerBytes, 'git.object.base.offset': o.baseOffset ?? -1, 'git.object.base.oid': o.baseOid ?? '',

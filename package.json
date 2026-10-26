@@ -29,7 +29,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/workerd.test.js test/read.test.js test/artifacts-compat.test.js test/worker.test.js && node test/fuzz/run.mjs --n 60 && node test/fuzz/hostile.mjs --n 60 && node test/fuzz/below-hash.mjs --n 20 --seed 1 && node test/fuzz/liar.mjs --n 60 && node test/fuzz/protocol.mjs --n 100 && node test/fuzz/packs.mjs --n 40 && node test/fuzz/packgen.mjs --n 60 && node test/fuzz/codec.mjs --n 20000 && node test/fuzz/usergiven.mjs && node test/fuzz/attributes.mjs --n 40 && node test/fuzz/linemerge.mjs --n 300 && node test/fuzz/linemerge.mjs --n 200 --runs && node test/fuzz/linemerge.mjs --n 150 --driver union && node test/fuzz/diffscript.mjs --n 60 && node test/fuzz/diffscript.mjs --n 4 --huge",
+    "test": "node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/workerd.test.js test/read.test.js test/artifacts-compat.test.js && node test/fuzz/run.mjs --n 60 && node test/fuzz/hostile.mjs --n 60 && node test/fuzz/below-hash.mjs --n 20 --seed 1 && node test/fuzz/liar.mjs --n 60 && node test/fuzz/protocol.mjs --n 100 && node test/fuzz/packs.mjs --n 40 && node test/fuzz/packgen.mjs --n 60 && node test/fuzz/codec.mjs --n 20000 && node test/fuzz/usergiven.mjs && node test/fuzz/attributes.mjs --n 40 && node test/fuzz/linemerge.mjs --n 300 && node test/fuzz/linemerge.mjs --n 200 --runs && node test/fuzz/linemerge.mjs --n 150 --driver union && node test/fuzz/diffscript.mjs --n 60 && node test/fuzz/diffscript.mjs --n 4 --huge",
     "test:props": "node --test test/props.test.js",
     "test:oracle": "node --test test/oracle.test.js test/concurrency.test.js test/edges.test.js",
     "test:adversarial": "node --test test/adversarial.test.js",
@@ -47,9 +47,6 @@
     "fuzz:attributes": "node test/fuzz/attributes.mjs",
     "test:workerd": "node --test test/workerd.test.js",
     "test:read": "node --test test/read.test.js test/artifacts-compat.test.js",
-    "worker:test": "node --test test/worker.test.js",
-    "worker:deploy": "env -u CLOUDFLARE_API_TOKEN wrangler deploy -c worker/wrangler.jsonc",
-    "worker:smoke": "node worker/smoke.mjs",
     "coverage": "rm -rf /tmp/ply-cov && NODE_V8_COVERAGE=/tmp/ply-cov node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/packcache.test.js test/pure.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/run.mjs --n 60 --seed 11 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/hostile.mjs --n 60 --seed 12 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/protocol.mjs --n 80 --seed 32 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/packs.mjs --n 30 --seed 5; NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 200 --runs && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 200 --rediff undecided && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/diffscript.mjs --n 40 --snake && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/diffscript.mjs --n 3 --huge && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/attributes.mjs --n 40 && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 200 --driver union && NODE_V8_COVERAGE=/tmp/ply-cov node test/fuzz/linemerge.mjs --n 50 --driver binary; node test/coverage.mjs /tmp/ply-cov --lines",
     "live:prepare": "node test/live-prepare.mjs",
     "deploy": "python3 test/deploy/deploy.py",
@@ -81,7 +78,6 @@
     "@stryker-mutator/core": "^10.1.1",
     "esbuild": "^0.24.0",
     "oxlint": "^1.89.0",
-    "workerd": "1.20261018.1",
-    "wrangler": "^4.152.0"
+    "workerd": "1.20261018.1"
   }
 }

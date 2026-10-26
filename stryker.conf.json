@@ -6,7 +6,7 @@
   },
   "coverageAnalysis": "off",
   "mutate": ["src/**/*.js"],
-  "ignorePatterns": ["reports", ".stryker-tmp", "fuzz-out", "coverage", "worker"],
+  "ignorePatterns": ["reports", ".stryker-tmp", "fuzz-out", "coverage"],
   "tempDirName": ".stryker-tmp",
   "reporters": ["clear-text", "json", "progress"],
   "jsonReporter": { "fileName": "reports/mutation/mutation.json" },

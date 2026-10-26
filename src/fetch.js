@@ -7,7 +7,7 @@ import { td, concat, take } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
-import { parsePack, resolvePack, readObjHeader, readUint32BE } from './packresolve.js';
+import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 import { DEFAULT_LIMITS, limitError } from './limits.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
@@ -239,7 +239,7 @@ async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
         total += chunk.length; if (total > t.limits.maxPackBytes) throw limitError('pack bytes', total, t.limits.maxPackBytes);
         parts.push(chunk);
       }
-      const parsed = parsePack(concat(parts), { limits: t.limits });
+      const parsed = parsePack(concat(parts), packParseOpts(t.limits));
       const { objects } = resolvePack(parsed, undefined, t.limits);
       for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data);
       const want = objects.get(oid);

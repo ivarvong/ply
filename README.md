@@ -4,6 +4,10 @@ Zero-dependency git smart-HTTP client that edits one file in a remote repo in **
 
 Every byte and every roundtrip is recorded as an OTLP span. The test suite is a property/fuzz harness that uses real `git` as the oracle and the spans as the coverage map that steers generation.
 
+The hosted HTTP API and the public repository viewer live in [ply-web](https://github.com/ivarvong/ply-web) (the Cloudflare Worker `ply`). This repository is the git client.
+
+`parsePack` accepts optional `maxObjects` and `maxInflatedTotal`. Omitting them leaves those caps unlimited, which is what existing callers do. The Worker also uses these entry-point exports: `validateIdent`, `validateRef`, `validatePath`, `concat`, `limitError`, `isFilterRejection`, `fromAny`, `packParseOpts`.
+
 ```js
 import { editFile, Tracer, jsonlExporter } from 'ply';
 
