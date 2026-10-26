@@ -9,7 +9,7 @@ import {
 } from '../src/objects.js';
 import { pkt, pktInit, pktStep, pktFinish, FLUSH, DELIM } from '../src/pktline.js';
 import {
-  parsePack, applyDelta, makeDelta, readObjHeader, readOfsDelta, readUint32BE,
+  parsePack, applyDelta, makeDelta, readObjHeader, readOfsDelta, readUint32BE, packParseOpts,
 } from '../src/packresolve.js';
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
@@ -929,6 +929,42 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   for (let i = 0; i < 15; i++) putHole(1, 1);
   assert.equal(hole.length % 8, 0);
   throws(() => inflate(packBits(hole), 0, { raw: true, maxOutput: 32 }), 'pack_corrupt', 'inflate: invalid huffman code');
+});
+
+test('parsePack caps reject a hostile count and inflated total on the boundary', async () => {
+  const blob = te.encode('hello');
+  const other = te.encode('hello!');
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: blob }]);
+  const { pack: two } = await buildPack([{ type: TYPE.BLOB, data: blob }, { type: TYPE.BLOB, data: other }]);
+  const emptyBody = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 0);
+  const { Sha1 } = await import('../src/sha1.js');
+  const emptyPack = concat([emptyBody, new Sha1().update(emptyBody).digest()]);
+  const total = blob.length + other.length;
+
+  assert.equal(parsePack(pack, { maxObjects: 1, maxInflatedTotal: blob.length }).objects.length, 1);
+  assert.equal(parsePack(emptyPack, { maxObjects: 0, maxInflatedTotal: 0 }).stats.count, 0);
+  assert.equal(parsePack(two, { maxObjects: 2, maxInflatedTotal: total }).objects.length, 2);
+  throws(() => parsePack(pack, { maxObjects: 0 }), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
+  throws(() => parsePack(two, { maxObjects: 1 }), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
+  throws(() => parsePack(pack, { maxInflatedTotal: blob.length - 1 }), 'limit_exceeded', `pack inflated bytes ${blob.length} exceeds limit ${blob.length - 1}`);
+  throws(() => parsePack(two, { maxInflatedTotal: total - 1 }), 'limit_exceeded', `pack inflated bytes ${total} exceeds limit ${total - 1}`);
+
+  const zero = packParseOpts(withLimits({ maxPackObjects: 0, maxInflatedTotal: 0 }));
+  assert.equal(zero.maxObjects, 0);
+  assert.equal(zero.maxInflatedTotal, 0);
+  assert.equal(zero.limits.maxObjectSize, withLimits({}).maxObjectSize);
+  throws(() => parsePack(pack, zero), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
+
+  const positive = packParseOpts({ maxPackObjects: 1, maxInflatedTotal: blob.length, maxObjectSize: blob.length + blob.length });
+  assert.equal(positive.maxObjects, 1);
+  assert.equal(positive.maxInflatedTotal, blob.length);
+  assert.equal(positive.limits.maxObjectSize, blob.length + blob.length);
+  assert.equal(parsePack(pack, positive).objects.length, 1);
+
+  const open = packParseOpts();
+  assert.equal(open.maxObjects, Infinity);
+  assert.equal(open.maxInflatedTotal, Infinity);
+  assert.equal(parsePack(pack, open).stats.inflated, blob.length);
 });
 
 function huffCodes(h) {
