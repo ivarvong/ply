@@ -109,10 +109,10 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
         // git porcelain: one "!" line per rejected ref with the server's reason; a client-side lease refusal never reaches the server
         const gitRejects = new Map([...g.out.matchAll(/^!\s+\S*:(\S+)\s+\[remote rejected\]\s+\((.*)\)/gm)].map(m => [m[1], m[2]]));
         const ourRejects = new Map(err.report?.refs?.filter(r => !r.ok).map(r => [r.ref, r.reason]) ?? []);
-        if (/stale info/.test(g.out)) assert.ok([...ourRejects.values()].every(r => /^(failed to update ref|pre-receive hook declined|hook declined|atomic push failure|bad ref)$/.test(r)), `${label}: ${[...ourRejects.values()]}`);
+        if (/stale info/.test(g.out)) assert.ok([...ourRejects.values()].every(r => /^(failed to update ref|pre-receive hook declined|hook declined|atomic push failure|bad ref|incorrect old value provided)$/.test(r)), `${label}: ${[...ourRejects.values()]}`);
         else assert.deepEqual([...ourRejects].sort(), [...gitRejects].sort(), `${label}: per-ref reasons`);
         const reasons = [...ourRejects.values()];
-        const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r); // 'bad ref': denyNonFastForwards could not parse the (stale, unknown) old oid
+        const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref|incorrect old value provided)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r); // 'bad ref': denyNonFastForwards could not parse the (stale, unknown) old oid. 'incorrect old value provided': git ≥ 2.50.
         const expectCas = reasons.length && reasons.every(isCas) && reasons.some(r => r !== 'atomic push failure');
         assert.equal(err.code, expectCas ? 'cas_conflict' : 'push_rejected', `${label}: code for ${JSON.stringify(reasons)}`);
       } else stats.ok++;

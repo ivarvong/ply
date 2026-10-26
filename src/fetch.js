@@ -3,13 +3,21 @@
 // resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
 import { fail } from './errors.js';
 import { pkts } from './pktline.js';
-import { td, concat } from './bytes.js';
+import { td, concat, take } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
-import { TYPE, TYPE_NAME, hashObject } from './objects.js';
+import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
-import { parsePack, resolvePack } from './packresolve.js';
+import { parsePack, resolvePack, readObjHeader, readUint32BE } from './packresolve.js';
+import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 import { DEFAULT_LIMITS, limitError } from './limits.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
+
+/* oxlint-disable no-magic-numbers -- span tails and the compressed-size slack are diagnostics, not wire-format facts */
+const PROGRESS_KEEP = 512;
+const PROGRESS_ATTR = 200;
+const COMPRESSED_SLACK = 64 * 1024;
+const OID_PREVIEW = 48;
+/* oxlint-enable no-magic-numbers */
 
 
 // ---- request body (pure) ----
@@ -37,21 +45,22 @@ export const v2Init = (limits = DEFAULT_LIMITS) => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
   band1: 0, band2: 0, band3: 0, band2Frames: 0, progress: '', error: null, done: false, packFrames: 0,
 });
+// @decoder v2Step prefix=v2
 export function v2Step(st, frame) {
   if (st.done) throw proto('v2: frame after flush');
   if (frame.kind === 'flush') return { state: { ...st, done: true }, pack: null };
   if (frame.kind === 'end') return { state: st, pack: null };
   if (st.phase === 'pack') {
     if (frame.kind !== 'data') return { state: st, pack: null };
-    const band = frame.payload[0], body = frame.payload.subarray(1);
-    if (band === 1) return { state: { ...st, band1: st.band1 + body.length, packFrames: st.packFrames + 1 }, pack: body };
-    if (band === 2) return { state: { ...st, band2: st.band2 + body.length, band2Frames: st.band2Frames + 1, progress: (st.progress + td.decode(body)).slice(-512) }, pack: null };
-    if (band === 3) throw fail('remote_error', `remote: ${td.decode(body).trim()}`);
-    throw proto(`v2: bad sideband ${band}`);
+    const band = parseSideband(frame.payload);
+    if (band.band === SIDEBAND_PACK) return { state: { ...st, band1: st.band1 + band.body.length, packFrames: st.packFrames + 1 }, pack: band.body };
+    if (band.band === SIDEBAND_PROGRESS) return { state: { ...st, band2: st.band2 + band.body.length, band2Frames: st.band2Frames + 1, progress: (st.progress + td.decode(band.body)).slice(-PROGRESS_KEEP) }, pack: null };
+    if (band.band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(band.body).trim()}`);
+    throw proto(`v2: bad sideband ${band.band}`);
   }
   if (frame.kind === 'delim') return { state: { ...st, section: null }, pack: null };
   const line = td.decode(frame.payload).replace(/\n$/, '');
-  if (line.startsWith('ERR ')) throw fail('remote_error', `remote: ${line.slice(4)}`);
+  if (line.startsWith('ERR ')) throw fail('remote_error', `remote: ${line.slice('ERR '.length)}`);
   if (st.section === null) {
     const next = { ...st, section: line, sections: [...st.sections, line] };
     if (line === 'packfile') next.phase = 'pack';
@@ -61,8 +70,8 @@ export function v2Step(st, frame) {
     if ((st.sectionLines ?? 0) >= st.limits.maxSectionLines) throw limitError('shallow-info lines', (st.sectionLines ?? 0) + 1, st.limits.maxSectionLines);
     st = { ...st, sectionLines: (st.sectionLines ?? 0) + 1 };
     // the server may repeat a shallow line when a commit is wanted both directly and through a tag; keep them unique
-    if (line.startsWith('shallow ')) return { state: { ...st, shallow: st.shallow.includes(line.slice(8)) ? st.shallow : [...st.shallow, line.slice(8)] }, pack: null };
-    if (line.startsWith('unshallow ')) return { state: { ...st, unshallow: st.unshallow.includes(line.slice(10)) ? st.unshallow : [...st.unshallow, line.slice(10)] }, pack: null };
+    if (line.startsWith('shallow ')) return { state: { ...st, shallow: st.shallow.includes(line.slice('shallow '.length)) ? st.shallow : [...st.shallow, line.slice('shallow '.length)] }, pack: null };
+    if (line.startsWith('unshallow ')) return { state: { ...st, unshallow: st.unshallow.includes(line.slice('unshallow '.length)) ? st.unshallow : [...st.unshallow, line.slice('unshallow '.length)] }, pack: null };
   }
   if (st.section === 'acknowledgments') {
     if (st.acks.length >= st.limits.maxSectionLines) throw limitError('acknowledgment lines', st.acks.length + 1, st.limits.maxSectionLines);
@@ -75,10 +84,10 @@ export const v2Attrs = st => ({
   'git.fetch.sections': st.sections.join(','), 'git.fetch.shallow': st.shallow, 'git.fetch.unshallow': st.unshallow,
   'git.fetch.acks': st.acks, 'git.fetch.ready': st.ready,
   'git.sideband.band1.bytes': st.band1, 'git.sideband.band2.bytes': st.band2, 'git.sideband.band2.frames': st.band2Frames,
-  'git.sideband.band3.bytes': st.band3, 'git.sideband.pack.frames': st.packFrames, 'git.sideband.progress.tail': st.progress.slice(-200),
+  'git.sideband.band3.bytes': st.band3, 'git.sideband.pack.frames': st.packFrames, 'git.sideband.progress.tail': st.progress.slice(-PROGRESS_ATTR),
 });
 export const fetchAttrs = opts => ({
-  'git.command': 'fetch', 'git.protocol.version': 2, 'git.fetch.wants': opts.wants, 'git.fetch.wants.count': opts.wants.length,
+  'git.command': 'fetch', 'git.protocol.version': PROTOCOL_V2, 'git.fetch.wants': opts.wants, 'git.fetch.wants.count': opts.wants.length,
   'git.fetch.haves.count': (opts.haves ?? []).length, 'git.fetch.filter': opts.filter ?? '', 'git.fetch.deepen': opts.deepen ?? 0, 'git.fetch.deepen_since': opts.deepenSince ?? 0, 'git.fetch.deepen_not': opts.deepenNot ?? [], 'git.fetch.shallows.count': (opts.shallows ?? []).length, 'git.fetch.done': opts.done !== false,
   'git.fetch.thin_pack': !!opts.thinPack, 'git.fetch.ofs_delta': opts.ofsDelta !== false, 'git.fetch.no_progress': opts.noProgress !== false,
 });
@@ -100,39 +109,51 @@ export async function* packStream(t, opts, span) {
 
 // ---- single-object pack stream parser (pure step) ----
 // Emits the zlib bytes of the single object, withholding the trailing 20-byte trailer, verifying it at finish.
+// @decoder parseSideband prefix=sideband
+export function parseSideband(payload) {
+  const band = take(payload, 0, SIDEBAND_CHANNEL_BYTES, 'protocol')[0];
+  // Stryker disable next-line ConditionalExpression,EqualityOperator,StringLiteral: a one-byte payload takes zero body bytes, the same empty result, and that read cannot be short
+  const body = payload.length > SIDEBAND_CHANNEL_BYTES ? take(payload, SIDEBAND_CHANNEL_BYTES, payload.length - SIDEBAND_CHANNEL_BYTES, 'protocol') : new Uint8Array(0);
+  return { band, body };
+}
+
+const shortRead = e => e?.code === 'pack_corrupt' && String(e.message).startsWith('short read:');
+
 export const spInit = () => Object.freeze({ head: new Uint8Array(0), phase: 'header', type: 0, size: 0, lag: new Uint8Array(0), sha: new Sha1(), bytes: 0, zlibBytes: 0 });
+// @decoder spStep prefix=sp-header
 export function spStep(st, chunk) {
   let s = { ...st, bytes: st.bytes + chunk.length };
   let data = chunk;
   if (s.phase === 'header') {
     const head = concat([s.head, chunk]);
-    // need 12 + up to 10 header bytes; parse when we can
-    if (head.length < 13) return { state: { ...s, head }, zlib: [] };
-    if (head[0] !== 0x50 || head[1] !== 0x41 || head[2] !== 0x43 || head[3] !== 0x4b) throw fail('pack_corrupt', 'pack: bad signature');
-    const dv = new DataView(head.buffer, head.byteOffset);
-    if (dv.getUint32(4) !== 2) throw fail('pack_corrupt', 'pack: bad version');
-    const count = dv.getUint32(8);
+    // need the pack header plus the first object-header byte; a short read means the chunk has not arrived
+    if (head.length < PACK_HEADER_BYTES + 1) return { state: { ...s, head }, zlib: [] };
+    if (!take(head, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw fail('pack_corrupt', 'pack: bad signature');
+    if (readUint32BE(head, PACK_SIGNATURE.length) !== PACK_VERSION) throw fail('pack_corrupt', 'pack: bad version');
+    const count = readUint32BE(head, PACK_SIGNATURE.length + UINT32_BYTES);
     if (count !== 1) throw fail('pack_corrupt', `pack: expected 1 object, got ${count}`);
-    let p = 12, c = head[p++];
-    const type = (c >> 4) & 7;
-    let size = c & 15, shift = 4;
-    while (c & 0x80) { if (p >= head.length) return { state: { ...s, head }, zlib: [] }; c = head[p++]; size += (c & 0x7f) * 2 ** shift; shift += 7; }
-    if (type === TYPE.OFS_DELTA || type === TYPE.REF_DELTA) throw fail('pack_corrupt', 'pack: single-object pack is a delta');
-    s = { ...s, phase: 'body', type, size, head: new Uint8Array(0), headerBytes: p };
-    s.sha.update(head.subarray(0, p));
-    data = head.subarray(p);
+    let header;
+    try { header = readObjHeader(head, PACK_HEADER_BYTES); }
+    // Stryker disable next-line ConditionalExpression: readObjHeader's only throw here is the short read take() raises
+    catch (e) { if (shortRead(e)) return { state: { ...s, head }, zlib: [] }; throw e; }
+    if (header.type === TYPE.OFS_DELTA || header.type === TYPE.REF_DELTA) throw fail('pack_corrupt', 'pack: single-object pack is a delta');
+    const p = header.next;
+    s = { ...s, phase: 'body', type: header.type, size: header.size, head: new Uint8Array(0), headerBytes: p };
+    s.sha.update(take(head, 0, p));
+    data = take(head, p, head.length - p);
   }
-  // body: pass through with 20-byte lag
+  // body: pass through with the trailer withheld
   const all = s.lag.length ? concat([s.lag, data]) : data;
-  const emitLen = Math.max(0, all.length - 20);
-  const emit = all.subarray(0, emitLen);
-  const lag = all.slice(emitLen);
+  const emitLen = Math.max(0, all.length - PACK_TRAILER_BYTES);
+  const emit = emitLen ? take(all, 0, emitLen) : new Uint8Array(0);
+  const lag = take(all, emitLen, all.length - emitLen).slice();
+  // Stryker disable next-line ConditionalExpression: hashing an empty emit leaves the trailer digest unchanged
   if (emitLen) s.sha.update(emit);
   return { state: { ...s, lag, zlibBytes: s.zlibBytes + emitLen }, zlib: emitLen ? [emit] : [] };
 }
 export function spFinish(st) {
   if (st.phase !== 'body') throw fail('pack_corrupt', 'pack: truncated before object header');
-  if (st.lag.length !== 20) throw fail('pack_corrupt', 'pack: missing trailer');
+  if (st.lag.length !== PACK_TRAILER_BYTES) throw fail('pack_corrupt', 'pack: missing trailer');
   const want = toHex(st.lag), got = st.sha.hex();
   if (want !== got) throw fail('pack_corrupt', `pack: trailer ${want} != ${got}`);
   return { ...st, trailer: want };
@@ -150,7 +171,7 @@ export const spAttrs = (st, prefix = 'git.pack') => ({ [`${prefix}.objects`]: 1,
 // want its whole subtree — so it is parsed and delta-resolved (packresolve.js), the wanted object is taken by its
 // computed hash, and the other commits and trees are harvested into `t.objects` (bounded by limits.maxHarvestBytes):
 // the next tree:0 fetch of any of them is answered locally. Spans: `git.fetch.filter.fallback`, `git.fetch.wide.*`.
-const OID_RE = /^[0-9a-f]{40}$/;
+const OID_RE = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
 export const isFilterRejection = e => ['http', 'remote_error', 'protocol'].includes(e?.code) && /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i.test(String(e?.message ?? ''));
 
 // Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack).
@@ -166,7 +187,7 @@ export function harvest(t, objects, skip = null) {
 }
 
 export async function fetchObject(t, { oid, filter = 'tree:0', deepen, expectType = null }) {
-  if (!OID_RE.test(oid ?? '')) throw fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, 48))}`);
+  if (!OID_RE.test(oid ?? '')) throw fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`);
   const narrow = filter === 'tree:0';
   const held = narrow ? t.objects?.get(oid) : undefined;
   if (held && (expectType === null || held.type === expectType)) return { type: held.type, data: held.data, oid, size: held.data.length, bust: false, harvested: true };
@@ -189,7 +210,7 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
         if (sp.phase === 'body' && sp.size > t.limits.maxObjectSize) throw limitError('object size', sp.size, t.limits.maxObjectSize);
         if (sp.bytes > t.limits.maxPackBytes) throw limitError('pack bytes', sp.bytes, t.limits.maxPackBytes);
         for (const z of r.zlib) { zlibParts.push(z); zlibLen += z.length; }
-        if (zlibLen > t.limits.maxObjectSize + 64 * 1024) throw limitError('compressed object bytes', zlibLen, t.limits.maxObjectSize);
+        if (zlibLen > t.limits.maxObjectSize + COMPRESSED_SLACK) throw limitError('compressed object bytes', zlibLen, t.limits.maxObjectSize);
       }
       sp = spFinish(sp);
       const zlib = concat(zlibParts);
@@ -198,6 +219,7 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
       const got = hashObject(TYPE_NAME[sp.type], out);
       span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': TYPE_NAME[sp.type] });
       if (got !== oid) throw fail('pack_corrupt', `object ${got} served for want ${oid}`);
+      assertFetched(TYPE_NAME[sp.type], out);
       if (expectType !== null && sp.type !== expectType) throw fail('pack_corrupt', `expected ${TYPE_NAME[expectType]}, got ${TYPE_NAME[sp.type]}`);
       return { type: sp.type, data: out, oid, size: out.length, bust };
     } catch (e) { if (e && typeof e === 'object') e.cacheStatus = span.attrs['git.response.cache'] ?? ''; throw e; }
@@ -219,6 +241,7 @@ async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
       }
       const parsed = parsePack(concat(parts), { limits: t.limits });
       const { objects } = resolvePack(parsed, undefined, t.limits);
+      for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data);
       const want = objects.get(oid);
       if (!want) throw fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
       if (want.data.length > t.limits.maxObjectSize) throw limitError('object size', want.data.length, t.limits.maxObjectSize);

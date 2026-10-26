@@ -1,6 +1,8 @@
 node_modules/
 fuzz-out/
 coverage/
+reports/
+.stryker-tmp/
 .DS_Store
 .wrangler/
 .cloudflare/

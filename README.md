@@ -139,7 +139,10 @@ Peak per invocation is one pkt-line (≤ 64 KB) + one inflate chunk (16 KB) + `|
 `npm test` runs the push matrix as a seeded 1-in-8 sample (~2 min; the seed rotates daily, `PUSH_MATRIX_SEED=<n>` reproduces a day); `npm run test:push-full` runs all 1,400 cells (~20 min). Coverage: 100% of lines across every `src/` module (`npm run coverage`), with the matrix excluded because it adds time, not lines.
 
 ```
+npm run lint            # oxlint; no-magic-numbers on the wire decoders (0 and 1 are the only allowed literals)
 npm run test:props      # ~5 s: pure step functions — chunking invariance, codec roundtrips, node:zlib/crypto oracles
+npm run test:mutate     # Stryker across src/. Full run locally and on main; a PR mutates only the src files it changes
+npm run fuzz:below-hash -- --n 20 --seed 1   # mutate decompressed objects, re-hash, fetch, compare with git fsck --strict
 npm run test:oracle     # ~5 s: real git — tree oids vs write-tree, git pack-objects (ofs-delta, 5 window/depth/compression combos) parsed to cat-file truth, verify-pack chain depths, index-pack --fix-thin accepts our thin packs, filter semantics, 6-writer CAS convergence
 npm run fuzz -- --n 200 # ~30 s: steered generative cases against git http-backend
 npm run test:git        # ~15 min: fsck/check-ref-format/mktree compliance, clone/fetch parity with git's client, 768-cell push matrix vs git push
@@ -147,6 +150,8 @@ npm run test:protocol   # ~4 min: exhaustive fetch matrix (14,256 cells) vs pack
 npm run fuzz:protocol -- --n 500   # random wants/haves/deepen/filter/thin/negotiate/shallow on generated DAGs
 npm run trace -- fuzz-out/trace.jsonl git.receive-pack "git.push.ok==false"
 ```
+
+An equivalent mutant stays only as `// Stryker disable next-line <Mutator>: <reason>` on that line. A blanket `Stryker disable all`, or dropping a parser file from the Stryker config, fails `npm run test:mutate`. See SAFETY.md.
 
 ### The fuzzer
 

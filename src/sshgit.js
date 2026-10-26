@@ -13,6 +13,7 @@ import { td, concat } from './bytes.js';
 import { DEFAULT_LIMITS } from './limits.js';
 
 
+// @decoder parseSshUrl prefix=ssh-url
 export function parseSshUrl(url) {
   let m = String(url).match(/^ssh:\/\/(?:([^@/]+)@)?([^/:]+)(?::(\d+))?\/(.*)$/);
   if (m) return { user: m[1] ?? 'git', host: m[2], port: m[3] ? +m[3] : 22, path: '/' + m[4] };

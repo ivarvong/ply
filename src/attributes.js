@@ -123,6 +123,7 @@ export const wildmatch = (pattern, text, { pathname = false } = {}) => dowild(pa
 const simpleLength = s => { let i = 0; while (i < s.length && !isGlobSpecial(s.charCodeAt(i))) i++; return i; };
 function parsePattern(raw) {
   let p = raw, negative = false;
+  // Stryker disable next-line MethodExpression: parseLine drops a negative pattern before this sliced text is read
   if (p[0] === '!') { negative = true; p = p.slice(1); }
   let len = p.length, mustBeDir = false;
   if (len && p[len - 1] === '/') { len--; mustBeDir = true; }
@@ -186,16 +187,27 @@ function parseStates(s, reserved) { // → [[name, value]] or null (any invalid 
   const out = []; let i = 0;
   while (i < s.length) {
     const ep = span(s, i, BLANK, false);
-    let eq = s.indexOf('=', i); if (eq < 0 || ep < eq) eq = -1;
-    let name = s.slice(i, eq >= 0 ? eq : ep), value;
+    let eq = s.indexOf('=', i);
+    // Stryker disable next-line EqualityOperator,ConditionalExpression: indexOf is -1 or past the token start, and a token that starts with '=' is rejected either way
+    if (eq < 0) eq = -1;
+    // The else-if form is one statement, so a disable comment between the branches does not apply.
+    // Stryker disable next-line EqualityOperator: '=' is not blank, so it cannot sit on the exclusive end of the token
+    if (ep < eq) eq = -1;
+    // Stryker disable next-line EqualityOperator: an '=' at index 0 makes the name empty or invalid, so both comparisons reject the line
+    let name = s.slice(i, eq >= 0 ? eq : ep);
+    let value;
     if (name[0] === '-' || name[0] === '!') { value = name[0] === '-' ? false : UNSET; name = name.slice(1); }
-    else value = eq >= 0 ? s.slice(eq + 1, ep) : true;
+    else {
+      // Stryker disable next-line EqualityOperator: an '=' at index 0 fails validName before this value is read, so both comparisons reject the line
+      value = eq >= 0 ? s.slice(eq + 1, ep) : true;
+    }
     if (!validName(name) || reserved(name)) return null;
     out.push([name, value]);
     i = span(s, ep, BLANK, true);
   }
   return out;
 }
+// @decoder parseLine prefix=attr-line
 export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   const reserved = reservedIn(reserveBuiltin);
   let cp = span(line, 0, BLANK, true);
@@ -208,7 +220,9 @@ export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   let macro = null;
   if (name.length > 6 && name.startsWith('[attr]')) {
     if (!macrosOk) return null;
-    const rest = name.slice(6); const k = span(rest, 0, BLANK, true); const mname = rest.slice(k, span(rest, k, BLANK, false));
+    const rest = name.slice(6); const k = span(rest, 0, BLANK, true);
+    // Stryker disable next-line MethodExpression: the macro name token contains no blank, so this slice is the whole remainder
+    const mname = rest.slice(k, span(rest, k, BLANK, false));
     if (!validName(mname) || reserved(mname)) return null;
     macro = mname;
   }
@@ -219,8 +233,11 @@ export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   if (pat.negative) return null; // negative patterns are ignored in attributes
   return { pat, states: parsed };
 }
-export function parseFile(text, { macrosOk = false, reserveBuiltin = true } = {}) {
-  if (text.length >= MAX_FILE) return [];
+// @decoder parseFile prefix=attr-file
+// maxFile defaults to git's 100MiB attribute-file cap. Tests pass a smaller cap so the boundary is reachable
+// without allocating that buffer on every run.
+export function parseFile(text, { macrosOk = false, reserveBuiltin = true, maxFile = MAX_FILE } = {}) {
+  if (text.length >= maxFile) return [];
   const nul = text.indexOf('\0'); if (nul >= 0) text = text.slice(0, nul); // C string
   const lines = []; let sp = 0;
   while (sp < text.length) { let ep = text.indexOf('\n', sp); const more = ep >= 0; if (!more) ep = text.length; const l = parseLine(text.slice(sp, ep), { macrosOk, reserveBuiltin }); if (l) lines.push(l); sp = ep + (more ? 1 : 0); }

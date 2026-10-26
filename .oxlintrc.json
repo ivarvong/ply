@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "rules": {
+    "no-magic-numbers": "off"
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/objects.js",
+        "src/bytes.js",
+        "src/pktline.js",
+        "src/pack.js",
+        "src/packresolve.js",
+        "src/inflate.js",
+        "src/fetch.js",
+        "src/push.js",
+        "src/lsrefs.js"
+      ],
+      "rules": {
+        "no-magic-numbers": [
+          "error",
+          {
+            "ignore": [0, 1],
+            "ignoreArrayIndexes": true,
+            "ignoreDefaultValues": true,
+            "enforceConst": false,
+            "detectObjects": false
+          }
+        ]
+      }
+    }
+  ]
+}
