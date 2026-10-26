@@ -57,6 +57,7 @@ export function pktStep(st, chunk) {
     // Stryker disable next-line StringLiteral: the length check already proved the payload bytes remain, so take() cannot throw
     const payload = take(buf, p + PKT_LEN_HEX, len - PKT_LEN_HEX, 'protocol');
     data++;
+    // Stryker disable next-line EqualityOperator: a payload equal to the current maximum leaves the maximum unchanged
     if (payload.length > maxPayload) maxPayload = payload.length;
     frames.push({ kind: 'data', payload });
     p += len;

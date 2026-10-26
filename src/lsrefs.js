@@ -19,6 +19,7 @@ const OID_SHA256 = new RegExp(`^[0-9a-f]{${SHA256_HEX_CHARS}}$`);
 export function parseLsRefLine(line) {
   if (line.startsWith(ERR)) throw fail('remote_error', `remote: ${line.slice(ERR.length)}`);
   const sp = line.indexOf(' ');
+  // Stryker disable next-line EqualityOperator: a leading space still fails the oid check with this same malformed-line error
   if (sp < 0) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   const oid = line.slice(0, sp);
   const rest = line.slice(sp + 1);

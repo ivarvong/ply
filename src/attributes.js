@@ -123,6 +123,7 @@ export const wildmatch = (pattern, text, { pathname = false } = {}) => dowild(pa
 const simpleLength = s => { let i = 0; while (i < s.length && !isGlobSpecial(s.charCodeAt(i))) i++; return i; };
 function parsePattern(raw) {
   let p = raw, negative = false;
+  // Stryker disable next-line MethodExpression: parseLine drops a negative pattern before this sliced text is read
   if (p[0] === '!') { negative = true; p = p.slice(1); }
   let len = p.length, mustBeDir = false;
   if (len && p[len - 1] === '/') { len--; mustBeDir = true; }

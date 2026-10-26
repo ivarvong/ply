@@ -134,6 +134,7 @@ export function spStep(st, chunk) {
     if (count !== 1) throw fail('pack_corrupt', `pack: expected 1 object, got ${count}`);
     let header;
     try { header = readObjHeader(head, PACK_HEADER_BYTES); }
+    // Stryker disable next-line ConditionalExpression: readObjHeader's only throw here is the short read take() raises
     catch (e) { if (shortRead(e)) return { state: { ...s, head }, zlib: [] }; throw e; }
     if (header.type === TYPE.OFS_DELTA || header.type === TYPE.REF_DELTA) throw fail('pack_corrupt', 'pack: single-object pack is a delta');
     const p = header.next;
@@ -146,6 +147,7 @@ export function spStep(st, chunk) {
   const emitLen = Math.max(0, all.length - PACK_TRAILER_BYTES);
   const emit = emitLen ? take(all, 0, emitLen) : new Uint8Array(0);
   const lag = take(all, emitLen, all.length - emitLen).slice();
+  // Stryker disable next-line ConditionalExpression: hashing an empty emit leaves the trailer digest unchanged
   if (emitLen) s.sha.update(emit);
   return { state: { ...s, lag, zlibBytes: s.zlibBytes + emitLen }, zlib: emitLen ? [emit] : [] };
 }

@@ -30,6 +30,7 @@ export const pushBody = ({ commands, caps = ['report-status', `agent=${UA.replac
 // ---- report-status parsing (pure) ----
 // @decoder parseReportStatus prefix=report
 export function parseReportStatus(lines) {
+  // Stryker disable next-line BooleanLiteral: the loop below always assigns r.ok again before the return
   const r = { unpack: null, refs: [], ok: false };
   for (const l of lines) {
     if (l.startsWith(UNPACK)) r.unpack = l.slice(UNPACK.length);

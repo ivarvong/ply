@@ -701,4 +701,70 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.equal(parsed.stats.inflate.dynamic, 0);
   const fixed = parsePack(pack);
   assert.equal(fixed.stats.inflate.stored + fixed.stats.inflate.fixed + fixed.stats.inflate.dynamic, fixed.stats.inflate.blocks);
+  let words = '';
+  for (let i = 0; i < 400; i++) words += `word${i} `;
+  const wordBytes = te.encode(words);
+  const wordInf = inflate(new Uint8Array(zlib.deflateSync(wordBytes)));
+  assert.equal(wordInf.stats.dynamic, 1);
+  assert.equal(wordInf.stats.maxDist, 2819);
+  assert.equal(wordInf.stats.maxLen, 9);
+  assert.equal(wordInf.stats.matchBytes, 2745);
+  const variedZ = new Uint8Array(zlib.deflateSync(wordBytes));
+  const variedHeader = encodeObjHeader(TYPE.BLOB, wordBytes.length);
+  const variedBody = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), variedHeader, variedZ]);
+  const variedPack = concat([variedBody, new Sha1().update(variedBody).digest()]);
+  assert.equal(parsePack(variedPack).stats.inflate.dynamic, 1);
+
+  assert.equal(parseLine('a text', no).pat.endsWith, false);
+  assert.deepEqual(parseLine('*.c text=', no).states, [['text', '']]);
+  assert.deepEqual(parseIdent('  Ada <ada@ex'), { name: 'Ada <ada@ex', email: '', time: null, tz: '' });
+  const dupTag = parseTag(te.encode(`type commit\ntype blob\nobject ${id}\ntag v1\ntag v2\ntagger ${tagger}\n\n`));
+  assert.equal(dupTag.type, 'commit');
+  assert.equal(dupTag.tag, 'v1');
+
+  throws(() => pktStep(pktInit(), te.encode('0000zzzz')), 'protocol', 'bad pkt-line length at byte 4');
+  const line = s => ({ kind: 'data', payload: te.encode(s) });
+  const endOnly = v2Step(v2Init(), { kind: 'end' });
+  assert.equal(endOnly.state.done, false);
+  assert.deepEqual(endOnly.state.sections, []);
+  let shallow = v2Step(v2Init(), line('shallow-info')).state;
+  shallow = v2Step(shallow, line(`shallow ${oid(4)}`)).state;
+  const other = v2Step(shallow, line('other')).state;
+  assert.deepEqual(other.unshallow, []);
+  assert.deepEqual(other.acks, []);
+
+  const ofsHeader = encodeObjHeader(TYPE.OFS_DELTA, 1);
+  const ofsZ = await zlibDeflate(Uint8Array.of(0));
+  const ofsBody = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), ofsHeader, Uint8Array.of(1), ofsZ]);
+  throws(() => spStep(spInit(), concat([ofsBody, new Sha1().update(ofsBody).digest()])), 'pack_corrupt', 'pack: single-object pack is a delta');
+  const whole = pack.slice();
+  const opened = spStep(spInit(), whole.subarray(0, PACK_HEADER_BYTES + 1));
+  whole[PACK_HEADER_BYTES] ^= 0xff;
+  const streamed = spStep(opened.state, whole.subarray(PACK_HEADER_BYTES + 1));
+  assert.equal(spFinish(streamed.state).trailer.length, 40);
+
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(DELTA_COPY | DELTA_COPY_LEN1, 2)])), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(5), Uint8Array.of(3, 1)])), 'pack_corrupt', 'delta: insert out of range');
+
+  throws(() => parseLsRefLine('x'.repeat(80)), 'protocol', `ls-refs: malformed line ${JSON.stringify('x'.repeat(60))}`);
+  throws(() => parseLsRefLine(`${'ab'.repeat(20)}c`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${'ab'.repeat(20)}c`)}`);
+
+  const bits = []; const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+  put(1, 1); put(2, 2);
+  put(0, 5); put(0, 5); put(1, 4);
+  put(0, 3); put(0, 3); put(0, 3); put(1, 3); put(1, 3);
+  for (let i = 0; i < 256; i++) put(0, 1);
+  put(1, 1);
+  put(0, 1);
+  for (let i = 0; i < 16; i++) put(1, 1);
+  const raw = Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
+  throws(() => inflate(raw, 0, { raw: true, maxOutput: 1024 }), 'pack_corrupt', 'inflate: invalid huffman code');
+
+  const helloZ = new Uint8Array(zlib.deflateSync(hello));
+  assert.equal(inflate(helloZ, 0, { expectedSize: hello.length, maxOutput: hello.length + 10 }).out.length, hello.length);
+  const emptyStored = Uint8Array.of(1, 0, 0, 255, 255);
+  assert.equal(inflate(emptyStored, 0, { raw: true }).out.length, 0);
+  const zhead = Uint8Array.of(0x78, 0x9c);
+  const cut = concat([zhead, Uint8Array.of(1, 0, 0, 255, 255)]);
+  throws(() => inflate(cut), 'pack_corrupt', 'inflate: truncated adler32');
 });
