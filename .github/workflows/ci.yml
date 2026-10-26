@@ -9,12 +9,19 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
       - run: npm run lint
       - name: unit tests
