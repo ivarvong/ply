@@ -112,6 +112,15 @@ export const SIDEBAND_CHANNEL_BYTES = 1;
 /** gitprotocol-v2(5): the client's `Git-Protocol: version=2` and the `version 2` advertisement line. */
 export const PROTOCOL_V2 = 2;
 
+// ---- ident timezone (fsck.c fsck_ident, FSCK_MSG_BAD_TIMEZONE) ----
+/**
+ * Digits after the `+` or `-` of a commit or tag ident timezone (`+0530`). The zone is that sign,
+ * these digits, and then the newline. git does not range-check the hour or the minute: `+9999` and
+ * `+1560` are well-formed. A non-digit, a shorter or longer run, a missing sign, or any trailing byte
+ * is "bad time zone".
+ */
+export const IDENT_TZ_DIGITS = 4;
+
 // ---- zlib / deflate (RFC 1950, RFC 1951) ----
 export const ZLIB_HEADER_BYTES = 2;
 export const ZLIB_CM_DEFLATE = 8;

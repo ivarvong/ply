@@ -4,7 +4,7 @@ import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take } from './bytes.js';
 import { isDotGit } from './validate.js';
 import {
-  OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE,
+  OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
 } from './format.js';
 
@@ -146,8 +146,23 @@ export function parseTag(data) {
 
 function checkIdent(line, role) {
   const id = parseIdent(line);
-  if (!id || line.indexOf('<') < 0 || line.indexOf('>') < 0) throw fail('pack_corrupt', `${role}: missing email`);
-  if (id.time === null) throw fail('pack_corrupt', `${role}: bad date`);
+  const lt = line.indexOf('<');
+  if (!id || lt < 0 || line.indexOf('>') < 0) throw fail('pack_corrupt', `${role}: missing email`);
+  // fsck.c fsck_ident: a '>' in the name is a bad name; the byte before '<' must be a space
+  // ('Name<email>' and a line that opens on '<' are both "missing space before email").
+  if (line.slice(0, lt).includes('>')) throw fail('pack_corrupt', `${role}: bad name`);
+  if (line[lt - 1] !== ' ') throw fail('pack_corrupt', `${role}: missing space before email`);
+  // Then one space after '>', spaces or tabs, the timestamp, one space, a sign and IDENT_TZ_DIGITS digits, and
+  // the newline. A non-digit ends the timestamp early (bad date). Hours and minutes are not range-checked.
+  const gt = line.indexOf('>', lt);
+  let p = gt + 1;
+  if (line[p] !== ' ') throw fail('pack_corrupt', `${role}: bad date`);
+  p++;
+  while (line[p] === ' ' || line[p] === '\t') p++;
+  while (line[p] >= '0' && line[p] <= '9') p++;
+  if (line[p] !== ' ') throw fail('pack_corrupt', `${role}: bad date`);
+  p++;
+  if (!new RegExp(`^[+-][0-9]{${IDENT_TZ_DIGITS}}$`).test(line.slice(p))) throw fail('pack_corrupt', `${role}: bad time zone`);
 }
 
 // Semantic checks git fsck --strict applies to a complete object. Structural prefixes (parseCommit of a header

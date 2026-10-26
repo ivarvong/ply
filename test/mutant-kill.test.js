@@ -140,6 +140,51 @@ test('commit and tag headers, idents, and assertFetched', () => {
   assert.deepEqual(parseIdent('Ada  <ada@ex> nope +0100'), { name: 'Ada', email: 'ada@ex', time: null, tz: '+0100' });
 });
 
+test('fsck badTimezone: a sign, four digits, then the end of the ident line', () => {
+  const tree = oid(1);
+  const who = tz => `A <a@b.c> 1700000000 ${tz}`;
+  const commit = (author, committer = who('+0000')) => te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${committer}\n\nm\n`);
+  const tag = tagger => te.encode(`object ${tree}\ntype commit\ntag v1\ntagger ${tagger}\n\n`);
+  for (const tz of ['+0000', '-0000', '+0530', '-1200', '+1400', '+9999', '+1560', '+2400', '+0059']) {
+    assertFetched('commit', commit(who(tz)));
+    assertFetched('tag', tag(who(tz)));
+  }
+  // fsck skips spaces and tabs before the timestamp, and a timestamp of 0 must not be confused with a zero in the zone
+  assertFetched('commit', commit('A <a@b.c>  1700000000 +0000'));
+  assertFetched('commit', commit('A <a@b.c> \t1700000000 +0530'));
+  assertFetched('commit', commit('A <a@b.c> 0 -1200'));
+  assertFetched('commit', commit('A <a@b.c> 1700000009 +0000'));
+  const bad = ['+000', '+00000', '+00', '+', '0000', '+0a00', '+00:00', 'Z', '+0000x', '+0000 ', '+0000\t', ' +0000', '+00 00', '++000', '+-000', '+0000 extra'];
+  for (const tz of bad) {
+    throws(() => assertFetched('commit', commit(who(tz))), 'pack_corrupt', 'author: bad time zone');
+    throws(() => assertFetched('commit', commit(who('+0000'), who(tz))), 'pack_corrupt', 'committer: bad time zone');
+    throws(() => assertFetched('tag', tag(who(tz))), 'pack_corrupt', 'tagger: bad time zone');
+  }
+  throws(() => assertFetched('commit', commit('A <a@b.c> 1700000000')), 'pack_corrupt', 'author: bad date');
+  throws(() => assertFetched('commit', commit('A <a@b.c>1700000000 +0000')), 'pack_corrupt', 'author: bad date');
+  throws(() => assertFetched('commit', commit('A <a@b.c> 12:34 +0000')), 'pack_corrupt', 'author: bad date');
+  throws(() => assertFetched('commit', commit('Ada <ada@ex> soon +0000')), 'pack_corrupt', 'author: bad date');
+  // a space is required immediately before '<'. commit#23000087 replaced it with '!'; commit#19000059 with 0x9E.
+  throws(() => assertFetched('commit', commit('A<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
+  throws(() => assertFetched('commit', commit('A!<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
+  throws(() => assertFetched('commit', commit('<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
+  throws(() => assertFetched('commit', commit('A\t<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
+  assertFetched('commit', commit(' <a@b.c> 1700000000 +0000'));
+  const glued = concat([
+    te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +0000\ncommitter A `),
+    Uint8Array.of(0x9e),
+    te.encode('<a@b.c> 1700000000 +0000\n\nm\n'),
+  ]);
+  throws(() => assertFetched('commit', glued), 'pack_corrupt', 'committer: missing space before email');
+  // commit#1000022: 0xC1 inserted into the author zone, Latin-1 "+00Á00"
+  const poison = concat([
+    te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +00`),
+    Uint8Array.of(0xc1),
+    te.encode('00\ncommitter A <a@b.c> 1700000000 +0000\n\nm\n'),
+  ]);
+  throws(() => assertFetched('commit', poison), 'pack_corrupt', 'author: bad time zone');
+});
+
 test('pkt-line kinds, counters, and length errors', () => {
   const step = chunk => pktStep(pktInit(), chunk);
   throws(() => step(te.encode('zzzz')), 'protocol', 'bad pkt-line length at byte 0');
@@ -487,7 +532,8 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const tree = oid(1);
   throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
   throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing space before email');
+  assertFetched('commit', te.encode(`tree ${tree}\nauthor  <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
   assert.equal(parseCommit(new Uint8Array(0)).message, null);
   throws(() => parseTree(data('100644 a', oidBytes(4))), 'pack_corrupt', 'tree: malformed entry');
   throws(() => parseTree(data('g7 a\0', oidBytes(4))), 'pack_corrupt', 'tree: malformed mode');
@@ -602,7 +648,8 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(parseIdent('a><b@c> 1 +0000'), { name: 'a>', email: 'b@c', time: '1', tz: '+0000' });
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad name');
   throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'committer: missing email');
   const id = oid(3);
   const tagger = author;
