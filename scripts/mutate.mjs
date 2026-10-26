@@ -16,8 +16,10 @@ function commentProblems() {
   for (const file of readdirSync('src').filter(f => f.endsWith('.js'))) {
     readFileSync(join('src', file), 'utf8').split('\n').forEach((line, i) => {
       if (/Stryker disable all\b/.test(line)) bad.push(`${file}:${i + 1} uses a blanket Stryker disable`);
-      if (/Stryker disable next-line/.test(line) && !/Stryker disable next-line\s+\S[^:]*:\s+\S{8,}/.test(line)) {
-        bad.push(`${file}:${i + 1} equivalent mutant needs "Stryker disable next-line <Mutator>: <reason>"`);
+      if (/Stryker disable next-line/.test(line)) {
+        const reason = line.slice(line.indexOf(':') + 1).trim();
+        const named = /Stryker disable next-line\s+\S[^:]*:/.test(line);
+        if (!named || reason.length < 8) bad.push(`${file}:${i + 1} equivalent mutant needs "Stryker disable next-line <Mutator>: <reason>"`);
       }
     });
   }
