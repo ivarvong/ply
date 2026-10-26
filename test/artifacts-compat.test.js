@@ -40,6 +40,8 @@ test('stale ref (Artifacts wording) is cas_conflict; git\'s wordings unchanged',
   assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main stale ref'])), 'cas_conflict');
   assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/a stale ref', 'ng refs/heads/b stale ref'])), 'cas_conflict', 'every multi-ref push is atomic on Artifacts');
   assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main failed to update ref'])), 'cas_conflict');
+  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main incorrect old value provided'])), 'cas_conflict');
+  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main refname conflict'])), 'push_rejected');
   assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main pre-receive hook declined'])), 'push_rejected');
   assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main stale ref', 'ng refs/heads/x pre-receive hook declined'])), 'push_rejected');
 });

@@ -56,7 +56,9 @@ export function checkReport(report, commands) {
 // member of an atomic push; a hook rejection anywhere makes the push non-retryable
 // 'stale ref': Cloudflare Artifacts' only ref-update rejection (stale old oid, create over an existing ref, stale delete, and
 // the innocent members of a multi-ref push, which it always treats as atomic) — observed 2026-10-23, see SAFETY.md
-const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref|stale ref)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r); // 'bad ref': denyNonFastForwards could not parse the (stale, unknown) old oid
+// 'incorrect old value provided': git ≥ 2.50 receive-pack (batched ref updates) reports a stale old oid
+// under that name. 'bad ref': denyNonFastForwards could not parse a stale, unknown old oid.
+const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref|stale ref|incorrect old value provided)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r);
 export const rejectionCode = report => {
   const reasons = report.refs.filter(r => !r.ok).map(r => r.reason);
   return report.unpack !== 'ok' ? 'push_rejected' : reasons.length && reasons.every(isCas) && reasons.some(r => r !== 'atomic push failure') ? 'cas_conflict' : 'push_rejected';

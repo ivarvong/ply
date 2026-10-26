@@ -59,7 +59,7 @@ test('concurrent CAS writers converge; conflicts are observed and retried, never
     assert.ok(retried.every(s => s.links.length === 1), 'retries link to the attempt they retry');
     assert.equal(surfaced, lostRoots.filter(s => s.attrs['git.edit.attempt'] === 1).length, 'callers see only double losses');
     const conflicts = ngSpans.length;
-    assert.ok(ngSpans.every(s => /failed to update ref|fetch first|non-fast-forward|lock/.test(s.attrs['git.push.ng.reason'])), ngSpans.map(s => s.attrs['git.push.ng.reason']).join('|'));
+    assert.ok(ngSpans.every(s => /failed to update ref|fetch first|non-fast-forward|lock|incorrect old value provided/.test(s.attrs['git.push.ng.reason'])), ngSpans.map(s => s.attrs['git.push.ng.reason']).join('|'));
     assert.ok(conflicts > 0, 'expected at least one CAS conflict under contention');
     // successful pushes == landed commits
     assert.equal(spans.filter(s => s.name === 'git.receive-pack' && s.attrs['git.push.ok'] === true).length, K * ROUNDS);
