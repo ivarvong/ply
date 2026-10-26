@@ -58,9 +58,13 @@ export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = 
     if (flg & ZLIB_FDICT) throw bad('zlib: preset dictionary not supported');
     pos += ZLIB_HEADER_BYTES;
   }
-  if (expectedSize !== undefined && expectedSize > maxOutput) throw fail('limit_exceeded', `inflate: expected size ${expectedSize} exceeds limit ${maxOutput}`);
-  // oxlint-disable-next-line no-magic-numbers -- output-buffer growth, not a wire-format fact
-  let out = new Uint8Array(expectedSize ?? Math.min(maxOutput, Math.max(256, (buf.length - pos) * 3)));
+  // Stryker disable next-line ConditionalExpression: an omitted expected size is not greater than the limit, so treating this check as true changes nothing
+  if (expectedSize !== undefined) {
+    if (expectedSize > maxOutput) throw fail('limit_exceeded', `inflate: expected size ${expectedSize} exceeds limit ${maxOutput}`);
+  }
+  // Stryker disable next-line ArithmeticOperator,MethodExpression: the buffer is grown until it holds the output, so a different positive initial guess yields the same bytes
+  const guess = Math.max(256, (buf.length - pos) * 3); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
+  let out = new Uint8Array(expectedSize ?? Math.min(maxOutput, guess));
   let o = 0;
   const ensure = n => {
     if (o + n <= out.length) return;
@@ -101,6 +105,7 @@ export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = 
       if (li >= DEFLATE_LENGTH_CODES) throw bad('inflate: bad length symbol');
       const len = LBASE[li] + bits(LEXT[li]);
       const di = decode(dist);
+      // Stryker disable next-line ConditionalExpression,EqualityOperator,StringLiteral: ndist cannot exceed DEFLATE_HDIST_MAX, so a distance symbol is never out of that table
       if (di >= DEFLATE_HDIST_MAX) throw bad('inflate: bad distance symbol');
       const d = DBASE[di] + bits(DEXT[di]);
       if (d > o) throw bad('inflate: distance too far back');

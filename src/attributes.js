@@ -187,9 +187,15 @@ function parseStates(s, reserved) { // → [[name, value]] or null (any invalid 
   const out = []; let i = 0;
   while (i < s.length) {
     const ep = span(s, i, BLANK, false);
-    let eq = s.indexOf('=', i); if (eq < 0 || ep < eq) eq = -1;
+    let eq = s.indexOf('=', i);
+    // Stryker disable next-line EqualityOperator,ConditionalExpression: indexOf is -1 or past the token start, and a token that starts with '=' is rejected either way
+    if (eq < 0) eq = -1;
+    // Stryker disable next-line EqualityOperator: '=' is not blank, so it cannot sit on the exclusive end of the token
+    else if (ep < eq) eq = -1;
+    // Stryker disable next-line EqualityOperator: an '=' at index 0 makes the name empty or invalid, so '>' and '>=' reject the same line
     let name = s.slice(i, eq >= 0 ? eq : ep), value;
     if (name[0] === '-' || name[0] === '!') { value = name[0] === '-' ? false : UNSET; name = name.slice(1); }
+    // Stryker disable next-line EqualityOperator: an '=' at index 0 fails validName before this value is read, so '>' and '>=' reject the same line
     else value = eq >= 0 ? s.slice(eq + 1, ep) : true;
     if (!validName(name) || reserved(name)) return null;
     out.push([name, value]);
@@ -210,7 +216,9 @@ export function parseLine(line, { macrosOk, reserveBuiltin = true }) {
   let macro = null;
   if (name.length > 6 && name.startsWith('[attr]')) {
     if (!macrosOk) return null;
-    const rest = name.slice(6); const k = span(rest, 0, BLANK, true); const mname = rest.slice(k, span(rest, k, BLANK, false));
+    const rest = name.slice(6); const k = span(rest, 0, BLANK, true);
+    // Stryker disable next-line MethodExpression: the macro name token contains no blank, so this slice is the whole remainder
+    const mname = rest.slice(k, span(rest, k, BLANK, false));
     if (!validName(mname) || reserved(mname)) return null;
     macro = mname;
   }

@@ -25,6 +25,7 @@ export function parseLsRefLine(line) {
   const rest = line.slice(sp + 1);
   const cut = rest.indexOf(' ');
   const name = cut < 0 ? rest : rest.slice(0, cut);
+  // Stryker disable next-line EqualityOperator: a cut at 0 makes the name empty and the line throws before attrs is read
   const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ').filter(Boolean);
   if (OID_SHA256.test(oid)) throw fail('unsupported', 'unsupported object-format: only sha1 repositories are supported');
   if (!OID_SHA1.test(oid) || !name) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
