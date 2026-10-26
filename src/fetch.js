@@ -112,6 +112,7 @@ export async function* packStream(t, opts, span) {
 // @decoder parseSideband prefix=sideband
 export function parseSideband(payload) {
   const band = take(payload, 0, SIDEBAND_CHANNEL_BYTES, 'protocol')[0];
+  // Stryker disable next-line ConditionalExpression,EqualityOperator,StringLiteral: a one-byte payload takes zero body bytes, the same empty result, and that read cannot be short
   const body = payload.length > SIDEBAND_CHANNEL_BYTES ? take(payload, SIDEBAND_CHANNEL_BYTES, payload.length - SIDEBAND_CHANNEL_BYTES, 'protocol') : new Uint8Array(0);
   return { band, body };
 }

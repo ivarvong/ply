@@ -26,9 +26,12 @@ const CLORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 1
 // Canonical Huffman table from code lengths (puff algorithm). Returns {count, symbol}.
 export function huffBuild(lengths) {
   const count = new Uint16Array(DEFLATE_BIT_TABLE), symbol = new Uint16Array(lengths.length), offs = new Uint16Array(DEFLATE_BIT_TABLE);
+  // Stryker disable next-line EqualityOperator: one past the end reads undefined, and count[0] is cleared on the next line
   for (let i = 0; i < lengths.length; i++) count[lengths[i]]++;
   count[0] = 0;
+  // Stryker disable next-line EqualityOperator: offs is DEFLATE_BIT_TABLE long, so the extra index is ignored
   for (let l = 1; l < DEFLATE_BIT_TABLE; l++) offs[l] = offs[l - 1] + count[l - 1];
+  // Stryker disable next-line EqualityOperator: lengths[lengths.length] is undefined and the if skips it
   for (let s = 0; s < lengths.length; s++) if (lengths[s]) symbol[offs[lengths[s]]++] = s;
   return { count, symbol };
 }
@@ -103,7 +106,9 @@ export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = 
       if (d > o) throw bad('inflate: distance too far back');
       ensure(len);
       stats.matches++; stats.matchBytes += len;
+      // Stryker disable next-line EqualityOperator: writing the same maximum when the distance is equal does not change the stat
       if (d > stats.maxDist) stats.maxDist = d;
+      // Stryker disable next-line EqualityOperator: writing the same maximum when the length is equal does not change the stat
       if (len > stats.maxLen) stats.maxLen = len;
       let from = o - d;
       for (let i = 0; i < len; i++) out[o++] = out[from++]; // overlap is intentional

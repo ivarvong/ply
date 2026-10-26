@@ -31,6 +31,7 @@ export function concat(parts) {
 export function indexOfBytes(hay, needle, from = 0) {
   const n = needle.length;
   if (n === 0) return from;
+  // Stryker disable next-line ArithmeticOperator: an end index past hay only reads undefined, which is never a needle byte
   const first = needle[0], last = hay.length - n;
   outer: for (let i = from; i <= last; i++) {
     if (hay[i] !== first) continue;

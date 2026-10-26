@@ -580,3 +580,125 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const nl = v2Step(st, line('shallow x\n')).state;
   assert.equal(nl.shallow[0], 'x');
 });
+
+test('asymmetric boundaries a symmetric fixture hides', async () => {
+  const no = { macrosOk: false };
+  assert.equal(parseLine('*.txt text', no).pat.endsWith, true);
+  assert.equal(parseLine('*.txt text', no).pat.nodir, true);
+  assert.equal(parseLine('/file text', no).pat.nodir, false);
+  assert.equal(parseLine('docs/ text', no).pat.nodir, true);
+  assert.equal(parseLine('*a* text', no).pat.endsWith, false);
+  assert.equal(parseLine('a* text', no).pat.endsWith, false);
+  assert.deepEqual(parseLine('*.c plain later=v', no).states[0], ['plain', true]);
+  assert.equal(parseLine('*.c plain later=v', no).states[1][0], 'later');
+  assert.deepEqual(parseFile('[attr]binary -text'), []);
+  assert.deepEqual(parseFile('*.c builtin_x'), []);
+  assert.equal(parseFile('*.c builtin_x', { reserveBuiltin: false }).length, 1);
+  assert.deepEqual(parseFile('\0*.c text'), []);
+  assert.equal(parseFile('*.c text').length, 1);
+  assert.equal(parseFile('\n*.c text')[0].pat.pattern, '*.c');
+
+  throws(() => parseTree(Uint8Array.of(0x20)), 'pack_corrupt', 'tree: malformed entry');
+  assert.deepEqual(parseIdent('a><b@c> 1 +0000'), { name: 'a>', email: 'b@c', time: '1', tz: '+0000' });
+  const author = 'Ada <ada@ex> 1700000000 +0000';
+  const tree = oid(1);
+  assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'committer: missing email');
+  const id = oid(3);
+  const tagger = author;
+  const ordered = parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`));
+  assert.equal(ordered.object, id);
+  assert.equal(ordered.type, 'commit');
+  const tagFirst = parseTag(te.encode(`tag v1\nobject ${id}\ntype blob\ntagger ${tagger}\n\n`));
+  assert.equal(tagFirst.tag, 'v1');
+  assert.equal(tagFirst.type, 'blob');
+
+  const onlyDelim = pktStep(pktInit(), DELIM);
+  assert.equal(onlyDelim.state.delim, 1);
+  assert.equal(onlyDelim.state.end, 0);
+  assert.equal(onlyDelim.state.flush, 0);
+  const onlyEnd = pktStep(pktInit(), te.encode('0002'));
+  assert.equal(onlyEnd.state.end, 1);
+  assert.equal(onlyEnd.state.delim, 0);
+  const first = pkt('ab');
+  throws(() => pktStep(pktStep(pktInit(), first).state, te.encode('zzzz')), 'protocol', `bad pkt-line length at byte ${first.length}`);
+  const long = pkt('abcd');
+  const afterLong = pktStep(pktInit(), long).state;
+  const shorter = pktStep(afterLong, pkt('z'));
+  assert.equal(shorter.state.maxPayload, 4);
+  assert.equal(pktStep(pktInit(), pkt('a')).state.carry, null);
+  const partial = te.encode('000');
+  const carried = pktStep(pktInit(), partial);
+  partial[0] = 0x31;
+  assert.equal(carried.state.carry[0], 0x30);
+  assert.equal(carried.state.carryMax, 3);
+  const rest = te.encode('6abZ');
+  const finished = pktStep(carried.state, rest);
+  assert.equal(finished.state.carry.length, 1);
+  assert.equal(finished.state.carryMax, 3);
+
+  const embedded = v2Step(v2Init(), { kind: 'data', payload: te.encode('foo\nbar\n') });
+  assert.equal(embedded.state.sections[0], 'foo\nbar');
+  const eleven = new Uint8Array(PACK_HEADER_BYTES - 1);
+  eleven.set(PACK_SIGNATURE);
+  eleven[0] ^= 0xff;
+  assert.equal(spStep(spInit(), eleven).state.phase, 'header');
+  const continued = encodeObjHeader(TYPE.BLOB, 300);
+  const waitHead = concat([
+    Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1),
+    continued.subarray(0, 1),
+  ]);
+  const waited = spStep(spInit(), waitHead);
+  assert.equal(waited.state.phase, 'header');
+  assert.deepEqual(waited.zlib, []);
+
+  const base = Uint8Array.of(1, 2, 3);
+  const off4 = Uint8Array.of(
+    DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_OFF4 | DELTA_COPY_LEN1,
+    1, 1, 1,
+  );
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), off4])), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(2), Uint8Array.of(DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 2, 2)])), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(2, 9, 9)])), 'pack_corrupt', 'delta: insert out of range');
+
+  assert.equal(parseReportStatus([]).ok, false);
+  assert.equal(parseReportStatus(['unpack ok']).ok, false);
+  assert.equal(parseReportStatus(['unpack ok', 'ng refs/heads/a no']).ok, false);
+
+  const ref = `${oid(4)} refs/heads/a :val`;
+  assert.equal(parseLsRefLine(ref)[''], 'val');
+  throws(() => parseLsRefLine(`${oid(4)}  refs/heads/a`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${oid(4)}  refs/heads/a`)}`);
+  const spaced = parseLsRefLine(`${oid(4)} refs/heads/a a:b  c:d`);
+  assert.equal(spaced.a, 'b');
+  assert.equal(spaced.c, 'd');
+  assert.equal(spaced[''], undefined);
+
+  throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'not an ssh git url: ssh://host/path\n');
+  throws(() => parseSshUrl('host:name\n'), 'bad_request', 'not an ssh git url: host:name\n');
+
+  const hello = te.encode('hello hello hello hello');
+  const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)));
+  assert.ok(inflated.stats.matchBytes > 0);
+  assert.equal(inflated.stats.matchBytes, 16);
+  const repeated = te.encode('abcdefghijabcdefghijab');
+  const twice = inflate(new Uint8Array(zlib.deflateSync(repeated)));
+  assert.ok(twice.stats.maxLen >= 10);
+  assert.ok(twice.stats.maxDist >= 10);
+
+  const blob = te.encode('hello');
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: blob }]);
+  const shrunk = pack.slice();
+  shrunk[PACK_HEADER_BYTES] = (shrunk[PACK_HEADER_BYTES] & 0xf0) | 1;
+  throws(() => parsePack(shrunk), 'pack_corrupt', 'inflate: output exceeds expected 1');
+  const stored = new Uint8Array(zlib.deflateSync(blob, { level: 0 }));
+  const header = encodeObjHeader(TYPE.BLOB, blob.length);
+  const body = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), header, stored]);
+  const { Sha1 } = await import('../src/sha1.js');
+  const storedPack = concat([body, new Sha1().update(body).digest()]);
+  const parsed = parsePack(storedPack);
+  assert.equal(parsed.stats.inflate.stored, 1);
+  assert.equal(parsed.stats.inflate.fixed, 0);
+  assert.equal(parsed.stats.inflate.dynamic, 0);
+  const fixed = parsePack(pack);
+  assert.equal(fixed.stats.inflate.stored + fixed.stats.inflate.fixed + fixed.stats.inflate.dynamic, fixed.stats.inflate.blocks);
+});

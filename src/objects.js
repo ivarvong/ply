@@ -83,6 +83,7 @@ function splitHeaders(data, what) {
   const blank = '\n\n';
   const nl = text.indexOf(blank);
   if (nl < 0 && text.length > 0 && !text.endsWith('\n')) throw fail('pack_corrupt', `${what}: truncated header line`);
+  // Stryker disable next-line ConditionalExpression: a header that does not throw and has no blank line is empty or ends in a newline, so slice(0, -1) drops that same byte
   const headText = nl < 0 ? text.replace(/\n$/, '') : text.slice(0, nl);
   const head = headText.length ? headText.split('\n') : [];
   for (const line of head) if (line.indexOf(' ') < 0) throw fail('pack_corrupt', `${what}: truncated header line`);
@@ -114,9 +115,15 @@ export const ident = ({ name, email, time, tz = '+0000' }) => `${name} <${email}
 // @decoder parseIdent prefix=ident
 export function parseIdent(line) {
   if (typeof line !== 'string') return null;
-  const lt = line.indexOf('<'), gt = lt < 0 ? lt : line.indexOf('>', lt + 1);
-  if (lt < 0 || gt < 0) return { name: line.trim(), email: '', time: null, tz: '' };
-  const [time = '', tz = ''] = line.slice(line.lastIndexOf('>') + 1).trim().split(/\s+/);
+  const lt = line.indexOf('<');
+  if (lt < 0) return { name: line.trim(), email: '', time: null, tz: '' };
+  const gt = line.indexOf('>', lt + 1);
+  // Stryker disable next-line EqualityOperator: indexOf from lt + 1 cannot return 0, so <= and < reject the same missing '>'
+  if (gt < 0) return { name: line.trim(), email: '', time: null, tz: '' };
+  const parts = line.slice(line.lastIndexOf('>') + 1).trim().split(/\s+/);
+  // Stryker disable next-line StringLiteral: a missing time fails the digit test the same way any non-numeric default does
+  const time = parts[0] ?? '';
+  const tz = parts[1] ?? '';
   return { name: line.slice(0, lt).trimEnd(), email: line.slice(lt + 1, gt), time: /^\d+$/.test(time) ? time : null, tz };
 }
 
@@ -150,6 +157,7 @@ export function assertFetched(typeName, data) {
   if (typeName === 'tree') { parseTree(data); return; }
   if (typeName === 'commit') {
     const c = parseCommit(data);
+    // Stryker disable next-line StringLiteral: the fallback is rejected by OID_TEXT whether it is empty or any other non-oid
     if (!OID_TEXT.test(c.tree ?? '')) throw fail('pack_corrupt', 'commit: missing or bad tree');
     if (c.parents.some(p => !OID_TEXT.test(p))) throw fail('pack_corrupt', 'commit: bad parent');
     if (!c.author) throw fail('pack_corrupt', 'commit: missing author');
@@ -160,6 +168,7 @@ export function assertFetched(typeName, data) {
   }
   if (typeName === 'tag') {
     const t = parseTag(data);
+    // Stryker disable next-line StringLiteral: the fallback is rejected by OID_TEXT whether it is empty or any other non-oid
     if (!OID_TEXT.test(t.object ?? '')) throw fail('pack_corrupt', 'tag: missing or bad object');
     if (!t.type) throw fail('pack_corrupt', 'tag: missing type');
     if (t.tag === null) throw fail('pack_corrupt', 'tag: missing name');
