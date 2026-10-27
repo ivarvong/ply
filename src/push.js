@@ -33,7 +33,11 @@ export function parseReportStatus(lines) {
   // Stryker disable next-line BooleanLiteral: the loop below always assigns r.ok again before the return
   const r = { unpack: null, refs: [], ok: false };
   for (const l of lines) {
-    if (l.startsWith(UNPACK)) r.unpack = l.slice(UNPACK.length);
+    if (l.startsWith(UNPACK)) {
+      // send-pack.c receive_unpack_status reads one unpack line. A second is an invalid ref status, not a new status.
+      if (r.unpack !== null) throw fail('protocol', 'report: duplicate unpack');
+      r.unpack = l.slice(UNPACK.length);
+    }
     else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: {} });
     else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: {} }); }
     else if (l.startsWith(OPTION) && r.refs.length) { const [k, v] = l.slice(OPTION.length).split(' '); r.refs[r.refs.length - 1].options[k] = v ?? true; } // report-status-v2
@@ -85,10 +89,10 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
       body = concat([head, ...pushOptions.map(o => pkt(o + '\n')), FLUSH, ...(pack ? [pack] : [])]);
     }
     const lines = [];
-    let band2 = '', band2Frames = 0, inner = pktInit();
+    let band2 = '', band2Frames = 0, inner = pktInit(), report;
     // The request body (commands + pack) is on the wire. From here, ANY failure to obtain a trustworthy report —
-    // transport, HTTP status, wrong content-type, malformed framing, bad sideband, band-3 error — means the ref may
-    // have moved: the outcome is 'ambiguous'. Only our own pre-send refusals keep their codes.
+    // transport, HTTP status, wrong content-type, malformed framing, bad sideband, band-3 error, a report the parser
+    // rejects — means the ref may have moved: the outcome is 'ambiguous'. Only our own pre-send refusals keep their codes.
     const ambiguous = e => (['limit_exceeded', 'bad_request'].includes(e?.code) ? e : fail('ambiguous', `push outcome unknown: ${e?.message ?? e}`, { cause: e, original: e?.code }));
     try {
       for await (const f of frames(t, 'git-receive-pack', body, span)) {
@@ -100,8 +104,8 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
         else if (band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(payload).trim()}`);
         else throw proto(`receive-pack: bad sideband ${band}`);
       }
+      report = parseReportStatus(lines);
     } catch (e) { throw ambiguousAfterPush(e); }
-    const report = parseReportStatus(lines);
     const remoteMessages = bandLines(band2);
     const malformed = checkReport(report, commands);
     if (malformed) {

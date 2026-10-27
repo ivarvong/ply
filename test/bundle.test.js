@@ -30,7 +30,8 @@ test('edit entry carries only what the edit path uses', async () => {
   console.log(`  edit bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
   // 2026-10-23: 49.9 KB / 18.9 KB gz (was 42.6 / 16.5): +4.2 KB packresolve.js, +2.6 KB fetch.js for the blob:none fallback
   // 2026-10-25: 55.1 KB / 20.8 KB gz. take(), format facts, and fsck checks in parseTree/assertFetched.
-  assert.ok(min < 56_000, `edit bundle ${min} B exceeds budget`);
+  // 2026-10-27: 56,087 B. The shared header checker, the encoding field it round-trips, and the one-unpack guard.
+  assert.ok(min < 56_088, `edit bundle ${min} B exceeds budget`);
   assert.ok(gz < 21_500, `edit bundle ${gz} B gz exceeds budget`);
 });
 

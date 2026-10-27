@@ -6,6 +6,9 @@ import { isDotGit } from './validate.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
+  COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
+  COMMIT_HEADER_ORDER, TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER, TAG_HEADER_ORDER,
+  HEADER_SKIP_OPTIONAL,
 } from './format.js';
 
 export const TYPE = Object.freeze({ COMMIT: OBJ_COMMIT, TREE: OBJ_TREE, BLOB: OBJ_BLOB, TAG: OBJ_TAG, OFS_DELTA: OBJ_OFS_DELTA, REF_DELTA: OBJ_REF_DELTA });
@@ -90,21 +93,49 @@ function splitHeaders(data, what) {
   return { head, message: nl < 0 ? null : text.slice(nl + blank.length) };
 }
 
-// ---- commit ----
+// One checker for commit_tree_extended and builtin/tag.c. `repeat` is the header that may occur more than
+// once (commit `parent`); a tag passes null. A second single-valued header throws even when fsck accepts
+// the object: git shows the first tree, so a last-wins parse would hash a different tree than
+// `git log --format=%T`. Extras (gpgsig, mergetag) are legal once `phase` has reached `extraFrom`.
+function parseOrderedHeaders(kind, head, order, repeat, extraFrom) {
+  const bad = (why, key) => { throw fail('pack_corrupt', key === undefined ? `${kind}: ${why}` : `${kind}: ${why} ${key}`); };
+  const rec = { extra: [] };
+  for (const name of order) rec[name === repeat ? `${name}s` : name] = name === repeat ? [] : null;
+  let phase = null;
+  for (const line of head) {
+    const sp = line.indexOf(' ');
+    const key = line.slice(0, sp), value = line.slice(sp + 1);
+    const at = order.indexOf(key);
+    if (at < 0) {
+      // null is below every index, so a header before the first structural line fails here too
+      if (phase < extraFrom) bad('bad header order');
+      rec.extra.push(line);
+      phase = order.length;
+    } else if (phase === null) {
+      if (at > 0) bad('bad header order');
+      rec[key] = value;
+      phase = at;
+    } else if (key !== repeat && phase >= at) bad('duplicate', key);
+    else {
+      // author may follow tree because parent is optional. The duplicate check already rejected every
+      // later phase, so the phases that reach this comparison are exactly the skipped index.
+      // Stryker disable next-line ConditionalExpression: author is the only header this skip can allow, and every phase that reaches the comparison already matches it
+      const skipped = order[at - 1] === repeat && phase === at - 1 - HEADER_SKIP_OPTIONAL;
+      if (phase !== at && phase !== at - 1 && !skipped) bad('bad header order');
+      if (key === repeat) rec[`${key}s`].push(value);
+      else rec[key] = value;
+      phase = at;
+    }
+  }
+  return rec;
+}
+
 // @decoder parseCommit prefix=commit
 export function parseCommit(data) {
   const { head, message } = splitHeaders(data, 'commit');
   // message is null when the object has no body section at all (no blank line); '' when the body is empty
-  const c = { tree: null, parents: [], author: null, committer: null, extra: [], message };
-  for (const line of head) {
-    const sp = line.indexOf(' ');
-    const k = line.slice(0, sp), v = line.slice(sp + 1);
-    if (k === 'tree') c.tree = v;
-    else if (k === 'parent') c.parents.push(v);
-    else if (k === 'author') c.author = v;
-    else if (k === 'committer') c.committer = v;
-    else c.extra.push(line);
-  }
+  const c = parseOrderedHeaders('commit', head, COMMIT_HEADER_ORDER, COMMIT_HEADER_PARENT, COMMIT_HEADER_ORDER.indexOf(COMMIT_HEADER_COMMITTER));
+  c.message = message;
   return c;
 }
 
@@ -131,16 +162,8 @@ export function parseIdent(line) {
 // @decoder parseTag prefix=tag
 export function parseTag(data) {
   const { head, message } = splitHeaders(data, 'tag');
-  const t = { object: null, type: null, tag: null, tagger: null, extra: [], message };
-  for (const line of head) {
-    const sp = line.indexOf(' ');
-    const k = line.slice(0, sp), v = line.slice(sp + 1);
-    if (k === 'object' && t.object === null) t.object = v;
-    else if (k === 'type' && t.type === null) t.type = v;
-    else if (k === 'tag' && t.tag === null) t.tag = v;
-    else if (k === 'tagger' && t.tagger === null) t.tagger = v;
-    else t.extra.push(line);
-  }
+  const t = parseOrderedHeaders('tag', head, TAG_HEADER_ORDER, null, TAG_HEADER_ORDER.indexOf(TAG_HEADER_TAGGER));
+  t.message = message;
   return t;
 }
 
@@ -196,12 +219,22 @@ export function assertFetched(typeName, data) {
 
 // Faithful: the message is written verbatim after the blank line; null means no body section. Callers that want
 // git's conventional trailing newline add it themselves (editFile does).
-export function encodeCommit({ tree, parents = [], author, committer = author, message = null, extra = [] }) {
-  const lines = [`tree ${tree}`, ...parents.map(p => `parent ${p}`), `author ${author}`, `committer ${committer}`, ...extra];
+export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }) {
+  const lines = [
+    `${COMMIT_HEADER_TREE} ${tree}`,
+    ...parents.map(p => `${COMMIT_HEADER_PARENT} ${p}`),
+    `${COMMIT_HEADER_AUTHOR} ${author}`,
+    `${COMMIT_HEADER_COMMITTER} ${committer}`,
+  ];
+  if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
+  lines.push(...extra);
   return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
 }
 
 export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }) {
-  const lines = [`object ${object}`, `type ${type}`, `tag ${tag}`, `tagger ${tagger}`, ...extra];
+  const lines = [
+    `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
+    ...extra,
+  ];
   return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
 }

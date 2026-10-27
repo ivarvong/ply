@@ -6,6 +6,7 @@
 // crypto.subtle.sign; verified by `git verify-commit` with an allowed-signers file in test/sign.test.js.
 import { fail } from './errors.js';
 import { te, concat } from './bytes.js';
+import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
 
 const u32 = n => Uint8Array.from([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
 const sshString = b => { const bytes = typeof b === 'string' ? te.encode(b) : b; return concat([u32(bytes.length), bytes]); };
@@ -36,13 +37,15 @@ export function armor(blob) {
   return `-----BEGIN SSH SIGNATURE-----\n${lines.join('\n')}\n-----END SSH SIGNATURE-----\n`;
 }
 
-// Pure: splice a gpgsig header into an encoded commit (after `committer`, before any other header or the body).
+// Pure: splice a gpgsig header into an encoded commit. commit_tree_extended writes encoding, then gpgsig.
+// The signature goes after encoding when that header is present, otherwise immediately after committer.
 export function withGpgsig(commitBytes, signatureText) {
   const text = new TextDecoder().decode(commitBytes);
   const nl = text.indexOf('\n\n');
   const headers = (nl < 0 ? text : text.slice(0, nl)).split('\n');
-  const i = headers.findIndex(l => l.startsWith('committer '));
+  let i = headers.findIndex(l => l.startsWith(`${COMMIT_HEADER_COMMITTER} `));
   if (i < 0) throw fail('bad_request', 'commit has no committer line');
+  if (headers[i + 1]?.startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
   const sigLines = signatureText.replace(/\n$/, '').split('\n');
   const gpgsig = 'gpgsig ' + sigLines.join('\n ');
   headers.splice(i + 1, 0, gpgsig);
