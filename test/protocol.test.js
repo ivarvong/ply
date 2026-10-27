@@ -8,13 +8,21 @@ import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { genDag, readModel, expectedObjects, requiredAndHad, treeClosure } from './fuzz/dag.js';
-import { packObjectsOracle, reconstructFor } from './fuzz/packobjects.js';
+import { packObjectsArgs, packObjectsOracle, reconstructFor } from './fuzz/packobjects.js';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Rng } from './fuzz/prng.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE_NAME } from '../src/objects.js';
+
+test('pack-objects argv: git 2.55 create_pack_file, git 2.56 odb_source_files_generate_pack', () => {
+  const full = { thinPack: true, shallows: ['aa'], ofsDelta: true, filter: 'blob:none' };
+  assert.equal(packObjectsArgs({ ...full, version: [2, 55, 0] }).join(' '), '--revs --thin --stdout --shallow --delta-base-offset --filter=blob:none');
+  assert.equal(packObjectsArgs({ ...full, version: [2, 56, 0] }).join(' '), '--revs --stdout --thin --shallow --delta-base-offset --quiet --filter=blob:none');
+  assert.equal(packObjectsArgs({ thinPack: false, shallows: [], ofsDelta: false, version: [2, 43, 0] }).join(' '), '--revs --stdout');
+  assert.equal(packObjectsArgs({ thinPack: false, shallows: [], ofsDelta: false, version: [2, 56, 0] }).join(' '), '--revs --stdout --quiet');
+});
 
 let root, cleanup, srv, hookLog;
 before(async () => {
