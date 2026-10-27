@@ -14,13 +14,14 @@ jobs:
       - name: Dispatch ply-main-updated
         env:
           PLY_WEB_DISPATCH_TOKEN: ${{ secrets.PLY_WEB_DISPATCH_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [ -z "${PLY_WEB_DISPATCH_TOKEN}" ]; then
             echo "::notice title=ply-web not notified::PLY_WEB_DISPATCH_TOKEN is not set. Add a fine-grained PAT with Contents: Read and write on ivarvong/ply-web. This push did not send repository_dispatch."
             exit 0
           fi
-          # GITHUB_SHA is the commit just pushed. ply-web resolves main itself.
+          # COMMIT_SHA is the commit just pushed. ply-web resolves main itself.
           GH_TOKEN="${PLY_WEB_DISPATCH_TOKEN}" gh api --method POST repos/ivarvong/ply-web/dispatches --input - <<EOF
-          {"event_type":"ply-main-updated","client_payload":{"sha":"${GITHUB_SHA}"}}
+          {"event_type":"ply-main-updated","client_payload":{"sha":"${COMMIT_SHA}"}}
           EOF
