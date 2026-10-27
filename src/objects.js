@@ -7,7 +7,8 @@ import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
-  TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER, HEADER_PHASE_EXTRA,
+  COMMIT_HEADER_ORDER, TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER, TAG_HEADER_ORDER,
+  HEADER_SKIP_OPTIONAL,
 } from './format.js';
 
 export const TYPE = Object.freeze({ COMMIT: OBJ_COMMIT, TREE: OBJ_TREE, BLOB: OBJ_BLOB, TAG: OBJ_TAG, OFS_DELTA: OBJ_OFS_DELTA, REF_DELTA: OBJ_REF_DELTA });
@@ -92,49 +93,45 @@ function splitHeaders(data, what) {
   return { head, message: nl < 0 ? null : text.slice(nl + blank.length) };
 }
 
-// ---- commit ----
-// Order is commit_tree_extended's. A second single-valued header throws even when fsck accepts the object:
-// git shows the first tree and the first encoding, so a last-wins parser would read a different tree than
-// `git log --format=%T` and editFile would hash that other tree. parent may repeat. Anything else is extra,
-// and only after committer (or encoding).
-// @decoder parseCommit prefix=commit
-export function parseCommit(data) {
-  const { head, message } = splitHeaders(data, 'commit');
-  // message is null when the object has no body section at all (no blank line); '' when the body is empty
-  const c = { tree: null, parents: [], author: null, committer: null, encoding: null, extra: [], message };
+// One checker for commit_tree_extended and builtin/tag.c. `repeat` is the header that may occur more than
+// once (commit `parent`); a tag passes null. A second single-valued header throws even when fsck accepts
+// the object: git shows the first tree, so a last-wins parse would hash a different tree than
+// `git log --format=%T`. Extras (gpgsig, mergetag) are legal once `phase` has reached `extraFrom`.
+function parseOrderedHeaders(kind, head, order, repeat, extraFrom) {
+  const bad = (why, key) => { throw fail('pack_corrupt', key === undefined ? `${kind}: ${why}` : `${kind}: ${why} ${key}`); };
+  const rec = { extra: [] };
+  for (const name of order) rec[name === repeat ? `${name}s` : name] = name === repeat ? [] : null;
   let phase = null;
   for (const line of head) {
     const sp = line.indexOf(' ');
     const key = line.slice(0, sp), value = line.slice(sp + 1);
-    if (key === COMMIT_HEADER_TREE) {
-      if (phase !== null) throw fail('pack_corrupt', 'commit: duplicate tree');
-      c.tree = value;
-      phase = COMMIT_HEADER_TREE;
-    } else if (key === COMMIT_HEADER_PARENT) {
-      if (phase !== COMMIT_HEADER_TREE && phase !== COMMIT_HEADER_PARENT) throw fail('pack_corrupt', 'commit: bad header order');
-      c.parents.push(value);
-      phase = COMMIT_HEADER_PARENT;
-    } else if (key === COMMIT_HEADER_AUTHOR) {
-      if (phase === COMMIT_HEADER_AUTHOR || phase === COMMIT_HEADER_COMMITTER || phase === COMMIT_HEADER_ENCODING || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: duplicate author');
-      if (phase !== COMMIT_HEADER_TREE && phase !== COMMIT_HEADER_PARENT) throw fail('pack_corrupt', 'commit: bad header order');
-      c.author = value;
-      phase = COMMIT_HEADER_AUTHOR;
-    } else if (key === COMMIT_HEADER_COMMITTER) {
-      if (phase === COMMIT_HEADER_COMMITTER || phase === COMMIT_HEADER_ENCODING || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: duplicate committer');
-      if (phase !== COMMIT_HEADER_AUTHOR) throw fail('pack_corrupt', 'commit: bad header order');
-      c.committer = value;
-      phase = COMMIT_HEADER_COMMITTER;
-    } else if (key === COMMIT_HEADER_ENCODING) {
-      if (phase === COMMIT_HEADER_ENCODING || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: duplicate encoding');
-      if (phase !== COMMIT_HEADER_COMMITTER) throw fail('pack_corrupt', 'commit: bad header order');
-      c.encoding = value;
-      phase = COMMIT_HEADER_ENCODING;
-    } else {
-      if (phase !== COMMIT_HEADER_COMMITTER && phase !== COMMIT_HEADER_ENCODING && phase !== HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: bad header order');
-      c.extra.push(line);
-      phase = HEADER_PHASE_EXTRA;
+    const at = order.indexOf(key);
+    if (at < 0) {
+      // null is below every index, so a header before the first structural line fails here too
+      if (phase < extraFrom) bad('bad header order');
+      rec.extra.push(line);
+      phase = order.length;
+    } else if (phase === null) {
+      if (at > 0) bad('bad header order');
+      rec[key] = value;
+      phase = at;
+    } else if (key !== repeat && phase >= at) bad('duplicate', key);
+    else if (phase !== at && phase !== at - 1 && !(order[at - 1] === repeat && phase === at - 1 - HEADER_SKIP_OPTIONAL)) bad('bad header order');
+    else {
+      if (key === repeat) rec[`${key}s`].push(value);
+      else rec[key] = value;
+      phase = at;
     }
   }
+  return rec;
+}
+
+// @decoder parseCommit prefix=commit
+export function parseCommit(data) {
+  const { head, message } = splitHeaders(data, 'commit');
+  // message is null when the object has no body section at all (no blank line); '' when the body is empty
+  const c = parseOrderedHeaders('commit', head, COMMIT_HEADER_ORDER, COMMIT_HEADER_PARENT, COMMIT_HEADER_ORDER.indexOf(COMMIT_HEADER_COMMITTER));
+  c.message = message;
   return c;
 }
 
@@ -161,36 +158,8 @@ export function parseIdent(line) {
 // @decoder parseTag prefix=tag
 export function parseTag(data) {
   const { head, message } = splitHeaders(data, 'tag');
-  const t = { object: null, type: null, tag: null, tagger: null, extra: [], message };
-  let phase = null;
-  for (const line of head) {
-    const sp = line.indexOf(' ');
-    const key = line.slice(0, sp), value = line.slice(sp + 1);
-    if (key === TAG_HEADER_OBJECT) {
-      if (phase !== null) throw fail('pack_corrupt', 'tag: duplicate object');
-      t.object = value;
-      phase = TAG_HEADER_OBJECT;
-    } else if (key === TAG_HEADER_TYPE) {
-      if (phase === TAG_HEADER_TYPE || phase === TAG_HEADER_TAG || phase === TAG_HEADER_TAGGER || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: duplicate type');
-      if (phase !== TAG_HEADER_OBJECT) throw fail('pack_corrupt', 'tag: bad header order');
-      t.type = value;
-      phase = TAG_HEADER_TYPE;
-    } else if (key === TAG_HEADER_TAG) {
-      if (phase === TAG_HEADER_TAG || phase === TAG_HEADER_TAGGER || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: duplicate tag');
-      if (phase !== TAG_HEADER_TYPE) throw fail('pack_corrupt', 'tag: bad header order');
-      t.tag = value;
-      phase = TAG_HEADER_TAG;
-    } else if (key === TAG_HEADER_TAGGER) {
-      if (phase === TAG_HEADER_TAGGER || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: duplicate tagger');
-      if (phase !== TAG_HEADER_TAG) throw fail('pack_corrupt', 'tag: bad header order');
-      t.tagger = value;
-      phase = TAG_HEADER_TAGGER;
-    } else {
-      if (phase !== TAG_HEADER_TAGGER && phase !== HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: bad header order');
-      t.extra.push(line);
-      phase = HEADER_PHASE_EXTRA;
-    }
-  }
+  const t = parseOrderedHeaders('tag', head, TAG_HEADER_ORDER, null, TAG_HEADER_ORDER.indexOf(TAG_HEADER_TAGGER));
+  t.message = message;
   return t;
 }
 

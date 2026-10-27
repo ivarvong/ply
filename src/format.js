@@ -136,7 +136,7 @@ export const COMMIT_HEADER_ORDER = Object.freeze([
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
 ]);
 /** Headers that appear at most once. parent is not in this list; mergetag is an extra header and may repeat. */
-export const COMMIT_SINGLE_HEADERS = Object.freeze([
+export const COMMIT_SINGLE_HEADERS = /* @__PURE__ */ Object.freeze([
   COMMIT_HEADER_TREE, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
 ]);
 
@@ -156,8 +156,16 @@ export const TAG_SINGLE_HEADERS = TAG_HEADER_ORDER;
 /**
  * Phase after the first header the writer would not emit (gpgsig, mergetag, a space-continuation,
  * anything else). A header key cannot be this: splitHeaders has already split on newlines.
+ * The parser stores that phase as the header-order length, which is past every structural index.
  */
 export const HEADER_PHASE_EXTRA = '\n';
+
+/**
+ * `parent` is the only optional commit header between two required ones, so `author` may follow
+ * `tree` with exactly this many headers skipped (commit.c commit_tree_extended). A tag has nothing
+ * optional in the middle, and the skip does not apply when no header may repeat.
+ */
+export const HEADER_SKIP_OPTIONAL = 1;
 
 // ---- zlib / deflate (RFC 1950, RFC 1951) ----
 export const ZLIB_HEADER_BYTES = 2;

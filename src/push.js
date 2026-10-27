@@ -34,8 +34,7 @@ export function parseReportStatus(lines) {
   const r = { unpack: null, refs: [], ok: false };
   for (const l of lines) {
     if (l.startsWith(UNPACK)) {
-      // send-pack.c receive_unpack_status reads one unpack line. A later "unpack " is not a second status;
-      // git reports it as an invalid ref status. Last-wins would let "unpack failed" then "unpack ok" look successful.
+      // send-pack.c receive_unpack_status reads one unpack line. A second is an invalid ref status, not a new status.
       if (r.unpack !== null) throw fail('protocol', 'report: duplicate unpack');
       r.unpack = l.slice(UNPACK.length);
     }
@@ -90,10 +89,10 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
       body = concat([head, ...pushOptions.map(o => pkt(o + '\n')), FLUSH, ...(pack ? [pack] : [])]);
     }
     const lines = [];
-    let band2 = '', band2Frames = 0, inner = pktInit();
+    let band2 = '', band2Frames = 0, inner = pktInit(), report;
     // The request body (commands + pack) is on the wire. From here, ANY failure to obtain a trustworthy report —
-    // transport, HTTP status, wrong content-type, malformed framing, bad sideband, band-3 error — means the ref may
-    // have moved: the outcome is 'ambiguous'. Only our own pre-send refusals keep their codes.
+    // transport, HTTP status, wrong content-type, malformed framing, bad sideband, band-3 error, a report the parser
+    // rejects — means the ref may have moved: the outcome is 'ambiguous'. Only our own pre-send refusals keep their codes.
     const ambiguous = e => (['limit_exceeded', 'bad_request'].includes(e?.code) ? e : fail('ambiguous', `push outcome unknown: ${e?.message ?? e}`, { cause: e, original: e?.code }));
     try {
       for await (const f of frames(t, 'git-receive-pack', body, span)) {
@@ -105,14 +104,8 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
         else if (band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(payload).trim()}`);
         else throw proto(`receive-pack: bad sideband ${band}`);
       }
+      report = parseReportStatus(lines);
     } catch (e) { throw ambiguousAfterPush(e); }
-    let report;
-    try { report = parseReportStatus(lines); }
-    catch (e) {
-      const remoteMessages = bandLines(band2);
-      span.set({ 'git.push.report.lines': lines.slice(0, REPORT_KEEP), 'git.push.ok': false, 'git.push.ambiguous': e.message, 'git.push.remote.messages': remoteMessages });
-      throw fail('ambiguous', `push outcome unknown: malformed report (${e.message})`, { cause: e, hookOutput: band2 });
-    }
     const remoteMessages = bandLines(band2);
     const malformed = checkReport(report, commands);
     if (malformed) {

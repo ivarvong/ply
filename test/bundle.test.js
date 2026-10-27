@@ -30,9 +30,9 @@ test('edit entry carries only what the edit path uses', async () => {
   console.log(`  edit bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
   // 2026-10-23: 49.9 KB / 18.9 KB gz (was 42.6 / 16.5): +4.2 KB packresolve.js, +2.6 KB fetch.js for the blob:none fallback
   // 2026-10-25: 55.1 KB / 20.8 KB gz. take(), format facts, and fsck checks in parseTree/assertFetched.
-  // 2026-10-27: 57.5 KB / 21.5 KB gz. Duplicate and misordered commit/tag headers.
-  assert.ok(min < 59_000, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 22_200, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-27: 56,061 B. The shared header checker, the encoding field it round-trips, and the one-unpack guard.
+  assert.ok(min < 56_062, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 21_500, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -56,8 +56,7 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-20: 63.9 KB — line merge (xdiff port incl. Myers) ≈ 10.4 KB, .gitattributes ≈ 5.5 KB; the edit bundle carries neither
   // 2026-10-23: 67.4 KB with the blob:none fallback (fetchPackTree0, fetchWide)
   // 2026-10-25: 72.5 KB. The same parser checks the edit and read bundles grew by.
-  // 2026-10-27: 74.9 KB. The commit/tag header state machine.
-  assert.ok(min < 76_000, `merge bundle ${min} B exceeds budget`);
+  assert.ok(min < 74_000, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -78,7 +77,6 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   console.log(`  read bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
   // 2026-10-23: 36.3 KB / 13.9 KB gz, of which packresolve.js 4.2 KB is the blob:none fallback's delta resolver
   // 2026-10-25: 42.0 KB / 16.0 KB gz. take(), format facts, and fsck checks in parseTree/assertFetched.
-  // 2026-10-27: 44.0 KB / 16.5 KB gz. The commit/tag header state machine.
-  assert.ok(min < 45_000, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_200, `read bundle ${gz} B gz exceeds budget`);
+  assert.ok(min < 43_000, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 16_500, `read bundle ${gz} B gz exceeds budget`);
 });
