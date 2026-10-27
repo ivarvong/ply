@@ -139,6 +139,7 @@ function linesOf(c) {
   if (c.author != null) lines.push(`author ${c.author}`);
   if (c.committer != null) lines.push(`committer ${c.committer}`);
   if (c.tagger != null) lines.push(`tagger ${c.tagger}`);
+  if (c.encoding != null) lines.push(`encoding ${c.encoding}`);
   lines.push(...(c.extra ?? []));
   return lines;
 }
@@ -189,6 +190,7 @@ const tagBytes = encodeTag({ object: oid(9), type: 'commit', tag: 'v1', tagger: 
 property('commit', 'commit prefix-closure: header lines are entries, the message is an opaque tail', () => {
   assertHeaderObject(parseCommit, commitBytes);
   assertHeaderObject(parseCommit, encodeCommit({ tree: oid(1), author, message: null }));
+  assertHeaderObject(parseCommit, encodeCommit({ tree: oid(9), author, encoding: 'UTF-8', message: 'm\n', extra: ['gpgsig -----BEGIN', ' signature'] }));
 });
 
 property('tag', 'tag prefix-closure matches the commit header framing', () => {
@@ -217,12 +219,14 @@ test('assertFetched applies fsck to a complete object and leaves a header prefix
   assert.throws(() => assertFetched('tree', tree.subarray(0, tree.length - 1)), e => e.code === 'pack_corrupt');
   const good = encodeCommit({ tree: oid(1), author, message: 'm\n' });
   assertFetched('commit', good);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\ncommitter ${author}\n\nm\n`)), /missing author/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\ncommitter ${author}\n\nm\n`)), /bad header order/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\n\nm\n`)), /missing author/);
   assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada 1700000000 +0000\ncommitter ${author}\n\nm\n`)), /missing email/);
   assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada <ada@x> soon +0000\ncommitter ${author}\n\nm\n`)), /bad date/);
   assert.throws(() => assertFetched('commit', te.encode(`tree short\nauthor ${author}\ncommitter ${author}\n\nm\n`)), /bad tree/);
   assertFetched('tag', tagBytes);
-  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\ntagger ${author}\n\nm\n`)), /missing name/);
+  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\ntagger ${author}\n\nm\n`)), /bad header order/);
+  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\n\nm\n`)), /missing name/);
   assert.equal(hashObject('blob', te.encode('x')).length, OID_HEX_CHARS);
   // a one-line header prefix still parses; it is not a complete object, so fetch is what calls assertFetched
   assert.equal(parseCommit(te.encode(`tree ${oid(1)}\n`)).tree, oid(1));

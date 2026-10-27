@@ -121,6 +121,44 @@ export const PROTOCOL_V2 = 2;
  */
 export const IDENT_TZ_DIGITS = 4;
 
+// ---- commit headers (Documentation/gitformat-commit; commit.c commit_tree_extended) ----
+// commit-tree writes exactly one tree, then zero or more parent lines, then one author, one committer,
+// then an optional encoding, then other headers (gpgsig, mergetag — mergetag may repeat). A second
+// single-valued header is not a commit git would write. git's parser is first-wins for tree and encoding
+// and fsck still accepts some of those objects; ply rejects them.
+export const COMMIT_HEADER_TREE = 'tree';
+export const COMMIT_HEADER_PARENT = 'parent';
+export const COMMIT_HEADER_AUTHOR = 'author';
+export const COMMIT_HEADER_COMMITTER = 'committer';
+export const COMMIT_HEADER_ENCODING = 'encoding';
+/** The order commit_tree_extended emits. parent and encoding are optional; the others are not. */
+export const COMMIT_HEADER_ORDER = Object.freeze([
+  COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
+]);
+/** Headers that appear at most once. parent is not in this list; mergetag is an extra header and may repeat. */
+export const COMMIT_SINGLE_HEADERS = Object.freeze([
+  COMMIT_HEADER_TREE, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
+]);
+
+// ---- tag headers (builtin/tag.c) ----
+// An annotated tag is object, type, tag, tagger, then optional extras (gpgsig). All four are single-valued.
+// git is first-wins for a repeated tagger and fsck accepts it; ply rejects the repeat.
+export const TAG_HEADER_OBJECT = 'object';
+export const TAG_HEADER_TYPE = 'type';
+export const TAG_HEADER_TAG = 'tag';
+export const TAG_HEADER_TAGGER = 'tagger';
+export const TAG_HEADER_ORDER = Object.freeze([
+  TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER,
+]);
+/** Every header builtin/tag.c writes is single-valued. */
+export const TAG_SINGLE_HEADERS = TAG_HEADER_ORDER;
+
+/**
+ * Phase after the first header the writer would not emit (gpgsig, mergetag, a space-continuation,
+ * anything else). A header key cannot be this: splitHeaders has already split on newlines.
+ */
+export const HEADER_PHASE_EXTRA = '\n';
+
 // ---- zlib / deflate (RFC 1950, RFC 1951) ----
 export const ZLIB_HEADER_BYTES = 2;
 export const ZLIB_CM_DEFLATE = 8;

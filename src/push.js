@@ -33,7 +33,12 @@ export function parseReportStatus(lines) {
   // Stryker disable next-line BooleanLiteral: the loop below always assigns r.ok again before the return
   const r = { unpack: null, refs: [], ok: false };
   for (const l of lines) {
-    if (l.startsWith(UNPACK)) r.unpack = l.slice(UNPACK.length);
+    if (l.startsWith(UNPACK)) {
+      // send-pack.c receive_unpack_status reads one unpack line. A later "unpack " is not a second status;
+      // git reports it as an invalid ref status. Last-wins would let "unpack failed" then "unpack ok" look successful.
+      if (r.unpack !== null) throw fail('protocol', 'report: duplicate unpack');
+      r.unpack = l.slice(UNPACK.length);
+    }
     else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: {} });
     else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: {} }); }
     else if (l.startsWith(OPTION) && r.refs.length) { const [k, v] = l.slice(OPTION.length).split(' '); r.refs[r.refs.length - 1].options[k] = v ?? true; } // report-status-v2
@@ -101,7 +106,13 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
         else throw proto(`receive-pack: bad sideband ${band}`);
       }
     } catch (e) { throw ambiguousAfterPush(e); }
-    const report = parseReportStatus(lines);
+    let report;
+    try { report = parseReportStatus(lines); }
+    catch (e) {
+      const remoteMessages = bandLines(band2);
+      span.set({ 'git.push.report.lines': lines.slice(0, REPORT_KEEP), 'git.push.ok': false, 'git.push.ambiguous': e.message, 'git.push.remote.messages': remoteMessages });
+      throw fail('ambiguous', `push outcome unknown: malformed report (${e.message})`, { cause: e, hookOutput: band2 });
+    }
     const remoteMessages = bandLines(band2);
     const malformed = checkReport(report, commands);
     if (malformed) {

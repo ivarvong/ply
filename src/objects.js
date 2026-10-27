@@ -6,6 +6,8 @@ import { isDotGit } from './validate.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
+  COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
+  TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER, HEADER_PHASE_EXTRA,
 } from './format.js';
 
 export const TYPE = Object.freeze({ COMMIT: OBJ_COMMIT, TREE: OBJ_TREE, BLOB: OBJ_BLOB, TAG: OBJ_TAG, OFS_DELTA: OBJ_OFS_DELTA, REF_DELTA: OBJ_REF_DELTA });
@@ -91,19 +93,47 @@ function splitHeaders(data, what) {
 }
 
 // ---- commit ----
+// Order is commit_tree_extended's. A second single-valued header throws even when fsck accepts the object:
+// git shows the first tree and the first encoding, so a last-wins parser would read a different tree than
+// `git log --format=%T` and editFile would hash that other tree. parent may repeat. Anything else is extra,
+// and only after committer (or encoding).
 // @decoder parseCommit prefix=commit
 export function parseCommit(data) {
   const { head, message } = splitHeaders(data, 'commit');
   // message is null when the object has no body section at all (no blank line); '' when the body is empty
-  const c = { tree: null, parents: [], author: null, committer: null, extra: [], message };
+  const c = { tree: null, parents: [], author: null, committer: null, encoding: null, extra: [], message };
+  let phase = null;
   for (const line of head) {
     const sp = line.indexOf(' ');
-    const k = line.slice(0, sp), v = line.slice(sp + 1);
-    if (k === 'tree') c.tree = v;
-    else if (k === 'parent') c.parents.push(v);
-    else if (k === 'author') c.author = v;
-    else if (k === 'committer') c.committer = v;
-    else c.extra.push(line);
+    const key = line.slice(0, sp), value = line.slice(sp + 1);
+    if (key === COMMIT_HEADER_TREE) {
+      if (phase !== null) throw fail('pack_corrupt', 'commit: duplicate tree');
+      c.tree = value;
+      phase = COMMIT_HEADER_TREE;
+    } else if (key === COMMIT_HEADER_PARENT) {
+      if (phase !== COMMIT_HEADER_TREE && phase !== COMMIT_HEADER_PARENT) throw fail('pack_corrupt', 'commit: bad header order');
+      c.parents.push(value);
+      phase = COMMIT_HEADER_PARENT;
+    } else if (key === COMMIT_HEADER_AUTHOR) {
+      if (phase === COMMIT_HEADER_AUTHOR || phase === COMMIT_HEADER_COMMITTER || phase === COMMIT_HEADER_ENCODING || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: duplicate author');
+      if (phase !== COMMIT_HEADER_TREE && phase !== COMMIT_HEADER_PARENT) throw fail('pack_corrupt', 'commit: bad header order');
+      c.author = value;
+      phase = COMMIT_HEADER_AUTHOR;
+    } else if (key === COMMIT_HEADER_COMMITTER) {
+      if (phase === COMMIT_HEADER_COMMITTER || phase === COMMIT_HEADER_ENCODING || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: duplicate committer');
+      if (phase !== COMMIT_HEADER_AUTHOR) throw fail('pack_corrupt', 'commit: bad header order');
+      c.committer = value;
+      phase = COMMIT_HEADER_COMMITTER;
+    } else if (key === COMMIT_HEADER_ENCODING) {
+      if (phase === COMMIT_HEADER_ENCODING || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: duplicate encoding');
+      if (phase !== COMMIT_HEADER_COMMITTER) throw fail('pack_corrupt', 'commit: bad header order');
+      c.encoding = value;
+      phase = COMMIT_HEADER_ENCODING;
+    } else {
+      if (phase !== COMMIT_HEADER_COMMITTER && phase !== COMMIT_HEADER_ENCODING && phase !== HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'commit: bad header order');
+      c.extra.push(line);
+      phase = HEADER_PHASE_EXTRA;
+    }
   }
   return c;
 }
@@ -132,14 +162,34 @@ export function parseIdent(line) {
 export function parseTag(data) {
   const { head, message } = splitHeaders(data, 'tag');
   const t = { object: null, type: null, tag: null, tagger: null, extra: [], message };
+  let phase = null;
   for (const line of head) {
     const sp = line.indexOf(' ');
-    const k = line.slice(0, sp), v = line.slice(sp + 1);
-    if (k === 'object' && t.object === null) t.object = v;
-    else if (k === 'type' && t.type === null) t.type = v;
-    else if (k === 'tag' && t.tag === null) t.tag = v;
-    else if (k === 'tagger' && t.tagger === null) t.tagger = v;
-    else t.extra.push(line);
+    const key = line.slice(0, sp), value = line.slice(sp + 1);
+    if (key === TAG_HEADER_OBJECT) {
+      if (phase !== null) throw fail('pack_corrupt', 'tag: duplicate object');
+      t.object = value;
+      phase = TAG_HEADER_OBJECT;
+    } else if (key === TAG_HEADER_TYPE) {
+      if (phase === TAG_HEADER_TYPE || phase === TAG_HEADER_TAG || phase === TAG_HEADER_TAGGER || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: duplicate type');
+      if (phase !== TAG_HEADER_OBJECT) throw fail('pack_corrupt', 'tag: bad header order');
+      t.type = value;
+      phase = TAG_HEADER_TYPE;
+    } else if (key === TAG_HEADER_TAG) {
+      if (phase === TAG_HEADER_TAG || phase === TAG_HEADER_TAGGER || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: duplicate tag');
+      if (phase !== TAG_HEADER_TYPE) throw fail('pack_corrupt', 'tag: bad header order');
+      t.tag = value;
+      phase = TAG_HEADER_TAG;
+    } else if (key === TAG_HEADER_TAGGER) {
+      if (phase === TAG_HEADER_TAGGER || phase === HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: duplicate tagger');
+      if (phase !== TAG_HEADER_TAG) throw fail('pack_corrupt', 'tag: bad header order');
+      t.tagger = value;
+      phase = TAG_HEADER_TAGGER;
+    } else {
+      if (phase !== TAG_HEADER_TAGGER && phase !== HEADER_PHASE_EXTRA) throw fail('pack_corrupt', 'tag: bad header order');
+      t.extra.push(line);
+      phase = HEADER_PHASE_EXTRA;
+    }
   }
   return t;
 }
@@ -196,12 +246,22 @@ export function assertFetched(typeName, data) {
 
 // Faithful: the message is written verbatim after the blank line; null means no body section. Callers that want
 // git's conventional trailing newline add it themselves (editFile does).
-export function encodeCommit({ tree, parents = [], author, committer = author, message = null, extra = [] }) {
-  const lines = [`tree ${tree}`, ...parents.map(p => `parent ${p}`), `author ${author}`, `committer ${committer}`, ...extra];
+export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }) {
+  const lines = [
+    `${COMMIT_HEADER_TREE} ${tree}`,
+    ...parents.map(p => `${COMMIT_HEADER_PARENT} ${p}`),
+    `${COMMIT_HEADER_AUTHOR} ${author}`,
+    `${COMMIT_HEADER_COMMITTER} ${committer}`,
+  ];
+  if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
+  lines.push(...extra);
   return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
 }
 
 export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }) {
-  const lines = [`object ${object}`, `type ${type}`, `tag ${tag}`, `tagger ${tagger}`, ...extra];
+  const lines = [
+    `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
+    ...extra,
+  ];
   return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
 }

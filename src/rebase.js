@@ -41,7 +41,7 @@ export function linearChain(commits, tip, base, max = 10000) {
 }
 
 // Effect: one transplant — three-way tree merge then a commit on `parent`. Returns { oid, data, treeOid, objects }.
-async function transplant(t, cache, { base, ours, theirs }, { parent, author, committer, message, extra = [] }, signer, out) {
+async function transplant(t, cache, { base, ours, theirs }, { parent, author, committer, message, encoding = null, extra = [] }, signer, out) {
   // attributes: 'ours' is the tree being built on (what a worktree rebase/cherry-pick reads); a ref resolves once
   const fixed = out.attributes !== null && !['ours', 'theirs', 'base'].includes(out.attributes);
   const attrTree = fixed ? (out.attrTree ??= await attributeTree(t, out.attributes, {})) : await attributeTree(t, out.attributes, { base, ours, theirs });
@@ -49,7 +49,7 @@ async function transplant(t, cache, { base, ours, theirs }, { parent, author, co
   out.fetched += m.fetched;
   if (m.conflicts.length) return { conflicts: m.conflicts, reasons: m.reasons };
   const treeOid = m.oid ?? hashObject('tree', new Uint8Array(0));
-  let data = encodeCommit({ tree: treeOid, parents: [parent], author, committer, message: message === null ? null : message, extra });
+  let data = encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message: message === null ? null : message, extra });
   if (signer) data = await signCommit(data, signer);
   const oid = hashObject('commit', data);
   out.contentMerged = (out.contentMerged ?? 0) + m.contentMerged;
@@ -87,7 +87,7 @@ export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committ
       objects.push(...r.objects); cur = r.oid; replayed.push({ from: last.oid, to: r.oid, tree: r.treeOid });
     } else {
       for (const c of chain) {
-        const r = await transplant(t, cache, { base: commits.get(c.parents[0]).tree, ours: curTree, theirs: c.tree }, { parent: cur, author: c.author, committer: who, message: c.message, extra: carriedExtra(c.extra) }, signer, out);
+        const r = await transplant(t, cache, { base: commits.get(c.parents[0]).tree, ours: curTree, theirs: c.tree }, { parent: cur, author: c.author, committer: who, message: c.message, encoding: c.encoding, extra: carriedExtra(c.extra) }, signer, out);
         if (r.conflicts) throw fail('merge_conflict', `replaying ${c.oid.slice(0, 8)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).map(p => `${p} (${r.reasons[p]})`).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons, commit: c.oid, replayed });
         // git rebase --empty=drop (the default): a commit that did not start empty but becomes empty is dropped
         if (r.treeOid === curTree && c.tree !== commits.get(c.parents[0]).tree) { dropped.push(c.oid); continue; }
@@ -117,7 +117,7 @@ export async function pickCommit(url, { ref = 'refs/heads/main', commit, committ
     const subject = (c.message ?? '').split('\n')[0];
     const r = await transplant(t, cache,
       revert ? { base: c.tree, ours: tInfo.tree, theirs: p.tree } : { base: p.tree, ours: tInfo.tree, theirs: c.tree },
-      { parent: target, author: revert ? who : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
+      { parent: target, author: revert ? who : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
     if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
     if (r.treeOid === tInfo.tree) return outcome('empty', { outcome: 'empty', ref, oid: target });
     const pushed = await push(t, { ref, oldOid: target, newOid: r.oid, objects: uniqueObjects(r.objects) });
