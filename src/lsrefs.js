@@ -2,7 +2,8 @@
 import { fail } from './errors.js';
 import { pkts } from './pktline.js';
 import { td } from './bytes.js';
-import { limitError } from './limits.js';
+import { limitError, requireLimit } from './limits.js';
+import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
 import { OID_HEX_CHARS, SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 
@@ -38,17 +39,29 @@ export const lsRefsBody = (prefixes = [], { peel = true, symrefs = true } = {}) 
   pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n'].filter(Boolean), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
 
 export async function lsRefs(t, prefixes = []) {
+  for (const p of prefixes) validateWire(p, 'ref prefix');
+  const maxBytes = requireLimit(t.limits, 'maxLsRefsBytes');
+  const maxRefs = requireLimit(t.limits, 'maxRefs');
   return coded('protocol', () => t.tracer.span('git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async span => {
     const refs = new Map();
     let head = null;
+    // gitprotocol-v2 ls-refs: output = *ref flush-pkt. git dies "expected flush after ref listing" (connect.c) when the
+    // flush is missing; a truncated listing must never read as "these are all the refs" (found by the calibration harness).
+    let ended = false;
+    let bytes = 0;
     for await (const f of frames(t, 'git-upload-pack', lsRefsBody(prefixes), span)) {
-      if (f.kind !== 'data') continue;
+      if (ended) throw proto(`ls-refs: ${f.kind} after the terminating flush-pkt`);
+      if (f.kind === 'flush') { ended = true; continue; }
+      if (f.kind !== 'data') throw proto(`ls-refs: unexpected ${f.kind} in ref listing`);
+      bytes += f.payload.length;
+      if (bytes > maxBytes) throw limitError('ls-refs bytes', bytes, maxBytes);
       const line = td.decode(f.payload).trim();
       const rec = parseLsRefLine(line);
-      if (refs.size >= t.limits.maxRefs) throw limitError('ls-refs lines', refs.size + 1, t.limits.maxRefs);
+      if (refs.size >= maxRefs) throw limitError('ls-refs lines', refs.size + 1, maxRefs);
       refs.set(rec.name, rec);
       if (rec.name === 'HEAD' && rec['symref-target']) head = rec['symref-target'];
     }
+    if (!ended) throw proto('ls-refs: response ended without the terminating flush-pkt');
     span.set({ 'git.ls_refs.count': refs.size, 'git.ls_refs.refs': [...refs.values()].slice(0, SPAN_REFS).map(r => `${r.oid} ${r.name}`), 'git.ls_refs.head': head ?? '' });
     return { refs, head };
   }));

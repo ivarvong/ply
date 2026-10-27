@@ -23,7 +23,7 @@ import { validateRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
-import { limitError } from './limits.js';
+import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.js';
 
 const EMPTY = [];
 const same = (a, b) => (a === null && b === null) || (a !== null && b !== null && a.mode === b.mode && a.oid === b.oid);
@@ -80,20 +80,21 @@ export function bestBases(commits, a, b) {
 // Effect: ancestors of `head` as oid → distance, via commit-only packs (tree:0 keeps trees and blobs out) of doubling depth.
 export async function ancestors(t, head, depth) {
   const r = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
-  const commits = new Map(); for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) commits.set(oid, parseCommit(o.data));
+  const commits = new Map(); for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) commits.set(oid, parseCommit(o.data, t.limits));
   const dist = new Map([[head, 0]]); const q = [head];
-  while (q.length) { const c = q.shift(); const d = dist.get(c); for (const p of commits.get(c)?.parents ?? []) if (!dist.has(p)) { dist.set(p, d + 1); q.push(p); } }
+  for (let i = 0; i < q.length; i++) { const c = q[i]; const d = dist.get(c); for (const p of commits.get(c)?.parents ?? []) if (!dist.has(p)) { dist.set(p, d + 1); q.push(p); } }
   return { dist, commits, complete: r.shallow.length === 0 }; // no shallow boundary reported → the whole history fit in the depth
 }
 
-export async function mergeBase(t, a, b, { maxDepth = 1024 } = {}) {
-  for (let depth = 8; depth <= maxDepth; depth *= 2) {
+export async function mergeBase(t, a, b, { maxDepth } = {}) {
+  const cap = maxDepth === undefined ? requireLimit(t.limits, 'maxMergeDepth') : finiteLimit(maxDepth, 'maxMergeDepth');
+  for (let depth = 8; depth <= cap; depth *= 2) {
     const [A, B] = await Promise.all([ancestors(t, a, depth), ancestors(t, b, depth)]);
     const commits = new Map([...B.commits, ...A.commits]);
     const { best, truncated } = bestBases(commits, a, b);
     if (!truncated || (A.complete && B.complete)) return { base: best.length === 1 ? best[0] : null, bases: best, depth, commits };
   }
-  throw limitError('merge-base search depth', maxDepth, maxDepth);
+  throw limitError('merge-base search depth', cap, cap);
 }
 
 // Effect: the paths `side` adds relative to `base` (both tree oids), recursing only into differing subtrees; a directory
@@ -125,7 +126,7 @@ async function addedPaths(read, base, side, prefix = '') {
 export async function mergeTrees(t, cache, { base, ours, theirs, prefix = '', removed = null, mergeBlob = null, driverFor = null }, out = null) {
   const top = out === null;
   out = out ?? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: {}, contentMerged: 0 };
-  const read = async oid => { if (!oid) return EMPTY; let data = cache.get(oid); if (!data) { data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); out.fetched++; } return parseTree(data); };
+  const read = async oid => { if (!oid) return EMPTY; let data = cache.get(oid); if (!data) { data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); out.fetched++; } return parseTree(data, t.limits); };
   const [B, O, T] = await Promise.all([read(base), read(ours), read(theirs)]);
   const r = threeWay(B, O, T);
   const { entries } = r;
@@ -175,7 +176,7 @@ export async function mergeTrees(t, cache, { base, ours, theirs, prefix = '', re
 // 'text' | 'union' | 'binary' as find_ll_merge_driver picks: merge set → text, -merge → binary, merge=binary|union|text
 // → that, any other name → text (a custom driver is server configuration we cannot see), unspecified → text.
 export function attributeDrivers(t, cache, treeOid) {
-  const readTree = async oid => { let data = cache.get(oid); if (!data) { data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); } return parseTree(data); };
+  const readTree = async oid => { let data = cache.get(oid); if (!data) { data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); } return parseTree(data, t.limits); };
   const dirTree = new Map([['', Promise.resolve(treeOid)]]), files = new Map();
   const treeOf = dir => {
     if (!dirTree.has(dir)) {
@@ -205,9 +206,11 @@ export function attributeDrivers(t, cache, treeOid) {
 // Effect: the content half of a both-sides-changed file — git's shortcuts first (one side equal to base or both equal),
 // then the three blobs (bounded by limits.maxMergeBlobBytes) through the ported xdiff merge. Returns { oid, data? } or
 // { conflict: true, reason }. Shared by merge, rebase, cherry-pick and revert.
-export function blobMerger(t, { maxMergeBlobBytes = 8 * 1024 * 1024, rediff = 'myers', stats = { merged: 0, undecided: 0, unioned: 0, attrBinary: 0 } } = {}) {
+export function blobMerger(t, { maxMergeBlobBytes = LIMIT_MERGE_BLOB, rediff = 'myers', stats = { merged: 0, undecided: 0, unioned: 0, attrBinary: 0 } } = {}) {
   if (!['undecided', 'skip', 'myers'].includes(rediff)) throw fail('bad_request', `rediff must be 'undecided', 'skip' or 'myers', not ${JSON.stringify(rediff)}`);
-  const bounded = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(t.limits.maxObjectSize, maxMergeBlobBytes) } } });
+  const blobCap = finiteLimit(maxMergeBlobBytes, 'maxMergeBlobBytes');
+  const objectCap = requireLimit(t.limits, 'maxObjectSize');
+  const bounded = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(objectCap, blobCap) } } });
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map();
@@ -221,7 +224,7 @@ export function blobMerger(t, { maxMergeBlobBytes = 8 * 1024 * 1024, rediff = 'm
     let B, O, T;
     try { [B, O, T] = await Promise.all([get(base), get(ours), get(theirs)]); }
     catch (e) { if (e.code === 'limit_exceeded') return { conflict: true, reason: 'too large to merge' }; throw e; }
-    const m = mergeLines(B, O, T, { maxBytes: maxMergeBlobBytes, rediff, driver });
+    const m = mergeLines(B, O, T, { maxBytes: blobCap, rediff, driver });
     if (!m.clean) { if (m.reason === 'undecided') stats.undecided++; return { conflict: true, reason: m.reason === 'content' ? 'content (both sides changed the same lines)' : m.reason === 'undecided' ? 'content (git would decide this with a classic-diff fallback ply does not implement)' : m.reason }; }
     stats.merged++; if (m.unioned) stats.unioned++;
     const oid = hashObject('blob', m.data); made.set(oid, m.data);
@@ -249,7 +252,7 @@ export async function attributeTree(t, attributes, trees) {
   if (typeof attributes !== 'string') throw fail('bad_request', 'attributes must be null, ours, theirs, base, a ref or a commit oid');
   let oid = attributes;
   if (!/^[0-9a-f]{40}$/.test(attributes)) { validateRef(attributes); oid = (await lsRefs(t, [attributes])).refs.get(attributes)?.oid; if (!oid) throw fail('not_found', `attributes ref ${attributes} not found`); }
-  return parseCommit((await fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })).data).tree;
+  return parseCommit((await fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits).tree;
 }
 
 // Fast-forward `ref` to `to`, expecting it to be at `from` (CAS). Empty pack: the server already has the objects.
@@ -262,7 +265,9 @@ export async function deleteBranch(t, { ref, oid }) {
 }
 
 export async function mergeBranch(url, { ref = 'refs/heads/main', from, author, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts } = {}) {
-  validateRef(ref); validateRef(from); if (author) validateIdent(author); if (message) validateMessage(message); validateAttributes(attributes);
+  validateRef(ref); validateRef(from);
+  const person = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+  if (message) validateMessage(message); validateAttributes(attributes);
   return operation('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }) => {
     const { refs } = await lsRefs(t, [ref, from]);
     const ours = refs.get(ref)?.oid, theirs = refs.get(from)?.oid;
@@ -283,16 +288,16 @@ export async function mergeBranch(url, { ref = 'refs/heads/main', from, author, 
     if (fastForwardOnly) throw fail('not_fast_forward', `${ref} has moved past the merge base; a merge commit would be needed`);
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     const [cB, cO, cT] = await Promise.all([base, ours, theirs].map(oid => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })));
-    const trees = { base: parseCommit(cB.data).tree, ours: parseCommit(cO.data).tree, theirs: parseCommit(cT.data).tree };
-    const mergeBlob = blobMerger(t, { maxMergeBlobBytes: t.limits.maxMergeBlobBytes, rediff });
+    const trees = { base: parseCommit(cB.data, t.limits).tree, ours: parseCommit(cO.data, t.limits).tree, theirs: parseCommit(cT.data, t.limits).tree };
+    const mergeBlob = blobMerger(t, { maxMergeBlobBytes: requireLimit(t.limits, 'maxMergeBlobBytes'), rediff });
     const attrTree = await attributeTree(t, attributes, trees);
     root.set({ 'git.merge.attributes': attributes ?? '' });
     const merged = await mergeTrees(t, cache, { ...trees, mergeBlob, driverFor: attrTree ? attributeDrivers(t, cache, attrTree) : null });
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': merged.objects.filter(o => o.type === TYPE.TREE).length, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
     if (merged.conflicts.length) throw fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons });
     const treeOid = merged.oid ?? hashObject('tree', encodeTree([]));
-    if (!author) throw fail('bad_request', 'author is required for a merge commit');
-    const who = ident({ ...author, time });
+    if (!person) throw fail('bad_request', 'author is required for a merge commit');
+    const who = ident(person);
     let commitData = encodeCommit({ tree: treeOid, parents: [ours, theirs], author: who, committer: who, message: (message ?? `Merge ${from.replace(/^refs\/heads\//, '')} into ${ref.replace(/^refs\/heads\//, '')}`).replace(/\n?$/, '\n') });
     if (signer) commitData = await signCommit(commitData, signer);
     const oid = hashObject('commit', commitData);

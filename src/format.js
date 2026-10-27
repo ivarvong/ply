@@ -120,6 +120,14 @@ export const PROTOCOL_V2 = 2;
  * is "bad time zone".
  */
 export const IDENT_TZ_DIGITS = 4;
+/**
+ * Caller-supplied offsets only. fsck_ident does not range-check (`+9999` is a well-formed zone on the wire;
+ * checkIdent stays that loose). A caller is held to the offsets civil time uses: −12:00 (Etc/GMT+12) through
+ * +14:00 (Pacific/Kiritimati), minutes 00..59, and the extreme hours only on the hour.
+ */
+export const IDENT_TZ_HOUR_MIN = -12;
+export const IDENT_TZ_HOUR_MAX = 14;
+export const IDENT_TZ_MINUTE_MAX = 59;
 
 // ---- commit headers (Documentation/gitformat-commit; commit.c commit_tree_extended) ----
 // commit-tree writes exactly one tree, then zero or more parent lines, then one author, one committer,

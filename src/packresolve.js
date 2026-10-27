@@ -6,7 +6,7 @@ import { fail } from './errors.js';
 import { inflate } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';
-import { DEFAULT_LIMITS, limitError } from './limits.js';
+import { DEFAULT_LIMITS, limitError, requireLimit, finiteLimit } from './limits.js';
 import { spliceDelta } from './pack.js';
 import { take } from './bytes.js';
 import {
@@ -66,18 +66,23 @@ export function readOfsDelta(buf, p) {
 }
 
 // ---- parse ----
-// Optional tighter caps live on the caller's limits object. Absent means unlimited, which is what every
-// existing caller already observed.
-export const packParseOpts = (limits = DEFAULT_LIMITS) => ({ limits, maxObjects: limits.maxPackObjects ?? Infinity, maxInflatedTotal: limits.maxInflatedTotal ?? Infinity });
+// Caps are required. A missing field used to become Infinity (`??`), which disabled the check; finiteLimit rejects that.
+const capOf = (value, limits, key) => (value === undefined ? requireLimit(limits, key) : finiteLimit(value, key));
+export const packParseOpts = (limits = DEFAULT_LIMITS) => ({ limits, maxObjects: requireLimit(limits, 'maxPackObjects'), maxInflatedTotal: requireLimit(limits, 'maxInflatedTotal') });
 
 // @decoder parsePack prefix=pack
-export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS, maxObjects = Infinity, maxInflatedTotal = Infinity } = {}) {
+export function parsePack(buf, opts = {}) {
+  const verify = opts.verify !== false;
+  const limits = opts.limits ?? DEFAULT_LIMITS;
+  const maxObjects = capOf(opts.maxObjects, limits, 'maxPackObjects');
+  const maxInflatedTotal = capOf(opts.maxInflatedTotal, limits, 'maxInflatedTotal');
+  const maxObjectSize = requireLimit(limits, 'maxObjectSize');
   const minPack = PACK_HEADER_BYTES + PACK_TRAILER_BYTES;
   if (buf.length < minPack || !take(buf, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw corrupt('pack: bad signature');
   const version = readUint32BE(buf, PACK_SIGNATURE.length);
   const count = readUint32BE(buf, PACK_SIGNATURE.length + UINT32_BYTES);
   if (version !== PACK_VERSION) throw corrupt(`pack: unsupported version ${version}`);
-  // A hostile count must fail before the loop allocates. Defaults preserve every existing caller.
+  // A hostile count must fail before the loop allocates one object record.
   if (count > maxObjects) throw limitError('pack objects', count, maxObjects);
   const objects = [];
   const stats = { version, count, full: 0, ofsDelta: 0, refDelta: 0, byType: {}, compressed: 0, inflated: 0, inflate: { blocks: 0, stored: 0, fixed: 0, dynamic: 0 } };
@@ -100,10 +105,10 @@ export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS, maxObje
       stats.refDelta++;
     } else if (type >= TYPE.COMMIT && type <= TYPE.TAG) stats.full++;
     else throw corrupt(`pack: bad object type ${type} at ${offset}`);
-    if (size > limits.maxObjectSize) throw limitError('pack object size', size, limits.maxObjectSize);
+    if (size > maxObjectSize) throw limitError('pack object size', size, maxObjectSize);
     // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
     if (stats.inflated + size > maxInflatedTotal) throw limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal);
-    const { out, consumed, stats: is } = inflate(buf, p, { expectedSize: size, maxOutput: limits.maxObjectSize });
+    const { out, consumed, stats: is } = inflate(buf, p, { expectedSize: size, maxOutput: maxObjectSize });
     stats.compressed += consumed; stats.inflated += size;
     stats.inflate.blocks += is.blocks; stats.inflate.stored += is.stored; stats.inflate.fixed += is.fixed; stats.inflate.dynamic += is.dynamic;
     stats.byType[TYPE_NAME[type]] = (stats.byType[TYPE_NAME[type]] ?? 0) + 1;
@@ -123,7 +128,8 @@ export function parsePack(buf, { verify = true, limits = DEFAULT_LIMITS, maxObje
 const deltaByte = (delta, p) => ({ b: take(delta, p, 1)[0], p: p + 1 });
 
 // @decoder applyDelta prefix=delta
-export function applyDelta(base, delta, { maxResult = DEFAULT_LIMITS.maxDeltaResult } = {}) {
+export function applyDelta(base, delta, opts = {}) {
+  const maxResult = opts.maxResult === undefined ? requireLimit(DEFAULT_LIMITS, 'maxDeltaResult') : finiteLimit(opts.maxResult, 'maxDeltaResult');
   if (delta.length < DELTA_SIZE_MIN) throw corrupt('delta: shorter than DELTA_SIZE_MIN');
   let p = 0, baseSize, resultSize;
   // readVarint uses take(), so a header that runs past the buffer throws a short read before p can pass the end.
@@ -177,14 +183,22 @@ export function makeDelta(base, target) {
 // ---- resolve ----
 // objects from parsePack; external(oid) -> {type, data} for thin bases. Returns Map oid -> resolved.
 export function resolvePack(parsed, external = () => undefined, limits = DEFAULT_LIMITS) {
+  const maxChain = requireLimit(limits, 'maxDeltaChain');
+  const maxDelta = requireLimit(limits, 'maxDeltaResult');
+  const inflatedCap = requireLimit(limits, 'maxInflatedTotal');
   const byOffset = new Map(parsed.objects.map(o => [o.offset, o]));
+  // Full objects are hashed once. REF_DELTA lookup is this map, not parsed.objects.find (that scan is
+  // O(n) per delta, O(passes·n²) on a pack of tiny ref-deltas). Resolved deltas join the same map.
+  const byOid = new Map();
   const resolved = new Map();
   const memo = new Map();
-  const stats = { maxChain: 0, externalBases: 0 };
+  const stats = { maxChain: 0, externalBases: 0, baseLookups: 0 };
+  // Bytes already held (inflated instructions and bases) plus each delta result, which is a new buffer.
+  let held = parsed.stats?.inflated ?? parsed.objects.reduce((n, o) => n + (o.data?.length ?? 0), 0);
   let allowExternal = false;
   const resolveObj = (obj, depth = 0) => {
     if (memo.has(obj.offset)) return memo.get(obj.offset);
-    if (depth > limits.maxDeltaChain) throw limitError('delta chain depth', depth, limits.maxDeltaChain);
+    if (depth > maxChain) throw limitError('delta chain depth', depth, maxChain);
     let r;
     if (obj.baseOffset !== undefined || obj.baseOid !== undefined) {
       let base;
@@ -193,7 +207,8 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
         if (!b) throw corrupt(`pack: ofs delta base not at object boundary ${obj.baseOffset}`);
         base = resolveObj(b, depth + 1);
       } else {
-        const inPack = parsed.objects.find(o => o.oid === obj.baseOid) ?? byDeltaOid.get(obj.baseOid);
+        stats.baseLookups++;
+        const inPack = byOid.get(obj.baseOid);
         if (inPack) base = resolveObj(inPack, depth + 1);
         else {
           const ext = allowExternal ? external(obj.baseOid) : undefined;
@@ -202,7 +217,11 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
           base = { type: ext.type, data: ext.data, chain: 0 };
         }
       }
-      const { out, ops } = applyDelta(base.data, obj.data, { maxResult: limits.maxDeltaResult });
+      // The result buffer does not exist until applyDelta passes maxResult. Room is what the aggregate cap has left.
+      const room = inflatedCap - held;
+      if (room < 0) throw limitError('pack inflated bytes', held, inflatedCap);
+      const { out, ops } = applyDelta(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
+      held += out.length;
       r = { type: base.type, data: out, chain: base.chain + 1, deltaOps: ops };
     } else r = { type: obj.type, data: obj.data, chain: 0 };
     r.oid = hashObject(TYPE_NAME[r.type], r.data);
@@ -211,20 +230,16 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
     if (r.chain > stats.maxChain) stats.maxChain = r.chain;
     memo.set(obj.offset, r);
     resolved.set(r.oid, r);
+    byOid.set(r.oid, obj);
     return r;
   };
-  // pre-hash full objects so REF_DELTA bases appearing later in-pack can be found by oid
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject(TYPE_NAME[o.type], o.data);
-  // a REF_DELTA base can itself be a delta object anywhere in the pack: resolve what we can, learn oids, repeat
-  const byDeltaOid = new Map();
+  for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) { byOid.set(o.oid, o); resolveObj(o); }
   let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
-  for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) resolveObj(o);
-  // oxlint-disable-next-line no-magic-numbers -- fixpoint iterations, not a pack field width
-  const RESOLVE_PASSES = 64;
-  for (let pass = 0; pending.length && pass < RESOLVE_PASSES; pass++) {
+  for (let pass = 0; pending.length && pass < maxChain; pass++) {
     const next = [];
     for (const o of pending) {
-      try { const r = resolveObj(o); byDeltaOid.set(r.oid, o); }
+      try { resolveObj(o); }
       catch (e) { if (e.code === 'pack_corrupt' && /ref delta base .* not found/.test(e.message)) next.push(o); else throw e; }
     }
     if (next.length === pending.length) {

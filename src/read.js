@@ -19,7 +19,7 @@ import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { KIND } from './otel.js';
-import { DEFAULT_LIMITS, limitError } from './limits.js';
+import { DEFAULT_LIMITS } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -72,15 +72,15 @@ const identView = line => {
 
 // Pure: the JSON view of a commit object. `signed` is whether it carries a gpgsig/gpgsig-sha256 header (any format:
 // OpenPGP, SSH, X.509); it says nothing about whether the signature verifies. The message is the raw body, UTF-8.
-export function commitView(data) {
-  const c = parseCommit(data);
+export function commitView(data, limits = DEFAULT_LIMITS) {
+  const c = parseCommit(data, limits);
   return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message ?? '', signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
 }
 
 export async function readCommit(url, { ref = null } = {}, opts = {}) {
   return operation('read_commit', url, { ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } }, async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
-    const view = commitView(await fetchCommit(t, commit));
+    const view = commitView(await fetchCommit(t, commit), t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
   });
 }
@@ -88,7 +88,7 @@ export async function readCommit(url, { ref = null } = {}, opts = {}) {
 // Effect: walk `comps` from the commit's root tree. Returns { commit, levels, entry } where entry is the last
 // component's tree entry (null for the root: comps = []).
 async function walk(t, root, tracer, { commit, comps, cache, limits }) {
-  const info = parseCommit(await fetchCommit(t, commit));
+  const info = parseCommit(await fetchCommit(t, commit), limits);
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.tree });
   let treeOid = info.tree, entry = null;
   for (let depth = 0; depth < comps.length; depth++) {
@@ -97,8 +97,7 @@ async function walk(t, root, tracer, { commit, comps, cache, limits }) {
       let data = cache.get(treeOid);
       span.set({ 'git.read.tree.cache_hit': !!data });
       if (!data) { data = (await fetchObject(t, { oid: treeOid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(treeOid, data); }
-      const entries = parseTree(data);
-      if (entries.length > limits.maxTreeEntries) throw limitError('tree entries', entries.length, limits.maxTreeEntries);
+      const entries = parseTree(data, limits);
       const e = entries.find(x => x.name === name);
       span.set({ 'git.read.tree.entries': entries.length, 'git.read.tree.entry.found': !!e, 'git.read.tree.entry.mode': e?.mode ?? '' });
       if (!e) throw fail('not_found', `path component ${name} not found`);
@@ -125,8 +124,7 @@ export async function listTree(url, { ref = null, path = '' } = {}, { cache = ne
     const oid = entry ? entry.oid : tree;
     let data = cache.get(oid);
     if (!data) { data = (await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(oid, data); }
-    const entries = parseTree(data);
-    if (entries.length > limits.maxTreeEntries) throw limitError('tree entries', entries.length, limits.maxTreeEntries);
+    const entries = parseTree(data, limits);
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
   });
 }

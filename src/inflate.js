@@ -5,6 +5,7 @@
 
 import { fail } from './errors.js';
 import { take } from './bytes.js';
+import { DEFAULT_LIMITS, requireLimit, finiteLimit } from './limits.js';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ADLER_BYTES, ADLER_MOD,
   DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC, DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,
@@ -47,7 +48,10 @@ export function adler32(bytes, a = 1, b = 0) {
 
 // @decoder inflate prefix=inflate
 
-export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = false, maxOutput = Infinity } = {}) {
+export function inflate(buf, pos = 0, opts = {}) {
+  const { expectedSize, verifyAdler = true, raw = false } = opts;
+  // Omitted means the object cap. An explicit Infinity used to disable the check (`n > Infinity` is false).
+  const maxOutput = opts.maxOutput === undefined ? requireLimit(DEFAULT_LIMITS, 'maxObjectSize') : finiteLimit(opts.maxOutput, 'maxObjectSize');
   const start = pos;
   const stats = { blocks: 0, stored: 0, fixed: 0, dynamic: 0, literals: 0, matches: 0, matchBytes: 0, maxDist: 0, maxLen: 0 };
   if (!raw) {

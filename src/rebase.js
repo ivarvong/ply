@@ -16,7 +16,7 @@ import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attrib
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validateRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
-import { limitError } from './limits.js';
+import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 const short = r => r.replace(/^refs\/heads\//, '');
 
@@ -28,7 +28,7 @@ export function carriedExtra(extra) {
 }
 
 // Pure: the linear chain of commits from `base` (exclusive) to `tip`, oldest first; throws if a merge commit is in it.
-export function linearChain(commits, tip, base, max = 10000) {
+export function linearChain(commits, tip, base, max = LIMIT_REBASE_COMMITS) {
   const chain = [];
   for (let c = tip; c !== base; c = commits.get(c).parents[0]) {
     const info = commits.get(c);
@@ -45,7 +45,7 @@ async function transplant(t, cache, { base, ours, theirs }, { parent, author, co
   // attributes: 'ours' is the tree being built on (what a worktree rebase/cherry-pick reads); a ref resolves once
   const fixed = out.attributes !== null && !['ours', 'theirs', 'base'].includes(out.attributes);
   const attrTree = fixed ? (out.attrTree ??= await attributeTree(t, out.attributes, {})) : await attributeTree(t, out.attributes, { base, ours, theirs });
-  const m = await mergeTrees(t, cache, { base, ours, theirs, mergeBlob: out.mergeBlob ??= blobMerger(t, { maxMergeBlobBytes: t.limits.maxMergeBlobBytes, rediff: out.rediff }), driverFor: attrTree ? attributeDrivers(t, cache, attrTree) : null });
+  const m = await mergeTrees(t, cache, { base, ours, theirs, mergeBlob: out.mergeBlob ??= blobMerger(t, { maxMergeBlobBytes: requireLimit(t.limits, 'maxMergeBlobBytes'), rediff: out.rediff }), driverFor: attrTree ? attributeDrivers(t, cache, attrTree) : null });
   out.fetched += m.fetched;
   if (m.conflicts.length) return { conflicts: m.conflicts, reasons: m.reasons };
   const treeOid = m.oid ?? hashObject('tree', new Uint8Array(0));
@@ -58,7 +58,10 @@ async function transplant(t, cache, { base, ours, theirs }, { parent, author, co
 
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committer, author, time = Math.floor(Date.now() / 1000), squash = false, message = null }, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts } = {}) {
-  validateAttributes(attributes); validateRef(ref); validateRef(onto); validateIdent(committer); if (author) validateIdent(author); if (message !== null) validateMessage(message);
+  validateAttributes(attributes); validateRef(ref); validateRef(onto);
+  const committerPerson = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
+  const authorPerson = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+  if (message !== null) validateMessage(message);
   return operation('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }) => {
     const { refs } = await lsRefs(t, [ref, onto]);
     const tip = refs.get(ref)?.oid, target = refs.get(onto)?.oid;
@@ -75,14 +78,14 @@ export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committ
       await push(t, { ref, oldOid: tip, newOid: target, objects: [] });
       return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 });
     }
-    const chain = linearChain(commits, tip, base, limits.maxRebaseCommits ?? 10000);
+    const chain = linearChain(commits, tip, base, requireLimit(limits, 'maxRebaseCommits'));
     root.set({ 'git.rebase.commits': chain.length });
-    const targetTree = parseCommit((await fetchObject(t, { oid: target, expectType: TYPE.COMMIT, deepen: 1 })).data).tree;
-    const who = ident({ ...committer, time });
+    const targetTree = parseCommit((await fetchObject(t, { oid: target, expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits).tree;
+    const who = ident(committerPerson);
     const out = { fetched: 0, rediff, attributes }; const objects = []; let cur = target, curTree = targetTree; const replayed = [], dropped = [];
     if (squash) {
       const first = chain[0], last = chain[chain.length - 1];
-      const r = await transplant(t, cache, { base: commits.get(base).tree, ours: targetTree, theirs: last.tree }, { parent: target, author: author ? ident({ ...author, time }) : first.author, committer: who, message: message ?? chain.map(c => (c.message ?? '').replace(/\n+$/, '')).filter(Boolean).join('\n\n') + '\n', extra: [] }, signer, out);
+      const r = await transplant(t, cache, { base: commits.get(base).tree, ours: targetTree, theirs: last.tree }, { parent: target, author: authorPerson ? ident(authorPerson) : first.author, committer: who, message: message ?? chain.map(c => (c.message ?? '').replace(/\n+$/, '')).filter(Boolean).join('\n\n') + '\n', extra: [] }, signer, out);
       if (r.conflicts) throw fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
       objects.push(...r.objects); cur = r.oid; replayed.push({ from: last.oid, to: r.oid, tree: r.treeOid });
     } else {
@@ -102,17 +105,19 @@ export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committ
 
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
 export async function pickCommit(url, { ref = 'refs/heads/main', commit, committer, time = Math.floor(Date.now() / 1000), revert = false, message = null }, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts } = {}) {
-  validateAttributes(attributes); validateRef(ref); validateIdent(committer); if (message !== null) validateMessage(message);
+  validateAttributes(attributes); validateRef(ref);
+  const committerPerson = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
+  if (message !== null) validateMessage(message);
   if (!/^[0-9a-f]{40}$/.test(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');
   const op = revert ? 'revert' : 'cherry_pick', name = `git.${op}`;
   return operation(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit } }, async ({ t, root, outcome }) => {
     const { refs } = await lsRefs(t, [ref]);
     const target = refs.get(ref)?.oid; if (!target) throw fail('not_found', `ref ${ref} not found`);
     const [cT, cC] = await Promise.all([target, commit].map(oid => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })));
-    const tInfo = parseCommit(cT.data), c = parseCommit(cC.data);
+    const tInfo = parseCommit(cT.data, t.limits), c = parseCommit(cC.data, t.limits);
     if (c.parents.length !== 1) throw fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
-    const p = parseCommit((await fetchObject(t, { oid: c.parents[0], expectType: TYPE.COMMIT, deepen: 1 })).data);
-    const who = ident({ ...committer, time });
+    const p = parseCommit((await fetchObject(t, { oid: c.parents[0], expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits);
+    const who = ident(committerPerson);
     const out = { fetched: 0, rediff, attributes };
     const subject = (c.message ?? '').split('\n')[0];
     const r = await transplant(t, cache,
