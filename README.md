@@ -6,7 +6,7 @@ Every byte and every roundtrip is recorded as an OTLP span. The test suite is a 
 
 The hosted HTTP API and the public repository viewer live in [ply-web](https://github.com/ivarvong/ply-web) (the Cloudflare Worker `ply`). This repository is the git client.
 
-`parsePack` accepts optional `maxObjects` and `maxInflatedTotal`. Omitting them leaves those caps unlimited, which is what existing callers do. The Worker also uses these entry-point exports: `validateIdent`, `validateRef`, `validatePath`, `concat`, `limitError`, `isFilterRejection`, `fromAny`, `packParseOpts`.
+`parsePack` accepts optional `maxObjects` and `maxInflatedTotal`. Omitting them leaves those caps unlimited, which is what existing callers do. [ply-web](https://github.com/ivarvong/ply-web) also uses these entry-point exports: `validateIdent`, `validateRef`, `validatePath`, `concat`, `limitError`, `isFilterRejection`, `fromAny`, `packParseOpts`.
 
 ```js
 import { editFile, Tracer, jsonlExporter } from 'ply';
