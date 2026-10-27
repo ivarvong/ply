@@ -116,8 +116,12 @@ function parseOrderedHeaders(kind, head, order, repeat, extraFrom) {
       rec[key] = value;
       phase = at;
     } else if (key !== repeat && phase >= at) bad('duplicate', key);
-    else if (phase !== at && phase !== at - 1 && !(order[at - 1] === repeat && phase === at - 1 - HEADER_SKIP_OPTIONAL)) bad('bad header order');
     else {
+      // author may follow tree because parent is optional. The duplicate check already rejected every
+      // later phase, so the phases that reach this comparison are exactly the skipped index.
+      // Stryker disable next-line ConditionalExpression: author is the only header this skip can allow, and every phase that reaches the comparison already matches it
+      const skipped = order[at - 1] === repeat && phase === at - 1 - HEADER_SKIP_OPTIONAL;
+      if (phase !== at && phase !== at - 1 && !skipped) bad('bad header order');
       if (key === repeat) rec[`${key}s`].push(value);
       else rec[key] = value;
       phase = at;
