@@ -15,12 +15,16 @@ import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
 import { editFile } from '../src/edit.js';
+import { mergeBranch } from '../src/merge.js';
+import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits } from '../src/limits.js';
-import { applyDelta, parsePack, buildPack, encodeObjHeader } from '../src/pack.js';
+import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
+import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
+import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1 } from '../src/sha1.js';
 import { concat, te } from '../src/bytes.js';
+import { spawn } from 'node:child_process';
 
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 const AUTHOR = { name: 'adv', email: 'adv@x' };
@@ -193,14 +197,49 @@ test('I5 caller input validation happens before any I/O', async () => {
       e => e.code === 'bad_request' && (what === undefined || e.what === what), JSON.stringify(over));
     assert.equal(calls, 0, 'no I/O before validation');
   }
-  // and the server agrees: an ident git would mangle is rejected by receive.fsckObjects if it ever got through
+  // encodeCommit refuses the injected header itself. The same bytes, written without that helper, are still
+  // rejected by receive.fsckObjects: defense in depth if a caller pushes raw objects.
+  const { encodeCommit } = await import('../src/objects.js');
+  assert.throws(() => encodeCommit({ tree: 'a'.repeat(40), parents: ['b'.repeat(40)], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' }), e => e.code === 'bad_request');
   const repo = freshRepo();
   const c = new GitHttp(`${srv.url}/${repo.name}.git`, { tracer: new Tracer() });
-  const { encodeCommit, hashObject, TYPE } = await import('../src/objects.js');
   const tree = git(repo.bare, ['rev-parse', 'main^{tree}']).trim();
-  const bad = encodeCommit({ tree, parents: [repo.head], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' });
+  const bad = te.encode(`tree ${tree}\nparent ${repo.head}\nauthor x <a@x> 1 +0000\ncommitter y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000\n\nm\n`);
   await assert.rejects(c.push({ ref: 'refs/heads/main', oldOid: repo.head, newOid: hashObject('commit', bad), objects: [{ type: TYPE.COMMIT, data: bad }] }), e => e.code === 'push_rejected');
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head);
+});
+
+test('I5 every operation rejects a bad ident field before any fetch', async () => {
+  const good = { name: 'a', email: 'a@x' };
+  const fields = [
+    ['name', { name: 'a\nparent 0000000000000000000000000000000000000000', email: 'a@x' }, 'author name', 1700000000],
+    ['email', { name: 'a', email: 'a\nb@x' }, 'author email', 1700000000],
+    ['time', good, 'time', -1],
+    ['time-huge', good, 'time', Number.MAX_SAFE_INTEGER + 1],
+    ['tz', { ...good, tz: '+0000\nparent 0000000000000000000000000000000000000000' }, 'tz', 1700000000],
+    ['tz-range', { ...good, tz: '+9999' }, 'tz', 1700000000],
+  ];
+  const once = async (label, what, fn) => {
+    let calls = 0;
+    const fetchImpl = async () => { calls++; throw new Error('should not be called'); };
+    await assert.rejects(fn(fetchImpl), e => e.code === 'bad_request' && e.what === what, label);
+    assert.equal(calls, 0, label);
+  };
+  for (const [field, person, what, time] of fields) {
+    await once(`editFile ${field}`, what, fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: person, message: 'm', time }, { fetchImpl }));
+    await once(`mergeBranch ${field}`, what, fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: person, message: 'm', time }, { fetchImpl }));
+    await once(`rebaseBranch ${field}`, what, fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: person, author: person, time }, { fetchImpl }));
+    await once(`cherryPick ${field}`, what, fetchImpl => cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: person, time }, { fetchImpl }));
+    await once(`revertCommit ${field}`, what, fetchImpl => revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'b'.repeat(40), committer: person, time }, { fetchImpl }));
+  }
+  await once('edit message', 'message', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'x\0y' }, { fetchImpl }));
+  await once('edit ref', 'ref', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'm', ref: 'refs/heads/main\n' }, { fetchImpl }));
+  await once('merge ref', 'ref', fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', from: 'refs/heads/other', author: good, message: 'm' }, { fetchImpl }));
+  await once('merge message', 'message', fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: good, message: 'x\0y' }, { fetchImpl }));
+  await once('rebase ref', 'ref', fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic\n', committer: good }, { fetchImpl }));
+  await once('rebase message', 'message', fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', committer: good, message: 'x\0y' }, { fetchImpl }));
+  await once('cherryPick message', 'message', fetchImpl => cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: good, message: 'x\0y' }, { fetchImpl }));
+  await once('revertCommit ref', 'ref', fetchImpl => revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', commit: 'b'.repeat(40), committer: good }, { fetchImpl }));
 });
 
 test('I6 secrets never reach telemetry: token in auth, token in URL userinfo', async () => {
@@ -236,6 +275,69 @@ test('external AbortSignal mid-stream → aborted, ref unchanged', async () => {
   const r2 = await run(at('fetch', 4, { type: 'slow', chunk: 2, delayMs: 30 }), { opts: { signal: ac2.signal }, limits: withLimits({ requestTimeoutMs: 30000 }) });
   checkInvariants(r2, { stage: 'abort', requireError: true });
   assert.equal(r2.error.code, 'aborted');
+});
+
+test('I4 six objects at the per-object cap exceed the inflated aggregate', { timeout: 120_000 }, async () => {
+  const zlib = await import('node:zlib');
+  const per = DEFAULT_LIMITS.maxObjectSize;
+  const z = zlib.deflateSync(Buffer.alloc(per));
+  const entry = concat([encodeObjHeader(3, per), z]);
+  const hdr = new Uint8Array(12);
+  hdr.set([0x50, 0x41, 0x43, 0x4b]);
+  new DataView(hdr.buffer).setUint32(4, 2);
+  new DataView(hdr.buffer).setUint32(8, 6);
+  const body = concat([hdr, entry, entry, entry, entry, entry]);
+  const pack = concat([body, new Sha1().update(body).digest()]);
+  assert.throws(() => parsePack(pack, packParseOpts(DEFAULT_LIMITS)), e => {
+    assert.equal(e.code, 'limit_exceeded');
+    assert.equal(e.what, 'pack inflated bytes');
+    assert.equal(e.got, per * 5);
+    assert.equal(e.max, DEFAULT_LIMITS.maxInflatedTotal);
+    return true;
+  });
+});
+
+test('I4 many ref-deltas resolve in linear lookups', { timeout: 30_000 }, async () => {
+  const base = te.encode('a');
+  const delta = makeDelta(base, te.encode('b')).delta;
+  const baseOid = hashObject('blob', base);
+  const n = 8_000;
+  const objects = [{ type: TYPE.BLOB, data: base }];
+  for (let i = 0; i < n; i++) objects.push({ type: TYPE.BLOB, data: delta, baseOid });
+  const { pack } = await buildPack(objects);
+  const parsed = parsePack(pack, packParseOpts());
+  const t0 = Date.now();
+  const resolved = resolvePack(parsed);
+  const dt = Date.now() - t0;
+  assert.equal(resolved.stats.baseLookups, n);
+  assert.ok(dt < 3_000, `resolvePack took ${dt}ms`);
+});
+
+test('I4 parsePack keeps inflated bytes within the cap', async () => {
+  for (let n = 1; n <= 4; n++) {
+    const objects = Array.from({ length: n }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(String(i + 1)) }));
+    const { pack } = await buildPack(objects);
+    const parsed = parsePack(pack, packParseOpts());
+    assert.ok(parsed.stats.inflated <= DEFAULT_LIMITS.maxInflatedTotal);
+    assert.ok(parsed.stats.inflated <= parsed.objects.reduce((s, o) => s + o.size, 0));
+  }
+  const declared = 1_000;
+  const hdr = new Uint8Array(12);
+  hdr.set([0x50, 0x41, 0x43, 0x4b]);
+  new DataView(hdr.buffer).setUint32(4, 2);
+  new DataView(hdr.buffer).setUint32(8, 1);
+  const body = concat([hdr, encodeObjHeader(3, declared), Uint8Array.of(0)]);
+  const pack = concat([body, new Sha1().update(body).digest()]);
+  assert.throws(() => parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 }), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
+});
+
+test('request timeout survives a GC during a stalled body', { timeout: 8_000 }, async () => {
+  const child = spawn(process.execPath, ['--expose-gc', 'test/timeout-gc.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '', err = '';
+  child.stdout.on('data', d => { out += d; });
+  child.stderr.on('data', d => { err += d; });
+  const code = await new Promise(resolve => child.on('close', resolve));
+  assert.equal(code, 0, err + out);
 });
 
 // helpers

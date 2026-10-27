@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { concat, te } from '../../src/bytes.js';
 import { fromHex } from '../../src/sha1.js';
 import { hashObject, encodeCommit, encodeTag, encodeTree, ident, TYPE } from '../../src/objects.js';
+import { validateIdent } from '../../src/validate.js';
 import { buildPack } from '../../src/pack.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
 import { listTree, readCommit } from '../../src/read.js';
@@ -28,7 +29,7 @@ const N = parseInt(args.n ?? '20', 10);
 const SEED = parseInt(args.seed ?? '1', 10);
 const ONLY = args.case && args.case !== true ? String(args.case) : null;
 const LIMITS = withLimits({ requestTimeoutMs: 4000 });
-const AUTHOR = ident({ name: 'A', email: 'a@b.c', time: '1700000000' });
+const AUTHOR = ident(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }));
 const REJECT = new Set(['pack_corrupt', 'protocol', 'remote_error', 'not_found', 'unsupported']);
 
 const entry = (mode, name, oid) => concat([te.encode(`${mode} ${name}\0`), oid]);

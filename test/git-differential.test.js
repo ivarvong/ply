@@ -8,14 +8,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { te } from '../src/bytes.js';
 import { parseCommit, parseTag, encodeCommit, ident } from '../src/objects.js';
+import { validateIdent } from '../src/validate.js';
 
 const env = {
   ...process.env,
   GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false',
   GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@b.c', GIT_COMMITTER_NAME: 'C', GIT_COMMITTER_EMAIL: 'c@b.c',
 };
-const author = ident({ name: 'A', email: 'a@b.c', time: '1700000000' });
-const other = ident({ name: 'B', email: 'b@b.c', time: '1700000001' });
+const author = ident(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }));
+const other = ident(validateIdent({ name: 'B', email: 'b@b.c', time: 1700000001 }));
 
 function git(dir, args, input) {
   const r = spawnSync('git', ['-C', dir, ...args], { input, encoding: 'utf8', env });

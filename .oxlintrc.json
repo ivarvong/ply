@@ -14,7 +14,8 @@
         "src/inflate.js",
         "src/fetch.js",
         "src/push.js",
-        "src/lsrefs.js"
+        "src/lsrefs.js",
+        "src/limits.js"
       ],
       "rules": {
         "no-magic-numbers": [

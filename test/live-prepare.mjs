@@ -3,6 +3,7 @@
 import { writeFileSync } from 'node:fs';
 import { GitHttp } from '../src/client.js';
 import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident, objectHeader, TYPE } from '../src/objects.js';
+import { validateIdent } from '../src/validate.js';
 import { spliceDelta, buildPack } from '../src/pack.js';
 import { Sha1, fromHex } from '../src/sha1.js';
 import { te } from '../src/bytes.js';
@@ -40,7 +41,7 @@ export async function prepare({ url, ref = 'refs/heads/main', path, find, replac
   const blobDelta = spliceDelta({ baseLen: sp.size, off: scan.matches[0], oldLen: findB.length, insert: replB }).delta;
   const treeObjs = []; let child = newBlob;
   for (let i = levels.length - 1; i >= 0; i--) { const { treeOid: oldT, data, entry } = levels[i]; const nd = treeReplaceOid(data, entry, child); const nid = hashObject('tree', nd); treeObjs.unshift({ type: TYPE.TREE, data: spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) }).delta, baseOid: oldT, newOid: nid }); child = nid; }
-  const who = ident({ ...author, time: Math.floor(Date.now() / 1000) });
+  const who = ident(validateIdent({ name: author.name, email: author.email, time: Math.floor(Date.now() / 1000), tz: author.tz }));
   const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: who, message: message + '\n' });
   const newCommit = hashObject('commit', commitData);
   const objects = [{ type: TYPE.COMMIT, data: commitData }, ...treeObjs.map(t => ({ type: t.type, data: t.data, baseOid: t.baseOid })), blobDelta.length >= 4 ? { type: TYPE.BLOB, data: blobDelta, baseOid: blobOid } : { type: TYPE.BLOB, data: new Uint8Array(0) }];
