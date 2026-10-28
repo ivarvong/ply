@@ -5,6 +5,7 @@
 
 import { fail } from './errors.js';
 import { take } from './bytes.js';
+import { DEFAULT_LIMITS, requireLimit, finiteLimit } from './limits.js';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ADLER_BYTES, ADLER_MOD,
   DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC, DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,
@@ -47,7 +48,10 @@ export function adler32(bytes, a = 1, b = 0) {
 
 // @decoder inflate prefix=inflate
 
-export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = false, maxOutput = Infinity } = {}) {
+export function inflate(buf, pos = 0, opts = {}) {
+  const { expectedSize, verifyAdler = true, raw = false } = opts;
+  // Omitted means the object cap. An explicit Infinity used to disable the check (`n > Infinity` is false).
+  const maxOutput = opts.maxOutput === undefined ? requireLimit(DEFAULT_LIMITS, 'maxObjectSize') : finiteLimit(opts.maxOutput, 'maxObjectSize');
   const start = pos;
   const stats = { blocks: 0, stored: 0, fixed: 0, dynamic: 0, literals: 0, matches: 0, matchBytes: 0, maxDist: 0, maxLen: 0 };
   if (!raw) {
@@ -70,8 +74,9 @@ export function inflate(buf, pos = 0, { expectedSize, verifyAdler = true, raw = 
     if (o + n <= out.length) return;
     if (expectedSize !== undefined) throw bad(`inflate: output exceeds expected ${expectedSize}`);
     if (o + n > maxOutput) throw fail('limit_exceeded', `inflate: output exceeds limit ${maxOutput}`);
-    // Stryker disable next-line ArithmeticOperator: a smaller starting capacity is doubled until it holds the output, so the bytes do not change
+    // Stryker disable next-line ArithmeticOperator,MethodExpression: o+n is already refused past maxOutput, so a larger spare capacity returns the same bytes
     let cap = Math.min(maxOutput, out.length * 2); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
+    // Stryker disable next-line ArithmeticOperator,MethodExpression: doubling stops once the buffer holds o+n, which is already within maxOutput
     while (cap < o + n) cap = Math.min(maxOutput, cap * 2); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
     const nb = new Uint8Array(cap); nb.set(out.subarray(0, o)); out = nb;
   };

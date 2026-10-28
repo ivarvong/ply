@@ -3,24 +3,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { take, indexOfBytes, bytesOf, te, td, concat } from '../src/bytes.js';
 import {
-  parseTree, parseCommit, parseTag, parseIdent, assertFetched, encodeTree, encodeCommit, encodeTag, TYPE, hashObject,
+  parseTree, parseCommit, parseTag, parseIdent, assertFetched, encodeTree, encodeCommit, encodeTag, TYPE, hashObject, ident,
 } from '../src/objects.js';
 import { pkt, pktInit, pktStep, pktFinish, FLUSH, DELIM } from '../src/pktline.js';
 import {
-  parsePack, applyDelta, makeDelta, readObjHeader, readOfsDelta, readUint32BE, packParseOpts,
+  parsePack, applyDelta, makeDelta, readObjHeader, readOfsDelta, readUint32BE, packParseOpts, resolvePack,
 } from '../src/packresolve.js';
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
-import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish } from '../src/fetch.js';
-import { parseLsRefLine } from '../src/lsrefs.js';
-import { parseReportStatus } from '../src/push.js';
+import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
+import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
+import { parseReportStatus, checkReport, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
-import { parseSshUrl } from '../src/sshgit.js';
+import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
+import { validateIdent, isValidatedIdent } from '../src/validate.js';
+import { createTransport } from '../src/http.js';
+import { negotiate } from '../src/negotiate.js';
 import {
   OID_BYTES, OID_HEX_CHARS, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
@@ -1055,9 +1060,12 @@ test('parsePack caps reject a hostile count and inflated total on the boundary',
   assert.equal(parsePack(pack, positive).objects.length, 1);
 
   const open = packParseOpts();
-  assert.equal(open.maxObjects, Infinity);
-  assert.equal(open.maxInflatedTotal, Infinity);
+  assert.equal(open.maxObjects, DEFAULT_LIMITS.maxPackObjects);
+  assert.equal(open.maxInflatedTotal, DEFAULT_LIMITS.maxInflatedTotal);
   assert.equal(parsePack(pack, open).stats.inflated, blob.length);
+  throws(() => packParseOpts({ maxObjectSize: 1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => parsePack(two, { limits: withLimits({ maxPackObjects: 1 }) }), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
+  throws(() => parsePack(pack, { maxObjects: Infinity, maxInflatedTotal: blob.length }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
 });
 
 function huffCodes(h) {
@@ -1073,3 +1081,182 @@ function huffCodes(h) {
 function packBits(bits) {
   return Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
 }
+
+const spanStub = { set() {}, event() {} };
+const tracerStub = { span: async (_name, _opts, fn) => fn(spanStub) };
+
+test('every DEFAULT_LIMITS key is read outside limits.js', () => {
+  const src = readdirSync('src').filter(f => f.endsWith('.js') && f !== 'limits.js').map(f => readFileSync(join('src', f), 'utf8')).join('\n');
+  for (const key of Object.keys(DEFAULT_LIMITS)) assert.match(src, new RegExp(key), key);
+  assert.equal(DEFAULT_LIMITS.maxInflatedTotal, DEFAULT_LIMITS.maxObjectSize * 4);
+  assert.equal(DEFAULT_LIMITS.maxPackObjects, 100_000);
+  assert.equal(DEFAULT_LIMITS.maxLsRefsBytes, DEFAULT_LIMITS.maxPackBytes);
+  assert.equal(DEFAULT_LIMITS.maxReportLines, DEFAULT_LIMITS.maxRefs);
+  assert.equal(DEFAULT_LIMITS.maxCommitParents, DEFAULT_LIMITS.maxRefs);
+  assert.equal(DEFAULT_LIMITS.maxRebaseCommits, DEFAULT_LIMITS.maxRefs);
+  throws(() => finiteLimit(Infinity, 'maxObjectSize'), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => finiteLimit(-1, 'maxObjectSize'), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => requireLimit({}, 'maxInflatedTotal'), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  assert.equal(requireLimit({ maxObjectSize: 0 }, 'maxObjectSize'), 0);
+});
+
+test('aggregate caps fail closed before allocation', async () => {
+  const hostile = new Uint8Array(32);
+  hostile.set(PACK_SIGNATURE);
+  new DataView(hostile.buffer).setUint32(4, PACK_VERSION);
+  new DataView(hostile.buffer).setUint32(8, DEFAULT_LIMITS.maxPackObjects + 1);
+  throws(() => parsePack(hostile), 'limit_exceeded', `pack objects ${DEFAULT_LIMITS.maxPackObjects + 1} exceeds limit ${DEFAULT_LIMITS.maxPackObjects}`);
+
+  const hello = te.encode('hi');
+  const zhello = new Uint8Array(zlib.deflateSync(hello));
+  throws(() => inflate(zhello, 0, { expectedSize: DEFAULT_LIMITS.maxObjectSize + 1 }), 'limit_exceeded', `inflate: expected size ${DEFAULT_LIMITS.maxObjectSize + 1} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
+  throws(() => inflate(zhello, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+
+  const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
+  assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
+  throws(() => parseTree(twoEntries, { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  throws(() => parseTree(twoEntries, {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+
+  const tree = oid(1);
+  const who = 'A <a@b.c> 1 +0000';
+  const parents = [oid(2), oid(3)];
+  const commit = te.encode(`tree ${tree}\n${parents.map(p => `parent ${p}`).join('\n')}\nauthor ${who}\ncommitter ${who}\n\nm\n`);
+  assert.equal(parseCommit(commit, { maxCommitParents: 2 }).parents.length, 2);
+  throws(() => parseCommit(commit, { maxCommitParents: 1 }), 'limit_exceeded', 'commit parents 2 exceeds limit 1');
+  throws(() => parseCommit(commit, {}), 'bad_request', 'limits.maxCommitParents must be a finite non-negative number');
+
+  const line = s => ({ kind: 'data', payload: te.encode(s) });
+  throws(() => v2Step({ ...v2Init(), limits: {} }, line('packfile')), 'bad_request', 'limits.maxSectionLines must be a finite non-negative number');
+  let st = v2Step(v2Init(withLimits({ maxSectionLines: 1 })), line('wanted-refs')).state;
+  st = v2Step(st, line('abc')).state;
+  throws(() => v2Step(st, line('def')), 'limit_exceeded', 'section lines 2 exceeds limit 1');
+  st = v2Step(v2Init(withLimits({ maxSectionLines: 1 })), line('acknowledgments')).state;
+  st = v2Step(st, { kind: 'delim' }).state;
+  throws(() => v2Step(st, line('shallow-info')), 'limit_exceeded', 'section headers 2 exceeds limit 1');
+  // one wanted-refs body line under a cap of 2 is still kept
+  st = v2Step(v2Init(withLimits({ maxSectionLines: 2 })), line('wanted-refs')).state;
+  assert.equal(v2Step(st, line('abc')).state.section, 'wanted-refs');
+
+  throws(() => parseReportStatus(['unpack ok', 'ok refs/heads/a'], { maxReportLines: 1 }), 'limit_exceeded', 'report lines 2 exceeds limit 1');
+  assert.equal(parseReportStatus(['unpack ok'], { maxReportLines: 1 }).unpack, 'ok');
+  throws(() => parseReportStatus(['unpack ok'], {}), 'bad_request', 'limits.maxReportLines must be a finite non-negative number');
+
+  const base = te.encode('abcd');
+  const delta = makeDelta(base, te.encode('abXY')).delta;
+  const baseOid = hashObject('blob', base);
+  const { pack } = await buildPack([
+    { type: TYPE.BLOB, data: delta, baseOid },
+    { type: TYPE.BLOB, data: delta, baseOid },
+    { type: TYPE.BLOB, data: delta, baseOid },
+    { type: TYPE.BLOB, data: base },
+  ]);
+  const parsed = parsePack(pack);
+  assert.equal(resolvePack(parsed).stats.baseLookups, 3);
+  assert.throws(() => resolvePack(parsed, undefined, withLimits({ maxInflatedTotal: parsed.stats.inflated + te.encode('abXY').length })), e => e.code === 'limit_exceeded');
+  throws(() => applyDelta(base, makeDelta(base, base).delta, { maxResult: Infinity }), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
+});
+
+test('idents are branded, wire fields reject breaks, atomic split is ambiguous, ls-refs needs a flush', async () => {
+  const person = validateIdent({ name: 'A', email: 'a@b.c', time: 1 });
+  assert.equal(isValidatedIdent(person), true);
+  assert.equal(person.tz, '+0000');
+  assert.equal(ident(person), 'A <a@b.c> 1 +0000');
+  throws(() => ident({ name: 'A', email: 'a@b.c', time: 1, tz: '+0000' }), 'bad_request', 'ident: unvalidated identity');
+  throws(() => ident({ ...person }), 'bad_request', 'ident: unvalidated identity');
+  for (const tz of ['+0000', '-0000', '+0530', '-0530', '+0059', '+1400', '-1200']) validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz });
+  for (const tz of ['+1401', '-1230', '+9999', '+1560', '+2400', '0000', '+000', '+00000']) {
+    assert.throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz }), e => e.code === 'bad_request' && e.what === 'tz', tz);
+  }
+  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: -1 }), 'bad_request', 'invalid time: must be a non-negative safe integer');
+  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: 1.5 }), 'bad_request', 'invalid time: must be a non-negative safe integer');
+  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: '1700000000' }), 'bad_request', 'invalid time: must be a non-negative safe integer');
+  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz: '+0000\nparent x' }), 'bad_request', 'invalid tz: must be a sign and four digits');
+
+  const tree = oid(1);
+  throws(() => encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', committer: 'y\nparent x <a@b.c> 1 +0000' }), 'bad_request', 'committer must not contain NUL or newline');
+  throws(() => encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\0b' }), 'bad_request', 'message must not contain NUL');
+  assert.ok(encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\nb\n' }).byteLength > 0);
+  throws(() => encodeTag({ object: tree, type: 'commit', tag: 'v\n1', tagger: 'A <a@b.c> 1 +0000' }), 'bad_request', 'tag must not contain NUL or newline');
+
+  throws(() => fetchBody({ wants: ['abc\n'] }), 'bad_request', 'invalid want: must be a string without NUL, CR, or LF');
+  throws(() => fetchBody({ wants: [oid(1)], deepen: -1 }), 'bad_request', 'invalid deepen: must be a non-negative safe integer');
+  throws(() => fetchBody({ wants: [oid(1)], deepenSince: '1\n2' }), 'bad_request', 'invalid deepen-since: must be a string without NUL, CR, or LF');
+  throws(() => fetchBody({ wants: [oid(1)], haves: ['a\rb'] }), 'bad_request', 'invalid have: must be a string without NUL, CR, or LF');
+  assert.ok(fetchBody({ wants: [oid(1)], deepenSince: 1, filter: 'blob:none', deepen: 1 }).byteLength > 0);
+  await assert.rejects(() => negotiate({}, { wants: [oid(1)], haves: [oid(2)], maxRounds: Infinity }), e => e.code === 'bad_request' && e.what === 'maxNegotiateRounds');
+  await assert.rejects(() => negotiate({}, { wants: [oid(1)], haves: [oid(2)], batch: 0 }), e => e.code === 'bad_request' && e.what === 'negotiateBatch');
+
+  const commands = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
+  const mixed = { unpack: 'ok', refs: [{ ref: 'refs/heads/a', ok: true, reason: '' }, { ref: 'refs/heads/b', ok: false, reason: 'failed to lock' }] };
+  assert.equal(checkReport(mixed, commands, { atomic: true }), 'atomic push split: some refs ok, some ng');
+  assert.equal(checkReport(mixed, commands), null);
+
+  const refLine = `${oid(4)} refs/heads/main\n`;
+  const framesOf = list => ({
+    limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
+    async *frames() { for (const f of list) yield f; },
+  });
+  await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
+  await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }, { kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: data after the terminating flush-pkt');
+  await assert.rejects(lsRefs(framesOf([{ kind: 'delim' }])), e => e.code === 'protocol' && e.message === 'ls-refs: unexpected delim in ref listing');
+  const listed = await lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }]));
+  assert.equal(listed.refs.get('refs/heads/main').oid, oid(4));
+  await assert.rejects(lsRefs(framesOf([]), ['refs/heads/a\nb']), e => e.code === 'bad_request' && e.what === 'ref prefix');
+  const payload = te.encode(refLine);
+  await assert.rejects(lsRefs({ ...framesOf([{ kind: 'data', payload }, { kind: 'flush' }]), limits: withLimits({ maxLsRefsBytes: payload.length - 1 }) }), e => e.code === 'limit_exceeded' && e.what === 'ls-refs bytes');
+
+  const reportLines = ['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'];
+  const receipt = () => ({
+    limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
+    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; },
+  });
+  const deletes = [
+    { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID },
+    { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
+  ];
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: true }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'cas_conflict');
+  await assert.rejects(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false }), e => e.code === 'bad_request' && e.what === 'ref');
+  await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, pushOptions: ['a\nb'] }), e => e.code === 'bad_request' && e.what === 'push option');
+  await assert.rejects(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push commands');
+
+  const fetchImpl = (_url, init) => new Promise((_resolve, reject) => {
+    // The request timer is unref'd, so a live socket (here, an interval) has to keep the loop awake.
+    const keep = setInterval(() => {}, 50);
+    init.signal.addEventListener('abort', () => { clearInterval(keep); reject(init.signal.reason); });
+  });
+  const http = createTransport('http://127.0.0.1:9/r.git', { fetchImpl, limits: withLimits({ requestTimeoutMs: 40 }), tracer: tracerStub });
+  const t0 = Date.now();
+  await assert.rejects((async () => { for await (const frame of http.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'timeout');
+  assert.ok(Date.now() - t0 < 2000);
+
+  assert.throws(() => createTransport('http://127.0.0.1/r.git', { userAgent: 'ply\r\nX: 1' }), e => e.code === 'bad_request' && e.what === 'user agent');
+  assert.throws(() => createTransport('http://127.0.0.1/r.git', { auth: { bearer: 'tok\n' } }), e => e.code === 'bad_request' && e.what === 'bearer');
+  let pulls = 0;
+  const advBody = new ReadableStream({ pull(controller) { pulls++; controller.enqueue(new Uint8Array(1000)); if (pulls > 8) controller.close(); } });
+  const advHttp = createTransport('http://127.0.0.1:9/r.git', {
+    fetchImpl: async () => new Response(advBody, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } }),
+    limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
+  });
+  await assert.rejects(advHttp.advertise('git-upload-pack', spanStub), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got > 2500);
+  assert.ok(pulls <= 4, `advertisement kept reading (${pulls} chunks)`);
+  const declared = createTransport('http://127.0.0.1:9/r.git', {
+    fetchImpl: async () => ({
+      ok: true, status: 200,
+      headers: { get: n => (n === 'content-type' ? 'application/x-git-upload-pack-advertisement' : n === 'content-length' ? '999999999' : null) },
+      body: { async *[Symbol.asyncIterator]() { throw new Error('body should not be read'); }, async cancel() {} },
+    }),
+    limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
+  });
+  await assert.rejects(declared.advertise('git-upload-pack', spanStub), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got === 999999999);
+  let errPulls = 0;
+  const errBody = new ReadableStream({ pull(controller) { errPulls++; controller.enqueue(te.encode('x'.repeat(3000))); if (errPulls > 6) controller.close(); } });
+  const errHttp = createTransport('http://127.0.0.1:9/r.git', {
+    fetchImpl: async () => new Response(errBody, { status: 500, headers: { 'content-type': 'text/plain' } }),
+    limits: withLimits({ requestTimeoutMs: 2000 }), tracer: tracerStub,
+  });
+  await assert.rejects((async () => { for await (const frame of errHttp.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'upstream_5xx' && e.message.includes('xxx'));
+  assert.ok(errPulls <= 3, `error body kept reading (${errPulls} chunks)`);
+  assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), limits: {}, connect() { throw new Error('connect'); } }), e => e.code === 'bad_request' && e.what === 'requestTimeoutMs');
+  assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), user: 'a\nb' }), e => e.code === 'bad_request' && e.what === 'ssh user');
+});

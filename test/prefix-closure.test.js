@@ -9,6 +9,7 @@ import zlib from 'node:zlib';
 import { te, td, concat, take } from '../src/bytes.js';
 import { fromHex } from '../src/sha1.js';
 import { fail } from '../src/errors.js';
+import { validateIdent } from '../src/validate.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,
 } from '../src/objects.js';
@@ -181,7 +182,7 @@ function assertHeaderObject(parse, bytes) {
   }
 }
 
-const author = ident({ name: 'Ada', email: 'ada@x', time: '1700000000' });
+const author = ident(validateIdent({ name: 'Ada', email: 'ada@x', time: 1700000000 }));
 const commitBytes = encodeCommit({
   tree: oid(9), parents: [oid(8)], author, message: 'subject\n\nbody\n', extra: ['gpgsig -----BEGIN', ' signature'],
 });

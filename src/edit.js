@@ -13,7 +13,7 @@ import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident
 import { fromHex, streamingSha1 } from './sha1.js';
 import { te, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
-import { DEFAULT_LIMITS, limitError } from './limits.js';
+import { DEFAULT_LIMITS } from './limits.js';
 import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 
@@ -59,14 +59,15 @@ const OID = /^[0-9a-f]{40}$/;
 // `base`: the ref whose head the commit is built on (default: `ref` itself). With base ≠ ref the push *creates* `ref`
 // (old oid = zeros), the way a pull-request branch is made; the CAS then means "the branch must not exist yet".
 export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find, replace, author, message, time = Math.floor(Date.now() / 1000) }, limits, head = null) {
-  validateRef(ref); validateRef(base); validateIdent(author); validateMessage(message);
+  validateRef(ref); validateRef(base);
+  const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
+  validateMessage(message);
   const comps = validatePath(path, limits);
   find = bytesOf(find); replace = bytesOf(replace);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
   if (!find.length) throw fail('bad_request', 'find must be non-empty');
-  if (!Number.isInteger(time) || time < 0) throw fail('bad_request', 'time must be a non-negative integer');
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
-  return Object.freeze({ ref, base, create: base !== ref, path, comps, find, replace, author, message, time, head });
+  return Object.freeze({ ref, base, create: base !== ref, path, comps, find, replace, author: person, message, time: person.time, head });
 }
 
 // Pure: which oid is the parent, and what the hint turned out to be. ls-refs always wins; the hint only decides
@@ -78,8 +79,7 @@ export function decideHead({ hint, resolved }) {
 
 // Pure: one path component against one tree's entries.
 export function lookupEntry(data, name, last, limits) {
-  const entries = parseTree(data);
-  if (entries.length > limits.maxTreeEntries) throw limitError('tree entries', entries.length, limits.maxTreeEntries);
+  const entries = parseTree(data, limits);
   const entry = entries.find(e => e.name === name);
   const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': !!entry, 'git.edit.tree.entry.mode': entry?.mode ?? '', 'git.edit.tree.entry.oid': entry?.oid ?? '', 'git.edit.tree.entry.oid_offset': entry?.oidOffset ?? -1 };
   if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs });
@@ -100,7 +100,7 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
     trees.unshift({ type: TYPE.TREE, data: delta, baseOid: oldOid, newOid, newData });
     child = newOid;
   }
-  const who = ident({ ...author, time });
+  const who = ident(validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz }));
   const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: who, message: message.endsWith('\n') ? message : message + '\n' });
   const newCommit = hashObject('commit', commitData);
   const objects = [
@@ -166,7 +166,7 @@ async function editOnce(url, spec, { cache = new Map(), verify = false, allowLfs
     if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${oldCommit}, not the expected head ${head}`, { expected: head, actual: oldCommit });
     if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': speculative.code ?? 'error' });
     const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative : await getObject(oldCommit, TYPE.COMMIT, 1);
-    const commit = parseCommit(commitObj.data);
+    const commit = parseCommit(commitObj.data, limits);
     root.set({ 'git.edit.commit.old': oldCommit, 'git.edit.tree.root': commit.tree, 'git.edit.commit.old.parents': commit.parents.length });
 
     // 3. trees, one per level. Effect: fetch on cache miss; decision: lookupEntry.

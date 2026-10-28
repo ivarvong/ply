@@ -10,6 +10,8 @@
 // The 64-record hash-chain limit in scanA is modelled exactly (buckets of the per-diff class index): git's merge fails
 // there ("failed to execute internal merge"), so we answer 'undecided' — the 64/65 boundary is pinned against git.
 
+import { LIMIT_MERGE_BLOB } from './limits.js';
+
 const BINARY_SNIFF = 8000; // git's FIRST_FEW_BYTES: a NUL in the first 8000 bytes makes the merge binary (= conflict)
 const MAX_CHAIN = 64;      // xhistogram.c max_chain_length
 
@@ -421,7 +423,7 @@ function fill(base, ours, theirs, c, favor = 0) {
 // driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
 // -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
 // driver, as in ll_xdl_merge.
-export function mergeLines(base, ours, theirs, { maxBytes = 8 * 1024 * 1024, rediff = 'myers', driver = 'text' } = {}) {
+export function mergeLines(base, ours, theirs, { maxBytes = LIMIT_MERGE_BLOB, rediff = 'myers', driver = 'text' } = {}) {
   if (driver === 'binary') return { clean: false, reason: 'binary (merge attribute)' };
   if (base.length > maxBytes || ours.length > maxBytes || theirs.length > maxBytes) return { clean: false, reason: 'too large to merge' };
   if (isBinary(base) || isBinary(ours) || isBinary(theirs)) return { clean: false, reason: 'binary' };

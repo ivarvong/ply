@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { concat, te } from '../../src/bytes.js';
 import { fromHex } from '../../src/sha1.js';
 import { hashObject, parseCommit, parseTag, parseTree, encodeCommit, encodeTag, ident } from '../../src/objects.js';
+import { validateIdent } from '../../src/validate.js';
 import { Rng } from './prng.js';
 import { OID_BYTES } from '../../src/format.js';
 
@@ -22,8 +23,8 @@ const env = {
   GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false',
   GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@b.c', GIT_COMMITTER_NAME: 'C', GIT_COMMITTER_EMAIL: 'c@b.c',
 };
-const AUTHOR = ident({ name: 'A', email: 'a@b.c', time: '1700000000' });
-const COMMITTER = ident({ name: 'C', email: 'c@b.c', time: '1700000001' });
+const AUTHOR = ident(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }));
+const COMMITTER = ident(validateIdent({ name: 'C', email: 'c@b.c', time: 1700000001 }));
 
 function git(dir, argv, input) {
   const r = spawnSync('git', ['-C', dir, ...argv], { input, encoding: 'utf8', env });

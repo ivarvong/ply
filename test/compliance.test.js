@@ -35,7 +35,7 @@ test('ident validation == git fsck --strict (exhaustive over an alphabet, name a
   let n = 0, disagree = [];
   const check = (name, email) => {
     n++;
-    let ours; try { validateIdent({ name, email }); ours = 'ok'; } catch { ours = 'reject'; }
+    let ours; try { validateIdent({ name, email, time: 1700000000, tz: '+0000' }); ours = 'ok'; } catch { ours = 'reject'; }
     const data = Buffer.from(`tree ${emptyTree}\nauthor ${name} <${email}> 1700000000 +0000\ncommitter ${name} <${email}> 1700000000 +0000\n\nm\n`, 'utf8');
     const oid = writeLiterally('commit', data);
     const theirs = oid ? fsckOf(oid) : 'unwritable';

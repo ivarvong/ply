@@ -2,7 +2,8 @@
 import { fail } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take } from './bytes.js';
-import { isDotGit } from './validate.js';
+import { isDotGit, isValidatedIdent } from './validate.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
@@ -32,11 +33,13 @@ const cmpBytes = (a, b) => {
 // ---- tree ----
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
 // @decoder parseTree prefix=tree
-export function parseTree(data) {
+export function parseTree(data, limits = DEFAULT_LIMITS) {
+  const maxEntries = requireLimit(limits, 'maxTreeEntries');
   const entries = [];
   let p = 0;
   let prevKey = null;
   while (p < data.length) {
+    if (entries.length >= maxEntries) throw limitError('tree entries', entries.length + 1, maxEntries);
     const sp = data.indexOf(TREE_MODE_SEP, p);
     // A negative fromIndex would wrap; indexOf returns -1 when the separator is absent.
     if (sp < p) throw fail('pack_corrupt', 'tree: malformed entry');
@@ -97,7 +100,7 @@ function splitHeaders(data, what) {
 // once (commit `parent`); a tag passes null. A second single-valued header throws even when fsck accepts
 // the object: git shows the first tree, so a last-wins parse would hash a different tree than
 // `git log --format=%T`. Extras (gpgsig, mergetag) are legal once `phase` has reached `extraFrom`.
-function parseOrderedHeaders(kind, head, order, repeat, extraFrom) {
+function parseOrderedHeaders(kind, head, order, repeat, extraFrom, maxRepeat) {
   const bad = (why, key) => { throw fail('pack_corrupt', key === undefined ? `${kind}: ${why}` : `${kind}: ${why} ${key}`); };
   const rec = { extra: [] };
   for (const name of order) rec[name === repeat ? `${name}s` : name] = name === repeat ? [] : null;
@@ -122,7 +125,11 @@ function parseOrderedHeaders(kind, head, order, repeat, extraFrom) {
       // Stryker disable next-line ConditionalExpression: author is the only header this skip can allow, and every phase that reaches the comparison already matches it
       const skipped = order[at - 1] === repeat && phase === at - 1 - HEADER_SKIP_OPTIONAL;
       if (phase !== at && phase !== at - 1 && !skipped) bad('bad header order');
-      if (key === repeat) rec[`${key}s`].push(value);
+      if (key === repeat) {
+        const next = rec[`${key}s`].length + 1;
+        if (next > maxRepeat) throw limitError('commit parents', next, maxRepeat);
+        rec[`${key}s`].push(value);
+      }
       else rec[key] = value;
       phase = at;
     }
@@ -131,15 +138,19 @@ function parseOrderedHeaders(kind, head, order, repeat, extraFrom) {
 }
 
 // @decoder parseCommit prefix=commit
-export function parseCommit(data) {
+export function parseCommit(data, limits = DEFAULT_LIMITS) {
+  const maxParents = requireLimit(limits, 'maxCommitParents');
   const { head, message } = splitHeaders(data, 'commit');
   // message is null when the object has no body section at all (no blank line); '' when the body is empty
-  const c = parseOrderedHeaders('commit', head, COMMIT_HEADER_ORDER, COMMIT_HEADER_PARENT, COMMIT_HEADER_ORDER.indexOf(COMMIT_HEADER_COMMITTER));
+  const c = parseOrderedHeaders('commit', head, COMMIT_HEADER_ORDER, COMMIT_HEADER_PARENT, COMMIT_HEADER_ORDER.indexOf(COMMIT_HEADER_COMMITTER), maxParents);
   c.message = message;
   return c;
 }
 
-export const ident = ({ name, email, time, tz = '+0000' }) => `${name} <${email}> ${time} ${tz}`;
+export function ident(person) {
+  if (!isValidatedIdent(person)) throw fail('bad_request', 'ident: unvalidated identity', { what: 'ident' });
+  return `${person.name} <${person.email}> ${person.time} ${person.tz}`;
+}
 
 // The inverse, as git's split_ident_line reads it: name up to the first '<' (trailing spaces trimmed), email up to the
 // next '>', then "<epoch> <tz>" after the last '>'. Fields git would print as empty are '' (time null when the date is missing).
@@ -190,11 +201,11 @@ function checkIdent(line, role) {
 
 // Semantic checks git fsck --strict applies to a complete object. Structural prefixes (parseCommit of a header
 // prefix) do not come through here; fetch does, after the object hashes to the oid the server advertised.
-export function assertFetched(typeName, data) {
+export function assertFetched(typeName, data, limits = DEFAULT_LIMITS) {
   if (typeName === 'blob' || typeName === 'ofs_delta' || typeName === 'ref_delta') return;
-  if (typeName === 'tree') { parseTree(data); return; }
+  if (typeName === 'tree') { parseTree(data, limits); return; }
   if (typeName === 'commit') {
-    const c = parseCommit(data);
+    const c = parseCommit(data, limits);
     // Stryker disable next-line StringLiteral: the fallback is rejected by OID_TEXT whether it is empty or any other non-oid
     if (!OID_TEXT.test(c.tree ?? '')) throw fail('pack_corrupt', 'commit: missing or bad tree');
     if (c.parents.some(p => !OID_TEXT.test(p))) throw fail('pack_corrupt', 'commit: bad parent');
@@ -217,9 +228,26 @@ export function assertFetched(typeName, data) {
   throw fail('pack_corrupt', `object: bad type ${typeName}`);
 }
 
+// A header value is one line. LF or NUL, from any caller, would open a new header. The message is the body: LF is
+// legal there, NUL is not. withGpgsig splices signature continuation lines after this returns, so those bytes are
+// not re-checked here.
+const headerValue = (value, what) => {
+  if (typeof value !== 'string' || /[\0\n]/.test(value)) throw fail('bad_request', `${what} must not contain NUL or newline`, { what });
+};
+const messageBody = message => {
+  if (message !== null && (typeof message !== 'string' || message.includes('\0'))) throw fail('bad_request', 'message must not contain NUL', { what: 'message' });
+};
+
 // Faithful: the message is written verbatim after the blank line; null means no body section. Callers that want
 // git's conventional trailing newline add it themselves (editFile does).
 export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }) {
+  headerValue(tree, 'tree');
+  for (const p of parents) headerValue(p, 'parent');
+  headerValue(author, 'author');
+  headerValue(committer, 'committer');
+  if (encoding !== null) headerValue(encoding, 'encoding');
+  for (const line of extra) headerValue(line, 'extra');
+  messageBody(message);
   const lines = [
     `${COMMIT_HEADER_TREE} ${tree}`,
     ...parents.map(p => `${COMMIT_HEADER_PARENT} ${p}`),
@@ -232,6 +260,12 @@ export function encodeCommit({ tree, parents = [], author, committer = author, e
 }
 
 export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }) {
+  headerValue(object, 'object');
+  headerValue(type, 'type');
+  headerValue(tag, 'tag');
+  headerValue(tagger, 'tagger');
+  for (const line of extra) headerValue(line, 'extra');
+  messageBody(message);
   const lines = [
     `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
     ...extra,

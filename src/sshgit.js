@@ -10,7 +10,8 @@ import { fail } from './errors.js';
 import { SshClient, hostKeyFromLine } from './ssh.js';
 import { pktInit, pktStep, FLUSH } from './pktline.js';
 import { td, concat } from './bytes.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
+import { validateWire } from './validate.js';
 
 
 // @decoder parseSshUrl prefix=ssh-url
@@ -26,6 +27,8 @@ export const sshRedact = ({ user, host, port, path }) => `ssh://${user}@${host}$
 // `connect(host, port) → stream` is the platform's TCP (ssh-node.js / ssh-workers.js); the key is a WebCrypto Ed25519 pair.
 export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, connect, tracer, parent = null, limits = DEFAULT_LIMITS, signal = null, user: userOverride } = {}) {
   const u = parseSshUrl(url); if (userOverride) u.user = userOverride;
+  validateWire(u.user, 'ssh user'); validateWire(u.host, 'ssh host'); validateWire(u.path, 'ssh path');
+  const timeoutMs = requireLimit(limits, 'requestTimeoutMs');
   if (!hostKey) throw fail('bad_request', 'hostKey is required: an SSH client in a Worker cannot trust-on-first-use (ssh-keyscan -t ed25519 <host>)');
   const pinned = hostKey instanceof Uint8Array ? hostKey : hostKeyFromLine(hostKey);
   const st = { client: null, channels: new Map(), connecting: null };
@@ -34,8 +37,8 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     async connectOnce(span) {
       if (st.client) return st.client;
       if (!st.connecting) st.connecting = (async () => {
-        const stream = await connect(u.host, u.port, { timeoutMs: limits.requestTimeoutMs });
-        const c = new SshClient(stream, { user: u.user, privateKey, publicKeyRaw, hostKey: pinned, tracer, parent: span ?? t.parent, timeoutMs: limits.requestTimeoutMs });
+        const stream = await connect(u.host, u.port, { timeoutMs });
+        const c = new SshClient(stream, { user: u.user, privateKey, publicKeyRaw, hostKey: pinned, tracer, parent: span ?? t.parent, timeoutMs });
         await c.connect(); await c.authenticate();
         st.client = c; return c;
       })();
@@ -48,7 +51,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
       const quoted = `'${u.path.replace(/'/g, `'\\''`)}'`;
       const chSpan = tracer.start('ssh.exec', { parent: span ?? t.parent, attrs: { 'ssh.command': `${service} ${quoted}`, 'git.service': service } });
       const ch = await c.exec(`${service} ${quoted}`, { env: service === 'git-upload-pack' ? { GIT_PROTOCOL: 'version=2' } : {} });
-      const entry = { ch, pkt: pktInit(), carry: [], adv: null, caps: null, span: chSpan, bytesIn: 0, bytesOut: 0, lock: Promise.resolve() };
+      const entry = { ch, pkt: pktInit(), carry: [], carryAt: 0, adv: null, caps: null, span: chSpan, bytesIn: 0, bytesOut: 0, lock: Promise.resolve() };
       // read the advertisement: frames up to and including the first flush
       const advFrames = []; const raw = [];
       for await (const f of t.readUntilFlush(entry, raw)) advFrames.push(f);
@@ -68,10 +71,23 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     },
     // Frames from the channel up to and including the next top-level flush (the decoder state carries across commands).
     async *readUntilFlush(entry, rawOut = null) {
-      // frames already decoded but not yet yielded (a chunk can carry the end of one response and the start of the next)
-      while (entry.carry.length) { const f = entry.carry.shift(); yield f; if (f.kind === 'flush') return; }
+      // frames already decoded but not yet yielded (a chunk can carry the end of one response and the start of the next).
+      // An index, not shift(): the remainder can be every pkt-line of the next pack, and shift is O(n) per frame.
+      const maxAdv = rawOut ? requireLimit(t.limits, 'maxPackBytes') : 0;
+      let advBytes = 0;
+      while (entry.carryAt < entry.carry.length) {
+        const f = entry.carry[entry.carryAt++];
+        if (entry.carryAt === entry.carry.length) { entry.carry = []; entry.carryAt = 0; }
+        yield f;
+        if (f.kind === 'flush') return;
+      }
       for await (const chunk of entry.ch.stdout()) {
-        entry.bytesIn += chunk.length; if (rawOut) rawOut.push(chunk);
+        entry.bytesIn += chunk.length;
+        if (rawOut) {
+          advBytes += chunk.length;
+          if (advBytes > maxAdv) throw limitError('advertisement bytes', advBytes, maxAdv);
+          rawOut.push(chunk);
+        }
         const r = pktStep(entry.pkt, chunk); entry.pkt = r.state;
         let i = 0;
         for (; i < r.frames.length; i++) { yield r.frames[i]; if (r.frames[i].kind === 'flush') { entry.carry.push(...r.frames.slice(i + 1)); return; } }

@@ -9,7 +9,8 @@ import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2 } from './format.js';
-import { DEFAULT_LIMITS, limitError } from './limits.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
+import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the compressed-size slack are diagnostics, not wire-format facts */
@@ -21,7 +22,24 @@ const OID_PREVIEW = 48;
 
 
 // ---- request body (pure) ----
+const wireField = (value, what) => validateWire(value, what);
+const countField = (value, what) => {
+  if (!Number.isSafeInteger(value) || value < 0) throw fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
+};
+// deepen-since is a unix timestamp on the wire (a number from callers, or a digit string). Either way it is one token.
+const sinceField = (value, what) => {
+  if (typeof value === 'number') countField(value, what);
+  else wireField(value, what);
+};
+
 export function fetchBody({ wants, haves = [], filter, deepen, deepenSince, deepenNot = [], deepenRelative = false, thinPack = false, ofsDelta = true, includeTag = false, noProgress = true, done = true, shallows = [] }) {
+  for (const w of wants) wireField(w, 'want');
+  for (const h of haves) wireField(h, 'have');
+  for (const s of shallows) wireField(s, 'shallow');
+  for (const r of deepenNot) wireField(r, 'deepen-not');
+  if (filter) wireField(filter, 'filter');
+  if (deepen) countField(deepen, 'deepen');
+  if (deepenSince) sinceField(deepenSince, 'deepen-since');
   const args = [
     ...wants.map(w => `want ${w}\n`),
     ...haves.map(h => `have ${h}\n`),
@@ -47,6 +65,9 @@ export const v2Init = (limits = DEFAULT_LIMITS) => Object.freeze({ limits,
 });
 // @decoder v2Step prefix=v2
 export function v2Step(st, frame) {
+  // Every section line, including ones this client does not interpret, counts against the same cap. A missing
+  // maxSectionLines used to make `n >= undefined` false and disable the check.
+  const maxLines = requireLimit(st.limits, 'maxSectionLines');
   if (st.done) throw proto('v2: frame after flush');
   if (frame.kind === 'flush') return { state: { ...st, done: true }, pack: null };
   if (frame.kind === 'end') return { state: st, pack: null };
@@ -62,23 +83,26 @@ export function v2Step(st, frame) {
   const line = td.decode(frame.payload).replace(/\n$/, '');
   if (line.startsWith('ERR ')) throw fail('remote_error', `remote: ${line.slice('ERR '.length)}`);
   if (st.section === null) {
+    if (st.sections.length >= maxLines) throw limitError('section headers', st.sections.length + 1, maxLines);
     const next = { ...st, section: line, sections: [...st.sections, line] };
     if (line === 'packfile') next.phase = 'pack';
     return { state: next, pack: null };
   }
   if (st.section === 'shallow-info') {
-    if ((st.sectionLines ?? 0) >= st.limits.maxSectionLines) throw limitError('shallow-info lines', (st.sectionLines ?? 0) + 1, st.limits.maxSectionLines);
+    if ((st.sectionLines ?? 0) >= maxLines) throw limitError('shallow-info lines', (st.sectionLines ?? 0) + 1, maxLines);
     st = { ...st, sectionLines: (st.sectionLines ?? 0) + 1 };
     // the server may repeat a shallow line when a commit is wanted both directly and through a tag; keep them unique
     if (line.startsWith('shallow ')) return { state: { ...st, shallow: st.shallow.includes(line.slice('shallow '.length)) ? st.shallow : [...st.shallow, line.slice('shallow '.length)] }, pack: null };
     if (line.startsWith('unshallow ')) return { state: { ...st, unshallow: st.unshallow.includes(line.slice('unshallow '.length)) ? st.unshallow : [...st.unshallow, line.slice('unshallow '.length)] }, pack: null };
+    return { state: st, pack: null };
   }
   if (st.section === 'acknowledgments') {
-    if (st.acks.length >= st.limits.maxSectionLines) throw limitError('acknowledgment lines', st.acks.length + 1, st.limits.maxSectionLines);
+    if (st.acks.length >= maxLines) throw limitError('acknowledgment lines', st.acks.length + 1, maxLines);
     if (line === 'ready') return { state: { ...st, ready: true }, pack: null };
     return { state: { ...st, acks: [...st.acks, line] }, pack: null };
   }
-  return { state: st, pack: null };
+  if ((st.otherLines ?? 0) >= maxLines) throw limitError('section lines', (st.otherLines ?? 0) + 1, maxLines);
+  return { state: { ...st, otherLines: (st.otherLines ?? 0) + 1 }, pack: null };
 }
 export const v2Attrs = st => ({
   'git.fetch.sections': st.sections.join(','), 'git.fetch.shallow': st.shallow, 'git.fetch.unshallow': st.unshallow,
@@ -180,7 +204,7 @@ export function harvest(t, objects, skip = null) {
   let kept = 0, bytes = 0; store.bytes ??= 0;
   for (const [oid, o] of objects) {
     if (oid === skip || store.has(oid) || (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE)) continue;
-    if (store.bytes + o.data.length > (t.limits.maxHarvestBytes ?? 0)) break;
+    if (store.bytes + o.data.length > requireLimit(t.limits, 'maxHarvestBytes')) break;
     store.set(oid, { type: o.type, data: o.data }); store.bytes += o.data.length; kept++; bytes += o.data.length;
   }
   return { kept, bytes };
@@ -204,22 +228,25 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
   // retried once past the cache (packcache.js), a corrupt live response is not.
   const once = bust => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust }), async span => {
     try {
+      const maxObject = requireLimit(t.limits, 'maxObjectSize');
+      const maxPack = requireLimit(t.limits, 'maxPackBytes');
       let sp = spInit(); const zlibParts = []; let zlibLen = 0;
       for await (const chunk of packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span)) {
+        // Refuse before spStep concatenates the chunk onto the header buffer.
+        if (sp.bytes + chunk.length > maxPack) throw limitError('pack bytes', sp.bytes + chunk.length, maxPack);
         const r = spStep(sp, chunk); sp = r.state;
-        if (sp.phase === 'body' && sp.size > t.limits.maxObjectSize) throw limitError('object size', sp.size, t.limits.maxObjectSize);
-        if (sp.bytes > t.limits.maxPackBytes) throw limitError('pack bytes', sp.bytes, t.limits.maxPackBytes);
+        if (sp.phase === 'body' && sp.size > maxObject) throw limitError('object size', sp.size, maxObject);
         for (const z of r.zlib) { zlibParts.push(z); zlibLen += z.length; }
-        if (zlibLen > t.limits.maxObjectSize + COMPRESSED_SLACK) throw limitError('compressed object bytes', zlibLen, t.limits.maxObjectSize);
+        if (zlibLen > maxObject + COMPRESSED_SLACK) throw limitError('compressed object bytes', zlibLen, maxObject);
       }
       sp = spFinish(sp);
       const zlib = concat(zlibParts);
-      const { out, consumed, stats } = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: t.limits.maxObjectSize });
+      const { out, consumed, stats } = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });
       if (consumed !== zlib.length) throw fail('pack_corrupt', `pack: ${zlib.length - consumed} trailing bytes after object`);
       const got = hashObject(TYPE_NAME[sp.type], out);
       span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': TYPE_NAME[sp.type] });
       if (got !== oid) throw fail('pack_corrupt', `object ${got} served for want ${oid}`);
-      assertFetched(TYPE_NAME[sp.type], out);
+      assertFetched(TYPE_NAME[sp.type], out, t.limits);
       if (expectType !== null && sp.type !== expectType) throw fail('pack_corrupt', `expected ${TYPE_NAME[expectType]}, got ${TYPE_NAME[sp.type]}`);
       return { type: sp.type, data: out, oid, size: out.length, bust };
     } catch (e) { if (e && typeof e === 'object') e.cacheStatus = span.attrs['git.response.cache'] ?? ''; throw e; }
@@ -234,17 +261,19 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
 async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
   const once = bust => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': 'tree:0', 'git.fetch.filter.learned': learned }), async span => {
     try {
+      const maxPack = requireLimit(t.limits, 'maxPackBytes');
+      const maxObject = requireLimit(t.limits, 'maxObjectSize');
       const parts = []; let total = 0;
       for await (const chunk of packStream(t, { wants: [oid], filter: 'blob:none', deepen, bypassCache: bust }, span)) {
-        total += chunk.length; if (total > t.limits.maxPackBytes) throw limitError('pack bytes', total, t.limits.maxPackBytes);
+        total += chunk.length; if (total > maxPack) throw limitError('pack bytes', total, maxPack);
         parts.push(chunk);
       }
       const parsed = parsePack(concat(parts), packParseOpts(t.limits));
       const { objects } = resolvePack(parsed, undefined, t.limits);
-      for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data);
+      for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data, t.limits);
       const want = objects.get(oid);
       if (!want) throw fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
-      if (want.data.length > t.limits.maxObjectSize) throw limitError('object size', want.data.length, t.limits.maxObjectSize);
+      if (want.data.length > maxObject) throw limitError('object size', want.data.length, maxObject);
       if (expectType !== null && want.type !== expectType) throw fail('pack_corrupt', `expected ${TYPE_NAME[expectType]}, got ${TYPE_NAME[want.type]}`);
       let extraBytes = 0, blobs = 0; for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
       const h = harvest(t, objects, oid);

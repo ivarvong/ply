@@ -18,6 +18,8 @@ const NG_REF = 'ng ';
 const OPTION = 'option ';
 import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, proto, UA } from './transport.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
+import { validateRef, validateWire } from './validate.js';
 
 export const ZERO_OID = '0'.repeat(OID_HEX_CHARS);
 
@@ -29,7 +31,9 @@ export const pushBody = ({ commands, caps = ['report-status', `agent=${UA.replac
 
 // ---- report-status parsing (pure) ----
 // @decoder parseReportStatus prefix=report
-export function parseReportStatus(lines) {
+export function parseReportStatus(lines, limits = DEFAULT_LIMITS) {
+  const maxLines = requireLimit(limits, 'maxReportLines');
+  if (lines.length > maxLines) throw limitError('report lines', lines.length, maxLines);
   // Stryker disable next-line BooleanLiteral: the loop below always assigns r.ok again before the return
   const r = { unpack: null, refs: [], ok: false };
   for (const l of lines) {
@@ -46,7 +50,7 @@ export function parseReportStatus(lines) {
   return r;
 }
 // A report is well-formed iff it has exactly one unpack line and exactly one status line per commanded ref, no extras.
-export function checkReport(report, commands) {
+export function checkReport(report, commands, { atomic = false } = {}) {
   const want = new Set(commands.map(c => c.ref));
   const seen = new Map();
   for (const r of report.refs) { if (!want.has(r.ref)) return `status for unexpected ref ${r.ref}`; if (seen.has(r.ref)) return `duplicate status for ${r.ref}`; seen.set(r.ref, r); }
@@ -54,6 +58,9 @@ export function checkReport(report, commands) {
   if (report.unpack === null) return 'no unpack line';
   if (!/^[\x20-\x7e]+$/.test(report.unpack)) return `unreadable unpack status ${JSON.stringify(report.unpack)}`;
   for (const r of report.refs) if (!r.ok && !/^[\x20-\x7e]*$/.test(r.reason ?? '')) return `unreadable reason for ${r.ref}`;
+  // gitprotocol-capabilities "atomic": all refs update or none do. A mixed ok/ng receipt for an atomic push means some ref
+  // DID move while others did not: never a retryable "nothing changed" (found by the calibration harness, non-atomic-multi-ref).
+  if (atomic && report.unpack === 'ok' && report.refs.some(r => r.ok) && report.refs.some(r => !r.ok)) return 'atomic push split: some refs ok, some ng';
   return null;
 }
 // retryable iff every failed ref failed on receive-pack's own ref update (stale old value, lock) or was an innocent
@@ -76,7 +83,15 @@ const bandLines = text => text.split(/\r?\n|\r/).map(l => l.trim()).filter(Boole
 //            have checked the advertisement for push-options (receivecaps.js); an unadvertised option is read as the pack.
 export async function push(t, { ref, oldOid, newOid, objects = [], commands, sideband = true, reportV2 = false, atomic = false, pushOptions = [] }) {
   commands = commands ?? [{ ref, oldOid, newOid }];
-  for (const c of commands) if (!new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`).test(c.oldOid) || !new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`).test(c.newOid)) throw fail('bad_request', 'push: oids must be 40-hex');
+  const maxRefs = requireLimit(t.limits, 'maxRefs');
+  if (commands.length > maxRefs) throw limitError('push commands', commands.length, maxRefs);
+  for (const c of commands) {
+    validateRef(c.ref);
+    if (!new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`).test(c.oldOid) || !new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`).test(c.newOid)) throw fail('bad_request', 'push: oids must be 40-hex');
+  }
+  for (const o of pushOptions) validateWire(o, 'push option');
+  requireLimit(t.limits, 'maxReportLines');
+  requireLimit(t.limits, 'maxPackBytes');
   const caps = [reportV2 ? 'report-status-v2' : 'report-status', ...(sideband ? ['side-band-64k'] : []), ...(atomic ? ['atomic'] : []), ...(commands.some(c => c.newOid === ZERO_OID) ? ['delete-refs'] : []), ...(pushOptions.length ? ['push-options'] : []), `agent=${UA.replace(/ .*/, '')}`];
   return coded('protocol', () => t.tracer.span('git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': commands[0].ref, 'git.push.old': commands[0].oldOid, 'git.push.new': commands[0].newOid }), async span => {
     const needPack = commands.some(c => c.newOid !== ZERO_OID);
@@ -89,6 +104,15 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
       body = concat([head, ...pushOptions.map(o => pkt(o + '\n')), FLUSH, ...(pack ? [pack] : [])]);
     }
     const lines = [];
+    const maxReportLines = requireLimit(t.limits, 'maxReportLines');
+    const maxReportBytes = requireLimit(t.limits, 'maxPackBytes');
+    let reportBytes = 0;
+    const pushLine = payload => {
+      reportBytes += payload.length;
+      if (reportBytes > maxReportBytes) throw limitError('report bytes', reportBytes, maxReportBytes);
+      if (lines.length >= maxReportLines) throw limitError('report lines', lines.length + 1, maxReportLines);
+      lines.push(td.decode(payload).replace(/\n$/, ''));
+    };
     let band2 = '', band2Frames = 0, inner = pktInit(), report;
     // The request body (commands + pack) is on the wire. From here, ANY failure to obtain a trustworthy report —
     // transport, HTTP status, wrong content-type, malformed framing, bad sideband, band-3 error, a report the parser
@@ -97,9 +121,9 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
     try {
       for await (const f of frames(t, 'git-receive-pack', body, span)) {
         if (f.kind !== 'data') continue;
-        if (!sideband) { lines.push(td.decode(f.payload).replace(/\n$/, '')); continue; }
+        if (!sideband) { pushLine(f.payload); continue; }
         const { band, body: payload } = parseSideband(f.payload);
-        if (band === SIDEBAND_PACK) { const r = pktStep(inner, payload); inner = r.state; for (const g of r.frames) if (g.kind === 'data') lines.push(td.decode(g.payload).replace(/\n$/, '')); }
+        if (band === SIDEBAND_PACK) { const r = pktStep(inner, payload); inner = r.state; for (const g of r.frames) if (g.kind === 'data') pushLine(g.payload); }
         else if (band === SIDEBAND_PROGRESS) { band2Frames++; band2 = (band2 + td.decode(payload)).slice(-BAND_TAIL); }
         else if (band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(payload).trim()}`);
         else throw proto(`receive-pack: bad sideband ${band}`);
@@ -107,7 +131,7 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
       report = parseReportStatus(lines);
     } catch (e) { throw ambiguousAfterPush(e); }
     const remoteMessages = bandLines(band2);
-    const malformed = checkReport(report, commands);
+    const malformed = checkReport(report, commands, { atomic });
     if (malformed) {
       span.set({ 'git.push.report.lines': lines.slice(0, REPORT_KEEP), 'git.push.ok': false, 'git.push.ambiguous': malformed, 'git.push.remote.messages': remoteMessages });
       throw fail('ambiguous', `push outcome unknown: malformed report (${malformed})`, { report, hookOutput: band2 });
