@@ -1138,6 +1138,7 @@ test('aggregate caps fail closed before allocation', async () => {
   assert.equal(v2Step(st, line('abc')).state.section, 'wanted-refs');
 
   throws(() => parseReportStatus(['unpack ok', 'ok refs/heads/a'], { maxReportLines: 1 }), 'limit_exceeded', 'report lines 2 exceeds limit 1');
+  assert.equal(parseReportStatus(['unpack ok'], { maxReportLines: 1 }).unpack, 'ok');
   throws(() => parseReportStatus(['unpack ok'], {}), 'bad_request', 'limits.maxReportLines must be a finite non-negative number');
 
   const base = te.encode('abcd');
