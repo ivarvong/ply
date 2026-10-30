@@ -1,13 +1,23 @@
 // Semantic-lie fuzz: the server answers with WELL-FORMED protocol bytes that are wrong. No corruption the parsers
 // can see — only the client's content checks (oid verification, size contracts, CAS) stand between a lie and a bad push.
 // Every lie is built from real objects taken from a second repo or an older commit of the same repo.
-//   node test/fuzz/liar.mjs [--n 200] [--seed 1] [--case <seed>]
+//   node test/fuzz/liar.mjs [--n 200] [--seed 1] [--case <seed>] [--op edit|mergebase|mixed]
+// Two families. `edit`: editFile on a fixed two-commit repo (LIES). `mergebase` (issue #18): mergeBase / mergeBranch on a
+// random DAG (dag.js) behind a server that answers the commit-only `tree:0` + `deepen` walks with a cut history
+// (MERGE_LIES): ancestors omitted without a `shallow` line, omitted beside honest shallow lines, a consistent shallower
+// cut, the want itself missing, an unrequested commit, a tree in a tree:0 pack. Oracle: `git merge-base --all` and
+// `git merge-tree --write-tree`. A lied-to run must end in a typed error or exactly git's bases; an honest run must
+// equal git's bases (set equality, criss-cross included); a merge that lands must be the one git produces (I21).
 import { join } from 'node:path';
 import { mkdirSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { Rng } from './prng.js';
+import { genDag, readModel, reachableCommits } from './dag.js';
 import { editFile } from '../../src/edit.js';
+import { mergeBase, mergeBranch } from '../../src/merge.js';
+import { createTransport } from '../../src/http.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { buildPack } from '../../src/pack.js';
@@ -16,7 +26,9 @@ import { concat, te } from '../../src/bytes.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;
-const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
+const OP = args.op ?? 'mixed';
+if (!['edit', 'mergebase', 'mixed'].includes(OP)) throw new Error(`--op must be edit, mergebase or mixed, not ${OP}`);
+const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous', 'merge_conflict', 'unrelated_histories', 'not_fast_forward']);
 
 const pktLine = s => { const b = typeof s === 'string' ? te.encode(s) : s; return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); };
 const FLUSH = te.encode('0000');
@@ -78,14 +90,131 @@ const LIES = {
   'replica:consistent-lag': (R, D) => ctx => ctx.stage === 'ls-refs' ? { type: 'bytes', bytes: concat([pktLine(`${R.older} refs/heads/main\n`), FLUSH]), name: 'lag' } : { type: 'pass' },
 };
 
+// ---- merge-base lies (issue #18) ----
+// The request names one commit want, `filter tree:0` and `deepen N`; the honest answer is every commit within N of the
+// want, with the commits at the cut as `shallow` lines (dag.js reachableCommits, calibrated against upload-pack). Each
+// lie is a function of the request alone (a sub-Rng seeded from the want and the case, so concurrent fetches of `ours`
+// and `theirs` cannot reorder the randomness) and answers without forwarding; `M.lied` counts the answers that were lies.
+const fetchRequest = body => { const s = Buffer.from(body).toString('latin1'); return { want: /want ([0-9a-f]{40})\n/.exec(s)?.[1] ?? null, deepen: +(/deepen (\d+)\n/.exec(s)?.[1] ?? 0), filter: /filter ([^\n]+)\n/.exec(s)?.[1] ?? null }; };
+const window = (M, want, deepen) => { const { commits, boundary } = reachableCommits(M.model, [want], { depth: deepen }); return { all: [...commits.keys()], boundary: [...boundary] }; };
+const drop = (rng, list, k) => { const out = new Set(); const pool = [...list]; while (out.size < Math.min(k, pool.length)) out.add(pool[rng.int(0, pool.length - 1)]); return out; };
+const MERGE_LIES = {
+  // control: forwarded untouched → the bases must be git's
+  'mb:honest': () => null,
+  // the issue: ancestors inside the window are omitted and no shallow line admits it. The pack still hash-verifies.
+  'mb:omit-no-shallow': (M, rng, w) => { const gone = drop(rng, w.all.filter(c => c !== w.want), rng.int(1, 3)); return { keep: w.all.filter(c => !gone.has(c)), shallow: [], omitted: gone.size }; },
+  // the honest shallow lines are sent, but commits elsewhere in the window are missing too
+  'mb:omit-keep-shallow': (M, rng, w) => { const gone = drop(rng, w.all.filter(c => c !== w.want && !w.boundary.includes(c)), rng.int(1, 3)); return { keep: w.all.filter(c => !gone.has(c)), shallow: w.boundary, omitted: gone.size }; },
+  // a consistent cut shallower than asked: one commit c declared shallow, everything only reachable through it dropped.
+  // Not a contradiction of the protocol — a server may answer with less depth — so the client must deepen or give up typed.
+  'mb:cut-shallower': (M, rng, w) => {
+    const c = rng.pick(w.all.filter(x => x !== w.want)); if (!c) return null;
+    const seen = new Set([w.want]); const st = [w.want];
+    while (st.length) { const x = st.pop(); if (x === c) continue; for (const p of M.model.commits.get(x).parents) if (!seen.has(p) && w.all.includes(p)) { seen.add(p); st.push(p); } }
+    return { keep: [...seen], shallow: [...new Set([...w.boundary.filter(b => seen.has(b) && b !== c), c])], omitted: w.all.length - seen.size };
+  },
+  // the want itself is missing from an otherwise honest pack
+  'mb:omit-want': (M, rng, w) => ({ keep: w.all.filter(c => c !== w.want), shallow: w.boundary, omitted: 1 }),
+  // an unrequested commit (from an unrelated repo) rides along in an otherwise honest pack
+  'mb:extra-foreign': (M, rng, w) => ({ keep: w.all, shallow: w.boundary, extra: [M.decoy], omitted: 0 }),
+  // a tree object in a tree:0 pack (the want's root tree): wrong type for the request
+  'mb:tree-in-tree0': (M, rng, w) => ({ keep: w.all, shallow: w.boundary, extra: [{ type: TYPE.TREE, data: M.treeOf(w.want) }], omitted: 0 }),
+};
+const mergeLie = (M, kind, seed) => ctx => {
+  if (ctx.stage !== 'fetch' || ctx.phase !== 'request') return null;
+  const { want, deepen, filter } = fetchRequest(ctx.reqBody);
+  if (!want || !deepen || filter !== 'tree:0' || !M.model.commits.has(want)) return null;
+  const rng = new Rng((seed ^ parseInt(want.slice(0, 8), 16) ^ (deepen * 2654435761)) >>> 0);
+  if (kind !== 'mb:honest' && deepen === 1 && rng.bool(0.5)) return null; // let some of the three-commit fetches through
+  const w = { ...window(M, want, deepen), want };
+  const plan = MERGE_LIES[kind](M, rng, w);
+  if (!plan || (plan.omitted === 0 && !plan.extra)) return null; // nothing to omit in a one-commit window: the honest answer
+  M.lied++; M.omitted += plan.omitted;
+  const objs = [...plan.keep.map(c => ({ type: TYPE.COMMIT, data: M.commitData.get(c) })), ...(plan.extra ?? [])];
+  return { type: 'bytes', noForward: true, name: kind, bytes: fetchResponse(objs, { shallow: plan.shallow }) };
+};
+
+// one random DAG per case, pushed to a bare repo; every commit's bytes read once, up front (the fault never spawns git)
+function dagRepo(rng, i, decoy) {
+  const name = `g${i}`; const bare = makeBareRepo(root, name); const work = join(root, `gw${i}`); mkdirSync(work);
+  const dag = genDag(rng, work, { commits: rng.int(8, 26), branches: rng.int(2, 4) });
+  git(work, ['push', '-q', '--all', bare]);
+  const model = readModel(bare);
+  const commitData = new Map(); for (const c of model.commits.keys()) commitData.set(c, obj(bare, c).data);
+  const trees = new Map();
+  return { name, bare, work, model, dag, commitData, decoy, lied: 0, omitted: 0, treeOf: c => { const t = model.commits.get(c).tree; if (!trees.has(t)) trees.set(t, obj(bare, t).data); return trees.get(t); } };
+}
+const sortedBases = s => s.trim().split('\n').filter(Boolean).sort();
+const gitMergeTree = (bare, ours, theirs) => { const r = spawnSync('git', ['-C', bare, '-c', 'attr.tree=4b825dc642cb6eb9a060e54bf8d69288fbee4904', 'merge-tree', '--write-tree', '--name-only', ours, theirs], { encoding: 'utf8' }); return { clean: r.status === 0, tree: r.stdout.split('\n')[0].trim() }; };
+
+async function mergeBaseCase(rng, i, seed, decoy) {
+  const kinds = Object.keys(MERGE_LIES);
+  const kind = kinds[rng.int(0, kinds.length - 1)];
+  const M = dagRepo(rng, i, decoy);
+  const commits = [...M.model.commits.keys()]; // what the bare repo holds (genDag's unreferenced commits are not pushed)
+  // two distinct commits, branch heads more often than not; refs for the end-to-end merge
+  const pickC = () => rng.weighted([[rng.pick(M.dag.branchHeads), 3], [rng.pick(commits), 2], [M.dag.tip, 1]]);
+  let a = pickC(), b = pickC(); for (let k = 0; a === b && k < 20; k++) b = pickC();
+  if (a === b) b = commits.find(c => c !== a);
+  git(M.bare, ['update-ref', 'refs/heads/ours', a]); git(M.bare, ['update-ref', 'refs/heads/theirs', b]);
+  const gitBases = sortedBases(git(M.bare, ['merge-base', '--all', a, b]));
+  const op = rng.bool(0.6) ? 'mergeBase' : 'mergeBranch';
+  const maxDepth = rng.pick([undefined, undefined, 16, 32]);
+  const proxy = await startProxy(srv.url, mergeLie(M, kind, seed));
+  const exporter = arrayExporter();
+  let result = null, error = null;
+  const url = `${proxy.url}/${M.name}.git`;
+  try {
+    if (op === 'mergeBase') result = await mergeBase(createTransport(url, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }) }), a, b, maxDepth ? { maxDepth } : {});
+    else result = await mergeBranch(url, { ref: 'refs/heads/ours', from: 'refs/heads/theirs', author: { name: 'l', email: 'l@x' } }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000, ...(maxDepth ? { maxMergeDepth: maxDepth } : {}) }) });
+  } catch (e) { error = e; }
+  await proxy.close();
+  const problems = [];
+  const same = (x, y) => x.length === y.length && x.every((v, k) => v === y[k]);
+  const nowOurs = git(M.bare, ['rev-parse', 'refs/heads/ours']).trim();
+  if (error && !CODES.has(error.code)) problems.push(`untyped ${error.code}: ${error.message}`);
+  if (error && nowOurs !== a) problems.push(`ref moved on error to ${nowOurs.slice(0, 8)}`);
+  const basesOf = () => (op === 'mergeBase' ? result.bases.slice().sort() : null);
+  if (!error && op === 'mergeBase' && !same(basesOf(), gitBases)) problems.push(`bases ${basesOf().map(x => x.slice(0, 8))} != git merge-base --all ${gitBases.map(x => x.slice(0, 8))}${M.lied ? ' (lied to)' : ' (HONEST server)'}`);
+  if (!error && op === 'mergeBranch') {
+    // I21: whatever landed is what git produces from git's base; a many-bases history is refused, not merged
+    if (gitBases.length !== 1 && result.outcome !== 'up_to_date') problems.push(`merged with ${gitBases.length} git bases (outcome ${result.outcome})`);
+    if (result.base !== undefined && !gitBases.includes(result.base)) problems.push(`merge used base ${String(result.base).slice(0, 8)}, git's: ${gitBases.map(x => x.slice(0, 8))}`);
+    if (result.outcome === 'merge') { const g = gitMergeTree(M.bare, a, b); if (!g.clean || g.tree !== result.tree) problems.push(`pushed merge tree ${result.tree.slice(0, 8)}; git merge-tree ${g.clean ? g.tree.slice(0, 8) : 'conflicts'}`); if (nowOurs !== result.oid) problems.push('ref is not the merge commit'); }
+    if (result.outcome === 'fast_forward' && (nowOurs !== b || gitBases[0] !== a)) problems.push('fast-forward where git has no ancestor relation');
+    if (result.outcome === 'up_to_date' && !(gitBases.length === 1 && gitBases[0] === b) && a !== b) problems.push('up_to_date but theirs is not the base');
+    const fsck = git(M.bare, ['fsck', '--strict', '--no-dangling']).trim(); if (fsck) problems.push(`fsck: ${fsck.split('\n')[0]}`);
+  }
+  if (error && op === 'mergeBranch' && error.code === 'merge_conflict' && error.bases && !same(error.bases.slice().sort(), gitBases)) problems.push(`criss-cross refusal with bases ${error.bases.length}, git has ${gitBases.length}${M.lied ? ' (lied to)' : ' (HONEST server)'}`);
+  if (error && error.code === 'unrelated_histories' && gitBases.length) problems.push(`unrelated_histories but git has a base${M.lied ? ' (lied to)' : ' (HONEST server)'}`);
+  // lies the pack itself contradicts must be pack_corrupt (a missing want, an unrequested object, a wrong type), with
+  // nothing landed; omissions may also surface as the depth cap (a consistent shallower cut) or a correct base.
+  if (M.lied && ['mb:omit-want', 'mb:extra-foreign', 'mb:tree-in-tree0'].includes(kind) && error?.code !== 'pack_corrupt') problems.push(`${kind} fired ${M.lied}× but outcome is ${error ? error.code : 'success'}`);
+  if (M.lied && error && !['pack_corrupt', 'limit_exceeded', 'protocol', 'merge_conflict', 'not_fast_forward', 'unrelated_histories'].includes(error.code)) problems.push(`lied to, unexpected code ${error.code}`);
+  const code = error ? error.code : (op === 'mergeBase' ? `ok(${result.bases.length})` : `ok:${result.outcome}`);
+  return { lie: `${kind}${M.lied ? `×${M.lied}` : ''} ${op}${maxDepth ? ` d${maxDepth}` : ''}`, code, error, problems, cleanup: () => rmSync(M.work, { recursive: true, force: true }) };
+}
+
 const { root, cleanup } = tmpRoot();
 const srv = await startGitServer(root);
 const outcomes = {}, fails = [];
 try {
   const names = Object.keys(LIES);
   const seeds = ONLY !== null ? [ONLY] : Array.from({ length: N }, (_, i) => (SEED * 7919 + i * 104729) >>> 0);
+  // the unrelated commit for mb:extra-foreign, made once
+  const dbare0 = makeBareRepo(root, 'decoy0'); const dwork0 = join(root, 'decoy0w'); mkdirSync(dwork0); git(dwork0, ['init', '-q', '-b', 'main']);
+  const decoy = obj(dbare0, commitFiles(dwork0, dbare0, { 'decoy.txt': 'decoy\n' }, 'decoy'));
   for (let i = 0; i < seeds.length; i++) {
     const rng = new Rng(seeds[i]);
+    const mb = rng.bool(1 / 3); // drawn in every mode so --op mergebase --case <seed> replays a mixed run's case
+    if (OP === 'mergebase' || (OP === 'mixed' && mb)) {
+      const r = await mergeBaseCase(rng, i, seeds[i], decoy);
+      outcomes[`${r.lie.split(/[×\s]/)[0]} → ${r.code}`] = (outcomes[`${r.lie.split(/[×\s]/)[0]} → ${r.code}`] ?? 0) + 1;
+      process.stdout.write(`${r.problems.length ? 'FAIL' : 'ok  '} #${String(i).padStart(3)} seed=${seeds[i]} ${r.lie.padEnd(38)} → ${r.code.padEnd(13)} ${r.error ? r.error.message.slice(0, 70) : ''}\n`);
+      if (r.problems.length) { fails.push(seeds[i]); console.log('     ' + r.problems.join('\n     ') + `\n     repro: node test/fuzz/liar.mjs --op mergebase --case ${seeds[i]}`); }
+      r.cleanup();
+      continue;
+    }
     const lie = names[rng.int(0, names.length - 1)];
     const name = `l${i}`;
     // real repo: two commits so there is an "older" version of everything
