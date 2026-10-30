@@ -39,6 +39,8 @@ before(async () => {
   sshd = await startSshd(root, { publicKeyRaw: pub });
 });
 after(async () => { await sshd.close(); cleanup(); });
+// polls f() until it equals want (a destroyed socket leaves the list a tick later), at most ~2 s; returns the last value
+const settled = async (f, want) => { let v; for (let i = 0; i < 40 && (v = f()) !== want; i++) await new Promise(r => setTimeout(r, 50)); return v; };
 const repo = () => { const name = `s${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']); return { name, bare, work, url: `ssh://${sshd.user}@127.0.0.1:${sshd.port}${bare}` }; };
 const transport = (url, extra = {}) => createSshTransport(url, { privateKey: kp.privateKey, publicKeyRaw: pub, hostKey: sshd.hostKeyLine, connect: nodeStream, tracer: new Tracer(), ...extra });
 
@@ -119,25 +121,30 @@ test('parity with git over ssh: a clone through OpenSSH sees exactly what we pus
   } finally { rmSync(d, { recursive: true, force: true }); await t.close(); }
 });
 
-test('failures are typed: host key mismatch (before auth), unauthorized key, no AcceptEnv, missing repo, scp-like url', async () => {
+test('failures are typed: host key mismatch (before auth), unauthorized key, no AcceptEnv, missing repo, scp-like url; none leaves a socket open', async () => {
   const r = repo(); commitFiles(r.work, r.bare, { 'f.txt': 'x\n' }, 'seed');
+  // every connection a failing command dials, with whether it was closed: a failure must not hold a socket (issue #31: the
+  // missing repo's connection stayed open until the socket's idle timeout, holding this file's exit ~60 s)
+  const dialed = []; const counting = (...a) => Promise.resolve(nodeStream(...a)).then(s => { const d = { closed: false }; dialed.push(d); return { ...s, close() { d.closed = true; return s.close(); } }; });
   const other = crypto.getRandomValues(new Uint8Array(32));
   const logBefore = sshd.log().length;
-  await assert.rejects(lsRefs(transport(r.url, { hostKey: hostKeyLine(other) }), ['HEAD']), e => e.code === 'host_key_mismatch' && /does not match the pinned/.test(e.message) && e.presented === sshd.hostKeyLine.split(' ').slice(0, 2).join(' '));
+  await assert.rejects(lsRefs(transport(r.url, { hostKey: hostKeyLine(other), connect: counting }), ['HEAD']), e => e.code === 'host_key_mismatch' && /does not match the pinned/.test(e.message) && e.presented === sshd.hostKeyLine.split(' ').slice(0, 2).join(' '));
   assert.doesNotMatch(sshd.log().slice(logBefore), /Accepted publickey/, 'no credential was presented to an unverified host');
   const kp2 = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']); const pub2 = new Uint8Array(await crypto.subtle.exportKey('raw', kp2.publicKey));
-  await assert.rejects(lsRefs(transport(r.url, { privateKey: kp2.privateKey, publicKeyRaw: pub2 }), ['HEAD']), e => e.code === 'auth' && /publickey authentication refused/.test(e.message));
-  await assert.rejects(lsRefs(transport(`ssh://${sshd.user}@127.0.0.1:${sshd.port}${root}/does-not-exist.git`), ['HEAD']), e => (e.code === 'not_found' || e.code === 'remote_error') && /does-not-exist|not appear|no such|denied/i.test(e.message));
+  await assert.rejects(lsRefs(transport(r.url, { privateKey: kp2.privateKey, publicKeyRaw: pub2, connect: counting }), ['HEAD']), e => e.code === 'auth' && /publickey authentication refused/.test(e.message));
+  await assert.rejects(lsRefs(transport(`ssh://${sshd.user}@127.0.0.1:${sshd.port}${root}/does-not-exist.git`, { connect: counting }), ['HEAD']), e => (e.code === 'not_found' || e.code === 'remote_error') && /does-not-exist|not appear|no such|denied/i.test(e.message));
   await assert.rejects(editFile(r.url, { path: 'f.txt', find: 'x', replace: 'y', author, message: 'm' }, { tracer: new Tracer(), transport: transport(r.url, { connect: () => { throw Object.assign(new Error('ECONNREFUSED'), { code: 'network' }); } }) }), e => e.code === 'network');
   assert.throws(() => createSshTransport(r.url, { privateKey: kp.privateKey, publicKeyRaw: pub, connect: nodeStream, tracer: new Tracer() }), e => e.code === 'bad_request' && /hostKey is required/.test(e.message));
   // a server that drops GIT_PROTOCOL answers in v0: we refuse rather than guess
   const s0 = await startSshd(join(root, 'noenv'), { publicKeyRaw: pub, acceptEnv: false });
-  try { await assert.rejects(lsRefs(createSshTransport(`ssh://${s0.user}@127.0.0.1:${s0.port}${r.bare}`, { privateKey: kp.privateKey, publicKeyRaw: pub, hostKey: s0.hostKeyLine, connect: nodeStream, tracer: new Tracer() }), ['HEAD']), e => e.code === 'unsupported' && /AcceptEnv GIT_PROTOCOL/.test(e.message)); }
+  try { await assert.rejects(lsRefs(createSshTransport(`ssh://${s0.user}@127.0.0.1:${s0.port}${r.bare}`, { privateKey: kp.privateKey, publicKeyRaw: pub, hostKey: s0.hostKeyLine, connect: counting, tracer: new Tracer() }), ['HEAD']), e => e.code === 'unsupported' && /AcceptEnv GIT_PROTOCOL/.test(e.message)); }
   finally { await s0.close(); }
   // scp-like form resolves relative to the user's home: use a repo there
   const home = process.env.HOME; const hb = makeBareRepo(home, `ply-scp-${process.pid}`);
   try { commitFiles(r.work, hb, { 'f.txt': 'home\n' }, 'home'); const t = transport(`${sshd.user}@127.0.0.1:ply-scp-${process.pid}.git`, {}); t.ssh.port = sshd.port; const { refs } = await lsRefs(t, ['refs/heads/main']); assert.ok(refs.has('refs/heads/main')); await t.close(); }
   finally { rmSync(hb, { recursive: true, force: true }); }
+  // none of the failed commands' transports was closed by this test
+  assert.deepEqual(dialed.map(d => d.closed), [true, true, true, true], 'host key, auth, missing repo, no AcceptEnv: each connection closed');
 });
 
 test('mutating the encrypted stream fails closed: every flipped byte after NEWKEYS is a bad tag, never a wrong answer', async () => {
@@ -255,6 +262,64 @@ test('I1 ssh: an aborted signal stops an exchange before it connects and during 
     assert.deepEqual(outcome(hs), { code: 'aborted', message: 'request aborted: caller gave up' });
     assert.ok(hs.ms >= 290 && hs.ms < 700, `stopped at ${hs.ms} ms`);
   } finally { await px.close(); await h.close(); }
+});
+
+// ---- issue #31: concurrent first commands, a failed handshake, a failed channel ----
+const sessions = since => (sshd.log().slice(since).match(/Starting session: command/g) ?? []).length;
+const closedSessions = since => (sshd.log().slice(since).match(/Close session/g) ?? []).length;
+const execsBy = ex => { const by = {}; for (const s of ex.lines.flatMap(flattenLine).filter(s => s.name === 'ssh.exec')) by[s.attrs['git.service']] = (by[s.attrs['git.service']] ?? 0) + 1; return by; };
+
+test('concurrent first commands share one channel per service: one session at the sshd; editFile with a hint on a fresh transport opens one upload-pack and one receive-pack', async () => {
+  const r = repo(); const seed = commitFiles(r.work, r.bare, { 'f.txt': 'MARK\n' }, 'seed');
+  const log0 = sshd.log().length;
+  const ex = arrayExporter(); const t = transport(r.url, { tracer: new Tracer({ exporter: ex }) });
+  try {
+    const got = await Promise.all([lsRefs(t, ['refs/heads/main']), lsRefs(t, ['refs/heads/main']), lsRefs(t, ['HEAD']), discover(t)]);
+    for (const g of got.slice(0, 2)) assert.equal(g.refs.get('refs/heads/main').oid, seed);
+    assert.match(got[3].agent, /^git\//);
+  } finally { await t.close(); }
+  assert.equal(await settled(() => closedSessions(log0), 1), 1);
+  console.log(`  4 concurrent first commands: ${sessions(log0)} session(s) at the sshd, exec spans ${JSON.stringify(execsBy(ex))}`);
+  assert.equal(sessions(log0), 1, 'one CHANNEL_OPEN + exec at the sshd');
+  assert.deepEqual(execsBy(ex), { 'git-upload-pack': 1 });
+  // editFile overlaps ls-refs with the speculative fetch of the hinted commit: both are the first upload-pack command
+  const log1 = sshd.log().length;
+  const ex2 = arrayExporter(); const t2 = transport(r.url, { tracer: new Tracer({ exporter: ex2 }) });
+  let e;
+  try { e = await editFile(r.url, { path: 'f.txt', find: 'MARK', replace: 'DONE', author, message: 'hinted' }, { tracer: new Tracer({ exporter: ex2 }), transport: t2, head: seed }); }
+  finally { await t2.close(); }
+  assert.equal(e.hint, 'used'); assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), e.newCommit); assert.equal(git(r.bare, ['cat-file', '-p', 'main:f.txt']), 'DONE\n');
+  assert.equal(await settled(() => closedSessions(log1), 2), 2);
+  console.log(`  editFile (hinted, fresh transport): ${sessions(log1)} session(s) at the sshd, exec spans ${JSON.stringify(execsBy(ex2))}`);
+  assert.equal(sessions(log1), 2);
+  assert.deepEqual(execsBy(ex2), { 'git-upload-pack': 1, 'git-receive-pack': 1 });
+});
+
+test('a handshake that fails for a non-timeout reason is not kept: the next command dials again and succeeds; a permanent failure stays typed on every command', async () => {
+  const r = repo(); commitFiles(r.work, r.bare, { 'f.txt': 'x\n' }, 'seed');
+  const px = await trickleProxy(sshd.port); const url = `ssh://${sshd.user}@127.0.0.1:${px.port}${r.bare}`;
+  try {
+    const t = transport(url);
+    px.mode.banner = 'SSH-1.5-old\r\n';
+    await assert.rejects(lsRefs(t, ['refs/heads/main']), e => e.code === 'unsupported' && /server version SSH-1\.5-old/.test(e.message));
+    px.mode.banner = null;
+    assert.ok((await lsRefs(t, ['refs/heads/main'])).refs.has('refs/heads/main'), 'reconnected');
+    assert.equal(px.connections(), 2);
+    await t.close();
+    // a connect() that throws once (refused) is not kept either
+    let dials = 0;
+    const t1 = transport(url, { connect: (...a) => { if (dials++ === 0) throw Object.assign(new Error('ECONNREFUSED'), { code: 'network' }); return nodeStream(...a); } });
+    await assert.rejects(lsRefs(t1, ['HEAD']), e => e.code === 'network');
+    assert.ok((await lsRefs(t1, ['refs/heads/main'])).refs.has('refs/heads/main'), 'reconnected after a refused dial');
+    assert.equal(dials, 2);
+    await t1.close();
+    // permanent: every command dials, and fails typed
+    px.mode.banner = 'SSH-1.5-old\r\n';
+    const before = px.connections(); const t2 = transport(url);
+    for (let i = 0; i < 3; i++) await assert.rejects(lsRefs(t2, ['HEAD']), e => e.code === 'unsupported' && /server version SSH-1\.5-old/.test(e.message));
+    assert.equal(px.connections() - before, 3, 'one dial per command, not one cached rejection');
+    await t2.close();
+  } finally { await px.close(); }
 });
 
 test('a server sending CHANNEL_DATA past our window while we wait for another message: typed ssh error, at most one window held', async () => {
