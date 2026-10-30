@@ -125,7 +125,8 @@ async function addedPaths(read, base, side, prefix = '') {
 // A rename on one side with the other side untouched merges exactly as git does.
 export async function mergeTrees(t, cache, { base, ours, theirs, prefix = '', removed = null, mergeBlob = null, driverFor = null }, out = null) {
   const top = out === null;
-  out = out ?? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: {}, contentMerged: 0 };
+  // reasons is keyed by path, so it has no prototype: a path named `__proto__` or `constructor` is recorded like any other
+  out = out ?? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: Object.create(null), contentMerged: 0 };
   const read = async oid => { if (!oid) return EMPTY; let data = cache.get(oid); if (!data) { data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); out.fetched++; } return parseTree(data, t.limits); };
   const [B, O, T] = await Promise.all([read(base), read(ours), read(theirs)]);
   const r = threeWay(B, O, T);
@@ -136,11 +137,12 @@ export async function mergeTrees(t, cache, { base, ours, theirs, prefix = '', re
   for (const name of r.deletedBoth) out.deletedBoth.push(prefix + name);
   if (removed === 'ours') for (const name of r.addedTheirs) out.dirAdds.push(prefix + name);
   if (removed === 'theirs') for (const name of r.addedOurs) out.dirAdds.push(prefix + name);
-  const byName = list => Object.fromEntries(list.map(e => [e.name, e]));
+  // Names are the repository's: a Map, so a directory called `constructor` or `__proto__` is not Object.prototype's
+  const byName = list => new Map(list.map(e => [e.name, e]));
   const b = byName(B), o = byName(O), th = byName(T);
   for (const name of r.content) {
-    const mode = mergeMode(b[name].mode, o[name].mode, th[name].mode);
-    const blob = mode === null || !mergeBlob ? null : await mergeBlob({ base: b[name].oid, ours: o[name].oid, theirs: th[name].oid, path: prefix + name, driverFor });
+    const mode = mergeMode(b.get(name).mode, o.get(name).mode, th.get(name).mode);
+    const blob = mode === null || !mergeBlob ? null : await mergeBlob({ base: b.get(name).oid, ours: o.get(name).oid, theirs: th.get(name).oid, path: prefix + name, driverFor });
     if (blob === null || blob.conflict) { out.conflicts.push(prefix + name); out.reasons[prefix + name] = mode === null ? 'mode' : blob?.reason ?? 'content'; continue; }
     entries.push({ mode, name, oid: blob.oid });
     if (blob.data) out.objects.push({ type: TYPE.BLOB, data: blob.data, oid: blob.oid });
@@ -148,8 +150,8 @@ export async function mergeTrees(t, cache, { base, ours, theirs, prefix = '', re
   }
   for (const name of r.recurse) {
     const treeOid = e => (e && e.mode === '40000' ? e.oid : null);
-    const sideRemoved = removed ?? (b[name]?.mode === '40000' ? (o[name] == null ? 'ours' : th[name] == null ? 'theirs' : null) : null);
-    const sub = await mergeTrees(t, cache, { base: treeOid(b[name]), ours: treeOid(o[name]), theirs: treeOid(th[name]), prefix: `${prefix}${name}/`, removed: sideRemoved, mergeBlob, driverFor }, out);
+    const sideRemoved = removed ?? (b.get(name)?.mode === '40000' ? (!o.has(name) ? 'ours' : !th.has(name) ? 'theirs' : null) : null);
+    const sub = await mergeTrees(t, cache, { base: treeOid(b.get(name)), ours: treeOid(o.get(name)), theirs: treeOid(th.get(name)), prefix: `${prefix}${name}/`, removed: sideRemoved, mergeBlob, driverFor }, out);
     if (sub.oid !== null) entries.push({ mode: '40000', name, oid: sub.oid }); // an empty merged subtree drops the directory, as git does
   }
   if (top) for (const p of out.dirAdds) if (!(p in out.reasons)) { out.conflicts.push(p); out.reasons[p] = 'possible directory rename (added inside a directory the other side removed)'; }
@@ -279,7 +281,7 @@ export async function mergeBranch(url, { ref = 'refs/heads/main', from, author, 
     if (bases.length === 0) throw fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
     // criss-cross history: git merges the bases into a virtual one (merge-ort, recursively); a single base can give a clean
     // result that differs from git's, so we refuse rather than guess
-    if (bases.length > 1) throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: {}, bases });
+    if (bases.length > 1) throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases });
     if (base === theirs) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
     if (base === ours && !noFastForward) {
       const r = await fastForward(t, { ref, from: ours, to: theirs });

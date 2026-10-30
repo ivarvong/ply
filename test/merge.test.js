@@ -15,6 +15,7 @@ import { editFile } from '../src/edit.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { mergeBranch, deleteBranch, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
+import { attributesFor } from '../src/attributes.js';
 import { createTransport } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -240,6 +241,58 @@ test('.gitattributes merge drivers, judged by git (attr.tree): union, -merge, bi
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:CHANGELOG']).stdout, L(3) + 'ours 1\nours 2\ntheirs 1\ntheirs 2');
   await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), attributes: 'nope nope' }), e => e.code === 'bad_request');
   await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), attributes: 42 }), e => e.code === 'bad_request');
+});
+
+test('names that are Object.prototype members (#16): a directory rename + add inside `constructor`/`__proto__`/…, a rename onto `__proto__`, a `__proto__` content conflict — each judged by git', async () => {
+  const body = (n, k = 30) => Array.from({ length: k }, (_, i) => `line ${i} of ${n}\n`).join('');
+  const lines = body('a').split(/(?<=\n)/);
+  // computed keys: a literal `__proto__:` key would set the prototype, not name a file
+  const cases = [];
+  for (const d of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    cases.push([`dir rename + add in ${d}/`, { [`${d}/x.txt`]: body('x'), [`${d}/y.txt`]: body('y') }, { [`${d}/x.txt`]: null, [`${d}/y.txt`]: null, ['e/x.txt']: body('x'), ['e/y.txt']: body('y') }, { [`${d}/new.txt`]: 'new\n' }]);
+    cases.push([`dir rename + add in ${d}/ (theirs renames)`, { [`${d}/x.txt`]: body('x'), [`${d}/y.txt`]: body('y') }, { [`${d}/new.txt`]: 'new\n' }, { [`${d}/x.txt`]: null, [`${d}/y.txt`]: null, ['e/x.txt']: body('x'), ['e/y.txt']: body('y') }]);
+  }
+  cases.push(['rename/delete onto __proto__', { ['a.txt']: body('a') }, { ['a.txt']: null, ['__proto__']: body('a') }, { ['a.txt']: null }]);
+  cases.push(['same line in __proto__', { ['__proto__']: body('a') }, { ['__proto__']: ['OURS\n', ...lines.slice(1)].join('') }, { ['__proto__']: ['THEIRS\n', ...lines.slice(1)].join('') }]);
+  cases.push(['same line in constructor/__proto__', { ['constructor/__proto__']: body('a') }, { ['constructor/__proto__']: ['OURS\n', ...lines.slice(1)].join('') }, { ['constructor/__proto__']: ['THEIRS\n', ...lines.slice(1)].join('') }]);
+  for (const [name, base, o, th] of cases) {
+    const r = repo();
+    const b = commitFiles(r.work, r.bare, base, 'base');
+    const theirs = branchCommit(r, 'feat', b, th, 'theirs'); const ours = branchCommit(r, 'main', b, o, 'ours');
+    const g = gitMergeTree(r.bare, ours, theirs);
+    assert.equal(g.clean, false, `${name}: git conflicts (the case means what it says)`);
+    let m = null, err = null; try { m = await merge(r); } catch (e) { err = e; }
+    assert.equal(err?.code, 'merge_conflict', `${name}: git conflicts on ${g.conflicts} (${g.info}), so must we — we merged to ${m?.tree}`);
+    for (const p of g.conflicts) assert.ok(err.conflicts.includes(p) || Object.values(err.reasons).some(x => /directory rename/.test(x)), `${name}: git conflicts on ${p}, we did not (${err.message})`);
+    for (const p of err.conflicts) assert.equal(typeof Object.getOwnPropertyDescriptor(err.reasons, p)?.value, 'string', `${name}: ${p} has its own reason (${err.message})`);
+    assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), ours, `${name}: nothing pushed on conflict`);
+  }
+});
+
+test('.gitattributes [:class:] names that are Object.prototype members (#16): attributes == git check-attr, merge drivers == git merge-tree, never an untyped error', async () => {
+  const L = n => Array.from({ length: n }, (_, i) => `entry ${i}\n`).join('');
+  const attrs = 'x[[:hasOwnProperty:]] -merge\n*[[:constructor:]]* -merge\n*[[:toString:]]* merge=union\n*[[:__proto__:]]* -merge\n*[[:valueOf:]] merge=union\n*[[:alpha:]].log merge=union\n';
+  const paths = ['a.txt', 'xy', 'x1', 'constructor', 'toString.md', 'b.log', '__proto__', 'd/a.txt', 'd/x:'];
+  // check-attr: git's verdict for every path, against attributesFor
+  const r = repo();
+  const b = commitFiles(r.work, r.bare, { '.gitattributes': attrs, ...Object.fromEntries(paths.map(p => [p, L(5)])) }, 'base');
+  const res = sh(r.work, ['check-attr', `--source=${b}`, '-a', '-z', '--stdin'], paths.join('\0') + '\0');
+  assert.equal(res.status, 0, res.stderr);
+  const fields = res.stdout.split('\0'), want = new Map(paths.map(p => [p, []]));
+  for (let i = 0; i + 2 < fields.length; i += 3) want.get(fields[i]).push([fields[i + 1], fields[i + 2]]);
+  for (const p of paths) {
+    const ours = [...attributesFor(p, new Map([['', attrs]]))].filter(([, v]) => v !== null).map(([k, v]) => [k, v === true ? 'set' : v === false ? 'unset' : v]);
+    assert.deepEqual(ours.sort(), want.get(p).sort(), `${p}: attributes == git check-attr`);
+  }
+  assert.deepEqual(want.get('b.log'), [['merge', 'union']], 'a real class still matches');
+  // merge: every file changes the same line on both sides; only b.log (union) is clean in git
+  const theirs = branchCommit(r, 'feat', b, Object.fromEntries(paths.map(p => [p, L(5) + 'theirs\n'])), 'theirs');
+  const ours = branchCommit(r, 'main', b, Object.fromEntries(paths.map(p => [p, L(5) + 'ours\n'])), 'ours');
+  const g = gitMergeTree(r.bare, ours, theirs, ours);
+  let err = null; try { await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), rediff, attributes: 'ours' }); } catch (e) { err = e; }
+  assert.equal(err?.code, 'merge_conflict', `git conflicts on ${g.conflicts}; we: ${err?.code} ${err?.message}`);
+  assert.deepEqual([...err.conflicts].sort(), [...g.conflicts].sort(), 'conflicts == git merge-tree');
+  for (const p of err.conflicts) assert.match(err.reasons[p], /^content/, `${p}: a text conflict, not -merge from a pattern git does not match`);
 });
 
 test('branch workflow: editFile creates the branch from main (CAS: must not exist), merge lands it, delete removes it', async () => {

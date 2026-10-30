@@ -399,6 +399,27 @@ test('I6c a Location carrying a query or the credential is quoted as origin + pa
   } finally { await srv2.close(); }
 });
 
+// Every ref line of an ls-refs response with `extra` appended: attributes a hostile server adds after the real ones.
+const appendLsRefAttrs = (bytes, extra) => {
+  const out = []; let o = 0;
+  while (o < bytes.length) {
+    const len = parseInt(new TextDecoder().decode(bytes.subarray(o, o + 4)), 16);
+    if (len < 4) { out.push(bytes.subarray(o, o + 4)); o += 4; continue; }
+    out.push(pkt(`${new TextDecoder().decode(bytes.subarray(o + 4, o + len)).replace(/\n$/, '')} ${extra}\n`)); o += len;
+  }
+  return concat(out);
+};
+
+test('#16 ls-refs attributes never override the parsed oid or name: oid:/name: extras leave the edit on the real head', async () => {
+  for (const extra of ['oid:junk name:refs/heads/other', `oid:${'1'.repeat(40)}`, 'name:refs/heads/other', 'name:HEAD oid:junk __proto__:x constructor:y']) {
+    const r = await run(ctx => (ctx.stage === 'ls-refs' && ctx.phase !== 'request' ? { type: 'bytes', bytes: appendLsRefAttrs(ctx.bytes, extra) } : { type: 'pass' }));
+    assert.equal(r.error, null, `${extra}: ${r.error?.code} ${r.error?.message}`);
+    assert.ok(r.log.some(l => l.stage === 'ls-refs' && l.spec === 'bytes'), `${extra}: the ls-refs response was rewritten`);
+    checkInvariants(r, { stage: `ls-refs + ${extra}` });
+    assert.equal(git(r.repo.bare, ['log', '-1', '--format=%P', r.head]).trim(), r.repo.head, `${extra}: parent is the real head`);
+  }
+});
+
 test('ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct', async () => {
   const r = await run(at('receive-pack', 0, { type: 'drop', after: 0 }));
   assert.equal(r.error.code, 'ambiguous');

@@ -18,13 +18,15 @@ const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT
 const NAMES = ['ab', 'bb', 'x.txt', 'y.txt', 'z.bin', 'Makefile', 'lock.json', 'pkg.lock', 'read me.md', 'a.b.c', '[x]', 'q*', 'é.txt', '-dash', '!bang', '#hash', 'tab\there'];
 const DIRS = ['', 'a', 'a/b', 'docs', 'docs/a', 'src/x', 'a b'];
 const ATTRS = ['merge', 'merge', 'merge', 'diff', 'text', 'binary', 'lock', 'custom', 'eol', 'x-y.z'];
+// not classes: git's wildmatch aborts the pattern; Object.prototype members must not read as classes (#16)
+const BOGUS_CLASSES = ['bogus', 'constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf'];
 function genPattern(rng) {
   const lit = () => rng.pick(['a', 'b', 'x', 'txt', 'bin', 'lock', 'json', 'docs', 'src', 'é', 'read me', 'q']);
   const parts = [];
   const n = rng.int(1, 3);
   for (let i = 0; i < n; i++) {
     const k = rng.int(0, 13);
-    parts.push(k < 3 ? lit() : k < 5 ? '*' : k === 5 ? '?' : k === 6 ? '**' : k === 7 ? '[a-c]' : k === 8 ? '[!x]' : k === 9 ? '[[:alpha:]]' : k === 10 ? '\\*' : k === 11 ? '.' : k === 12 ? '[^a]' : '[[:bogus:]]');
+    parts.push(k < 3 ? lit() : k < 5 ? '*' : k === 5 ? '?' : k === 6 ? '**' : k === 7 ? '[a-c]' : k === 8 ? '[!x]' : k === 9 ? '[[:alpha:]]' : k === 10 ? '\\*' : k === 11 ? '.' : k === 12 ? '[^a]' : `[[:${rng.pick(BOGUS_CLASSES)}:]]`);
     if (i < n - 1) parts.push(rng.int(0, 2) ? '' : '/');
   }
   let p = parts.join('');
