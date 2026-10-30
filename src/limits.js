@@ -26,7 +26,8 @@ export const LIMIT_PACK_WIRE = LIMIT_OBJECT * 2;
 export const LIMIT_DELTA_RESULT = LIMIT_OBJECT;
 /**
  * Delta chain depth. pack-objects' default window depth is 50; 64 is past that and still a fixed walk.
- * resolvePack uses the same number as its fixpoint-pass ceiling.
+ * resolvePack counts deltas from the full (or external) base, so no resolved object is more than 64 deltas deep in
+ * either pack order (test/delta-bound.test.js).
  */
 export const LIMIT_DELTA_CHAIN = 64;
 /**
