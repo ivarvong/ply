@@ -1,27 +1,66 @@
 // Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
+import { fail } from './errors.js';
 import { concat } from './bytes.js';
-import { TYPE_NAME } from './objects.js';
+import { TYPE, TYPE_NAME, parseCommit, assertFetched } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { limitError, requireLimit } from './limits.js';
 import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest } from './fetch.js';
 
+// Pure: the commit window a `deepen` fetch of commit wants must contain, checked the way git's fetch checks what it
+// received — fsck on every object (transfer.fsckObjects) and connectivity (check_connected): every object is a commit
+// (or, from a blob:none answer, a tree) and well-formed (assertFetched); every want is a commit in the pack; every commit
+// is reachable from a want; and every commit's parents are in the pack unless the server declared that commit a shallow
+// boundary. A cut the server did not declare is pack_corrupt — the pack is not the answer to the request — so no caller
+// ever walks a graph with a hole it was not told about (issue #18: the merge base of such a graph is not git's). Returns
+// oid → parsed commit for the window, so the caller parses nothing itself.
+export function checkCommitWindow(objects, { wants, shallow = [], trees = false }, limits) {
+  for (const [oid, o] of objects) {
+    const name = TYPE_NAME[o.type];
+    if (o.type !== TYPE.COMMIT && !(trees && o.type === TYPE.TREE)) throw fail('pack_corrupt', `unrequested ${name} ${oid} in a commit-only pack (${objects.size} objects)`);
+    assertFetched(name, o.data, limits);
+  }
+  for (const w of wants) if (!objects.has(w)) throw fail('pack_corrupt', `want ${w} not in the pack (${objects.size} objects)`);
+  const cut = new Set(shallow);
+  const commits = new Map(); const st = [...wants];
+  while (st.length) {
+    const c = st.pop(); if (commits.has(c)) continue;
+    const o = objects.get(c);
+    if (o.type !== TYPE.COMMIT) throw fail('pack_corrupt', `${c} is a ${TYPE_NAME[o.type]}, not a commit`);
+    const parsed = parseCommit(o.data, limits); commits.set(c, parsed);
+    for (const p of parsed.parents) {
+      if (objects.has(p)) { st.push(p); continue; }
+      if (!cut.has(c)) throw fail('pack_corrupt', `commit ${p}, parent of ${c}, is not in the pack and ${c} was not declared shallow`);
+    }
+  }
+  for (const [oid, o] of objects) if (o.type === TYPE.COMMIT && !commits.has(oid)) throw fail('pack_corrupt', `unrequested commit ${oid}: not reachable from a want`);
+  return commits;
+}
+
 // fetchPack for a `filter tree:0` request (commit-only history walks) with the blob:none fallback of fetch.js: a server
 // that refuses tree:0 gets blob:none, which also carries every tree of every commit in the window — far more bytes on a
-// deep window (bounded by limits.maxPackBytes; the attrs say how much). The trees are harvested for later tree fetches.
+// deep window (bounded by limits.maxPackBytes; the attrs say how much). Either answer passes checkCommitWindow before
+// anything is kept: the result carries `commits` (oid → parsed), and the trees of a wide answer are harvested for later
+// tree fetches (fetch.js harvest, which is where every object entering t.objects is checked).
 export async function fetchPackTree0(t, opts) {
+  const checked = (r, trees) => {
+    if (!r.objects) throw fail('protocol', 'fetch: no packfile in the answer to a commit walk');
+    return { ...r, commits: checkCommitWindow(r.objects, { wants: opts.wants, shallow: r.shallow, trees }, t.limits) };
+  };
   const wide = async learned => {
-    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
-    if (r.objects) harvest(t, r.objects);
+    const r = checked(await fetchPack(t, { ...opts, filter: 'blob:none' }, { attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } }), true);
+    harvest(t, r.objects);
     return r;
   };
   if (t.quirks?.treeFilter === 'blob:none') return wide(false);
-  try { return await fetchPack(t, opts); } catch (e) {
+  let r;
+  try { r = await fetchPack(t, opts); } catch (e) {
     if (!isFilterRejection(e)) throw e;
     if (t.quirks) t.quirks.treeFilter = 'blob:none';
     return wide(true);
   }
+  return checked(r, false);
 }
 
 export const packAttrs = (parsed, resolved) => ({

@@ -202,13 +202,16 @@ export const spAttrs = (st, prefix = 'git.pack') => ({ [`${prefix}.objects`]: 1,
 const OID_RE = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
 export const isFilterRejection = e => ['http', 'remote_error', 'protocol'].includes(e?.code) && /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i.test(String(e?.message ?? ''));
 
-// Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack).
+// Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack),
+// and this is the one door into `t.objects`: an object is fsck-checked (assertFetched) as it is kept, so fetchObject can
+// serve the store without re-checking (issue #18: fetchPackTree0's harvest used to skip the check fetchWide applied).
 export function harvest(t, objects, skip = null) {
   const store = t.objects; if (!store) return { kept: 0, bytes: 0 };
   let kept = 0, bytes = 0; store.bytes ??= 0;
   for (const [oid, o] of objects) {
     if (oid === skip || store.has(oid) || (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE)) continue;
     if (store.bytes + o.data.length > requireLimit(t.limits, 'maxHarvestBytes')) break;
+    assertFetched(TYPE_NAME[o.type], o.data, t.limits);
     store.set(oid, { type: o.type, data: o.data }); store.bytes += o.data.length; kept++; bytes += o.data.length;
   }
   return { kept, bytes };
@@ -274,11 +277,12 @@ async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
       }
       const parsed = parsePack(concat(parts), packParseOpts(t.limits));
       const { objects } = resolvePack(parsed, undefined, t.limits);
-      for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data, t.limits);
       const want = objects.get(oid);
       if (!want) throw fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
       if (want.data.length > maxObject) throw limitError('object size', want.data.length, maxObject);
       if (expectType !== null && want.type !== expectType) throw fail('pack_corrupt', `expected ${TYPE_NAME[expectType]}, got ${TYPE_NAME[want.type]}`);
+      // the want is checked here, every other commit and tree as harvest keeps it; nothing unchecked is ever served
+      assertFetched(TYPE_NAME[want.type], want.data, t.limits);
       let extraBytes = 0, blobs = 0; for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
       const h = harvest(t, objects, oid);
       span.set({ 'git.pack.objects': parsed.stats.count, 'git.pack.bytes': total, 'git.object.oid': oid, 'git.object.type': TYPE_NAME[want.type], 'git.fetch.wide.objects': objects.size, 'git.fetch.wide.extra_objects': objects.size - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes });

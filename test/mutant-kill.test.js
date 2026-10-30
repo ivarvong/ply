@@ -15,7 +15,9 @@ import {
 } from '../src/packresolve.js';
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
-import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
+import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, harvest } from '../src/fetch.js';
+import { checkCommitWindow, fetchPackTree0 } from '../src/fetchpack.js';
+import { bestBases, mergeBase } from '../src/merge.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
 import { parseReportStatus, checkReport, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
@@ -1305,4 +1307,105 @@ test('size varints stop at 64 bits: a header that never ends is pack_corrupt at 
   throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
   throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+});
+
+// A commit-only v2 server over a hand graph ({ name: [parent names] }), answering `want` + `deepen N` + `filter tree:0`
+// as upload-pack does: the commits within N of the want (the want is depth 1), those at depth N as `shallow` lines.
+// `lie(req)` may return { drop: [oids], shallow: [oids], extra: [objects] } to cut the window, declare a different
+// boundary, or add objects. Every commit has the empty tree; names map to oids through `oid(name)`.
+function graphServer(edges, lie = () => null) {
+  const author = ident(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }));
+  const tree = hashObject('tree', new Uint8Array(0));
+  const oids = new Map(), datas = new Map();
+  const build = name => { if (oids.has(name)) return oids.get(name); const d = encodeCommit({ tree, parents: edges[name].map(build), author, committer: author, message: `${name}\n` }); const o = hashObject('commit', d); oids.set(name, o); datas.set(o, d); return o; };
+  for (const name of Object.keys(edges)) build(name);
+  const parentsOf = new Map([...oids].map(([name, o]) => [o, edges[name].map(n => oids.get(n))]));
+  const requests = [];
+  const t = { limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null, objects: new Map(), quirks: {}, requests,
+    async *frames(_service, body) {
+      const lines = pktStep(pktInit(), body).frames.filter(f => f.kind === 'data').map(f => td.decode(f.payload).replace(/\n$/, ''));
+      const want = lines.find(l => l.startsWith('want '))?.slice(5), deepen = +(lines.find(l => l.startsWith('deepen '))?.slice(7) ?? 0);
+      requests.push({ want, deepen, filter: lines.find(l => l.startsWith('filter '))?.slice(7) ?? null });
+      const depth = new Map([[want, 1]]); const q = [want];
+      for (let i = 0; i < q.length; i++) { const c = q[i]; if (depth.get(c) >= deepen) continue; for (const p of parentsOf.get(c) ?? []) if (!depth.has(p)) { depth.set(p, depth.get(c) + 1); q.push(p); } }
+      const window = [...depth.keys()], boundary = window.filter(c => depth.get(c) === deepen);
+      const plan = lie({ want, deepen, window, boundary }) ?? {};
+      const keep = window.filter(c => !(plan.drop ?? []).includes(c)), shallow = plan.shallow ?? boundary;
+      const { pack } = await buildPack([...keep.map(c => ({ type: TYPE.COMMIT, data: datas.get(c) })), ...(plan.extra ?? [])]);
+      const line = s => ({ kind: 'data', payload: te.encode(s) });
+      if (shallow.length) { yield line('shallow-info\n'); for (const c of shallow) yield line(`shallow ${c}\n`); yield { kind: 'delim' }; }
+      yield line('packfile\n');
+      for (let i = 0; i < pack.length; i += 65000) yield { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pack.subarray(i, Math.min(i + 65000, pack.length))]) };
+      yield { kind: 'flush' };
+    } };
+  return { t, oid: name => oids.get(name), data: name => datas.get(oids.get(name)) };
+}
+
+test('issue #18: a commit window with an undeclared cut is pack_corrupt; harvest is the one checked door into t.objects', async () => {
+  const author = 'Ada <ada@ex> 1700000000 +0000';
+  const tree = hashObject('tree', new Uint8Array(0));
+  const emptyTree = new Uint8Array(0);
+  const commit = (parents, msg = 'm\n') => { const d = encodeCommit({ tree, parents, author, committer: author, message: msg }); return [hashObject('commit', d), d]; };
+  const [r, rD] = commit([]), [p, pD] = commit([r]), [c, cD] = commit([p]);
+  const obj = (type, d) => ({ type, data: d });
+  const pack = entries => new Map(entries);
+  // the honest window: c → p → r, nothing cut
+  const win = checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)]]), { wants: [c] }, DEFAULT_LIMITS);
+  assert.deepEqual([...win.keys()].sort(), [c, p, r].sort()); assert.deepEqual(win.get(c).parents, [p]); assert.deepEqual(win.get(r).parents, []);
+  // p's parent r is missing: pack_corrupt unless p is a declared shallow boundary
+  throws(() => checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)]]), { wants: [c] }, DEFAULT_LIMITS), 'pack_corrupt', `commit ${r}, parent of ${p}, is not in the pack and ${p} was not declared shallow`);
+  throws(() => checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)]]), { wants: [c], shallow: [c] }, DEFAULT_LIMITS), 'pack_corrupt', `commit ${r}, parent of ${p}, is not in the pack and ${p} was not declared shallow`);
+  assert.equal(checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)]]), { wants: [c], shallow: [p] }, DEFAULT_LIMITS).size, 2);
+  // the want itself: missing, or not a commit
+  throws(() => checkCommitWindow(pack([[p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)]]), { wants: [c] }, DEFAULT_LIMITS), 'pack_corrupt', `want ${c} not in the pack (2 objects)`);
+  throws(() => checkCommitWindow(pack([[tree, obj(TYPE.TREE, emptyTree)]]), { wants: [tree], trees: true }, DEFAULT_LIMITS), 'pack_corrupt', `${tree} is a tree, not a commit`);
+  // objects the request did not ask for: a tree or blob in a tree:0 pack, a commit no want reaches (a tree is fine from blob:none)
+  throws(() => checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)], [tree, obj(TYPE.TREE, emptyTree)]]), { wants: [c] }, DEFAULT_LIMITS), 'pack_corrupt', `unrequested tree ${tree} in a commit-only pack (4 objects)`);
+  const blob = hashObject('blob', te.encode('x'));
+  throws(() => checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)], [blob, obj(TYPE.BLOB, te.encode('x'))]]), { wants: [c], trees: true }, DEFAULT_LIMITS), 'pack_corrupt', `unrequested blob ${blob} in a commit-only pack (4 objects)`);
+  assert.equal(checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)], [tree, obj(TYPE.TREE, emptyTree)]]), { wants: [c], trees: true }, DEFAULT_LIMITS).size, 3);
+  const [x, xD] = commit([], 'elsewhere\n');
+  throws(() => checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)], [x, obj(TYPE.COMMIT, xD)]]), { wants: [c] }, DEFAULT_LIMITS), 'pack_corrupt', `unrequested commit ${x}: not reachable from a want`);
+  assert.equal(checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)], [x, obj(TYPE.COMMIT, xD)]]), { wants: [c, x] }, DEFAULT_LIMITS).size, 4, 'reachable from the second want');
+  // fsck on every object before the walk: a commit without a committer, a tree with an empty mode, in a window that is otherwise fine
+  const badC = te.encode(`tree ${tree}\nparent ${p}\nauthor ${author}\n\nm\n`);
+  throws(() => checkCommitWindow(pack([[hashObject('commit', badC), obj(TYPE.COMMIT, badC)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)]]), { wants: [hashObject('commit', badC)] }, DEFAULT_LIMITS), 'pack_corrupt', 'commit: missing committer');
+  const badT = data(' a\0', oidBytes(1));
+  throws(() => checkCommitWindow(pack([[c, obj(TYPE.COMMIT, cD)], [p, obj(TYPE.COMMIT, pD)], [r, obj(TYPE.COMMIT, rD)], [hashObject('tree', badT), obj(TYPE.TREE, badT)]]), { wants: [c], trees: true }, DEFAULT_LIMITS), 'pack_corrupt', 'tree: empty mode');
+  // a parent id that names a tree in the pack
+  const [q, qD] = commit([tree]);
+  throws(() => checkCommitWindow(pack([[q, obj(TYPE.COMMIT, qD)], [tree, obj(TYPE.TREE, emptyTree)]]), { wants: [q], trees: true }, DEFAULT_LIMITS), 'pack_corrupt', `${tree} is a tree, not a commit`);
+
+  // harvest: the one door into t.objects checks what it keeps (fetchObject serves the store without re-checking)
+  const t0 = { objects: new Map(), limits: DEFAULT_LIMITS };
+  throws(() => harvest(t0, pack([[hashObject('tree', badT), obj(TYPE.TREE, badT)]])), 'pack_corrupt', 'tree: empty mode');
+  assert.equal(t0.objects.size, 0, 'nothing kept from a pack with a malformed tree');
+  throws(() => harvest(t0, pack([[hashObject('commit', badC), obj(TYPE.COMMIT, badC)]])), 'pack_corrupt', 'commit: missing committer');
+  assert.deepEqual(harvest(t0, pack([[c, obj(TYPE.COMMIT, cD)], [tree, obj(TYPE.TREE, emptyTree)], [blob, obj(TYPE.BLOB, te.encode('x'))]]), c), { kept: 1, bytes: 0 }, 'the skipped want and the blob stay out');
+  assert.ok(t0.objects.has(tree) && !t0.objects.has(c) && !t0.objects.has(blob));
+  assert.deepEqual(harvest({ limits: DEFAULT_LIMITS }, pack([[tree, obj(TYPE.TREE, badT)]])), { kept: 0, bytes: 0 }, 'no store: nothing kept, nothing to check');
+
+  // fetchPackTree0 against a stub upload-pack: a tree in a tree:0 answer is refused before anything is kept or walked
+  const G = { r: [], p: ['r'], c: ['p'] };
+  { const s = graphServer(G, () => ({ extra: [obj(TYPE.TREE, emptyTree)] }));
+    await assert.rejects(fetchPackTree0(s.t, { wants: [s.oid('c')], filter: 'tree:0', deepen: 8 }), e => e.code === 'pack_corrupt' && e.message === `unrequested tree ${tree} in a commit-only pack (4 objects)`);
+    assert.equal(s.t.objects.size, 0); }
+  { const s = graphServer(G); const res = await fetchPackTree0(s.t, { wants: [s.oid('c')], filter: 'tree:0', deepen: 8 });
+    assert.deepEqual([...res.commits.keys()].sort(), [s.oid('c'), s.oid('p'), s.oid('r')].sort()); assert.deepEqual(res.shallow, []); assert.equal(s.t.objects.size, 0, 'a tree:0 answer harvests nothing'); }
+  { const s = graphServer(G); const res = await fetchPackTree0(s.t, { wants: [s.oid('c')], filter: 'tree:0', deepen: 2 });
+    assert.deepEqual(res.shallow, [s.oid('p')]); assert.equal(res.commits.size, 2); }
+  // the blob:none fallback: trees ride along and are harvested; a malformed one is pack_corrupt with nothing kept
+  { const s = graphServer(G, () => ({ extra: [obj(TYPE.TREE, emptyTree)] })); s.t.quirks.treeFilter = 'blob:none';
+    const res = await fetchPackTree0(s.t, { wants: [s.oid('c')], filter: 'tree:0', deepen: 8 });
+    assert.equal(res.commits.size, 3); assert.deepEqual(s.t.requests.map(q => q.filter), ['blob:none']); assert.ok(s.t.objects.has(tree) && s.t.objects.has(s.oid('p')), 'trees and commits of the wide answer are kept'); }
+  { const s = graphServer(G, () => ({ extra: [obj(TYPE.TREE, badT)] })); s.t.quirks.treeFilter = 'blob:none';
+    await assert.rejects(fetchPackTree0(s.t, { wants: [s.oid('c')], filter: 'tree:0', deepen: 8 }), e => e.code === 'pack_corrupt' && e.message === 'tree: empty mode');
+    assert.equal(s.t.objects.size, 0); }
+  // a window with a hole, in either answer form
+  for (const wide of [false, true]) {
+    const s = graphServer(G, ({ want }) => (want === s.oid('c') ? { drop: [s.oid('p')] } : null)); if (wide) s.t.quirks.treeFilter = 'blob:none';
+    await assert.rejects(fetchPackTree0(s.t, { wants: [s.oid('c')], filter: 'tree:0', deepen: 8 }), e => e.code === 'pack_corrupt' && e.message === `commit ${s.oid('p')}, parent of ${s.oid('c')}, is not in the pack and ${s.oid('c')} was not declared shallow`);
+    assert.equal(s.t.objects.size, 0);
+  }
+
 });
