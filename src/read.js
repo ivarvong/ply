@@ -19,7 +19,7 @@ import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { KIND } from './otel.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -141,7 +141,7 @@ export async function readFile(url, { ref = null, path } = {}, { cache = new Map
     // a symlink's blob is its target (what `git show <ref>:<path>` prints); a gitlink has no blob in this repository
     if (entry.mode === '40000') throw fail('not_found', `${comps.join('/')} is a directory`);
     if (entry.mode === '160000') throw fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`);
-    const blob = await openBlob(t, tracer, root, entry.oid);
+    const blob = await openBlob(t, tracer, root, entry.oid, limits);
     return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: blob.size, stream: blob.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': blob.size, 'git.read.blob.mode': entry.mode });
   });
 }
@@ -149,17 +149,23 @@ export async function readFile(url, { ref = null, path } = {}, { cache = new Map
 // Effect: one blob as a ReadableStream. Reads the pack until the object header (→ size), then pipes the zlib bytes
 // through DecompressionStream and a verifying transform. Back-pressure: the pump awaits each write, so at most one
 // network chunk and one inflate chunk are in flight beyond what the consumer has taken.
-async function openBlob(t, tracer, parent, oid) {
+async function openBlob(t, tracer, parent, oid, limits = DEFAULT_LIMITS) {
   const span = tracer.start('git.read.blob', { parent, attrs: { 'git.read.blob.oid': oid } });
   const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   const it = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
+  const maxPack = requireLimit(limits, 'maxPackBytes');
   let sp = spInit(); const early = [];
+  // The same pack-byte cap fetchObject applies, before spStep sees the chunk, in both phases of the stream.
+  const step = chunk => {
+    if (sp.bytes + chunk.length > maxPack) throw limitError('pack bytes', sp.bytes + chunk.length, maxPack);
+    const r = spStep(sp, chunk); sp = r.state; return r.zlib;
+  };
   const failHere = e => { const err = isPlyCode(e?.code) ? e : fail('pack_corrupt', `blob stream: ${e?.message ?? e}`, { cause: e }); fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); return err; };
   try {
     while (sp.phase !== 'body') {
       const { value, done } = await it.next();
       if (done) throw fail('pack_corrupt', 'pack ended before the object header');
-      const r = spStep(sp, value); sp = r.state; early.push(...r.zlib);
+      early.push(...step(value));
     }
     if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${TYPE_NAME[sp.type] ?? sp.type}`);
   } catch (e) { await it.return?.().catch(() => {}); throw failHere(e); }
@@ -172,8 +178,7 @@ async function openBlob(t, tracer, parent, oid) {
     for (;;) {
       const { value, done } = await it.next();
       if (done) break;
-      const r = spStep(sp, value); sp = r.state;
-      for (const z of r.zlib) await writer.write(z);
+      for (const z of step(value)) await writer.write(z);
     }
     sp = spFinish(sp); // pack trailer checksum
     fetchSpan.end();

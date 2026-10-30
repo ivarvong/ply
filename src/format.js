@@ -80,6 +80,13 @@ export const OBJ_CONTINUE = 0x80;
 export const OBJ_SIZE_FIRST_BASE = 16;
 export const OBJ_SIZE_NEXT_BASE = 128;
 export const VARINT_BITS = 7;
+/**
+ * Bytes the single-object pack stream may hold before the first object's header is complete: the 12-byte pack
+ * header and one object header (a size_t-sized varint is at most 9 bytes after the type byte, so 22 bytes is the
+ * longest legitimate header; 64 is generous). A pack whose header has not finished by this many bytes is corrupt,
+ * however many bytes follow; the parser stops concatenating there.
+ */
+export const SP_HEADER_MAX_BYTES = 64;
 
 // ---- delta (gitformat-pack(5) "Deltified representation"; patch-delta.c DELTA_SIZE_MIN) ----
 /** git rejects a delta shorter than 4 bytes. */

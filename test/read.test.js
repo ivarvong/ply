@@ -12,6 +12,9 @@ import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from 
 import { readFile, listTree, readCommit, refCandidates } from '../src/read.js';
 import { parseIdent } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { withLimits } from '../src/limits.js';
+import { pkt } from '../src/pktline.js';
+import { PACK_SIGNATURE, PACK_VERSION, SP_HEADER_MAX_BYTES } from '../src/format.js';
 
 let root, cleanup, srv, R;
 const tracer = () => new Tracer();
@@ -125,6 +128,48 @@ test('a server that serves a different blob than asked: the stream errors (pack_
   };
   const r = await readFile(R.url, { path: 'README.md' }, { tracer: tracer(), fetchImpl: liar });
   await assert.rejects(drain(r.stream), e => e.code === 'pack_corrupt' && /hashes to/.test(e.message));
+});
+
+// A fetchImpl that answers the blob fetch (wants-only, no filter) with a v2 packfile whose object header never ends:
+// `PACK`, version, count=1, then band-1 frames of 0x80 forever. Everything else goes to the real server. `impl.sent` counts
+// the body bytes handed to the client, so a test can assert the parser gave up within a bound.
+const endlessHeader = (frameBytes = 16) => {
+  const impl = (u, init) => {
+    const body = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
+    if (!(/command=fetch\n/.test(body) && /want /.test(body) && !/filter /.test(body))) return fetch(u, init);
+    let first = true;
+    const stream = new ReadableStream({
+      pull(ctl) {
+        const chunk = first
+          ? Buffer.concat([pkt('packfile\n'), pkt(Uint8Array.of(1, ...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1))])
+          : Buffer.from(pkt(Uint8Array.of(1, ...new Uint8Array(frameBytes).fill(0x80))));
+        first = false; impl.sent += chunk.length; ctl.enqueue(new Uint8Array(chunk));
+      },
+      cancel() { impl.cancelled = true; },
+    }, { highWaterMark: 1 });
+    return Promise.resolve(new Response(stream, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }));
+  };
+  impl.sent = 0; impl.cancelled = false;
+  return impl;
+};
+
+test('readFile: a blob stream over maxPackBytes is limit_exceeded (the cap fetchObject applies, now on the streamed path too)', async () => {
+  // big.bin is 3 MiB and deflates to ~59 KB; the commit and tree packs are hundreds of bytes, so only the blob trips a 40 KB cap
+  const limits = withLimits({ maxPackBytes: 40_000 });
+  const r = await readFile(R.url, { path: 'big.bin' }, { tracer: tracer(), limits });
+  assert.equal(r.size, 3 << 20, 'the header arrives before the cap');
+  await assert.rejects(drain(r.stream), e => e.code === 'limit_exceeded' && e.what === 'pack bytes' && e.max === 40_000);
+  const ok = await readFile(R.url, { path: 'README.md' }, { tracer: tracer(), limits });
+  assert.equal((await drain(ok.stream)).toString(), '# v3 main\n', 'a blob under the cap still reads');
+});
+
+test('readFile: a server whose object header never ends is pack_corrupt within SP_HEADER_MAX_BYTES, not a growing buffer', async () => {
+  const liar = endlessHeader(16);
+  await assert.rejects(readFile(R.url, { path: 'README.md' }, { tracer: tracer(), fetchImpl: liar }), e => e.code === 'pack_corrupt' && /object header not complete/.test(e.message));
+  // the header cap is 64 bytes; 16-byte frames at highWaterMark 1 means the client saw at most a few frames past it
+  assert.ok(liar.sent < 1024, `server sent ${liar.sent} bytes before the client gave up`);
+  assert.ok(liar.sent >= SP_HEADER_MAX_BYTES, 'the parser read up to the cap before refusing');
+  assert.ok(liar.cancelled, 'the response body was cancelled');
 });
 
 test('credential hygiene: never in spans; an upstream error body echoing Authorization is scrubbed', async () => {

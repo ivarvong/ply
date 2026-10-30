@@ -36,8 +36,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-27: 60,436 B / 23,089 B gz. http.js streams advertisements into maxPackBytes, keeps a 4 KiB
   // error-page prefix, and rejects CR/LF in caller header fields. That module is on every entry.
   // 2026-10-30: 60,438 B / 23,111 B gz. The scanner counts matches and keeps two offsets instead of every one.
-  assert.ok(min < 60_439, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_112, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 60,655 B / 23,211 B gz. The streamed blob checks maxPackBytes per chunk and spStep caps its header phase.
+  assert.ok(min < 60_656, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_212, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -63,7 +64,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-25: 72.5 KB. The same parser checks the edit and read bundles grew by.
   // 2026-10-27: 77,245 B. Merge validates idents before I/O and the ancestors walk is an index, not q.shift.
   // 2026-10-27: 78,147 B. The same http.js advertisement and header checks, plus parsers taking transport limits.
-  assert.ok(min < 78_148, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 78,259 B. spStep's header-phase cap (fetch.js is on every entry).
+  assert.ok(min < 78_260, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -86,6 +88,7 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-25: 42.0 KB / 16.0 KB gz. take(), format facts, and fsck checks in parseTree/assertFetched.
   // 2026-10-27: 44,745 B / 17,299 B gz. Tree and commit parsers take the transport caps, and ls-refs requires the flush.
   // 2026-10-27: 45,553 B / 17,616 B gz. The read path uses the same capped HTTP advertisement and error-page reader.
-  assert.ok(min < 45_554, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_617, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 45,721 B / 17,684 B gz. openBlob checks maxPackBytes per chunk; spStep caps its header phase.
+  assert.ok(min < 45_722, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_685, `read bundle ${gz} B gz exceeds budget`);
 });

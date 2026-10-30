@@ -8,7 +8,7 @@ import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
-import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2 } from './format.js';
+import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, SP_HEADER_MAX_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
@@ -149,9 +149,16 @@ export function spStep(st, chunk) {
   let s = { ...st, bytes: st.bytes + chunk.length };
   let data = chunk;
   if (s.phase === 'header') {
+    // `head` is kept only while the header is incomplete, and never past SP_HEADER_MAX_BYTES (12 + at most 10 bytes is
+    // a whole one): a continuation bit held high forever is corrupt, not a reason to grow the buffer chunk by chunk.
+    // The concat is at most that many bytes plus the one chunk that already exists.
     const head = concat([s.head, chunk]);
+    const incomplete = () => {
+      if (head.length > SP_HEADER_MAX_BYTES) throw fail('pack_corrupt', `pack: object header not complete after ${head.length} bytes (limit ${SP_HEADER_MAX_BYTES})`);
+      return { state: { ...s, head }, zlib: [] };
+    };
     // need the pack header plus the first object-header byte; a short read means the chunk has not arrived
-    if (head.length < PACK_HEADER_BYTES + 1) return { state: { ...s, head }, zlib: [] };
+    if (head.length < PACK_HEADER_BYTES + 1) return incomplete();
     if (!take(head, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw fail('pack_corrupt', 'pack: bad signature');
     if (readUint32BE(head, PACK_SIGNATURE.length) !== PACK_VERSION) throw fail('pack_corrupt', 'pack: bad version');
     const count = readUint32BE(head, PACK_SIGNATURE.length + UINT32_BYTES);
@@ -159,7 +166,7 @@ export function spStep(st, chunk) {
     let header;
     try { header = readObjHeader(head, PACK_HEADER_BYTES); }
     // Stryker disable next-line ConditionalExpression: readObjHeader's only throw here is the short read take() raises
-    catch (e) { if (shortRead(e)) return { state: { ...s, head }, zlib: [] }; throw e; }
+    catch (e) { if (shortRead(e)) return incomplete(); throw e; }
     if (header.type === TYPE.OFS_DELTA || header.type === TYPE.REF_DELTA) throw fail('pack_corrupt', 'pack: single-object pack is a delta');
     const p = header.next;
     s = { ...s, phase: 'body', type: header.type, size: header.size, head: new Uint8Array(0), headerBytes: p };

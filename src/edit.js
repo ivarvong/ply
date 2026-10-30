@@ -13,7 +13,7 @@ import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident
 import { fromHex, streamingSha1 } from './sha1.js';
 import { te, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 
@@ -194,7 +194,7 @@ async function editOnce(url, spec, { cache = new Map(), verify = false, allowLfs
     root.set({ 'git.edit.blob.old': blobOid, 'git.edit.tree.cache_hits': cacheHits, 'git.edit.tree.fetches': s.comps.length - cacheHits });
 
     // 4. streamed blob replace. Effect: one pack stream; decisions: spStep/scanStep (pure), the exactly-one-match contract.
-    const blob = await streamBlobEdit({ t, tracer, root, blobOid, find: s.find, replace: s.replace, allowLfsPointer });
+    const blob = await streamBlobEdit({ t, tracer, root, blobOid, find: s.find, replace: s.replace, allowLfsPointer, limits });
     streamed = { scan: blob.scan, inflated: blob.inflated };
 
     // identical content → no commit; a no-op edit must not create an empty commit
@@ -221,15 +221,19 @@ async function editOnce(url, spec, { cache = new Map(), verify = false, allowLfs
 const LFS_MAGIC = te.encode('version https://git-lfs.github.com/spec/v1');
 export const isLfsPointerPrefix = bytes => { const n = Math.min(bytes.length, LFS_MAGIC.length); for (let i = 0; i < n; i++) if (bytes[i] !== LFS_MAGIC[i]) return false; return n === LFS_MAGIC.length; };
 
-async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPointer = false }) {
+async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPointer = false, limits = DEFAULT_LIMITS }) {
   return tracer.span('git.edit.blob', { parent: root, attrs: { 'git.edit.blob.oid': blobOid } }, async span => {
     const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
+    const maxPack = requireLimit(limits, 'maxPackBytes');
     let sp = spInit(), scan = scanInit({ find, replace }), newLen = null, sha = null, inflated = 0, cpuMs = 0;
     const ds = new DecompressionStream('deflate');
     const writer = ds.writable.getWriter();
     const pump = (async () => {
       try {
         for await (const chunk of packStream(t, { wants: [blobOid] }, fetchSpan)) {
+          // The same pack-byte cap fetchObject applies, before spStep sees the chunk: the blob is streamed, but the
+          // bytes on the wire are still bounded (a header that never completes is also refused inside spStep).
+          if (sp.bytes + chunk.length > maxPack) throw limitError('pack bytes', sp.bytes + chunk.length, maxPack);
           const r = spStep(sp, chunk); sp = r.state;
           for (const z of r.zlib) await writer.write(z);
         }

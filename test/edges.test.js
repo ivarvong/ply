@@ -9,6 +9,8 @@ import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
 import { TYPE_NAME } from '../src/objects.js';
+import { pkt } from '../src/pktline.js';
+import { PACK_SIGNATURE, PACK_VERSION, SP_HEADER_MAX_BYTES } from '../src/format.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -170,6 +172,43 @@ test('empty blob: find on a 0-byte file is match_count (0 matches), never a push
   await editFile(r.url, { path: 'one.txt', find: 'M', replace: '', author: A, message: 'e' }, { tracer: new Tracer() });
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:one.txt']).length, 0);
   await assert.rejects(editFile(r.url, { path: 'one.txt', find: 'M', replace: 'back', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'match_count');
+});
+
+test('streamed blob over maxPackBytes is limit_exceeded before any push; the ref is untouched', async () => {
+  const r = repo();
+  // 1 MiB of hash bytes deflates to ~24 KB; commit and tree packs are hundreds of bytes, so a 10 KB cap trips only on the blob
+  const big = Buffer.alloc(1 << 20); for (let i = 0; i < big.length; i++) big[i] = (i * 2654435761) >>> 24; big.write('MARK', 1 << 19);
+  commitFiles(r.work, r.bare, { 'big.bin': big, 'small.txt': 'a MARK b\n' }, 's');
+  const head = git(r.bare, ['rev-parse', 'main']).trim();
+  await assert.rejects(edit(r, 'big.bin', {}, { limits: withLimits({ maxPackBytes: 10_000 }) }), e => e.code === 'limit_exceeded' && e.what === 'pack bytes' && e.max === 10_000);
+  assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), head, 'ref untouched');
+  await edit(r, 'small.txt', {}, { limits: withLimits({ maxPackBytes: 10_000 }) });
+  assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:small.txt']).toString(), 'a OK b\n', 'a blob under the cap still edits');
+});
+
+test('streamed blob whose object header never ends is pack_corrupt within SP_HEADER_MAX_BYTES; the ref is untouched', async () => {
+  const r = repo();
+  commitFiles(r.work, r.bare, { 'f.txt': 'a MARK b\n' }, 's');
+  const head = git(r.bare, ['rev-parse', 'main']).trim();
+  // the blob fetch (wants-only, no filter) is answered with PACK, version, count=1, then 16-byte band-1 frames of 0x80 forever
+  let sent = 0, cancelled = false;
+  const liar = (u, init) => {
+    const body = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
+    if (!(/command=fetch\n/.test(body) && /want /.test(body) && !/filter /.test(body))) return fetch(u, init);
+    let first = true;
+    const stream = new ReadableStream({
+      pull(ctl) {
+        const chunk = first ? Buffer.concat([pkt('packfile\n'), pkt(Uint8Array.of(1, ...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1))]) : Buffer.from(pkt(Uint8Array.of(1, ...new Uint8Array(16).fill(0x80))));
+        first = false; sent += chunk.length; ctl.enqueue(new Uint8Array(chunk));
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 1 });
+    return Promise.resolve(new Response(stream, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }));
+  };
+  await assert.rejects(edit(r, 'f.txt', {}, { fetchImpl: liar }), e => e.code === 'pack_corrupt' && /object header not complete/.test(e.message));
+  assert.ok(sent >= SP_HEADER_MAX_BYTES && sent < 1024, `server sent ${sent} bytes before the client gave up`);
+  assert.ok(cancelled, 'the response body was cancelled');
+  assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), head, 'ref untouched');
 });
 
 test('strictHead: a moved ref is cas_conflict before any push and is not retried; a current head lands', async () => {

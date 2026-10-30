@@ -8,7 +8,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './fuzz/prng.js';
-import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep, scanFinish, scanAttrs } from '../src/edit.js';
+import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep, scanFinish, scanAttrs, spInit, spStep } from '../src/edit.js';
+import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, SP_HEADER_MAX_BYTES } from '../src/format.js';
 import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
@@ -125,6 +126,24 @@ test('scanStep: a blob of nothing but matches is linear (128 KiB of the needle u
   assert.equal(two.count, 3); assert.deepEqual(two.matches, [0, 2]);
   const none = scanStep(scanInit({ find: new Uint8Array([7, 8]), replace: new Uint8Array(0) }), new Uint8Array([1, 2, 3])).state;
   assert.equal(none.count, 0); assert.deepEqual(none.matches, []);
+});
+
+test('spStep: an object header whose continuation bit never clears is pack_corrupt within SP_HEADER_MAX_BYTES, in one chunk or many', () => {
+  // Before: every chunk of a never-ending header was concatenated onto `head`, so a server could stream any number of
+  // 0x80 bytes and the parser would hold them all. Now the header phase holds at most SP_HEADER_MAX_BYTES.
+  const packHeader = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1);
+  const endless = new Uint8Array(200).fill(0x80);
+  const whole = new Uint8Array([...packHeader, ...endless]);
+  assert.throws(() => spStep(spInit(), whole), e => e.code === 'pack_corrupt' && /object header not complete after 212 bytes/.test(e.message));
+  // one byte at a time: the state never holds more than the cap, and the throw comes at the first byte past it
+  let st = spInit(), fed = 0, err = null;
+  try { for (const b of whole) { st = spStep(st, Uint8Array.of(b)).state; fed++; assert.ok(st.head.length <= SP_HEADER_MAX_BYTES, `head ${st.head.length}`); } } catch (e) { err = e; }
+  assert.equal(err?.code, 'pack_corrupt');
+  assert.equal(fed, SP_HEADER_MAX_BYTES, 'the byte that would make the header one past the cap is the one refused');
+  // exactly at the cap is still "incomplete", not an error: the header may legitimately need every byte up to it
+  const atCap = new Uint8Array([...packHeader, ...new Uint8Array(SP_HEADER_MAX_BYTES - PACK_HEADER_BYTES).fill(0x80)]);
+  assert.equal(spStep(spInit(), atCap).state.phase, 'header');
+  assert.throws(() => spStep(spInit(), new Uint8Array([...atCap, 0x80])), e => e.code === 'pack_corrupt');
 });
 
 test('otel: links, event cap, isolate counter, flatten round-trip', () => {
