@@ -120,7 +120,7 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
       if (caps.sideband && hk === 'pre-receive-accept-noisy') assert.match((err?.hookOutput ?? res.hookOutput), /hello from hook\r?\nline two/, `${label}: band 2`);
       if (!caps.sideband) assert.equal((err?.hookOutput ?? res?.hookOutput ?? ''), '', `${label}: no band 2 without side-band`);
       // 6. report-status-v2 is accepted; git 2.43 emits `option` lines only through proc-receive, so none are expected here
-      if (caps.reportV2 && !err) assert.deepEqual(res.report.refs.map(r => r.options), res.report.refs.map(() => ({})), label);
+      if (caps.reportV2 && !err) assert.deepEqual(res.report.refs.map(r => ({ ...r.options })), res.report.refs.map(() => ({})), label);
       // 6b. push options: only valid when the server advertises them; git refuses client-side otherwise, we get the server's refusal
       if (caps.pushOptions && !err) assert.match(res.hookOutput, hk === 'pre-receive-echo-options' ? /opts=2:ci\.skip:reviewer=alice/ : /.*/, `${label}: options reached the hook`);
       // 7. server state is sound

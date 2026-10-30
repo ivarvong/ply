@@ -13,6 +13,7 @@ import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { fail, scrubError } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
@@ -230,4 +231,12 @@ test('error taxonomy: every fail(\'code\') literal in src/ is in the table (stat
   for (const f of readdirSync('src')) if (f.endsWith('.js')) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
   for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);
   assert.ok(used.size >= 20);
+});
+
+test('scrubError walks prototype-less maps (#16: merge reasons, report-status options) as it walks plain objects', () => {
+  const options = Object.create(null); options.__proto__ = 'tok SECRET'; options['old-oid'] = 'SECRET';
+  const reasons = Object.create(null); reasons['a.txt'] = 'SECRET';
+  const e = scrubError(fail('push_rejected', 'x', { report: { refs: [{ options }] }, reasons }), s => s.replaceAll('SECRET', '[redacted]'));
+  assert.deepEqual(Object.entries(e.report.refs[0].options), [['__proto__', 'tok [redacted]'], ['old-oid', '[redacted]']]);
+  assert.equal(e.reasons['a.txt'], '[redacted]');
 });

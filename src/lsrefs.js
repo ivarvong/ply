@@ -12,6 +12,7 @@ const LINE_PREVIEW = 60;
 const SPAN_REFS = 64;
 /* oxlint-enable no-magic-numbers */
 const ERR = 'ERR ';
+const PEELED = 'peeled', SYMREF_TARGET = 'symref-target';
 
 const OID_SHA1 = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
 const OID_SHA256 = new RegExp(`^[0-9a-f]{${SHA256_HEX_CHARS}}$`);
@@ -30,8 +31,16 @@ export function parseLsRefLine(line) {
   const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ').filter(Boolean);
   if (OID_SHA256.test(oid)) throw fail('unsupported', 'unsupported object-format: only sha1 repositories are supported');
   if (!OID_SHA1.test(oid) || !name) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
+  // server attribute can never stand in for the parsed oid or name. A bad peeled oid is malformed (git: invalid ls-refs response).
   const rec = { oid, name };
-  for (const a of attrs) { const colon = a.indexOf(':'); rec[colon < 0 ? a : a.slice(0, colon)] = colon < 0 ? '' : a.slice(colon + 1); }
+  for (const a of attrs) {
+    const colon = a.indexOf(':');
+    if (colon < 0) continue;
+    const key = a.slice(0, colon), value = a.slice(colon + 1);
+    if (key === PEELED && !OID_SHA1.test(value)) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+    if (key === PEELED || key === SYMREF_TARGET) rec[key] = value;
+  }
   return rec;
 }
 

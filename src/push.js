@@ -42,9 +42,9 @@ export function parseReportStatus(lines, limits = DEFAULT_LIMITS) {
       if (r.unpack !== null) throw fail('protocol', 'report: duplicate unpack');
       r.unpack = l.slice(UNPACK.length);
     }
-    else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: {} });
-    else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: {} }); }
-    else if (l.startsWith(OPTION) && r.refs.length) { const [k, v] = l.slice(OPTION.length).split(' '); r.refs[r.refs.length - 1].options[k] = v ?? true; } // report-status-v2
+    else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: Object.create(null) });
+    else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: Object.create(null) }); }
+    else if (l.startsWith(OPTION) && r.refs.length) { const [k, v] = l.slice(OPTION.length).split(' '); r.refs[r.refs.length - 1].options[k] = v ?? true; } // report-status-v2; option names are the server's, so options has no prototype
   }
   r.ok = r.unpack === 'ok' && r.refs.length > 0 && r.refs.every(x => x.ok);
   return r;

@@ -35,6 +35,9 @@ const isXdigit = c => isDigit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102
 const isBlank = c => c === 32 || c === 9;
 const isGlobSpecial = c => c === 42 || c === 63 || c === 91 || c === 92; // * ? [ \
 
+// a Map: the class name comes from .gitattributes, and `[[:constructor:]]` is not a class (wildmatch: ABORT_ALL)
+const CLASSES = new Map([['alnum', c => isAlpha(c) || isDigit(c)], ['alpha', isAlpha], ['blank', isBlank], ['cntrl', isCntrl], ['digit', isDigit], ['graph', isGraph], ['lower', isLower], ['print', isPrint], ['punct', isPunct], ['space', isSpace], ['upper', isUpper], ['xdigit', isXdigit]]);
+
 // ---- wildmatch.c (no WM_CASEFOLD: a bare server repo has core.ignorecase off) ----
 const MATCH = 0, NOMATCH = 1, ABORT_ALL = -1, ABORT_TO_STARSTAR = -2;
 function dowild(P, pi, T, ti, pathname) {
@@ -102,7 +105,7 @@ function dowild(P, pi, T, ti, pathname) {
             if (len < 0 || p(pi - 1) !== 58) { pi = s - 2; pch = 91; if (tch === pch) matched = true; }
             else {
               const cls = P.slice(s, s + len);
-              const test = { alnum: c => isAlpha(c) || isDigit(c), alpha: isAlpha, blank: isBlank, cntrl: isCntrl, digit: isDigit, graph: isGraph, lower: isLower, print: isPrint, punct: isPunct, space: isSpace, upper: isUpper, xdigit: isXdigit }[cls];
+              const test = CLASSES.get(cls);
               if (!test) return ABORT_ALL; // malformed [:class:]
               if (test(tch)) matched = true;
               pch = 0;

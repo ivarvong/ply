@@ -555,7 +555,15 @@ test('ls-refs lines and report-status', () => {
   assert.deepEqual(parseLsRefLine(`${id} HEAD symref-target:refs/heads/main peeled:${id}`), {
     oid: id, name: 'HEAD', 'symref-target': 'refs/heads/main', peeled: id,
   });
-  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 bare`), { oid: id, name: 'refs/tags/v1', bare: '' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 bare`), { oid: id, name: 'refs/tags/v1' });
+  // #16: only symref-target and peeled are kept; a server attribute never overrides the parsed oid or name
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:junk name:refs/heads/other`), { oid: id, name: 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:${oid(5)} name:HEAD __proto__:x constructor:y`), { oid: id, name: 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled symref-target`), { oid: id, name: 'refs/heads/main' }, 'no colon: not the attribute (git skip_prefix)');
+  for (const bad of ['junk', 'AB'.repeat(20), `${oid(5)}0`, '']) {
+    const line = `${id} refs/tags/v1 peeled:${bad}`;
+    throws(() => parseLsRefLine(line), 'protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
+  }
   throws(() => parseLsRefLine('ERR no such ref'), 'remote_error', 'remote: no such ref');
   throws(() => parseLsRefLine('nope'), 'protocol', 'ls-refs: malformed line "nope"');
   throws(() => parseLsRefLine(`${id} `), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${id} `)}`);
@@ -574,6 +582,11 @@ test('ls-refs lines and report-status', () => {
   assert.equal(ng.refs[1].ref, 'refs/heads/other');
   assert.equal(ng.refs[1].reason, 'failed to lock');
   assert.equal(ng.refs[1].options['old-oid'], 'abc');
+  // #16: option names are the server's; a `__proto__` or `constructor` option is recorded, and an absent one reads as absent
+  const named = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'option __proto__ x', 'option constructor']);
+  assert.deepEqual(Object.entries(named.refs[0].options), [['__proto__', 'x'], ['constructor', true]]);
+  assert.equal(ok.refs[0].options.constructor, undefined);
+  assert.equal('toString' in ok.refs[0].options, false);
   assert.equal(ng.refs[1].options.quiet, true);
   assert.equal(parseReportStatus(['unpack error']).ok, false);
   assert.equal(parseReportStatus(['unpack ok']).unpack, 'ok');
@@ -712,7 +725,8 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const id = oid(9);
   throws(() => parseLsRefLine(` ${id}`), 'protocol', `ls-refs: malformed line ${JSON.stringify(` ${id}`)}`);
   assert.equal(parseLsRefLine(`${id} refs/heads/a`).name, 'refs/heads/a');
-  assert.equal(parseLsRefLine(`${id} refs/heads/a sym:val`).sym, 'val');
+  assert.equal(parseLsRefLine(`${id} refs/heads/a symref-target:val`)['symref-target'], 'val');
+  assert.equal(parseLsRefLine(`${id} refs/heads/a sym:val`).sym, undefined);
   const report = parseReportStatus(['unpack ok', 'ok refs/heads/main']);
   assert.equal(report.ok, true);
   assert.equal(report.refs[0].ref, 'refs/heads/main');
@@ -813,12 +827,10 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.equal(parseReportStatus(['unpack ok', 'ng refs/heads/a no']).ok, false);
 
   const ref = `${oid(4)} refs/heads/a :val`;
-  assert.equal(parseLsRefLine(ref)[''], 'val');
+  assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a' });
   throws(() => parseLsRefLine(`${oid(4)}  refs/heads/a`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${oid(4)}  refs/heads/a`)}`);
-  const spaced = parseLsRefLine(`${oid(4)} refs/heads/a a:b  c:d`);
-  assert.equal(spaced.a, 'b');
-  assert.equal(spaced.c, 'd');
-  assert.equal(spaced[''], undefined);
+  const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
+  assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 
   throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'not an ssh git url: ssh://host/path\n');
   throws(() => parseSshUrl('host:name\n'), 'bad_request', 'not an ssh git url: host:name\n');
