@@ -225,12 +225,16 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
           base = { type: ext.type, data: ext.data, chain: 0 };
         }
       }
+      // Chain length, not recursion depth: a base resolved earlier comes back from memo, so depth alone let a chain
+      // emitted base-first grow without bound (#14). An external base is chain 0.
+      const chain = base.chain + 1;
+      if (chain > maxChain) throw limitError('delta chain depth', chain, maxChain);
       // The result buffer does not exist until applyDelta passes maxResult. Room is what the aggregate cap has left.
       const room = inflatedCap - held;
       if (room < 0) throw limitError('pack inflated bytes', held, inflatedCap);
       const { out, ops } = applyDelta(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
       held += out.length;
-      r = { type: base.type, data: out, chain: base.chain + 1, deltaOps: ops };
+      r = { type: base.type, data: out, chain, deltaOps: ops };
     } else r = { type: obj.type, data: obj.data, chain: 0 };
     r.oid = hashObject(TYPE_NAME[r.type], r.data);
     r.offset = obj.offset; r.size = obj.size; r.compressed = obj.compressed;
@@ -243,8 +247,11 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
   };
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject(TYPE_NAME[o.type], o.data);
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) { byOid.set(o.oid, o); resolveObj(o); }
+  // Until nothing is pending: a pass either resolves something, or switches to external bases once, or throws. A REF
+  // chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check above
+  // (≤ 2 · maxDeltaChain + 2), not by a pass ceiling that used to return the tail unresolved without an error (#14).
   let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
-  for (let pass = 0; pending.length && pass < maxChain; pass++) {
+  while (pending.length) {
     const next = [];
     for (const o of pending) {
       try { resolveObj(o); }
