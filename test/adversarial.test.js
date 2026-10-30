@@ -15,6 +15,8 @@ import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
 import { editFile } from '../src/edit.js';
+import { readFile } from '../src/read.js';
+import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { GitHttp } from '../src/client.js';
@@ -329,6 +331,57 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   const body = concat([hdr, encodeObjHeader(3, declared), Uint8Array.of(0)]);
   const pack = concat([body, new Sha1().update(body).digest()]);
   assert.throws(() => parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 }), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
+});
+
+// #13: a server answering a blob fetch with PACK + version + count=1 and then object-header continuation bytes forever.
+// The streamed paths (edit's streamBlobEdit, readFile's openBlob, checkoutTree's single-blob stream) used to keep every
+// byte in the header buffer, re-concatenated per chunk, until the request timer fired between chunks: linear memory,
+// quadratic CPU. The header phase now ends at its 22nd byte, so the first band-1 frame is refused.
+function endlessHeader() {
+  const served = { bytes: 0, requests: 0 };
+  const frame = pktRaw(concat([Uint8Array.of(1), new Uint8Array(65515).fill(0x80)]));
+  const f = async (url, init) => {
+    const body = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
+    if (!body.includes('command=fetch\n') || body.includes('filter ')) return fetch(url, init);
+    served.requests++;
+    let first = true;
+    const stream = new ReadableStream({
+      pull(c) {
+        const chunk = first ? concat([pktLine('packfile\n'), pktRaw(Uint8Array.of(1, 0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1, 0xb0))]) : frame;
+        first = false; served.bytes += chunk.length; c.enqueue(chunk);
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+  };
+  return { served, f };
+}
+
+test('I4 a blob fetch whose object header never ends: pack_corrupt within the first frame on every streamed path', { timeout: 60_000 }, async () => {
+  const repo = freshRepo();
+  const url = `${srv.url}/${repo.name}.git`;
+  const limits = withLimits({ requestTimeoutMs: 5000 });
+  const refused = e => e.code === 'pack_corrupt' && e.message === 'pack: size varint longer than 64 bits';
+  const paths = {
+    edit: f => editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }),
+    read: f => readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f }),
+    checkout: async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream); },
+  };
+  const seen = {};
+  for (const [name, op] of Object.entries(paths)) {
+    const { served, f } = endlessHeader();
+    const rss0 = process.memoryUsage().rss, t0 = performance.now();
+    const err = await op(f).then(() => null, e => e);
+    const ms = performance.now() - t0;
+    assert.ok(err && refused(err), `${name}: ${err?.code}: ${err?.message}`);
+    assert.equal(served.requests, 1, `${name}: one blob request`);
+    assert.ok(ms < 1000, `${name}: ${ms.toFixed(0)} ms`);
+    assert.ok(served.bytes < 1 << 20, `${name}: the client read ${served.bytes} bytes of header`);
+    assert.ok(process.memoryUsage().rss - rss0 < 64 << 20, `${name}: rss grew`);
+    seen[name] = `${served.bytes} B served, ${ms.toFixed(0)} ms`;
+  }
+  console.log('  endless object header:', JSON.stringify(seen));
+  assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head, 'I2: ref unchanged');
+  rmSync(repo.work, { recursive: true, force: true });
 });
 
 test('request timeout survives a GC during a stalled body', { timeout: 8_000 }, async () => {

@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './fuzz/prng.js';
-import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep } from '../src/edit.js';
+import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep, MATCH_OFFSETS_KEPT } from '../src/edit.js';
 import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
@@ -90,6 +90,24 @@ test('deflate only: a stored-block zlib stream never beats CompressionStream (th
     // zlib's own stored blocks are ~16 KiB, ours 64 KiB: deflate can lose by ≤5 bytes per 16 KiB on incompressible input, nothing more
     assert.ok(zd.length <= zs.length + 5 * Math.ceil(n / 16384), `n=${n}: deflate ${zd.length} vs stored ${zs.length}`);
   }
+});
+
+test('scanStep counts every match and keeps the first MATCH_OFFSETS_KEPT offsets; each hit is O(1) (#13)', () => {
+  const run = n => {
+    const data = new Uint8Array(n).fill(0x61);
+    let st = scanInit({ find: Uint8Array.of(0x61), replace: Uint8Array.of(0x62) });
+    const t0 = performance.now();
+    for (let o = 0; o < n; o += 16384) st = scanStep(st, data.subarray(o, o + 16384)).state;
+    return { st, ms: performance.now() - t0 };
+  };
+  const { st, ms } = run(128 << 10);
+  assert.equal(st.count, 128 << 10);
+  assert.equal(st.emitted, 128 << 10);
+  assert.deepEqual(st.matches, Array.from({ length: MATCH_OFFSETS_KEPT }, (_, i) => i));
+  assert.ok(ms < 500, `128 KiB of matches took ${ms.toFixed(0)} ms`);
+  const two = scanStep(scanInit({ find: Uint8Array.of(1), replace: new Uint8Array(0) }), Uint8Array.of(1, 0, 1)).state;
+  assert.equal(two.count, 2);
+  assert.deepEqual(two.matches, [0, 2]);
 });
 
 test('memFromScan/memAttrs: whole-edit accounting from what was held', () => {

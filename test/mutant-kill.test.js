@@ -1277,3 +1277,32 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
   await assert.rejects(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'ambiguous');
   assert.equal(sent, 1, 'under the cap the body is sent');
 });
+
+test('size varints stop at 64 bits: a header that never ends is pack_corrupt at its 11th byte, never a NaN size (#13)', () => {
+  const ones = n => new Uint8Array(n).fill(0x80);
+  // ten bytes is the longest legal object header (4 + 9 × 7 bits), and every size it can carry is finite
+  assert.deepEqual(readObjHeader(concat([Uint8Array.of(0xb0), ones(8), Uint8Array.of(0)]), 0), { type: TYPE.BLOB, size: 0, next: 10 });
+  assert.ok(Number.isFinite(readObjHeader(concat([Uint8Array.of(0xbf), new Uint8Array(8).fill(0xff), Uint8Array.of(0x7f)]), 0).size));
+  throws(() => readObjHeader(concat([Uint8Array.of(0xb0), ones(9), Uint8Array.of(0)]), 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  // the probe: 200 continuation bytes used to decode to NaN, which every `size > limit` check lets through
+  throws(() => readObjHeader(concat([Uint8Array.of(0xb0), ones(200), Uint8Array.of(0)]), 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  throws(() => parsePack(concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0), ones(200), new Uint8Array(40)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+
+  // a delta size may take ten groups (bits 0..69); the tenth starts at bit 63, the eleventh is refused
+  assert.deepEqual([...applyDelta(new Uint8Array(0), concat([ones(9), Uint8Array.of(0, 1, 1, 0x41)])).out], [0x41]);
+  assert.throws(() => applyDelta(new Uint8Array(0), concat([Uint8Array.of(0), new Uint8Array(9).fill(0xff), Uint8Array.of(1, 1, 0x41)])), e => e.code === 'limit_exceeded' && /^delta result size \d+ exceeds limit/.test(e.message));
+  throws(() => applyDelta(new Uint8Array(0), concat([ones(10), Uint8Array.of(0, 1, 1, 0x41)])), 'pack_corrupt', 'delta: size varint longer than 64 bits');
+  // the probe: an over-long result size was NaN; NaN passed the limit, and the copy ended in an untyped RangeError
+  const base = Uint8Array.of(9, 8, 7);
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), ones(200), Uint8Array.of(0, DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 0, 3)])), 'pack_corrupt', 'delta: size varint longer than 64 bits');
+
+  // the streamed single-object parser: its header phase holds ≤ 21 bytes, for every caller (fetchSingle, edit, read, checkout)
+  const packHead = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0);
+  let sp = spInit(), held = 0;
+  for (const b of concat([packHead, ones(8)])) { sp = spStep(sp, Uint8Array.of(b)).state; held = Math.max(held, sp.head.length); }
+  assert.equal(sp.phase, 'header');
+  assert.equal(held, PACK_HEADER_BYTES + 9);
+  throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
+  throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+});

@@ -10,7 +10,7 @@ import { inflate } from '../src/inflate.js';
 import { Sha1, toHex } from '../src/sha1.js';
 import { encodeObjHeader, applyDelta, spliceDelta, makeDelta, parsePack, resolvePack, buildPack } from '../src/pack.js';
 import { parseTree, encodeTree, treeSort, hashObject, parseCommit, encodeCommit } from '../src/objects.js';
-import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish } from '../src/edit.js';
+import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish, MATCH_OFFSETS_KEPT } from '../src/edit.js';
 import { v2Init, v2Step } from '../src/client.js';
 import { concat, indexOfBytes } from '../src/bytes.js';
 
@@ -106,7 +106,8 @@ forAll('scan: chunking-invariant, equals replace-all, offsets exact, carry bound
   const f = scanFinish(st); st = f.state; out.push(...f.emit);
   const got = concat(out);
   assert.deepEqual([...got], [...ref]);
-  assert.deepEqual(st.matches, refOffs);
+  assert.deepEqual(st.matches, refOffs.slice(0, MATCH_OFFSETS_KEPT));
+  assert.equal(st.count, refOffs.length);
   assert.equal(st.emitted, ref.length);
 });
 

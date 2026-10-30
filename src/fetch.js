@@ -149,6 +149,9 @@ export function spStep(st, chunk) {
   let s = { ...st, bytes: st.bytes + chunk.length };
   let data = chunk;
   if (s.phase === 'header') {
+    // The header phase is bounded here, for every caller: readObjHeader refuses an object header past 10 bytes
+    // (VARINT_MAX_SHIFT), so `head` never holds more than PACK_HEADER_BYTES + 9 bytes between chunks and the 22nd
+    // byte of a pack whose object header never ends is `pack_corrupt` (#13: endless 0x80 used to grow `head` without bound).
     const head = concat([s.head, chunk]);
     // need the pack header plus the first object-header byte; a short read means the chunk has not arrived
     if (head.length < PACK_HEADER_BYTES + 1) return { state: { ...s, head }, zlib: [] };
