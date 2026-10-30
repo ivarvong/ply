@@ -15,17 +15,24 @@ import {
   DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_BYTE2_SHIFT,
   OBJ_TYPE_SHIFT, OBJ_TYPE_MASK, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
-  OBJ_SIZE_NEXT_BASE, VARINT_BITS, varintScale, BE32_SHIFTS,
+  OBJ_SIZE_NEXT_BASE, VARINT_BITS, VARINT_MAX_BITS, varintScale, BE32_SHIFTS,
 } from './format.js';
 
 const corrupt = msg => fail('pack_corrupt', msg);
+
+// A size group may not start at or past the bits a size can use. git (unpack_object_header_buffer, get_delta_hdr_size)
+// stops at sizeof(size_t); here the check also keeps the scale finite: 2 ** 1024 is Infinity and 0 * Infinity is NaN.
+const sizeBits = (shift, what) => {
+  if (shift >= VARINT_MAX_BITS) throw corrupt(`${what}: size varint longer than ${VARINT_MAX_BITS} bits`);
+  return shift;
+};
 
 function readVarint(buf, p) {
   let n = 0, shift = 0, c;
   do {
     c = take(buf, p, 1)[0];
     p += 1;
-    n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
+    n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(sizeBits(shift, 'delta'));
     shift += VARINT_BITS;
   } while (c & OBJ_CONTINUE);
   return [n, p];
@@ -46,7 +53,7 @@ export function readObjHeader(buf, p) {
   while (c & OBJ_CONTINUE) {
     c = take(buf, p, 1)[0];
     p += 1;
-    size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
+    size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(sizeBits(shift, 'pack'));
     shift += VARINT_BITS;
   }
   return { type, size, next: p };

@@ -205,8 +205,9 @@ test('streamed blob whose object header never ends is pack_corrupt within SP_HEA
     }, { highWaterMark: 1 });
     return Promise.resolve(new Response(stream, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }));
   };
-  await assert.rejects(edit(r, 'f.txt', {}, { fetchImpl: liar }), e => e.code === 'pack_corrupt' && /object header not complete/.test(e.message));
-  assert.ok(sent >= SP_HEADER_MAX_BYTES && sent < 1024, `server sent ${sent} bytes before the client gave up`);
+  // readObjHeader's varint bound (11th size byte) or spStep's SP_HEADER_MAX_BYTES cap refuses it; both are pack_corrupt
+  await assert.rejects(edit(r, 'f.txt', {}, { fetchImpl: liar }), e => e.code === 'pack_corrupt' && /object header not complete|size varint longer/.test(e.message));
+  assert.ok(sent >= 12 + 11 && sent < 1024, `server sent ${sent} bytes before the client gave up (cap ${SP_HEADER_MAX_BYTES})`);
   assert.ok(cancelled, 'the response body was cancelled');
   assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), head, 'ref untouched');
 });

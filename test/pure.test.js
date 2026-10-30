@@ -130,19 +130,26 @@ test('scanStep: a blob of nothing but matches is linear (128 KiB of the needle u
 
 test('spStep: an object header whose continuation bit never clears is pack_corrupt within SP_HEADER_MAX_BYTES, in one chunk or many', () => {
   // Before: every chunk of a never-ending header was concatenated onto `head`, so a server could stream any number of
-  // 0x80 bytes and the parser would hold them all. Now the header phase holds at most SP_HEADER_MAX_BYTES.
+  // 0x80 bytes and the parser would hold them all. Now the header phase holds at most SP_HEADER_MAX_BYTES; and
+  // readObjHeader's own varint bound (VARINT_MAX_BITS) refuses the run earlier still, at its 11th size byte. Either way
+  // the error is typed pack_corrupt and `head` never grows past the cap.
   const packHeader = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1);
   const endless = new Uint8Array(200).fill(0x80);
   const whole = new Uint8Array([...packHeader, ...endless]);
-  assert.throws(() => spStep(spInit(), whole), e => e.code === 'pack_corrupt' && /object header not complete after 212 bytes/.test(e.message));
-  // one byte at a time: the state never holds more than the cap, and the throw comes at the first byte past it
+  assert.throws(() => spStep(spInit(), whole), e => e.code === 'pack_corrupt' && /object header not complete|size varint longer/.test(e.message));
+  // one byte at a time: the state never holds more than the cap, and the throw comes no later than the first byte past it
   let st = spInit(), fed = 0, err = null;
   try { for (const b of whole) { st = spStep(st, Uint8Array.of(b)).state; fed++; assert.ok(st.head.length <= SP_HEADER_MAX_BYTES, `head ${st.head.length}`); } } catch (e) { err = e; }
   assert.equal(err?.code, 'pack_corrupt');
-  assert.equal(fed, SP_HEADER_MAX_BYTES, 'the byte that would make the header one past the cap is the one refused');
-  // exactly at the cap is still "incomplete", not an error: the header may legitimately need every byte up to it
+  assert.ok(fed <= SP_HEADER_MAX_BYTES, `refused after ${fed} bytes, the cap is ${SP_HEADER_MAX_BYTES}`);
+  // a header still waiting for bytes is kept (short of the pack header, or a size varint that has not ended yet)
+  const shortHeader = packHeader.subarray(0, PACK_HEADER_BYTES - 1);
+  assert.equal(spStep(spInit(), shortHeader).state.phase, 'header');
+  assert.equal(spStep(spInit(), new Uint8Array([...packHeader, 0x80 | (3 << 4), 0x80, 0x80])).state.phase, 'header');
+  // the cap at its boundary: 64 header bytes that cannot be parsed yet are held, the 65th is refused before the concat
+  // (readObjHeader's own bound takes a valid header first, so the cap is the backstop for the bytes before it)
   const atCap = new Uint8Array([...packHeader, ...new Uint8Array(SP_HEADER_MAX_BYTES - PACK_HEADER_BYTES).fill(0x80)]);
-  assert.equal(spStep(spInit(), atCap).state.phase, 'header');
+  assert.throws(() => spStep(spInit(), atCap), e => e.code === 'pack_corrupt');
   assert.throws(() => spStep(spInit(), new Uint8Array([...atCap, 0x80])), e => e.code === 'pack_corrupt');
 });
 

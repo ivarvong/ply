@@ -37,8 +37,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // error-page prefix, and rejects CR/LF in caller header fields. That module is on every entry.
   // 2026-10-30: 60,438 B / 23,111 B gz. The scanner counts matches and keeps two offsets instead of every one.
   // 2026-10-30: 60,655 B / 23,211 B gz. The streamed blob checks maxPackBytes per chunk and spStep caps its header phase.
-  assert.ok(min < 60_656, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_212, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 60,766 B / 23,262 B gz. Size varints are bounded at 63 bits (packresolve.js).
+  assert.ok(min < 60_767, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_263, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -65,7 +66,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-27: 77,245 B. Merge validates idents before I/O and the ancestors walk is an index, not q.shift.
   // 2026-10-27: 78,147 B. The same http.js advertisement and header checks, plus parsers taking transport limits.
   // 2026-10-30: 78,259 B. spStep's header-phase cap (fetch.js is on every entry).
-  assert.ok(min < 78_260, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 78,370 B. Size varints bounded at 63 bits.
+  assert.ok(min < 78_371, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -89,6 +91,7 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-27: 44,745 B / 17,299 B gz. Tree and commit parsers take the transport caps, and ls-refs requires the flush.
   // 2026-10-27: 45,553 B / 17,616 B gz. The read path uses the same capped HTTP advertisement and error-page reader.
   // 2026-10-30: 45,721 B / 17,684 B gz. openBlob checks maxPackBytes per chunk; spStep caps its header phase.
-  assert.ok(min < 45_722, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_685, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 45,832 B / 17,731 B gz. Size varints bounded at 63 bits.
+  assert.ok(min < 45_833, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_732, `read bundle ${gz} B gz exceeds budget`);
 });

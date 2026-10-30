@@ -165,10 +165,12 @@ test('readFile: a blob stream over maxPackBytes is limit_exceeded (the cap fetch
 
 test('readFile: a server whose object header never ends is pack_corrupt within SP_HEADER_MAX_BYTES, not a growing buffer', async () => {
   const liar = endlessHeader(16);
-  await assert.rejects(readFile(R.url, { path: 'README.md' }, { tracer: tracer(), fetchImpl: liar }), e => e.code === 'pack_corrupt' && /object header not complete/.test(e.message));
-  // the header cap is 64 bytes; 16-byte frames at highWaterMark 1 means the client saw at most a few frames past it
+  // two guards refuse this stream: readObjHeader's varint bound (the 11th size byte) and, for bytes that never form a
+  // header, spStep's SP_HEADER_MAX_BYTES cap. Either way the error is typed and comes within a few frames.
+  await assert.rejects(readFile(R.url, { path: 'README.md' }, { tracer: tracer(), fetchImpl: liar }), e => e.code === 'pack_corrupt' && /object header not complete|size varint longer/.test(e.message));
+  // 16-byte frames at highWaterMark 1: the client saw at most a few frames past the 64-byte header cap
   assert.ok(liar.sent < 1024, `server sent ${liar.sent} bytes before the client gave up`);
-  assert.ok(liar.sent >= SP_HEADER_MAX_BYTES, 'the parser read up to the cap before refusing');
+  assert.ok(liar.sent >= 12 + 11, 'the parser read at least a whole pack header and an over-long size before refusing');
   assert.ok(liar.cancelled, 'the response body was cancelled');
 });
 

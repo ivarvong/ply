@@ -8,11 +8,12 @@ import { genBlob, genFind, genReplace, KNOBS, countOccurrences } from './fuzz/ge
 import { pkt, pkts, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.js';
 import { inflate } from '../src/inflate.js';
 import { Sha1, toHex } from '../src/sha1.js';
-import { encodeObjHeader, applyDelta, spliceDelta, makeDelta, parsePack, resolvePack, buildPack } from '../src/pack.js';
+import { encodeObjHeader, encodeVarint, applyDelta, spliceDelta, makeDelta, parsePack, resolvePack, buildPack, readObjHeader } from '../src/pack.js';
 import { parseTree, encodeTree, treeSort, hashObject, parseCommit, encodeCommit } from '../src/objects.js';
 import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish } from '../src/edit.js';
 import { v2Init, v2Step } from '../src/client.js';
 import { concat, indexOfBytes } from '../src/bytes.js';
+import { PACK_SIGNATURE, PACK_VERSION, VARINT_MAX_BITS } from '../src/format.js';
 
 const N = parseInt(process.env.PROP_N ?? '200', 10);
 const SEED = parseInt(process.env.SEED ?? '1', 10);
@@ -109,6 +110,38 @@ forAll('scan: chunking-invariant, equals replace-all, offsets exact, carry bound
   assert.equal(st.count, refOffs.length);
   assert.deepEqual(st.matches, refOffs.slice(0, 2)); // the splice needs the first offset; a second one says "more than one"
   assert.equal(st.emitted, ref.length);
+});
+
+test('size varints: a run past VARINT_MAX_BITS is pack_corrupt, never NaN; every in-range length decodes (object header and delta header)', () => {
+  // Before: `(c & 0x7f) * 2 ** shift` kept going; past 2 ** 1023 the scale is Infinity and 0 * Infinity is NaN, so a
+  // ~150-byte header produced size NaN, which no `> max` check catches. Now the group that would start at bit 63 throws.
+  const run = new Uint8Array([...new Uint8Array(20).fill(0x80), 0x01]);
+  assert.throws(() => readObjHeader(new Uint8Array([0x80 | (3 << 4), ...run]), 0), e => e.code === 'pack_corrupt' && /size varint longer than 63 bits/.test(e.message));
+  assert.throws(() => readObjHeader(run, 0), e => e.code === 'pack_corrupt' && /size varint longer/.test(e.message));
+  assert.throws(() => applyDelta(new Uint8Array(0), new Uint8Array([...run, ...run, 0])), e => e.code === 'pack_corrupt' && /delta: size varint longer than 63 bits/.test(e.message));
+  const nan = new Uint8Array([0x80 | (3 << 4), ...new Uint8Array(160).fill(0x80), 0x01]);
+  assert.throws(() => readObjHeader(nan, 0), e => e.code === 'pack_corrupt'); // was { size: NaN }
+  // object header: the type byte carries 4 bits, then 7 per byte; a group may start at bit 60 (10 bytes) but not 67 (11)
+  for (const size of [0, 15, 16, 2 ** 32, 2 ** 52, 2 ** 60 + 2 ** 59]) { const h = encodeObjHeader(3, size); assert.deepEqual(readObjHeader(h, 0), { type: 3, size, next: h.length }); }
+  const ten = encodeObjHeader(3, 2 ** 62); assert.equal(ten.length, 10); assert.equal(readObjHeader(ten, 0).size, 2 ** 62);
+  const eleven = new Uint8Array([...ten.subarray(0, 9), ten[9] | 0x80, 0x01]);
+  assert.throws(() => readObjHeader(eleven, 0), e => e.code === 'pack_corrupt' && /size varint longer/.test(e.message));
+  // delta header: 7 bits per byte from bit 0; a group may start at bit 56 (9 bytes) but not 63 (10) — exactly the bound
+  const nine = encodeVarint(2 ** 62); assert.equal(nine.length, 9);
+  const base = new Uint8Array(3);
+  assert.throws(() => applyDelta(base, new Uint8Array([...encodeVarint(3), ...nine, 0])), e => e.code === 'limit_exceeded' && e.what === 'delta result size' && e.got === 2 ** 62, 'a 9-byte result size decodes, then fails the result cap');
+  const tenV = new Uint8Array([...nine.subarray(0, 8), nine[8] | 0x80, 0x01]);
+  assert.throws(() => applyDelta(base, new Uint8Array([...encodeVarint(3), ...tenV, 0])), e => e.code === 'pack_corrupt' && new RegExp(`delta: size varint longer than ${VARINT_MAX_BITS} bits`).test(e.message));
+  assert.deepEqual([...applyDelta(base, new Uint8Array([...encodeVarint(3), ...encodeVarint(2), 0x02, 7, 8])).out], [7, 8]);
+  // spStep decodes its one header through readObjHeader, so this bound covers the streamed path too: once the run is
+  // in the buffer it is refused as a varint, however long; the 64-byte header cap (fetch.js) backstops the buffer itself
+  // when the run arrives in pieces
+  const packHeader = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1);
+  for (const n of [12, 200]) assert.throws(() => spStep(spInit(), new Uint8Array([...packHeader, 0x80 | (3 << 4), ...new Uint8Array(n).fill(0x80)])), e => e.code === 'pack_corrupt' && /size varint longer/.test(e.message));
+  let st = spStep(spInit(), packHeader).state;
+  let fed = 0;
+  assert.throws(() => { for (; fed < 200; fed++) st = spStep(st, Uint8Array.of(0x80)).state; }, e => e.code === 'pack_corrupt' && /size varint longer/.test(e.message));
+  assert.equal(fed, 10, 'the 11th size byte (bit 67) is the one refused; 10 were held'); assert.equal(st.head.length, 12 + 10);
 });
 
 forAll('single-object pack stream: chunking-invariant, trailer verified, zlib bytes exact', async rng => {

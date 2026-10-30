@@ -81,6 +81,13 @@ export const OBJ_SIZE_FIRST_BASE = 16;
 export const OBJ_SIZE_NEXT_BASE = 128;
 export const VARINT_BITS = 7;
 /**
+ * Bits a size varint may carry. git decodes object and delta sizes into size_t (unpack_object_header_buffer,
+ * get_delta_hdr_size) and refuses a header whose shift reaches the width of that type; 63 bits is every size a 64-bit
+ * git can hold. A group that would start at or past this bit is corrupt. It also keeps this decoder's double arithmetic
+ * honest: past 2**1023 the scale is Infinity and `0 * Infinity` is NaN, which no size check could catch.
+ */
+export const VARINT_MAX_BITS = 63;
+/**
  * Bytes the single-object pack stream may hold before the first object's header is complete: the 12-byte pack
  * header and one object header (a size_t-sized varint is at most 9 bytes after the type byte, so 22 bytes is the
  * longest legitimate header; 64 is generous). A pack whose header has not finished by this many bytes is corrupt,
