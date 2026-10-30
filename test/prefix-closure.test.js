@@ -107,7 +107,7 @@ property('tree', 'tree prefix-closure holds, including the 29/89 cut', () => {
   assert.deepEqual(parseTree(bytes).map(e => e.name), entries.map(e => e.name));
 });
 
-test('tree: fsck-hard malformations are rejected; a bad filemode warning still parses', () => {
+test('tree: every fsck tree diagnostic is a rejection, bad filemodes and non-adjacent duplicates included', () => {
   const id = oid(4);
   const raw = (text, extra = oidBytes(4)) => concat([te.encode(text), extra]);
   const bad = [
@@ -123,9 +123,14 @@ test('tree: fsck-hard malformations are rejected; a bad filemode warning still p
     ['dotgit', raw('100644 .git\0')],
     ['unsorted', concat([raw('100644 b\0'), raw('100644 a\0')])],
     ['duplicate', concat([raw('100644 a\0'), raw('100644 a\0', oidBytes(5))])],
+    ['file and directory of one name, apart (issue #34)', concat([raw('100644 d\0'), raw('100644 d.x\0'), raw('40000 d\0', oidBytes(5))])],
+    ['bad filemode (fsck badFilemode, 100664 under --strict)', raw('100664 a\0')],
+    ['null oid', raw('100644 a\0', oidBytes(0))],
+    ['.gitmodules symlink', raw('120000 .gitmodules\0')],
+    ['dotgit after a backslash', raw('100644 x\\.git\0')],
   ];
   for (const [label, bytes] of bad) assert.throws(() => parseTree(bytes), e => e.code === 'pack_corrupt', label);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
+  assert.deepEqual(parseTree(concat([raw('100644 A\0'), raw('100644 a\0', oidBytes(5))])).map(e => e.name), ['A', 'a'], 'case-only twins are two names');
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
   assert.equal(id.length, OID_HEX_CHARS);
 });

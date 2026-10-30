@@ -4,7 +4,7 @@ import { fail, ambiguousAfterPush } from './errors.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat } from './bytes.js';
 import { parseSideband } from './fetch.js';
-import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS } from './format.js';
+import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS, ZERO_OID } from './format.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -21,7 +21,7 @@ import { frames, coded, clientSpan, proto, UA } from './transport.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateRef, validateWire } from './validate.js';
 
-export const ZERO_OID = '0'.repeat(OID_HEX_CHARS);
+export { ZERO_OID };
 
 // commands: [{ ref, oldOid, newOid }] (create: oldOid = zeros; delete: newOid = zeros). A push with only deletes sends no pack.
 export const pushBody = ({ commands, caps = ['report-status', `agent=${UA.replace(/ .*/, '')}`] }, pack) => {

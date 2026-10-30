@@ -2,10 +2,10 @@
 import { fail } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take } from './bytes.js';
-import { isDotGit, isValidatedIdent } from './validate.js';
+import { isDotGit, protectedDotfile, isValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import {
-  OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
+  OID_BYTES, OID_HEX_CHARS, ZERO_OID, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_LINK, TREE_MODES, TREE_SORT_SLASH, IDENT_TZ_DIGITS,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
   COMMIT_HEADER_ORDER, TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER, TAG_HEADER_ORDER,
@@ -32,10 +32,16 @@ const cmpBytes = (a, b) => {
 
 // ---- tree ----
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
+// Every rule `git fsck --strict` has for a tree is a rejection here, the ones it prints as warnings (badFilemode, the
+// dotfile-symlink infos) included; git-differential.test.js holds the two to "accepted iff fsck is silent". The one
+// asymmetry: fsck keeps a mode in an `unsigned short`, so a mode over 16 bits truncates to a legal one there (`240000`
+// is a directory to fsck); ply refuses every mode git does not write.
 // @decoder parseTree prefix=tree
 export function parseTree(data, limits = DEFAULT_LIMITS) {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
+  const maxName = requireLimit(limits, 'maxPathComponent');
   const entries = [];
+  const names = new Set();
   let p = 0;
   let prevKey = null;
   while (p < data.length) {
@@ -46,20 +52,38 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
     const nul = data.indexOf(TREE_NUL, sp + 1);
     if (nul < sp + 1) throw fail('pack_corrupt', 'tree: malformed entry');
     const mode = td.decode(take(data, p, sp - p));
-    const name = td.decode(take(data, sp + 1, nul - (sp + 1)));
+    const nameBytes = take(data, sp + 1, nul - (sp + 1));
+    const name = td.decode(nameBytes);
     // The id starts at nul+1. take() demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
     const oidBytes = take(data, nul + 1, OID_BYTES);
     if (mode.length === 0) throw fail('pack_corrupt', 'tree: empty mode');
     if (!/^[0-7]+$/.test(mode)) throw fail('pack_corrupt', 'tree: malformed mode');
     if (mode[0] === '0') throw fail('pack_corrupt', 'tree: zero-padded mode');
-    if (name.length === 0) throw fail('pack_corrupt', 'tree: empty name');
+    if (!TREE_MODES.includes(mode)) throw fail('pack_corrupt', 'tree: bad mode');
+    if (nameBytes.length === 0) throw fail('pack_corrupt', 'tree: empty name');
+    // fsck largePathname: git's PATH_MAX, the same cap validatePath puts on a caller's component
+    if (nameBytes.length > maxName) throw limitError('tree entry name', nameBytes.length, maxName);
     if (name.indexOf('/') >= 0) throw fail('pack_corrupt', 'tree: full pathname');
-    if (name === '.' || name === '..' || isDotGit(name)) throw fail('pack_corrupt', 'tree: bad name');
-    const key = te.encode(mode === MODE_TREE ? name + '/' : name);
+    if (name === '.' || name === '..' || isDotGit(name, nameBytes)) throw fail('pack_corrupt', 'tree: bad name');
+    if (mode === MODE_LINK) {
+      const dotfile = protectedDotfile(name, nameBytes);
+      if (dotfile !== null) throw fail('pack_corrupt', `tree: ${dotfile} is a symlink`);
+    }
+    const oid = toHex(oidBytes);
+    if (oid === ZERO_OID) throw fail('pack_corrupt', 'tree: null oid');
+    // fsck duplicateEntries: one name twice, whatever the modes, adjacent or not — a file `d` and a directory `d` sort
+    // apart (`d` < `d.x` < `d/`), so the check is by name over the whole tree, on the bytes (two invalid sequences
+    // decode to the same U+FFFD and are still two names to git). Before the order check, as fsck's verify_ordered
+    // answers TREE_HAS_DUPS before TREE_UNORDERED. encodeTree refuses to write one.
+    const nameKey = toHex(nameBytes);
+    if (names.has(nameKey)) throw fail('pack_corrupt', `tree: duplicate entry ${JSON.stringify(name)}`);
+    names.add(nameKey);
+    const key = mode === MODE_TREE ? concat([nameBytes, Uint8Array.of(TREE_SORT_SLASH)]) : nameBytes;
+    // Stryker disable next-line EqualityOperator: equal keys are equal names (no name holds a '/'), which the duplicate check above has refused
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw fail('pack_corrupt', 'tree: not strictly sorted');
     prevKey = key;
-    entries.push({ mode, name, oid: toHex(oidBytes), oidOffset: nul + 1, entryOffset: p });
+    entries.push({ mode, name, oid, oidOffset: nul + 1, entryOffset: p });
     p = nul + 1 + OID_BYTES;
   }
   return entries;

@@ -9,6 +9,8 @@ export const OID_BYTES = 20;
 export const OID_HEX_CHARS = OID_BYTES * 2;
 /** SHA-256 object names, rejected: gitprotocol-v2 object-format. */
 export const SHA256_HEX_CHARS = 64;
+/** The all-zero object name: "no object" in a push command, and a tree entry fsck refuses (nullSha1). */
+export const ZERO_OID = '0'.repeat(OID_HEX_CHARS);
 
 /** One byte, and the mask that keeps one. */
 export const BYTE_VALUES = 256;
@@ -29,6 +31,12 @@ export const MODE_EXEC = '100755';
 export const MODE_LINK = '120000';
 export const MODE_TREE = '40000';
 export const MODE_COMMIT = '160000';
+/** The five modes git writes, and fsck's `badFilemode` for any other (100664 included under --strict). */
+export const TREE_MODES = Object.freeze([MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT]);
+/** Tree entries sort as if a directory name ended in '/' (fsck.c verify_ordered, the implicit slash). */
+export const TREE_SORT_SLASH = 0x2f;
+/** U+FFFD REPLACEMENT CHARACTER as UTF-8. A decoder emits it for an invalid sequence too, so the bytes tell them apart. */
+export const UTF8_REPLACEMENT = Object.freeze([0xef, 0xbf, 0xbd]);
 /**
  * Shortest well-framed entry: one octal mode digit, the separating space, one name byte, NUL, and the object id.
  * git's tree-walk rejects anything shorter (`too-short tree object`).

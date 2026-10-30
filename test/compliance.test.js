@@ -67,7 +67,9 @@ test('ref validation == git check-ref-format (exhaustive over an alphabet)', () 
 
 test('path validation == git tree acceptance + fsck --strict (components over an alphabet, .git variants, NTFS/HFS)', () => {
   const alpha = ['a', '.', 'g', 'i', 't', '~', '1', ' ', 'G', 'I', 'T', '\\'];
-  const comps = [...new Set([...strings(alpha, 2).filter(s => s.length), ...strings(['.', 'g', 'i', 't', 'G'], 4).filter(s => s.length), '.git', '.GIT', '.Git', 'git~1', 'GIT~1', '.gi\u200ct', '.g\u200ci\u200dt', '.git ', '.git.', '.git..', '.git . ', 'gi7eba~1', '.GIT~1', 'x', '..', '.', 'nul\0x', 'a\nb', '.gitmodules', '.git\u200e', '\ufeff.git', '.giT'])]; // 'a/b' is two components for us, one (invalid) name for a tree
+  const comps = [...new Set([...strings(alpha, 2).filter(s => s.length), ...strings(['.', 'g', 'i', 't', 'G'], 4).filter(s => s.length), '.git', '.GIT', '.Git', 'git~1', 'GIT~1', '.gi\u200ct', '.g\u200ci\u200dt', '.git ', '.git.', '.git..', '.git . ', 'gi7eba~1', '.GIT~1', 'x', '..', '.', 'nul\0x', 'a\nb', '.gitmodules', '.git\u200e', '\ufeff.git', '.giT',
+    // issue #34: a backslash is a separator to fsck (`x\.git`, `.git\x`), a `:` opens an NTFS stream, only `git~1` is the short name (not `git~2`), and the HFS+ and NTFS normalisations do not combine
+    'x\\.git', 'a\\b\\.GIT.', '.git\\x', 'x\\git~1', '.git:x', '.git:', 'git~1:s', 'git~2', 'GIT~9', 'git~1x', '.git\u200f\u202a\u206f\ufeff', '.git\ufffd', '.git\ufeff.', '.git.\ufeff', '.git \u200c', '.git\u200b', '\u200c.gitx'])]; // 'a/b' is two components for us, one (invalid) name for a tree
   let n = 0; const disagree = [];
   for (const c of comps) {
     n++;

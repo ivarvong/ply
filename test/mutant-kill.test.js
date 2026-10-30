@@ -23,7 +23,7 @@ import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
-import { validateIdent, isValidatedIdent } from '../src/validate.js';
+import { validateIdent, isValidatedIdent, validatePath } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
 import { negotiate } from '../src/negotiate.js';
 import {
@@ -87,13 +87,88 @@ test('parseTree error strings and the boundaries next to them', () => {
   for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
   throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
   throws(() => parseTree(data(raw('100644 b\0'), raw('100644 a\0'))), 'pack_corrupt', 'tree: not strictly sorted');
-  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => parseTree(data(raw('40000 d\0'), raw('100644 d-\0'))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => parseTree(data(raw('100644 d0\0'), raw('40000 d\0'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(raw('100644 d-\0'), raw('40000 d\0'), raw('100644 d0\0'))).map(e => e.name), ['d-', 'd', 'd0']);
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
-  // a file and a directory of one name sort apart ('d' < 'd/'): the order check passes it. encodeTree refuses to write
-  // it (git fsck duplicateEntries), so the bytes are built by hand.
-  const tree = data(raw('100644 d\0', oidBytes(2)), raw('40000 d\0', oidBytes(1)));
-  assert.deepEqual(parseTree(tree).map(e => e.name), ['d', 'd']);
+  // issue #34: one name twice is fsck duplicateEntries whatever the modes, and the pair need not be adjacent: a file `d`
+  // and a directory `d` sort apart ('d' < 'd.x' < 'd/'). Same name in either order is a duplicate, not an order fault
+  // (fsck's verify_ordered answers TREE_HAS_DUPS before it looks at the order). encodeTree refuses to write these.
+  throws(() => parseTree(data(raw('100644 d\0', oidBytes(2)), raw('100644 d.x\0', oidBytes(3)), raw('40000 d\0', oidBytes(1)))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(raw('100644 d\0', oidBytes(2)), raw('40000 d\0', oidBytes(1)))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(raw('40000 d\0', oidBytes(1)), raw('100644 d\0', oidBytes(2)))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  throws(() => parseTree(data(raw('40000 a\0'), raw('40000 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  throws(() => parseTree(data(raw('100644 a\0'), raw('120000 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  // case-only twins are two names to git (they collide only on a case-insensitive checkout)
+  assert.deepEqual(parseTree(data(raw('100644 A\0'), raw('100644 a\0', oidBytes(5)))).map(e => e.name), ['A', 'a']);
+  // fsck badFilemode: only the five modes git writes. 100664 is bad under --strict (git's own early history has it).
+  // A mode over 16 bits (`240000`, `1100644`) truncates to a legal one inside fsck's `unsigned short`; ply refuses it.
+  for (const mode of ['100644', '100755', '120000', '40000', '160000']) assert.equal(parseTree(raw(`${mode} a\0`))[0].mode, mode);
+  for (const mode of ['100664', '100600', '777', '4000', '1', '7', '240000', '1100644', '300755', '100645', '100754', '120001', '40001', '160001', '140000', '170000', '177777']) {
+    throws(() => parseTree(raw(`${mode} a\0`)), 'pack_corrupt', 'tree: bad mode');
+  }
+  // fsck nullSha1
+  throws(() => parseTree(raw('100644 a\0', oidBytes(0))), 'pack_corrupt', 'tree: null oid');
+  assert.equal(parseTree(raw('100644 a\0', Uint8Array.of(...oidBytes(0).subarray(1), 1)))[0].oid, '0'.repeat(38) + '01');
+  // fsck gitmodulesSymlink (error) and gitattributesSymlink / gitignoreSymlink / mailmapSymlink (info): the four names
+  // git opens with O_NOFOLLOW may not be symlinks, under their NTFS short names and HFS+ spellings too. fsck checks
+  // `.gitmodules` after every backslash as well; the other three only at the start of the name.
+  for (const [name, dotfile] of [
+    ['.gitmodules', '.gitmodules'], ['.GitModules', '.gitmodules'], ['.gitmodules.', '.gitmodules'], ['.gitmodules . ', '.gitmodules'], ['.gitmodules:x', '.gitmodules'],
+    ['gitmod~1', '.gitmodules'], ['GITMOD~4', '.gitmodules'], ['gitmod~1.', '.gitmodules'], ['gi7eba~1', '.gitmodules'], ['GI7EBA~9', '.gitmodules'], ['gi7eb~12', '.gitmodules'],
+    ['gi7e~123', '.gitmodules'], ['gi7~1234', '.gitmodules'], ['gi~12345', '.gitmodules'], ['g~123456', '.gitmodules'], ['~1234567', '.gitmodules'], ['gi7eba~1 . :x', '.gitmodules'],
+    ['x\\.gitmodules', '.gitmodules'], ['a\\b\\gitmod~2', '.gitmodules'], ['.gitmodule‌s', '.gitmodules'], ['﻿.GITMODULES', '.gitmodules'],
+    ['.gitattributes', '.gitattributes'], ['gitatt~1', '.gitattributes'], ['gi7d29~1', '.gitattributes'], ['.gitattributes:', '.gitattributes'],
+    ['.gitignore', '.gitignore'], ['gitign~1', '.gitignore'], ['gi250a~1', '.gitignore'], ['.GITIGNORE..', '.gitignore'],
+    ['.mailmap', '.mailmap'], ['mailma~1', '.mailmap'], ['maba30~1', '.mailmap'], ['.mailmap ', '.mailmap'],
+  ]) throws(() => parseTree(raw(`120000 ${name}\0`)), 'pack_corrupt', `tree: ${dotfile} is a symlink`);
+  for (const name of [
+    '.gitmodules', 'gitmod~1', 'gi7eba~1', '.gitattributes', '.gitignore', '.mailmap', // as blobs
+  ]) assert.equal(parseTree(raw(`100644 ${name}\0`))[0].name, name);
+  for (const name of [
+    '.gitmodulesx', '.gitmodulesx:', '.gitattributesx', '.gitignorex', '.mailmapx', '.gitattributes\u200cx', 'gitmod~5', 'gitmod~0', 'gi7eba~0', 'gi7eba~12', 'gi7ebx~1', 'gi7eba1~', 'gi7eba~1x', '~123456', '~12345678',
+    'x\\.gitattributes', 'x\\.gitignore', 'x\\.mailmap', '.gitmodule', '.gitattribute', '.mailma', 'mailmap', 'gitmodules',
+    // a backslash ends nothing for is_ntfs_dotgitmodules (unlike is_ntfs_dotgit), and the segment after it is `x`
+    '.gitmodules\\x', 'x\\.gitmodule‌s',
+  ]) assert.equal(parseTree(raw(`120000 ${name}\0`))[0].name, name, name);
+  // fsck hasDotgit as path.c is_ntfs_dotgit / utf8.c is_hfs_dotgit: `.git` or `git~1` (not `git~2`) then only dots
+  // and spaces up to the end, a `:` stream or a `\` separator, in every backslash segment; HFS+ ignorable code
+  // points dropped, and the HFS+ scan ends at the first invalid UTF-8 sequence, so `.git` + 0xff is `.git`.
+  const bytes = (...parts) => data(...parts);
+  for (const name of ['.git', '.GIT', '.Git.', '.git ', '.git. . .', 'git~1', 'GIT~1', 'git~1.', '.git:x', '.git:', 'git~1:s', '.git\\x', 'x\\.git', '\\.git', 'a\\b\\.GIT.', 'x\\git~1',
+    '.gi‌t', '﻿.git', '.g‌i‍t', '.git‮', '.GIT⁪', '.git‏‪⁯﻿']) {
+    throws(() => parseTree(raw(`100644 ${name}\0`)), 'pack_corrupt', 'tree: bad name');
+  }
+  // the two normalisations do not combine: NTFS stops at the ignorable's first byte, HFS+ sees the dot
+  for (const name of ['git~2', 'GIT~9', '.gitx', '.git.x', '.git x', '.gitt', 'git~', 'git~1x', 'x.git', '.git‌x', '.giit', '‌.gitx', '.git�', '.git�.', '�.git',
+    '.git﻿.', '.git.﻿', '.git ‌', '.git​', '.git⁠']) {
+    assert.equal(parseTree(raw(`100644 ${name}\0`))[0].name, name, name);
+  }
+  const dotgit = [0x2e, 0x67, 0x69, 0x74];
+  throws(() => parseTree(bytes('100644 ', Uint8Array.of(...dotgit, 0xff), '\0', id)), 'pack_corrupt', 'tree: bad name');
+  throws(() => parseTree(bytes('100644 ', Uint8Array.of(...dotgit, 0xff, 0x78), '\0', id)), 'pack_corrupt', 'tree: bad name');
+  throws(() => parseTree(bytes('100644 ', Uint8Array.of(0x2e, 0xe2, 0x80, 0x8c, 0x67, 0x69, 0x74, 0xc3), '\0', id)), 'pack_corrupt', 'tree: bad name');
+  throws(() => parseTree(bytes('100644 ', Uint8Array.of(...dotgit, 0xef, 0xbf), '\0', id)), 'pack_corrupt', 'tree: bad name'); // a truncated 3-byte sequence is invalid
+  throws(() => parseTree(bytes('100644 ', Uint8Array.of(...dotgit, 0xed, 0xa0, 0x80), '\0', id)), 'pack_corrupt', 'tree: bad name'); // an encoded surrogate is invalid
+  throws(() => parseTree(bytes('100644 ', Uint8Array.of(...dotgit, 0xc0, 0xae), '\0', id)), 'pack_corrupt', 'tree: bad name'); // an overlong '.' is invalid
+  // a literal U+FFFD (EF BF BD) is a character the scan reads, so what follows it no longer matters
+  for (const tail of [[0xef, 0xbf, 0xbd], [0xef, 0xbf, 0xbd, 0x78], [0xef, 0xbf, 0xbd, 0xff], [0xc3, 0xa9]]) assert.equal(parseTree(bytes('100644 ', Uint8Array.of(...dotgit, ...tail), '\0', id)).length, 1, JSON.stringify(tail));
+  assert.equal(parseTree(bytes('120000 ', te.encode('.gitmodules'), Uint8Array.of(0xef, 0xbf, 0xbd, 0xff), '\0', id)).length, 1);
+  throws(() => parseTree(bytes('120000 ', te.encode('.gitmodules'), Uint8Array.of(0xff), '\0', id)), 'pack_corrupt', 'tree: .gitmodules is a symlink');
+  assert.equal(parseTree(bytes('100644 ', Uint8Array.of(0xff, ...dotgit), '\0', id)).length, 1);
+  assert.equal(parseTree(bytes('100644 ', Uint8Array.of(0x2e, 0x67, 0xff, 0x69, 0x74), '\0', id)).length, 1);
+  // a caller's path component goes through the same rules with no bytes: a literal U+FFFD is text, a backslash splits
+  assert.deepEqual(validatePath('d/.git\ufffd', DEFAULT_LIMITS), ['d', '.git\ufffd']);
+  assert.deepEqual(validatePath('git~2/\ufffd.git', DEFAULT_LIMITS), ['git~2', '\ufffd.git']);
+  for (const p of ['x\\.git', '.git:x', 'd/GIT~1.', 'd/.gi\u200ct']) assert.throws(() => validatePath(p, DEFAULT_LIMITS), e => e.code === 'bad_request' && e.what === 'path', p);
+  // encodeTree sorts a directory as if its name ended in '/': `d-` (0x2d) before `d/`, `d0` (0x30) after
+  assert.deepEqual(parseTree(encodeTree([{ mode: '100644', name: 'd0', oid: oid(1) }, { mode: '40000', name: 'd', oid: oid(2) }, { mode: '100644', name: 'd-', oid: oid(3) }])).map(e => e.name), ['d-', 'd', 'd0']);
+  // fsck largePathname: a name over maxPathComponent (git's 4096) bytes
+  assert.equal(parseTree(raw(`100644 ${'a'.repeat(4096)}\0`))[0].name.length, 4096);
+  throws(() => parseTree(raw(`100644 ${'a'.repeat(4097)}\0`)), 'limit_exceeded', 'tree entry name 4097 exceeds limit 4096');
+  throws(() => parseTree(raw(`100644 ${'é'.repeat(2049)}\0`)), 'limit_exceeded', 'tree entry name 4098 exceeds limit 4096');
+  throws(() => parseTree(raw('100644 ab\0'), { ...DEFAULT_LIMITS, maxPathComponent: 1 }), 'limit_exceeded', 'tree entry name 2 exceeds limit 1');
 });
 
 test('commit and tag headers, idents, and assertFetched', () => {
@@ -1115,9 +1190,10 @@ test('aggregate caps fail closed before allocation', async () => {
   throws(() => inflate(zhello, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
 
   const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
-  assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
-  throws(() => parseTree(twoEntries, { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  assert.equal(parseTree(twoEntries, { maxTreeEntries: 2, maxPathComponent: 1 }).length, 2);
+  throws(() => parseTree(twoEntries, { maxTreeEntries: 1, maxPathComponent: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
   throws(() => parseTree(twoEntries, {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  throws(() => parseTree(twoEntries, { maxTreeEntries: 2 }), 'bad_request', 'limits.maxPathComponent must be a finite non-negative number');
 
   const tree = oid(1);
   const who = 'A <a@b.c> 1 +0000';

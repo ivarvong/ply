@@ -15,7 +15,7 @@ export const CODE_DOCS = Object.freeze({
   ssh: { where: 'net', what: 'ssh transport failure: bad packet tag, protocol violation, disconnect' },
   host_key_mismatch: { where: 'net', what: 'the ssh host key is not the pinned one; no credential was sent' },
   protocol: { where: 'remote', what: 'malformed pkt-line / v2 framing from the server' },
-  pack_corrupt: { where: 'remote', what: 'a pack or object failed verification (hash, size, zlib, delta; an unwanted object; a tree naming one entry twice)' },
+  pack_corrupt: { where: 'remote', what: 'a pack or object failed verification (hash, size, zlib, delta; an unwanted object; a tree git fsck --strict would refuse: a name twice, unsorted, `.git`, a bad or zero-padded mode, a null oid, a dotfile symlink)' },
   remote_error: { where: 'remote', what: 'the server said ERR / band 3' },
   limit_exceeded: { where: 'local', what: 'a limits.* bound was hit before allocation' },
   match_count: { where: 'content', what: 'find matched 0 or >1 times (exactly-one-match contract)' },
