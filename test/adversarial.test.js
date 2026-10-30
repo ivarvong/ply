@@ -475,6 +475,9 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   assert.throws(() => parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 }), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
 });
 
+const pktLine = s => { const b = te.encode(s); return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); };
+const pktRaw = b => concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]);
+
 // #13: a server answering a blob fetch with PACK + version + count=1 and then object-header continuation bytes forever.
 // The streamed paths (edit's streamBlobEdit, readFile's openBlob, checkoutTree's single-blob stream) used to keep every
 // byte in the header buffer, re-concatenated per chunk, until the request timer fired between chunks: linear memory,
@@ -526,6 +529,74 @@ test('I4 a blob fetch whose object header never ends: pack_corrupt within the fi
   rmSync(repo.work, { recursive: true, force: true });
 });
 
+// A server that answers a blob fetch (or, for `wants`, every unfiltered fetch) with `first` and then `frame` forever,
+// yielding to the event loop between chunks as a socket does and erroring the body when the request signal aborts (as a
+// real fetch does), so the test depends on the client's caps and not on the request timer. Counts every byte it served.
+function endlessBody({ first, frame }) {
+  const served = { bytes: 0, requests: 0, perRequest: [] };
+  const f = async (url, init) => {
+    const body = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
+    if (!body.includes('command=fetch\n') || body.includes('filter ')) return fetch(url, init);
+    const req = { wants: body.split('want ').length - 1, bytes: 0 };
+    served.requests++; served.perRequest.push(req);
+    let more = true, ctrl;
+    init.signal?.addEventListener('abort', () => { more = false; ctrl?.error(init.signal.reason); });
+    const stream = new ReadableStream({
+      start(c) { ctrl = c; },
+      async pull(c) {
+        await new Promise(r => setImmediate(r));
+        if (!more) return;
+        const chunk = req.bytes === 0 ? first : frame;
+        req.bytes += chunk.length; served.bytes += chunk.length; c.enqueue(chunk);
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+  };
+  return { served, f };
+}
+const PACK_ONE = Uint8Array.of(0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1); // PACK, v2, one object
+// 13103 non-final empty stored blocks (`00 00 00 ff ff`): infinite compressed input, zero inflated output
+const EMPTY_STORED = (() => { const b = new Uint8Array(65515); for (let i = 0; i + 5 <= b.length; i += 5) b.set([0x00, 0x00, 0x00, 0xff, 0xff], i); return b; })();
+const STORED_FRAME = pktRaw(concat([Uint8Array.of(1), EMPTY_STORED]));
+// a single-object pack whose object header declares `size` bytes of blob and whose zlib stream never ends
+const endlessStored = size => endlessBody({ first: concat([pktLine('packfile\n'), pktRaw(concat([Uint8Array.of(1), PACK_ONE, encodeObjHeader(3, size), Uint8Array.of(0x78, 0x01), EMPTY_STORED.subarray(0, 65000)]))]), frame: STORED_FRAME });
+
+const streamedPaths = (url, limits) => ({
+  edit: f => editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }),
+  read: async f => { const r = await readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f }); for await (const _ of r.stream) void _; },
+  'checkout single': async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
+  'checkout batched': async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
+});
+
+// The probe behind this test: on the previous source, readFile accepted 793.6 MiB and editFile 632.7 MiB of an endless
+// blob body in 8 s (~90 MiB/s) and failed `timeout` — at the default 60 s timer that is ~5 GiB per request — because no
+// streamed path applied limits.maxPackBytes to the body. Now the cap is in v2Step, for every consumer of packStream, with
+// limit_exceeded's `got` within one frame of the cap.
+test('I4 maxPackBytes bounds the streamed body on every path: limit_exceeded within one frame of the cap, not timeout', { timeout: 60_000 }, async () => {
+  const repo = freshRepo();
+  const url = `${srv.url}/${repo.name}.git`;
+  const limits = withLimits({ requestTimeoutMs: 5000, maxPackBytes: 1 << 20 });
+  for (const [name, op] of Object.entries(streamedPaths(url, limits))) {
+    const { served, f } = endlessStored(16 << 20);
+    const t0 = performance.now();
+    const err = await op(f).then(() => null, e => e);
+    const ms = performance.now() - t0;
+    assert.ok(err && err.code === 'limit_exceeded' && err.what === 'pack bytes', `${name}: ${err?.code}: ${err?.message}`);
+    assert.equal(err.max, limits.maxPackBytes);
+    assert.ok(err.got > limits.maxPackBytes && err.got <= limits.maxPackBytes + STORED_FRAME.length, `${name}: got ${err.got}`);
+    assert.ok(ms < 2000, `${name}: ${ms.toFixed(0)} ms`);
+    for (const r of served.perRequest) assert.ok(r.bytes <= limits.maxPackBytes + 2 * STORED_FRAME.length, `${name}: a ${r.wants}-want request read ${r.bytes} B`);
+  }
+  // band 2 (progress) is the other stream a fetch response carries; it is held to the same cap
+  const PROGRESS_FRAME = pktRaw(concat([Uint8Array.of(2), new Uint8Array(65515).fill(0x2e)]));
+  const { served, f } = endlessBody({ first: concat([pktLine('packfile\n'), PROGRESS_FRAME]), frame: PROGRESS_FRAME });
+  const err = await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }).then(() => null, e => e);
+  assert.ok(err && err.code === 'limit_exceeded' && err.what === 'progress bytes', `progress flood: ${err?.code}: ${err?.message}`);
+  assert.ok(served.bytes <= limits.maxPackBytes + 2 * PROGRESS_FRAME.length, `progress flood: ${served.bytes} B served`);
+  assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head, 'I2: ref unchanged');
+  rmSync(repo.work, { recursive: true, force: true });
+});
+
 test('request timeout survives a GC during a stalled body', { timeout: 8_000 }, async () => {
   const child = spawn(process.execPath, ['--expose-gc', 'test/timeout-gc.mjs'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', err = '';
@@ -536,11 +607,9 @@ test('request timeout survives a GC during a stalled body', { timeout: 8_000 }, 
 });
 
 // helpers
-const pktLine = s => { const b = te.encode(s); return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); };
 function wrapPack(pack) { // v2 fetch response: packfile section + sideband band 1 frames + flush
   const parts = [pktLine('packfile\n')];
   for (let i = 0; i < pack.length; i += 65000) parts.push(pktRaw(concat([Uint8Array.of(1), pack.subarray(i, Math.min(i + 65000, pack.length))])));
   parts.push(te.encode('0000'));
   return concat(parts);
 }
-const pktRaw = b => concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]);

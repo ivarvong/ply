@@ -21,8 +21,9 @@
 // Memory. The tree pack is one buffered fetch (maxPackBytes, maxInflatedTotal, maxPackObjects); the entries walked are
 // bounded by maxPackObjects (a tree reused at many paths cannot multiply them past it) and the depth by maxPathDepth.
 // A blob batch is one buffered fetch under the same caps; one that hits a cap is split in half and refetched, down to
-// single blobs, which stream in O(1) memory whatever their size. The iterator holds at most the batch it is yielding
-// (and the previous one while its streams are unread).
+// single blobs, which stream in O(1) memory. Every fetch, streamed or buffered, delivers at most maxPackBytes of pack
+// (v2Step): a single blob whose pack is over it is limit_exceeded, not fetched (the default, 128 MiB, is above GitHub's
+// 100 MiB file cap). The iterator holds at most the batch it is yielding (and the previous one while its streams are unread).
 //
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
 import { fail } from './errors.js';

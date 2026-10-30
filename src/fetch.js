@@ -68,14 +68,27 @@ export function v2Step(st, frame) {
   // Every section line, including ones this client does not interpret, counts against the same cap. A missing
   // maxSectionLines used to make `n >= undefined` false and disable the check.
   const maxLines = requireLimit(st.limits, 'maxSectionLines');
+  // The one place every consumer of a fetch response passes: band 1 (the pack) and band 2 (progress) are each held to
+  // maxPackBytes here, before the frame is yielded, so fetchSingle, fetchWide, fetchPackOnce, the streamed blob (edit,
+  // read, checkout) and any new consumer are bounded without a check of their own. Before, only the buffered consumers
+  // counted, and a streamed blob body was accepted until the request timer (~5 GiB at the default 60 s).
+  const maxPack = requireLimit(st.limits, 'maxPackBytes');
   if (st.done) throw proto('v2: frame after flush');
   if (frame.kind === 'flush') return { state: { ...st, done: true }, pack: null };
   if (frame.kind === 'end') return { state: st, pack: null };
   if (st.phase === 'pack') {
     if (frame.kind !== 'data') return { state: st, pack: null };
     const band = parseSideband(frame.payload);
-    if (band.band === SIDEBAND_PACK) return { state: { ...st, band1: st.band1 + band.body.length, packFrames: st.packFrames + 1 }, pack: band.body };
-    if (band.band === SIDEBAND_PROGRESS) return { state: { ...st, band2: st.band2 + band.body.length, band2Frames: st.band2Frames + 1, progress: (st.progress + td.decode(band.body)).slice(-PROGRESS_KEEP) }, pack: null };
+    if (band.band === SIDEBAND_PACK) {
+      const band1 = st.band1 + band.body.length;
+      if (band1 > maxPack) throw limitError('pack bytes', band1, maxPack);
+      return { state: { ...st, band1, packFrames: st.packFrames + 1 }, pack: band.body };
+    }
+    if (band.band === SIDEBAND_PROGRESS) {
+      const band2 = st.band2 + band.body.length;
+      if (band2 > maxPack) throw limitError('progress bytes', band2, maxPack);
+      return { state: { ...st, band2, band2Frames: st.band2Frames + 1, progress: (st.progress + td.decode(band.body)).slice(-PROGRESS_KEEP) }, pack: null };
+    }
     if (band.band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(band.body).trim()}`);
     throw proto(`v2: bad sideband ${band.band}`);
   }
@@ -233,11 +246,9 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
   const once = bust => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust }), async span => {
     try {
       const maxObject = requireLimit(t.limits, 'maxObjectSize');
-      const maxPack = requireLimit(t.limits, 'maxPackBytes');
+      // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here.
       let sp = spInit(); const zlibParts = []; let zlibLen = 0;
       for await (const chunk of packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span)) {
-        // Refuse before spStep concatenates the chunk onto the header buffer.
-        if (sp.bytes + chunk.length > maxPack) throw limitError('pack bytes', sp.bytes + chunk.length, maxPack);
         const r = spStep(sp, chunk); sp = r.state;
         if (sp.phase === 'body' && sp.size > maxObject) throw limitError('object size', sp.size, maxObject);
         for (const z of r.zlib) { zlibParts.push(z); zlibLen += z.length; }
@@ -261,17 +272,13 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
   }
 }
 
-// The blob:none form of a tree:0 single-object fetch (see fetchObject). Bounded by limits.maxPackBytes.
+// The blob:none form of a tree:0 single-object fetch (see fetchObject). Bounded by limits.maxPackBytes (v2Step).
 async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
   const once = bust => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': 'tree:0', 'git.fetch.filter.learned': learned }), async span => {
     try {
-      const maxPack = requireLimit(t.limits, 'maxPackBytes');
       const maxObject = requireLimit(t.limits, 'maxObjectSize');
       const parts = []; let total = 0;
-      for await (const chunk of packStream(t, { wants: [oid], filter: 'blob:none', deepen, bypassCache: bust }, span)) {
-        total += chunk.length; if (total > maxPack) throw limitError('pack bytes', total, maxPack);
-        parts.push(chunk);
-      }
+      for await (const chunk of packStream(t, { wants: [oid], filter: 'blob:none', deepen, bypassCache: bust }, span)) { total += chunk.length; parts.push(chunk); }
       const parsed = parsePack(concat(parts), packParseOpts(t.limits));
       const { objects } = resolvePack(parsed, undefined, t.limits);
       for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data, t.limits);

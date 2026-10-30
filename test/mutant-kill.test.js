@@ -1306,3 +1306,27 @@ test('size varints stop at 64 bits: a header that never ends is pack_corrupt at 
   assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
   throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
 });
+
+
+
+// Every consumer of packStream (fetchSingle, fetchWide, fetchPackOnce, streamBlobEdit, openBlob, checkoutTree's streams)
+// gets limits.maxPackBytes from v2Step, before the frame is yielded: band 1 as 'pack bytes', band 2 as 'progress bytes'.
+// A consumer cannot forget the cap, and a missing limit is bad_request on the first frame.
+const sidebandFrame = (n, len) => ({ kind: 'data', payload: concat([Uint8Array.of(n), new Uint8Array(len).fill(0x78)]) });
+test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of packStream', () => {
+  const line = s => ({ kind: 'data', payload: te.encode(s) });
+  const band = sidebandFrame;
+  const limits = withLimits({ maxPackBytes: 10 });
+  let st = v2Step(v2Init(limits), line('packfile')).state;
+  const feed = f => { const r = v2Step(st, f); st = r.state; return r; };
+  assert.equal(feed(band(SIDEBAND_PACK, 6)).pack.length, 6);
+  assert.equal(feed(band(SIDEBAND_PACK, 4)).pack.length, 4);
+  assert.equal(st.band1, 10);
+  assert.equal(feed(band(SIDEBAND_PROGRESS, 10)).pack, null);
+  assert.equal(st.band2, 10);
+  assert.throws(() => feed(band(SIDEBAND_PACK, 1)), e => e.code === 'limit_exceeded' && e.message === 'pack bytes 11 exceeds limit 10' && e.what === 'pack bytes' && e.got === 11 && e.max === 10);
+  assert.throws(() => feed(band(SIDEBAND_PROGRESS, 1)), e => e.code === 'limit_exceeded' && e.message === 'progress bytes 11 exceeds limit 10' && e.what === 'progress bytes' && e.got === 11 && e.max === 10);
+  assert.equal(feed(band(SIDEBAND_PACK, 0)).pack.length, 0, 'an empty frame at the cap is not past it');
+  throws(() => v2Step({ ...v2Init(), limits: { maxSectionLines: 1 } }, line('packfile')), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
+});
+

@@ -1,9 +1,9 @@
-// Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes), parsed and delta-resolved.
+// Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes, enforced by v2Step as the band-1
+// bytes arrive), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 import { concat } from './bytes.js';
 import { TYPE_NAME } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
-import { limitError, requireLimit } from './limits.js';
 import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest } from './fetch.js';
 
@@ -45,11 +45,10 @@ export async function fetchPack(t, opts, extra = {}) {
 
 export async function fetchPackOnce(t, opts, { external, resolve = true, attrs = {} } = {}) {
   return coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': !!opts.bypassCache, ...attrs }), async span => { try {
-    const maxPack = requireLimit(t.limits, 'maxPackBytes');
     const parts = []; let total = 0;
     const it = packStream(t, opts, span);
     let st;
-    for (;;) { const { value, done } = await it.next(); if (done) { st = value; break; } total += value.length; if (total > maxPack) throw limitError('pack bytes', total, maxPack); parts.push(value); }
+    for (;;) { const { value, done } = await it.next(); if (done) { st = value; break; } total += value.length; parts.push(value); }
     const acks = { acks: st.acks.filter(a => a.startsWith('ACK ')).map(a => a.slice(4)), nak: st.acks.includes('NAK'), ready: st.ready, shallow: st.shallow, unshallow: st.unshallow };
     if (st.phase !== 'pack') { span.set({ 'git.fetch.pack': false }); return { parsed: null, objects: null, resolved: null, ...acks }; }
     const buf = concat(parts);
