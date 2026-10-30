@@ -24,7 +24,7 @@ import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent } from '../src/validate.js';
-import { createTransport } from '../src/http.js';
+import { createTransport, pctDecode } from '../src/http.js';
 import { negotiate } from '../src/negotiate.js';
 import {
   OID_BYTES, OID_HEX_CHARS, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
@@ -1305,4 +1305,97 @@ test('size varints stop at 64 bits: a header that never ends is pack_corrupt at 
   throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
   throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+});
+
+test('URL userinfo is the Basic credential git sends; an explicit auth wins; every form is scrubbed (#32)', async () => {
+  const TOK = 'ghp_KillToken0123456789abcdefXYZ';
+  const basic = s => `Basic ${Buffer.from(s, 'utf8').toString('base64')}`;
+  // header sent, and what an error page echoing the credential is reduced to
+  const send = async (url, opts = {}) => {
+    let header = 'unsent', hit = 0;
+    const fetchImpl = async (_u, init) => { hit++; header = init.headers.Authorization ?? null; return new Response(['echo', header, header?.slice(6) ?? '-', TOK, ...(opts.say ?? [])].join(' | '), { status: 401, headers: { 'content-type': 'text/plain' } }); };
+    const t = createTransport(url, { fetchImpl, tracer: tracerStub, ...(opts.auth ? { auth: opts.auth } : {}) });
+    const e = await (async () => { for await (const f of t.frames('git-upload-pack', new Uint8Array(0), spanStub)) void f; })().catch(x => x);
+    assert.equal(e.code, 'auth', `${url}: ${e.code} ${e.message}`);
+    assert.equal(hit, 1);
+    // `|`-separated so each echoed form is one run; a run's gram may eat the space before it, so separators are normalised
+    return { header, message: e.message, said: e.message.replace(/\s*\|\s*/g, '|'), url: t.url };
+  };
+  // percent-decoding, as curl's: %XX is a byte, a malformed or cut escape stays literal, `+` stays, case-insensitive hex
+  assert.deepEqual([...pctDecode('a%40b%3a%2F%zz%4%+c%')], [...te.encode('a@b:/%zz%4%+c%')]);
+  assert.deepEqual([...pctDecode('%4142%2541')], [0x41, 0x34, 0x32, 0x25, 0x34, 0x31]);
+  assert.deepEqual([...pctDecode('a%zz%41')], [0x61, 0x25, 0x7a, 0x7a, 0x41]);
+  assert.deepEqual([...pctDecode('%FF%C3%A9')], [0xff, 0xc3, 0xa9]);
+  assert.deepEqual([...pctDecode('é')], [0xc3, 0xa9]);
+  assert.equal(pctDecode('').length, 0);
+
+  const H = 'http://h.test/r.git';
+  const rows = [
+    [`http://${TOK}@h.test/r.git`, basic(`${TOK}:`)],
+    [`http://:${TOK}@h.test/r.git`, basic(`:${TOK}`)],
+    ['http://user:@h.test/r.git', basic('user:')],
+    [`http://user:${TOK}@h.test/r.git`, basic(`user:${TOK}`)],
+    [`http://us%40er:p%3As%2Fs@h.test/r.git`, basic('us@er:p:s/s')],
+    [`http://a%zz:${TOK}%2@h.test/r.git`, basic(`a%zz:${TOK}%2`)],
+    [`http://u+x:${TOK}+y@h.test/r.git`, basic(`u+x:${TOK}+y`)],
+    ['http://%C3%A9:p@h.test/r.git', basic('é:p')],
+    ['http://é:p@h.test/r.git', basic('é:p')],
+    ['http://@h.test/r.git', null],
+    [H, null],
+    // the parser takes a special scheme with no, one or backslashed slashes; the raw authority is still read for the ':' rule
+    [`http:${TOK}@h.test/r.git`, basic(`${TOK}:`)],
+    [`http:/user:${TOK}@h.test/r.git`, basic(`user:${TOK}`)],
+    [`http:\\${TOK}@h.test/r.git`, basic(`${TOK}:`)],
+    [`http://user:${TOK}@h.test\\a@b/r.git`, basic(`user:${TOK}`), 'http://h.test/a@b/r.git'],
+  ];
+  for (const [url, want, base = H] of rows) {
+    const r = await send(url);
+    assert.equal(r.header, want, url);
+    assert.equal(r.url, base, url);
+    if (url.includes(TOK)) assert.ok(!r.message.includes(TOK), `${url}: ${r.message}`);
+    if (want) assert.ok(!r.message.includes(want.slice(6)), `${url}: base64 in ${r.message}`);
+  }
+  // a non-UTF-8 byte is one byte; a non-Latin-1 credential is UTF-8 bytes, not a DOMException
+  assert.equal((await send(`http://u:%FF@h.test/r.git`)).header, `Basic ${Buffer.from([0x75, 0x3a, 0xff]).toString('base64')}`);
+  assert.equal((await send(H, { auth: { user: 'Ω', token: '한🚀' } })).header, basic('Ω:한🚀'));
+  assert.equal((await send(H, { auth: { token: 'é' } })).header, basic('x-access-token:é'));
+  // precedence: a credential-bearing auth wins and drops the userinfo (which is still scrubbed); an empty one does not
+  assert.equal((await send(`http://${TOK}@h.test/r.git`, { auth: { token: 'other-secret-token-77' } })).header, basic('x-access-token:other-secret-token-77'));
+  assert.equal((await send(`http://${TOK}@h.test/r.git`, { auth: { user: 'me', token: 'other-secret-token-77' } })).header, basic('me:other-secret-token-77'));
+  assert.equal((await send(`http://${TOK}@h.test/r.git`, { auth: { bearer: 'b-0123456789abcdef' } })).header, 'Bearer b-0123456789abcdef');
+  assert.equal((await send(`http://${TOK}@h.test/r.git`, { auth: { header: 'Basic dXNlcjo=' } })).header, 'Basic dXNlcjo=');
+  assert.equal((await send(`http://${TOK}@h.test/r.git`, { auth: { token: '' } })).header, basic(`${TOK}:`));
+  assert.equal((await send(`http://${TOK}@h.test/r.git`, { auth: {} })).header, basic(`${TOK}:`));
+  assert.equal((await send(`http://:${TOK}@h.test/r.git`, { auth: { user: 'ignored' } })).header, basic(`:${TOK}`));
+  assert.equal((await send(H, { auth: { user: 'alone' } })).header, null);
+  // scrub forms: the encoded password, the decoded one, a token-only user of any shape, a secret-shaped user; a name survives
+  const R = '[redacted]', M = 'HTTP 401 git-upload-pack: echo|';
+  const enc = await send(`http://oauth2:gl%40pat%3A${TOK}@h.test/r.git`, { say: [`gl%40pat%3A${TOK}`, `gl@pat:${TOK}`, 'oauth2 ok'] });
+  assert.equal(enc.said, `${M}${R}|${R}|${R}|${R}|${R}|oauth2 ok`);
+  const shortUser = await send('http://tok_ab@h.test/r.git', { say: ['tok_ab seen'] });
+  assert.equal(shortUser.said, `${M}${R}|${R}|${TOK}|${R} seen`);
+  const nameUser = await send('http://tok_ab:@h.test/r.git', { say: ['tok_ab seen'] });
+  assert.equal(nameUser.said, `${M}${R}|${R}|${TOK}|tok_ab seen`);
+  const secretUser = await send(`http://${TOK}:pwd4@h.test/r.git`, { say: ['pwd4'] });
+  assert.equal(secretUser.said, `${M}${R}|${R}|${R}|${R}`);
+  const dropped = await send('http://dr%40opped-55555-44444-333:p%40ss@h.test/r.git', { auth: { token: 'other-secret-token-77' }, say: ['dr%40opped-55555-44444-333', 'dr@opped-55555-44444-333', 'p%40ss', 'p@ss', 'other-secret-token-77'] });
+  assert.equal(dropped.said, `${M}${R}|${R}|${TOK}|${R}|${R}|${R}|${R}|${R}`);
+  // a caller's own Basic header is decoded for the scrub, with or without a colon; an undecodable one still scrubs itself
+  assert.equal((await send(H, { auth: { header: `Basic ${Buffer.from(`${TOK}:pw-secret`).toString('base64')}` }, say: ['pw-secret'] })).said, `${M}${R}|${R}|${R}|${R}`);
+  assert.equal((await send(H, { auth: { header: `Basic ${Buffer.from(TOK).toString('base64')}` } })).said, `${M}${R}|${R}|${R}`);
+  assert.equal((await send(H, { auth: { header: 'Basic %%%%' }, say: ['x'] })).said, `${M}${R}|${R}|${TOK}|x`);
+  // ... and only a Basic header is decoded: a base64-shaped bearer or another scheme is not read as user:password
+  assert.equal((await send(H, { auth: { bearer: Buffer.from('u:pwd-secret-99').toString('base64') }, say: ['pwd-secret-99'] })).said, `${M}${R}|${R}|${TOK}|pwd-secret-99`);
+  assert.equal((await send(H, { auth: { header: `Negotiate Basic ${Buffer.from('u:pwd-secret-99').toString('base64')}` }, say: ['pwd-secret-99'] })).said, `${M}${R}|${R}|${TOK}|pwd-secret-99`);
+  assert.equal((await send(H, { auth: { header: `Basic ${Buffer.from('abcd').toString('base64')}` }, say: ['abcd'] })).said, `${M}${R}|${R}|${TOK}|abcd`);
+  assert.equal((await send(H, { auth: { header: `Basic ${Buffer.from(':pwd-secret-99').toString('base64')}` }, say: ['pwd-secret-99'] })).said, `${M}${R}|${R}|${TOK}|${R}`);
+  assert.equal((await send(H, { auth: { header: `Basic  ${Buffer.from('u:pwd-secret-99').toString('base64')}` }, say: ['pwd-secret-99'] })).said, `${M}${R}|${R}|${TOK}|${R}`);
+  // the base64 part alone, inside other text, is a secret (whole when short)
+  assert.equal((await send('http://user:@h.test/r.git', { say: ['(dXNlcjo=)'] })).said, `${M}${R}|${R}|${TOK}|(${R})`);
+  assert.equal((await send(H, { auth: { header: 'Basic  YWJjZA==' }, say: ['(YWJjZA==)'] })).said, `${M}${R}|${R}|${TOK}|(${R})`);
+  // the ':' rule reads the URL as written: `tok@` is a token, `tok:@` a name, whatever the slashes
+  assert.equal((await send(`http:tok_ab@h.test/r.git`, { say: ['tok_ab seen'] })).said, `${M}${R}|${R}|${TOK}|${R} seen`);
+  assert.equal((await send(`http:\\tok_ab:@h.test/r.git`, { say: ['tok_ab seen'] })).said, `${M}${R}|${R}|${TOK}|tok_ab seen`);
+  // an unparseable URL is a typed error
+  assert.throws(() => createTransport('not a url', { tracer: tracerStub }), e => e.code === 'bad_request' && e.what === 'url' && e.message === 'invalid url');
 });

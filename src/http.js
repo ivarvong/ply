@@ -2,7 +2,7 @@
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
 import { fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
-import { concat, td } from './bytes.js';
+import { concat, te, td } from './bytes.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
 import { UA, wrapNet } from './transport.js';
@@ -86,27 +86,80 @@ async function readCapped(body, max, { what = 'response bytes', truncate = false
   return concat(chunks);
 }
 
+// A URL's userinfo is the Basic credential git sends, byte for byte (credential.c credential_from_url_1 cases 2 and 3;
+// libcurl answers the 401 from the same userinfo — measured against git 2.43 + libcurl 8.5 in adversarial I6d): user and
+// password percent-decoded to bytes, joined by ':', a missing or empty password the empty string. `https://TOKEN@host`
+// is therefore `Basic base64("TOKEN:")` — the form GitHub documents for a token as the user ("a blank password or
+// x-oauth-basic") and the bytes git sends when its password prompt is answered with Enter — not an unauthenticated
+// request (issue #32). Nothing is substituted: `:TOKEN@` is ":TOKEN" and `user:@` is "user:". The WHATWG parser has
+// already escaped raw non-ASCII as UTF-8, so what reaches `pctDecode` is ASCII; as in curl, a malformed escape stays
+// literal and `+` is not a space. A bare `@` (`https://@host`) is dropped by the parser and sends nothing.
+const COLON = 0x3a;
+const HEX_PAIR = 2;
+const HEX_ESCAPE = /%([0-9a-fA-F]{2})/y;
+const DEFAULT_BASIC_USER = 'x-access-token';
+// The authority of the URL as written: scheme, any run of slashes (the parser accepts `http:u@h` and `http:\\u@h`), then
+// everything up to the last `@` before the path. Only consulted once the parser has found userinfo, so the match at
+// position 0 exists; no `^` because the leftmost match is that one (the scheme has no `:/?#`).
+const RAW_USERINFO = /[^:/?#]+:[\\/]*([^/?#\\]*)@/;
+// Percent-decoding of a WHATWG username/password (ASCII: the parser escaped everything else as UTF-8) to bytes.
+export function pctDecode(text) {
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    HEX_ESCAPE.lastIndex = i;
+    const m = HEX_ESCAPE.exec(text);
+    if (m) { out.push(parseInt(m[1], 16)); i += HEX_PAIR; } else out.push(...te.encode(text[i]));
+  }
+  return Uint8Array.from(out);
+}
+// base64 of bytes. btoa takes a Latin-1 string: a credential with a character past U+00FF would throw an untyped
+// DOMException from it, and one in U+0080–U+00FF would go as one Latin-1 byte where git sends its UTF-8 bytes.
+const b64 = bytes => { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s); };
+const basicHeader = ({ user, pass }) => `Basic ${b64(concat([user, Uint8Array.of(COLON), pass]))}`;
+// A caller's own `Basic` header, decoded, so its parts can be scrubbed too (null for any other header, or no base64).
+function decodeBasic(authorization) {
+  try {
+    const d = Uint8Array.from(atob(/^Basic\s+(.*)/i.exec(authorization)[1]), c => c.charCodeAt(0));
+    const c = d.indexOf(COLON), at = c < 0 ? d.length : c;
+    return { user: td.decode(d.subarray(0, at)), pass: td.decode(d.subarray(at + 1)) };
+  } catch { /* another scheme, or not base64: the header itself is still scrubbed */ }
+  return null;
+}
+
 export function createTransport(url, { auth, tracer, parent = null, fetchImpl = globalThis.fetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {} } = {}) {
   headerField(userAgent, 'user agent');
   headerField(auth?.header, 'authorization');
   headerField(auth?.token, 'token');
   headerField(auth?.bearer, 'bearer');
   headerField(auth?.user, 'auth user');
-  // userinfo in the URL becomes auth and never appears again: not in requests, not in spans, not in error messages
-  const u = new URL(url);
-  if ((u.username || u.password) && !auth) auth = { user: decodeURIComponent(u.username) || 'x-access-token', token: decodeURIComponent(u.password) };
+  let u;
+  try { u = new URL(url); } catch { throw fail('bad_request', 'invalid url', { what: 'url' }); }
+  // auth: { token, user? } → Basic; { bearer } → Bearer; { header } → the Authorization value verbatim (a proxy forwarding
+  // its caller's credential). An `auth` carrying one of those wins over the URL's userinfo; one carrying none (`{}`,
+  // `{ user }`, an empty token) leaves the URL's credential in force. Whatever the form and the source, the value never
+  // reaches a request URL, a span or an error message (`scrub`), even echoed. The userinfo is gone from the URL either way.
+  const explicit = auth?.header || auth?.token || auth?.bearer ? auth : null;
+  // `TOKEN@host` and `user:@host` serialize alike (password ''); the URL as written tells a token (no ':') from a name.
+  const userinfo = u.username || u.password ? { user: u.username, pass: u.password, userOnly: !RAW_USERINFO.exec(String(url))[1].includes(':') } : null;
   u.username = ''; u.password = '';
   const base = u.toString().replace(/\/$/, '');
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
-  // auth: { token, user? } → Basic; { bearer } → Bearer; { header } → the Authorization value verbatim (a proxy forwarding
-  // its caller's credential). Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
-  const authorization = auth?.header ? String(auth.header) : auth?.token ? `Basic ${btoa(`${auth.user ?? 'x-access-token'}:${auth.token}`)}` : auth?.bearer ? `Bearer ${auth.bearer}` : null;
-  const basic = (() => { if (!/^Basic\s/i.test(authorization ?? '')) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
-  const user = auth?.user ?? basic?.user;
+  const basic = explicit?.token ? { user: te.encode(explicit.user ?? DEFAULT_BASIC_USER), pass: te.encode(explicit.token) }
+    : !explicit && userinfo ? { user: pctDecode(userinfo.user), pass: pctDecode(userinfo.pass) } : null;
+  const authorization = explicit?.header ? String(explicit.header) : basic ? basicHeader(basic) : explicit?.bearer ? `Bearer ${explicit.bearer}` : null;
+  // The text forms of the credential a server could echo: the header and its value, `token`, `bearer`, the user and
+  // password of a caller's own Basic header, and the URL's password and user as written (percent-encoded) and decoded —
+  // a userinfo an explicit `auth` displaced too. A user is scrubbed when it is secret-shaped (see `secretShaped`) or is
+  // the whole userinfo (`TOKEN@host`: a user with no password is a token, whatever its shape; `user:@host` is a name).
+  const fromHeader = explicit?.header ? decodeBasic(authorization) : null;
+  const user = auth?.user ?? fromHeader?.user;
+  const urlUser = userinfo ? td.decode(pctDecode(userinfo.user)) : null;
+  const tokenUser = userinfo ? userinfo.userOnly || secretShaped(urlUser) : false;
   // Every string a server can send back (error bodies, ERR lines, band-2/3 text, ng reasons, hook output) passes through
   // `scrub` before it reaches an error or a span: the transport carries it (`t.scrub`) and otel.js applies it.
-  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), basic?.pass, secretShaped(user) ? user : null]);
+  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), fromHeader?.pass, secretShaped(user) ? user : null,
+    userinfo?.pass, userinfo ? td.decode(pctDecode(userinfo.pass)) : null, tokenUser ? userinfo.user : null, tokenUser ? urlUser : null]);
   const headers = (service, extra = {}) => {
     const h = { 'Content-Type': `application/x-${service}-request`, Accept: `application/x-${service}-result`, 'User-Agent': userAgent, ...extra };
     if (authorization) h.Authorization = authorization;

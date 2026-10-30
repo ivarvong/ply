@@ -11,7 +11,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
 import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
@@ -21,7 +21,7 @@ import { readFile } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
-import { GitHttp } from '../src/client.js';
+import { GitHttp, redactUrl } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
@@ -397,6 +397,162 @@ test('I6c a Location carrying a query or the credential is quoted as origin + pa
     assert.equal(err.location, 'https://elsewhere.example/[redacted]/x');
     assert.ok(!reachableText(err).includes(TOK));
   } finally { await srv2.close(); }
+});
+
+// ---- I6d: URL userinfo is sent as the Basic credential git sends, and every form of it is scrubbed ----
+
+// Decided by git (test 'I6d git oracle' below runs the real binary against a 401 → record server): the userinfo is
+// percent-decoded to bytes (a malformed escape stays literal, `+` is not a space), user and password joined by ':', a
+// missing password the empty string. So `TOKEN@host` is `Basic base64("TOKEN:")` (GitHub: the token as the user with a
+// blank password), `:TOKEN@host` is `":TOKEN"`, `user:@host` is `"user:"`. An explicit `auth` with a credential wins;
+// an `auth` without one (`{}`, `{ user }`, an empty token) leaves the URL's credential in force.
+const basicOf = (...parts) => `Basic ${Buffer.concat(parts.map(p => (typeof p === 'string' ? Buffer.from(p, 'utf8') : Buffer.from(p)))).toString('base64')}`;
+const b64part = h => h.replace(/^Basic /, '');
+const SECRET_USER = 'dep@loy:4711/secret?name';                       // secret-shaped (≥ 16 chars with a digit), needs encoding
+const SECRET_USER_ENC = 'dep%40loy%3A4711%2Fsecret%3Fname';
+const PASS_ENC = 'glpat-Echo%3Aed%40Password%2F9876543210';
+const PASS_DEC = 'glpat-Echo:ed@Password/9876543210';
+const OTHER = 'ghp_DroppedUrlToken4444444444xyz';
+const USERINFO = [
+  { name: 'TOKEN@ (username only, the issue)', userinfo: `${TOK}@`, want: basicOf(`${TOK}:`), secrets: [TOK] },
+  { name: ':TOKEN@ (password only)', userinfo: `:${TOK}@`, want: basicOf(`:${TOK}`), secrets: [TOK] },
+  { name: 'user:@ (explicit empty password)', userinfo: 'user:@', want: basicOf('user:'), secrets: [], survives: 'denied to user' },
+  { name: 'short@ (a user with no password is a token whatever its shape)', userinfo: 'tok_ab@', want: basicOf('tok_ab:'), secrets: ['tok_ab'] },
+  { name: 'user:TOKEN@', userinfo: `user:${TOK}@`, want: basicOf(`user:${TOK}`), secrets: [TOK], survives: 'denied to user' },
+  { name: 'percent-encoded @ : / ? in both parts', userinfo: `${SECRET_USER_ENC}:${PASS_ENC}@`, want: basicOf(`${SECRET_USER}:${PASS_DEC}`), secrets: [PASS_DEC, PASS_ENC, SECRET_USER, SECRET_USER_ENC] },
+  { name: 'malformed escape stays literal', userinfo: `a%zz:${TOK}%2@`, want: basicOf(`a%zz:${TOK}%2`), secrets: [TOK] },
+  { name: 'UTF-8 escapes are bytes', userinfo: `%C3%A9:${TOK}@`, want: basicOf('é', `:${TOK}`), secrets: [TOK] },
+  { name: 'a non-UTF-8 byte is a byte', userinfo: `u:${TOK}%FF@`, want: basicOf(`u:${TOK}`, Buffer.from([0xff])), secrets: [TOK] },
+  { name: 'plus is not a space', userinfo: `u+x:${TOK}+y@`, want: basicOf(`u+x:${TOK}+y`), secrets: [TOK] },
+  { name: 'auth { token } wins over the URL (the URL secret is dropped and scrubbed too)', userinfo: `${OTHER}@`, auth: { token: TOK }, want: basicOf(`x-access-token:${TOK}`), secrets: [TOK, OTHER] },
+  { name: 'auth { bearer } wins over the URL', userinfo: `user:${OTHER}@`, auth: { bearer: TOK }, want: `Bearer ${TOK}`, secrets: [TOK, OTHER] },
+  { name: 'auth { header } wins over the URL', userinfo: `:${OTHER}@`, auth: { header: `Basic ${btoa(`${USER}:${PASS}`)}` }, want: `Basic ${btoa(`${USER}:${PASS}`)}`, secrets: [PASS, USER, OTHER] },
+  { name: 'auth without a credential ({ token: "" }) leaves the URL in force', userinfo: `${TOK}@`, auth: { token: '' }, want: basicOf(`${TOK}:`), secrets: [TOK] },
+  { name: 'auth { user } alone is not a credential: the URL is used whole', userinfo: `:${TOK}@`, auth: { user: 'ignored' }, want: basicOf(`:${TOK}`), secrets: [TOK] },
+];
+const HOST = 'h.test';
+// A fake fetch that records the Authorization header and answers 401 with a page echoing everything it saw plus `extra`.
+function echoFetch(extra) {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    const a = init.headers.Authorization ?? null; seen.push({ url, a });
+    const said = [a ?? 'no-auth', a ? b64part(a) : '', a ? Buffer.from(b64part(a), 'base64').toString('utf8') : '', ...extra].join(' | ');
+    return new Response(`denied to user: ${said}`, { status: 401, headers: { 'content-type': 'text/plain' } });
+  };
+  return { seen, fetchImpl };
+}
+// Every secret, whole and as any 12-character run, is absent from `text`.
+function assertAbsent(text, secrets, where) {
+  for (const s of secrets) for (const frag of [s, ...Array.from({ length: Math.max(0, s.length - 11) }, (_, i) => s.slice(i, i + 12))]) {
+    if ('[redacted]'.includes(frag)) continue;
+    assert.ok(!text.includes(frag), `${where}: ${JSON.stringify(frag)} present`);
+  }
+}
+
+test('I6d URL userinfo forms: the Authorization git sends, byte for byte; no form of the credential in the error, a span or the URL', async () => {
+  for (const c of USERINFO) {
+    const url = `http://${c.userinfo}${HOST}/r.git`;
+    const ex = arrayExporter();
+    const { seen, fetchImpl } = echoFetch([c.userinfo, ...c.secrets]);
+    const client = new GitHttp(url, { tracer: new Tracer({ exporter: ex }), fetchImpl, ...(c.auth ? { auth: c.auth } : {}) });
+    const err = await client.lsRefs(['refs/heads/']).catch(e => e);
+    assert.equal(err.code, 'auth', `${c.name}: ${err.code} ${err.message}\n${err.stack}`);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].a, c.want, `${c.name}: header`);
+    assert.equal(seen[0].url, `http://${HOST}/r.git/git-upload-pack`, `${c.name}: userinfo reached the request URL`);
+    assert.equal(client.url, `http://${HOST}/r.git`);
+    assert.equal(redactUrl(url), `http://${HOST}/r.git`, `${c.name}: redactUrl`);
+    const secrets = [c.want, b64part(c.want), ...c.secrets];
+    const text = `${reachableText(err)}\n${String(err)}\n${inspect(err, { depth: 20, showHidden: true })}`;
+    assertAbsent(text, secrets, `${c.name} / error`);
+    assertAbsent(reachableText(ex.lines), secrets, `${c.name} / spans`);
+    assert.match(err.message, /^HTTP 401 git-upload-pack: denied to user: \[redacted\]/, `${c.name}: the echo was scrubbed`);
+    if (c.survives) assert.ok(err.message.includes(c.survives), `${c.name}: a plain user name was scrubbed: ${err.message}`);
+  }
+  // An unparseable URL is a typed error, before any request
+  assert.throws(() => new GitHttp('not a url', { fetchImpl: () => { throw new Error('reached fetch'); } }), e => e.code === 'bad_request' && e.what === 'url');
+});
+
+// Real git against a server that challenges once (401 Basic) and records the retry's Authorization. GIT_ASKPASS answers
+// an empty password, so a form git prompts for (username only) is pinned at "the user pressed Enter"; measured here
+// (git 2.43, libcurl 8.5) git never prompts for it: libcurl answers the challenge from the URL's userinfo itself.
+test('I6d git oracle: ply sends exactly the Basic header git sends for every userinfo form', async () => {
+  const askpass = join(root, 'askpass-empty.sh'); writeFileSync(askpass, '#!/bin/sh\necho ""\n'); chmodSync(askpass, 0o755);
+  const got = [];
+  const challenge = await listen((req, res) => {
+    if (!req.headers.authorization) { res.writeHead(401, { 'www-authenticate': 'Basic realm="ply"' }); res.end(); return; }
+    got.push(req.headers.authorization);
+    res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-advertisement' }); res.end('001e# service=git-upload-pack\n00000000');
+  });
+  const gitSends = userinfo => new Promise((ok, no) => {
+    got.length = 0;
+    const p = spawn('git', ['-c', 'credential.helper=', 'ls-remote', `http://${userinfo}${new URL(challenge.url).host}/r.git`], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: askpass, NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = ''; p.stderr.on('data', d => { err += d; }); p.on('error', no);
+    p.on('close', code => (code === 0 && got.length === 1 ? ok(got[0]) : no(new Error(`git ls-remote ${userinfo}: exit ${code}, ${got.length} authenticated requests: ${err.trim()}`))));
+  });
+  try {
+    for (const c of USERINFO.filter(x => !x.auth)) {
+      const fromGit = await gitSends(c.userinfo);
+      assert.equal(fromGit, c.want, `${c.name}: the table disagrees with git`);
+      const { seen, fetchImpl } = echoFetch([]);
+      await new GitHttp(`http://${c.userinfo}${HOST}/r.git`, { tracer: new Tracer(), fetchImpl }).lsRefs(['refs/heads/']).catch(() => {});
+      assert.equal(seen[0]?.a, fromGit, `${c.name}: ply disagrees with git`);
+    }
+  } finally { await challenge.close(); }
+});
+
+// Random credentials over the URL-unsafe, base64-shaped, hex and non-ASCII alphabets: the header is base64 of the UTF-8
+// bytes `user:password` for every encoding of the URL, and the scrub removes the password, the header, its base64 part,
+// the encoded forms and a secret-shaped user from the error and the spans.
+const ALPHABETS = {
+  urlUnsafe: [...'@:/?#%+ &=;[]{}|\\^~"\'<>`'],
+  base64: [...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='],
+  hex: [...'0123456789abcdef'],
+  nonAscii: ['é', 'ü', 'ß', '한', '글', '🚀', 'Ω', 'ÿ'],
+  tokenish: [...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-'],
+};
+const genString = (rng, n, alphabets) => Array.from({ length: n }, () => rng.pick(ALPHABETS[rng.pick(alphabets)])).join('');
+const secretShaped = s => s.length >= 16 && /[0-9]/.test(s);
+function genCredential(rng) {
+  const alphabets = rng.pick([['tokenish'], ['base64'], ['hex'], ['urlUnsafe', 'tokenish'], ['nonAscii', 'tokenish'], ['urlUnsafe', 'base64', 'nonAscii', 'hex']]);
+  const shape = rng.pick(['tokenUser', 'nameUser', 'secretUser', 'emptyUser']);
+  const user = shape === 'tokenUser' || shape === 'secretUser' ? genString(rng, rng.int(16, 48), alphabets) + rng.pick(['0', '7', '', '']) : shape === 'nameUser' ? rng.pick(['git', 'oauth2', 'x-access-token', 'ivar', 'deploy']) : '';
+  const pass = shape === 'tokenUser' ? '' : genString(rng, rng.int(4, 48), alphabets);
+  const fixedUser = shape === 'tokenUser' || shape === 'secretUser' ? (secretShaped(user) ? user : `${user}1234567890123456`) : user;
+  // the URL form: encoded; the raw-safe subset sometimes unencoded; a username-only form when the password is empty
+  const enc = s => (rng.bool(0.3) && /^[A-Za-z0-9_.~-]*$/.test(s) ? s : encodeURIComponent(s));
+  const userinfo = pass === '' && rng.bool(0.6) ? `${enc(fixedUser)}@` : `${enc(fixedUser)}:${enc(pass)}@`;
+  return { user: fixedUser, pass, userinfo, shape };
+}
+
+// USERINFO_N / USERINFO_SEED for a longer or a different run (reported in SAFETY.md).
+const UI_N = parseInt(process.env.USERINFO_N ?? '150', 10), UI_SEED = parseInt(process.env.USERINFO_SEED ?? '32', 10);
+test(`I6d property: random credentials in every encoding → the header git sends; the scrub removes every form (seed ${UI_SEED}, ${UI_N} cases)`, async () => {
+  const rng = new Rng(UI_SEED);
+  let cases = 0;
+  for (let i = 0; i < UI_N; i++) {
+    const { user, pass, userinfo, shape } = genCredential(rng);
+    if (user === '' && pass === '') continue;
+    const want = basicOf(`${user}:${pass}`);
+    const url = `http://${userinfo}${HOST}/r.git`;
+    const encUser = userinfo.split(/[:@]/)[0], encPass = userinfo.includes(':') ? userinfo.slice(userinfo.indexOf(':') + 1, -1) : '';
+    const ex = arrayExporter();
+    const { seen, fetchImpl } = echoFetch([user, pass, encUser, encPass, userinfo]);
+    const err = await new GitHttp(url, { tracer: new Tracer({ exporter: ex }), fetchImpl }).lsRefs(['refs/heads/']).catch(e => e);
+    const where = `case ${i} (${shape}) ${JSON.stringify(userinfo)}`;
+    assert.equal(err.code, 'auth', `${where}: ${err.code} ${err.message}\n${err.stack}`);
+    assert.equal(seen[0].a, want, `${where}: header`);
+    assert.ok(!redactUrl(url).includes('@'), `${where}: redactUrl kept userinfo`);
+    const secrets = [want, b64part(want)];
+    if (pass.length >= 4) secrets.push(pass, encPass);
+    if (user.length >= 4 && (secretShaped(user) || shape === 'tokenUser')) secrets.push(user, encUser);
+    const text = `${reachableText(err)}\n${String(err)}\n${inspect(err, { depth: 20, showHidden: true })}`;
+    assertAbsent(text, secrets, `${where} / error`);
+    assertAbsent(reachableText(ex.lines), secrets, `${where} / spans`);
+    if (shape === 'nameUser' && pass.length >= 12) assert.ok(err.message.includes('denied to user: [redacted]'), `${where}: ${err.message}`);
+    cases++;
+  }
+  assert.ok(cases >= UI_N * 0.9, `${cases} cases`);
 });
 
 test('ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct', async () => {
