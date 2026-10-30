@@ -82,7 +82,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     },
     // One channel per service, opened on first use; the server's opening advertisement is read and kept. Concurrent first
     // callers (editFile overlaps ls-refs with a speculative fetch) share one opening: a second channel would escape the
-    // first one's command lock, and SshClient is not reentrant (two CHANNEL_OPENs at once share a GCM nonce).
+    // first one's command lock.
     channelFor(service, span) {
       if (st.channels.has(service)) return Promise.resolve(st.channels.get(service));
       if (!st.opening.has(service)) {

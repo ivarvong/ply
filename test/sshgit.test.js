@@ -18,7 +18,7 @@ import { SshClient, hostKeyLine, hostKeyFromLine, padded, mpint, str, u32, parse
 import { createTransport } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 import { retryPolicy } from '../src/errors.js';
-import { concat } from '../src/bytes.js';
+import { concat, td } from '../src/bytes.js';
 import { readFile } from '../src/read.js';
 import { editFile } from '../src/edit.js';
 import { mergeBranch } from '../src/merge.js';
@@ -155,7 +155,9 @@ test('mutating the encrypted stream fails closed: every flipped byte after NEWKE
     const flipAfter = rng.int(2, 40); let seen = 0, flipped = false;
     const proxy = net.createServer(c => { const up = net.connect(sshd.port, '127.0.0.1'); c.pipe(up); up.on('data', d => { seen++; if (!flipped && seen >= flipAfter) { flipped = true; const b = Buffer.from(d); b[rng.int(0, b.length - 1)] ^= 1 << rng.int(0, 7); c.write(b); } else c.write(d); }); up.on('end', () => c.end()); c.on('error', () => up.destroy()); up.on('error', () => c.destroy()); });
     const port = await freePort(); await new Promise(res => proxy.listen(port, '127.0.0.1', res));
-    const t = transport(`ssh://${sshd.user}@127.0.0.1:${port}${r.bare}`);
+    // a flip in a packet's length field (sent in the clear; checked only with the tag) makes any reader wait for bytes the
+    // server never sends: that is a `timeout`, so bound it well under the default 60 s
+    const t = transport(`ssh://${sshd.user}@127.0.0.1:${port}${r.bare}`, { limits: withLimits({ requestTimeoutMs: 3000 }) });
     let code = 'ok';
     try { await editFile(r.url, { path: 'f.txt', find: 'MARK', replace: `M${i}`, author, message: 'm' }, { tracer: new Tracer(), transport: t, verify: true }); }
     catch (e) { code = e.code; }
@@ -266,7 +268,6 @@ test('I1 ssh: an aborted signal stops an exchange before it connects and during 
 
 // ---- issue #31: concurrent first commands, a failed handshake, a failed channel ----
 const sessions = since => (sshd.log().slice(since).match(/Starting session: command/g) ?? []).length;
-const closedSessions = since => (sshd.log().slice(since).match(/Close session/g) ?? []).length;
 const execsBy = ex => { const by = {}; for (const s of ex.lines.flatMap(flattenLine).filter(s => s.name === 'ssh.exec')) by[s.attrs['git.service']] = (by[s.attrs['git.service']] ?? 0) + 1; return by; };
 
 test('concurrent first commands share one channel per service: one session at the sshd; editFile with a hint on a fresh transport opens one upload-pack and one receive-pack', async () => {
@@ -278,7 +279,7 @@ test('concurrent first commands share one channel per service: one session at th
     for (const g of got.slice(0, 2)) assert.equal(g.refs.get('refs/heads/main').oid, seed);
     assert.match(got[3].agent, /^git\//);
   } finally { await t.close(); }
-  assert.equal(await settled(() => closedSessions(log0), 1), 1);
+  assert.equal(await settled(() => sessions(log0), 1), 1);
   console.log(`  4 concurrent first commands: ${sessions(log0)} session(s) at the sshd, exec spans ${JSON.stringify(execsBy(ex))}`);
   assert.equal(sessions(log0), 1, 'one CHANNEL_OPEN + exec at the sshd');
   assert.deepEqual(execsBy(ex), { 'git-upload-pack': 1 });
@@ -289,7 +290,7 @@ test('concurrent first commands share one channel per service: one session at th
   try { e = await editFile(r.url, { path: 'f.txt', find: 'MARK', replace: 'DONE', author, message: 'hinted' }, { tracer: new Tracer({ exporter: ex2 }), transport: t2, head: seed }); }
   finally { await t2.close(); }
   assert.equal(e.hint, 'used'); assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), e.newCommit); assert.equal(git(r.bare, ['cat-file', '-p', 'main:f.txt']), 'DONE\n');
-  assert.equal(await settled(() => closedSessions(log1), 2), 2);
+  assert.equal(await settled(() => sessions(log1), 2), 2);
   console.log(`  editFile (hinted, fresh transport): ${sessions(log1)} session(s) at the sshd, exec spans ${JSON.stringify(execsBy(ex2))}`);
   assert.equal(sessions(log1), 2);
   assert.deepEqual(execsBy(ex2), { 'git-upload-pack': 1, 'git-receive-pack': 1 });
@@ -320,6 +321,105 @@ test('a handshake that fails for a non-timeout reason is not kept: the next comm
     assert.equal(px.connections() - before, 3, 'one dial per command, not one cached rejection');
     await t2.close();
   } finally { await px.close(); }
+});
+
+// ---- AES-GCM nonces under concurrency: every packet each way has its own nonce, in wire order ----
+// Records the nonce of every AES-GCM encrypt/decrypt as called (WebCrypto copies the iv on call), by key, while f runs.
+const recordNonces = async f => {
+  const subtle = crypto.subtle, used = { encrypt: new Map(), decrypt: new Map() };
+  for (const op of ['encrypt', 'decrypt']) { const orig = subtle[op]; subtle[op] = function (alg, key, data) { if (alg?.name === 'AES-GCM') { if (!used[op].has(key)) used[op].set(key, []); used[op].get(key).push(BigInt(`0x${Buffer.from(alg.iv).toString('hex')}`)); } return orig.call(subtle, alg, key, data); }; }
+  try { await f(); } finally { delete subtle.encrypt; delete subtle.decrypt; }
+  return used;
+};
+// every key's nonces: no repeat, each one more than the last (the order they were claimed is the order they were used)
+const nonceReport = used => Object.fromEntries(['encrypt', 'decrypt'].map(op => [op, [...used[op].values()].map(l => ({ n: l.length, unique: new Set(l).size, consecutive: l.every((x, i) => i === 0 || x === l[i - 1] + 1n) }))]));
+const assertNonces = (used, label) => { for (const op of ['encrypt', 'decrypt']) for (const l of used[op].values()) { assert.equal(new Set(l).size, l.length, `${label}: an ${op} nonce used twice`); assert.ok(l.every((x, i) => i === 0 || x === l[i - 1] + 1n), `${label}: ${op} nonces not strictly increasing by one`); } };
+
+test('SshClient seals concurrent packets one at a time: two channels opened together, 2 × 100 concurrent channel writes and 100 bare packets each get their own nonce, in wire order', async () => {
+  const rng = new Rng(31);
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, false, ['encrypt', 'decrypt']);
+  const iv0 = crypto.getRandomValues(new Uint8Array(12)); iv0[4] = 0; // the counter has room: no wrap in this test
+  const wire = []; // packets in the order they were handed to the stream: what a server reads
+  const c = new SshClient({ read: async () => null, write: async b => { wire.push(b); await new Promise(r => setTimeout(r, rng.int(0, 2))); }, close() {} }, { user: 'u', hostKey: new Uint8Array(32), tracer: new Tracer() });
+  const nonce = iv0.slice();
+  c.enc = { key, nonce, bump: () => { for (let i = 11; i >= 4; i--) { nonce[i] = (nonce[i] + 1) & 255; if (nonce[i]) break; } } };
+  // the server's side, scripted: both opens confirmed, then both execs accepted (the replies for one channel may be read by the other's wait)
+  const replies = [concat([Uint8Array.from([91]), u32(1), u32(11), u32(64 << 20), u32(32768)]), concat([Uint8Array.from([91]), u32(0), u32(10), u32(64 << 20), u32(32768)]), concat([Uint8Array.from([99]), u32(1)]), concat([Uint8Array.from([99]), u32(0)])];
+  c.readMessage = async () => { await new Promise(r => setTimeout(r, rng.int(0, 2))); return replies.shift() ?? new Promise(() => {}); };
+  const chunk = (ch, i) => new TextEncoder().encode(`${ch}:${String(i).padStart(4, '0')}:${'x'.repeat(rng.int(0, 300))}\n`);
+  const sent = [[], []];
+  // 50 bare packets at once (SSH_MSG_IGNORE)
+  const bare = await recordNonces(() => Promise.all(Array.from({ length: 50 }, (_, i) => c.writePacket(Uint8Array.from([2, ...str(`ignore ${i}`)])))));
+  console.log(`  50 concurrent packets: client nonces ${JSON.stringify(nonceReport(bare).encrypt)}`);
+  assertNonces(bare, 'bare packets');
+  // two channels opened together, then 2 × 100 channel writes and 50 more bare packets, all at once
+  const used = await recordNonces(async () => {
+    const [a, b] = await Promise.all([c.exec('git-upload-pack x', { env: { GIT_PROTOCOL: 'version=2' } }), c.exec('git-receive-pack x')]);
+    const writes = [];
+    for (let i = 0; i < 100; i++) for (const [k, ch] of [[0, a], [1, b]]) { const d = chunk(k, i); sent[k].push(d); writes.push(ch.write(d)); }
+    for (let i = 0; i < 50; i++) writes.push(c.writePacket(Uint8Array.from([2, ...str(`ignore ${i}`)])));
+    await Promise.all(writes);
+  });
+  for (const [k, l] of bare.encrypt) used.encrypt.set(k, [...l, ...used.encrypt.get(k)]);
+  // the server opens every packet with the next nonce, in wire order
+  const got = new Map(); let opened = 0;
+  for (const [i, pkt] of wire.entries()) {
+    const iv = iv0.slice(); let n = BigInt(`0x${Buffer.from(iv0.subarray(4)).toString('hex')}`) + BigInt(i); for (let j = 11; j >= 4; j--) { iv[j] = Number(n & 255n); n >>= 8n; }
+    const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: pkt.subarray(0, 4), tagLength: 128 }, key, pkt.subarray(4)).catch(() => new ArrayBuffer(0)));
+    if (!plain.length) continue; opened++;
+    const payload = plain.subarray(1, plain.length - plain[0]);
+    if (payload[0] === 94) { const r = new DataView(payload.buffer, payload.byteOffset); const remote = r.getUint32(1); const len = r.getUint32(5); if (!got.has(remote)) got.set(remote, []); got.get(remote).push(td.decode(payload.subarray(9, 9 + len))); }
+  }
+  console.log(`  ${wire.length} packets on the wire, ${opened} opened by the server in order; client nonces ${JSON.stringify(nonceReport(used).encrypt)}`);
+  assertNonces(used, 'fake server');
+  assert.equal(used.encrypt.get(key).length, wire.length);
+  assert.equal(opened, wire.length, 'every packet opens with the next nonce');
+  assert.deepEqual(got.get(10), sent[0].map(d => td.decode(d)), 'channel 0 bytes arrive in write order');
+  assert.deepEqual(got.get(11), sent[1].map(d => td.decode(d)), 'channel 1 bytes arrive in write order');
+});
+
+test('a packet that fails kills the connection: after a bad tag, later reads and writes fail with that error without touching the stream', async () => {
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, false, ['encrypt', 'decrypt']);
+  let reads = 0, writes = 0;
+  const c = new SshClient({ read: async () => { reads++; return concat([u32(32), new Uint8Array(48)]); }, write: async () => { writes++; }, close() {} }, { user: 'u', hostKey: new Uint8Array(32), tracer: new Tracer() });
+  const st = () => ({ key, nonce: new Uint8Array(12), bump() {} }); c.enc = st(); c.dec = st();
+  await assert.rejects(c.readPacket(), e => e.code === 'ssh' && /bad tag/.test(e.message));
+  const r0 = reads;
+  const results = await Promise.allSettled([c.readMessage(), c.writePacket(Uint8Array.from([2])), c.readPacket()]);
+  assert.deepEqual(results.map(x => x.reason?.message), Array(3).fill('ssh: packet authentication failed (bad tag)'));
+  assert.equal(reads, r0, 'no read after the bad tag'); assert.equal(writes, 0, 'no write after the bad tag');
+});
+
+test('real sshd: upload-pack and receive-pack opened and used together, and 2 × 64 concurrent writes through two `cat` channels; no MAC error, every nonce once and in order', async () => {
+  const r = repo(); const seed = commitFiles(r.work, r.bare, { 'f.txt': 'x\n' }, 'seed');
+  const log0 = sshd.log().length;
+  let res, echoes; const sent = [[], []];
+  const used = await recordNonces(async () => {
+    const t = transport(r.url);
+    try {
+      res = await Promise.all([lsRefs(t, ['refs/heads/main']), receiveCaps(t), lsRefs(t, ['HEAD']), discover(t)]);
+      res.push(...await Promise.all([receiveCaps(t), lsRefs(t, ['refs/heads/main'])]));
+    } finally { await t.close(); }
+    const c = new SshClient(await nodeStream('127.0.0.1', sshd.port), { user: sshd.user, privateKey: kp.privateKey, publicKeyRaw: pub, hostKey: sshd.hostKeyLine, tracer: new Tracer() });
+    try {
+      await c.connect(); await c.authenticate();
+      const chs = await Promise.all([c.exec('cat'), c.exec('cat')]);
+      const reads = chs.map(async ch => { const parts = []; for await (const d of ch.stdout()) parts.push(d); return td.decode(concat(parts)); });
+      const writes = [];
+      for (let i = 0; i < 64; i++) for (const k of [0, 1]) { const d = new TextEncoder().encode(`${k}:${i}:${'y'.repeat(997)}\n`); sent[k].push(d); writes.push(chs[k].write(d)); }
+      await Promise.all(writes); await Promise.all(chs.map(ch => ch.eof()));
+      echoes = await Promise.all(reads);
+    } finally { await c.disconnect(); }
+  });
+  assert.equal(res[0].refs.get('refs/heads/main').oid, seed); assert.ok(res[1].has('report-status')); assert.match(res[3].agent, /^git\//); assert.ok(res[4].has('report-status')); assert.equal(res[5].refs.get('refs/heads/main').oid, seed);
+  assert.deepEqual(echoes, sent.map(s => td.decode(concat(s))), 'each cat echoes its writes in call order');
+  assert.equal(await settled(() => sessions(log0), 4), 4);
+  const log = sshd.log().slice(log0);
+  console.log(`  ${sessions(log0)} sessions, MAC error: ${/message authentication code incorrect/.test(log)}; nonces ${JSON.stringify(nonceReport(used))}`);
+  assert.doesNotMatch(log, /message authentication code incorrect|Corrupted|Bad packet/i);
+  assert.equal(sessions(log0), 4, 'upload-pack, receive-pack, cat, cat');
+  assert.equal(used.encrypt.size, 2); assert.equal(used.decrypt.size, 2);
+  assertNonces(used, 'real sshd');
 });
 
 test('a server sending CHANNEL_DATA past our window while we wait for another message: typed ssh error, at most one window held', async () => {
