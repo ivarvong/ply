@@ -1,7 +1,7 @@
 // What each error code means and where it comes from. Documentation for humans and tooling; the runtime table is
 // errors.js (RETRY), and test/pure.test.js checks the two stay in step.
 export const CODE_DOCS = Object.freeze({
-  bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path)' },
+  bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path; checkout: a non-empty dir, or a path that collides or would pass through a symlink)' },
   unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, no v2 over ssh, push-options not advertised)' },
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
   timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },
@@ -15,7 +15,7 @@ export const CODE_DOCS = Object.freeze({
   ssh: { where: 'net', what: 'ssh transport failure: bad packet tag, protocol violation, disconnect' },
   host_key_mismatch: { where: 'net', what: 'the ssh host key is not the pinned one; no credential was sent' },
   protocol: { where: 'remote', what: 'malformed pkt-line / v2 framing from the server' },
-  pack_corrupt: { where: 'remote', what: 'a pack or object failed verification (hash, size, zlib, delta)' },
+  pack_corrupt: { where: 'remote', what: 'a pack or object failed verification (hash, size, zlib, delta; an unwanted object; a tree naming one entry twice)' },
   remote_error: { where: 'remote', what: 'the server said ERR / band 3' },
   limit_exceeded: { where: 'local', what: 'a limits.* bound was hit before allocation' },
   match_count: { where: 'content', what: 'find matched 0 or >1 times (exactly-one-match contract)' },

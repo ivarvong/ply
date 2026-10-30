@@ -87,8 +87,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-25: 42.0 KB / 16.0 KB gz. take(), format facts, and fsck checks in parseTree/assertFetched.
   // 2026-10-27: 44,745 B / 17,299 B gz. Tree and commit parsers take the transport caps, and ls-refs requires the flush.
   // 2026-10-27: 45,553 B / 17,616 B gz. The read path uses the same capped HTTP advertisement and error-page reader.
-  assert.ok(min < 45_554, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_617, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 45,568 B / 17,625 B gz. openBlob is exported for checkout.js (issue #12): its name is no longer mangled.
+  assert.ok(min < 45_569, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_626, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -106,8 +107,27 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
-  // src/ imports node: builtins in exactly the two Node adapters
+  // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
   const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
-  assert.deepEqual(withNode, ['ssh-node.js', 'tree-node.js']);
+  assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
+});
+
+test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {
+  const out = await bundle('src/checkout.js');
+  const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
+  for (const f of ['checkout-node.js', 'tree-node.js', 'tree.js', 'push.js', 'pack.js', 'edit.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the checkout bundle`);
+  const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
+  for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the checkout bundle (${re})`);
+  const min = js.length, gz = gzipSync(js, { level: 9 }).length;
+  console.log(`  checkout bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
+  // 2026-10-30: 42,396 B / 16,829 B gz, first measured (issue #12): the read path's ls-refs and blob stream, plus the
+  // buffered fetchPack and delta resolver for the tree pack and the blob batches. Smaller than the read entry because
+  // it does not carry readFile's tree:0 walk or readCommit's views.
+  assert.ok(min < 42_397, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 16_830, `checkout bundle ${gz} B gz exceeds budget`);
+  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
+  const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  assert.match(node.outputFiles[0].text, /node:fs\/promises/);
 });

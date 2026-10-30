@@ -55,8 +55,8 @@ Layers, bottom up (each depends only on the ones below):
 | Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
 | Transport contract | `transport`, `http`, `sshgit` (+ `ssh`, `ssh-node`, `ssh-workers`) | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; two implementations, no dispatch |
 | Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |
-| Operations | `operation`, `edit`, `tree`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
-| Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `ssh-node.js` (`node:net`), `tree-node.js` (`node:fs`) | `sideEffects: false` |
+| Operations | `operation`, `edit`, `tree`, `checkout`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
+| Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `checkout.js` (whole-tree read), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `ssh-node.js` (`node:net`), `tree-node.js` and `checkout-node.js` (`node:fs`) | `sideEffects: false` |
 | Telemetry | `otel` | minimal OTLP/JSON tracer; exporters pluggable (`test/jsonl.mjs` for files) |
 
 Key operation modules:
@@ -68,6 +68,12 @@ Key operation modules:
   `verify`/`ambiguous`, signing and tree cache. Thin repeat pushes: the parent's trees are read only where the new tree
   differs, known blobs are not sent, changed trees go as `REF_DELTA`s. `tree-node.js` (`filesFromDir`, `pushDir`) is the
   Node directory walk. Issue #11.
+- `checkout.js` — `checkoutTree(url, { ref, path }, opts)`: the mirror of pushTree. ls-refs → one `blob:none` fetch of the
+  commit (every tree) → blobs in `batch`-sized wants lists (buffered, delta-resolved, keyed by computed hash; an unwanted
+  object is `pack_corrupt`), a batch over a cap split in half down to single blobs that stream through read.js's
+  `openBlob`; a host refusing many wants gets one per request (`quirks.blobWants`). Returns `entries` and a `files` async
+  iterator. `checkout-node.js` (`writeFiles`, `checkoutDir`) writes a directory as `git clone` lays it out and never
+  writes through a symlink. Issue #12.
 - `merge.js` — `mergeBranch`, `fastForward`, `deleteBranch`, `mergeTrees` (trivial-merge rules per directory, only differing
   subtrees fetched), `bestBases` (git's `merge-base --all` with a completeness check), rename guards, `blobMerger`,
   `attributeDrivers`/`attributeTree`.
@@ -161,8 +167,10 @@ This session (2026-10-19 → 20):
 | `attributes` option, default `null` | measured: git 2.43 bare repos read HEAD's attributes, 2.46+ read none — there is no single "git's answer"; the caller names the source |
 | Merge bundle budget 66 KB (edit bundle 44 KB) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
 | Git's GPL test vectors (t3070) run once, not shipped | licence; the result (380/380) is recorded in SAFETY.md |
-| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`) | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `ssh-node.js` and `tree-node.js` |
+| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`); likewise checkoutTree yields streams and `ply/checkout-node` writes them | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `ssh-node.js`, `tree-node.js` and `checkout-node.js` |
 | pushTree's "server has it" set = oids named by the parent's trees it read | exact for one-commit deploys (push 2 == `git rev-list --objects new ^old`, 7 objects / 1,176 B on a 208-entry tree); objects only in older history are resent — correct, not minimal, no history walk |
+| checkoutTree fetches every tree in one `blob:none` pack, then blobs by wants list | 3 requests for a 22-entry fixture vs 72 for readCommit → listTree → readFile per file; `blob:none` is the one filter Artifacts serves, so the same 3 there. A `path` still fetches the whole commit's trees (one round trip beats a tree:0 walk; bounded by `maxPackBytes`) |
+| Blob batches are buffered and split on a cap, not streamed | a multi-object pack cannot be cut into objects without inflating each one (zlib end is found only by inflating); a batch is bounded by the same caps as any buffered pack, and a blob alone streams in O(1) memory. A split re-downloads up to `maxPackBytes` — the cost of not knowing blob sizes in advance (trees do not carry them) |
 | Every push refuses a pack over `maxPackBytes` before sending | a capped host (Artifacts 62–93 MiB) would otherwise take the upload and answer 4xx; `limit_exceeded` carries the measured size |
 
 ## 6. Verification — how to rerun everything
@@ -225,7 +233,9 @@ In order of value:
 7. Protocol/transport limits: SHA-256 repositories; servers without protocol v2; SSH supports Ed25519 keys only and
    does not re-key.
 8. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
-   LFS beyond the guard, merges of files over 8 MiB, a `ply push <dir>` CLI and `.gitignore` reading for `pushDir`.
+   LFS beyond the guard, merges of files over 8 MiB, a `ply push <dir>` CLI and `.gitignore` reading for `pushDir`;
+   for checkoutTree: submodule recursion, `.gitattributes` (eol/filters) and LFS smudging, sparse fetching of only `path`'s
+   trees, and checkout into a non-empty directory.
 
 ## 9. What is in this export
 
