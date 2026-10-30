@@ -20,7 +20,7 @@ const r = await editFile('https://github.com/o/r.git', {
 // r.newCommit, r.pushBytes (≈ 300 + |replace| + 80·depth), r.noop
 ```
 
-Credentials: `auth: { token }` (Basic `x-access-token:<token>`), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim). None reaches a span or an error message, even when a server echoes it (the Basic user too, when it is token-shaped). Redirects are never followed: a 3xx is an `http` error naming the target, so no credential can follow it to another origin.
+Credentials: `auth: { token }` (Basic `x-access-token:<token>`), `{ user, token }`, `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim). A credential in the URL (`https://TOKEN@host/…`, `https://user:token@host/…`) is sent exactly as git sends it — Basic of the percent-decoded `user:password`, a missing password empty, so `TOKEN@` is `TOKEN:` (the token-as-user form GitHub and GitLab accept) and `:TOKEN@` is `:TOKEN` — and is removed from the URL before anything else sees it. An `auth` that carries a credential wins over the URL's; one that carries none (`{}`, an empty token) leaves the URL's in force. None reaches a span or an error message, even when a server echoes it (the Basic user too, when it is token-shaped or is the whole userinfo). Redirects are never followed: a 3xx is an `http` error naming the target, so no credential can follow it to another origin.
 
 Outcomes are typed on `err.code`: `cas_conflict` (retry), `match_count` (find ≠ exactly once), `not_found`, `auth`, `rate_limited`, `pack_corrupt`, `remote_error`, `upstream_5xx`. A `find === replace` edit returns `{ noop: true }` and pushes nothing.
 
