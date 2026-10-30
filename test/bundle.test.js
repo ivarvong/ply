@@ -35,8 +35,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // (parsePack, inflate, encodeCommit, validateIdent) so a missing limit cannot fall open.
   // 2026-10-27: 60,436 B / 23,089 B gz. http.js streams advertisements into maxPackBytes, keeps a 4 KiB
   // error-page prefix, and rejects CR/LF in caller header fields. That module is on every entry.
-  assert.ok(min < 60_437, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_090, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 60,438 B / 23,111 B gz. The scanner counts matches and keeps two offsets instead of every one.
+  assert.ok(min < 60_439, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_112, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {

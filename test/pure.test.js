@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './fuzz/prng.js';
-import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep } from '../src/edit.js';
+import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep, scanFinish, scanAttrs } from '../src/edit.js';
 import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
@@ -98,6 +98,33 @@ test('memFromScan/memAttrs: whole-edit accounting from what was held', () => {
   assert.deepEqual(memFromScan(st, 8302), { 'mem.alloc.inflate_chunk.bytes': 8302, 'mem.alloc.inflate_chunk.count': 4, 'mem.alloc.inflate_chunk.max_single': 4096 });
   const m = memAttrs({ objects: [190, 777, 777], scan: st, inflated: 8302 });
   assert.equal(m['mem.alloc.bytes'], 190 + 777 + 777 + 8302); assert.equal(m['mem.alloc.count'], 3 + 4); assert.equal(m['mem.alloc.max_single'], 4096); assert.equal(m['mem.alloc.object.count'], 3);
+});
+
+test('scanStep: a blob of nothing but matches is linear (128 KiB of the needle under a second), count and first offsets exact', () => {
+  // Before: `matches = [...matches, off]` copied the array on every match, O(matches²): 128 KiB of 'a' with find 'a'
+  // took 87 s on this machine. The contract needs the count (0, 1, >1) and the first offset, so at most two are kept.
+  const n = 128 * 1024;
+  const data = new Uint8Array(n).fill(0x61);
+  let st = scanInit({ find: new Uint8Array([0x61]), replace: new Uint8Array([0x62]) });
+  const t0 = performance.now();
+  let emitted = 0;
+  for (let p = 0; p < n; p += 16384) { const r = scanStep(st, data.subarray(p, p + 16384)); st = r.state; for (const e of r.emit) emitted += e.length; }
+  const f = scanFinish(st); st = f.state; for (const e of f.emit) emitted += e.length;
+  const ms = performance.now() - t0;
+  assert.ok(ms < 1000, `scan of ${n} matches took ${ms | 0} ms`);
+  assert.equal(st.count, n);
+  assert.deepEqual(st.matches, [0, 1]);
+  assert.equal(emitted, n);
+  assert.equal(scanAttrs(st)['git.edit.blob.scan.matches'], n);
+  assert.deepEqual(scanAttrs(st)['git.edit.blob.scan.match_offsets'], [0, 1]);
+  // the three outcomes the caller distinguishes, across chunk boundaries
+  const one = scanStep(scanInit({ find: new Uint8Array([7, 8]), replace: new Uint8Array(0) }), new Uint8Array([1, 7, 8, 2])).state;
+  assert.equal(one.count, 1); assert.deepEqual(one.matches, [1]);
+  let two = scanInit({ find: new Uint8Array([7, 8]), replace: new Uint8Array(0) });
+  two = scanStep(two, new Uint8Array([7])).state; two = scanStep(two, new Uint8Array([8, 7, 8, 7, 8])).state;
+  assert.equal(two.count, 3); assert.deepEqual(two.matches, [0, 2]);
+  const none = scanStep(scanInit({ find: new Uint8Array([7, 8]), replace: new Uint8Array(0) }), new Uint8Array([1, 2, 3])).state;
+  assert.equal(none.count, 0); assert.deepEqual(none.matches, []);
 });
 
 test('otel: links, event cap, isolate counter, flatten round-trip', () => {

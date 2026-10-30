@@ -20,18 +20,23 @@ import { signCommit } from './sign.js';
 export { spInit, spStep, spFinish }; // the single-object pack parser lives in fetch.js; re-exported for callers of old paths
 
 // ---- streaming find/replace scanner (pure step) ----
-// Emits transformed bytes; records match offsets. Carry ≤ |find|-1 bytes.
-export const scanInit = ({ find, replace }) => Object.freeze({ find, replace, carry: new Uint8Array(0), base: 0, matches: [], emitted: 0, chunks: 0, maxChunk: 0 });
+// Emits transformed bytes; counts every match and records the first few offsets. Carry ≤ |find|-1 bytes.
+// The edit contract is exactly one match, so the splice needs the first offset and the error needs the count. Keeping
+// one offset past that is enough to tell "more than one"; keeping them all was O(matches²) (a fresh array per match)
+// and a blob of nothing but matches took minutes to scan.
+const SCAN_OFFSETS_KEPT = 2;
+export const scanInit = ({ find, replace }) => Object.freeze({ find, replace, carry: new Uint8Array(0), base: 0, matches: [], count: 0, emitted: 0, chunks: 0, maxChunk: 0 });
 export function scanStep(st, chunk) {
   const data = st.carry.length ? concat([st.carry, chunk]) : chunk;
   const emit = [];
-  let matches = st.matches, p = 0, emitted = st.emitted;
+  let matches = st.matches, count = st.count, p = 0, emitted = st.emitted;
   for (;;) {
     const i = indexOfBytes(data, st.find, p);
     if (i < 0) break;
     emit.push(data.subarray(p, i)); emitted += i - p;
     emit.push(st.replace); emitted += st.replace.length;
-    matches = [...matches, st.base + i];
+    if (matches.length < SCAN_OFFSETS_KEPT) matches = [...matches, st.base + i];
+    count++;
     p = i + st.find.length;
   }
   const keep = Math.min(st.find.length - 1, data.length - p);
@@ -39,7 +44,7 @@ export function scanStep(st, chunk) {
   if (flushTo > p) { emit.push(data.subarray(p, flushTo)); emitted += flushTo - p; }
   return {
     emit: emit.filter(e => e.length),
-    state: { ...st, carry: data.slice(flushTo), base: st.base + flushTo, matches, emitted, chunks: st.chunks + 1, maxChunk: Math.max(st.maxChunk, chunk.length) },
+    state: { ...st, carry: data.slice(flushTo), base: st.base + flushTo, matches, count, emitted, chunks: st.chunks + 1, maxChunk: Math.max(st.maxChunk, chunk.length) },
   };
 }
 export function scanFinish(st) {
@@ -47,8 +52,8 @@ export function scanFinish(st) {
   return { emit, state: { ...st, carry: new Uint8Array(0), emitted: st.emitted + st.carry.length } };
 }
 export const scanAttrs = st => ({
-  'git.edit.blob.scan.chunks': st.chunks, 'git.edit.blob.scan.chunk.max': st.maxChunk, 'git.edit.blob.scan.matches': st.matches.length,
-  'git.edit.blob.scan.match_offsets': st.matches.slice(0, 16), 'git.edit.blob.scan.emitted': st.emitted,
+  'git.edit.blob.scan.chunks': st.chunks, 'git.edit.blob.scan.chunk.max': st.maxChunk, 'git.edit.blob.scan.matches': st.count,
+  'git.edit.blob.scan.match_offsets': st.matches, 'git.edit.blob.scan.emitted': st.emitted,
 });
 
 // ---- the pipeline ----
@@ -267,7 +272,7 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     const fin = scanFinish(scan); scan = fin.state; for (const p of fin.emit) await sha.update(p);
     partial();
     if (inflated !== sp.size) throw fail('pack_corrupt', `inflated ${inflated} != header size ${sp.size}`);
-    if (scan.matches.length !== 1) throw fail('match_count', `expected exactly one match, found ${scan.matches.length}`, { matches: scan.matches.length });
+    if (scan.count !== 1) throw fail('match_count', `expected exactly one match, found ${scan.count}`, { matches: scan.count });
     if (scan.emitted !== newLen) throw fail('internal', `emitted ${scan.emitted} != ${newLen}`);
     const newOid = await sha.hex();
     const { delta, ops } = spliceDelta({ baseLen: sp.size, off: scan.matches[0], oldLen: find.length, insert: replace });

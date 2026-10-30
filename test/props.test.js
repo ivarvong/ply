@@ -106,7 +106,8 @@ forAll('scan: chunking-invariant, equals replace-all, offsets exact, carry bound
   const f = scanFinish(st); st = f.state; out.push(...f.emit);
   const got = concat(out);
   assert.deepEqual([...got], [...ref]);
-  assert.deepEqual(st.matches, refOffs);
+  assert.equal(st.count, refOffs.length);
+  assert.deepEqual(st.matches, refOffs.slice(0, 2)); // the splice needs the first offset; a second one says "more than one"
   assert.equal(st.emitted, ref.length);
 });
 
