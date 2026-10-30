@@ -134,6 +134,30 @@ test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd;
   } finally { await sshd.close(); }
 });
 
+test('workerd: I1 over SSH — a trickling server is cut at requestTimeoutMs and an aborted signal stops the exchange, typed as over HTTP', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const { startSshd, trickleProxy } = await import('./sshd.js');
+  const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+  const hexOf = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  const keys = { privateKeyPkcs8Hex: hexOf(new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey))), publicKeyHex: hexOf(publicKeyRaw) };
+  const sshd = await startSshd(join(root, 'bound'), { publicKeyRaw });
+  const px = await trickleProxy(sshd.port);
+  try {
+    const bare = makeBareRepo(root, 'wbound'); const work = join(root, 'wwbound'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    commitFiles(work, bare, { 'f.txt': 'x\n' }, 'seed');
+    const req = extra => post('/ssh-bound', { url: `ssh://${sshd.user}@127.0.0.1:${px.port}${bare}`, hostKey: sshd.hostKeyLine, ...keys, ...extra });
+    const ok = await req({ requestTimeoutMs: 5000 }); assert.ok(ok.ok, JSON.stringify(ok));
+    px.mode.trickle = 100; // one byte per 100 ms from the first: under workersStream's per-read idle timer, never done
+    const slow = await req({ requestTimeoutMs: 1000 });
+    const aborted = await req({ requestTimeoutMs: 30_000, abortMs: 300 });
+    console.log(`  workerd ssh: trickle ${JSON.stringify(slow)}; abort ${JSON.stringify(aborted)}`);
+    assert.deepEqual([slow.code, slow.message], ['timeout', 'request aborted: request exceeded 1000 ms']);
+    assert.ok(slow.ms >= 990 && slow.ms < 1500, `cut at ${slow.ms} ms`);
+    assert.equal(aborted.code, 'aborted'); assert.match(aborted.message, /^request aborted: The operation was aborted/); // workerd's default abort reason
+    assert.ok(aborted.ms >= 290 && aborted.ms < 800, `stopped at ${aborted.ms} ms`);
+  } finally { await px.close(); await sshd.close(); }
+});
+
 test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST; nothing reaches the other origin', { skip: !WORKERD && 'workerd not installed' }, async () => {
   const listen = h => new Promise(ok => { const s = http.createServer(h); s.listen(0, '127.0.0.1', () => ok(s)); });
   const seen = [];

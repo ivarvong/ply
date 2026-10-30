@@ -27,3 +27,22 @@ export async function startSshd(root, { publicKeyRaw, acceptEnv = true, user = p
   for (let i = 0; i < 100; i++) { try { await new Promise((res, rej) => { const s = net.connect(port, '127.0.0.1'); s.once('connect', () => { s.destroy(); res(); }); s.once('error', rej); }); break; } catch { await new Promise(r => setTimeout(r, 50)); } }
   return { port, host: '127.0.0.1', user, hostKeyLine, dir, log: () => log, close: () => new Promise(r => { proc.once('exit', r); proc.kill('SIGTERM'); }) };
 }
+
+// A TCP proxy in front of a port. `mode.trickle` (ms, 0 = off) holds server→client bytes back and releases one per tick:
+// a server that is never idle for long, the shape an idle timer cannot catch. `connections` counts accepted clients.
+export async function trickleProxy(target, mode = { trickle: 0 }) {
+  const socks = new Set(); let connections = 0;
+  const server = net.createServer(c => {
+    connections++;
+    const up = net.connect(target, '127.0.0.1'); socks.add(c); socks.add(up);
+    const held = []; let timer = null;
+    const drip = () => { timer = null; if (!held.length || c.destroyed) return; c.write(held[0].subarray(0, 1)); held[0] = held[0].subarray(1); if (!held[0].length) held.shift(); if (held.length) timer = setTimeout(drip, mode.trickle); };
+    up.on('data', d => { if (!mode.trickle && !held.length) c.write(d); else { held.push(d); if (!timer) timer = setTimeout(drip, mode.trickle); } });
+    c.on('data', d => up.write(d));
+    up.on('end', () => c.end()); c.on('end', () => up.end());
+    up.on('error', () => c.destroy()); c.on('error', () => up.destroy());
+    c.on('close', () => { clearTimeout(timer); up.destroy(); });
+  });
+  const port = await freePort(); await new Promise(r => server.listen(port, '127.0.0.1', r));
+  return { port, mode, connections: () => connections, close: () => { for (const s of socks) s.destroy(); return new Promise(r => server.close(r)); } };
+}

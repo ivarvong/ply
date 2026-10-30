@@ -8,12 +8,18 @@ import { mkdirSync, writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
+import http from 'node:http';
 import { git, tmpRoot, makeBareRepo, commitFiles } from './server.js';
-import { startSshd, freePort } from './sshd.js';
+import { startSshd, freePort, trickleProxy } from './sshd.js';
 import { Rng } from './fuzz/prng.js';
 import { createSshTransport, parseSshUrl, sshRedact } from '../src/sshgit.js';
 import { nodeStream } from '../src/ssh-node.js';
-import { SshClient, hostKeyLine, hostKeyFromLine, padded, mpint, str, parseKexInit, kexInit, fingerprint } from '../src/ssh.js';
+import { SshClient, hostKeyLine, hostKeyFromLine, padded, mpint, str, u32, parseKexInit, kexInit, fingerprint } from '../src/ssh.js';
+import { createTransport } from '../src/http.js';
+import { withLimits } from '../src/limits.js';
+import { retryPolicy } from '../src/errors.js';
+import { concat } from '../src/bytes.js';
+import { readFile } from '../src/read.js';
 import { editFile } from '../src/edit.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
@@ -172,4 +178,125 @@ test('userauth: a message outside the protocol (not SUCCESS, BANNER or FAILURE) 
   Object.assign(c, { tracer: new Tracer({ exporter: ex }), parent: null, user: 'git', sessionId: new Uint8Array(32), privateKey: keys.privateKey, publicKeyRaw: new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey)), writePacket: async () => {}, readMessage: async () => replies.shift() });
   await assert.rejects(c.authenticate(), e => e.code === 'ssh' && /unexpected message 99 during userauth/.test(e.message));
   assert.equal(ex.lines.flatMap(flattenLine).find(sp => sp.name === 'ssh.userauth').attrs['ssh.auth.banner'], 'welcome\n');
+});
+
+// ---- SAFETY I1 over SSH (issue #17): every wait on the server is bounded by requestTimeoutMs and the caller's signal ----
+// The outcome is compared with the HTTP transport's for the same event (a server that never answers), code and message.
+const settle = (p, ms) => { const t0 = Date.now(); let timer; return Promise.race([p.then(v => ({ v }), e => ({ e })), new Promise(r => { timer = setTimeout(() => r({ hung: true }), ms); })]).then(r => { clearTimeout(timer); return { ...r, ms: Date.now() - t0 }; }); };
+const silentHttp = async () => { const socks = new Set(); const s = http.createServer(() => {}); s.on('connection', c => socks.add(c)); await new Promise(r => s.listen(0, '127.0.0.1', r)); return { url: `http://127.0.0.1:${s.address().port}/r.git`, close: () => { for (const c of socks) c.destroy(); return new Promise(r => s.close(r)); } }; };
+const outcome = r => (r.e ? { code: r.e.code, message: r.e.message } : r.hung ? 'hung' : 'resolved');
+
+test('I1 ssh: a server trickling a byte per 100 ms (under the idle timer) is cut at requestTimeoutMs, in a command and in the handshake; typed as HTTP; the transport reconnects', async () => {
+  const r = repo(); commitFiles(r.work, r.bare, { 'f.txt': 'x\n' }, 'seed');
+  const px = await trickleProxy(sshd.port); const url = `ssh://${sshd.user}@127.0.0.1:${px.port}${r.bare}`;
+  const limits = withLimits({ requestTimeoutMs: 1000 });
+  const h = await silentHttp();
+  try {
+    const httpR = await settle(lsRefs(createTransport(h.url, { tracer: new Tracer(), limits }), ['HEAD']), 5000);
+    assert.deepEqual(outcome(httpR), { code: 'timeout', message: 'request aborted: request exceeded 1000 ms' });
+    // mid-command: connection, channel and advertisement at full speed, then the ls-refs response trickles
+    const t = transport(url, { limits });
+    assert.ok((await lsRefs(t, ['refs/heads/main'])).refs.has('refs/heads/main'));
+    px.mode.trickle = 100;
+    const cmd = await settle(lsRefs(t, ['refs/heads/main']), 5000);
+    console.log(`  trickled command: ${JSON.stringify(outcome(cmd))} after ${cmd.ms} ms (http: ${httpR.ms} ms)`);
+    assert.deepEqual(outcome(cmd), outcome(httpR));
+    assert.equal(retryPolicy(cmd.e), 'yes');
+    assert.ok(cmd.ms >= 990 && cmd.ms < 1400, `cut at ${cmd.ms} ms`);
+    // the torn-down connection is not reused: the next command opens a fresh one and succeeds
+    px.mode.trickle = 0;
+    assert.ok((await lsRefs(t, ['refs/heads/main'])).refs.has('refs/heads/main'));
+    assert.equal(px.connections(), 2);
+    await t.close();
+    // handshake: the server's version line and KEXINIT trickle from the first byte
+    px.mode.trickle = 100;
+    const hs = await settle(lsRefs(transport(url, { limits }), ['HEAD']), 5000);
+    console.log(`  trickled handshake: ${JSON.stringify(outcome(hs))} after ${hs.ms} ms`);
+    assert.deepEqual(outcome(hs), outcome(httpR));
+    assert.ok(hs.ms >= 990 && hs.ms < 1400, `cut at ${hs.ms} ms`);
+  } finally { await px.close(); await h.close(); }
+});
+
+test('I1 ssh: an aborted signal stops an exchange before it connects and during one, with the outcome HTTP gives', async () => {
+  const r = repo(); commitFiles(r.work, r.bare, { 'f.txt': 'x\n' }, 'seed');
+  const px = await trickleProxy(sshd.port); const url = `ssh://${sshd.user}@127.0.0.1:${px.port}${r.bare}`;
+  const limits = withLimits({ requestTimeoutMs: 30_000 });
+  const h = await silentHttp();
+  try {
+    // already aborted: nothing is dialled
+    const pre = new AbortController(); pre.abort();
+    let dials = 0;
+    const httpPre = await settle(lsRefs(createTransport(h.url, { tracer: new Tracer(), limits, signal: pre.signal }), ['HEAD']), 5000);
+    const sshPre = await settle(lsRefs(transport(url, { limits, signal: pre.signal, connect: (...a) => { dials++; return nodeStream(...a); } }), ['HEAD']), 5000);
+    console.log(`  pre-aborted: ssh ${JSON.stringify(outcome(sshPre))} after ${sshPre.ms} ms, ${dials} dials; http ${JSON.stringify(outcome(httpPre))}`);
+    assert.equal(outcome(httpPre).code, 'aborted');
+    assert.deepEqual(outcome(sshPre), outcome(httpPre));
+    assert.equal(dials, 0); assert.equal(px.connections(), 0);
+    // aborted 300 ms into a trickled command (the request timeout is 30 s)
+    const ac = new AbortController();
+    const t = transport(url, { limits, signal: ac.signal });
+    assert.ok((await lsRefs(t, ['refs/heads/main'])).refs.has('refs/heads/main'));
+    px.mode.trickle = 100;
+    setTimeout(() => ac.abort(), 300);
+    const mid = await settle(lsRefs(t, ['refs/heads/main']), 5000);
+    const acH = new AbortController(); setTimeout(() => acH.abort(), 300);
+    const httpMid = await settle(lsRefs(createTransport(h.url, { tracer: new Tracer(), limits, signal: acH.signal }), ['HEAD']), 5000);
+    console.log(`  aborted mid-command: ssh ${JSON.stringify(outcome(mid))} after ${mid.ms} ms; http ${JSON.stringify(outcome(httpMid))} after ${httpMid.ms} ms`);
+    assert.deepEqual(outcome(mid), outcome(httpMid));
+    assert.equal(retryPolicy(mid.e), 'no');
+    assert.ok(mid.ms >= 290 && mid.ms < 700, `stopped at ${mid.ms} ms`);
+    await t.close(); // with the signal aborted: the connection is dropped, close does not wait on the server
+    // during the handshake, with a custom reason: still `aborted`, the reason's message carried as HTTP carries it
+    const ac2 = new AbortController(); setTimeout(() => ac2.abort(new Error('caller gave up')), 300);
+    const hs = await settle(lsRefs(transport(url, { limits, signal: ac2.signal }), ['HEAD']), 5000);
+    const ac3 = new AbortController(); setTimeout(() => ac3.abort(new Error('caller gave up')), 300);
+    const httpHs = await settle(lsRefs(createTransport(h.url, { tracer: new Tracer(), limits, signal: ac3.signal }), ['HEAD']), 5000);
+    assert.deepEqual(outcome(hs), outcome(httpHs));
+    assert.deepEqual(outcome(hs), { code: 'aborted', message: 'request aborted: caller gave up' });
+    assert.ok(hs.ms >= 290 && hs.ms < 700, `stopped at ${hs.ms} ms`);
+  } finally { await px.close(); await h.close(); }
+});
+
+test('a server sending CHANNEL_DATA past our window while we wait for another message: typed ssh error, at most one window held', async () => {
+  const W = 2 * 1024 * 1024, CHUNK = 32768, CAP = 64 << 20;
+  const c = Object.create(SshClient.prototype);
+  const data = concat([Uint8Array.from([94]), u32(0), str(new Uint8Array(CHUNK).fill(7))]); // CHANNEL_DATA, our channel 0
+  let sent = 0, step = 0;
+  const readMessage = async () => {
+    if (step++ === 0) return concat([Uint8Array.from([91]), u32(0), u32(7), u32(W), u32(32768)]); // OPEN_CONFIRMATION
+    if (sent < CAP) { sent += CHUNK; return data; } // the server ignores the window instead of answering exec
+    return concat([Uint8Array.from([99]), u32(0)]); // CHANNEL_SUCCESS, eventually
+  };
+  Object.assign(c, { windowSize: W, maxPacket: 32768, channels: new Map(), nextChannel: 0, writePacket: async () => {}, readMessage });
+  globalThis.gc?.();
+  const rss0 = process.memoryUsage().rss;
+  const r = await settle(c.exec('git-upload-pack x'), 30_000);
+  const ch = c.channels.get(0);
+  const held = ch.queue.reduce((n, d) => n + d.length, 0);
+  const rss = process.memoryUsage().rss - rss0;
+  console.log(`  ${JSON.stringify(r.e ? { code: r.e.code, message: r.e.message } : 'resolved')}: server sent ${sent} B, queue holds ${held} B, rss +${(rss / 1048576).toFixed(1)} MiB`);
+  assert.equal(r.e?.code, 'ssh'); assert.match(r.e.message, /bytes with 0 left in the channel window/);
+  assert.equal(sent, W + CHUNK, 'refused at the first byte past the window');
+  assert.equal(held, W); assert.equal(ch.queued, W);
+  assert.ok(rss < 24 << 20, `rss +${rss} B`);
+});
+
+test('flow control: a 6 MiB blob read and edited over ssh (window given back as stdout is consumed), git-verified', async () => {
+  const r = repo();
+  const big = Buffer.alloc(6 << 20); for (let i = 0; i < big.length; i += 64) big.write(`${String(i).padStart(12, '0')} ${'abcdefghijklmnopqrstuvwxyz0123456789ab'}\n`, i);
+  const noise = big.subarray(2 << 20, 5 << 20); for (let i = 0; i < noise.length; i += 65536) crypto.getRandomValues(noise.subarray(i, i + 65536));
+  for (let i = 0; i < noise.length; i++) noise[i] |= 0x80; // 3 MiB that does not compress (and cannot spell MARK): the pack outgrows one window
+  big.write('MARK', 1 << 20);
+  commitFiles(r.work, r.bare, { 'big.txt': big }, 'seed');
+  const t = transport(r.url);
+  try {
+    const got = await readFile(r.url, { path: 'big.txt' }, { tracer: new Tracer(), transport: t });
+    const parts = []; for await (const c of got.stream) parts.push(Buffer.from(c));
+    assert.ok(Buffer.concat(parts).equals(big), 'bytes equal');
+    const e = await editFile(r.url, { path: 'big.txt', find: 'MARK', replace: 'DONE', author, message: 'big' }, { tracer: new Tracer(), transport: t, verify: true });
+    assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), e.newCommit);
+    assert.equal(git(r.bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    console.log(`  ${t.stats().bytesIn} B in over ${t.stats().packetsIn} packets`);
+    assert.ok(t.stats().bytesIn > 2 * (2 << 20), 'more than one window each way through');
+  } finally { await t.close(); }
 });

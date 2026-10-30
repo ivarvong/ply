@@ -86,11 +86,11 @@ export const hostKeyFromLine = line => {
 };
 
 export class SshClient {
-  constructor(stream, { user, privateKey, publicKeyRaw, hostKey, tracer, parent = null, clientVersion = 'SSH-2.0-ply_0.1.0', windowSize = 2 * 1024 * 1024, maxPacket = 32768, timeoutMs = 30000 } = {}) {
+  constructor(stream, { user, privateKey, publicKeyRaw, hostKey, tracer, parent = null, clientVersion = 'SSH-2.0-ply_0.1.0', windowSize = 2 * 1024 * 1024, maxPacket = 32768 } = {}) {
     if (!hostKey) throw fail('bad_request', 'hostKey is required: an SSH client in a Worker cannot trust-on-first-use');
     this.s = stream; this.user = user; this.privateKey = privateKey; this.publicKeyRaw = publicKeyRaw;
     this.hostKeyPinned = hostKey instanceof Uint8Array ? hostKey : hostKeyFromLine(hostKey);
-    this.tracer = tracer; this.parent = parent; this.vC = clientVersion; this.windowSize = windowSize; this.maxPacket = maxPacket; this.timeoutMs = timeoutMs;
+    this.tracer = tracer; this.parent = parent; this.vC = clientVersion; this.windowSize = windowSize; this.maxPacket = maxPacket;
     this.rbuf = new Uint8Array(0); this.enc = null; this.dec = null; this.seqIn = 0; this.seqOut = 0;
     this.sessionId = null; this.channels = new Map(); this.nextChannel = 0; this.closed = false; this.stats = { packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0 };
     this.pending = []; // messages for channels not yet consumed
@@ -235,7 +235,7 @@ export class SshClient {
   // Run a command on a session channel. Returns { stdout: AsyncIterable<Uint8Array>, write(bytes), eof(), stderr(): string, exit(): Promise<number|null> }.
   async exec(command, { env = {} } = {}) {
     const id = this.nextChannel++;
-    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], waiters: [], eof: false, closed: false, stderr: '', exit: null, exitWaiters: [], winWaiters: [] };
+    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], queued: 0, waiters: [], eof: false, closed: false, stderr: '', exit: null, exitWaiters: [], winWaiters: [] };
     this.channels.set(id, ch);
     await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_OPEN]), str('session'), u32(id), u32(this.windowSize), u32(this.maxPacket)]));
     const conf = await this.readChannelMsg(ch, [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE]);
@@ -259,7 +259,7 @@ export class SshClient {
         }
       },
       async eof() { if (!ch.sentEof) { ch.sentEof = true; await self.writePacket(concat([Uint8Array.from([MSG.CHANNEL_EOF]), u32(ch.remote)])); } },
-      async *stdout() { for (;;) { if (ch.queue.length) { yield ch.queue.shift(); continue; } if (ch.eof || ch.closed) return; await self.pumpOnce(ch); } },
+      async *stdout() { for (;;) { if (ch.queue.length) { const d = ch.queue.shift(); ch.queued -= d.length; await self.consumed(ch); yield d; continue; } if (ch.eof || ch.closed) return; await self.pumpOnce(ch); } },
       stderr: () => ch.stderr,
       async exit() { while (ch.exit === null && !ch.closed) await self.pumpOnce(ch); return ch.exit; },
       async close() { if (!ch.closed && !ch.sentClose) { ch.sentClose = true; try { await self.writePacket(concat([Uint8Array.from([MSG.CHANNEL_CLOSE]), u32(ch.remote)])); } catch { /* closing */ } } },
@@ -268,7 +268,7 @@ export class SshClient {
 
   // Read messages until one of `types` arrives for this channel (other channel traffic is dispatched meanwhile).
   async readChannelMsg(ch, types) {
-    for (;;) { const m = await this.readMessage(); if (types.includes(m[0])) { const r = new Reader(m); r.byte(); if (r.u32() === ch.id) return m; } this.dispatch(m); }
+    for (;;) { const m = await this.readMessage(); if (types.includes(m[0])) { const r = new Reader(m); r.byte(); if (r.u32() === ch.id) return m; } await this.dispatch(m); }
   }
   async pumpOnce(ch) { if (ch.closed) return; const m = await this.readMessage(); await this.dispatch(m); }
   async dispatch(m) {
@@ -277,15 +277,18 @@ export class SshClient {
     const chanMsgs = [MSG.CHANNEL_WINDOW_ADJUST, MSG.CHANNEL_DATA, MSG.CHANNEL_EXTENDED_DATA, MSG.CHANNEL_EOF, MSG.CHANNEL_CLOSE, MSG.CHANNEL_REQUEST, MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE];
     if (!chanMsgs.includes(type)) throw sshErr(`ssh: unexpected message ${type}`);
     const ch = this.channels.get(r.u32()); if (!ch) return;
-    if (type === MSG.CHANNEL_DATA) { const d = r.string().slice(); ch.queue.push(d); await this.consumed(ch, d.length); }
-    else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); ch.stderr = (ch.stderr + td.decode(d)).slice(-8192); await this.consumed(ch, d.length); }
+    if (type === MSG.CHANNEL_DATA) { const d = r.string(); this.arrived(ch, d.length); ch.queue.push(d.slice()); ch.queued += d.length; }
+    else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); this.arrived(ch, d.length); ch.stderr = (ch.stderr + td.decode(d)).slice(-8192); await this.consumed(ch); }
     else if (type === MSG.CHANNEL_WINDOW_ADJUST) ch.winRemote += r.u32();
     else if (type === MSG.CHANNEL_EOF) ch.eof = true;
     else if (type === MSG.CHANNEL_CLOSE) { ch.closed = true; ch.eof = true; if (!ch.sentClose) { ch.sentClose = true; try { await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_CLOSE]), u32(ch.remote)])); } catch { /* peer gone */ } } }
     else if (type === MSG.CHANNEL_REQUEST) { const name = r.text(); const wantReply = r.bool(); if (name === 'exit-status') ch.exit = r.u32(); else if (name === 'exit-signal') { ch.exit = -1; ch.exitSignal = r.text(); } if (wantReply) await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_FAILURE]), u32(ch.remote)])); }
   }
-  // Give the window back as data is consumed (we buffer at most one channel's worth; git streams are consumed promptly)
-  async consumed(ch, n) { ch.winLocal -= n; if (ch.winLocal < this.windowSize / 2) { const add = this.windowSize - ch.winLocal; ch.winLocal += add; await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_WINDOW_ADJUST]), u32(ch.remote), u32(add)])); } }
+  // Flow control bounds what we hold: data takes window as it arrives and gets it back only once stdout() hands it on (stderr
+  // is consumed on arrival, as an 8 KiB tail), so queued + winLocal ≤ windowSize. Data past the window is a server that
+  // ignores flow control (RFC 4254 §5.2): refused before it is copied, whatever message we were waiting for.
+  arrived(ch, n) { if (n > ch.winLocal) throw sshErr(`ssh: server sent ${n} bytes with ${ch.winLocal} left in the channel window`, { window: this.windowSize, queued: ch.queued }); ch.winLocal -= n; }
+  async consumed(ch) { const add = this.windowSize - ch.winLocal - ch.queued; if (ch.winLocal < this.windowSize / 2 && add > 0) { ch.winLocal += add; await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_WINDOW_ADJUST]), u32(ch.remote), u32(add)])); } }
 
   async disconnect(reason = 'done') {
     if (this.closed) return; this.closed = true;
