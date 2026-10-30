@@ -560,6 +560,11 @@ test('ls-refs lines and report-status', () => {
   assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:junk name:refs/heads/other`), { oid: id, name: 'refs/heads/main' });
   assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:${oid(5)} name:HEAD __proto__:x constructor:y`), { oid: id, name: 'refs/heads/main' });
   assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled symref-target`), { oid: id, name: 'refs/heads/main' }, 'no colon: not the attribute (git skip_prefix)');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled_ symref-target_`), { oid: id, name: 'refs/heads/main' }, 'no colon: never a key cut one char short');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main  peeled:${id}  `), { oid: id, name: 'refs/heads/main', peeled: id }, 'doubled spaces');
+  // the name is never read as an attribute, with or without attributes after it
+  assert.deepEqual(parseLsRefLine(`${id} symref-target:refs/heads/x`), { oid: id, name: 'symref-target:refs/heads/x' });
+  assert.deepEqual(parseLsRefLine(`${id} peeled:junk symref-target:refs/heads/main`), { oid: id, name: 'peeled:junk', 'symref-target': 'refs/heads/main' });
   for (const bad of ['junk', 'AB'.repeat(20), `${oid(5)}0`, '']) {
     const line = `${id} refs/tags/v1 peeled:${bad}`;
     throws(() => parseLsRefLine(line), 'protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
