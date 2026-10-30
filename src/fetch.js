@@ -8,15 +8,14 @@ import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
-import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2 } from './format.js';
+import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
 
-/* oxlint-disable no-magic-numbers -- span tails and the compressed-size slack are diagnostics, not wire-format facts */
+/* oxlint-disable no-magic-numbers -- span tails are diagnostics, not wire-format facts */
 const PROGRESS_KEEP = 512;
 const PROGRESS_ATTR = 200;
-const COMPRESSED_SLACK = 64 * 1024;
 const OID_PREVIEW = 48;
 /* oxlint-enable no-magic-numbers */
 
@@ -188,9 +187,17 @@ export function spStep(st, chunk) {
   const emitLen = Math.max(0, all.length - PACK_TRAILER_BYTES);
   const emit = emitLen ? take(all, 0, emitLen) : new Uint8Array(0);
   const lag = take(all, emitLen, all.length - emitLen).slice();
+  // The zlib bytes of an object declared `size` may not run past zlibBound(size) (format.js). The declared-size check on
+  // inflated bytes cannot see a stream that inflates to nothing (non-final empty stored blocks, 5 bytes in, 0 out), which
+  // used to be accepted until the request timer; this refuses it on the chunk that crosses the bound, so a 10-byte blob
+  // costs at most 26 zlib bytes plus the rest of that chunk, whatever maxPackBytes is. The message carries no count: the
+  // same bytes in any chunking give the same error (I10).
+  const zlibBytes = s.zlibBytes + emitLen;
+  const bound = zlibBound(s.size);
+  if (zlibBytes > bound) throw fail('pack_corrupt', `pack: zlib stream longer than its declared size allows (${s.size}-byte object, ${bound}-byte bound)`, { got: zlibBytes, max: bound, size: s.size });
   // Stryker disable next-line ConditionalExpression: hashing an empty emit leaves the trailer digest unchanged
   if (emitLen) s.sha.update(emit);
-  return { state: { ...s, lag, zlibBytes: s.zlibBytes + emitLen }, zlib: emitLen ? [emit] : [] };
+  return { state: { ...s, lag, zlibBytes }, zlib: emitLen ? [emit] : [] };
 }
 export function spFinish(st) {
   if (st.phase !== 'body') throw fail('pack_corrupt', 'pack: truncated before object header');
@@ -246,13 +253,13 @@ async function fetchSingle(t, { oid, filter, deepen, expectType }) {
   const once = bust => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust }), async span => {
     try {
       const maxObject = requireLimit(t.limits, 'maxObjectSize');
-      // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here.
-      let sp = spInit(); const zlibParts = []; let zlibLen = 0;
+      // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
+      // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
+      let sp = spInit(); const zlibParts = [];
       for await (const chunk of packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span)) {
         const r = spStep(sp, chunk); sp = r.state;
         if (sp.phase === 'body' && sp.size > maxObject) throw limitError('object size', sp.size, maxObject);
-        for (const z of r.zlib) { zlibParts.push(z); zlibLen += z.length; }
-        if (zlibLen > maxObject + COMPRESSED_SLACK) throw limitError('compressed object bytes', zlibLen, maxObject);
+        for (const z of r.zlib) zlibParts.push(z);
       }
       sp = spFinish(sp);
       const zlib = concat(zlibParts);

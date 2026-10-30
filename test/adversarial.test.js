@@ -568,10 +568,41 @@ const streamedPaths = (url, limits) => ({
   'checkout batched': async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
 });
 
-// The probe behind this test: on the previous source, readFile accepted 793.6 MiB and editFile 632.7 MiB of an endless
-// blob body in 8 s (~90 MiB/s) and failed `timeout` — at the default 60 s timer that is ~5 GiB per request — because no
-// streamed path applied limits.maxPackBytes to the body. Now the cap is in v2Step, for every consumer of packStream, with
-// limit_exceeded's `got` within one frame of the cap.
+// The probe behind this test: on the previous source, readFile accepted 793.6 MiB and editFile 632.7 MiB of this stream in
+// 8 s (~90 MiB/s) and failed `timeout` — at the default 60 s timer that is ~5 GiB per request — because no streamed path
+// applied limits.maxPackBytes to the body, and the declared-size check only fires on inflated bytes, of which there are none.
+test('I4 a blob whose zlib stream never ends (empty stored blocks): refused at the per-object bound, never the timer, on every streamed path', { timeout: 60_000 }, async () => {
+  const repo = freshRepo();
+  const url = `${srv.url}/${repo.name}.git`;
+  const limits = withLimits({ requestTimeoutMs: 5000, maxPackBytes: 2 << 20 });
+  const seen = {};
+  for (const [name, op] of Object.entries(streamedPaths(url, limits))) {
+    const { served, f } = endlessStored(ORIG.length);
+    const rss0 = process.memoryUsage().rss, t0 = performance.now();
+    const err = await op(f).then(() => null, e => e);
+    const ms = performance.now() - t0;
+    assert.ok(err, `${name}: succeeded`);
+    assert.notEqual(err.code, 'timeout', `${name}: the request timer, not a cap, ended it (${served.bytes} B served)`);
+    assert.ok(['pack_corrupt', 'limit_exceeded'].includes(err.code), `${name}: ${err.code}: ${err.message}`);
+    assert.ok(ms < 1000, `${name}: ${ms.toFixed(0)} ms`);
+    for (const r of served.perRequest) {
+      // one blob: the first frame already carries more zlib bytes than an 18-byte blob allows → refused on that frame.
+      // many blobs (a buffered batch): bounded by maxPackBytes, plus at most one frame past it, then split down to single blobs.
+      const cap = r.wants === 1 ? 0 : limits.maxPackBytes;
+      assert.ok(r.bytes <= cap + 2 * STORED_FRAME.length, `${name}: a ${r.wants}-want request read ${r.bytes} B (cap ${cap})`);
+    }
+    assert.ok(process.memoryUsage().rss - rss0 < 64 << 20, `${name}: rss grew by ${process.memoryUsage().rss - rss0}`);
+    seen[name] = `${err.code} (${err.message.slice(0, 70)}) after ${served.bytes} B in ${served.requests} request(s), ${ms.toFixed(0)} ms`;
+    // the single-blob paths are refused inside the first frame
+    if (name !== 'checkout batched') { assert.equal(err.code, 'pack_corrupt'); assert.match(err.message, /zlib stream longer than its declared size allows/); assert.equal(served.requests, 1); }
+  }
+  console.log('  endless zlib stream:', JSON.stringify(seen, null, 1));
+  assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head, 'I2: ref unchanged');
+  rmSync(repo.work, { recursive: true, force: true });
+});
+
+// The same stream against a blob declared large enough that its zlib bound is past maxPackBytes: the pack-byte cap is
+// what stops it, on every consumer of packStream, with limit_exceeded's `got` within one frame of the cap.
 test('I4 maxPackBytes bounds the streamed body on every path: limit_exceeded within one frame of the cap, not timeout', { timeout: 60_000 }, async () => {
   const repo = freshRepo();
   const url = `${srv.url}/${repo.name}.git`;
