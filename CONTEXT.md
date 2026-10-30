@@ -172,6 +172,7 @@ This session (2026-10-19 → 20):
 | checkoutTree fetches every tree in one `blob:none` pack, then blobs by wants list | 3 requests for a 22-entry fixture vs 72 for readCommit → listTree → readFile per file; `blob:none` is the one filter Artifacts serves, so the same 3 there. A `path` still fetches the whole commit's trees (one round trip beats a tree:0 walk; bounded by `maxPackBytes`) |
 | Blob batches are buffered and split on a cap, not streamed | a multi-object pack cannot be cut into objects without inflating each one (zlib end is found only by inflating); a batch is bounded by the same caps as any buffered pack, and a blob alone streams in O(1) memory. A split re-downloads up to `maxPackBytes` — the cost of not knowing blob sizes in advance (trees do not carry them) |
 | Every push refuses a pack over `maxPackBytes` before sending | a capped host (Artifacts 62–93 MiB) would otherwise take the upload and answer 4xx; `limit_exceeded` carries the measured size |
+| Redirects never followed (`redirect: 'manual'`, 3xx → `http`); the credential scrub rides on the transport into every span and error | workerd 2026-10-23 forwards Authorization on a cross-origin redirect (measured); a server can echo the token in ERR/band 2/band 3/`ng` text. SAFETY I6b, I6c (issue #15) |
 
 ## 6. Verification — how to rerun everything
 

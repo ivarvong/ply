@@ -4,6 +4,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
@@ -131,4 +132,22 @@ test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd;
     assert.equal(connect.attrs['ssh.cipher.c2s'], 'aes128-gcm@openssh.com'); assert.equal(connect.attrs['ssh.kex'], 'curve25519-sha256');
     console.log(`  ssh edit under workerd: ${r.ms}ms, ${r.stats.bytesIn} B in / ${r.stats.bytesOut} B out, ${r.stats.packetsIn + r.stats.packetsOut} packets`);
   } finally { await sshd.close(); }
+});
+
+test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST; nothing reaches the other origin', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const listen = h => new Promise(ok => { const s = http.createServer(h); s.listen(0, '127.0.0.1', () => ok(s)); });
+  const seen = [];
+  const other = await listen((req, res) => { seen.push({ url: req.url, authorization: req.headers.authorization ?? null }); res.writeHead(200, { 'content-type': 'text/plain' }); res.end('x'); });
+  const red = await listen((req, res) => { res.writeHead(307, { location: `http://127.0.0.1:${other.address().port}${req.url}` }); res.end(); });
+  try {
+    const r = await post('/redirect', { url: `http://127.0.0.1:${red.address().port}/r.git`, auth: { token: 'ghp_workerdRedirect0123456789' } });
+    assert.equal(r.get.code, 'http', JSON.stringify(r.get)); assert.equal(r.get.status, 307);
+    assert.equal(r.post.code, 'http', JSON.stringify(r.post)); assert.equal(r.post.status, 307);
+    assert.match(r.post.message, /redirected to .*\/r\.git\/git-upload-pack; ply does not follow redirects/);
+    const plyHits = seen.filter(h => h.authorization !== 'Bearer workerd-follow-probe');
+    assert.deepEqual(plyHits, [], 'ply requests reached the redirect target');
+    // Not ply: what this workerd does under the default `follow` with an Authorization header, cross-origin (recorded).
+    const probe = seen.find(h => h.authorization === 'Bearer workerd-follow-probe') ?? seen.find(h => h.url.includes('info/refs'));
+    console.log(`  workerd default follow, cross-origin: ${probe ? `target reached, Authorization ${probe.authorization ? 'FORWARDED' : 'stripped'}` : 'target not reached'} (${JSON.stringify(r.follow)})`);
+  } finally { other.close(); red.close(); }
 });

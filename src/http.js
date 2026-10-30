@@ -16,6 +16,55 @@ const ERROR_QUOTE = 200;
 
 const headerField = (value, what) => { if (value != null) validateWire(value, what); };
 
+// The Basic user is a name on most hosts (`x-access-token`, `oauth2`, `git`, a login) and a secret on some (a deploy
+// token, a PAT given as the user). Scrubbing a name would mangle legitimate server text ("denied to ivar"), so the user
+// is scrubbed only when it is secret-shaped: at least 16 characters with a digit. Every token format seen (ghp_…, glpat-…,
+// hex, base64) is; every conventional user name is not. Below 4 characters nothing is scrubbed (it would eat text).
+const MIN_SECRET = 4;
+const SECRET_USER_CHARS = 16;
+const secretShaped = s => typeof s === 'string' && s.length >= SECRET_USER_CHARS && /[0-9]/.test(s);
+
+// text → text with every secret replaced by '[redacted]'; null when there is nothing to hide. Server text is kept as a
+// tail or a prefix in places (progress, hook output, a quoted line), so a secret can arrive cut: any run of FRAGMENT or
+// more characters of a secret is redacted, not only whole ones. 12 characters of a random token cannot occur by chance
+// (a 12-hex window of a commit oid matches a hex token's with p ≈ 1e-13); shorter secrets are matched whole.
+const FRAGMENT = 12;
+const REDACTED = '[redacted]';
+function scrubber(values) {
+  const secrets = values.filter(x => typeof x === 'string' && x.length >= MIN_SECRET);
+  if (!secrets.length) return null;
+  const whole = secrets.filter(x => x.length < FRAGMENT);
+  const grams = new Set();
+  for (const x of secrets) for (let i = 0; i + FRAGMENT <= x.length; i++) grams.add(x.slice(i, i + FRAGMENT));
+  const cut = s => {
+    let out = '', from = 0, start = -1, end = -1;
+    for (let i = 0; i + FRAGMENT <= s.length; i++) {
+      if (!grams.has(s.slice(i, i + FRAGMENT))) continue;
+      if (i > end) { if (start >= 0) { out += s.slice(from, start) + REDACTED; from = end; } start = i; }
+      end = i + FRAGMENT;
+    }
+    return start < 0 ? s : out + s.slice(from, start) + REDACTED + s.slice(end);
+  };
+  return text => whole.reduce((acc, x) => acc.split(x).join(REDACTED), cut(String(text)));
+}
+
+// A 3xx is never followed (fetch `redirect: 'manual'`), same-origin or not. Following hands the Authorization header to
+// whatever the server names, under the runtime's own rules: undici strips it cross-origin, workerd 2026-10-23 forwards it
+// (measured, SAFETY I6c). A 301/302 also turns the POST into a GET, which surfaced as a content-type error. git follows
+// only on the initial info/refs and then rebases every request on the new URL; ply's first request is usually the v2
+// POST, so following on the GET alone would not make a moved repository work. A moved remote is a URL the caller
+// updates: the error names where the server pointed (origin and path only, scrubbed). Browsers answer `manual` with an
+// opaque redirect (status 0): same error.
+const isRedirect = res => res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
+function redirectError(res, url, what, scrub) {
+  let to = '';
+  const loc = res.headers.get('location');
+  if (loc) try { const x = new URL(loc, url); to = `${x.origin}${x.pathname}`; } catch { /* unparseable Location */ }
+  if (scrub) to = scrub(to);
+  try { res.body?.cancel?.(); } catch { /* unopened */ }
+  return fail('http', `HTTP ${res.status} ${what}: redirected${to ? ` to ${to}` : ''}; ply does not follow redirects (update the remote URL)`, { status: res.status, location: to });
+}
+
 // Read a body without ever holding more than `max` bytes. `truncate` keeps a prefix (error pages);
 // otherwise the first chunk that would pass the cap throws and is not retained.
 async function readCapped(body, max, { what = 'response bytes', truncate = false } = {}) {
@@ -51,11 +100,13 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
   // auth: { token, user? } → Basic; { bearer } → Bearer; { header } → the Authorization value verbatim (a proxy forwarding
-  // its caller's credential). Whatever form, the value never reaches a span or an error message (`scrub`).
+  // its caller's credential). Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
   const authorization = auth?.header ? String(auth.header) : auth?.token ? `Basic ${btoa(`${auth.user ?? 'x-access-token'}:${auth.token}`)}` : auth?.bearer ? `Bearer ${auth.bearer}` : null;
-  const basicPass = () => { try { const d = atob(authorization.replace(/^Basic\s+/i, '')); return d.slice(d.indexOf(':') + 1); } catch { return null; } };
-  const secrets = [authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), /^Basic\s/i.test(authorization ?? '') ? basicPass() : null].filter(x => typeof x === 'string' && x.length >= 4);
-  const scrub = text => secrets.reduce((s, x) => s.split(x).join('[redacted]'), text);
+  const basic = (() => { if (!/^Basic\s/i.test(authorization ?? '')) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
+  const user = auth?.user ?? basic?.user;
+  // Every string a server can send back (error bodies, ERR lines, band-2/3 text, ng reasons, hook output) passes through
+  // `scrub` before it reaches an error or a span: the transport carries it (`t.scrub`) and otel.js applies it.
+  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), basic?.pass, secretShaped(user) ? user : null]);
   const headers = (service, extra = {}) => {
     const h = { 'Content-Type': `application/x-${service}-request`, Accept: `application/x-${service}-result`, 'User-Agent': userAgent, ...extra };
     if (authorization) h.Authorization = authorization;
@@ -84,14 +135,15 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
     const sig = requestSignal();
     let res;
     try {
-    try { res = await f(url, { method: 'POST', headers: headers(service, extra), body, signal: sig.signal }); }
+    try { res = await f(url, { method: 'POST', headers: headers(service, extra), body, signal: sig.signal, redirect: 'manual' }); }
     catch (e) { throw wrapNet(e, sig.signal); }
     const cache = res.headers.get('x-ply-pack-cache') ?? '';
     span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': res.headers.get('content-type') ?? '', 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
+    if (isRedirect(res)) throw redirectError(res, url, service, scrub);
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
       const preview = td.decode(await readCapped(res.body, ERROR_PREVIEW, { truncate: true }));
-      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${scrub(preview).slice(0, ERROR_QUOTE)}`, { status: res.status });
+      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${(scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE)}`, { status: res.status });
     }
     let bytes = 0, chunks = 0, maxChunk = 0, first = null;
     const ct = res.headers.get('content-type') ?? '';
@@ -108,7 +160,8 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
   return {
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
-    kind: 'http', url: base, tracer, parent, limits, signal, quirks, objects: new Map(),
+    // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
+    kind: 'http', url: base, tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     async *frames(service, body, span, hints = {}) {
       let st = pktInit();
       for await (const chunk of post(service, body, span, hints)) { const r = pktStep(st, chunk); st = r.state; yield* r.frames; }
@@ -123,8 +176,9 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
       try {
       const t0 = Date.now();
       let res;
-      try { res = await f(url, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal }); } catch (e) { throw wrapNet(e, sig.signal); }
+      try { res = await f(url, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
       span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
+      if (isRedirect(res)) throw redirectError(res, url, `${service} advertisement`, scrub);
       if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status });
       if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
       const maxPack = requireLimit(limits, 'maxPackBytes');

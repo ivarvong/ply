@@ -53,6 +53,14 @@ export default {
         return Response.json({ ok: true, ms: Date.now() - t0, newCommit: r.newCommit, pushBytes: r.pushBytes, stats: t.stats(), spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, attrs: pick(s.attrs) })) });
       } catch (e) { await t.close().catch(() => {}); return Response.json({ ok: false, ms: Date.now() - t0, code: e.code, message: e.message }); }
     }
+    if (u.pathname === '/redirect') { // ply against a redirecting server; plus what workerd's own `follow` does with Authorization
+      const body = await req.json();
+      const c = new GitHttp(body.url, { tracer: new Tracer(), auth: body.auth });
+      const res = {};
+      for (const [k, op] of [['get', () => c.discover()], ['post', () => c.lsRefs()]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
+      try { const r = await fetch(`${body.url}/info/refs?service=git-upload-pack`, { headers: { Authorization: 'Bearer workerd-follow-probe' } }); res.follow = { status: r.status, url: r.url }; await r.body?.cancel(); } catch (e) { res.follow = { error: e.message }; }
+      return Response.json(res);
+    }
     if (u.pathname === '/edit') {
       const body = await req.json();
       const n = body.n ?? 1, concurrent = u.searchParams.get('concurrent') === '1';
