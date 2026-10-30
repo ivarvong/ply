@@ -164,6 +164,9 @@ test('parseTree error strings and the boundaries next to them', () => {
   for (const p of ['x\\.git', '.git:x', 'd/GIT~1.', 'd/.gi\u200ct']) assert.throws(() => validatePath(p, DEFAULT_LIMITS), e => e.code === 'bad_request' && e.what === 'path', p);
   // encodeTree sorts a directory as if its name ended in '/': `d-` (0x2d) before `d/`, `d0` (0x30) after
   assert.deepEqual(parseTree(encodeTree([{ mode: '100644', name: 'd0', oid: oid(1) }, { mode: '40000', name: 'd', oid: oid(2) }, { mode: '100644', name: 'd-', oid: oid(3) }])).map(e => e.name), ['d-', 'd', 'd0']);
+  // a leading U+FEFF is a byte of the name to git; the default TextDecoder would drop it and `README` would be found
+  assert.equal(parseTree(raw('100644 \ufeffREADME\0'))[0].name, '\ufeffREADME');
+  assert.equal(td.decode(te.encode('\ufeffX')), '\ufeffX');
   // fsck largePathname: a name over maxPathComponent (git's 4096) bytes
   assert.equal(parseTree(raw(`100644 ${'a'.repeat(4096)}\0`))[0].name.length, 4096);
   throws(() => parseTree(raw(`100644 ${'a'.repeat(4097)}\0`)), 'limit_exceeded', 'tree entry name 4097 exceeds limit 4096');

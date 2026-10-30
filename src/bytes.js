@@ -2,7 +2,9 @@
 import { fail } from './errors.js';
 
 export const te = new TextEncoder();
-export const td = new TextDecoder();
+// git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
+// does not find `\ufeffREADME`), so the decoder must not swallow it the way the default one does.
+export const td = new TextDecoder('utf-8', { ignoreBOM: true });
 
 /**
  * Bounded read. `subarray` / `slice` clamp a range that runs past the end and return a short view; parsers that
