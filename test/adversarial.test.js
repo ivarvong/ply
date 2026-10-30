@@ -17,7 +17,7 @@ import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
 import { editFile } from '../src/edit.js';
-import { readFile } from '../src/read.js';
+import { readFile, listTree } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
@@ -408,6 +408,53 @@ test('ambiguous push (response lost after server applied it): ref == our commit;
   await assert.rejects(editFile(`${srv.url}/${r.repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer() }), e => e.code === 'match_count');
   assert.equal(gitBuf(r.repo.bare, ['cat-file', 'blob', `main:${FILE}`]).toString(), EXPECTED);
   assert.equal(git(r.repo.bare, ['rev-list', '--count', `${r.repo.head}..main`]).trim(), '1', 'no duplicate commit');
+});
+
+// issue #34: a tree with a file `d` and a directory `d`. They are not neighbours in git's order (`d` < `d.x` < `d/`), so
+// the sort check passed it and lookupEntry took the first `d`. git refuses the tree (fsck duplicateEntries); so does ply
+// now, at the fetch boundary (assertFetched), before any path logic sees it.
+test('I1/I2 a tree naming `d` as a file and a directory, served in a tree:0 pack: every read path is pack_corrupt, edit and merge leave both refs', async () => {
+  const name = `dup${n++}`;
+  const bare = makeBareRepo(root, name), url = `${srv.url}/${name}.git`;
+  const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const base = commitFiles(work, bare, { 'c.txt': 'c MARK c\n', 'd.x': 'x\n' }, 'base');
+  git(work, ['checkout', '-q', '-b', 'feat']);
+  const feat = commitFiles(work, bare, { 'e.txt': 'e\n' }, 'feat');
+  git(work, ['push', '-q', bare, 'HEAD:refs/heads/feat']);
+  git(work, ['push', '-q', '-f', bare, `${base}:refs/heads/main`]);
+  const hash = (type, bytes) => gitBuf(bare, ['hash-object', '--literally', '-w', '-t', type, '--stdin'], bytes).toString().trim();
+  const entry = (mode, nm, oid) => Buffer.concat([Buffer.from(`${mode} ${nm}\0`), Buffer.from(oid, 'hex')]);
+  const blob = hash('blob', Buffer.from('file d MARK\n')), inner = hash('tree', entry('100644', 'f', blob));
+  const tree = hash('tree', Buffer.concat([entry('100644', 'c.txt', git(bare, ['rev-parse', `${base}:c.txt`]).trim()), entry('100644', 'd', blob), entry('100644', 'd.x', blob), entry('40000', 'd', inner)]));
+  let fsck = ''; try { git(bare, ['fsck', '--strict', '--no-dangling']); } catch (e) { fsck = `${e.stderr}`; }
+  assert.match(fsck, new RegExp(`error in tree ${tree}: duplicateEntries`), 'git itself refuses the tree');
+  const tip = git(bare, ['-c', 'user.name=x', '-c', 'user.email=x@x', 'commit-tree', tree, '-p', base, '-m', 'dup']).trim();
+  git(bare, ['update-ref', 'refs/heads/main', tip]);
+  const refs = () => [git(bare, ['rev-parse', 'refs/heads/main']).trim(), git(bare, ['rev-parse', 'refs/heads/feat']).trim()];
+  const corrupt = e => { assert.equal(e.code, 'pack_corrupt', `${e.code}: ${e.message}`); assert.match(e.message, /tree: duplicate entry "d"/); return true; };
+  const opts = () => { const exporter = arrayExporter(); return { tracer: new Tracer({ exporter }), exporter }; };
+  // reads: the path that resolves uniquely (`d.x`, `c.txt`) is refused too — the tree is judged whole, as git judges it
+  for (const path of ['d', 'd/f', 'd.x', 'c.txt', 'nope']) await assert.rejects(readFile(url, { path }, opts()), corrupt, `readFile ${path}`);
+  for (const path of ['', 'd']) await assert.rejects(listTree(url, { path }, opts()), corrupt, `listTree ${JSON.stringify(path)}`);
+  const yielded = [];
+  await assert.rejects((async () => { const co = await checkoutTree(url, {}, opts()); for await (const f of co.files) yielded.push(f.path); })(), corrupt, 'checkoutTree');
+  assert.deepEqual(yielded, [], 'checkout yields nothing from a refused tree');
+  // edits at every depth: typed error, outcome on the span, both refs where they were (I2)
+  for (const path of ['d', 'd/f', 'd.x', 'c.txt', 'new.txt']) {
+    const o = opts();
+    await assert.rejects(editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'adv' }, o), corrupt, `editFile ${path}`);
+    assert.deepEqual(refs(), [tip, feat], `I2: refs unchanged after edit of ${path}`);
+    assert.equal(o.exporter.lines.flatMap(flattenLine).find(sp => sp.name === 'git.edit').attrs['git.edit.outcome'], 'pack_corrupt');
+  }
+  // merges in both directions walk the hostile tree as ours or theirs
+  await assert.rejects(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: AUTHOR }, opts()), corrupt, 'merge feat into main');
+  await assert.rejects(mergeBranch(url, { ref: 'refs/heads/feat', from: 'refs/heads/main', author: AUTHOR }, opts()), corrupt, 'merge main into feat');
+  assert.deepEqual(refs(), [tip, feat], 'I2: refs unchanged after merges');
+  // the same server with the tree repaired (one `d`) is readable: the refusal was the tree's, not the repository's
+  const fixed = hash('tree', Buffer.concat([entry('100644', 'c.txt', git(bare, ['rev-parse', `${base}:c.txt`]).trim()), entry('100644', 'd.x', blob), entry('40000', 'd', inner)]));
+  git(bare, ['update-ref', 'refs/heads/main', git(bare, ['-c', 'user.name=x', '-c', 'user.email=x@x', 'commit-tree', fixed, '-p', base, '-m', 'fixed']).trim()]);
+  const chunks = []; for await (const c of (await readFile(url, { path: 'd/f' }, opts())).stream) chunks.push(Buffer.from(c));
+  assert.equal(Buffer.concat(chunks).toString(), 'file d MARK\n');
 });
 
 test('external AbortSignal mid-stream → aborted, ref unchanged', async () => {

@@ -1,18 +1,21 @@
-// Header-level mutations of commits, tags, and trees. ply may reject an object git accepts — duplicate
-// single-valued headers and orders commit-tree would not write are illegal here on purpose, and fsck is
-// looser. If ply parses the object, every field git exposes has to match.
+// Header-level mutations of commits, tags, and trees. For commits and tags ply may reject an object git accepts —
+// duplicate single-valued headers and orders commit-tree would not write are illegal here on purpose, and fsck is
+// looser. If ply parses the object, every field git exposes has to match. For trees the relation is exact (issue
+// #34): parseTree accepts a tree iff `git fsck --strict` is silent on it (its warnings count: badFilemode and the
+// dotfile-symlink infos stay warnings under --strict), with one allowed asymmetry — fsck holds a mode in an
+// `unsigned short`, so a mode over 16 bits passes it as the legal mode it truncates to; ply refuses it.
 //
 //   node test/fuzz/git-semantic.mjs [--n 20] [--seed 1] [--case <seed>]
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { concat, te } from '../../src/bytes.js';
+import { concat, te, td } from '../../src/bytes.js';
 import { fromHex } from '../../src/sha1.js';
 import { hashObject, parseCommit, parseTag, parseTree, encodeCommit, encodeTag, ident } from '../../src/objects.js';
 import { validateIdent } from '../../src/validate.js';
 import { Rng } from './prng.js';
-import { OID_BYTES } from '../../src/format.js';
+import { genHostileTree } from './gen.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '20', 10);
@@ -40,6 +43,11 @@ const treeBytes = concat([te.encode(`100644 a\0`), fromHex(blob), te.encode(`400
 const treeOid = git(dir, ['hash-object', '-t', 'tree', '-w', '--stdin', '--literally'], Buffer.from(treeBytes)).out.trim();
 const commitText = `tree ${empty}\nauthor ${AUTHOR}\ncommitter ${COMMITTER}\n\nmsg\n`;
 const commitOid = git(dir, ['hash-object', '-t', 'commit', '-w', '--stdin', '--literally'], commitText).out.trim();
+// the subtree hostile trees point their directory entries at: its own name is in no generator pool, so no case can
+// be this object (fsck reports a `.gitmodules` directory's target as `gitmodulesBlob` on the target's oid)
+const blob2 = git(dir, ['hash-object', '-w', '--stdin'], 'world\n').out.trim();
+const fixtureTree = git(dir, ['hash-object', '-t', 'tree', '-w', '--stdin', '--literally'], Buffer.from(concat([te.encode('100644 sub-fixture\0'), fromHex(blob)]))).out.trim();
+const HOSTILE_OIDS = { blob: [blob, blob2], tree: fixtureTree, commit: commitOid };
 const TREES = [empty, treeOid];
 const COMMITS = [commitOid];
 const OBJECTS = [
@@ -98,8 +106,7 @@ function agreeTag(oid, parsed) {
   return null;
 }
 
-// ls-tree prints the mode git will use, not the raw bytes. A regular-file mode keeps only the executable bit
-// (100664 is shown as 100644). That normalization is deliberate in parseTree; compare the canonical mode.
+// ls-tree prints the mode git will use, not the raw bytes (`040000` for a tree). Compare the canonical mode.
 function canonicalMode(mode) {
   const text = String(mode).replace(/^0+/, '') || '0';
   const n = parseInt(text, 8);
@@ -112,15 +119,13 @@ function canonicalMode(mode) {
 }
 
 function agreeTree(oid, entries) {
-  const r = git(dir, ['ls-tree', oid]);
+  // -z: names raw, NUL-terminated (spaces and non-ASCII would otherwise be C-quoted)
+  const r = git(dir, ['ls-tree', '-z', oid]);
   if (r.code !== 0) return `git rejected the tree (${r.err.trim().split('\n')[0]})`;
-  const lines = r.out.split('\n').filter(Boolean);
+  const lines = r.out.split('\0').filter(Boolean);
   if (lines.length !== entries.length) return `entries ply ${entries.length} git ${lines.length}`;
   for (let i = 0; i < lines.length; i++) {
-    const [mode, , idName] = lines[i].split(' ');
-    const tab = idName.indexOf('\t');
-    const id = idName.slice(0, tab);
-    const name = idName.slice(tab + 1);
+    const [, mode, , id, name] = /^(\d+) (\w+) ([0-9a-f]{40})\t(.*)$/s.exec(lines[i]);
     if (canonicalMode(mode) !== canonicalMode(entries[i].mode) || id !== entries[i].oid || name !== entries[i].name) {
       return `entry ${i} ply ${entries[i].mode} ${entries[i].oid} ${entries[i].name} git ${mode} ${id} ${name}`;
     }
@@ -170,6 +175,7 @@ function tagText(rng) {
 }
 
 function treeData(rng) {
+  if (rng.bool(0.7)) return genHostileTree(rng, HOSTILE_OIDS).bytes;
   const entries = [
     { mode: '100644', name: 'a', oid: blob },
     { mode: '40000', name: 'd', oid: empty },
@@ -181,6 +187,14 @@ function treeData(rng) {
   else if (kind === 4) entries.push({ mode: '100644', name: 'b', oid: blob });
   return concat(entries.map(e => concat([te.encode(`${e.mode} ${e.name}\0`), fromHex(e.oid)])));
 }
+
+// fsck's (severity, msgId) pairs for one tree object; [] when it is silent.
+function fsckTree(oid) {
+  const r = git(dir, ['fsck', '--strict', '--no-dangling']);
+  return r.err.split('\n').map(l => /^(error|warning) in tree ([0-9a-f]{40}): (\w+): /.exec(l.trim())).filter(m => m && m[2] === oid).map(m => `${m[1]}:${m[3]}`);
+}
+const modeTexts = bytes => { const out = []; for (let p = 0; p < bytes.length;) { const sp = bytes.indexOf(0x20, p), nul = bytes.indexOf(0, sp); out.push(td.decode(bytes.subarray(p, sp))); p = nul + 1 + 20; } return out; };
+const overflowMode = mode => /^[0-7]+$/.test(mode) && BigInt(`0o${mode}`) > 0xffffn;
 
 const cases = [];
 cases.push({ name: 'dup-tree', type: 'commit', data: `tree ${empty}\nauthor ${AUTHOR}\ncommitter ${COMMITTER}\ntree ${blob}\n\nmsg\n` });
@@ -204,17 +218,32 @@ if (ONLY !== null) {
 }
 
 const fails = [];
+const seenVerdicts = {};
+const tick = verdicts => { for (const v of verdicts) seenVerdicts[v] = (seenVerdicts[v] ?? 0) + 1; };
 try {
   for (const c of selected) {
     const data = typeof c.data === 'string' ? c.data : c.data;
     let parsed, rejected;
+    let rejection = null;
     try { parsed = parseOrThrow(c.type, data); rejected = false; }
     catch (e) {
-      rejected = true;
-      if (e.code !== 'pack_corrupt') { fails.push(c.name); console.log(`FAIL ${c.name}: untyped ${e.code}: ${e.message}`); continue; }
+      rejected = true; rejection = e;
+      if (e.code !== 'pack_corrupt' && !(c.type === 'tree' && e.code === 'limit_exceeded')) { fails.push(c.name); console.log(`FAIL ${c.name}: untyped ${e.code}: ${e.message}`); continue; }
+    }
+    if (rejected && c.type === 'tree') {
+      // the other direction: a tree ply refuses, fsck must refuse too (or it is the 16-bit mode asymmetry)
+      const oid = literally(c.type, data);
+      const verdict = fsckTree(oid);
+      if (verdict.length) { tick(verdict); console.log(`reject    ${c.name} (fsck: ${verdict.join(' ')})`); continue; }
+      if (rejection.message === 'tree: bad mode' && modeTexts(data).some(overflowMode)) { tick(['overflow-mode']); console.log(`reject    ${c.name} (fsck silent: mode over 16 bits)`); continue; }
+      fails.push(c.name); console.log(`FAIL ${c.name}: ply ${rejection.message}, fsck silent`); continue;
     }
     if (rejected) { console.log(`reject    ${c.name}`); continue; }
     const oid = literally(c.type, data);
+    if (c.type === 'tree') {
+      const verdict = fsckTree(oid);
+      if (verdict.length) { fails.push(c.name); console.log(`FAIL ${c.name}: ply accepted, fsck: ${verdict.join(' ')}`); continue; }
+    }
     const diff = c.type === 'commit' ? agreeCommit(oid, parsed) : c.type === 'tag' ? agreeTag(oid, parsed) : agreeTree(oid, parsed);
     if (diff) { fails.push(c.name); console.log(`FAIL ${c.name}: ${diff}`); }
     else console.log(`agree     ${c.name}`);
@@ -222,5 +251,5 @@ try {
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
-console.log(`\n${selected.length} cases, ${fails.length} failures`);
+console.log(`\n${selected.length} cases, ${fails.length} failures; fsck verdicts on trees ply refused: ${Object.entries(seenVerdicts).sort().map(([k, v]) => `${k}=${v}`).join(' ') || 'none'}`);
 process.exit(fails.length ? 1 : 0);
