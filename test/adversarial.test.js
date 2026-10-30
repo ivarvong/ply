@@ -6,6 +6,8 @@
 //   I4  Nothing an untrusted size field says is allocated before it is checked against limits.
 //   I5  Caller strings that reach git objects or command lines are validated before any I/O.
 //   I6  Secrets never appear in telemetry.
+//   I6b A credential a server echoes back reaches no error and no span.
+//   I6c A 3xx is never followed: no request (and no Authorization) reaches another origin.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -27,6 +29,9 @@ import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1 } from '../src/sha1.js';
 import { concat, te } from '../src/bytes.js';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
+import { inspect } from 'node:util';
+import { pkt, FLUSH } from '../src/pktline.js';
 
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 const AUTHOR = { name: 'adv', email: 'adv@x' };
@@ -255,6 +260,143 @@ test('I6 secrets never reach telemetry: token in auth, token in URL userinfo', a
   assert.ok(!dump.includes(TOKEN), 'token leaked into spans');
   assert.ok(!dump.includes(btoa(`x-access-token:${TOKEN}`)), 'basic auth leaked');
   assert.ok(!dump.includes('user:'), 'userinfo leaked');
+});
+
+// ---- I6b/I6c: echoed credentials are scrubbed everywhere; redirects are never followed ----
+
+// Every string reachable from `root` (own keys, symbols, non-enumerable message/stack/cause, nested objects, functions),
+// so a check sees what JSON.stringify(err) would miss.
+function reachableText(root) {
+  const out = []; const seen = new Set();
+  const walk = v => {
+    if (typeof v === 'string') { out.push(v); return; }
+    if (v === null || (typeof v !== 'object' && typeof v !== 'function') || seen.has(v)) return;
+    seen.add(v);
+    if (ArrayBuffer.isView(v)) { out.push(Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('latin1')); return; }
+    if (v instanceof Map) { for (const [k, x] of v) { walk(k); walk(x); } return; }
+    for (const k of Reflect.ownKeys(v)) { let x; try { x = v[k]; } catch { continue; } walk(x); }
+  };
+  walk(root);
+  return out.join('\n');
+}
+
+const TOK = 'ghp_EchoedToken0123456789abcdefXYZ';
+const PASS = 'glpat-EchoedPassword9876543210';
+const USER = 'deploy-user-4711-secretname';
+const AUTHS = [
+  { name: 'token', auth: { token: TOK }, secrets: [TOK, btoa(`x-access-token:${TOK}`)] },
+  { name: 'user+token', auth: { user: USER, token: TOK }, secrets: [TOK, USER, btoa(`${USER}:${TOK}`)] },
+  { name: 'header Basic', auth: { header: `Basic ${btoa(`${USER}:${PASS}`)}` }, secrets: [PASS, USER, btoa(`${USER}:${PASS}`)] },
+  { name: 'bearer', auth: { bearer: TOK }, secrets: [TOK] },
+];
+const band = (n, text) => pkt(concat([new Uint8Array([n]), typeof text === 'string' ? te.encode(text) : text]));
+const once = (stage, k, make) => ctx => (ctx.stage === stage && ctx.n === k && ctx.phase === 'request' ? { type: 'bytes', noForward: true, name: 'echo', bytes: make() } : null);
+// A v2 fetch answer whose band-2 progress carries `text` split across two frames, spliced after the packfile header.
+const withProgress = text => ctx => {
+  if (ctx.stage !== 'fetch' || ctx.n !== 0 || ctx.phase === 'request') return { type: 'pass' };
+  const hdr = Buffer.from(pkt('packfile\n')); const b = Buffer.from(ctx.bytes); const at = b.indexOf(hdr) + hdr.length;
+  const half = text.length >> 1;
+  return { type: 'bytes', name: 'progress-echo', bytes: concat([b.subarray(0, at), band(2, text.slice(0, half)), band(2, text.slice(half)), b.subarray(at)]) };
+};
+const report = (...lines) => concat([band(1, concat([...lines.map(l => pkt(`${l}\n`)), FLUSH]))]);
+const ECHOES = [
+  { name: 'ls-refs ERR', code: 'remote_error', fault: s => once('ls-refs', 0, () => concat([pkt(`ERR access denied for ${s}\n`), FLUSH])) },
+  { name: 'ls-refs malformed line (quoted, cut at 60)', code: 'protocol', fault: s => once('ls-refs', 0, () => concat([pkt(`bogus-${s}\n`), FLUSH])) },
+  { name: 'fetch ERR', code: 'remote_error', fault: s => once('fetch', 0, () => concat([pkt(`ERR upload-pack: ${s}\n`), FLUSH])) },
+  { name: 'fetch band 3 (commit)', code: 'remote_error', fault: s => once('fetch', 0, () => concat([pkt('packfile\n'), band(3, `fatal: ${s}\n`), FLUSH])) },
+  { name: 'fetch band 3 (streamed blob)', code: 'remote_error', fault: s => once('fetch', 4, () => concat([pkt('packfile\n'), band(3, `fatal: ${s}\n`), FLUSH])) },
+  { name: 'push ng reason + band-2 hook output', code: 'push_rejected', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: hook saw ${s}\n`), report('unpack ok', `ng refs/heads/main pre-receive hook declined: ${s}`), FLUSH])) },
+  { name: 'push band-2 tail cut through the secret', code: 'push_rejected', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: ${s}`), band(2, `${'x'.repeat(4096 - 20)}\n`), report('unpack ok', 'ng refs/heads/main pre-receive hook declined'), FLUSH])) },
+  { name: 'push band 3', code: 'ambiguous', fault: s => once('receive-pack', 0, () => concat([band(3, `error: ${s}\n`), FLUSH])) },
+  { name: 'push malformed report + hook output', code: 'ambiguous', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: ${s}\n`), report('unpack ok', 'ok refs/heads/elsewhere'), FLUSH])) },
+  { name: 'fetch band-2 progress (success)', code: null, fault: withProgress },
+];
+
+test('I6b a credential echoed by the server reaches no error (any field) and no span: ERR, band 2/3, ng, hook output × 4 auth forms', async () => {
+  let cases = 0;
+  for (const { name: form, auth, secrets } of AUTHS) for (const echo of ECHOES) {
+    const said = `${secrets.join(' | ')} :: ${secrets.join('')}`;
+    const r = await run(echo.fault(said), { opts: { auth } });
+    const where = `${echo.name} / ${form}`;
+    let text = '';
+    if (echo.code === null) { assert.equal(r.error, null, `${where}: ${r.error?.message}`); assert.match(JSON.stringify(r.exporter.lines), /\[redacted\]/, `${where}: the echo reached a span`); }
+    else {
+      assert.equal(r.error?.code, echo.code, `${where}: ${r.error?.code} ${r.error?.message}`);
+      assert.match(reachableText(r.error), /\[redacted\]/, `${where}: the echo reached the error`);
+      text = `${reachableText(r.error)}\n${String(r.error)}\n${inspect(r.error, { depth: 20, showHidden: true })}`;
+    }
+    const dump = JSON.stringify(r.exporter.lines);
+    // whole, and as any 12-character run (a secret cut by a tail or a quote)
+    for (const s of secrets) for (const frag of [s, ...Array.from({ length: s.length - 11 }, (_, i) => s.slice(i, i + 12))]) {
+      assert.ok(!text.includes(frag), `${where}: ${JSON.stringify(frag)} in the error: ${r.error?.message}`);
+      assert.ok(!dump.includes(frag), `${where}: ${JSON.stringify(frag)} in a span`);
+    }
+    cases++;
+  }
+  assert.equal(cases, AUTHS.length * ECHOES.length);
+});
+
+test('I6b auth.user is scrubbed only when secret-shaped: a conventional user name in server text survives', async () => {
+  const r = await run(once('ls-refs', 0, () => concat([pkt(`ERR denied to x-access-token and git (token ${TOK})\n`), FLUSH])), { opts: { auth: { user: 'x-access-token', token: TOK } } });
+  assert.equal(r.error.code, 'remote_error');
+  assert.match(r.error.message, /denied to x-access-token and git \(token \[redacted\]\)/);
+  assert.ok(!JSON.stringify(r.exporter.lines).includes(TOK));
+});
+
+// A server that answers every request with `status` + Location: `to`, and one that records what reaches it.
+async function listen(handler) {
+  const s = http.createServer(handler); await new Promise(ok => s.listen(0, '127.0.0.1', ok));
+  return { url: `http://127.0.0.1:${s.address().port}`, close: () => new Promise(ok => { s.closeAllConnections?.(); s.close(ok); }) };
+}
+
+test('I6c a 3xx is never followed: cross-origin on the GET and the POST → typed http error; the other origin sees nothing', async () => {
+  const seen = [];
+  const other = await listen((req, res) => { seen.push({ method: req.method, url: req.url, authorization: req.headers.authorization ?? null }); res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-advertisement' }); res.end('0000'); });
+  let status = 302;
+  const redirector = await listen((req, res) => { res.writeHead(status, { location: `${other.url}${req.url}`, 'content-type': 'text/html' }); res.end(`moved; token ${TOK}`); });
+  try {
+    for (const s of [301, 302, 303, 307, 308]) {
+      status = s;
+      const ex = arrayExporter();
+      const c = new GitHttp(`${redirector.url}/r.git`, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } });
+      const get = await c.discover().catch(e => e);
+      assert.equal(get.code, 'http', `GET ${s}: ${get.code} ${get.message}`); assert.equal(get.status, s);
+      assert.match(get.message, new RegExp(`^HTTP ${s} git-upload-pack advertisement: redirected to ${other.url}/r.git/info/refs; ply does not follow redirects`));
+      const post = await c.lsRefs(['refs/heads/']).catch(e => e);
+      assert.equal(post.code, 'http', `POST ${s}: ${post.code} ${post.message}`); assert.equal(post.status, s);
+      assert.match(post.message, /redirected to .*\/r\.git\/git-upload-pack; ply does not follow redirects/);
+      const edit = await editFile(`${redirector.url}/r.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } }).catch(e => e);
+      assert.equal(edit.code, 'http', `edit ${s}: ${edit.code} ${edit.message}`);
+      assert.ok(!JSON.stringify(ex.lines).includes(TOK));
+    }
+    assert.deepEqual(seen, [], 'the redirect target received requests');
+  } finally { await redirector.close(); await other.close(); }
+});
+
+test('I6c a same-origin 301 on the POST (a moved repository) is a clear http error, not a content-type error', async () => {
+  const hits = [];
+  const srv2 = await listen((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    if (req.url.startsWith('/old.git/')) { res.writeHead(301, { location: req.url.replace('/old.git/', '/new.git/') }); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>repository page</html>');
+  });
+  try {
+    const err = await readFile(`${srv2.url}/old.git`, { path: 'README.md' }, { tracer: new Tracer(), auth: { token: TOK } }).catch(e => e);
+    assert.equal(err.code, 'http', `${err.code} ${err.message}`); assert.equal(err.status, 301);
+    assert.equal(err.message, `HTTP 301 git-upload-pack: redirected to ${srv2.url}/new.git/git-upload-pack; ply does not follow redirects (update the remote URL)`);
+    assert.equal(err.location, `${srv2.url}/new.git/git-upload-pack`);
+    assert.deepEqual(hits, ['POST /old.git/git-upload-pack']);
+  } finally { await srv2.close(); }
+});
+
+test('I6c a Location carrying a query or the credential is quoted as origin + path, scrubbed', async () => {
+  const srv2 = await listen((req, res) => { res.writeHead(302, { location: `https://elsewhere.example/${TOK}/x?sig=${TOK}` }); res.end(); });
+  try {
+    const err = await new GitHttp(`${srv2.url}/r.git`, { tracer: new Tracer(), auth: { token: TOK } }).lsRefs().catch(e => e);
+    assert.equal(err.code, 'http');
+    assert.equal(err.location, 'https://elsewhere.example/[redacted]/x');
+    assert.ok(!reachableText(err).includes(TOK));
+  } finally { await srv2.close(); }
 });
 
 test('ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct', async () => {

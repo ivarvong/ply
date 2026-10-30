@@ -20,7 +20,7 @@ const r = await editFile('https://github.com/o/r.git', {
 // r.newCommit, r.pushBytes (≈ 300 + |replace| + 80·depth), r.noop
 ```
 
-Credentials: `auth: { token }` (Basic `x-access-token:<token>`), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim). None reaches a span or an error message, even when a server echoes it.
+Credentials: `auth: { token }` (Basic `x-access-token:<token>`), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim). None reaches a span or an error message, even when a server echoes it (the Basic user too, when it is token-shaped). Redirects are never followed: a 3xx is an `http` error naming the target, so no credential can follow it to another origin.
 
 Outcomes are typed on `err.code`: `cas_conflict` (retry), `match_count` (find ≠ exactly once), `not_found`, `auth`, `rate_limited`, `pack_corrupt`, `remote_error`, `upstream_5xx`. A `find === replace` edit returns `{ noop: true }` and pushes nothing.
 

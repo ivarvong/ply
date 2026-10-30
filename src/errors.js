@@ -46,3 +46,22 @@ export const retryPolicy = e => RETRY[e?.code] ?? 'no';
 export const isRetryable = e => retryPolicy(e) === 'yes';
 // After a push body is on the wire, any failure to obtain a trustworthy report means the ref MAY have moved.
 export const ambiguousAfterPush = (e, message = 'push outcome unknown') => (['limit_exceeded', 'bad_request', 'ambiguous'].includes(e?.code) ? e : fail('ambiguous', `${message}: ${e?.message ?? e}`, { cause: e, original: e?.code }));
+
+// Rewrite every string an error carries through `scrub`, in place: message, stack, own fields, nested plain objects and
+// arrays (a push report, hook output) and the cause chain. Anything else (a Span on `e.span`, bytes) is left alone.
+export function scrubError(e, scrub) {
+  if (!scrub) return e;
+  const seen = new Set();
+  const walk = v => {
+    if (typeof v === 'string') return scrub(v);
+    if (v === null || typeof v !== 'object' || seen.has(v)) return v;
+    const isErr = v instanceof Error;
+    if (!isErr && !Array.isArray(v) && Object.getPrototypeOf(v) !== Object.prototype) return v;
+    seen.add(v);
+    const keys = new Set(Object.keys(v));
+    if (isErr) for (const k of ['message', 'stack', 'cause']) if (k in v) keys.add(k);
+    for (const k of keys) { try { v[k] = walk(v[k]); } catch { /* read-only */ } }
+    return v;
+  };
+  return walk(e);
+}

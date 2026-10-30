@@ -38,8 +38,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 60,525 B / 23,128 B gz. push.js refuses a pack over maxPackBytes before sending it (issue #11).
   // 2026-10-30: 60,668 B / 23,229 B gz. the size-varint cap in readObjHeader/applyDelta and the counted scan (issue #13).
   // 2026-10-30: 60,701 B / 23,239 B gz. resolvePack counts delta chain length per link and runs its fixpoint to completion (issue #14).
-  assert.ok(min < 60_702, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_240, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 62,215 B / 23,900 B gz. the credential scrub (12-character fragments, the user rule) and the redirect refusal in http.js, the span scrub in otel.js (issue #15).
+  assert.ok(min < 62_216, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_901, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -68,7 +69,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 78,403 B. The same pre-send push refusal, and encodeTree refusing a duplicate name (issue #11).
   // 2026-10-30: 78,515 B. The same size-varint cap (issue #13).
   // 2026-10-30: 78,548 B. The same delta chain bound (issue #14).
-  assert.ok(min < 78_549, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 80,062 B. The same credential scrub and redirect refusal (issue #15).
+  assert.ok(min < 80_063, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -94,8 +96,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 45,568 B / 17,625 B gz. openBlob is exported for checkout.js (issue #12): its name is no longer mangled.
   // 2026-10-30: 45,680 B / 17,679 B gz. The same size-varint cap, which bounds openBlob's header phase (issue #13).
   // 2026-10-30: 45,713 B / 17,690 B gz. The same delta chain bound (issue #14).
-  assert.ok(min < 45_714, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_691, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 47,227 B / 18,349 B gz. The same credential scrub and redirect refusal (issue #15).
+  assert.ok(min < 47_228, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 18_350, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -109,8 +112,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // makeDelta and the tree diff; no streamed blob scanner, no merge.
   // 2026-10-30: 57,344 B / 22,128 B gz. The same size-varint cap (issue #13).
   // 2026-10-30: 57,377 B / 22,136 B gz. The same delta chain bound (issue #14).
-  assert.ok(min < 57_378, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 22_137, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 58,891 B / 22,787 B gz. The same credential scrub and redirect refusal (issue #15).
+  assert.ok(min < 58_892, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 22_788, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -134,8 +138,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // it does not carry readFile's tree:0 walk or readCommit's views.
   // 2026-10-30: 42,508 B / 16,894 B gz. The same size-varint cap (issue #13).
   // 2026-10-30: 42,541 B / 16,901 B gz. The same delta chain bound (issue #14).
-  assert.ok(min < 42_542, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 16_902, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 44,055 B / 17,546 B gz. The same credential scrub and redirect refusal (issue #15).
+  assert.ok(min < 44_056, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_547, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

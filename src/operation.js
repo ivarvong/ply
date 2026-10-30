@@ -18,6 +18,8 @@ export async function operation(op, url, { auth, tracer, parent = null, fetchImp
   const root = tracer.start(name, { parent, attrs: { [`${name}.url`]: transport?.url ?? redactUrl(url), ...attrs } });
   if (link) root.link(link.span, { 'ply.link': link.kind });
   const t = transport ? withParent(transport, root) : createTransport(url, { auth, tracer, parent: root, fetchImpl, limits, signal, quirks });
+  // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
+  if (t.scrub) root.scrub = t.scrub;
   const finish = extra => { if (onFinish) root.set(onFinish()); root.set(extra); return root; };
   const outcome = (kind, result, extra = {}) => { finish({ ...extra, [`${name}.outcome`]: kind }).end(); return result; };
   try {

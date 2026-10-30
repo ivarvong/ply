@@ -1,7 +1,7 @@
 // v2 fetch: request body (pure), response state machine (pure step), the streamed band-1 pack, and fetchObject — one
 // object by oid through the single-object pack parser, hash-verified. The buffered multi-object fetch with delta
 // resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
-import { fail } from './errors.js';
+import { fail, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
 import { td, concat, take } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -120,11 +120,12 @@ export const fetchAttrs = opts => ({
 export async function* packStream(t, opts, span) {
   span.set(fetchAttrs(opts));
   let st = v2Init(t.limits);
-  for await (const f of frames(t, 'git-upload-pack', fetchBody(opts), span, { bypassCache: !!opts.bypassCache })) {
+  // A caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too.
+  try { for await (const f of frames(t, 'git-upload-pack', fetchBody(opts), span, { bypassCache: !!opts.bypassCache })) {
     const r = v2Step(st, f);
     st = r.state;
     if (r.pack) yield r.pack;
-  }
+  } } catch (e) { throw scrubError(e, t.scrub); }
   if (!st.done) throw proto('v2: response ended without flush');
   if (st.phase !== 'pack' && !st.sections.includes('acknowledgments')) throw proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
   span.set(v2Attrs(st));

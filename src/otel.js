@@ -2,6 +2,8 @@
 // so `grep '"key":"git.pack.objects"' trace.jsonl` works and the same lines can be
 // POSTed to any OTLP/HTTP collector unchanged.
 
+import { scrubError } from './errors.js';
+
 // Platform clocks are probed, not type-checked: newer Workers compatibility dates define a `process` global whose
 // `hrtime`/`cpuUsage` exist but throw "not implemented" (found under workerd 2026-10-18, compat date 2026-10-18).
 const probe = (make, fallback) => { try { const f = make(); f(); return f; } catch { return fallback; } };
@@ -30,6 +32,8 @@ export function anyValue(v) {
   return { stringValue: String(v) }; // objects are stringified: attribute values are scalars or arrays of scalars
 }
 export const kvs = obj => Object.entries(obj).filter(([, v]) => v !== undefined).map(([key, value]) => ({ key, value: anyValue(value) }));
+const scrubAny = (v, scrub) => 'stringValue' in v ? { stringValue: scrub(v.stringValue) } : 'arrayValue' in v ? { arrayValue: { values: v.arrayValue.values.map(x => scrubAny(x, scrub)) } } : v;
+const scrubKvs = (list, scrub) => list.map(({ key, value }) => ({ key, value: scrubAny(value, scrub) }));
 
 export const KIND = Object.freeze({ INTERNAL: 1, SERVER: 2, CLIENT: 3, PRODUCER: 4, CONSUMER: 5 });
 
@@ -41,8 +45,8 @@ export class Tracer {
     this.scope = scope;
     this.count = 0;
   }
-  start(name, { parent = null, kind = KIND.INTERNAL, attrs = {} } = {}) {
-    return new Span(this, { name, kind, attrs, parent });
+  start(name, { parent = null, kind = KIND.INTERNAL, attrs = {}, scrub = null } = {}) {
+    return new Span(this, { name, kind, attrs, parent, scrub });
   }
   // Run fn(span) with automatic end/status.
   async span(name, opts, fn) {
@@ -56,8 +60,11 @@ export class Tracer {
   }
 }
 
+// A span under an authenticated transport carries the transport's `scrub` (http.js), and every child inherits it. At
+// export every string (attributes, event attributes, status) passes through it, and `error(e)` scrubs the error object
+// itself in place, so neither the trace nor the error the caller catches holds a credential a server echoed back.
 export class Span {
-  constructor(tracer, { name, kind, attrs, parent }) {
+  constructor(tracer, { name, kind, attrs, parent, scrub = null }) {
     this.tracer = tracer;
     this.traceId = parent ? parent.traceId : rand(16);
     this.spanId = rand(8);
@@ -72,6 +79,7 @@ export class Span {
     this.droppedEvents = 0;
     this.status = { code: 0 };
     this.ended = false;
+    this.scrub = scrub ?? parent?.scrub ?? null;
   }
   set(attrs) { Object.assign(this.attrs, attrs); return this; }
   // Bounded: a pack with 10k objects must not produce a 10k-event span. The count of dropped events is exported.
@@ -82,6 +90,7 @@ export class Span {
   // OTLP span link: a causal relation to a span that is not the parent (e.g. the attempt this one retries).
   link(span, attrs = {}) { this.links.push({ traceId: span.traceId, spanId: span.spanId, attributes: kvs(attrs) }); return this; }
   error(e, type) {
+    scrubError(e, this.scrub);
     this.status = { code: 2, message: String(e?.message ?? e) };
     this.set({ 'error.type': type ?? e?.code ?? e?.name ?? 'Error' });
     this.event('exception', { 'exception.type': e?.name ?? 'Error', 'exception.message': String(e?.message ?? e), 'exception.stacktrace': String(e?.stack ?? '') });
@@ -92,10 +101,13 @@ export class Span {
     if (this.ended) return this;
     this.ended = true;
     this.ok();
+    const s = this.scrub;
     this.tracer.export({
       traceId: this.traceId, spanId: this.spanId, parentSpanId: this.parentSpanId, name: this.name, kind: this.kind,
       startTimeUnixNano: this.start, endTimeUnixNano: now(),
-      attributes: kvs(this.attrs), events: this.events, links: this.links, status: this.status,
+      attributes: s ? scrubKvs(kvs(this.attrs), s) : kvs(this.attrs),
+      events: s ? this.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : this.events,
+      links: this.links, status: s && this.status.message ? { ...this.status, message: s(this.status.message) } : this.status,
       droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: 0,
     });
     return this;

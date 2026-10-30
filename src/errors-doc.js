@@ -6,7 +6,7 @@ export const CODE_DOCS = Object.freeze({
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
   timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },
   aborted: { where: 'local', what: 'the caller\'s AbortSignal fired' },
-  http: { where: 'remote', what: 'an HTTP status we do not classify further' },
+  http: { where: 'remote', what: 'an HTTP status we do not classify further, including any 3xx: redirects are not followed (status, location)' },
   auth: { where: 'remote', what: '401/403, or ssh publickey refused' },
   not_found: { where: 'remote', what: 'repository, ref or path does not exist' },
   rate_limited: { where: 'remote', what: 'HTTP 429; retry after a delay' },
