@@ -202,7 +202,9 @@ export const spAttrs = (st, prefix = 'git.pack') => ({ [`${prefix}.objects`]: 1,
 const OID_RE = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
 export const isFilterRejection = e => ['http', 'remote_error', 'protocol'].includes(e?.code) && /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i.test(String(e?.message ?? ''));
 
-// Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack).
+// Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack);
+// every caller has run assertFetched over the pack's commits, trees and tags first, since fetchObject serves the harvest
+// without another look.
 export function harvest(t, objects, skip = null) {
   const store = t.objects; if (!store) return { kept: 0, bytes: 0 };
   let kept = 0, bytes = 0; store.bytes ??= 0;

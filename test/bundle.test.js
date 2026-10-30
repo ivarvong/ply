@@ -72,7 +72,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 78,548 B. The same delta chain bound (issue #14).
   // 2026-10-30: 80,062 B. The same credential scrub and redirect refusal (issue #15).
   // 2026-10-30: 80,435 B. The same, plus the [:class:] table as a Map (issue #16).
-  assert.ok(min < 80_436, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 80,904 B. The walk's packs held to the deepen contract and checked with assertFetched before harvest (issue #18).
+  assert.ok(min < 80_905, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {

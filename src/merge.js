@@ -78,11 +78,23 @@ export function bestBases(commits, a, b) {
 }
 
 // Effect: ancestors of `head` as oid → distance, via commit-only packs (tree:0 keeps trees and blobs out) of doubling depth.
+// The pack is held to the deepen contract (shallow-info, protocol v2): `head` is in it as a commit, every commit in it is
+// an ancestor of `head` through it, and a commit whose parent it lacks is one the server named `shallow`. Commits are
+// hash-verified, so ancestry cannot be forged, only withheld; a server that withholds it without saying so would make
+// bestBases answer over a cut graph that looks whole (#18), so that is `pack_corrupt` here. git's upload-pack keeps the
+// contract (the boundary of the depth and of a shallow server repository are both reported).
 export async function ancestors(t, head, depth) {
   const r = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
   const commits = new Map(); for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) commits.set(oid, parseCommit(o.data, t.limits));
+  if (!commits.has(head)) throw fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
   const dist = new Map([[head, 0]]); const q = [head];
   for (let i = 0; i < q.length; i++) { const c = q[i]; const d = dist.get(c); for (const p of commits.get(c)?.parents ?? []) if (!dist.has(p)) { dist.set(p, d + 1); q.push(p); } }
+  const shallow = new Set(r.shallow);
+  for (const [oid, c] of commits) {
+    if (!dist.has(oid)) throw fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
+    const missing = shallow.has(oid) ? undefined : c.parents.find(p => !commits.has(p));
+    if (missing) throw fail('pack_corrupt', `parent ${missing} of ${oid} withheld and ${oid} not reported shallow`);
+  }
   return { dist, commits, complete: r.shallow.length === 0 }; // no shallow boundary reported → the whole history fit in the depth
 }
 
@@ -92,7 +104,9 @@ export async function mergeBase(t, a, b, { maxDepth } = {}) {
     const [A, B] = await Promise.all([ancestors(t, a, depth), ancestors(t, b, depth)]);
     const commits = new Map([...B.commits, ...A.commits]);
     const { best, truncated } = bestBases(commits, a, b);
-    if (!truncated || (A.complete && B.complete)) return { base: best.length === 1 ? best[0] : null, bases: best, depth, commits };
+    // Only a graph with no unexplored ancestry is an answer. Both sides complete and still truncated cannot happen now
+    // (ancestors refuses a parent withheld without a shallow line); it used to be accepted (#18).
+    if (!truncated) return { base: best.length === 1 ? best[0] : null, bases: best, depth, commits };
   }
   throw limitError('merge-base search depth', cap, cap);
 }
