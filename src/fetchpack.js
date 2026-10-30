@@ -15,7 +15,7 @@ import { packStream, isFilterRejection, harvest } from './fetch.js';
 // boundary. A cut the server did not declare is pack_corrupt — the pack is not the answer to the request — so no caller
 // ever walks a graph with a hole it was not told about (issue #18: the merge base of such a graph is not git's). Returns
 // oid → parsed commit for the window, so the caller parses nothing itself.
-export function checkCommitWindow(objects, { wants, shallow = [], trees = false }, limits) {
+export function checkCommitWindow(objects, { wants, shallow, trees = false }, limits) {
   for (const [oid, o] of objects) {
     const name = TYPE_NAME[o.type];
     if (o.type !== TYPE.COMMIT && !(trees && o.type === TYPE.TREE)) throw fail('pack_corrupt', `unrequested ${name} ${oid} in a commit-only pack (${objects.size} objects)`);
@@ -25,6 +25,7 @@ export function checkCommitWindow(objects, { wants, shallow = [], trees = false 
   const cut = new Set(shallow);
   const commits = new Map(); const st = [...wants];
   while (st.length) {
+    // Stryker disable next-line ConditionalExpression: a commit reached twice (a diamond) is parsed again to the same entry; the hash-verified graph has no cycles
     const c = st.pop(); if (commits.has(c)) continue;
     const o = objects.get(c);
     if (o.type !== TYPE.COMMIT) throw fail('pack_corrupt', `${c} is a ${TYPE_NAME[o.type]}, not a commit`);
