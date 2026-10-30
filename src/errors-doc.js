@@ -1,7 +1,7 @@
 // What each error code means and where it comes from. Documentation for humans and tooling; the runtime table is
 // errors.js (RETRY), and test/pure.test.js checks the two stay in step.
 export const CODE_DOCS = Object.freeze({
-  bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find)' },
+  bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path)' },
   unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, no v2 over ssh, push-options not advertised)' },
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
   timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },

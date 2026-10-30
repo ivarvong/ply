@@ -90,7 +90,9 @@ test('parseTree error strings and the boundaries next to them', () => {
   throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: not strictly sorted');
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
   assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
-  const tree = encodeTree([{ mode: '40000', name: 'd', oid: oid(1) }, { mode: '100644', name: 'd', oid: oid(2) }]);
+  // a file and a directory of one name sort apart ('d' < 'd/'): the order check passes it. encodeTree refuses to write
+  // it (git fsck duplicateEntries), so the bytes are built by hand.
+  const tree = data(raw('100644 d\0', oidBytes(2)), raw('40000 d\0', oidBytes(1)));
   assert.deepEqual(parseTree(tree).map(e => e.name), ['d', 'd']);
 });
 
@@ -1259,4 +1261,19 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   assert.ok(errPulls <= 3, `error body kept reading (${errPulls} chunks)`);
   assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), limits: {}, connect() { throw new Error('connect'); } }), e => e.code === 'bad_request' && e.what === 'requestTimeoutMs');
   assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), user: 'a\nb' }), e => e.code === 'bad_request' && e.what === 'ssh user');
+});
+
+test('encodeTree duplicate names and the pre-send push size refusal (issue #11)', async () => {
+  const blob = oid(1), dir = oid(2);
+  throws(() => encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a', oid: blob }]), 'bad_request', 'tree: duplicate entry "a"');
+  throws(() => encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a.b', oid: blob }, { mode: '40000', name: 'a', oid: dir }]), 'bad_request', 'tree: duplicate entry "a"');
+  assert.equal(encodeTree([{ mode: '100644', name: 'README', oid: blob }, { mode: '100644', name: 'readme', oid: blob }]).length, 2 * (OID_BYTES + 'README'.length + '100644 \0'.length), 'case-only twins are two names');
+  let sent = 0;
+  const t = { limits: withLimits({ maxPackBytes: 40 }), tracer: tracerStub, parent: null, async *frames() { sent++; for (const f of []) yield f; } };
+  const objects = [{ type: TYPE.BLOB, data: te.encode('x'.repeat(64)) }];
+  await assert.rejects(push(t, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push pack bytes' && e.max === 40 && e.got > 40);
+  assert.equal(sent, 0, 'nothing reached the transport');
+  const fits = { ...t, limits: withLimits({ maxPackBytes: 1 << 20 }) };
+  await assert.rejects(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'ambiguous');
+  assert.equal(sent, 1, 'under the cap the body is sent');
 });

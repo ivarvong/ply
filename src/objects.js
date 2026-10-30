@@ -70,7 +70,15 @@ export function treeSort(entries) {
   return [...entries].sort((a, b) => cmpBytes(te.encode(sortKey(a)), te.encode(sortKey(b))));
 }
 
+// git fsck `duplicateEntries`: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort
+// next to each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and
+// `readme`) are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
 export function encodeTree(entries) {
+  const names = new Set();
+  for (const e of entries) {
+    if (names.has(e.name)) throw fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
+    names.add(e.name);
+  }
   return concat(treeSort(entries).flatMap(e => [te.encode(`${e.mode} ${e.name}\0`), fromHex(e.oid)]));
 }
 

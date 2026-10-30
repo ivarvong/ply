@@ -35,8 +35,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // (parsePack, inflate, encodeCommit, validateIdent) so a missing limit cannot fall open.
   // 2026-10-27: 60,436 B / 23,089 B gz. http.js streams advertisements into maxPackBytes, keeps a 4 KiB
   // error-page prefix, and rejects CR/LF in caller header fields. That module is on every entry.
-  assert.ok(min < 60_437, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_090, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 60,525 B / 23,128 B gz. push.js refuses a pack over maxPackBytes before sending it (issue #11).
+  assert.ok(min < 60_526, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_129, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -62,7 +63,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-25: 72.5 KB. The same parser checks the edit and read bundles grew by.
   // 2026-10-27: 77,245 B. Merge validates idents before I/O and the ancestors walk is an index, not q.shift.
   // 2026-10-27: 78,147 B. The same http.js advertisement and header checks, plus parsers taking transport limits.
-  assert.ok(min < 78_148, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 78,403 B. The same pre-send push refusal, and encodeTree refusing a duplicate name (issue #11).
+  assert.ok(min < 78_404, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -87,4 +89,25 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-27: 45,553 B / 17,616 B gz. The read path uses the same capped HTTP advertisement and error-page reader.
   assert.ok(min < 45_554, `read bundle ${min} B exceeds budget`);
   assert.ok(gz < 17_617, `read bundle ${gz} B gz exceeds budget`);
+});
+
+test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
+  const out = await bundle('src/tree.js');
+  const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
+  for (const f of ['tree-node.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'read.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the tree bundle`);
+  assert.ok(!/node:|\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/.test(js), 'no node builtins or classes');
+  const min = js.length, gz = gzipSync(js, { level: 9 }).length;
+  console.log(`  tree bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
+  // 2026-10-30: 57,232 B / 22,070 B gz, first measured (issue #11): the edit path's fetch and push plus encodeTree,
+  // makeDelta and the tree diff; no streamed blob scanner, no merge.
+  assert.ok(min < 57_233, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 22_081, `tree bundle ${gz} B gz exceeds budget`);
+  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
+  const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  assert.match(node.outputFiles[0].text, /node:fs\/promises/);
+  // src/ imports node: builtins in exactly the two Node adapters
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
+  assert.deepEqual(withNode, ['ssh-node.js', 'tree-node.js']);
 });
