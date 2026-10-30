@@ -16,7 +16,7 @@ for (let run = 0; run < 5; run++) {
   const f = scanFinish(scan); for (const p of f.emit) sha.update(p); sha.hex();
   const cpu = cpuSince(c0), wall = performance.now() - t0;
   rates.push(buf.length / cpu);
-  console.log(`run ${run}: ${MB} MiB in ${cpu.toFixed(1)} ms cpu / ${wall.toFixed(1)} ms wall → ${Math.round(buf.length / cpu).toLocaleString()} B/ms (matches=${scan.matches.length})`);
+  console.log(`run ${run}: ${MB} MiB in ${cpu.toFixed(1)} ms cpu / ${wall.toFixed(1)} ms wall → ${Math.round(buf.length / cpu).toLocaleString()} B/ms (matches=${scan.count})`);
 }
 const med = rates.sort((a, b) => a - b)[2];
 console.log(`median ${Math.round(med).toLocaleString()} B/ms`);

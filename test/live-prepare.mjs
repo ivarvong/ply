@@ -36,7 +36,7 @@ export async function prepare({ url, ref = 'refs/heads/main', path, find, replac
   for await (const chunk of ds.readable) { if (!sha) { newLen = sp.size - findB.length + replB.length; sha = new Sha1().update(objectHeader('blob', newLen)); } inflated += chunk.length; const r = scanStep(scan, chunk); scan = r.state; for (const p of r.emit) sha.update(p); }
   await pump; if (!sha) { newLen = sp.size - findB.length + replB.length; sha = new Sha1().update(objectHeader('blob', newLen)); }
   const fin = scanFinish(scan); scan = fin.state; for (const p of fin.emit) sha.update(p);
-  if (scan.matches.length !== 1) throw Object.assign(new Error(`expected exactly one match, found ${scan.matches.length}`), { code: 'match_count' });
+  if (scan.count !== 1) throw Object.assign(new Error(`expected exactly one match, found ${scan.count}`), { code: 'match_count' });
   const newBlob = sha.hex();
   const blobDelta = spliceDelta({ baseLen: sp.size, off: scan.matches[0], oldLen: findB.length, insert: replB }).delta;
   const treeObjs = []; let child = newBlob;

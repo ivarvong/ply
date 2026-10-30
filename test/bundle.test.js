@@ -36,8 +36,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-27: 60,436 B / 23,089 B gz. http.js streams advertisements into maxPackBytes, keeps a 4 KiB
   // error-page prefix, and rejects CR/LF in caller header fields. That module is on every entry.
   // 2026-10-30: 60,525 B / 23,128 B gz. push.js refuses a pack over maxPackBytes before sending it (issue #11).
-  assert.ok(min < 60_526, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_129, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 60,668 B / 23,229 B gz. the size-varint cap in readObjHeader/applyDelta and the counted scan (issue #13).
+  assert.ok(min < 60_669, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_230, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -64,7 +65,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-27: 77,245 B. Merge validates idents before I/O and the ancestors walk is an index, not q.shift.
   // 2026-10-27: 78,147 B. The same http.js advertisement and header checks, plus parsers taking transport limits.
   // 2026-10-30: 78,403 B. The same pre-send push refusal, and encodeTree refusing a duplicate name (issue #11).
-  assert.ok(min < 78_404, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 78,515 B. The same size-varint cap (issue #13).
+  assert.ok(min < 78_516, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -88,8 +90,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-27: 44,745 B / 17,299 B gz. Tree and commit parsers take the transport caps, and ls-refs requires the flush.
   // 2026-10-27: 45,553 B / 17,616 B gz. The read path uses the same capped HTTP advertisement and error-page reader.
   // 2026-10-30: 45,568 B / 17,625 B gz. openBlob is exported for checkout.js (issue #12): its name is no longer mangled.
-  assert.ok(min < 45_569, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_626, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 45,680 B / 17,679 B gz. The same size-varint cap, which bounds openBlob's header phase (issue #13).
+  assert.ok(min < 45_681, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_680, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -101,8 +104,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   console.log(`  tree bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
   // 2026-10-30: 57,232 B / 22,070 B gz, first measured (issue #11): the edit path's fetch and push plus encodeTree,
   // makeDelta and the tree diff; no streamed blob scanner, no merge.
-  assert.ok(min < 57_233, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 22_081, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 57,344 B / 22,128 B gz. The same size-varint cap (issue #13).
+  assert.ok(min < 57_345, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 22_129, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -124,8 +128,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 42,396 B / 16,829 B gz, first measured (issue #12): the read path's ls-refs and blob stream, plus the
   // buffered fetchPack and delta resolver for the tree pack and the blob batches. Smaller than the read entry because
   // it does not carry readFile's tree:0 walk or readCommit's views.
-  assert.ok(min < 42_397, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 16_830, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 42,508 B / 16,894 B gz. The same size-varint cap (issue #13).
+  assert.ok(min < 42_509, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 16_895, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

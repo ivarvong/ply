@@ -15,14 +15,21 @@ import {
   DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_BYTE2_SHIFT,
   OBJ_TYPE_SHIFT, OBJ_TYPE_MASK, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
-  OBJ_SIZE_NEXT_BASE, VARINT_BITS, varintScale, BE32_SHIFTS,
+  OBJ_SIZE_NEXT_BASE, VARINT_BITS, VARINT_MAX_SHIFT, varintScale, BE32_SHIFTS,
 } from './format.js';
 
 const corrupt = msg => fail('pack_corrupt', msg);
 
+// Past VARINT_MAX_SHIFT a group used to scale by Infinity, and 0 × Infinity is NaN: every `size > limit` check is false
+// on NaN, so the size reached callers (#13). Checked before the byte is read, so a hostile header costs ≤ 10 bytes.
+function varintRoom(shift, what) {
+  if (shift > VARINT_MAX_SHIFT) throw corrupt(`${what}: size varint longer than ${VARINT_MAX_SHIFT + 1} bits`);
+}
+
 function readVarint(buf, p) {
   let n = 0, shift = 0, c;
   do {
+    varintRoom(shift, 'delta');
     c = take(buf, p, 1)[0];
     p += 1;
     n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
@@ -44,6 +51,7 @@ export function readObjHeader(buf, p) {
   let shift = OBJ_TYPE_SHIFT;
   p += 1;
   while (c & OBJ_CONTINUE) {
+    varintRoom(shift, 'pack');
     c = take(buf, p, 1)[0];
     p += 1;
     size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
