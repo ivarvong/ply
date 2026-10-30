@@ -12,6 +12,7 @@ import { pktInit, pktStep, FLUSH } from './pktline.js';
 import { td, concat } from './bytes.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
+import { wrapNet } from './transport.js';
 
 
 // @decoder parseSshUrl prefix=ssh-url
@@ -31,15 +32,47 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
   const timeoutMs = requireLimit(limits, 'requestTimeoutMs');
   if (!hostKey) throw fail('bad_request', 'hostKey is required: an SSH client in a Worker cannot trust-on-first-use (ssh-keyscan -t ed25519 <host>)');
   const pinned = hostKey instanceof Uint8Array ? hostKey : hostKeyFromLine(hostKey);
-  const st = { client: null, channels: new Map(), connecting: null };
+  // SAFETY I1 for SSH. Every wait on the server is bounded by `requestTimeoutMs` and by the caller's `signal`, and ends in
+  // the error HTTP gives for the same event (wrapNet: `timeout` / `aborted`). The stream's own timers are idle timers: a
+  // server trickling a byte at a time never trips them. Bounds: connection + handshake + channel setup (+ advertisement);
+  // one command from its body write to its closing flush (time queued behind the channel's previous command is not
+  // counted: that command holds its own bound); close. Every channel shares one byte stream, so a bound that fires tears
+  // the connection down: `conn.dead` rejects and every read and write races it, so a pending read ends at once whatever
+  // the platform stream does on close(). The next command opens a new connection. The timer is the strong owner of the
+  // teardown (not AbortSignal.timeout, for the reason http.js gives).
+  const fresh = () => { const conn = { reason: null, raw: null }; conn.dead = new Promise((_, rej) => { conn.kill = rej; }); conn.dead.catch(() => {}); return conn; };
+  const st = { client: null, channels: new Map(), connecting: null, conn: fresh() };
+  const teardown = (conn, e) => {
+    if (conn.reason) return;
+    conn.reason = e; conn.kill(e);
+    try { conn.raw?.close(); } catch { /* already closed */ }
+    if (st.conn !== conn) return;
+    for (const entry of st.channels.values()) { entry.span.error(e); entry.span.end(); }
+    if (st.client) st.lastStats = st.client.stats;
+    st.channels = new Map(); st.client = null; st.connecting = null; st.conn = fresh();
+  };
+  const bound = () => {
+    if (signal?.aborted) throw wrapNet(signal.reason, signal);
+    const conn = st.conn;
+    const timer = setTimeout(() => teardown(conn, wrapNet(new DOMException(`request exceeded ${timeoutMs} ms`, 'TimeoutError'))), timeoutMs);
+    timer?.unref?.();
+    const onAbort = () => teardown(conn, wrapNet(signal.reason, signal));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    return () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
+  };
   const t = {
     kind: 'ssh', url: sshRedact(u), ssh: u, tracer, parent, limits, signal, quirks: {}, objects: new Map(),
     async connectOnce(span) {
       if (st.client) return st.client;
+      const conn = st.conn;
       if (!st.connecting) st.connecting = (async () => {
-        const stream = await connect(u.host, u.port, { timeoutMs });
-        const c = new SshClient(stream, { user: u.user, privateKey, publicKeyRaw, hostKey: pinned, tracer, parent: span ?? t.parent, timeoutMs });
-        await c.connect(); await c.authenticate();
+        const opening = Promise.resolve(connect(u.host, u.port, { timeoutMs }));
+        opening.then(raw => { if (conn.reason) try { raw.close(); } catch { /* closing */ } }, () => {});
+        const raw = conn.raw = await Promise.race([opening, conn.dead]);
+        if (conn.reason) { try { raw.close(); } catch { /* closing */ } throw conn.reason; }
+        const stream = { read: () => Promise.race([raw.read(), conn.dead]), write: bytes => Promise.race([raw.write(bytes), conn.dead]), close: () => raw.close() };
+        const c = new SshClient(stream, { user: u.user, privateKey, publicKeyRaw, hostKey: pinned, tracer, parent: span ?? t.parent });
+        try { await c.connect(); await c.authenticate(); } catch (e) { try { raw.close(); } catch { /* closing */ } throw e; } // a failed handshake holds no socket
         st.client = c; return c;
       })();
       return st.connecting;
@@ -98,32 +131,48 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     // A channel is one git process reading commands in order: concurrent callers (editFile overlaps ls-refs with a
     // speculative fetch) are serialized here, each taking the channel from body write to the closing flush.
     async *frames(service, body, span) {
-      const entry = await t.channelFor(service, span);
+      let done = bound(), entry;
+      try { entry = await t.channelFor(service, span); } finally { done(); }
       span.set({ 'git.transport': 'ssh', 'server.address': `${u.host}:${u.port}`, 'url.full': t.url, 'git.request.bytes': body.length, 'git.response.cache': '', 'git.service': service });
       let release; const mine = new Promise(r => { release = r; }); const prev = entry.lock; entry.lock = mine;
+      // A command queued behind one whose bound fired holds a channel of the torn-down connection: its first write
+      // rejects at once with that bound's error (the stream races `conn.dead`).
       const tq = Date.now(); await prev; span.set({ 'ssh.channel.queued_ms': Date.now() - tq });
+      try { done = bound(); } catch (e) { release(); throw e; }
       try {
-        const t0 = Date.now();
-        await entry.ch.write(body); entry.bytesOut += body.length;
-        let bytes = 0, first = null;
-        for await (const f of t.readUntilFlush(entry)) { if (first === null) first = Date.now() - t0; bytes += 4 + (f.payload?.length ?? 0); yield f; }
-        span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first ?? -1, 'git.response.duration_ms': Date.now() - t0, 'ssh.channel.stderr.tail': entry.ch.stderr().slice(-256) });
-      } finally { release(); }
-      if (service === 'git-receive-pack') {
-        await t.closeChannel(service); // one push per receive-pack process
-        // git caches loose refs for the life of a process: a long-lived upload-pack would keep answering with the refs
-        // as they were before the push (found by `verify` over ssh). Drop it; the next command starts a fresh one.
-        await t.closeChannel('git-upload-pack');
-      }
+        try {
+          const t0 = Date.now();
+          await entry.ch.write(body); entry.bytesOut += body.length;
+          let bytes = 0, first = null;
+          for await (const f of t.readUntilFlush(entry)) { if (first === null) first = Date.now() - t0; bytes += 4 + (f.payload?.length ?? 0); yield f; }
+          span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first ?? -1, 'git.response.duration_ms': Date.now() - t0, 'ssh.channel.stderr.tail': entry.ch.stderr().slice(-256) });
+        } finally { release(); }
+        if (service === 'git-receive-pack') {
+          await t.closeChannel(service); // one push per receive-pack process
+          // git caches loose refs for the life of a process: a long-lived upload-pack would keep answering with the refs
+          // as they were before the push (found by `verify` over ssh). Drop it; the next command starts a fresh one.
+          await t.closeChannel('git-upload-pack');
+        }
+      } finally { done(); }
     },
-    async advertise(service, span) { const entry = await t.channelFor(service, span); span.set({ 'git.transport': 'ssh', 'server.address': `${u.host}:${u.port}`, 'git.response.bytes': entry.adv.length }); return entry.adv; },
+    async advertise(service, span) {
+      const done = bound();
+      try { const entry = await t.channelFor(service, span); span.set({ 'git.transport': 'ssh', 'server.address': `${u.host}:${u.port}`, 'git.response.bytes': entry.adv.length }); return entry.adv; }
+      finally { done(); }
+    },
     async closeChannel(service) {
       const entry = st.channels.get(service); if (!entry) return; st.channels.delete(service);
       try { if (service === 'git-upload-pack') { await entry.ch.write(FLUSH); } await entry.ch.eof(); const code = await entry.ch.exit(); entry.span.set({ 'ssh.exit': code ?? -1, 'ssh.bytes.in': entry.bytesIn, 'ssh.bytes.out': entry.bytesOut }); await entry.ch.close(); }
       catch (e) { entry.span.error(e); }
       entry.span.end();
     },
-    async close() { for (const s of [...st.channels.keys()]) await t.closeChannel(s); if (st.client) { st.lastStats = st.client.stats; await st.client.disconnect(); st.client = null; st.connecting = null; } },
+    // Bounded like a command; with the signal already aborted the connection is dropped without the goodbye.
+    async close() {
+      let done;
+      try { done = bound(); } catch (e) { teardown(st.conn, e); return; }
+      try { for (const s of [...st.channels.keys()]) await t.closeChannel(s); if (st.client) { st.lastStats = st.client.stats; await st.client.disconnect(); st.client = null; st.connecting = null; st.conn = fresh(); } }
+      finally { done(); }
+    },
     stats: () => st.client?.stats ?? st.lastStats ?? null,
   };
   return t;
