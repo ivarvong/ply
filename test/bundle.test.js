@@ -70,7 +70,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 78,515 B. The same size-varint cap (issue #13).
   // 2026-10-30: 78,548 B. The same delta chain bound (issue #14).
   // 2026-10-30: 80,062 B. The same credential scrub and redirect refusal (issue #15).
-  assert.ok(min < 80_063, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 81,001 B. checkCommitWindow (the commit walk checked as git checks a fetch) and harvest's fsck (issue #18).
+  assert.ok(min < 81_002, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
