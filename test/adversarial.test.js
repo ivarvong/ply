@@ -11,7 +11,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
 import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
@@ -22,6 +22,9 @@ import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { GitHttp } from '../src/client.js';
+import { createTransport } from '../src/http.js';
+import { fetchObject } from '../src/fetch.js';
+import { fetchPackTree0 } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
@@ -418,6 +421,119 @@ test('#16 ls-refs attributes never override the parsed oid or name: oid:/name: e
     checkInvariants(r, { stage: `ls-refs + ${extra}` });
     assert.equal(git(r.repo.bare, ['log', '-1', '--format=%P', r.head]).trim(), r.repo.head, `${extra}: parent is the real head`);
   }
+});
+
+// #18: the merge-base walk's commit-only packs, lied about. Commits are hash-verified, so ancestry can only be withheld.
+// P ← X ← M is main; feat = merge(Q, y10) with Q ← P and y10 ← … ← y1 ← X. git's base is X (via y1); with y1..y3 cut
+// the only common ancestor in view is P. X sets g=2 and y1 sets it back to 1: base X → g=1 (git), base P → g=2.
+function cutHistoryRepo() {
+  const name = `cut${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const g = args => git(work, ['-c', 'user.name=c', '-c', 'user.email=c@x', ...args]).trim();
+  const put = (files, msg) => { for (const [p, v] of Object.entries(files)) writeFileSync(join(work, p), v); g(['add', '-A']); g(['commit', '-q', '--allow-empty', '-m', msg]); return g(['rev-parse', 'HEAD']); };
+  const P = put({ g: '1\n', f: 'f\n' }, 'P'), X = put({ g: '2\n' }, 'X');
+  const y = [null, put({ g: '1\n' }, 'y1')]; for (let i = 2; i <= 10; i++) y.push(put({ [`y${i}`]: `${i}\n` }, `y${i}`));
+  g(['checkout', '-q', '--detach', X]); const M = put({ m: 'm\n' }, 'M');
+  g(['checkout', '-q', '--detach', P]); const Q = put({ q: 'q\n' }, 'Q'); g(['merge', '-q', '--no-edit', y[10]]); const S = g(['rev-parse', 'HEAD']);
+  g(['push', '-q', bare, `${M}:refs/heads/main`, `${S}:refs/heads/feat`, `${y[10]}:refs/heads/lin`]);
+  rmSync(work, { recursive: true, force: true });
+  return { name, bare, P, X, M, Q, S, y };
+}
+// a fetch the merge-base walk makes (commit-only, deepen > 1), rewritten by `lie(objects, shallow)` → { objects, shallow }
+const td = new TextDecoder();
+const walkFetch = ctx => ctx.stage === 'fetch' && ctx.phase !== 'request' && /filter tree:0/.test(ctx.reqBody.toString('latin1')) && Number(/deepen (\d+)/.exec(ctx.reqBody.toString('latin1'))?.[1]) > 1;
+const wantOf = ctx => /want ([0-9a-f]{40})/.exec(ctx.reqBody.toString('latin1'))[1];
+function splitFetch(bytes) { // v2 fetch response → { shallow, objects: Map oid → { type, data } }
+  const shallow = [], parts = []; let o = 0, inPack = false;
+  while (o < bytes.length) {
+    const len = parseInt(td.decode(bytes.subarray(o, o + 4)), 16); if (len < 4) { o += 4; continue; }
+    const body = bytes.subarray(o + 4, o + len); o += len;
+    if (inPack) { if (body[0] === 1) parts.push(body.subarray(1)); continue; }
+    const line = td.decode(body); if (line.startsWith('shallow ')) shallow.push(line.slice(8).trim()); if (line === 'packfile\n') inPack = true;
+  }
+  return { shallow, objects: resolvePack(parsePack(concat(parts), packParseOpts())).objects };
+}
+async function fetchReply(objects, shallow) {
+  const { pack } = await buildPack([...objects.values()].map(o => ({ type: o.type, data: o.data })));
+  const head = shallow.length ? [pktLine('shallow-info\n'), ...shallow.map(x => pktLine(`shallow ${x}\n`)), te.encode('0001')] : [];
+  return concat([...head, wrapPack(pack)]);
+}
+const walkLie = lie => ctx => { if (!walkFetch(ctx)) return { type: 'pass' }; const r = splitFetch(ctx.bytes); const l = lie(r.objects, r.shallow, wantOf(ctx)); return { type: 'bytes', bytes: fetchReply(l.objects, l.shallow), name: 'walk lie' }; };
+const without = (objects, drop) => new Map([...objects].filter(([k]) => !drop.includes(k)));
+const objOf = (bare, oid) => { const ty = git(bare, ['cat-file', '-t', oid]).trim(); return { type: TYPE[ty.toUpperCase()], data: new Uint8Array(gitBuf(bare, ['cat-file', ty, oid])) }; };
+async function mergeVia(R, fault, op = 'merge') {
+  const proxy = await startProxy(srv.url, fault);
+  const url = `${proxy.url}/${R.name}.git`, opts = { tracer: new Tracer(), limits: withLimits({ requestTimeoutMs: 3000 }) };
+  let result = null, error = null;
+  try { result = op === 'merge' ? await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: AUTHOR, message: 'm', time: 1 }, opts) : await rebaseBranch(url, { ref: 'refs/heads/lin', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts); }
+  catch (e) { error = e; }
+  await proxy.close();
+  return { result, error, counts: { ...proxy.counts }, main: git(R.bare, ['rev-parse', 'main']).trim(), lin: git(R.bare, ['rev-parse', 'lin']).trim() };
+}
+
+test('#18 merge base over a cut graph: a server that withholds ancestors without a shallow line fails closed (pack_corrupt), nothing pushed', async t => {
+  // honest control: git's base, git's tree, g=1
+  {
+    const R = cutHistoryRepo();
+    assert.equal(git(R.bare, ['merge-base', '--all', 'main', 'feat']).trim(), R.X);
+    const r = await mergeVia(R, () => ({ type: 'pass' }));
+    assert.equal(r.error, null, r.error?.message);
+    assert.equal(r.result.base, R.X); assert.equal(r.result.tree, git(R.bare, ['merge-tree', '--write-tree', R.M, R.S]).trim());
+    assert.equal(gitBuf(R.bare, ['cat-file', 'blob', 'main:g']).toString(), '1\n');
+  }
+  const lies = {
+    // the depth boundary is real, its shallow lines are stripped: at deepen 8, y4's parent y3 is missing unannounced
+    'strip shallow-info': () => (objects) => ({ objects, shallow: [] }),
+    // y1 never sent (honest shallow lines otherwise): at deepen 16 the server reports the history whole, y2's parent missing
+    'omit y1': R => (objects, shallow) => ({ objects: without(objects, [R.y[1]]), shallow }),
+  };
+  const wrong = [];
+  for (const [name, lie] of Object.entries(lies)) {
+    const R = cutHistoryRepo();
+    const r = await mergeVia(R, walkLie(lie(R)));
+    t.diagnostic(`${name}: ${r.error ? r.error.code : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
+    const ok = r.error?.code === 'pack_corrupt' && /withheld and [0-9a-f]{40} not reported shallow/.test(r.error.message) && r.main === R.M && !r.counts['receive-pack'];
+    if (!ok) wrong.push(`${name}: ${r.result ? `${r.result.outcome} with base ${r.result.base} (git: X ${R.X}; P ${R.P}), main:g=${JSON.stringify(gitBuf(R.bare, ['cat-file', 'blob', 'main:g']).toString())}` : `${r.error.code}: ${r.error.message}`}; requests ${JSON.stringify(r.counts)}`);
+    // rebase walks the same way: a linear branch y10 ← … ← X onto main fails closed the same, the branch untouched
+    const R2 = cutHistoryRepo(), rb = await mergeVia(R2, walkLie(lie(R2)), 'rebase');
+    if (rb.error?.code !== 'pack_corrupt' || rb.lin !== R2.y[10]) wrong.push(`${name} rebase: ${rb.error ? `${rb.error.code}: ${rb.error.message}` : rb.result.outcome}, lin ${rb.lin === R2.y[10] ? 'untouched' : 'moved'}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('#18 the walk\'s pack holds only what was asked for, well-formed: an extra commit, a malformed commit, the want answered by a tree → pack_corrupt, nothing pushed', async t => {
+  const cases = {
+    // feat's head in main's pack: a real commit, but not an ancestor of the want
+    'unrequested commit': R => (objects, shallow, want) => ({ objects: want === R.M ? new Map([...objects, [R.S, objOf(R.bare, R.S)]]) : objects, shallow }),
+    // a commit parseCommit reads but fsck --strict refuses (no email, no date), riding along unasked
+    'malformed commit': R => (objects, shallow) => ({ objects: new Map([...objects, ['x', { type: TYPE.COMMIT, data: te.encode(`tree ${git(R.bare, ['rev-parse', 'main^{tree}']).trim()}\nauthor nobody\ncommitter nobody\n\nbad\n`) }]]), shallow }),
+    // the wanted commit's place taken by its root tree
+    'want answered by a tree': R => (objects, shallow, want) => ({ objects: want === R.S ? new Map([...without(objects, [R.S]), ['t', objOf(R.bare, `${R.S}^{tree}`)]]) : objects, shallow }),
+  };
+  const wrong = [];
+  for (const [name, lie] of Object.entries(cases)) {
+    const R = cutHistoryRepo();
+    const r = await mergeVia(R, walkLie(lie(R)));
+    t.diagnostic(`${name}: ${r.error ? `${r.error.code} (${r.error.message})` : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
+    if (r.error?.code !== 'pack_corrupt' || r.main !== R.M || r.counts['receive-pack']) wrong.push(`${name}: ${r.result ? `${r.result.outcome} (base ${r.result.base})` : `${r.error.code}: ${r.error.message}`}; requests ${JSON.stringify(r.counts)}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('#18 the blob:none walk harvests only checked objects: a malformed commit in the wide pack fails the fetch and never reaches fetchObject', async () => {
+  const R = cutHistoryRepo();
+  const bad = te.encode(`tree ${git(R.bare, ['rev-parse', 'main^{tree}']).trim()}\nauthor nobody\ncommitter nobody\n\nbad\n`), badOid = hashObject('commit', bad);
+  const proxy = await startProxy(srv.url, ctx => {
+    if (ctx.stage !== 'fetch' || ctx.phase === 'request' || !/filter blob:none/.test(ctx.reqBody.toString('latin1'))) return { type: 'pass' };
+    const r = splitFetch(ctx.bytes); return { type: 'bytes', bytes: fetchReply(new Map([...r.objects, [badOid, { type: TYPE.COMMIT, data: bad }]]), r.shallow) };
+  });
+  try {
+    const t = createTransport(`${proxy.url}/${R.name}.git`, { tracer: new Tracer(), quirks: { treeFilter: 'blob:none' } });
+    let res = null, err = null;
+    try { res = await fetchPackTree0(t, { wants: [R.M], filter: 'tree:0', deepen: 8 }); } catch (e) { err = e; }
+    const served = t.objects.has(badOid) ? await fetchObject(t, { oid: badOid, expectType: TYPE.COMMIT }) : null;
+    assert.equal(err?.code, 'pack_corrupt', res ? `fetched; harvested ${t.objects.size}, malformed commit ${served?.harvested ? 'served by fetchObject from the harvest' : 'not kept'}` : String(err?.message));
+    assert.equal(t.objects.has(badOid), false, 'nothing harvested from a refused pack');
+  } finally { await proxy.close(); }
 });
 
 test('ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct', async () => {

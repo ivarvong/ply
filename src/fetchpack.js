@@ -1,7 +1,7 @@
 // Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 import { concat } from './bytes.js';
-import { TYPE_NAME } from './objects.js';
+import { TYPE, TYPE_NAME, assertFetched } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { limitError, requireLimit } from './limits.js';
 import { coded, clientSpan } from './transport.js';
@@ -10,14 +10,17 @@ import { packStream, isFilterRejection, harvest } from './fetch.js';
 // fetchPack for a `filter tree:0` request (commit-only history walks) with the blob:none fallback of fetch.js: a server
 // that refuses tree:0 gets blob:none, which also carries every tree of every commit in the window — far more bytes on a
 // deep window (bounded by limits.maxPackBytes; the attrs say how much). The trees are harvested for later tree fetches.
+// Either way every commit, tree and tag in the pack is checked as fetchObject checks one (assertFetched, as fetchWide
+// does), so a malformed object fails the fetch (`pack_corrupt`) instead of reaching a caller or the harvest.
 export async function fetchPackTree0(t, opts) {
+  const checked = r => { for (const o of r.objects?.values() ?? []) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data, t.limits); return r; };
   const wide = async learned => {
-    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
+    const r = checked(await fetchPack(t, { ...opts, filter: 'blob:none' }, { attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } }));
     if (r.objects) harvest(t, r.objects);
     return r;
   };
   if (t.quirks?.treeFilter === 'blob:none') return wide(false);
-  try { return await fetchPack(t, opts); } catch (e) {
+  try { return checked(await fetchPack(t, opts)); } catch (e) {
     if (!isFilterRejection(e)) throw e;
     if (t.quirks) t.quirks.treeFilter = 'blob:none';
     return wide(true);
