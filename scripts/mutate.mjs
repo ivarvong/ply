@@ -4,7 +4,7 @@
 // only as `// Stryker disable next-line <Mutator>: <reason>` on that line — never
 // `Stryker disable all`, and never a parser file dropped from stryker.conf.json.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const REPORT = 'reports/mutation/mutation.json';
@@ -60,9 +60,19 @@ function filesToMutate() {
   return diff.stdout.split('\n').map(s => s.trim()).filter(f => f.startsWith('src/') && f.endsWith('.js'));
 }
 
+// Stryker applies `thresholds.break` itself, to whatever it mutated. On a pull request that is the changed files only,
+// so the full-library break would fail any PR touching a file the quick suites do not reach (read.js, checkout.js: 0%).
+// The PR run gets the same config with the break off; the parser/bounds rule below is its gate.
+const PR_CONFIG = 'reports/stryker.pr.conf.json';
+
 function runStryker(files) {
   const args = ['stryker', 'run'];
-  if (files) args.push('--mutate', files.join(','));
+  if (files) {
+    const cfg = JSON.parse(readFileSync('stryker.conf.json', 'utf8'));
+    mkdirSync('reports', { recursive: true });
+    writeFileSync(PR_CONFIG, JSON.stringify({ ...cfg, $schema: undefined, thresholds: { ...cfg.thresholds, break: null } }, null, 2));
+    args.push(PR_CONFIG, '--mutate', files.join(','));
+  }
   const r = spawnSync('npx', args, { stdio: 'inherit' });
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
