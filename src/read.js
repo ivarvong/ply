@@ -179,8 +179,9 @@ export async function openBlob(t, tracer, parent, oid) {
     fetchSpan.end();
     await writer.close();
   })();
-  // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads
-  pump.catch(async e => { await writer.abort(e).catch(() => {}); await it.return?.().catch(() => {}); });
+  // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
+  // verify transform's flush never runs then, so the failure is recorded (and both spans ended) here.
+  pump.catch(async e => { const err = failHere(e); await writer.abort(err).catch(() => {}); await it.return?.().catch(() => {}); });
   const sha = streamingSha1();
   await sha.update(objectHeader('blob', size));
   let seen = 0;

@@ -101,6 +101,7 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 45,713 B / 17,690 B gz. The same delta chain bound (issue #14).
   // 2026-10-30: 47,227 B / 18,349 B gz. The same credential scrub and redirect refusal (issue #15).
   // 2026-10-30: 47,398 B / 18,400 B gz. The same ls-refs attribute whitelist and scrub walk (issue #16).
+  // 2026-10-30: 47,393 B / 18,399 B gz. openBlob's pump failure records itself and ends both spans (failHere); with #16 merged it minifies under the budget above.
   assert.ok(min < 47_399, `read bundle ${min} B exceeds budget`);
   assert.ok(gz < 18_401, `read bundle ${gz} B gz exceeds budget`);
 });
@@ -145,6 +146,7 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 42,541 B / 16,901 B gz. The same delta chain bound (issue #14).
   // 2026-10-30: 44,055 B / 17,546 B gz. The same credential scrub and redirect refusal (issue #15).
   // 2026-10-30: 44,226 B / 17,576 B gz. The same ls-refs attribute whitelist and scrub walk (issue #16).
+  // 2026-10-30: 44,221 B / 17,573 B gz. The same openBlob pump-failure span fix, with #16 merged.
   assert.ok(min < 44_227, `checkout bundle ${min} B exceeds budget`);
   assert.ok(gz < 17_577, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
