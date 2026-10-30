@@ -19,6 +19,8 @@ import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, har
 import { fail } from '../src/errors.js';
 import { checkCommitWindow, fetchPackTree0 } from '../src/fetchpack.js';
 import { bestBases, mergeBase } from '../src/merge.js';
+import { rebaseBranch } from '../src/rebase.js';
+import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
 import { parseReportStatus, checkReport, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
@@ -1322,10 +1324,16 @@ function graphServer(edges, lie = () => null) {
   for (const name of Object.keys(edges)) build(name);
   const parentsOf = new Map([...oids].map(([name, o]) => [o, edges[name].map(n => oids.get(n))]));
   const requests = [];
-  const t = { limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null, objects: new Map(), quirks: {}, requests,
-    async *frames(_service, body) {
-      const lines = pktStep(pktInit(), body).frames.filter(f => f.kind === 'data').map(f => td.decode(f.payload).replace(/\n$/, ''));
+  const line = s => ({ kind: 'data', payload: te.encode(s) });
+  // refs for ls-refs, and receive-pack answering every command `ok` (the pack is not inspected): enough for rebaseBranch
+  const t = { limits: DEFAULT_LIMITS, tracer: new Tracer(), parent: null, objects: new Map(), quirks: {}, requests, refs: new Map(), url: 'stub://graph',
+    async *frames(service, body) {
+      // the pkt-lines up to the first flush (a receive-pack body carries the raw pack after it)
+      const lines = []; for (let p = 0; p + 4 <= body.length;) { const n = parseInt(td.decode(body.subarray(p, p + 4)), 16); if (n === 0) break; if (n > 1) lines.push(td.decode(body.subarray(p + 4, p + n)).replace(/\n$/, '')); p += Math.max(n, 4); }
+      if (service === 'git-receive-pack') { yield { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n')]) }; for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt(`ok ${m[2]}\n`)]) }; } } yield { kind: 'flush' }; return; }
+      if (lines[0] === 'command=ls-refs') { const prefixes = lines.filter(l => l.startsWith('ref-prefix ')).map(l => l.slice(11)); for (const [ref, o] of t.refs) if (prefixes.some(p => ref.startsWith(p))) yield line(`${o} ${ref}\n`); yield { kind: 'flush' }; return; }
       const want = lines.find(l => l.startsWith('want '))?.slice(5), deepen = +(lines.find(l => l.startsWith('deepen '))?.slice(7) ?? 0);
+      if (want === tree) { const { pack } = await buildPack([{ type: TYPE.TREE, data: new Uint8Array(0) }]); requests.push({ want, deepen, filter: 'tree' }); yield line('packfile\n'); yield { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pack]) }; yield { kind: 'flush' }; return; }
       const filter = lines.find(l => l.startsWith('filter '))?.slice(7) ?? null;
       requests.push({ want, deepen, filter });
       if (filter !== 'tree:0' && filter !== 'blob:none') throw fail('remote_error', `stub: a commit walk names its filter, got ${JSON.stringify(filter)}`);
@@ -1337,7 +1345,6 @@ function graphServer(edges, lie = () => null) {
       const plan = lie({ want, deepen, window, boundary }) ?? {};
       const keep = window.filter(c => !(plan.drop ?? []).includes(c)), shallow = plan.shallow ?? boundary;
       const { pack } = await buildPack([...keep.map(c => ({ type: TYPE.COMMIT, data: datas.get(c) })), ...(plan.extra ?? [])]);
-      const line = s => ({ kind: 'data', payload: te.encode(s) });
       if (shallow.length) { yield line('shallow-info\n'); for (const c of shallow) yield line(`shallow ${c}\n`); yield { kind: 'delim' }; }
       yield line('packfile\n');
       for (let i = 0; i < pack.length; i += 65000) yield { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pack.subarray(i, Math.min(i + 65000, pack.length))]) };
@@ -1461,6 +1468,16 @@ test('issue #18: the merge-base search stops only on an answer a deeper window c
     assert.deepEqual([res.base, res.bases.length, res.depth], [null, 2, 8]); assert.deepEqual(res.bases, [s.oid('x'), s.oid('y')].sort()); }
   { const s = graphServer({ r1: [], r2: [], a: ['r1'], b: ['r2'] }); const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
     assert.deepEqual([res.base, res.bases, res.depth], [null, [], 8]); }
+  // rebase when the base sits exactly at the window's cut: named by both sides' children, never fetched by mergeBase. The
+  // base commit is fetched (deepen 1) before the first replay; with the base inside the window it is not fetched again.
+  for (const n of [8, 7]) {
+    const s = graphServer({ root: [], ...chain('f', n, 'root'), ...chain('m', n, 'root') });
+    s.t.refs.set('refs/heads/feat', s.oid('f1')); s.t.refs.set('refs/heads/main', s.oid('m1'));
+    const res = await rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+    assert.deepEqual([res.outcome, res.commits, res.base, res.onto], ['rebase', n, s.oid('root'), s.oid('m1')]);
+    assert.equal(s.t.refs.get('refs/heads/feat'), res.oid, 'the branch was force-updated to the new tip');
+    assert.equal(s.t.requests.filter(q => q.want === s.oid('root') && q.deepen === 1).length, n === 8 ? 1 : 0, `base fetched once at the cut (n=8), not when the window held it (n=7)`);
+  }
   // the want itself missing from the answer
   { const s = graphServer(deep, ({ want }) => (want === s.oid('o') ? { drop: [s.oid('o')] } : null));
     await assert.rejects(mergeBase(s.t, s.oid('o'), s.oid('t')), e => e.code === 'pack_corrupt' && e.message === `want ${s.oid('o')} not in the pack (7 objects)`); }
