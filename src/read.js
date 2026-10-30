@@ -146,10 +146,10 @@ export async function readFile(url, { ref = null, path } = {}, { cache = new Map
   });
 }
 
-// Effect: one blob as a ReadableStream. Reads the pack until the object header (→ size), then pipes the zlib bytes
+// Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
 // through DecompressionStream and a verifying transform. Back-pressure: the pump awaits each write, so at most one
 // network chunk and one inflate chunk are in flight beyond what the consumer has taken.
-async function openBlob(t, tracer, parent, oid) {
+export async function openBlob(t, tracer, parent, oid) {
   const span = tracer.start('git.read.blob', { parent, attrs: { 'git.read.blob.oid': oid } });
   const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   const it = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
