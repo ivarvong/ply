@@ -55,14 +55,19 @@ Layers, bottom up (each depends only on the ones below):
 | Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
 | Transport contract | `transport`, `http`, `sshgit` (+ `ssh`, `ssh-node`, `ssh-workers`) | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; two implementations, no dispatch |
 | Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |
-| Operations | `operation`, `edit`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
-| Entry points | `edit.js` (edit-only bundle), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper) | `sideEffects: false` |
+| Operations | `operation`, `edit`, `tree`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
+| Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `ssh-node.js` (`node:net`), `tree-node.js` (`node:fs`) | `sideEffects: false` |
 | Telemetry | `otel` | minimal OTLP/JSON tracer; exporters pluggable (`test/jsonl.mjs` for files) |
 
 Key operation modules:
 
 - `edit.js` — `editFile(url, spec, opts)`: find/replace in one path, create-on-branch (`ref` + `base`), head hint (ls-refs in
   parallel with a speculative commit fetch), pack cache, signing, verify, LFS guard.
+- `tree.js` — `pushTree(url, spec, opts)`: a caller-given file set (object, Map or iterable of `{ path, mode, data|oid }`,
+  symlinks 120000, gitlinks 160000) as one commit, with editFile's head hint, fresh `cas_conflict` retry, `strictHead`,
+  `verify`/`ambiguous`, signing and tree cache. Thin repeat pushes: the parent's trees are read only where the new tree
+  differs, known blobs are not sent, changed trees go as `REF_DELTA`s. `tree-node.js` (`filesFromDir`, `pushDir`) is the
+  Node directory walk. Issue #11.
 - `merge.js` — `mergeBranch`, `fastForward`, `deleteBranch`, `mergeTrees` (trivial-merge rules per directory, only differing
   subtrees fetched), `bestBases` (git's `merge-base --all` with a completeness check), rename guards, `blobMerger`,
   `attributeDrivers`/`attributeTree`.
@@ -156,6 +161,9 @@ This session (2026-10-19 → 20):
 | `attributes` option, default `null` | measured: git 2.43 bare repos read HEAD's attributes, 2.46+ read none — there is no single "git's answer"; the caller names the source |
 | Merge bundle budget 66 KB (edit bundle 44 KB) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
 | Git's GPL test vectors (t3070) run once, not shipped | licence; the result (380/380) is recorded in SAFETY.md |
+| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`) | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `ssh-node.js` and `tree-node.js` |
+| pushTree's "server has it" set = oids named by the parent's trees it read | exact for one-commit deploys (push 2 == `git rev-list --objects new ^old`, 7 objects / 1,176 B on a 208-entry tree); objects only in older history are resent — correct, not minimal, no history walk |
+| Every push refuses a pack over `maxPackBytes` before sending | a capped host (Artifacts 62–93 MiB) would otherwise take the upload and answer 4xx; `limit_exceeded` carries the measured size |
 
 ## 6. Verification — how to rerun everything
 
@@ -216,7 +224,8 @@ In order of value:
 6. Rebase niceties: patch-id skipping of already-upstream commits; merges in the chain (`not_linear` today).
 7. Protocol/transport limits: SHA-256 repositories; servers without protocol v2; SSH supports Ed25519 keys only and
    does not re-key.
-8. Features not built: annotated tags, multi-file commits, LFS beyond the guard, merges of files over 8 MiB.
+8. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
+   LFS beyond the guard, merges of files over 8 MiB, a `ply push <dir>` CLI and `.gitignore` reading for `pushDir`.
 
 ## 9. What is in this export
 
