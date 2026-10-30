@@ -7,7 +7,12 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { startProxy } from './proxy.js';
+import { buildPack } from '../src/pack.js';
+import { pkt, FLUSH } from '../src/pktline.js';
+import { concat } from '../src/bytes.js';
+import { TYPE } from '../src/objects.js';
 import { Rng } from './fuzz/prng.js';
 import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
@@ -74,6 +79,9 @@ test('threeWay: the trivial-merge rules, one directory', () => {
   // truncated: b's side runs into a commit whose parents are unknown, outside everything settled → may hide a base
   assert.equal(bestBases(G({ a: ['m'], b: ['q', 'm'], m: [] }), 'a', 'b').truncated, true);
   assert.equal(bestBases(G({ a: ['m'], b: ['m'], m: [] }), 'a', 'b').truncated, false, 'a frontier under a common ancestor does not matter');
+  // issue #18: with two best bases, a cut inside the settled region may hide that one is below the other (z below c through x)
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], x: ['z'], z: [] }), 'a', 'b'), { best: ['c'], truncated: false });
   // a pack must not carry an object twice (git: "tried to add buffer twice"); first occurrence wins, order kept
   assert.deepEqual(uniqueObjects([{ oid: 'a', n: 1 }, { oid: 'b' }, { oid: 'a', n: 2 }]), [{ oid: 'a', n: 1 }, { oid: 'b' }]);
 });
@@ -200,6 +208,66 @@ test('merge bases decided by git: criss-cross refuses (git builds a virtual base
     const g = gitMergeTree(r.bare, MM, FT); assert.ok(g.clean);
     const m = await merge(r); assert.equal(m.base, Y); assert.equal(m.tree, g.tree, 'tree == git merge-tree');
     assert.equal(run(r.bare, ['cat-file', '-p', 'main:f']), 'r');
+  }
+});
+
+test('issue #18: a server that omits ancestors without a shallow line is pack_corrupt, never a base; a cut below two candidates is deepened, as git merge-base --all says', async () => {
+  const run = (w, args, opts) => { const x = sh(w, args, opts); assert.equal(x.status, 0, `${args.join(' ')}: ${x.stderr}`); return x.stdout.trim(); };
+  const put = (w, p, v) => { writeFileSync(join(w, p), v); run(w, ['add', '-A']); };
+  // b → z; a → p → [z, k]; k → b. git: base b (a already contains b: "Already up to date"). With k omitted from a's
+  // window, the cut graph's only common ancestor is z: the old code took it (truncated, but no shallow line) and
+  // pushed a merge commit [a, b] over base z — a merge git does not produce.
+  {
+    const r = repo(); const w = r.work;
+    put(w, 'f', 'z\n'); run(w, ['commit', '-qm', 'z']); const Z = run(w, ['rev-parse', 'HEAD']);
+    put(w, 'f', 'b\n'); run(w, ['commit', '-qm', 'b']); const B = run(w, ['rev-parse', 'HEAD']);
+    put(w, 'g', 'k\n'); run(w, ['commit', '-qm', 'k']); const K = run(w, ['rev-parse', 'HEAD']);
+    run(w, ['checkout', '-q', '--detach', Z]); sh(w, ['merge', '-q', '--no-ff', '--no-commit', K]); put(w, 'f', 'z\n'); run(w, ['commit', '-qm', 'p: merge k, keep f=z']); const P = run(w, ['rev-parse', 'HEAD']);
+    put(w, 'h', 'a\n'); run(w, ['commit', '-qm', 'a']); const A = run(w, ['rev-parse', 'HEAD']);
+    run(w, ['push', '-q', '-f', r.bare, `${A}:refs/heads/main`, `${B}:refs/heads/feat`]);
+    assert.equal(run(r.bare, ['merge-base', '--all', A, B]), B);
+    // the lie, built from the real objects: every commit a's deepen window would carry except K, and no shallow-info section
+    const bytes = new Map(); for (const c of run(r.bare, ['rev-list', A]).split('\n')) bytes.set(c, new Uint8Array(gitBuf(r.bare, ['cat-file', 'commit', c])));
+    const lies = [];
+    const fault = ctx => {
+      if (ctx.stage !== 'fetch' || ctx.phase !== 'request') return null;
+      const body = Buffer.from(ctx.reqBody).toString('latin1');
+      if (!new RegExp(`want ${A}\\n`).test(body) || !/deepen (\d+)\n/.test(body) || /deepen 1\n/.test(body)) return null;
+      lies.push(+/deepen (\d+)\n/.exec(body)[1]);
+      const objs = [...bytes].filter(([c]) => c !== K).map(([, data]) => ({ type: TYPE.COMMIT, data }));
+      return { type: 'bytes', noForward: true, name: 'omit k', bytes: buildPack(objs).then(({ pack }) => concat([pkt('packfile\n'), pkt(concat([Uint8Array.of(1), pack])), FLUSH])) };
+    };
+    const proxy = await startProxy(srv.url, fault);
+    try {
+      const ex = arrayExporter();
+      await assert.rejects(mergeBranch(`${proxy.url}/${r.name}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer({ exporter: ex }), rediff }), e => e.code === 'pack_corrupt' && e.message === `commit ${K}, parent of ${P}, is not in the pack and ${P} was not declared shallow`);
+      assert.deepEqual(lies, [8], 'the lie answered the first window; nothing was asked again');
+      assert.equal(run(r.bare, ['rev-parse', 'main']), A, 'nothing pushed');
+      const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), rediff });
+      assert.equal(m.outcome, 'up_to_date'); assert.equal(m.base, B, 'honest answer: git\'s base');
+    } finally { await proxy.close(); }
+  }
+  // honest server, deep history: a,b → [c, z]; c → p6..p1 → x → z. The 8-deep window cuts x; over it z looks like a second
+  // best base (criss-cross, refused) where git has only c (z is below c through x). Must deepen and merge as git does.
+  {
+    const r = repo(); const w = r.work;
+    put(w, 'f', 'z\n'); run(w, ['commit', '-qm', 'z']); const Z = run(w, ['rev-parse', 'HEAD']);
+    put(w, 'f', 'x\n'); run(w, ['commit', '-qm', 'x']);
+    for (let i = 6; i >= 1; i--) { put(w, `p${i}`, `${i}\n`); run(w, ['commit', '-qm', `p${i}`]); }
+    put(w, 'f', 'c\n'); run(w, ['commit', '-qm', 'c']); const C = run(w, ['rev-parse', 'HEAD']);
+    // merge commits [C, Z] by hand: `git merge` would say "already up to date" (Z is below C), which is the point
+    put(w, 'ga', 'a\n'); const A = run(w, ['commit-tree', run(w, ['write-tree']), '-p', C, '-p', Z, '-m', 'a']);
+    run(w, ['checkout', '-q', '--detach', C]); put(w, 'gb', 'b\n'); const B = run(w, ['commit-tree', run(w, ['write-tree']), '-p', C, '-p', Z, '-m', 'b']);
+    run(w, ['push', '-q', '-f', r.bare, `${A}:refs/heads/main`, `${B}:refs/heads/feat`]);
+    assert.deepEqual(run(r.bare, ['rev-list', '--parents', '-n1', A]).split(' ').slice(1), [C, Z]);
+    assert.equal(run(r.bare, ['merge-base', '--all', A, B]), C, 'git: one base');
+    const t = createTransport(r.url, { tracer: new Tracer() });
+    const mb = await mergeBase(t, A, B);
+    assert.deepEqual([mb.bases, mb.depth], [[C], 16], 'deepened past the cut; the old code answered [C, Z] at depth 8');
+    const g = gitMergeTree(r.bare, A, B); assert.ok(g.clean);
+    const m = await merge(r); assert.equal(m.outcome, 'merge'); assert.equal(m.base, C); assert.equal(m.tree, g.tree, 'tree == git merge-tree');
+    assert.deepEqual(run(r.bare, ['rev-list', '--parents', '-n1', 'main']).split(' ').slice(1), [A, B]);
+    assert.equal(run(r.bare, ['fsck', '--strict', '--no-dangling']), '');
   }
 });
 

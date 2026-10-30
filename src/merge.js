@@ -62,10 +62,16 @@ export function threeWay(base, ours, theirs) {
 export const mergeMode = (b, o, t) => (o === t ? o : b === o ? t : b === t ? o : null);
 
 // Pure: git's merge bases — the best common ancestors of `a` and `b` (common ancestors that are not ancestors of another
-// common ancestor; git merge-base --all), over the commits known so far (oid → { parents }). `truncated` says the answer
-// may be incomplete: some commit that could lead to another best base has parents we have not fetched yet. Sound
-// because any best base outside what we know is an ancestor of a or b that is not an ancestor of a known common
-// ancestor — so it lies beyond a frontier commit of exactly that region.
+// common ancestor; git merge-base --all), over the commits known so far (oid → { parents }). A commit named as a parent
+// but not in the map is a cut: its ancestry is unknown. `truncated` says the answer may change once the cuts are fetched:
+//   - a cut reachable from a or b outside the settled region (common ancestors and everything below them) may hide a
+//     best base — any best base outside what we know is an ancestor of a or b that is not an ancestor of a known common
+//     ancestor, so it lies beyond exactly such a cut;
+//   - with more than one best base, a cut inside the settled region may hide that one of them is an ancestor of
+//     another (through the cut), so the set would shrink: {c, z} where z is below c through a cut x is not criss-cross,
+//     it is {c}. (Found by test/fuzz/liar.mjs's honest control, issue #18.)
+// A single best base over a graph whose only cuts are settled is final: everything behind such a cut is below a common
+// ancestor, so it is common but not best, and nothing can remove the one base (it cannot be its own ancestor).
 export function bestBases(commits, a, b) {
   const closure = starts => { const seen = new Set(); const st = [...starts]; while (st.length) { const c = st.pop(); if (seen.has(c)) continue; seen.add(c); for (const p of commits.get(c)?.parents ?? []) st.push(p); } return seen; };
   const A = closure([a]), B = closure([b]);
@@ -74,25 +80,32 @@ export function bestBases(commits, a, b) {
   const best = common.filter(c => !below.has(c)).sort();
   const settled = new Set([...common, ...below]);
   const frontier = start => { const seen = new Set(); const st = [start]; while (st.length) { const c = st.pop(); if (seen.has(c) || settled.has(c)) continue; seen.add(c); const k = commits.get(c); if (!k) return true; for (const p of k.parents) st.push(p); } return false; };
-  return { best, truncated: frontier(a) || frontier(b) };
+  const cutInside = () => { for (const c of settled) if (!commits.has(c)) return true; return false; };
+  return { best, truncated: frontier(a) || frontier(b) || (best.length > 1 && cutInside()) };
 }
 
-// Effect: ancestors of `head` as oid → distance, via commit-only packs (tree:0 keeps trees and blobs out) of doubling depth.
+// Effect: ancestors of `head` as oid → distance, via commit-only packs (tree:0 keeps trees and blobs out) of doubling
+// depth. fetchPackTree0 has checked the window: every commit's parents are in it unless that commit is one of the
+// server's `shallow` lines, so a commit whose parents are unknown here is a declared boundary, never a silent omission
+// (a pack with such a hole is pack_corrupt before this runs).
 export async function ancestors(t, head, depth) {
-  const r = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
-  const commits = new Map(); for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) commits.set(oid, parseCommit(o.data, t.limits));
+  const { commits } = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
   const dist = new Map([[head, 0]]); const q = [head];
   for (let i = 0; i < q.length; i++) { const c = q[i]; const d = dist.get(c); for (const p of commits.get(c)?.parents ?? []) if (!dist.has(p)) { dist.set(p, d + 1); q.push(p); } }
-  return { dist, commits, complete: r.shallow.length === 0 }; // no shallow boundary reported → the whole history fit in the depth
+  return { dist, commits };
 }
 
+// Doubling depth until the known graph decides the answer (bestBases: not truncated). Every cut in the graph is a
+// declared shallow boundary (ancestors), so `truncated` alone says whether a deeper window can change the answer; there is
+// no second exit on "no shallow lines" — that was issue #18: a server that omitted ancestors without declaring a boundary
+// had its cut graph's bases accepted (a wrong single base, or none, with `truncated` set). Past the cap: limit_exceeded.
 export async function mergeBase(t, a, b, { maxDepth } = {}) {
   const cap = maxDepth === undefined ? requireLimit(t.limits, 'maxMergeDepth') : finiteLimit(maxDepth, 'maxMergeDepth');
   for (let depth = 8; depth <= cap; depth *= 2) {
     const [A, B] = await Promise.all([ancestors(t, a, depth), ancestors(t, b, depth)]);
     const commits = new Map([...B.commits, ...A.commits]);
     const { best, truncated } = bestBases(commits, a, b);
-    if (!truncated || (A.complete && B.complete)) return { base: best.length === 1 ? best[0] : null, bases: best, depth, commits };
+    if (!truncated) return { base: best.length === 1 ? best[0] : null, bases: best, depth, commits };
   }
   throw limitError('merge-base search depth', cap, cap);
 }

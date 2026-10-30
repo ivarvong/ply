@@ -1409,3 +1409,35 @@ test('issue #18: a commit window with an undeclared cut is pack_corrupt; harvest
   }
 
 });
+
+test('issue #18: the merge-base search stops only on an answer a deeper window cannot change, and a cut graph is never one', async () => {
+  // bestBases: a cut inside the settled region is final with one base, not with two (z could be below c through x)
+  const g = e => new Map(Object.entries(e).map(([k, v]) => [k, { parents: v }]));
+  assert.deepEqual(bestBases(g({ a: ['c'], b: ['c'], c: ['x'] }), 'a', 'b'), { best: ['c'], truncated: false });
+  assert.deepEqual(bestBases(g({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
+  assert.deepEqual(bestBases(g({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], x: ['z'], z: [] }), 'a', 'b'), { best: ['c'], truncated: false }, 'with x known, z is below c');
+  assert.deepEqual(bestBases(g({ a: ['c', 'z'], b: ['c', 'z'], c: [], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: false }, 'a real criss-cross with no cut is final');
+
+  // mergeBase end to end on the stub. The chain is longer than the first window (8): ours = o → o1..o9 → m ← t1..t9 ← t = theirs
+  const chain = (name, n, below) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${name}${i + 1}`, [i + 1 < n ? `${name}${i + 2}` : below]]));
+  const deep = { m: [], ...chain('o', 9, 'm'), ...chain('t', 9, 'm'), o: ['o1'], t: ['t1'] };
+  { const s = graphServer(deep); const res = await mergeBase(s.t, s.oid('o'), s.oid('t'));
+    assert.deepEqual([res.base, res.depth], [s.oid('m'), 16]); assert.deepEqual(s.t.requests.map(q => q.deepen), [8, 8, 16, 16], 'deepened once: the 8-window ends at o7/t7 with no common ancestor'); }
+  // the issue's lie: o3 omitted from ours' window with no shallow line → pack_corrupt, not an answer (before: bases [] → unrelated_histories)
+  { const s = graphServer(deep, ({ want }) => (want === s.oid('o') ? { drop: [s.oid('o3')], shallow: [] } : null));
+    await assert.rejects(mergeBase(s.t, s.oid('o'), s.oid('t')), e => e.code === 'pack_corrupt' && e.message === `commit ${s.oid('o3')}, parent of ${s.oid('o2')}, is not in the pack and ${s.oid('o2')} was not declared shallow`); }
+  // the same omission beside honest shallow lines
+  { const s = graphServer(deep, ({ want }) => (want === s.oid('t') ? { drop: [s.oid('t5')] } : null));
+    await assert.rejects(mergeBase(s.t, s.oid('o'), s.oid('t')), e => e.code === 'pack_corrupt' && e.message.startsWith(`commit ${s.oid('t5')}, parent of ${s.oid('t4')}, is not in the pack`)); }
+  // a consistent shallower cut (the server declares what it withheld) is deepened through, or runs out at the cap
+  { const s = graphServer(deep, ({ want, deepen, window }) => (deepen < 32 && want === s.oid('o') ? { drop: window.filter(c => c !== s.oid('o') && c !== s.oid('o1')), shallow: [s.oid('o1')] } : null));
+    const res = await mergeBase(s.t, s.oid('o'), s.oid('t')); assert.deepEqual([res.base, res.depth], [s.oid('m'), 32]);
+    await assert.rejects(mergeBase(s.t, s.oid('o'), s.oid('t'), { maxDepth: 16 }), e => e.code === 'limit_exceeded' && e.what === 'merge-base search depth'); }
+  // the honest shape with an extra base at depth 8: a,b → [c, z]; c → p1..p6 → x → z. x is cut at 8; z is below c through it.
+  const shape = { z: [], x: ['z'], ...chain('p', 6, 'x'), c: ['p1'], a: ['c', 'z'], b: ['c', 'z'] };
+  { const s = graphServer(shape); const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.bases, res.depth], [[s.oid('c')], 16], 'git merge-base --all gives c alone; depth 8 would have said {c, z}'); }
+  // the want itself missing from the answer
+  { const s = graphServer(deep, ({ want }) => (want === s.oid('o') ? { drop: [s.oid('o')] } : null));
+    await assert.rejects(mergeBase(s.t, s.oid('o'), s.oid('t')), e => e.code === 'pack_corrupt' && e.message === `want ${s.oid('o')} not in the pack (7 objects)`); }
+});
