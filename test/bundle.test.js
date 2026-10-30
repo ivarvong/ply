@@ -97,8 +97,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 45,680 B / 17,679 B gz. The same size-varint cap, which bounds openBlob's header phase (issue #13).
   // 2026-10-30: 45,713 B / 17,690 B gz. The same delta chain bound (issue #14).
   // 2026-10-30: 47,227 B / 18,349 B gz. The same credential scrub and redirect refusal (issue #15).
-  assert.ok(min < 47_228, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_350, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 47,238 B / 18,353 B gz. openBlob's pump failure records itself and ends both spans (failHere), since the verify flush never runs then.
+  assert.ok(min < 47_239, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 18_354, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -139,8 +140,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 42,508 B / 16,894 B gz. The same size-varint cap (issue #13).
   // 2026-10-30: 42,541 B / 16,901 B gz. The same delta chain bound (issue #14).
   // 2026-10-30: 44,055 B / 17,546 B gz. The same credential scrub and redirect refusal (issue #15).
-  assert.ok(min < 44_056, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_547, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 44,066 B / 17,548 B gz. The same openBlob pump-failure span fix.
+  assert.ok(min < 44_067, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_549, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
