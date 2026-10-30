@@ -27,8 +27,9 @@ export function parseLsRefLine(line) {
   const rest = line.slice(sp + 1);
   const cut = rest.indexOf(' ');
   const name = cut < 0 ? rest : rest.slice(0, cut);
-  // Stryker disable next-line EqualityOperator: a cut at 0 makes the name empty and the line throws before attrs is read
-  const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ').filter(Boolean);
+  // Empty tokens (doubled spaces) need no filter: they have no colon and the loop skips them.
+  // Stryker disable next-line EqualityOperator,ArrayDeclaration,ArithmeticOperator: a cut at 0 empties the name and throws before attrs is read; any token injected for a name with no attributes, or the one-char name tail that cut - 1 adds, has no `key:` before its colon, so the loop skips it
+  const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ');
   if (OID_SHA256.test(oid)) throw fail('unsupported', 'unsupported object-format: only sha1 repositories are supported');
   if (!OID_SHA1.test(oid) || !name) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
@@ -36,6 +37,7 @@ export function parseLsRefLine(line) {
   const rec = { oid, name };
   for (const a of attrs) {
     const colon = a.indexOf(':');
+    // Stryker disable next-line EqualityOperator: a token starting with ':' has the empty key, which is neither kept attribute
     if (colon < 0) continue;
     const key = a.slice(0, colon), value = a.slice(colon + 1);
     if (key === PEELED && !OID_SHA1.test(value)) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
