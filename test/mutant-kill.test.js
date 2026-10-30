@@ -1330,3 +1330,18 @@ test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of pack
   throws(() => v2Step({ ...v2Init(), limits: { maxSectionLines: 1 } }, line('packfile')), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
 });
 
+// receive-pack's band 2 (hook stderr, the host's explanation) is held to the cap its band-1 report already had: a flood of it
+// used to be read until the request timer, with the tail kept but the bytes unbounded.
+test('push holds band 2 to maxPackBytes, the same cap as its report', async () => {
+  const band = sidebandFrame;
+  const deletes = [{ ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID }];
+  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt('ok refs/heads/a\n')]) };
+  const pushT = frames => ({ limits: withLimits({ maxPackBytes: 50 }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
+  const fifty = await push(pushT([band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }]), { commands: deletes, sideband: true });
+  assert.equal(fifty.report.ok, true); assert.equal(fifty.hookOutput.length, 50);
+  await assert.rejects(push(pushT([band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), band(SIDEBAND_PROGRESS, 1), report, { kind: 'flush' }]), { commands: deletes, sideband: true }),
+    e => e.code === 'limit_exceeded' && e.what === 'progress bytes' && e.got === 51 && e.max === 50);
+  // the report's own cap (band 1), already there, with the same numbers
+  const wide = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt(`ok refs/heads/a${' '.repeat(60)}\n`)]) };
+  await assert.rejects(push(pushT([wide, { kind: 'flush' }]), { commands: deletes, sideband: true }), e => e.code === 'limit_exceeded' && e.what === 'report bytes' && e.max === 50);
+});
