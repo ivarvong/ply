@@ -9,7 +9,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
 import http from 'node:http';
-import { git, tmpRoot, makeBareRepo, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, commitFiles, fsckProblems } from './server.js';
 import { startSshd, freePort, trickleProxy } from './sshd.js';
 import { Rng } from './fuzz/prng.js';
 import { createSshTransport, parseSshUrl, sshRedact } from '../src/sshgit.js';
@@ -83,7 +83,7 @@ test('one connection: ls-refs, discover, receive caps, edits with hint + verify 
     const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer, transport: t, verify: true });
     assert.equal(m.outcome, 'fast_forward');
     assert.equal(git(r.bare, ['cat-file', '-p', 'main:other.txt']), 'o-branch\n'); assert.equal(git(r.bare, ['cat-file', '-p', 'main:a/b.txt']), 'hello THREE\n');
-    assert.equal(git(r.bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    assert.deepEqual(fsckProblems(r.bare), []);
     const spans = ex.lines.flatMap(flattenLine);
     assert.equal(spans.filter(s => s.name === 'ssh.connect').length, 1, 'one handshake for everything');
     assert.equal(spans.filter(s => s.name === 'ssh.userauth').length, 1);
@@ -460,7 +460,7 @@ test('flow control: a 6 MiB blob read and edited over ssh (window given back as 
     assert.ok(Buffer.concat(parts).equals(big), 'bytes equal');
     const e = await editFile(r.url, { path: 'big.txt', find: 'MARK', replace: 'DONE', author, message: 'big' }, { tracer: new Tracer(), transport: t, verify: true });
     assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), e.newCommit);
-    assert.equal(git(r.bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    assert.deepEqual(fsckProblems(r.bare), []);
     console.log(`  ${t.stats().bytesIn} B in over ${t.stats().packetsIn} packets`);
     assert.ok(t.stats().bytesIn > 2 * (2 << 20), 'more than one window each way through');
   } finally { await t.close(); }

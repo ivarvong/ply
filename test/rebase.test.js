@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { rebaseBranch, cherryPick, revertCommit, linearChain, carriedExtra } from '../src/rebase.js';
 import { mergeBranch } from '../src/merge.js';
 import { editFile } from '../src/edit.js';
@@ -62,7 +62,7 @@ test('rebase: three commits onto a moved main — trees, authors, messages equal
   assert.deepEqual(ours, gitLog, 'tree|author|email|subject per commit == git rebase');
   assert.equal(ok(sh(r.bare, ['log', '-1', '--format=%cn <%ce>', 'feat'])), 'rebaser <rebaser@x>');
   assert.equal(ok(sh(r.bare, ['rev-parse', 'feat~3'])), mainNow, 'replayed on top of main');
-  assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
   const rootSpan = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.rebase'); assert.equal(rootSpan.attrs['git.rebase.commits'], 3);
   // up to date now; and a stale view of the tip is refused by the CAS
   assert.equal((await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T())).outcome, 'up_to_date');
@@ -91,7 +91,7 @@ test('rebase: conflict where git conflicts; branch untouched; squash produces on
   ok(sh(r.work, ['push', '-q', r.bare, `${ok(sh(r.bare, ['rev-parse', 'main~1']))}:refs/heads/old`]));
   const b = await rebaseBranch(r.url, { ref: 'refs/heads/old', onto: 'refs/heads/main', committer }, T());
   assert.equal(b.outcome, 'fast_forward'); assert.equal(ok(sh(r.bare, ['rev-parse', 'old'])), ok(sh(r.bare, ['rev-parse', 'main'])));
-  assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
 });
 
 test('rebase and squash when the merge base sits exactly at the first window\'s cut (8 commits above both tips): equal to git, not a TypeError', async () => {
@@ -109,7 +109,7 @@ test('rebase and squash when the merge base sits exactly at the first window\'s 
     assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), res.oid);
     assert.equal(treeOf(r.bare, 'feat'), gitTree, `${squash ? 'squash' : 'rebase'}: tip tree == git rebase`);
     if (!squash) assert.deepEqual(log(r.bare, 'main..feat').map(l => l.split('|')[0]), gitLog.map(l => l.split('|')[0]), 'every replayed tree == git');
-    assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+    assert.deepEqual(fsckProblems(r.bare), []);
   }
 });
 
@@ -136,7 +136,7 @@ test('cherry-pick and revert: trees equal git; signature not carried; signed res
   const clash = commitOn(r, 'feat', 'feat', { 'a.txt': 'feat-a\n' }, 'clash');
   commitOn(r, 'main', 'main', { 'a.txt': 'main-a\n' }, 'main a');
   await assert.rejects(cherryPick(r.url, { ref: 'refs/heads/main', commit: clash, committer }, T()), e => e.code === 'merge_conflict' && e.conflicts.includes('a.txt'));
-  assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
 });
 
 test('property: line-level edits to the same files on both sides — rebase and cherry-pick equal git, or conflict where git does', async () => {
@@ -166,7 +166,7 @@ test('property: line-level edits to the same files on both sides — rebase and 
     if (p?.outcome === 'ok') { assert.equal(p.tree, gitPick, `case ${i}: cherry-pick tree == git`); stats.picked++; }
     else if (p?.outcome === 'empty') assert.ok(gitEmpty, `case ${i}: we say empty, git does not`);
     else if (gitPick) stats.conservative++;
-    assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+    assert.deepEqual(fsckProblems(r.bare), []);
   }
   console.log(`  ${N} cases: ${JSON.stringify(stats)}`);
   assert.ok(stats.rebased > 0 && stats.picked > 0, 'line merges exercised');
@@ -206,5 +206,5 @@ test('end to end: edit on a branch, main moves, rebase, fast-forward land, delet
   assert.equal(m.outcome, 'fast_forward');
   assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:README.md'])), 'hello WORLD'); assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:other.txt'])), 'o2');
   assert.equal(ok(sh(r.bare, ['log', '--format=%s', '-3', 'main'])).split('\n').join('|'), 'edit|main moved|base', 'linear history');
-  assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
 });

@@ -11,7 +11,7 @@
 import { join } from 'node:path';
 import { mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { Rng } from './prng.js';
 import { genDag, readModel } from './dag.js';
@@ -127,7 +127,7 @@ async function mergeBaseCase(rng, i, seed, decoy) {
     if (result.outcome === 'merge') { const g = gitMergeTree(M.bare, a, b); if (!g.clean || g.tree !== result.tree) problems.push(`pushed merge tree ${result.tree.slice(0, 8)}; git merge-tree ${g.clean ? g.tree.slice(0, 8) : 'conflicts'}`); if (nowOurs !== result.oid) problems.push('ref is not the merge commit'); }
     if (result.outcome === 'fast_forward' && (nowOurs !== b || gitBases[0] !== a)) problems.push('fast-forward where git has no ancestor relation');
     if (result.outcome === 'up_to_date' && !(gitBases.length === 1 && gitBases[0] === b) && a !== b) problems.push('up_to_date but theirs is not the base');
-    const fsck = git(M.bare, ['fsck', '--strict', '--no-dangling']).trim(); if (fsck) problems.push(`fsck: ${fsck.split('\n')[0]}`);
+    const fsck = fsckProblems(M.bare); if (fsck.length) problems.push(`fsck: ${fsck[0]}`);
   }
   if (error && op === 'mergeBranch' && error.code === 'merge_conflict' && error.bases && !same(error.bases.slice().sort(), gitBases)) problems.push(`criss-cross refusal with bases ${error.bases.length}, git has ${gitBases.length}${M.lied ? ' (lied to)' : ' (HONEST server)'}`);
   if (error && error.code === 'unrelated_histories' && gitBases.length) problems.push(`unrelated_histories but git has a base${M.lied ? ' (lied to)' : ' (HONEST server)'}`);
@@ -180,8 +180,8 @@ try {
     const problems = [];
     const nowHead = git(bare, ['rev-parse', 'main']).trim();
     const content = gitBuf(bare, ['cat-file', 'blob', `main:${FILE}`]).toString();
-    const fsck = git(bare, ['fsck', '--strict', '--no-dangling']).trim();
-    if (fsck) problems.push(`fsck: ${fsck.split('\n')[0]}`);
+    const fsck = fsckProblems(bare);
+    if (fsck.length) problems.push(`fsck: ${fsck[0]}`);
     if (error) {
       if (!CODES.has(error.code)) problems.push(`untyped ${error.code}: ${error.message}`);
       if (error.code === 'ambiguous') { if (nowHead !== head && content !== EXPECTED) problems.push(`ambiguous but ref moved to wrong content ${JSON.stringify(content)}`); }

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { te } from '../src/bytes.js';
 import { parseCommit, parseTag, parseTree, encodeCommit, ident } from '../src/objects.js';
 import { validateIdent } from '../src/validate.js';
+import { fsck, fsckProblemsOf } from './server.js';
 
 const env = {
   ...process.env,
@@ -42,10 +43,6 @@ function literally(dir, type, text) {
   return r.out.trim();
 }
 
-function fsckErrors(dir, oid) {
-  const r = git(dir, ['fsck', '--strict']);
-  return r.err.split('\n').map(l => l.trim()).filter(l => l.startsWith('error:') && l.includes(oid));
-}
 
 test('a second tree header is fsck-clean and git shows the first; ply rejects it', () => {
   withRepo((dir, empty) => {
@@ -56,7 +53,7 @@ test('a second tree header is fsck-clean and git shows the first; ply rejects it
     assert.equal(raw.code, 0);
     assert.ok(raw.out.includes(`tree ${empty}`));
     assert.ok(raw.out.includes(`tree ${otherTree}`));
-    assert.deepEqual(fsckErrors(dir, oid), []);
+    assert.deepEqual(fsckProblemsOf(dir, oid), []);
     const shown = git(dir, ['log', '-1', '--no-walk', '--format=%T', oid]);
     assert.equal(shown.code, 0, shown.err);
     assert.equal(shown.out.trim(), empty);
@@ -68,14 +65,14 @@ test('duplicate encoding, duplicate committer, and a parent after committer', ()
   withRepo((dir, empty) => {
     const enc = `tree ${empty}\nauthor ${author}\ncommitter ${author}\nencoding ISO-8859-1\nencoding UTF-8\n\nmsg\n`;
     const encOid = literally(dir, 'commit', enc);
-    assert.deepEqual(fsckErrors(dir, encOid), []);
+    assert.deepEqual(fsckProblemsOf(dir, encOid), []);
     const encLog = git(dir, ['log', '-1', '--no-walk', '--format=%e', encOid]);
     assert.equal(encLog.out.trim(), 'ISO-8859-1');
     assert.throws(() => parseCommit(te.encode(enc)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate encoding');
 
     const com = `tree ${empty}\nauthor ${author}\ncommitter ${author}\ncommitter ${other}\n\nmsg\n`;
     const comOid = literally(dir, 'commit', com);
-    assert.deepEqual(fsckErrors(dir, comOid), []);
+    assert.deepEqual(fsckProblemsOf(dir, comOid), []);
     const comLog = git(dir, ['log', '-1', '--no-walk', '--format=%cn', comOid]);
     assert.equal(comLog.out.trim(), 'B');
     assert.throws(() => parseCommit(te.encode(com)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate committer');
@@ -83,7 +80,7 @@ test('duplicate encoding, duplicate committer, and a parent after committer', ()
     const parent = 'b'.repeat(40);
     const late = `tree ${empty}\nauthor ${author}\ncommitter ${author}\nparent ${parent}\n\nmsg\n`;
     const lateOid = literally(dir, 'commit', late);
-    assert.deepEqual(fsckErrors(dir, lateOid), []);
+    assert.deepEqual(fsckProblemsOf(dir, lateOid), []);
     const parents = git(dir, ['log', '-1', '--no-walk', '--format=%P', lateOid]);
     assert.equal(parents.out.trim(), '');
     assert.throws(() => parseCommit(te.encode(late)), e => e.code === 'pack_corrupt' && e.message === 'commit: bad header order');
@@ -108,7 +105,7 @@ test('a commit git writes round-trips, and a duplicate tagger is fsck-clean firs
     const tag = `object ${oid}\ntype commit\ntag v1\ntagger ${author}\ntagger ${other}\n\nrel\n`;
     const tagOid = literally(dir, 'tag', tag);
     assert.equal(git(dir, ['update-ref', 'refs/tags/v1', tagOid]).code, 0);
-    assert.deepEqual(fsckErrors(dir, tagOid), []);
+    assert.deepEqual(fsckProblemsOf(dir, tagOid), []);
     const shown = git(dir, ['for-each-ref', '--format=%(tagger)', 'refs/tags/v1']);
     assert.equal(shown.out.trim(), author);
     assert.throws(() => parseTag(te.encode(tag)), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger');
@@ -200,16 +197,16 @@ test('#34 parseTree on every cell of relation × mode × mode × position × ord
       c.bytes = Buffer.concat(c.list.flatMap(e => [Buffer.from(`${e.mode} `), e.name, Buffer.from([0]), Buffer.from(oidFor(e.mode), 'hex')]));
       c.oid = gitRaw(dir, ['hash-object', '-t', 'tree', '-w', '--stdin', '--literally'], c.bytes);
     }
-    const r = spawnSync('git', ['-C', dir, 'fsck', '--strict', '--no-dangling'], { env });
-    const fsck = new Map();
-    for (const line of r.stderr.toString().split('\n')) {
+    const fsckOut = fsck(dir, ['--no-dangling']);
+    const fsckOf = new Map();
+    for (const line of fsckOut.lines) {
       const m = /^error in tree ([0-9a-f]{40}): (\w+):/.exec(line);
-      if (m) { if (!fsck.has(m[1])) fsck.set(m[1], new Set()); fsck.get(m[1]).add(m[2]); }
+      if (m) { if (!fsckOf.has(m[1])) fsckOf.set(m[1], new Set()); fsckOf.get(m[1]).add(m[2]); }
     }
     const tally = new Map();
     const bad = [];
     for (const c of cells) {
-      const ids = fsck.get(c.oid) ?? new Set();
+      const ids = fsckOf.get(c.oid) ?? new Set();
       const ply = plyVerdict34(c.bytes);
       const gitRejects = ids.size > 0;
       if (gitRejects !== c.expectGitRejects) bad.push(`${c.id}: model says git ${c.expectGitRejects ? 'rejects' : 'accepts'}, fsck: [${[...ids]}]`);

@@ -6,7 +6,7 @@
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { git, gitBuf, tmpRoot } from '../server.js';
+import { git, gitBuf, tmpRoot, fsckProblems } from '../server.js';
 import { Rng } from './prng.js';
 import { parseTree, treeReplaceOid, hashObject, encodeCommit, TYPE } from '../../src/objects.js';
 import { spliceDelta, buildPack, makeDelta } from '../../src/pack.js';
@@ -69,7 +69,7 @@ try {
     }
     if (!problems.length) {
       if (!Buffer.from(gitBuf(judge, ['cat-file', 'blob', newBlob])).equals(target)) problems.push('blob content via git != target');
-      const fsck = git(judge, ['fsck', '--strict', '--connectivity-only', newCommit]).trim(); if (fsck) problems.push(`fsck ${fsck.split('\n')[0]}`);
+      const fsck = fsckProblems(judge, { args: [newCommit] }); if (fsck.length) problems.push(`fsck ${fsck[0]}`);
       // and a real push of the thin pack lands the ref
       const out = execFileSync('git', ['-C', judge, 'receive-pack', '.'], { input: concat([pktFor(`${oldCommit} ${newCommit} refs/heads/main\0report-status\n`), te.encode('0000'), thin]), stdio: 'pipe' }).toString();
       if (!/unpack ok/.test(out) || !/ok refs\/heads\/main/.test(out)) problems.push(`receive-pack: ${out.replace(/\n/g, '|').slice(0, 100)}`);

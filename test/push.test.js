@@ -5,7 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, cpSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { GitHttp, ZERO_OID } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
@@ -125,9 +125,9 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
       // 6. report-status-v2 is accepted; git 2.43 emits `option` lines only through proc-receive, so none are expected here
       if (caps.reportV2 && !err) assert.deepEqual(res.report.refs.map(r => ({ ...r.options })), res.report.refs.map(() => ({})), label);
       // 6b. push options: only valid when the server advertises them; git refuses client-side otherwise, we get the server's refusal
-      if (caps.pushOptions && !err) assert.match(res.hookOutput, hk === 'pre-receive-echo-options' ? /opts=2:ci\.skip:reviewer=alice/ : /.*/, `${label}: options reached the hook`);
+      if (caps.pushOptions && !err && hk === 'pre-receive-echo-options') assert.match(res.hookOutput, /opts=2:ci\.skip:reviewer=alice/, `${label}: options reached the hook`); // only this hook prints them
       // 7. server state is sound
-      assert.equal(git(t.ours, ['fsck', '--strict', '--no-dangling']).trim(), '', label);
+      assert.deepEqual(fsckProblems(t.ours), [], label);
       // 8. the receive-pack span records the outcome
       const span = exporter.lines.flatMap(flattenLine).find(s => s.name === 'git.receive-pack');
       assert.equal(span.attrs['git.push.ok'], !err, label);

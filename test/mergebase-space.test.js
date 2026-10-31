@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { MERGE_LIES, mergeLie } from './fuzz/mergelies.js';
 import { oracleRediff } from './gitversion.js';
@@ -159,7 +159,7 @@ async function cell(S, R, server, op, seed, git) {
     const trees = out(R.bare, ['log', '--format=%T', '--reverse', `${theirs}..main`]).split('\n');
     if (!same(trees, git.rebaseTrees)) p.push(`rebase trees ${trees.length} != git rebase ${git.rebaseTrees.length} (or differ)`);
   }
-  if (!err && op !== 'mergeBase') { const f = out(R.bare, ['fsck', '--strict', '--no-dangling']); if (f) p.push(`fsck: ${f.split('\n')[0]}`); }
+  if (!err && op !== 'mergeBase') { const f = fsckProblems(R.bare); if (f.length) p.push(`fsck: ${f[0]}`); }
   // lies the pack itself contradicts are pack_corrupt whenever they fired
   if (lied && ['mb:omit-want', 'mb:extra-foreign'].includes(server) && err?.code !== 'pack_corrupt') p.push(`${server} fired but outcome ${err ? err.code : 'success'}`);
   return { problems: p, lied, outcome: err ? (err.code ?? `untyped ${err.name}`) : op === 'mergeBase' ? `ok(${res.bases.length})@${res.depth}` : `ok:${res.outcome}` };
