@@ -28,6 +28,7 @@ export const RETRY = Object.freeze({
   lfs_pointer: 'no',
   cas_conflict: 'fresh',
   push_rejected: 'no',
+  push_partial: 'no',
   merge_conflict: 'no',
   not_fast_forward: 'no',
   not_linear: 'no',
@@ -45,7 +46,8 @@ export const isPlyCode = code => typeof code === 'string' && code in RETRY;
 export const retryPolicy = e => RETRY[e?.code] ?? 'no';
 export const isRetryable = e => retryPolicy(e) === 'yes';
 // After a push body is on the wire, any failure to obtain a trustworthy report means the ref MAY have moved.
-export const ambiguousAfterPush = (e, message = 'push outcome unknown') => (['limit_exceeded', 'bad_request', 'ambiguous'].includes(e?.code) ? e : fail('ambiguous', `${message}: ${e?.message ?? e}`, { cause: e, original: e?.code }));
+// That includes our own limits: a report too large to read says nothing about whether the ref moved.
+export const ambiguousAfterPush = (e, message = 'push outcome unknown') => (e?.code === 'ambiguous' ? e : fail('ambiguous', `${message}: ${e?.message ?? e}`, { cause: e, original: e?.code }));
 
 // Rewrite every string an error carries through `scrub`, in place: message, stack, own fields, nested plain objects,
 // prototype-less maps (merge reasons, report options) and arrays (a push report, hook output) and the cause chain.

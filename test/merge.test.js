@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { Rng } from './fuzz/prng.js';
 import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
@@ -75,6 +75,10 @@ test('threeWay: the trivial-merge rules, one directory', () => {
   // truncated: b's side runs into a commit whose parents are unknown, outside everything settled → may hide a base
   assert.equal(bestBases(G({ a: ['m'], b: ['q', 'm'], m: [] }), 'a', 'b').truncated, true);
   assert.equal(bestBases(G({ a: ['m'], b: ['m'], m: [] }), 'a', 'b').truncated, false, 'a frontier under a common ancestor does not matter');
+  // #42: with two best bases, a cut inside the settled region may hide that one is below the other (z below c through x)
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], x: ['z'], z: [] }), 'a', 'b'), { best: ['c'], truncated: false });
+  assert.deepEqual(bestBases(G({ a: ['c'], b: ['c'], c: ['x'] }), 'a', 'b'), { best: ['c'], truncated: false }, 'one base over a settled cut is final');
   // a pack must not carry an object twice (git: "tried to add buffer twice"); first occurrence wins, order kept
   assert.deepEqual(uniqueObjects([{ oid: 'a', n: 1 }, { oid: 'b' }, { oid: 'a', n: 2 }]), [{ oid: 'a', n: 1 }, { oid: 'b' }]);
 });
@@ -109,7 +113,7 @@ test('outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, c
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:d/y.txt']).stdout, 'y2\n'); assert.equal(sh(r.bare, ['cat-file', '-p', 'main:a.txt']).stdout, 'a2\n');
   const rootSpan = ex3.lines.flatMap(flattenLine).find(s => s.name === 'git.merge');
   assert.equal(rootSpan.attrs['git.merge.base'], feat2); assert.equal(m.newTrees, 2, 'root + d/ rewritten'); assert.ok(rootSpan.attrs['git.merge.trees.fetched'] <= 6, 'only differing directories fetched');
-  assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
   // conflict: both modify a.txt differently
   const ours4 = branchCommit(r, 'main', 'main', { 'a.txt': 'a3\n' }, 'ours4');
   const theirs4 = branchCommit(r, 'feat', 'feat', { 'a.txt': 'a4\n', 'f.txt': 'f\n' }, 'theirs4');
@@ -145,7 +149,7 @@ test('line merge and renames, judged by git: disjoint edits to one file merge to
     const g = gitMergeTree(r.bare, ours, theirs);
     assert.equal(g.clean, gitClean, `${name}: the case means what it says (git ${g.clean ? 'clean' : 'conflicts'})`);
     let m = null, err = null; try { m = await merge(r); } catch (e) { err = e; }
-    if (gitClean) { assert.ok(m, `${name}: git merges cleanly, so must we (${err?.message})`); assert.equal(m.tree, g.tree, `${name}: tree == git merge-tree`); assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), ''); }
+    if (gitClean) { assert.ok(m, `${name}: git merges cleanly, so must we (${err?.message})`); assert.equal(m.tree, g.tree, `${name}: tree == git merge-tree`); assert.deepEqual(fsckProblems(r.bare), []); }
     else assert.equal(err?.code, 'merge_conflict', `${name}: git conflicts, so must we`);
   }
 });
@@ -202,6 +206,30 @@ test('merge bases decided by git: criss-cross refuses (git builds a virtual base
     const m = await merge(r); assert.equal(m.base, Y); assert.equal(m.tree, g.tree, 'tree == git merge-tree');
     assert.equal(run(r.bare, ['cat-file', '-p', 'main:f']), 'r');
   }
+});
+
+test('#42: a cut below two candidates is deepened, as git merge-base --all says (honest server), and merges as git does', async () => {
+  const run = (w, args, opts) => { const x = sh(w, args, opts); assert.equal(x.status, 0, `${args.join(' ')}: ${x.stderr}`); return x.stdout.trim(); };
+  const put = (w, p, v) => { writeFileSync(join(w, p), v); run(w, ['add', '-A']); };
+  // a,b → [c, z]; c → p1..p6 → x → z. The 8-deep window cuts x; over it z looks like a second best base (criss-cross,
+  // refused) where git has only c (z is below c through x). Must deepen and merge as git does.
+  const r = repo(); const w = r.work;
+  put(w, 'f', 'z\n'); run(w, ['commit', '-qm', 'z']); const Z = run(w, ['rev-parse', 'HEAD']);
+  put(w, 'f', 'x\n'); run(w, ['commit', '-qm', 'x']);
+  for (let i = 6; i >= 1; i--) { put(w, `p${i}`, `${i}\n`); run(w, ['commit', '-qm', `p${i}`]); }
+  put(w, 'f', 'c\n'); run(w, ['commit', '-qm', 'c']); const C = run(w, ['rev-parse', 'HEAD']);
+  // merge commits [C, Z] by hand: `git merge` would say "already up to date" (Z is below C), which is the point
+  put(w, 'ga', 'a\n'); const A = run(w, ['commit-tree', run(w, ['write-tree']), '-p', C, '-p', Z, '-m', 'a']);
+  run(w, ['checkout', '-q', '--detach', C]); put(w, 'gb', 'b\n'); const B = run(w, ['commit-tree', run(w, ['write-tree']), '-p', C, '-p', Z, '-m', 'b']);
+  run(w, ['push', '-q', '-f', r.bare, `${A}:refs/heads/main`, `${B}:refs/heads/feat`]);
+  assert.deepEqual(run(r.bare, ['rev-list', '--parents', '-n1', A]).split(' ').slice(1), [C, Z]);
+  assert.equal(run(r.bare, ['merge-base', '--all', A, B]), C, 'git: one base');
+  const mb = await mergeBase(createTransport(r.url, { tracer: new Tracer() }), A, B);
+  assert.deepEqual([mb.bases, mb.depth], [[C], 16], 'deepened past the cut; main answered [C, Z] at depth 8');
+  const g = gitMergeTree(r.bare, A, B); assert.ok(g.clean);
+  const m = await merge(r); assert.equal(m.outcome, 'merge'); assert.equal(m.base, C); assert.equal(m.tree, g.tree, 'tree == git merge-tree');
+  assert.deepEqual(run(r.bare, ['rev-list', '--parents', '-n1', 'main']).split(' ').slice(1), [A, B]);
+  assert.deepEqual(fsckProblems(r.bare), []);
 });
 
 test('.gitattributes merge drivers, judged by git (attr.tree): union, -merge, binary macro, nested override; each attribute source', async () => {
@@ -315,7 +343,7 @@ test('branch workflow: editFile creates the branch from main (CAS: must not exis
   assert.equal(sh(r.bare, ['rev-parse', 'refs/heads/tmp']).stdout.trim(), base, 'tmp still there');
   await assert.rejects(deleteBranch(t, { ref: 'refs/heads/main', oid: e.newCommit }), e => e.code === 'push_rejected' && /current branch/.test(e.message));
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit, 'main still there');
-  assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
 });
 
 test('property: random three-way tree edits — clean merges equal git merge-tree; our conflicts ⊇ git\'s, and never a wrong tree', async () => {
@@ -374,7 +402,7 @@ test('property: random three-way tree edits — clean merges equal git merge-tre
       assert.ok(g.clean, `case ${i}: we merged cleanly but git conflicts on ${g.conflicts}`);
       const tree = m.outcome === 'merge' ? m.tree : sh(r.bare, ['rev-parse', `${m.oid}^{tree}`]).stdout.trim();
       assert.equal(tree, g.tree, `case ${i}: tree differs from git merge-tree (outcome ${m.outcome})`);
-      assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), '');
+      assert.deepEqual(fsckProblems(r.bare), []);
     } else if (nBases > 1) {
       // criss-cross: git merges the bases into a virtual one; we refuse, whatever git's verdict
       assert.ok(err.bases?.length === nBases, `case ${i}: ${nBases} merge bases must be refused as such (${err.message})`); stats.criss++;

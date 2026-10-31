@@ -10,13 +10,13 @@
 //
 // Poison: a cached body that fails verification is evicted and refetched once (`x-ply-cache: bust` from the
 // client). The response carries `x-ply-pack-cache: HIT|MISS|BUST` so spans can say which tier served it.
-import { te } from './bytes.js';
+import { te, td } from './bytes.js';
 
 const CACHE_HEADER = 'x-ply-pack-cache';
 export const CACHE_CONTROL_HEADER = 'x-ply-cache';
 
 export function isCacheableFetch(body) {
-  const t = typeof body === 'string' ? body : new TextDecoder().decode(body);
+  const t = typeof body === 'string' ? body : td.decode(body);
   // pkt-lines: each line is 4 hex + payload; match on payloads, anchored to the hex prefix so "have" inside a message can't fool it
   const has = re => re.test(t);
   return has(/[0-9a-f]{4}command=fetch\n/) && !has(/[0-9a-f]{4}have [0-9a-f]{40}\n/) && !has(/[0-9a-f]{4}want-ref /) && !has(/[0-9a-f]{4}deepen-(since|not) /) && !has(/[0-9a-f]{4}shallow [0-9a-f]{40}\n/) && has(/[0-9a-f]{4}filter /);

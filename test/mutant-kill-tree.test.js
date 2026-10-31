@@ -538,7 +538,13 @@ test('canonMode is git\'s canon_mode', () => {
   for (const m of ['120000', '160000', '40000']) assert.equal(canonMode(m), m);
   const cases = { 100644: '100644', 100755: '100755', 100664: '100644', 100600: '100644', 100000: '100644', 100700: '100755', 100100: '100755', 100744: '100755', 100777: '100755', 100677: '100644' };
   for (const [m, want] of Object.entries(cases)) assert.equal(canonMode(m), want, m);
-  for (const m of ['100', '1006440', '0100644', '040000', '100648', '100x44', '', 'x100644', '100644x', '200644', '120001', '160001', '4000']) assert.equal(canonMode(m), null, m);
+  // the low 16 bits, as tree-walk keeps them (observed with git ls-tree 2.50): a type git does not know is a gitlink,
+  // and the digits above the sixth from the right are gone
+  const odd = { 100: '160000', 1006440: '160000', 200644: '160000', 120001: '120000', 160001: '160000', 4000: '160000', 140000: '160000', 40755: '40000', 7100644: '100644', 300644: '100644', 107777: '100755', 1: '160000', 777777: '160000' };
+  for (const [m, want] of Object.entries(odd)) assert.equal(canonMode(m), want, m);
+  // what parse_mode refuses (empty, a non-octal byte) or fsck --strict errors on (zero-padded), and non-strings
+  for (const m of ['0100644', '040000', '0', '100648', '100x44', '', 'x100644', '100644x', ' 100644', '8']) assert.equal(canonMode(m), null, m);
+  assert.equal(canonMode(100644), null);
 });
 
 test('treeFiles: depth-first in tree order, canonical modes, every refusal', () => {
@@ -566,7 +572,7 @@ test('treeFiles: depth-first in tree order, canonical modes, every refusal', () 
   // the same name in two different trees is not a duplicate
   const two = new Map([['r', [{ mode: '40000', name: 'a', oid: 'x' }, { mode: '40000', name: 'b', oid: 'x' }]], ['x', [{ mode: '100644', name: 'a', oid: '1' }]]]);
   assert.deepEqual(treeFiles(o => two.get(o), 'r').map(f => f.path), ['a/a', 'b/a']);
-  const bad = new Map([['r', [{ mode: '40000', name: 'd', oid: 'd' }]], ['d', [{ mode: '100648', name: 'x', oid: '1' }]]]);
+  const bad = new Map([['r', [{ mode: '40755', name: 'd', oid: 'd' }]], ['d', [{ mode: '100648', name: 'x', oid: '1' }]]]);
   throws(() => treeFiles(o => bad.get(o), 'r'), 'pack_corrupt', 'tree d: d/x has mode 100648, which git cannot check out');
   throws(() => treeFiles(tree, 'r', { limits: {} }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   throws(() => treeFiles(tree, 'r', { limits: { maxPackObjects: 9 } }), 'bad_request', 'limits.maxPathDepth must be a finite non-negative number');
@@ -597,7 +603,9 @@ test('checkoutTree: one blob:none fetch for the trees, blobs in batches, gitlink
   ]);
   assert.deepEqual(r.fetches().slice(1).map(f => [f.wants.length, f.filter]), [[5, null]]);
   const blobs = e.span('git.checkout.blobs');
-  assert.equal(blobs.parentSpanId, root.spanId);
+  // consumed after checkoutTree returns: a root of its own trace that follows the checkout root (README "Span lifetimes")
+  assert.deepEqual([blobs.parentSpanId, blobs.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[root.traceId, root.spanId, 'follows_from']]]);
+  assert.notEqual(blobs.traceId, root.traceId);
   assert.deepEqual(Object.fromEntries(Object.entries(blobs.attrs).filter(([k]) => k.startsWith('git.checkout.'))), {
     'git.checkout.blobs.unique': 5, 'git.checkout.blobs.paths': 6, 'git.checkout.blobs.fetches': 1, 'git.checkout.blobs.buffered': 5, 'git.checkout.blobs.streamed': 0,
     'git.checkout.blobs.splits': 0, 'git.checkout.blobs.bytes': 26, 'git.checkout.blobs.single': false, 'git.checkout.blobs.outcome': 'ok',
@@ -685,7 +693,9 @@ test('checkoutTree: a batch over a cap splits in half; one left alone streams on
   const s = e.span('git.checkout.blobs').attrs;
   assert.deepEqual([s['git.checkout.blobs.splits'], s['git.checkout.blobs.fetches'], s['git.checkout.blobs.buffered'], s['git.checkout.blobs.streamed'], s['git.checkout.blobs.bytes']], [2, 2, 4, 1, 5]);
   assert.equal(e.all('git.read.blob').length, 1);
-  assert.equal(e.span('git.read.blob').parentSpanId, e.span('git.checkout.blobs').spanId);
+  const [rb, cb] = [e.span('git.read.blob'), e.span('git.checkout.blobs')];
+  assert.deepEqual([rb.parentSpanId, rb.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[cb.traceId, cb.spanId, 'follows_from']]]);
+  assert.deepEqual(cb.links.filter(l => l.attrs['ply.link'] === 'followed_by').map(l => l.spanId), [rb.spanId], 'the blobs span, open when the stream starts, links back');
 });
 
 test('checkoutTree: a host refusing many wants is asked one at a time from then on; a lie is never a reason to fall back', async () => {
@@ -834,11 +844,13 @@ test('commitView: idents for JSON, signed, parents and message', () => {
   assert.equal(commitView(raw('mergetag object x')).signed, false);
   assert.equal(commitView(raw('xgpgsig y')).signed, false);
   assert.equal(commitView(raw('gpgsigx y')).signed, false);
-  // a date git could not read: epoch and time null, the rest kept
-  const odd = commitView(te.encode(`tree ${tree}\nauthor A <a@x>\ncommitter A <a@x> 100000000000000000 +0000\n\nm\n`), withLimits({}));
-  assert.deepEqual(odd.author, { name: 'A', email: 'a@x', time: null, epoch: null, tz: '' });
+  // a date fsck accepts but a JS Date cannot hold: time null, the epoch and the rest kept
+  const odd = commitView(te.encode(`tree ${tree}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 100000000000000000 +0000\n\nm\n`), withLimits({}));
   assert.deepEqual(odd.committer, { name: 'A', email: 'a@x', time: null, epoch: 1e17, tz: '+0000' });
   assert.equal(odd.message, 'm\n');
+  // a commit fsck refuses is refused here too (#59): commitView reads through parseCommit
+  assert.throws(() => commitView(te.encode(`tree ${tree}\nauthor A <a@x>\ncommitter A <a@x> 1 +0000\n\nm\n`)), e => e.code === 'pack_corrupt' && e.msgId === 'missingSpaceBeforeDate');
+  assert.throws(() => commitView(te.encode(`tree ${tree}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n\nm\0\n`)), e => e.code === 'pack_corrupt' && e.msgId === 'nulInCommit');
 });
 
 test('readCommit: the commit alone (tree:0, deepen 1), its view and span; a non-commit oid is not_found', async () => {
@@ -916,7 +928,9 @@ test('readFile: the blob streamed and verified, its size first; directories and 
     ['HEAD', 'src/lib/b.js', 3, GIT.b, 2, '100644', 'ok']);
   const blob = e.span('git.read.blob');
   assert.deepEqual([blob.attrs['git.read.blob.oid'], blob.attrs['git.read.blob.size'], blob.attrs['git.read.blob.bytes'], blob.attrs['git.read.blob.verified'], blob.attrs['git.read.blob.outcome']], [GIT.b, 2, 2, true, 'ok']);
-  assert.equal(blob.parentSpanId, e.span('git.read').spanId);
+  const readRoot = e.span('git.read');
+  assert.deepEqual([blob.parentSpanId, blob.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[readRoot.traceId, readRoot.spanId, 'follows_from']]]);
+  assert.deepEqual(readRoot.links.map(l => [l.spanId, l.attrs['ply.link']]), [[blob.spanId, 'followed_by']]);
   // a big blob in 7-byte network chunks
   const big = await readFile('http://fake/r.git', { ref: 'main', path: 'big.txt' }, env(r).opts);
   assert.equal(big.size, 5000);

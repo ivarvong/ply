@@ -19,7 +19,8 @@ import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packr
 import { inflate } from '../src/inflate.js';
 import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
 import { parseLsRefLine } from '../src/lsrefs.js';
-import { parseReportStatus } from '../src/push.js';
+import { parseCapabilitiesV2 } from '../src/discover.js';
+import { parseReportStatus, classifyReport, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl } from '../src/sshgit.js';
 import { parseLine, parseFile } from '../src/attributes.js';
@@ -125,7 +126,7 @@ test('tree: fsck-hard malformations are rejected; a bad filemode warning still p
     ['duplicate', concat([raw('100644 a\0'), raw('100644 a\0', oidBytes(5))])],
   ];
   for (const [label, bytes] of bad) assert.throws(() => parseTree(bytes), e => e.code === 'pack_corrupt', label);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
+  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100644'); // canon_mode, as git ls-tree prints it
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
   assert.equal(id.length, OID_HEX_CHARS);
 });
@@ -214,23 +215,23 @@ property('ident', 'ident prefixes are field prefixes and never throw', () => {
   }
 });
 
-test('assertFetched applies fsck to a complete object and leaves a header prefix to parseCommit', () => {
+test('assertFetched and parseCommit apply fsck to a complete object; a header prefix is refused', () => {
   const tree = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }]);
   assertFetched('tree', tree);
   assert.throws(() => assertFetched('tree', tree.subarray(0, tree.length - 1)), e => e.code === 'pack_corrupt');
   const good = encodeCommit({ tree: oid(1), author, message: 'm\n' });
   assertFetched('commit', good);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\ncommitter ${author}\n\nm\n`)), /bad header order/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\n\nm\n`)), /missing author/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada 1700000000 +0000\ncommitter ${author}\n\nm\n`)), /missing email/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada <ada@x> soon +0000\ncommitter ${author}\n\nm\n`)), /bad date/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree short\nauthor ${author}\ncommitter ${author}\n\nm\n`)), /bad tree/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\ncommitter ${author}\n\nm\n`)), /missingAuthor/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\n\nm\n`)), /missingAuthor/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada 1700000000 +0000\ncommitter ${author}\n\nm\n`)), /missingEmail/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada <ada@x> soon +0000\ncommitter ${author}\n\nm\n`)), /badDate/);
+  assert.throws(() => assertFetched('commit', te.encode(`tree short\nauthor ${author}\ncommitter ${author}\n\nm\n`)), /badTreeSha1/);
   assertFetched('tag', tagBytes);
-  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\ntagger ${author}\n\nm\n`)), /bad header order/);
-  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\n\nm\n`)), /missing name/);
+  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\ntagger ${author}\n\nm\n`)), /missingTagEntry/);
+  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\n\nm\n`)), /missingTagEntry/);
   assert.equal(hashObject('blob', te.encode('x')).length, OID_HEX_CHARS);
-  // a one-line header prefix still parses; it is not a complete object, so fetch is what calls assertFetched
-  assert.equal(parseCommit(te.encode(`tree ${oid(1)}\n`)).tree, oid(1));
+  // parseCommit is the fsck check itself (#59): a header prefix that stops before the committer is not a commit
+  assert.throws(() => parseCommit(te.encode(`tree ${oid(1)}\n`)), /missingAuthor/);
 });
 
 function stepPkt(bytes) {
@@ -368,6 +369,13 @@ property('ls-ref', 'an ls-refs line prefix is a typed error or a field prefix', 
   }
 });
 
+property('caps', 'a v2 capability advertisement cut anywhere is a typed error: its flush comes last', () => {
+  const data = l => ({ kind: 'data', payload: te.encode(l) });
+  const frames = [data('# service=git-upload-pack\n'), { kind: 'flush' }, data('version 2\n'), data('agent=git/2.50.0\n'), data('ls-refs=unborn\n'), data('fetch=shallow wait-for-done filter\n'), data('object-format=sha1\n'), { kind: 'flush' }];
+  assert.deepEqual(parseCapabilitiesV2(frames), ['agent=git/2.50.0', 'ls-refs=unborn', 'fetch=shallow wait-for-done filter', 'object-format=sha1']);
+  for (let i = 0; i < frames.length; i++) assert.throws(() => parseCapabilitiesV2(frames.slice(0, i)), e => CODES.has(e.code), `${i} frames`);
+});
+
 property('report', 'a prefix of report-status lines is a prefix of the ref statuses', () => {
   const lines = ['unpack ok', 'ok refs/heads/main', 'ng refs/heads/other hook declined', 'option old-oid abcdef'];
   const full = parseReportStatus(lines);
@@ -379,6 +387,30 @@ property('report', 'a prefix of report-status lines is a prefix of the ref statu
   }
   const partial = parseReportStatus(['unpack o']);
   assert.equal(partial.unpack, 'o');
+});
+
+property('report', 'a proper prefix of a git report never classifies as definite', () => {
+  const commands = [{ ref: 'refs/heads/main' }, { ref: 'refs/heads/other' }];
+  const lines = ['unpack ok\n', 'ok refs/heads/main\n', 'ng refs/heads/other hook declined\n'].map(l => te.encode(l));
+  assert.equal(classifyReport(lines, commands).tag, 'statuses');
+  for (let i = 0; i < lines.length; i++) assert.equal(classifyReport(lines.slice(0, i), commands).tag, 'malformed', `${i} lines`);
+  const last = lines.at(-1);
+  for (let j = 0; j < last.length; j++) assert.equal(classifyReport([...lines.slice(0, -1), last.subarray(0, j)], commands).tag, 'malformed', `last line cut at ${j}`);
+});
+
+property('stream', 'a proper prefix of a git response stream is never a report', () => {
+  const inner = concat([pkt('unpack ok\n'), pkt('ok refs/heads/main\n'), FLUSH]);
+  const shapes = {
+    plain: { sideband: false, frames: [{ kind: 'data', payload: te.encode('unpack ok\n') }, { kind: 'data', payload: te.encode('ok refs/heads/main\n') }, { kind: 'flush' }] },
+    sideband: { sideband: true, frames: [{ kind: 'data', payload: concat([Uint8Array.of(2), te.encode('hook\n')]) }, { kind: 'data', payload: concat([Uint8Array.of(1), inner]) }, { kind: 'data', payload: Uint8Array.of(1) }, { kind: 'flush' }] },
+  };
+  for (const [name, { sideband, frames }] of Object.entries(shapes)) {
+    const run = fs => { let st = streamInit(sideband); for (const f of fs) st = streamStep(st, f); return streamFinish(st); };
+    assert.equal(run(frames).tag, 'report', name);
+    assert.equal(run(frames).lines.length, 2, name);
+    for (let i = 0; i < frames.length; i++) assert.equal(run(frames.slice(0, i)).tag, 'broken', `${name}: ${i} frames`);
+    if (sideband) for (let j = 1; j < inner.length; j++) assert.equal(run([frames[0], { kind: 'data', payload: concat([Uint8Array.of(1), inner.subarray(0, j)]) }, { kind: 'flush' }]).tag, 'broken', `band 1 cut at ${j}`);
+  }
 });
 
 property('kex', 'a KEXINIT prefix throws ssh until the reserved tail', () => {

@@ -20,6 +20,11 @@ test('format facts match the specs they cite', () => {
     MODE_LINK: fmt.MODE_LINK,
     MODE_TREE: fmt.MODE_TREE,
     MODE_COMMIT: fmt.MODE_COMMIT,
+    MODE_S_IFMT: fmt.MODE_S_IFMT,
+    MODE_S_IFDIR: fmt.MODE_S_IFDIR,
+    MODE_BITS: fmt.MODE_BITS,
+    MODE_LOW_DIGITS: fmt.MODE_LOW_DIGITS,
+    TREE_SORT_SLASH: fmt.TREE_SORT_SLASH,
     TREE_MODE_MIN_DIGITS: fmt.TREE_MODE_MIN_DIGITS,
     TREE_NAME_MIN_BYTES: fmt.TREE_NAME_MIN_BYTES,
     TREE_ENTRY_OVERHEAD: fmt.TREE_ENTRY_OVERHEAD,
@@ -33,6 +38,7 @@ test('format facts match the specs they cite', () => {
     PKT_DATA_MIN: fmt.PKT_DATA_MIN,
     PKT_MAX_SIZE: fmt.PKT_MAX_SIZE,
     PKT_MAX_PAYLOAD: fmt.PKT_MAX_PAYLOAD,
+    PKT_READ_MAX_PAYLOAD: fmt.PKT_READ_MAX_PAYLOAD,
     NIBBLE_BITS: fmt.NIBBLE_BITS,
     PKT_LEN_SHIFTS: [...fmt.PKT_LEN_SHIFTS],
     PACK_SIGNATURE: [...fmt.PACK_SIGNATURE],
@@ -74,6 +80,7 @@ test('format facts match the specs they cite', () => {
     SIDEBAND_CHANNEL_BYTES: fmt.SIDEBAND_CHANNEL_BYTES,
     PROTOCOL_V2: fmt.PROTOCOL_V2,
     IDENT_TZ_DIGITS: fmt.IDENT_TZ_DIGITS,
+    IDENT_TIMESTAMP_MAX: fmt.IDENT_TIMESTAMP_MAX,
     IDENT_TZ_HOUR_MIN: fmt.IDENT_TZ_HOUR_MIN,
     IDENT_TZ_HOUR_MAX: fmt.IDENT_TZ_HOUR_MAX,
     IDENT_TZ_MINUTE_MAX: fmt.IDENT_TZ_MINUTE_MAX,
@@ -82,16 +89,10 @@ test('format facts match the specs they cite', () => {
     COMMIT_HEADER_AUTHOR: fmt.COMMIT_HEADER_AUTHOR,
     COMMIT_HEADER_COMMITTER: fmt.COMMIT_HEADER_COMMITTER,
     COMMIT_HEADER_ENCODING: fmt.COMMIT_HEADER_ENCODING,
-    COMMIT_HEADER_ORDER: [...fmt.COMMIT_HEADER_ORDER],
-    COMMIT_SINGLE_HEADERS: [...fmt.COMMIT_SINGLE_HEADERS],
     TAG_HEADER_OBJECT: fmt.TAG_HEADER_OBJECT,
     TAG_HEADER_TYPE: fmt.TAG_HEADER_TYPE,
     TAG_HEADER_TAG: fmt.TAG_HEADER_TAG,
     TAG_HEADER_TAGGER: fmt.TAG_HEADER_TAGGER,
-    TAG_HEADER_ORDER: [...fmt.TAG_HEADER_ORDER],
-    TAG_SINGLE_HEADERS: [...fmt.TAG_SINGLE_HEADERS],
-    HEADER_PHASE_EXTRA: fmt.HEADER_PHASE_EXTRA,
-    HEADER_SKIP_OPTIONAL: fmt.HEADER_SKIP_OPTIONAL,
     ZLIB_HEADER_BYTES: fmt.ZLIB_HEADER_BYTES,
     ZLIB_CM_DEFLATE: fmt.ZLIB_CM_DEFLATE,
     ZLIB_CM_MASK: fmt.ZLIB_CM_MASK,
@@ -132,13 +133,17 @@ test('format facts match the specs they cite', () => {
     DEFLATE_REPEAT17_BITS: fmt.DEFLATE_REPEAT17_BITS,
     DEFLATE_REPEAT18_BASE: fmt.DEFLATE_REPEAT18_BASE,
     DEFLATE_REPEAT18_BITS: fmt.DEFLATE_REPEAT18_BITS,
+    ZLIB_BOUND_LITERAL_DIV: fmt.ZLIB_BOUND_LITERAL_DIV,
+    ZLIB_BOUND_BLOCK_DIV: fmt.ZLIB_BOUND_BLOCK_DIV,
+    ZLIB_BOUND_SLACK: fmt.ZLIB_BOUND_SLACK,
   }, {
     OID_BYTES: 20, OID_HEX_CHARS: 40, SHA256_HEX_CHARS: 64, BYTE_VALUES: 256, BYTE_MASK: 255,
     BE32_SHIFTS: [24, 16, 8, 0], UINT32_BYTES: 4,
     TREE_MODE_SEP: 0x20, TREE_NUL: 0, MODE_BLOB: '100644', MODE_EXEC: '100755', MODE_LINK: '120000', MODE_TREE: '40000', MODE_COMMIT: '160000',
+    MODE_S_IFMT: 0o170000, MODE_S_IFDIR: 0o040000, MODE_BITS: 0xffff, MODE_LOW_DIGITS: 6, TREE_SORT_SLASH: 0x2f,
     TREE_MODE_MIN_DIGITS: 1, TREE_NAME_MIN_BYTES: 1, TREE_ENTRY_OVERHEAD: 4, TREE_ENTRY_MIN: 24,
     PKT_LEN_HEX: 4, PKT_HEX_BASE: 16, PKT_FLUSH: 0, PKT_DELIM: 1, PKT_RESPONSE_END: 2, PKT_LEN_INVALID: 3, PKT_DATA_MIN: 4,
-    PKT_MAX_SIZE: 65520, PKT_MAX_PAYLOAD: 65516, NIBBLE_BITS: 4, PKT_LEN_SHIFTS: [12, 8, 4, 0],
+    PKT_MAX_SIZE: 65520, PKT_MAX_PAYLOAD: 65516, PKT_READ_MAX_PAYLOAD: 65519, NIBBLE_BITS: 4, PKT_LEN_SHIFTS: [12, 8, 4, 0],
     PACK_SIGNATURE: [0x50, 0x41, 0x43, 0x4b], PACK_VERSION: 2, PACK_HEADER_BYTES: 12, PACK_TRAILER_BYTES: 20,
     OBJ_COMMIT: 1, OBJ_TREE: 2, OBJ_BLOB: 3, OBJ_TAG: 4, OBJ_OFS_DELTA: 6, OBJ_REF_DELTA: 7,
     OBJ_TYPE_SHIFT: 4, OBJ_TYPE_MASK: 7, OBJ_SIZE_FIRST_MASK: 0x0f, OBJ_SIZE_NEXT_MASK: 0x7f, OBJ_CONTINUE: 0x80,
@@ -148,16 +153,11 @@ test('format facts match the specs they cite', () => {
     DELTA_COPY_LEN1: 0x10, DELTA_COPY_LEN2: 0x20, DELTA_COPY_LEN3: 0x40,
     BYTE_SHIFT: 8, DELTA_OFF_SHIFT: 8, DELTA_BYTE2_SHIFT: 16, DELTA_OFF4_FACTOR: 0x1000000,
     SIDEBAND_PACK: 1, SIDEBAND_PROGRESS: 2, SIDEBAND_ERROR: 3, SIDEBAND_CHANNEL_BYTES: 1, PROTOCOL_V2: 2, IDENT_TZ_DIGITS: 4,
+    IDENT_TIMESTAMP_MAX: 9223372036854775807n,
     IDENT_TZ_HOUR_MIN: -12, IDENT_TZ_HOUR_MAX: 14, IDENT_TZ_MINUTE_MAX: 59,
     COMMIT_HEADER_TREE: 'tree', COMMIT_HEADER_PARENT: 'parent', COMMIT_HEADER_AUTHOR: 'author',
     COMMIT_HEADER_COMMITTER: 'committer', COMMIT_HEADER_ENCODING: 'encoding',
-    COMMIT_HEADER_ORDER: ['tree', 'parent', 'author', 'committer', 'encoding'],
-    COMMIT_SINGLE_HEADERS: ['tree', 'author', 'committer', 'encoding'],
     TAG_HEADER_OBJECT: 'object', TAG_HEADER_TYPE: 'type', TAG_HEADER_TAG: 'tag', TAG_HEADER_TAGGER: 'tagger',
-    TAG_HEADER_ORDER: ['object', 'type', 'tag', 'tagger'],
-    TAG_SINGLE_HEADERS: ['object', 'type', 'tag', 'tagger'],
-    HEADER_PHASE_EXTRA: '\n',
-    HEADER_SKIP_OPTIONAL: 1,
     ZLIB_HEADER_BYTES: 2, ZLIB_CM_DEFLATE: 8, ZLIB_CM_MASK: 0x0f, ZLIB_FDICT: 0x20, ZLIB_HEADER_MOD: 31,
     ADLER_BYTES: 4, ADLER_MOD: 65521, ADLER_SHIFT: 16,
     DEFLATE_BFINAL_BITS: 1, DEFLATE_BTYPE_BITS: 2, DEFLATE_STORED: 0, DEFLATE_FIXED: 1, DEFLATE_DYNAMIC: 2,
@@ -169,8 +169,39 @@ test('format facts match the specs they cite', () => {
     DEFLATE_REPEAT_PREV: 16, DEFLATE_REPEAT_ZERO3: 17, DEFLATE_REPEAT_ZERO11: 18,
     DEFLATE_REPEAT16_BASE: 3, DEFLATE_REPEAT16_BITS: 2, DEFLATE_REPEAT17_BASE: 3, DEFLATE_REPEAT17_BITS: 3,
     DEFLATE_REPEAT18_BASE: 11, DEFLATE_REPEAT18_BITS: 7,
+    ZLIB_BOUND_LITERAL_DIV: 8, ZLIB_BOUND_BLOCK_DIV: 64, ZLIB_BOUND_SLACK: 13,
   });
   assert.equal(fmt.varintScale(0), 1);
   assert.equal(fmt.varintScale(4), 16);
   assert.equal(fmt.varintScale(7), 128);
+});
+
+// zlibBound(S) = S + ⌈S/8⌉ + ⌈S/64⌉ + 13: the longest zlib stream accepted for an object declared S bytes. The S/8 and S/64
+// terms are zlib's conservative deflateBound ("complen", deflate.c ≤ 1.2.13: sourceLen + ((sourceLen + 7) >> 3) +
+// ((sourceLen + 63) >> 6) + 5 — 9-bit literals in fixed blocks plus per-block overhead); 13 is compressBound's constant
+// (compress.c: the 6-byte zlib wrapper + 7). The function dominates every value deflateBound returns for a zlib-wrapped
+// stream without a dictionary — complen + 6, and the fixedlen (+4) and storelen (+7) forms zlib 1.3 switched to for
+// memLevel 2 and 1 — at every size, which the inequalities below check; the empirical half (node:zlib at every level,
+// strategy, memLevel and windowBits never exceeds it) is in mutant-kill.test.js.
+test('zlibBound: the pinned values, and it dominates every form of zlib deflateBound for a zlib-wrapped stream', () => {
+  const { zlibBound } = fmt;
+  assert.deepEqual([0, 1, 2, 7, 8, 9, 10, 63, 64, 65, 1000, 65535, 65536, 1 << 20, 64 << 20].map(zlibBound),
+    [13, 16, 17, 22, 23, 25, 26, 85, 86, 89, 1154, 74764, 74765, 1196045, 76546061]);
+  assert.equal(zlibBound(64 << 20), (64 << 20) + (8 << 20) + (1 << 20) + 13);
+  const wrap = 6;                                                                             // 2-byte header + 4-byte Adler-32
+  const complen = s => s + ((s + 7) >> 3) + ((s + 63) >> 6) + 5 + wrap;                      // deflate.c (≤ 1.2.13) deflateBound, non-default parameters
+  const fixedlen = s => s + (s >> 3) + (s >> 8) + (s >> 9) + 4 + wrap;                       // deflate.c (1.3) fixed blocks, 9-bit literals, memLevel 2
+  const storelen = s => s + (s >> 5) + (s >> 7) + (s >> 11) + 7 + wrap;                      // deflate.c (1.3) stored blocks of 127 bytes, memLevel 1
+  const tight = s => s + (s >> 12) + (s >> 14) + (s >> 25) + 13;                             // compress.c compressBound: default windowBits/memLevel
+  const stored = s => s + 5 * Math.max(1, Math.ceil(s / 65535)) + wrap;                      // 65535-byte stored blocks, the layout a level-0 encoder emits
+  for (let s = 0; s <= 200_000; s++) {
+    const b = zlibBound(s);
+    assert.ok(b >= complen(s) && b >= fixedlen(s) && b >= storelen(s) && b >= tight(s) && b >= stored(s), `zlibBound(${s}) = ${b}`);
+  }
+  for (const s of [1 << 20, 16 << 20, 64 << 20, 2 ** 31 - 1]) {
+    const b = zlibBound(s);
+    assert.ok(b >= complen(s) && b >= fixedlen(s) && b >= storelen(s) && b >= tight(s) && b >= stored(s), `zlibBound(${s}) = ${b}`);
+  }
+  // a size the 10-byte varint can declare (readObjHeader: up to ~2^70) stays finite; the object-size cap refuses it anyway
+  assert.ok(Number.isFinite(zlibBound(2 ** 69)));
 });

@@ -30,6 +30,23 @@ export const MODE_LINK = '120000';
 export const MODE_TREE = '40000';
 export const MODE_COMMIT = '160000';
 /**
+ * fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for its mode: the file-type bits (S_IFMT) of
+ * the low 16 bits (fsck keeps the mode in an `unsigned short`) are S_IFDIR. `40755` sorts as a directory; `160000`
+ * (gitlink) as a file. A tree sorts a directory by its name followed by `/`.
+ */
+export const MODE_S_IFMT = 0o170000;
+export const MODE_S_IFDIR = 0o040000;
+export const MODE_S_IFREG = 0o100000;
+export const MODE_S_IFLNK = 0o120000;
+/** ce_permissions: a regular file is executable (100755) when the owner-execute bit is set. */
+export const MODE_OWNER_EXEC = 0o100;
+/** fsck.c max_tree_entry_len (fsck.largePathname): a longer name is largePathname (WARN, an error under --strict). */
+export const TREE_MAX_NAME_BYTES = 4096;
+export const MODE_BITS = 0xffff;
+/** Octal digits that cover MODE_BITS: the low 18 bits are exact from the last six digits, however long the mode. */
+export const MODE_LOW_DIGITS = 6;
+export const TREE_SORT_SLASH = 0x2f;
+/**
  * Shortest well-framed entry: one octal mode digit, the separating space, one name byte, NUL, and the object id.
  * git's tree-walk rejects anything shorter (`too-short tree object`).
  */
@@ -52,6 +69,9 @@ export const PKT_DATA_MIN = PKT_LEN_HEX;
 /** gitprotocol-common(5): pkt-line length must be ≤ 65520. Payload budget is that minus the length prefix. */
 export const PKT_MAX_SIZE = 65520;
 export const PKT_MAX_PAYLOAD = PKT_MAX_SIZE - PKT_LEN_HEX;
+/** What git's reader accepts: pkt-line.c packet_read_with_status dies "protocol error: bad line length" once the payload
+ * (length minus the prefix) is ≥ its buffer, packet_buffer[LARGE_PACKET_MAX]. So it reads payloads up to 65519 bytes. */
+export const PKT_READ_MAX_PAYLOAD = PKT_MAX_SIZE - 1;
 /** Nibble width when decoding the hex length. Shifts of the four hex digits, high digit first. */
 export const NIBBLE_BITS = 4;
 export const PKT_LEN_SHIFTS = Object.freeze([NIBBLE_BITS * 3, NIBBLE_BITS * 2, NIBBLE_BITS, 0]);
@@ -133,51 +153,33 @@ export const IDENT_TZ_HOUR_MIN = -12;
 export const IDENT_TZ_HOUR_MAX = 14;
 export const IDENT_TZ_MINUTE_MAX = 59;
 
-// ---- commit headers (Documentation/gitformat-commit; commit.c commit_tree_extended) ----
-// commit-tree writes exactly one tree, then zero or more parent lines, then one author, one committer,
-// then an optional encoding, then other headers (gpgsig, mergetag — mergetag may repeat). A second
-// single-valued header is not a commit git would write. git's parser is first-wins for tree and encoding
-// and fsck still accepts some of those objects; ply rejects them.
+/**
+ * The largest author/committer/tagger timestamp fsck_ident accepts (fsck.c FSCK_MSG_BAD_DATE_OVERFLOW): git parses
+ * the digits with strtoumax and date_overflows() refuses anything that does not fit a signed 64-bit time_t, so
+ * 9223372036854775807 is a date and 9223372036854775808 is "date causes integer overflow". Measured on git 2.50
+ * (test/fsck-space.test.js `ok-max-date`, `date-overflow`).
+ */
+export const IDENT_TIMESTAMP_MAX = 0x7fffffffffffffffn;
+
+// ---- commit headers (Documentation/gitformat-commit; fsck.c fsck_commit) ----
+// fsck_commit reads exactly one tree, then any parent lines, then author lines (exactly one allowed), then one
+// committer, and stops: whatever follows (encoding, gpgsig, mergetag, unknown headers, a second tree or committer) is
+// not checked by fsck. ply keeps those lines in `extra`, except a second tree, parent, author, committer or encoding:
+// git's views of such an object disagree (pretty.c is last-wins for %an/%cn, %T and the date are first-wins), so ply
+// refuses it (PR #7, an allowed typed refusal in test/fsck-space.test.js).
 export const COMMIT_HEADER_TREE = 'tree';
 export const COMMIT_HEADER_PARENT = 'parent';
 export const COMMIT_HEADER_AUTHOR = 'author';
 export const COMMIT_HEADER_COMMITTER = 'committer';
 export const COMMIT_HEADER_ENCODING = 'encoding';
-/** The order commit_tree_extended emits. parent and encoding are optional; the others are not. */
-export const COMMIT_HEADER_ORDER = Object.freeze([
-  COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
-]);
-/** Headers that appear at most once. parent is not in this list; mergetag is an extra header and may repeat. */
-export const COMMIT_SINGLE_HEADERS = /* @__PURE__ */ Object.freeze([
-  COMMIT_HEADER_TREE, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
-]);
 
-// ---- tag headers (builtin/tag.c) ----
-// An annotated tag is object, type, tag, tagger, then optional extras (gpgsig). All four are single-valued.
-// git is first-wins for a repeated tagger and fsck accepts it; ply rejects the repeat.
+// ---- tag headers (fsck.c fsck_tag_standalone) ----
+// An annotated tag is object, type, tag, then tagger (optional: tags before git 0.99.1 have none), then anything but a
+// second object, type, tag or tagger (refused like a second commit author, PR #7).
 export const TAG_HEADER_OBJECT = 'object';
 export const TAG_HEADER_TYPE = 'type';
 export const TAG_HEADER_TAG = 'tag';
 export const TAG_HEADER_TAGGER = 'tagger';
-export const TAG_HEADER_ORDER = Object.freeze([
-  TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER,
-]);
-/** Every header builtin/tag.c writes is single-valued. */
-export const TAG_SINGLE_HEADERS = TAG_HEADER_ORDER;
-
-/**
- * Phase after the first header the writer would not emit (gpgsig, mergetag, a space-continuation,
- * anything else). A header key cannot be this: splitHeaders has already split on newlines.
- * The parser stores that phase as the header-order length, which is past every structural index.
- */
-export const HEADER_PHASE_EXTRA = '\n';
-
-/**
- * `parent` is the only optional commit header between two required ones, so `author` may follow
- * `tree` with exactly this many headers skipped (commit.c commit_tree_extended). A tag has nothing
- * optional in the middle, and the skip does not apply when no header may repeat.
- */
-export const HEADER_SKIP_OPTIONAL = 1;
 
 // ---- zlib / deflate (RFC 1950, RFC 1951) ----
 export const ZLIB_HEADER_BYTES = 2;
@@ -222,6 +224,24 @@ export const DEFLATE_REPEAT17_BASE = 3;
 export const DEFLATE_REPEAT17_BITS = 3;
 export const DEFLATE_REPEAT18_BASE = 11;
 export const DEFLATE_REPEAT18_BITS = 7;
+
+// ---- zlib stream length (zlib deflate.c deflateBound, compress.c compressBound) ----
+// RFC 1951 puts no ceiling on a deflate stream's length: a non-final empty stored block costs 5 bytes and produces nothing,
+// and may repeat forever (a fixed block holding only end-of-block, 10 bits, likewise). So "how long may the zlib stream
+// of an object declared S bytes be" is a policy, and the policy is zlib's own promise about its output: deflateBound(S)
+// is the most any level, strategy, windowBits or memLevel emits for S bytes under Z_FINISH/Z_NO_FLUSH (zlib.h). Its
+// conservative form (deflate.c, non-default parameters) is sourceLen + ((sourceLen + 7) >> 3) + ((sourceLen + 63) >> 6)
+// + 5 + a 6-byte wrapper: 9-bit literals in fixed blocks (RFC 1951 §3.2.6: literals 144–255) plus per-block overhead at
+// zlib's smallest blocks. The constant is compressBound's 13 (compress.c: the 2-byte header, the 4-byte Adler-32, and 7),
+// which also covers zlib 1.3's storelen (stored blocks of 127 bytes at memLevel 1, + 7) and fixedlen (+ 4) forms and the
+// 65535-byte stored blocks a level-0 encoder writes. zlibBound(S) = S + ⌈S/8⌉ + ⌈S/64⌉ + 13 is ≥ every one of those at
+// every S (test/format-facts.test.js checks the inequalities, mutant-kill.test.js node:zlib's actual output); an encoder
+// that flushes between tiny chunks could exceed it, and no git server does. Input past it is `pack_corrupt`.
+export const ZLIB_BOUND_LITERAL_DIV = 8;
+export const ZLIB_BOUND_BLOCK_DIV = 64;
+export const ZLIB_BOUND_SLACK = 13;
+/** The longest zlib stream accepted for an object whose inflated size is `size`. Finite for every finite size. */
+export const zlibBound = size => size + Math.ceil(size / ZLIB_BOUND_LITERAL_DIV) + Math.ceil(size / ZLIB_BOUND_BLOCK_DIV) + ZLIB_BOUND_SLACK;
 
 /** `2 ** shift` for a size-varint group. Defined once so the base is not recopied at each call site. */
 export const varintScale = shift => 2 ** shift;

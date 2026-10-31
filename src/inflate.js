@@ -14,7 +14,7 @@ import {
   DEFLATE_HLIT_MAX, DEFLATE_HDIST_MAX, DEFLATE_CODELEN_CODES, DEFLATE_CODELEN_BITS,
   DEFLATE_REPEAT_PREV, DEFLATE_REPEAT_ZERO3,
   DEFLATE_REPEAT16_BASE, DEFLATE_REPEAT16_BITS, DEFLATE_REPEAT17_BASE, DEFLATE_REPEAT17_BITS,
-  DEFLATE_REPEAT18_BASE, DEFLATE_REPEAT18_BITS, DEFLATE_BFINAL_BITS, BYTE_SHIFT, BE32_SHIFTS, ADLER_SHIFT,
+  DEFLATE_REPEAT18_BASE, DEFLATE_REPEAT18_BITS, DEFLATE_BFINAL_BITS, BYTE_SHIFT, BE32_SHIFTS, ADLER_SHIFT, zlibBound,
 } from './format.js';
 const bad = msg => fail('pack_corrupt', msg);
 /* oxlint-disable no-magic-numbers -- RFC 1951 §3.2.5 length/distance alphabets and the fixed Huffman assignment */
@@ -66,6 +66,13 @@ export function inflate(buf, pos = 0, opts = {}) {
   if (expectedSize !== undefined) {
     if (expectedSize > maxOutput) throw fail('limit_exceeded', `inflate: expected size ${expectedSize} exceeds limit ${maxOutput}`);
   }
+  // The stream may not run past zlibBound of the size it will produce (format.js): a run of non-final empty stored blocks
+  // (5 bytes in, 0 out) used to be consumed to the end of the buffer, so a pack's bytes bounded its CPU, not its objects.
+  // Without an expected size the output cap stands in. Checked where a block starts (so an endless stream is refused a
+  // few bytes past the bound, before any more of it is read) and when the stream ends (a last block may be long).
+  const declared = expectedSize ?? maxOutput;
+  const maxInput = zlibBound(declared);
+  const tooLong = n => bad(`inflate: zlib stream longer than its declared size allows (${n} > ${maxInput} for ${declared} bytes)`);
   // Stryker disable next-line ArithmeticOperator,MethodExpression: the buffer is grown until it holds the output, so a different positive initial guess yields the same bytes
   const guess = Math.max(256, (buf.length - pos) * 3); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
   let out = new Uint8Array(expectedSize ?? Math.min(maxOutput, guess));
@@ -128,6 +135,7 @@ export function inflate(buf, pos = 0, opts = {}) {
 
   let last;
   do {
+    if (p - start > maxInput) throw tooLong(p - start);
     last = bits(DEFLATE_BFINAL_BITS);
     const type = bits(DEFLATE_BTYPE_BITS);
     stats.blocks++;
@@ -135,12 +143,12 @@ export function inflate(buf, pos = 0, opts = {}) {
       stats.stored++;
       bitbuf = 0; bitcnt = 0; // discard to byte boundary
       if (p + DEFLATE_STORED_HEADER_BYTES > buf.length) throw bad('inflate: truncated stored header');
-      const sh = take(buf, p, DEFLATE_STORED_HEADER_BYTES);
+      const sh = buf.subarray(p, p + DEFLATE_STORED_HEADER_BYTES); // in range: checked on the line above
       const len = sh[0] | (sh[1] << BYTE_SHIFT), nlen = sh[2] | (sh[3] << BYTE_SHIFT);
       if (len !== (~nlen & DEFLATE_STORED_LEN_MASK)) throw bad('inflate: stored length check failed');
       p += DEFLATE_STORED_HEADER_BYTES;
       if (p + len > buf.length) throw bad('inflate: truncated stored block');
-      ensure(len); out.set(take(buf, p, len), o); o += len; p += len;
+      ensure(len); out.set(buf.subarray(p, p + len), o); o += len; p += len; // in range: "truncated stored block" above
     } else if (type === DEFLATE_FIXED) {
       stats.fixed++;
       codes(FIXED_LIT, FIXED_DIST);
@@ -170,11 +178,12 @@ export function inflate(buf, pos = 0, opts = {}) {
   const result = out.subarray(0, o);
   if (!raw) {
     if (p + ADLER_BYTES > buf.length) throw bad('inflate: truncated adler32');
-    const ad = take(buf, p, ADLER_BYTES);
+    const ad = buf.subarray(p, p + ADLER_BYTES); // in range: checked on the line above
     const want = ((ad[0] << BE32_SHIFTS[0]) | (ad[1] << BE32_SHIFTS[1]) | (ad[2] << BE32_SHIFTS[2]) | ad[3]) >>> 0;
     if (verifyAdler && adler32(result) !== want) throw bad('inflate: adler32 mismatch');
     p += ADLER_BYTES;
   }
   if (expectedSize !== undefined && o !== expectedSize) throw bad(`inflate: size ${o} != expected ${expectedSize}`);
+  if (p - start > maxInput) throw tooLong(p - start);
   return { out: result, consumed: p - start, stats };
 }

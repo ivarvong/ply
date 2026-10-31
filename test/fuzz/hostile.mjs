@@ -3,7 +3,7 @@
 //   node test/fuzz/hostile.mjs [--n 300] [--seed 1] [--case <seed>]
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './mutate.js';
 import { Rng } from './prng.js';
@@ -20,7 +20,7 @@ const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborte
 const STAGES = [['ls-refs', 0], ['fetch', 0], ['fetch', 1], ['fetch', 2], ['fetch', 3], ['fetch', 4], ['receive-pack', 0], ['push-sb', 0]];
 // which check caught it, from the message. 'bounds' is take()'s typed short read raised inside a frame parser, e.g. a
 // pkt-line cut to 0004 in the packfile section has no band byte (git: "missing sideband designator"); case 2366521731.
-const SITE = [['trailer', /trailer/], ['adler', /adler/], ['size', /size|exceeds expected|streamed more|inflated \d+ !=/], ['pkt', /pkt-line/], ['huffman', /huffman|block type|invalid|distance|stored|repeat|end-of-block|unexpected end/], ['zlib_hdr', /zlib:/], ['delta', /delta/], ['limit', /exceeds limit/], ['v2', /v2:|no packfile|sideband/], ['remote', /remote:/], ['ls_refs', /ls-refs:/], ['unsupported', /unsupported/], ['pack_hdr', /signature|version|expected 1 object|object type|not in pack|truncated before object header|missing trailer|single-object pack is a delta|trailing bytes after object|served for want/], ['tree', /tree:|not found/], ['content_type', /content-type/], ['http', /HTTP \d/], ['report', /push rejected|unpack/], ['net', /network|aborted|timeout/], ['bounds', /^short read:/], ['ambiguous', /outcome unknown/]];
+const SITE = [['trailer', /trailer/], ['adler', /adler/], ['zlib_bound', /zlib stream longer/], ['size', /size|exceeds expected|streamed more|inflated \d+ !=/], ['pkt', /pkt-line/], ['huffman', /huffman|block type|invalid|distance|stored|repeat|end-of-block|unexpected end/], ['zlib_hdr', /zlib:/], ['delta', /delta/], ['limit', /exceeds limit/], ['v2', /v2:|no packfile|sideband/], ['remote', /remote:/], ['ls_refs', /ls-refs:/], ['unsupported', /unsupported/], ['pack_hdr', /signature|version|expected 1 object|object type|not in pack|truncated before object header|missing trailer|single-object pack is a delta|trailing bytes after object|served for want/], ['tree', /tree:|not found/], ['content_type', /content-type/], ['http', /HTTP \d/], ['report', /push rejected|unpack/], ['net', /network|aborted|timeout/], ['bounds', /^short read:/], ['ambiguous', /outcome unknown/]];
 
 const { root, cleanup } = tmpRoot();
 const srv = await startGitServer(root);
@@ -82,7 +82,7 @@ try {
     } else {
       if (nowHead !== result.newCommit) problems.push('success but ref != our commit');
       if (content !== EXPECTED) problems.push('success but wrong content');
-      const fsck = git(bare, ['fsck', '--strict', '--no-dangling']).trim(); if (fsck) problems.push(`fsck ${fsck}`);
+      const fsck = fsckProblems(bare); if (fsck.length) problems.push(`fsck ${fsck.join(' | ')}`);
       silentOk++;
     }
     const code = error ? error.code : 'ok';

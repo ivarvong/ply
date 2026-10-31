@@ -5,7 +5,7 @@
 // is then inserted after `committer` (where git puts it), its continuation lines prefixed by a space. Pure except
 // crypto.subtle.sign; verified by `git verify-commit` with an allowed-signers file in test/sign.test.js.
 import { fail } from './errors.js';
-import { te, concat } from './bytes.js';
+import { te, concat, decodeBytes, encodeBytes } from './bytes.js';
 import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
 
 const u32 = n => Uint8Array.from([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
@@ -40,7 +40,8 @@ export function armor(blob) {
 // Pure: splice a gpgsig header into an encoded commit. commit_tree_extended writes encoding, then gpgsig.
 // The signature goes after encoding when that header is present, otherwise immediately after committer.
 export function withGpgsig(commitBytes, signatureText) {
-  const text = new TextDecoder().decode(commitBytes);
+  // decodeBytes/encodeBytes: a Latin-1 message or ident goes back out as its own bytes, and so is what was signed (#43)
+  const text = decodeBytes(commitBytes);
   const nl = text.indexOf('\n\n');
   const headers = (nl < 0 ? text : text.slice(0, nl)).split('\n');
   let i = headers.findIndex(l => l.startsWith(`${COMMIT_HEADER_COMMITTER} `));
@@ -49,7 +50,7 @@ export function withGpgsig(commitBytes, signatureText) {
   const sigLines = signatureText.replace(/\n$/, '').split('\n');
   const gpgsig = 'gpgsig ' + sigLines.join('\n ');
   headers.splice(i + 1, 0, gpgsig);
-  return te.encode(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)));
+  return encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit');
 }
 
 // Sign an encoded (unsigned) commit: returns the signed commit bytes. The message signed is the unsigned commit.

@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
 import { build } from './workerd/build.mjs';
 
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
@@ -53,7 +53,7 @@ test('workerd: edit small file, 24 MB file, cache hit on second edit; git-verifi
   // second edit on the same path inside the same isolate: tree cache is module-scoped per request here (cache passed per /edit call), so this checks the edit, not the cache
   r = await post('/edit', { url, path: 'a/b/c.txt', find: 'WORKERD', replace: 'AGAIN', n: 2 });
   assert.ok(r.results[0].ok && !r.results[0].noop); assert.equal(r.results[1].code, 'match_count');
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
   console.log(`  small ${r.results[0].ms}ms; 24MB edit git-verified, max alloc ${r.roots[0]['mem.alloc.max_single']}`);
 });
 
@@ -80,7 +80,7 @@ test('workerd: pack cache on caches.default + head hint (ls-refs skipped, CAS ca
   assert.deepEqual(r.roots.map(x => x['git.edit.outcome']), ['ok']);
   assert.equal(r.blob[0]['git.edit.blob.hasher'], 'digeststream', 'workerd has crypto.DigestStream: native SHA-1');
   assert.equal(gitBuf(bare, ['cat-file', 'blob', 'main:a/b/c.txt']).toString(), 'hello H2 world\n');
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
 });
 
 test('workerd: Ed25519 signing through the platform WebCrypto; git verifies', { skip: !WORKERD && 'workerd not installed' }, async () => {
@@ -110,7 +110,7 @@ test('workerd: 10 concurrent writers in one isolate converge via cas_conflict re
   for (let i = 0; i < 10; i++) assert.equal(gitBuf(bare, ['cat-file', 'blob', `main:f${i}.txt`]).toString(), `v0 DONE${i}\n`);
   assert.equal(git(bare, ['rev-list', '--count', 'main']).trim(), '11');
   assert.ok(rs.some(r => r.tries > 0), 'contention actually occurred');
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
   console.log(`  retries: ${rs.map(r => r.tries).join(',')}`);
 });
 
@@ -127,7 +127,7 @@ test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd;
     assert.ok(r.ok, JSON.stringify(r));
     assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.newCommit);
     assert.equal(gitBuf(bare, ['cat-file', 'blob', 'main:a/b.txt']).toString(), 'hello WORKERD-SSH\n');
-    assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    assert.deepEqual(fsckProblems(bare), []);
     const connect = r.spans.find(s => s.name === 'ssh.connect');
     assert.equal(connect.attrs['ssh.cipher.c2s'], 'aes128-gcm@openssh.com'); assert.equal(connect.attrs['ssh.kex'], 'curve25519-sha256');
     console.log(`  ssh edit under workerd: ${r.ms}ms, ${r.stats.bytesIn} B in / ${r.stats.bytesOut} B out, ${r.stats.packetsIn + r.stats.packetsOut} packets`);
@@ -194,4 +194,21 @@ test('workerd: a token given as the URL user authenticates the edit with the Aut
     assert.deepEqual([...new Set(gate.seen.map(x => x.authorization))], gitAuth);
     for (const s of [TOKEN, gitAuth[0].slice(6), `${TOKEN}@`]) assert.ok(!r.dump.includes(s), `${s} in a span`);
   } finally { await gate.close(); }
+});
+
+test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob follows the root in a trace of its own (#35)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const bare = makeBareRepo(root, 'rd'); const work = join(root, 'wrd'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const big = Buffer.alloc(1 << 20); for (let i = 0; i < big.length; i += 4096) big.write(`line ${i}\n`, i);
+  commitFiles(work, bare, { 'big.bin': big }, 'seed');
+  for (const cancel of [false, true]) {
+    const r = await post('/read', { url: `${srv.url}/rd.git`, path: 'big.bin', cancel });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(r.size, big.length);
+    if (cancel) assert.ok(r.bytes > 0 && r.bytes < big.length, `one chunk: ${r.bytes}`); else assert.equal(r.bytes, big.length);
+    const rootSpan = r.spans.find(s => s.name === 'git.read'), blob = r.spans.find(s => s.name === 'git.read.blob');
+    assert.ok(blob, 'the blob span ended');
+    assert.deepEqual([blob.parentSpanId, blob.traceId === rootSpan.traceId, blob.links, rootSpan.links], [null, false, [[rootSpan.spanId, 'follows_from']], [[blob.spanId, 'followed_by']]]);
+    assert.equal(blob.outcome, cancel ? 'cancelled' : 'ok');
+    assert.equal(r.spans.filter(s => s.name === 'git.read.blob').length, 1);
+  }
 });
