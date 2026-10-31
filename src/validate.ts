@@ -45,7 +45,7 @@ export function validateWire(value, what) {
 export function validateRef(ref) {
   if (typeof ref !== 'string' || !ref.startsWith('refs/')) throw bad('ref', 'must be a full ref name starting with refs/');
   // git check-ref-format rules that matter for injection and server acceptance
-  if (/[\0\n\r ~^:?*\[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\.|[\x01-\x1f\x7f]/.test(ref)) throw bad('ref', 'fails check-ref-format');
+  if (/[\0\n\r ~^:?*[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\.|[\x01-\x1f\x7f]/.test(ref)) throw bad('ref', 'fails check-ref-format');
   if (ref.length > 1024) throw bad('ref', 'too long');
   // a lone surrogate would be written as U+FFFD (TextEncoder); only an escaped byte from a read maps back (#43)
   encodeBytes(ref, 'ref');
@@ -80,7 +80,7 @@ function utf8At(b, i) {
   return null;
 }
 // utf8.c next_hfs_char: the code points HFS+ ignores are skipped; an invalid sequence reads as 0 (the end) from then on
-const HFS_IGNORED = new Set([0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x206a, 0x206b, 0x206c, 0x206d, 0x206e, 0x206f, 0xfeff]);
+const HFS_IGNORED = new Set([0x20_0c, 0x20_0d, 0x20_0e, 0x20_0f, 0x20_2a, 0x20_2b, 0x20_2c, 0x20_2d, 0x20_2e, 0x20_6a, 0x20_6b, 0x20_6c, 0x20_6d, 0x20_6e, 0x20_6f, 0xfe_ff]);
 function isHfsDot(b, needle) {
   let i = 0;
   const next = () => {

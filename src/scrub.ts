@@ -9,8 +9,8 @@
 // digit or not: a GitLab or GitHub token without one would otherwise stay readable.
 export const MIN_SECRET = 4;
 export const SECRET_USER_CHARS = 16;
-export const secretShaped = s => typeof s === 'string' && s.length >= SECRET_USER_CHARS && /[0-9]/.test(s);
-export const secretUser = (user, hasPassword) => secretShaped(user) || (!hasPassword && typeof user === 'string' && user.length >= SECRET_USER_CHARS);
+export const secretShaped = (s: unknown): boolean => typeof s === 'string' && s.length >= SECRET_USER_CHARS && /[0-9]/u.test(s);
+export const secretUser = (user: unknown, hasPassword: boolean): boolean => secretShaped(user) || (!hasPassword && typeof user === 'string' && user.length >= SECRET_USER_CHARS);
 
 // text → text with every secret replaced by '[redacted]'; null when there is nothing to hide. Server text is kept as a
 // tail or a prefix in places (progress, hook output, a quoted line), so a secret can arrive cut: any run of FRAGMENT or
@@ -18,14 +18,14 @@ export const secretUser = (user, hasPassword) => secretShaped(user) || (!hasPass
 // (a 12-hex window of a commit oid matches a hex token's with p ≈ 1e-13); shorter secrets are matched whole.
 export const FRAGMENT = 12;
 export const REDACTED = '[redacted]';
-export function scrubber(values) {
-  const secrets = values.filter(x => typeof x === 'string' && x.length >= MIN_SECRET);
-  if (!secrets.length) return null;
+export function scrubber(values: readonly unknown[]): ((text: unknown) => string) | null {
+  const secrets = values.filter((x): x is string => typeof x === 'string' && x.length >= MIN_SECRET);
+  if (secrets.length === 0) return null;
   const whole = secrets.filter(x => x.length < FRAGMENT);
-  const grams = new Set();
+  const grams = new Set<string>();
   for (const x of secrets) for (let i = 0; i + FRAGMENT <= x.length; i++) grams.add(x.slice(i, i + FRAGMENT));
-  const cut = s => {
-    let out = '', from = 0, start = -1, end = -1;
+  const cut = (s: string): string => {
+    let end = -1, from = 0, out = '', start = -1;
     for (let i = 0; i + FRAGMENT <= s.length; i++) {
       if (!grams.has(s.slice(i, i + FRAGMENT))) continue;
       if (i > end) { if (start >= 0) { out += s.slice(from, start) + REDACTED; from = end; } start = i; }
@@ -33,5 +33,9 @@ export function scrubber(values) {
     }
     return start < 0 ? s : out + s.slice(from, start) + REDACTED + s.slice(end);
   };
-  return text => whole.reduce((acc, x) => acc.split(x).join(REDACTED), cut(String(text)));
+  return text => {
+    let acc = cut(String(text));
+    for (const x of whole) acc = acc.split(x).join(REDACTED);
+    return acc;
+  };
 }
