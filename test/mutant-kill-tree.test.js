@@ -141,7 +141,8 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
   const transport = ({ tracer, limits = DEFAULT_LIMITS, quirks = {} }) => ({
     kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks, scrub: null,
     frames: (service, body) => serve(service, body),
-    advertise: async () => { throw new Error('not used'); },
+    // A ref miss asks discover() before it classifies the miss. No `unborn` feature: no second ls-refs, HEAD stays head_absent.
+    advertise: async () => pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n']),
   });
   return { objects, refs, log, put, commit, transport, fetches: () => log.filter(r => r.command === 'fetch'), pushes: () => log.filter(r => r.service === 'git-receive-pack') };
 }
@@ -817,12 +818,12 @@ test('resolveCommit: HEAD\'s symref, a detached HEAD, tags over branches, peeled
   assert.deepEqual(await resolveCommit(t, 'heads/v1'), { name: 'refs/heads/v1', commit: c2 });
   assert.deepEqual(await resolveCommit(t, c2), { name: c2, commit: c2 });
   assert.deepEqual(r.log.filter(x => x.command === 'ls-refs').map(x => x.prefixes), [['HEAD'], ['HEAD'], ['refs/v1', 'refs/tags/v1', 'refs/heads/v1'], ['refs/heads/v1'], ['refs/heads/v1', 'refs/tags/heads/v1', 'refs/heads/heads/v1']]);
-  await rejects(resolveCommit(t, 'nope'), 'not_found', 'ref nope not found');
-  await rejects(resolveCommit(t, 'refs/heads/nope'), 'not_found', 'ref refs/heads/nope not found');
+  await rejects(resolveCommit(t, 'nope'), 'not_found', 'ref nope not found', { miss: { kind: 'ref', ref: 'nope', candidates: ['refs/nope', 'refs/tags/nope', 'refs/heads/nope'] } });
+  await rejects(resolveCommit(t, 'refs/heads/nope'), 'not_found', 'ref refs/heads/nope not found', { miss: { kind: 'ref', ref: 'refs/heads/nope', candidates: ['refs/heads/nope'] } });
   const detached = remote({ head: c }); detached.objects.set(c, r.objects.get(c));
   assert.deepEqual(await resolveCommit(detached.transport({ tracer: new Tracer() }), null), { name: 'HEAD', commit: c });
   const unborn = remote();
-  await rejects(resolveCommit(unborn.transport({ tracer: new Tracer() }), 'HEAD'), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly');
+  await rejects(resolveCommit(unborn.transport({ tracer: new Tracer() }), 'HEAD'), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_absent' } });
 });
 
 test('commitView: idents for JSON, signed, parents and message', () => {

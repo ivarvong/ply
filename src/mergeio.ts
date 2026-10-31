@@ -4,11 +4,13 @@
 import type { Transport } from './transport.js';
 import type { Author, Commit } from './merge.js';
 import type { ValidatedIdent } from './validate.js';
-import { thrown as fail } from './errors.js';
+import { thrown as fail, isPlyError } from './errors.js';
+import type { Miss } from './errors.js';
 import { fetchObject } from './fetch.js';
 import { parseCommit, TYPE } from './objects.js';
 import { validateIdent, validateRef } from './validate.js';
 import { parseOid, ZERO_OID } from './oid.js';
+import { thrownCode, thrownReason } from './boundary.js';
 
 // fetch.ts's JS-default signature, cast at the call (type-only; see merge.ts)
 type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<{ readonly data: Uint8Array }>;
@@ -28,13 +30,19 @@ export const givenOid = (name: string, what: string): string | null => {
   if (name === ZERO_OID) throw fail('bad_request', `${what} must not be the zero oid`, { what });
   return name;
 };
-// Effect: a given commit id is a commit on the server, fetched alone (deepen 1). One the server does not have ('not our
-// ref') or that is not a commit ('expected commit') is the caller's not_found, as read.js's fetchCommit maps them — not
-// a corrupt pack mid-merge (pack_corrupt reads as retryable).
-type Loose = { readonly message?: unknown } | null | undefined;
+// The not_found a commit fetch already classified, or upload-pack's not_our_ref. Anything else (a corrupt pack) passes
+// through: pack_corrupt stays retryable, and is not reported as a missing commit. One fail(), so the decision id stays.
+const commitMiss = (e: unknown, oid: string): Miss | null => {
+  if (isPlyError(e) && e.code === 'not_found' && e.miss.kind === 'commit') return e.miss;
+  if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') return { kind: 'commit', miss: { kind: 'absent', oid } };
+  return null;
+};
+// Effect: a given commit id is a commit on the server, fetched alone (deepen 1). One the server does not have, or that
+// is not a commit, is the caller's not_found — the message names `what`, and the miss is the commit fetch's.
 export const assertCommit = async (t: Transport, oid: string, what: string): Promise<unknown> => commitBytesAt(t, oid).catch((e: unknown) => {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (as errors.ts reads one)
-  throw /expected commit|not our ref/u.test(String((e as Loose)?.message)) ? fail('not_found', `${what} ${oid} is not a commit on the remote`, { what }) : e;
+  const miss = commitMiss(e, oid);
+  if (miss === null) throw e;
+  throw fail('not_found', `${what} ${oid} is not a commit on the remote`, { what, miss });
 });
 // A commit stamp: who and when, each stamp with its own time and zone (#103 item 4). `time` is the operation's, for a
 // stamp that gives none; an omitted zone is +0000.

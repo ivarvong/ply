@@ -10,7 +10,7 @@ import { thrown as fail, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
-import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
+import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1)
@@ -123,6 +123,27 @@ export type V2State = {
 };
 export type V2Step = { readonly state: V2State; readonly pack: Uint8Array | null };
 
+// upload-pack's own words for an oid it will not send. v2 prefixes `upload-pack: `; v0 and v1 do not. A trailing oid
+// is separated by a space, so `not our refresh` is a different error. Recognised once, here: callers switch on
+// `reason` instead of the message.
+const NOT_OUR_REF = 'not our ref';
+const UPLOAD_PACK_NOT_OUR_REF = 'upload-pack: not our ref';
+function notOurRefReason(text: string): { readonly reason: 'not_our_ref' } | undefined {
+  const bare = text === NOT_OUR_REF || text.startsWith(`${NOT_OUR_REF} `);
+  const prefixed = text === UPLOAD_PACK_NOT_OUR_REF || text.startsWith(`${UPLOAD_PACK_NOT_OUR_REF} `);
+  if (bare || prefixed) return { reason: 'not_our_ref' };
+  return undefined;
+}
+
+// A commit want whose object is a tree, blob, or tag is not_found, before pack_corrupt is built. Any other mismatch
+// (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt. Top-level so its throw is this function's.
+function refuseNonCommit(expectType: number | null, type: number, oid: string): void {
+  if (expectType !== TYPE.COMMIT) return;
+  const name = nonCommitType(type);
+  if (name === null) return;
+  throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid, type: name } } });
+}
+
 export const v2Init = (limits: Limits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
   band1: 0, band2: 0, band3: 0, band2Frames: 0, progress: '', progressCarry: new Uint8Array(0), error: null, done: false, packFrames: 0,
@@ -157,7 +178,10 @@ export function v2Step(st: V2State, frame: Frame): V2Step {
       const d = decodeChunk(st.progressCarry, band.body);
       return { state: { ...st, band2, band2Frames: st.band2Frames + 1, progress: (st.progress + d.text).slice(-PROGRESS_KEEP), progressCarry: d.carry }, pack: null };
     }
-    if (band.band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(band.body).trim()}`);
+    if (band.band === SIDEBAND_ERROR) {
+      const text = td.decode(band.body).trim();
+      throw fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+    }
     throw proto(`v2: bad sideband ${band.band}`);
   }
   // A response-end outside the packfile section is skipped. (Checked here, after the packfile branch, rather than
@@ -165,7 +189,10 @@ export function v2Step(st: V2State, frame: Frame): V2Step {
   if (frame.kind === 'end') return { state: st, pack: null };
   if (frame.kind === 'delim') return { state: { ...st, section: null }, pack: null };
   const line = td.decode(frame.payload).replace(/\n$/, '');
-  if (line.startsWith('ERR ')) throw fail('remote_error', `remote: ${line.slice('ERR '.length)}`);
+  if (line.startsWith('ERR ')) {
+    const text = line.slice('ERR '.length);
+    throw fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+  }
   if (st.section === null) {
     if (st.sections.length >= maxLines) throw limitError('section headers', st.sections.length + 1, maxLines);
     const next: { -readonly [K in keyof V2State]: V2State[K] } = { ...st, section: line, sections: [...st.sections, line] };
@@ -375,6 +402,7 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
       span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': String((TYPE_NAME as Names)[sp.type]) });
       if (got !== oid) throw fail('pack_corrupt', `object ${got} served for want ${oid}`);
       assertFetched(String((TYPE_NAME as Names)[sp.type]), out, t.limits);
+      refuseNonCommit(expectType, sp.type, oid);
       if (expectType !== null && sp.type !== expectType) throw fail('pack_corrupt', `expected ${(TYPE_NAME as Names)[expectType]}, got ${String((TYPE_NAME as Names)[sp.type])}`);
       return { type: sp.type, data: out, oid, size: out.length, bust };
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- any thrown object carries the cache status (fetchPack reads it back)
@@ -402,6 +430,7 @@ async function fetchWide(t: Transport, { oid, deepen, expectType, learned = fals
       const want = objects.get(oid);
       if (!want) throw fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
       if (want.data.length > maxObject) throw limitError('object size', want.data.length, maxObject);
+      refuseNonCommit(expectType, want.type, oid);
       if (expectType !== null && want.type !== expectType) throw fail('pack_corrupt', `expected ${(TYPE_NAME as Names)[expectType]}, got ${(TYPE_NAME as Names)[want.type]}`);
       let blobs = 0, extraBytes = skipped.reduce((n, x) => n + x.bytes, 0); for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
       const h = harvest(t, objects, oid);

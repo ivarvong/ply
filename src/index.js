@@ -3,7 +3,15 @@
 export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, isLfsPointerPrefix, withCommitData } from './edit.js';
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
-export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode } from './read.js';
+/**
+ * Why a not_found missed. Switch on `kind`.
+ * @typedef {import('./errors.js').Miss} Miss
+ */
+/**
+ * Why a commit id is not a commit the remote will serve (`absent`, or `not_commit` of a tree, blob, or tag).
+ * @typedef {import('./errors.js').CommitMiss} CommitMiss
+ */
+export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, walkPath } from './read.js';
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
