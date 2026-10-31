@@ -30,8 +30,9 @@ import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/li
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
 import { negotiate } from '../src/negotiate.js';
+import { parseOid, parseCommitId } from '../src/oid.js';
 import {
-  OID_BYTES, OID_HEX_CHARS, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
+  OID_BYTES, OID_HEX_CHARS, HEX_DIGIT_MIN, HEX_DIGIT_MAX, HEX_LOWER_MIN, HEX_LOWER_MAX, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
@@ -1917,6 +1918,65 @@ test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was onl
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['x'] }), 'a', 'b'), { best: ['c', 'z'], truncated: false }, 'a cut both bases reach');
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['w'] }), 'a', 'b'), { best: ['c', 'z'], truncated: true }, 'each base reaches a cut the other does not');
+});
+
+test('parseOid is 40 lowercase hex; parseCommitId also refuses the zero oid', () => {
+  const code = n => String.fromCharCode(n);
+  const place = (i, ch) => `${'b'.repeat(i)}${ch}${'b'.repeat(OID_HEX_CHARS - 1 - i)}`;
+  const refused = (fn, value) => {
+    const r = fn(value);
+    assert.equal(r.ok, false);
+    if (r.ok) return null;
+    assert.equal(r.error.code, 'bad_request');
+    return r.error;
+  };
+  const accepted = value => {
+    const r = parseOid(value);
+    assert.equal(r.ok, true, typeof value === 'string' ? JSON.stringify(value) : typeof value);
+    if (!r.ok) return '';
+    assert.equal(r.value, value);
+    assert.equal(typeof r.value, 'string');
+    return r.value;
+  };
+  assert.equal(accepted(code(HEX_DIGIT_MIN).repeat(OID_HEX_CHARS)), ZERO_OID);
+  assert.equal(ZERO_OID, '0'.repeat(OID_HEX_CHARS));
+  accepted(code(HEX_DIGIT_MAX).repeat(OID_HEX_CHARS));
+  accepted(code(HEX_LOWER_MIN).repeat(OID_HEX_CHARS));
+  accepted(code(HEX_LOWER_MAX).repeat(OID_HEX_CHARS));
+  accepted(place(0, code(HEX_DIGIT_MIN)));
+  accepted(place(OID_HEX_CHARS - 1, code(HEX_LOWER_MAX)));
+  for (const ch of [code(HEX_DIGIT_MIN - 1), code(HEX_DIGIT_MAX + 1), code(HEX_LOWER_MIN - 1), code(HEX_LOWER_MAX + 1), 'A', 'F']) {
+    for (const i of [0, 7, OID_HEX_CHARS - 1]) {
+      const e = refused(parseOid, place(i, ch));
+      assert.equal(e.message, 'oid must be lowercase hex');
+      assert.equal(e.what, 'oid');
+      assert.equal(e.got, place(i, ch));
+    }
+  }
+  for (const value of ['', 'b'.repeat(OID_HEX_CHARS - 1), 'b'.repeat(OID_HEX_CHARS + 1)]) {
+    const e = refused(parseOid, value);
+    assert.equal(e.message, `oid must be ${OID_HEX_CHARS} lowercase hex characters`);
+    assert.equal(e.what, 'oid');
+    assert.equal(e.got, value);
+  }
+  for (const value of [1, null, undefined, true, {}, [], Object('b'.repeat(OID_HEX_CHARS))]) {
+    const e = refused(parseOid, value);
+    assert.equal(e.message, 'oid must be a string');
+    assert.equal(e.what, 'oid');
+    assert.equal(e.got, value);
+  }
+  const short = refused(parseCommitId, 'b'.repeat(OID_HEX_CHARS - 1));
+  assert.equal(short.message, `oid must be ${OID_HEX_CHARS} lowercase hex characters`);
+  assert.equal(short.what, 'oid');
+  assert.equal(short.got, 'b'.repeat(OID_HEX_CHARS - 1));
+  const zero = refused(parseCommitId, ZERO_OID);
+  assert.equal(zero.message, 'the zero oid is not a commit');
+  assert.equal(zero.what, 'commit');
+  assert.equal(zero.got, ZERO_OID);
+  const leading = `${code(HEX_DIGIT_MIN)}${'c'.repeat(OID_HEX_CHARS - 1)}`;
+  const kept = parseCommitId(leading);
+  assert.equal(kept.ok, true);
+  if (kept.ok) assert.equal(kept.value, leading);
 });
 
 test('validatePushRef: receive-pack\'s funny refname (the cells test/space/refname.test.js observes from git)', () => {
