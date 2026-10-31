@@ -119,7 +119,8 @@ export function pktStep(st: PktState, chunk: Uint8Array): PktStepped { return or
 
 // @decoder pktFinishResult prefix=pkt
 export function pktFinishResult(st: PktState): Result<PktState, Protocol> {
-  return st.carry && st.carry.length > 0 ? proto(`trailing ${st.carry.length} bytes after last pkt-line`) : ok(st);
+  // pktStepResult carries null, never an empty array, when nothing is left
+  return st.carry ? proto(`trailing ${st.carry.length} bytes after last pkt-line`) : ok(st);
 }
 // @decoder pktFinish prefix=pkt
 export function pktFinish(st: PktState): PktState { return orThrow(pktFinishResult(st)); }

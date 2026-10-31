@@ -35,6 +35,7 @@ const ESCAPE_HI = 0xdc_ff;
 const SUR_LO = 0xd8_00;
 const SUR_HI = 0xdf_ff;
 const HIGH_END = 0xdb_ff;
+// Stryker disable next-line ConditionalExpression: `undefined >= lo` is false, so dropping the undefined test changes no result (it is there for the type)
 const inRange = (b: number | undefined, lo: number, hi: number): boolean => b !== undefined && b >= lo && b <= hi;
 // Length of the well-formed UTF-8 sequence at i (Unicode Table 3-7), or 0. `i` is always < b.length (both callers).
 function wellFormedAt(b: Uint8Array, i: number): number {
@@ -50,6 +51,7 @@ function wellFormedAt(b: Uint8Array, i: number): number {
 }
 
 export function decodeBytes(b: Uint8Array): string {
+  // Stryker disable next-line BlockStatement: the fast path; the loop below returns the same string for well-formed bytes
   try { return strict.decode(b); } catch { /* ill-formed: escape byte by byte below */ }
   let s = '';
   let run = 0;
@@ -74,6 +76,7 @@ export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
 
 export function encodeBytesResult(s: unknown, what = 'string'): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
   if (typeof s !== 'string') return fail('bad_request', `${what} must be a string`, { what });
+  // Stryker disable next-line ConditionalExpression: the fast path; the loop below writes the same bytes for a well-formed string
   if (s.isWellFormed()) return ok(te.encode(s));
   const parts: Uint8Array[] = [];
   let run = 0;
@@ -98,8 +101,10 @@ export const encodeBytes = (s: unknown, what?: string): Uint8Array<ArrayBuffer> 
 // Text that arrives in pieces (sideband band 2, ssh stderr): a sequence cut by a frame boundary waits in `carry` for its
 // tail instead of decoding as two U+FFFD. Pure: returns { text, carry }.
 export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: string; carry: Uint8Array } {
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: concat of an empty carry is a copy of the chunk, the same bytes
   const buf = carry.length > 0 ? concat([carry, chunk]) : chunk;
   let cut = buf.length;
+  // Stryker disable next-line ConditionalExpression,LogicalOperator: past k = 3 a lead needs at most 4 ≤ k bytes (no cut), and past the start a read is undefined (neither branch)
   for (let k = 1; k <= 3 && k <= buf.length; k++) {
     const c = buf[buf.length - k] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- k <= buf.length (the loop)
     if (c < ASCII_END) break;

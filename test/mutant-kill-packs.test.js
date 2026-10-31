@@ -4,7 +4,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readFileSync } from 'node:fs';
-import { takeResult, take, shortRead, encodeBytesResult, encodeBytes, HEXV, te, concat } from '../src/bytes.js';
+import { takeResult, take, shortRead, encodeBytesResult, encodeBytes, HEXV, te, concat, decodeBytes as decodeBytesOf, decodeChunk as decodeChunkOf } from '../src/bytes.js';
 import { pktResult, pktStepResult, pktFinishResult, pktInit, pktStep } from '../src/pktline.js';
 import { inflateResult, inflate, DEFLATE_TABLES } from '../src/inflate.js';
 import {
@@ -211,4 +211,97 @@ test('fromHex: the table reads every pair parseInt reads, and garbage pairs as p
     const want = /[0-9a-f]/i.test(String.fromCharCode(c)) ? Number.parseInt(String.fromCharCode(c), 16) : -1;
     assert.equal(HEXV[c], want, `HEXV[${c}]`);
   }
+});
+
+// ---- #84: bytes.ts survivors, killed by an independent oracle (the platform's strict UTF-8 decoder) ----
+
+const strictDec = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const looseDec = new TextDecoder('utf-8', { ignoreBOM: true });
+const memo = new Map();
+// The one character these bytes are as UTF-8, or null (memoised: the decoder signals ill-formed bytes by throwing).
+function oneChar(bytes) {
+  const k = bytes.join();
+  if (!memo.has(k)) {
+    let v = null;
+    try { const t = strictDec.decode(bytes); if ([...t].length === 1) v = t; } catch { /* ill-formed */ }
+    memo.set(k, v);
+  }
+  return memo.get(k);
+}
+// PEP 383 surrogateescape, by the platform's decoder: at each byte, the shortest prefix that decodes to one code point is
+// a character; a byte that starts none is escaped as U+DC00 + byte.
+function refDecode(b) {
+  let s = '';
+  for (let i = 0; i < b.length;) {
+    let took = 0;
+    for (let n = 1; n <= 4 && i + n <= b.length && !took; n++) {
+      const t = oneChar(b.subarray(i, i + n));
+      if (t !== null) { s += t; took = n; }
+    }
+    if (!took) { s += String.fromCharCode(0xdc00 + b[i]); took = 1; }
+    i += took;
+  }
+  return s;
+}
+const EDGES = [0x00, 0x41, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xed, 0xef, 0xf0, 0xf4, 0xf5, 0xff];
+
+test('#84 decodeBytes is surrogateescape over every lead byte and boundary continuation, and encodeBytes inverts it', () => {
+  for (let lead = 0; lead < 256; lead++) {
+    for (const b1 of EDGES) for (const b2 of [0x7f, 0x80, 0xbf, 0xc0]) for (const b3 of [0x80, 0xbf, 0x41]) {
+      // an ill-formed byte on either side keeps the strict fast path out, so the escape loop decides every byte
+      for (const b of [Uint8Array.of(lead, b1, b2, b3, 0xff), Uint8Array.of(0xff, lead, b1, b2, b3), Uint8Array.of(0xff, lead, b1)]) {
+        const s = decodeBytesOf(b);
+        if (s !== refDecode(b)) assert.fail(`decodeBytes(${[...b].map(x => x.toString(16)).join(' ')}) = ${JSON.stringify(s)}, want ${JSON.stringify(refDecode(b))}`);
+        const back = encodeBytesResult(s);
+        if (!back.ok || Buffer.compare(Buffer.from(back.value), Buffer.from(b)) !== 0) assert.fail(`encodeBytes does not invert decodeBytes on ${[...b].map(x => x.toString(16)).join(' ')}`);
+      }
+    }
+  }
+});
+
+test('#84 encodeBytes: surrogate pairs at the edges are characters, lone ones outside the escape range are refused', () => {
+  const ok = (s, bytes) => assert.deepEqual([...encodeBytesResult(s).value], bytes, JSON.stringify(s));
+  ok('􏿿\udce9', [0xf4, 0x8f, 0xbf, 0xbf, 0xe9]); // U+10FFFF, the last pair, beside an escape
+  ok('𐀀\udc80', [0xf0, 0x90, 0x80, 0x80, 0x80]);
+  ok('\udc80\udcff', [0x80, 0xff]);
+  const lone = (s, u) => assert.equal(errOf(encodeBytesResult(s, 'name'), 'bad_request', `name: lone surrogate U+${u} is no byte sequence`).what, 'name');
+  lone('\ud800􏳩', 'D800'); // a high surrogate followed by a high one is no pair
+  lone('\udc7f', 'DC7F');
+  lone('\udd00', 'DD00');
+  lone('\udbff', 'DBFF');
+  assert.equal(errOf(encodeBytesResult('\udcc3\udca9', 'name'), 'bad_request', 'name: escaped bytes spell well-formed UTF-8; pass the characters').what, 'name');
+  assert.equal(errOf(encodeBytesResult(null), 'bad_request', 'string must be a string').what, 'string');
+});
+
+test('#84 decodeChunk: any split of any byte stream gives the whole stream\'s text, and carries only an unfinished sequence', () => {
+  const need = c => (c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : 2);
+  const streams = [];
+  for (const lead of EDGES) for (let n = 0; n <= 4; n++) for (const cont of [0x80, 0x82, 0xbf, 0x41]) streams.push(Uint8Array.of(0x61, lead, ...new Array(n).fill(cont)));
+  streams.push(te.encode('é€😀a'), Uint8Array.of(0xe2, 0x80, 0x80, 0xf0, 0x9f, 0x98, 0x80));
+  for (const s of streams) {
+    for (let cut = 0; cut <= s.length; cut++) for (let cut2 = cut; cut2 <= s.length; cut2++) {
+      let carry = new Uint8Array(0);
+      let text = '';
+      for (const piece of [s.subarray(0, cut), s.subarray(cut, cut2), s.subarray(cut2)]) {
+        const r = decodeChunkOf(carry, piece);
+        text += r.text; carry = r.carry;
+        if (carry.length) {
+          const where = `${[...s].map(x => x.toString(16)).join(' ')} cut ${cut}/${cut2}`;
+          assert.ok(carry[0] >= 0xc2 && carry.length < need(carry[0]), `carry starts a sequence it has not finished: ${where}`);
+          assert.ok(carry.subarray(1).every(c => c >= 0x80 && c <= 0xbf), `carry holds only continuation bytes after its lead: ${where}`);
+        }
+      }
+      text += looseDec.decode(carry);
+      if (text !== looseDec.decode(s)) assert.fail(`split ${cut}/${cut2} of ${[...s].map(x => x.toString(16)).join(' ')}: ${JSON.stringify(text)}`);
+    }
+  }
+});
+
+test('pktFinish refuses only a carry; parsePack refuses an ofs delta naming itself', async () => {
+  assert.equal(pktFinishResult(pktInit()).ok, true);
+  assert.equal(pktFinishResult(pktStep(pktInit(), te.encode('0000')).state).ok, true);
+  // a one-object pack whose object is an OFS_DELTA with offset 0
+  const body = concat([te.encode('PACK'), Uint8Array.of(0, 0, 0, 2, 0, 0, 0, 1), Uint8Array.of(0x62, 0x00), zlib.deflateSync(Uint8Array.of(0, 0))]);
+  const sha = (await import('node:crypto')).createHash('sha1').update(body).digest();
+  errOf(parsePackResult(concat([body, sha])), 'pack_corrupt', `pack: ofs delta at ${PACK_HEADER_BYTES} is its own base`);
 });
