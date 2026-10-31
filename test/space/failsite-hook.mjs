@@ -30,9 +30,8 @@ if (DIR && !globalThis[KEY]) {
   let named = null;
   const runner = () => named ?? process.env.PLY_FAILSITE_RUNNER ?? (process.argv[1] ? relative(ROOT, process.argv[1]) : '(eval)');
   const thread = isMainThread ? 'm' : `w${threadId}`;
-  // Written to a temp name and renamed: a process stopped mid-write (a killed fork, a timed-out child) used to leave an
-  // empty or cut .json that the gate's JSON.parse refused (CI run 41227496754: a 0-byte linemerge record). rename is
-  // atomic within a directory, so a reader sees the previous record or the new one, never part of one.
+  // written to a temporary name and renamed (atomic on one filesystem): a process killed mid-write (a test's timeout,
+  // a worker terminated) leaves its previous record or none, never a truncated one the gate cannot parse
   const save = r => {
     const file = join(out, `${process.pid}-${thread}-${r.replace(/[^\w.-]+/g, '_')}.json`);
     writeFileSync(`${file}.tmp`, JSON.stringify({ runner: r, platform: process.platform, frames: Object.fromEntries(byRunner.get(r) ?? []) }));
