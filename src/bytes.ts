@@ -1,6 +1,9 @@
 // Byte helpers.
-import type { Code } from './errors.js';
-import { thrown as fail } from './errors.js';
+import type { ErrorOf } from './errors.js';
+import { fail, plyError, orThrow } from './errors.js';
+import type { Result } from './result.js';
+import { ok, err } from './result.js';
+import { BYTE_VALUES, PKT_HEX_BASE } from './format.js';
 
 export const te: TextEncoder = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
@@ -69,9 +72,9 @@ export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-export function encodeBytes(s: unknown, what = 'string'): Uint8Array<ArrayBuffer> {
-  if (typeof s !== 'string') throw fail('bad_request', `${what} must be a string`, { what });
-  if (s.isWellFormed()) return te.encode(s);
+export function encodeBytesResult(s: unknown, what = 'string'): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
+  if (typeof s !== 'string') return fail('bad_request', `${what} must be a string`, { what });
+  if (s.isWellFormed()) return ok(te.encode(s));
   const parts: Uint8Array[] = [];
   let run = 0;
   for (let i = 0; i < s.length; i++) {
@@ -79,16 +82,18 @@ export function encodeBytes(s: unknown, what = 'string'): Uint8Array<ArrayBuffer
     const c = s.charCodeAt(i); // oxlint-disable-line unicorn/prefer-code-point -- see above
     if (c < SUR_LO || c > SUR_HI) continue;
     if (c <= HIGH_END && inRange(s.charCodeAt(i + 1), HIGH_END + 1, SUR_HI)) { i++; continue; } // oxlint-disable-line unicorn/prefer-code-point -- see above
-    if (c < ESCAPE_LO || c > ESCAPE_HI) throw fail('bad_request', `${what}: lone surrogate U+${c.toString(16).toUpperCase()} is no byte sequence`, { what });
+    if (c < ESCAPE_LO || c > ESCAPE_HI) return fail('bad_request', `${what}: lone surrogate U+${c.toString(16).toUpperCase()} is no byte sequence`, { what });
     parts.push(te.encode(s.slice(run, i)), Uint8Array.of(c - ESCAPE));
     run = i + 1;
   }
   parts.push(te.encode(s.slice(run)));
   const bytes = concat(parts);
   // `\udcc3\udca9` would write C3 A9, which reads back as `é`: two strings, one byte sequence. Refuse the spelling no read returns.
-  if (decodeBytes(bytes) !== s) throw fail('bad_request', `${what}: escaped bytes spell well-formed UTF-8; pass the characters`, { what });
-  return bytes;
+  if (decodeBytes(bytes) !== s) return fail('bad_request', `${what}: escaped bytes spell well-formed UTF-8; pass the characters`, { what });
+  return ok(bytes);
 }
+// The throwing form, for callers not yet on Result (docs/STACK.md, migration path step 2).
+export const encodeBytes = (s: unknown, what?: string): Uint8Array<ArrayBuffer> => orThrow(encodeBytesResult(s, what));
 
 // Text that arrives in pieces (sideband band 2, ssh stderr): a sequence cut by a frame boundary waits in `carry` for its
 // tail instead of decoding as two U+FFFD. Pure: returns { text, carry }.
@@ -108,20 +113,32 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
 
 /**
  * Bounded read. `subarray` / `slice` clamp a range that runs past the end and return a short view; parsers that
- * trusted that view accepted truncated fields (the tree-oid off-by-one). `take` throws the typed short-read error
- * instead, so the length is the bound.
+ * trusted that view accepted truncated fields (the tree-oid off-by-one). `takeResult` returns the typed short read
+ * instead, so the length is the bound. The error carries `reason: 'short_read'`: a stream parser that may get more
+ * bytes switches on that, never on the message (#76). An absent buffer is a short read of an empty one.
  */
-export function take(buf: Uint8Array | null | undefined, off: number, n: number, code: Code = 'pack_corrupt'): Uint8Array {
+export type ShortReadCode = 'pack_corrupt' | 'protocol';
+// The short-read error itself, for a parser that reads byte by byte without a take() per byte.
+export const shortRead = <C extends ShortReadCode>(code: C, off: number, n: number, have: number): ErrorOf<C> =>
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- plyError's member for C; the compiler cannot resolve Payload<C> for a type parameter
+  plyError<ShortReadCode>(code, `short read: need ${n} bytes at ${off}, have ${have}`, { reason: 'short_read' }) as ErrorOf<C>;
+export function takeResult<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null | undefined, off: number, n: number, code?: C): Result<Uint8Array, ErrorOf<C>> {
   const len = buf?.length ?? 0;
-  if (!Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) {
-    throw fail(code, `short read: need ${n} bytes at ${off}, have ${len}`);
-  }
-  // Only take(absent, 0, 0) gets here without a buffer, and it throws a TypeError as it always has (no caller passes one)
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above; TODO(A1): refuse it as a short read
-  return (buf as Uint8Array).subarray(off, off + n);
+  // an omitted code is C's default, 'pack_corrupt'; the compiler cannot tie a default value to a type parameter
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+  if (!buf || !Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) return err(shortRead(code ?? 'pack_corrupt' as C, off, n, len));
+  return ok(buf.subarray(off, off + n));
 }
+// The throwing form (docs/STACK.md, migration path step 2).
+export const take = (buf: Uint8Array | null | undefined, off: number, n: number, code?: ShortReadCode): Uint8Array => orThrow(takeResult(buf, off, n, code));
 
-
+// Hex digit value of each byte value, either case; -1 for a byte that is not a hex digit. The one hex table: the
+// pkt-line length reader and fromHex (sha1.ts) read it.
+// oxlint-disable-next-line no-magic-numbers -- sentinel: this byte is not a hex digit
+export const HEXV: Int8Array = new Int8Array(BYTE_VALUES).fill(-1);
+// ASCII digits: a code unit is the code point
+// oxlint-disable-next-line unicorn/prefer-code-point -- see above
+for (let i = 0; i < PKT_HEX_BASE; i++) { HEXV['0123456789abcdef'.charCodeAt(i)] = i; HEXV['0123456789ABCDEF'.charCodeAt(i)] = i; }
 
 // First index of needle in hay at or after from; -1 if none.
 export function indexOfBytes(hay: Uint8Array, needle: Uint8Array, from = 0): number {

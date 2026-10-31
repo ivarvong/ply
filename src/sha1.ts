@@ -1,7 +1,7 @@
 // Streaming SHA-1. Needed because crypto.subtle.digest is whole-buffer only,
 // and pack trailers / object ids must be computed over data we never hold at once.
 
-import { encodeBytes } from './bytes.js';
+import { encodeBytes, HEXV } from './bytes.js';
 
 // Workers' crypto.DigestStream: a WritableStream whose `digest` is a promise of the ArrayBuffer. Not in lib.dom, and
 // absent on node and in browsers, hence optional.
@@ -19,9 +19,17 @@ export function toHex(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i++) s += HEX[bytes[i] as number] as string;
   return s;
 }
+// Table-driven (bytes.ts HEXV): 3× faster than parseInt per byte (PR body). A pair that is not two hex digits keeps
+// parseInt's reading, so any string maps to the bytes it always did; fromHex has never validated (callers check oids).
 export function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length >> 1);
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < out.length; i++) {
+    // oxlint-disable-next-line unicorn/prefer-code-point -- a code unit indexes the byte table; one past it reads -1
+    const hi = HEXV[hex.charCodeAt(2 * i)] ?? -1;
+    // oxlint-disable-next-line unicorn/prefer-code-point -- see above
+    const lo = HEXV[hex.charCodeAt(2 * i + 1)] ?? -1;
+    out[i] = (hi | lo) < 0 ? Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16) : (hi << 4) | lo;
+  }
   return out;
 }
 
@@ -71,19 +79,17 @@ export class Sha1 {
     let c = h[2] as number;
     let d = h[3] as number;
     let e = h[4] as number;
-    for (let i = 0; i < 80; i++) {
-      let f: number;
-      let k: number;
-      if (i < 20) { f = (b & c) | (~b & d); k = 0x5a_82_79_99; }
-      else if (i < 40) { f = b ^ c ^ d; k = 0x6e_d9_eb_a1; }
-      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f_1b_bc_dc; }
-      else { f = b ^ c ^ d; k = 0xca_62_c1_d6; }
-      // `| 0` is the 32-bit wrap SHA-1 adds modulo, not a truncation
-      // oxlint-disable-next-line unicorn/prefer-math-trunc -- see above
-      const t = (((a << 5) | (a >>> 27)) + f + e + k + (w[i] as number)) | 0;
-      e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
-    }
-    (h[0] as number) += a; (h[1] as number) += b; (h[2] as number) += c; (h[3] as number) += d; (h[4] as number) += e;
+    // One loop per 20-round phase: no per-round branch on the phase (−18%, PR body). `| 0` is the 32-bit wrap SHA-1
+    // adds modulo, not a truncation.
+    /* oxlint-disable unicorn/prefer-math-trunc -- see above */
+    let i = 0;
+    for (; i < 20; i++) { const t = (((a << 5) | (a >>> 27)) + ((b & c) | (~b & d)) + e + 0x5a_82_79_99 + (w[i] as number)) | 0; e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t; }
+    for (; i < 40; i++) { const t = (((a << 5) | (a >>> 27)) + (b ^ c ^ d) + e + 0x6e_d9_eb_a1 + (w[i] as number)) | 0; e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t; }
+    for (; i < 60; i++) { const t = (((a << 5) | (a >>> 27)) + ((b & c) | (b & d) | (c & d)) + e + 0x8f_1b_bc_dc + (w[i] as number)) | 0; e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t; }
+    for (; i < 80; i++) { const t = (((a << 5) | (a >>> 27)) + (b ^ c ^ d) + e + 0xca_62_c1_d6 + (w[i] as number)) | 0; e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t; }
+    /* oxlint-enable unicorn/prefer-math-trunc */
+    // not `(h[0] as number) += a`: Stryker drops the parentheses when it mutates that form and the file no longer parses
+    h[0] = (h[0] as number) + a; h[1] = (h[1] as number) + b; h[2] = (h[2] as number) + c; h[3] = (h[3] as number) + d; h[4] = (h[4] as number) + e;
   }
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
 
