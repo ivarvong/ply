@@ -77,3 +77,4 @@ export async function lsRefs(t, prefixes = []) {
     return { refs, head };
   }));
 }
+// mutate-shard CI timing probe; reverted before merge.
