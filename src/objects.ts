@@ -38,8 +38,7 @@ export function hashObject(typeName: string, data: Uint8Array): string {
 const cmpBytes = (a: Uint8Array, b: Uint8Array): number => {
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) {
-    const x = a[i] ?? 0, y = b[i] ?? 0;
-    if (x !== y) return x - y;
+    if (a[i] !== b[i]) return (a[i] ?? 0) - (b[i] ?? 0);
   }
   return a.length - b.length;
 };
@@ -287,9 +286,8 @@ export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_
   refuseShadowed('commit', extra, COMMIT_SHADOWED);
   const at = extra.findIndex(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `));
   // extra[-1] is undefined: no encoding line
-  const line = extra[at];
-  const encoding = line === undefined ? null : line.slice(COMMIT_HEADER_ENCODING.length + 1);
-  if (line !== undefined) extra.splice(at, 1);
+  // splice returns the one line it removed; join('') is that line
+  const encoding = at < 0 ? null : extra.splice(at, 1).join('').slice(COMMIT_HEADER_ENCODING.length + 1);
   // a second encoding is a second copy of a single-valued header
   if (extra.some(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `))) throw duplicate('commit', COMMIT_HEADER_ENCODING);
   return { tree, parents, author, committer, encoding, extra, message };

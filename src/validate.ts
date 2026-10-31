@@ -17,20 +17,17 @@ export type IdentInput = { readonly name?: unknown; readonly email?: unknown; re
 type MaybeBranded = { readonly [VALIDATED_IDENT]?: unknown } | null | undefined;
 export const isValidatedIdent = (person: MaybeBranded): person is ValidatedIdent => !!person && person[VALIDATED_IDENT] === true;
 const TZ_TEXT = new RegExp(`^[+-][0-9]{${IDENT_TZ_DIGITS}}$`, 'u');
-const identText = (what: string, v: unknown): string => {
-  if (typeof v !== 'string') throw bad(what, 'must be a string');
-  if (/[\0\n<>]/u.test(v)) throw bad(what, 'must not contain NUL, newline, < or >');
-  return v;
-};
 
 export function validateIdent({ name, email, time, tz = '+0000' }: IdentInput = {}): ValidatedIdent {
   // Exactly fsck.c fsck_ident(): name is everything before " <" and may not contain '<', '>', NUL or newline;
   // email is between '<' and '>' and may not contain '<', '>', NUL or newline. Anything else — punctuation,
   // leading/trailing spaces, tabs, empty name or email — is a valid object. (Verified against git fsck --strict.)
-  const checkedName = identText('author name', name);
-  const checkedEmail = identText('author email', email);
+  for (const [k, v] of [['author name', name], ['author email', email]] as const) {
+    if (typeof v !== 'string') throw bad(k, 'must be a string');
+    if (/[\0\n<>]/u.test(v)) throw bad(k, 'must not contain NUL, newline, < or >');
+  }
   // Caller time is a unix epoch. A string would be interpolated into the header; only a safe non-negative integer is.
-  if (typeof time !== 'number' || !Number.isSafeInteger(time) || time < 0) throw bad('time', 'must be a non-negative safe integer');
+  if (!Number.isSafeInteger(time) || Number(time) < 0) throw bad('time', 'must be a non-negative safe integer');
   // Caller zones are the civil range. fsck_ident does not range-check (checkIdent still accepts +9999). Omitted means UTC
   // (the parameter default: undefined only, as before).
   if (typeof tz !== 'string' || !TZ_TEXT.test(tz)) throw bad('tz', 'must be a sign and four digits');
@@ -41,9 +38,9 @@ export function validateIdent({ name, email, time, tz = '+0000' }: IdentInput = 
   if (minutes > IDENT_TZ_MINUTE_MAX || minutes < 0) throw bad('tz', 'minutes out of range');
   if (hours < IDENT_TZ_HOUR_MIN || hours > IDENT_TZ_HOUR_MAX) throw bad('tz', 'hours out of range');
   if ((hours === IDENT_TZ_HOUR_MAX || hours === IDENT_TZ_HOUR_MIN) && minutes !== 0) throw bad('tz', 'extreme offset must be on the hour');
-  const person = { name: checkedName, email: checkedEmail, time, tz };
+  const person = { name, email, time, tz };
   Object.defineProperty(person, VALIDATED_IDENT, { value: true });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- defineProperty added the brand; its type cannot say so
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the loop above checked name and email, defineProperty added the brand; neither narrows the type
   return Object.freeze(person) as ValidatedIdent;
 }
 
@@ -70,13 +67,11 @@ export function validateRef(ref: unknown): string {
 // full name to check_refname_format, so every component passes; what is left is the part after refs/ as a refname of its
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
-export function validatePushRef(ref: unknown, deleting: boolean): string {
-  // validateRef returns the ref it was given, now known to be a string
-  const checked = validateRef(ref);
-  // after "refs/"
-  const name = checked.slice(5);
+// The ref is typed string (push.js's callers pass one); validateRef still refuses a non-string at run time.
+export function validatePushRef(ref: string, deleting: boolean): string {
+  const name = validateRef(ref).slice(5); // after "refs/"
   if (name === '@' || (!deleting && !name.includes('/'))) throw bad('ref', 'receive-pack refuses it (funny refname)');
-  return checked;
+  return ref;
 }
 
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
