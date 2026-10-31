@@ -13,16 +13,19 @@ import base from './vitest.config.ts';
 const guard = `--require=${fileURLToPath(new URL('./test/stryker-parent-guard.cjs', import.meta.url))}`;
 if (!(process.env['NODE_OPTIONS'] ?? '').includes(guard)) process.env['NODE_OPTIONS'] = [process.env['NODE_OPTIONS'], guard].filter(Boolean).join(' ');
 
-export default mergeConfig(base, defineConfig({
+// mergeConfig concatenates arrays, so `include` is set on the merged result: these files only, not base's glob too.
+const MUTATION_FILES = [
+  'test/format-facts.test.js',
+  'test/prefix-closure.test.js',
+  'test/props.test.js',
+  'test/mutant-kill.test.js',
+  'test/mutant-kill-tree.test.js',
+  'test/space/push-outcome.test.js',
+];
+const config = mergeConfig(base, defineConfig({
   test: {
-    include: [
-      'test/format-facts.test.js',
-      'test/prefix-closure.test.js',
-      'test/props.test.js',
-      'test/mutant-kill.test.js',
-      'test/mutant-kill-tree.test.js',
-      'test/space/push-outcome.test.js',
-    ],
     env: { PROP_N: '4', PUSH_SPACE: 'quick', PUSH_SPACE_WORKERS: '0', MUTATION: '1' },
   },
 }));
+config.test = { ...config.test, include: MUTATION_FILES };
+export default config;
