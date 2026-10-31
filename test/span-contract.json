@@ -1950,6 +1950,7 @@
       "kind": "INTERNAL",
       "attrs": {
         "git.cherry_pick.commit": "string",
+        "git.cherry_pick.empty": "string",
         "git.cherry_pick.new": "string",
         "git.cherry_pick.outcome": "string",
         "git.cherry_pick.push.bytes": "number",
@@ -2142,6 +2143,7 @@
       "kind": "INTERNAL",
       "attrs": {
         "git.revert.commit": "string",
+        "git.revert.empty": "string",
         "git.revert.new": "string",
         "git.revert.outcome": "string",
         "git.revert.push.bytes": "number",
