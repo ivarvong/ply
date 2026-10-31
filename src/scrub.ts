@@ -33,9 +33,6 @@ export function scrubber(values: readonly unknown[]): ((text: unknown) => string
     }
     return start < 0 ? s : out + s.slice(from, start) + REDACTED + s.slice(end);
   };
-  return text => {
-    let acc = cut(String(text));
-    for (const x of whole) acc = acc.split(x).join(REDACTED);
-    return acc;
-  };
+  // oxlint-disable-next-line unicorn/no-array-reduce -- one expression; the loop form costs 17 B on every entry
+  return text => whole.reduce((acc, x) => acc.split(x).join(REDACTED), cut(String(text)));
 }
