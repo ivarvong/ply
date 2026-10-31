@@ -140,9 +140,11 @@ const isWantsRefusal = e => ['http', 'remote_error', 'protocol'].includes(e?.cod
 const bytesStream = data => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
 // The files iterator. Gitlinks first (nothing to fetch), then the unique blobs in `batch`-sized wants lists; every path
-// naming a blob is yielded with it. Its span, `git.checkout.blobs`, ends when the iteration does.
-async function* blobFiles(transport, tracer, parent, entries, batch) {
-  const span = tracer.start('git.checkout.blobs', { parent });
+// naming a blob is yielded with it. Its span, `git.checkout.blobs`, starts at the first next() and ends when the
+// iteration does, both after the checkout root has ended: it is the root of its own trace with a follows_from link to
+// the checkout root (README "Span lifetimes"), and each streamed blob's git.read.blob follows it in turn.
+async function* blobFiles(transport, tracer, opener, entries, batch) {
+  const span = tracer.start('git.checkout.blobs', { follows: opener });
   const t = withParent(transport, span);
   const byOid = new Map();
   for (const e of entries) if (e.mode !== MODE_COMMIT) { const l = byOid.get(e.oid); if (l) l.push(e); else byOid.set(e.oid, [e]); }

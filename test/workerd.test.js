@@ -195,3 +195,20 @@ test('workerd: a token given as the URL user authenticates the edit with the Aut
     for (const s of [TOKEN, gitAuth[0].slice(6), `${TOKEN}@`]) assert.ok(!r.dump.includes(s), `${s} in a span`);
   } finally { await gate.close(); }
 });
+
+test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob follows the root in a trace of its own (#35)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const bare = makeBareRepo(root, 'rd'); const work = join(root, 'wrd'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const big = Buffer.alloc(1 << 20); for (let i = 0; i < big.length; i += 4096) big.write(`line ${i}\n`, i);
+  commitFiles(work, bare, { 'big.bin': big }, 'seed');
+  for (const cancel of [false, true]) {
+    const r = await post('/read', { url: `${srv.url}/rd.git`, path: 'big.bin', cancel });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(r.size, big.length);
+    if (cancel) assert.ok(r.bytes > 0 && r.bytes < big.length, `one chunk: ${r.bytes}`); else assert.equal(r.bytes, big.length);
+    const rootSpan = r.spans.find(s => s.name === 'git.read'), blob = r.spans.find(s => s.name === 'git.read.blob');
+    assert.ok(blob, 'the blob span ended');
+    assert.deepEqual([blob.parentSpanId, blob.traceId === rootSpan.traceId, blob.links, rootSpan.links], [null, false, [[rootSpan.spanId, 'follows_from']], [[blob.spanId, 'followed_by']]]);
+    assert.equal(blob.outcome, cancel ? 'cancelled' : 'ok');
+    assert.equal(r.spans.filter(s => s.name === 'git.read.blob').length, 1);
+  }
+});
