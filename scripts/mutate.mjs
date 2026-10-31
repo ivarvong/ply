@@ -66,9 +66,9 @@ function owner(fns, line) {
 }
 
 // On a pull request, the src lines it changed: file -> [[from, to], ...] (1-based, inclusive, the PR's side; a pure
-// deletion borders the lines on either side of it). null on a full run (main, nightly, local).
+// deletion borders the lines on either side of it). null on a full run (main, nightly, local, or MUTATE_FULL=1).
 function changedRanges() {
-  if (process.env.GITHUB_EVENT_NAME !== 'pull_request') return null;
+  if (process.env.GITHUB_EVENT_NAME !== 'pull_request' || process.env.MUTATE_FULL === '1') return null;
   const base = process.env.MUTATE_BASE || 'origin/main';
   // --diff-filter=d: a file the PR deletes has nothing left to mutate.
   const diff = spawnSync('git', ['diff', '-U0', '--no-color', '--diff-filter=d', `${base}...HEAD`, '--', 'src'], { encoding: 'utf8', maxBuffer: 1 << 28 });
@@ -385,7 +385,7 @@ function verdict(report) {
   const breakAt = JSON.parse(readFileSync('stryker.conf.json', 'utf8')).thresholds?.break;
   // A pull request mutates only the files it changed. That subset's percentage is not
   // comparable to the full-library break, so the threshold applies to a full run.
-  const fullRun = process.env.GITHUB_EVENT_NAME !== 'pull_request';
+  const fullRun = process.env.GITHUB_EVENT_NAME !== 'pull_request' || process.env.MUTATE_FULL === '1';
   printRows(rows);
   console.log(`\nscore ${score.toFixed(2)}  (${detected} detected, ${survived} survived/uncovered, ${ignored} ignored)`);
   if (fullRun && breakAt !== null && breakAt !== undefined && score + 1e-9 < breakAt) {
