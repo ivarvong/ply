@@ -2,8 +2,8 @@
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "testRunner": "tap",
   "tap": {
-    "testFiles": ["test/format-facts.test.js", "test/prefix-closure.test.js", "test/props.test.js", "test/mutant-kill.test.js", "test/mutant-kill-tree.test.js"],
-    "nodeArgs": ["--env-file=test/stryker.env", "--test-reporter=tap", "-r", "{{hookFile}}", "{{testFile}}"],
+    "testFiles": ["test/format-facts.test.js", "test/prefix-closure.test.js", "test/props.test.js", "test/mutant-kill.test.js", "test/mutant-kill-tree.test.js", "test/space/push-outcome.test.js"],
+    "nodeArgs": ["--env-file=test/stryker.env", "--test-reporter=tap", "--test-skip-pattern=cells observed from git|every tag of every axis", "-r", "{{hookFile}}", "{{testFile}}"],
     "forceBail": true
   },
   "coverageAnalysis": "perTest",

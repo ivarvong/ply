@@ -86,7 +86,8 @@ export function parsePack(buf, opts = {}) {
   const maxInflatedTotal = capOf(opts.maxInflatedTotal, limits, 'maxInflatedTotal');
   const maxObjectSize = requireLimit(limits, 'maxObjectSize');
   const minPack = PACK_HEADER_BYTES + PACK_TRAILER_BYTES;
-  if (buf.length < minPack || !take(buf, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw corrupt('pack: bad signature');
+  // Past the minPack check the header is a view, not a bounded read; the object loop's reads are take()s.
+  if (buf.length < minPack || !buf.subarray(0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw corrupt('pack: bad signature');
   const version = readUint32BE(buf, PACK_SIGNATURE.length);
   const count = readUint32BE(buf, PACK_SIGNATURE.length + UINT32_BYTES);
   if (version !== PACK_VERSION) throw corrupt(`pack: unsupported version ${version}`);
@@ -106,6 +107,9 @@ export function parsePack(buf, opts = {}) {
       const ofs = readOfsDelta(buf, p);
       p = ofs.next;
       baseOffset = offset - ofs.off;
+      // git index-pack: "delta base offset is out of bound" unless 0 < base < this object. An offset of 0 names the
+      // object itself, which used to recurse to the chain limit and come back limit_exceeded instead of corrupt.
+      if (ofs.off === 0) throw corrupt(`pack: ofs delta at ${offset} is its own base`);
       if (baseOffset < PACK_HEADER_BYTES) throw corrupt(`pack: ofs delta base before pack start at ${offset}`);
       stats.ofsDelta++;
     } else if (type === TYPE.REF_DELTA) {
@@ -124,8 +128,9 @@ export function parsePack(buf, opts = {}) {
     p += consumed;
   }
   if (p + PACK_TRAILER_BYTES !== buf.length) throw corrupt(`pack: expected trailer at ${p}, pack length ${buf.length}`);
-  const trailer = toHex(take(buf, p, PACK_TRAILER_BYTES));
-  const computed = verify ? new Sha1().update(take(buf, 0, p)).hex() : null;
+  // the check above fixed the trailer's place: these are views
+  const trailer = toHex(buf.subarray(p));
+  const computed = verify ? new Sha1().update(buf.subarray(0, p)).hex() : null;
   if (verify && computed !== trailer) throw corrupt(`pack: trailer sha mismatch ${trailer} != ${computed}`);
   return { objects, stats, trailer, bytes: buf.length };
 }
@@ -162,11 +167,11 @@ export function applyDelta(base, delta, opts = {}) {
       if (c & DELTA_COPY_LEN3) { const r = deltaByte(delta, p); len |= r.b << DELTA_BYTE2_SHIFT; p = r.p; }
       if (len === 0) len = DELTA_COPY_MAX;
       if (off + len > base.length || o + len > resultSize) throw corrupt('delta: copy out of range');
-      out.set(take(base, off, len), o); o += len;
+      out.set(base.subarray(off, off + len), o); o += len; // in range: checked on the line above
       ops.copy++; ops.copyBytes += len;
     } else if (c) {
       if (p + c > delta.length || o + c > resultSize) throw corrupt('delta: insert out of range');
-      out.set(take(delta, p, c), o); o += c; p += c;
+      out.set(delta.subarray(p, p + c), o); o += c; p += c; // in range: checked on the line above
       ops.insert++; ops.insertBytes += c;
     } else throw corrupt('delta: reserved opcode 0');
   }
@@ -182,7 +187,8 @@ export function makeDelta(base, target) {
   while (p < max && base[p] === target[p]) p++;
   let s = 0;
   while (s < max - p && base[base.length - 1 - s] === target[target.length - 1 - s]) s++;
-  return spliceDelta({ baseLen: base.length, off: p, oldLen: base.length - p - s, insert: take(target, p, target.length - s - p) });
+  // p + s <= min(base.length, target.length) by the loops above: a view, it cannot be short
+  return spliceDelta({ baseLen: base.length, off: p, oldLen: base.length - p - s, insert: target.subarray(p, target.length - s) });
 }
 
 // ---- resolve ----

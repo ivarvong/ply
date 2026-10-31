@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot } from './server.js';
+import { git, gitBuf, tmpRoot, fsck } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
@@ -18,19 +18,20 @@ let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });
 after(() => cleanup());
 
-// fsck verdicts for every object written so far: one `git fsck --strict` over the whole store, its output split by oid.
-// fsck reports each object it finds wanting on its own line naming that object, and an object's verdict depends only on
-// its own bytes, so one scan answers every case. (One fsck per case re-scanned a store that grew with every case:
-// quadratic, 259 s of CI for the ident test alone.) The verdict text is the line's, as one fsck per case read it.
+// fsck verdicts for every object written so far, from one `git fsck --strict` over the whole store: per object, the
+// msgId of the first line naming it (fsckProblemsOf's lines, whatever fsck exits with), or 'ok'. An object's verdict
+// depends only on its own bytes (fsck-oracle.test.js: one bad object does not taint a good one in the same store), so
+// one scan answers every case. One fsck per case re-scanned a store that grew with every case: quadratic, 259 s of CI
+// for the ident test alone.
 function fsckAll() {
-  let out = '';
-  try { git(repo, ['fsck', '--strict', '--no-dangling']); } catch (e) { out = (e.stderr || '').toString() + (e.stdout || '').toString(); }
-  const verdicts = new Map();
-  for (const line of out.split('\n')) {
-    if (!/^(error|warning)/.test(line)) continue;
-    for (const oid of line.match(/[0-9a-f]{40}/g) ?? []) if (!verdicts.has(oid)) verdicts.set(oid, line.replace(/^(error|warning) in \w+ [0-9a-f]+: /, '').split(':')[0]);
-  }
-  return oid => verdicts.get(oid) ?? 'ok';
+  const { status, lines } = fsck(repo, ['--no-dangling']);
+  if (status === null || (status & ~3) !== 0) throw new Error(`git fsck failed (exit ${status}): ${lines.join(' | ')}`);
+  const first = new Map();
+  for (const line of lines) for (const oid of new Set(line.match(/[0-9a-f]{40}/g) ?? [])) if (!first.has(oid)) first.set(oid, line);
+  return oid => {
+    const line = first.get(oid);
+    return line ? line.match(/^(?:error|warning) in \w+ [0-9a-f]{40}: (\w+):/)?.[1] ?? line : 'ok';
+  };
 }
 const writeLiterally = (type, data) => { try { return gitBuf(repo, ['hash-object', '-t', type, '-w', '--stdin', '--literally'], data).toString().trim(); } catch { return null; } };
 // The same, for many objects in one hash-object (--stdin-paths) instead of a process each. If git refuses the batch,

@@ -7,7 +7,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { readFile, listTree } from '../src/read.js';
@@ -72,7 +72,7 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
     assert.equal(quirks.treeFilter, 'blob:none');
     assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), res.newCommit);
     assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:a/b/c/d/deep.txt']).toString(), 'deep EDITED\n');
-    assert.equal(git(r.bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    assert.deepEqual(fsckProblems(r.bare), []);
     const fetches = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
     const wide = fetches.filter(s => s.attrs['git.fetch.filter.fallback'] === 'blob:none');
     assert.equal(wide.length, 1, 'one wide commit fetch; every tree level came from the harvest');
@@ -121,7 +121,7 @@ test('blob:none fallback: merge, rebase, cherry-pick, revert trees equal git mer
     assert.equal(cp.tree, git(bare, ['merge-tree', '--write-tree', `--merge-base=${base}`, mg.oid, f2]).trim().split('\n')[0]);
     const rv = await revertCommit(url, { ref: 'refs/heads/main', commit: cp.oid, committer: A }, opts());
     assert.equal(rv.tree, mg.tree, 'revert restores the pre-pick tree');
-    assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    assert.deepEqual(fsckProblems(bare), []);
     assert.equal(quirks.treeFilter, 'blob:none');
   } finally { await r.proxy.close(); }
 });

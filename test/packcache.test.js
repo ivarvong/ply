@@ -4,7 +4,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from '../src/packcache.js';
@@ -70,7 +70,7 @@ test('pack cache: second edit at the same tree serves commit+trees from cache; s
   assert.equal(b.spans.filter(s => s.name === 'git.upload-pack fetch' && s.attrs['git.pack.cache'] === 'HIT').length, 5);
   assert.equal(b.r.newCommit, headOf());
   assert.equal(git(bare, ['cat-file', '-p', 'main:a/b/c/file.txt']), 'hello MARK2 world\n');
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
   git(bare, ['update-ref', 'refs/heads/main', a.r.oldCommit]);
 
   // poison: flip a byte inside every cached body. Each hit now fails verification → one bust refetch each → repaired cache.
@@ -84,7 +84,7 @@ test('pack cache: second edit at the same tree serves commit+trees from cache; s
   git(bare, ['update-ref', 'refs/heads/main', a.r.oldCommit]);
   const d = await run('MARK', 'MARK4');
   assert.deepEqual(d.d, { 'ls-refs': 1, fetch: 1, 'receive-pack': 1 }, 'cache repaired');
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
   git(bare, ['update-ref', 'refs/heads/main', a.r.oldCommit]);
 });
 
@@ -129,7 +129,7 @@ test('head hint (parallel, default): ls-refs overlaps the speculative commit fet
   assert.equal(c.r.hint, 'stale'); assert.equal(c.d['receive-pack'], 1);
   assert.ok(c.spans.find(s => s.name === 'git.edit').attrs['git.edit.head.speculative_error']);
   assert.equal(c.r.newCommit, headOf());
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
   await assert.rejects(editFile(url, { path: 'a/b/c/file.txt', find: 'H3', replace: 'x', author, message: 'm' }, { tracer: new Tracer(), head: 'nope' }), e => e.code === 'bad_request');
 });
 

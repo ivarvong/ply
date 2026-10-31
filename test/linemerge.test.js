@@ -19,10 +19,12 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 const enc = s => (typeof s === 'string' ? new TextEncoder().encode(s) : s);
 const commit = (bytes, p) => { const b = git(['hash-object', '-w', '--stdin'], Buffer.from(bytes)).stdout.toString().trim(); const t = git(['mktree'], `100644 blob ${b}\tf\n`).stdout.toString().trim(); return git(['commit-tree', t, ...(p ? ['-p', p] : []), '-m', 'c']).stdout.toString().trim(); };
 const commitAttr = (bytes, p) => { const b = git(['hash-object', '-w', '--stdin'], Buffer.from(bytes)).stdout.toString().trim(); const a = git(['hash-object', '-w', '--stdin'], 'f merge=union\n').stdout.toString().trim(); const t = git(['mktree'], `100644 blob ${a}\t.gitattributes\n100644 blob ${b}\tf\n`).stdout.toString().trim(); return git(['commit-tree', t, ...(p ? ['-p', p] : []), '-m', 'c']).stdout.toString().trim(); };
+// a merged blob's bytes; a failed cat-file is an error, never an empty file that could equal an empty merge
+const blobAt = spec => { const r = git(['cat-file', 'blob', spec]); assert.equal(r.status, 0, `cat-file ${spec}: ${r.stderr}`); return new Uint8Array(r.stdout); };
 // git's verdict: { status: 'clean', data } | { status: 'conflict' } | { status: 'failed' } (exit 128: the merge itself failed)
 function gitMerge(base, ours, theirs) {
   const cb = commit(base), r = git(['merge-tree', '--write-tree', '--name-only', commit(ours, cb), commit(theirs, cb)]);
-  if (r.status === 0) return { status: 'clean', data: new Uint8Array(git(['cat-file', 'blob', `${r.stdout.toString().split('\n')[0]}:f`]).stdout) };
+  if (r.status === 0) return { status: 'clean', data: blobAt(`${r.stdout.toString().split('\n')[0]}:f`) };
   return { status: r.status === 1 ? 'conflict' : 'failed', stderr: r.stderr.toString() };
 }
 function judge(name, base, ours, theirs, expect) {
@@ -71,7 +73,7 @@ test('edges, each decided by git', () => {
     const cb = commitAttr(B), co = commitAttr(O, cb), ct = commitAttr(T, cb);
     const r = git(['-c', `attr.tree=${co}`, 'merge-tree', '--write-tree', '--name-only', co, ct]);
     assert.equal(r.status, 0, `${name}: git unions cleanly`);
-    const gitBytes = new Uint8Array(git(['cat-file', 'blob', `${r.stdout.toString().split('\n')[0]}:f`]).stdout);
+    const gitBytes = blobAt(`${r.stdout.toString().split('\n')[0]}:f`);
     const m = mergeLines(B, O, T, { rediff, driver: 'union' });
     assert.ok(m.clean, name); assert.deepEqual(m.data, gitBytes, `${name}: union bytes == git`);
   }

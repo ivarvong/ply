@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { cpSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { readFile, listTree } from '../src/read.js';
@@ -98,7 +98,7 @@ function template(root, wanted, sibling) {
   if (sibling === 'malformed') assert.match(fsckErr(bare), /treeNotSorted|not properly sorted/, 'git refuses the bad tree');
   return bare;
 }
-function fsckErr(bare) { try { git(bare, ['fsck', '--strict', '--no-dangling']); return ''; } catch (e) { return String(e.stderr ?? e.message); } }
+const fsckErr = bare => fsckProblems(bare).join('\n');
 
 // ---- one cell ----
 const sha = b => createHash('sha256').update(b).digest('hex').slice(0, 12);

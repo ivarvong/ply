@@ -41,7 +41,7 @@ jobs:
         env:
           INDEX: ${{ strategy.job-index }}
           TOTAL: ${{ strategy.job-total }}
-        run: node scripts/test.mjs --shard "$((INDEX + 1))/${TOTAL}" test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js test/delta-bound.test.js test/git-differential.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/read.test.js test/artifacts-compat.test.js test/wide-limits.test.js
+        run: node scripts/test.mjs --shard "$((INDEX + 1))/${TOTAL}" test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js test/delta-bound.test.js test/git-differential.test.js test/fsck-space.test.js test/fsck-oracle.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/read.test.js test/log.test.js test/artifacts-compat.test.js test/space/push-outcome.test.js test/space/push-outcome-boundary.test.js test/space/fsck-tree.test.js test/space/advertisement.test.js test/wide-limits.test.js test/examples.test.js test/mergebase-space.test.js test/git-bytes.test.js test/span-contract.test.js test/space/pack-cut.test.js test/space/pkt-frame.test.js test/space/push-ng.test.js test/space/ssh-faults.test.js test/space/ssh-service.test.js
 
   lint-fuzz:
     name: lint + fuzz
@@ -67,9 +67,49 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - name: below-hash fuzzer
-        run: node test/fuzz/below-hash.mjs --n 20 --seed 1
+        run: node test/fuzz/below-hash.mjs --n 20 --seed 1 && node test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
       - name: git-semantic fuzzer
         run: node test/fuzz/git-semantic.mjs --n 20 --seed 1
+      - name: liar merge-base fuzzer
+        run: node test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
+
+  fuzz:
+    # Deterministic fuzz, fixed seeds and sizes, in parallel with `test`, so it adds no PR wall time. The deep,
+    # date-seeded runs are in nightly.yml. hostile --case 2366521731 is the pinned case npm test also runs.
+    name: fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write # setup-node persists the npm cache
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: hostile fuzzer
+        run: node test/fuzz/hostile.mjs --n 180 --seed 1 && node test/fuzz/hostile.mjs --case 2366521731
+      - name: liar fuzzer
+        run: node test/fuzz/liar.mjs --n 120 --seed 1
+      - name: protocol fuzzer
+        run: node test/fuzz/protocol.mjs --n 300 --seed 1
+      - name: packs fuzzer
+        run: node test/fuzz/packs.mjs --n 36 --seed 1
+      - name: codec fuzzer
+        run: node test/fuzz/codec.mjs --n 15000 --seed 1
+      - name: attributes fuzzer
+        run: node test/fuzz/attributes.mjs --n 120 --seed 1
 
   # The gate. Its name stays `test` so anything waiting on that check still works. It runs even when a shard fails or
   # is cancelled (a skipped check would count as passing), and fails unless every shard and lint + fuzz succeeded.
