@@ -39,11 +39,11 @@ for (let c = 0; c < N; c++) {
   }
   const cl = classifier(); const enc = s => new TextEncoder().encode(s);
   let ours;
-  try {
-    const sc = diffScript(records(enc(A), cl), records(enc(B), cl), { rediff: REDIFF }); const oa = [], ob = [];
-    for (const x of [...sc].sort((p, q) => p.i1 - q.i1)) { for (let k = 0; k < x.chg1; k++) oa.push(x.i1 + k); for (let k = 0; k < x.chg2; k++) ob.push(x.i2 + k); }
-    ours = { a: oa, b: ob };
-  } catch (e) { if (e?.undecided) { counts.undecided++; continue; } throw e; }
+  const sc = diffScript(records(enc(A), cl), records(enc(B), cl), { rediff: REDIFF });
+  if (!sc.ok) { counts.undecided++; continue; }
+  { const oa = [], ob = [];
+    for (const x of [...sc.value].sort((p, q) => p.i1 - q.i1)) { for (let k = 0; k < x.chg1; k++) oa.push(x.i1 + k); for (let k = 0; k < x.chg2; k++) ob.push(x.i2 + k); }
+    ours = { a: oa, b: ob }; }
   const gh = gitCh;
   const same = JSON.stringify(ours) === JSON.stringify(gh);
   counts[same ? 'same' : 'differ']++;

@@ -10,7 +10,11 @@
 // The 64-record hash-chain limit in scanA is modelled exactly (buckets of the per-diff class index): git's merge fails
 // there ("failed to execute internal merge"), so we answer 'undecided' — the 64/65 boundary is pinned against git.
 
+import type { Result } from './result.js';
 import { LIMIT_MERGE_BLOB } from './limits.js';
+import { ok, err, assertNever } from './result.js';
+import { plyError } from './errors.js';
+import { bytesToStr } from './attributes.js';
 
 // A file split into line records. `ids` are classifier ids: equal id, equal content.
 export type Records = {
@@ -32,8 +36,13 @@ export type MergeLinesResult =
   | { readonly clean: false; readonly reason: 'binary (merge attribute)' | 'too large to merge' | 'binary' }
   | { readonly clean: false; readonly reason: 'content'; readonly conflicts: number }
   | { readonly clean: false; readonly reason: 'undecided'; readonly detail: string };
-// Thrown (not an Error: no stack to build) where we decline to answer: rediff 'undecided', or the hash-chain limit.
+// Where we decline to answer (rediff 'undecided', or the hash-chain limit): the Err of a diff, a value (#80).
 export type Undecided = { readonly undecided: true; readonly detail: string };
+type Diffed<T> = Result<T, Undecided>;
+const DONE: Diffed<null> = ok(null);
+// compact's invariant: the two sides' change groups move in step (equal counts of unchanged lines). Broken, it is a
+// programmer bug, so thrown, and typed (#80); the stack names the site.
+const broken = (): Error => plyError('internal', 'linemerge: groups out of step');
 
 const BINARY_SNIFF = 8000; // git's FIRST_FEW_BYTES: a NUL in the first 8000 bytes makes the merge binary (= conflict)
 const MAX_CHAIN = 64;      // xhistogram.c max_chain_length
@@ -56,20 +65,21 @@ export function records(bytes: Uint8Array, classify: Classify): Records {
 export function classifier(): Classify {
   const map = new Map<string, number>();
   return (bytes, s, e) => {
-    // oxlint-disable-next-line unicorn/prefer-code-point -- the key is the line's bytes, one char per byte
-    let key = ''; for (let i = s; i < e; i += 8192) key += String.fromCharCode(...bytes.subarray(i, Math.min(e, i + 8192)));
+    const key = bytesToStr(bytes.subarray(s, e)); // the line's bytes, one char per byte
     let id = map.get(key); if (id === undefined) { id = map.size + 1; map.set(key, id); } return id;
   };
 }
 
-const undecided = (detail: string): Undecided => ({ undecided: true, detail });
+const undecided = (detail: string): Diffed<never> => err({ undecided: true, detail });
 
 // ---- xhistogram.c ----
 type Rec = { ptr: number; cnt: number };
 type Lcs = { begin1: number; end1: number; begin2: number; end2: number };
-// A6 pass: { found, fallback } is two booleans for three states.
+// find_lcs's outcomes: a common subsequence, none (every line differs), the classic-diff fallback (every common line
+// occurs > 64 times), or the hash-chain limit where git's merge fails.
+type Found = Lcs & { readonly tag: 'lcs' } | { readonly tag: 'none' } | { readonly tag: 'fallback' } | { readonly tag: 'chain-limit' };
 /* oxlint-disable eslint/max-depth, eslint/complexity, eslint/max-params -- a line-for-line port of xhistogram.c's find_lcs / try_lcs */
-function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number): { found: boolean; fallback: boolean; lcs: Lcs } {
+function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number): Found {
   const END1 = line1 + count1 - 1;
   const END2 = line2 + count2 - 1;
   const recs = new Map<number | undefined, Rec>(); // id → { ptr, cnt }  (scanA: ptr = first occurrence, NEXT_PTR chains forward)
@@ -88,12 +98,11 @@ function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, li
     let bits = 0; for (let v = 1; v < count1 && bits < 32; v *= 2) bits++; bits = bits || 1;
     const mask = 2 ** bits - 1;
     const load = new Map<number, number>();
-    // oxlint-disable-next-line typescript/only-throw-error -- Undecided is a sentinel, not an Error (no stack to build)
-    for (const id of recs.keys()) { const h = ((id ?? 0) + Math.floor((id ?? 0) / 2 ** bits)) & mask; const l = (load.get(h) ?? 0) + 1; if (l > MAX_CHAIN) throw undecided('histogram hash chain limit (git fails this merge)'); load.set(h, l); }
+    for (const id of recs.keys()) { const h = ((id ?? 0) + Math.floor((id ?? 0) / 2 ** bits)) & mask; const l = (load.get(h) ?? 0) + 1; if (l > MAX_CHAIN) return { tag: 'chain-limit' }; load.set(h, l); }
   }
   const CNT = (ptr: number): number => lineMap[ptr - line1]?.cnt ?? 0;
   const NEXT = (ptr: number): number => next[ptr - line1] ?? 0;
-  const lcs = { begin1: 0, end1: 0, begin2: 0, end2: 0 };
+  const lcs = { tag: 'lcs' as const, begin1: 0, end1: 0, begin2: 0, end2: 0 };
   let cnt = MAX_CHAIN + 1;
   let hasCommon = false;
   for (let bPtr = line2; bPtr <= END2;) {
@@ -125,8 +134,8 @@ function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, li
     }
     bPtr = bNext;
   }
-  if (hasCommon && MAX_CHAIN < cnt) return { found: false, fallback: true, lcs };
-  return { found: !(lcs.begin1 === 0 && lcs.begin2 === 0), fallback: false, lcs };
+  if (hasCommon && MAX_CHAIN < cnt) return { tag: 'fallback' };
+  return lcs.begin1 === 0 && lcs.begin2 === 0 ? { tag: 'none' } : lcs;
 }
 /* oxlint-enable eslint/max-depth, eslint/complexity, eslint/max-params */
 
@@ -322,7 +331,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
 // ---- xhistogram.c: histogram_diff ----
 // a, b: id arrays (0-based storage, 1-based line numbers as in C). Marks ch1 / ch2 (index = line - 1).
 type Region = [line1: number, count1: number, line2: number, count2: number];
-function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8Array): void {
+function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8Array): Diffed<null> {
   const stack: Region[] = [[1, a.length, 1, b.length]];
   let top: Region | undefined;
   while ((top = stack.pop())) {
@@ -330,20 +339,21 @@ function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8
     if (count1 <= 0 && count2 <= 0) continue;
     if (!count1) { for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
     if (!count2) { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; continue; }
-    const { found, fallback, lcs } = findLcs(a, b, line1, count1, line2, count2);
-    if (fallback) { classicDiff(a, b, line1, count1, line2, count2, ch1, ch2); continue; } // fall_back_to_classic_diff
-    if (!found) { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
-    const end1 = line1 + count1 - 1;
-    const end2 = line2 + count2 - 1;
-    stack.push([lcs.end1 + 1, end1 - lcs.end1, lcs.end2 + 1, end2 - lcs.end2], [line1, lcs.begin1 - line1, line2, lcs.begin2 - line2]);
+    const found = findLcs(a, b, line1, count1, line2, count2);
+    // each outcome in turn; what is left is the lcs (a new outcome without its fields does not compile below)
+    if (found.tag === 'chain-limit') return undecided('histogram hash chain limit (git fails this merge)');
+    if (found.tag === 'fallback') { classicDiff(a, b, line1, count1, line2, count2, ch1, ch2); continue; } // fall_back_to_classic_diff
+    if (found.tag === 'none') { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
+    stack.push([found.end1 + 1, line1 + count1 - 1 - found.end1, found.end2 + 1, line2 + count2 - 1 - found.end2], [line1, found.begin1 - line1, line2, found.begin2 - line2]);
   }
+  return DONE;
 }
 
 // ---- xdl_change_compact (no indent heuristic: merges do not set it) ----
 // ch: Uint8Array of n+2 with ch[0] and ch[n+1] as the -1 / n sentinels; C index i ↔ ch[i + 1].
 type Group = { start: number; end: number };
 /* oxlint-disable eslint/max-params, eslint/no-param-reassign, eslint/complexity, eslint/max-depth -- a line-for-line port of xdiffi.c's xdl_change_compact and its group helpers, which advance the group in place */
-function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32Array, chO: Uint8Array, nO: number, rediff: Rediff): void {
+export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32Array, chO: Uint8Array, nO: number, rediff: Rediff): Diffed<null> {
   const C = (i: number): boolean => ch[i + 1] === 1;
   const CO = (i: number): boolean => chO[i + 1] === 1;
   const set = (i: number, v: number): void => { ch[i + 1] = v ? 1 : 0; };
@@ -364,29 +374,30 @@ function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32Array, c
       do {
         groupsize = g.end - g.start;
         endMatchingOther = -1;
-        while (slideUp()) if (!prevG(go, CO)) throw new Error('internal: group sync broken sliding up');
+        while (slideUp()) if (!prevG(go, CO)) throw broken();
         earliestEnd = g.end;
         if (go.end > go.start) endMatchingOther = g.end;
         for (;;) {
           if (!slideDown()) break;
-          if (!nextG(go, CO, nO)) throw new Error('internal: group sync broken sliding down');
+          if (!nextG(go, CO, nO)) throw broken();
           if (go.end > go.start) endMatchingOther = g.end;
         }
       } while (groupsize !== g.end - g.start);
       if (g.end === earliestEnd) { /* no shifting was possible */ }
       else if (endMatchingOther !== -1) {
-        while (go.end === go.start) { if (!slideUp()) throw new Error('internal: match disappeared'); if (!prevG(go, CO)) throw new Error('internal: group sync broken sliding to match'); }
+        while (go.end === go.start) { if (!slideUp()) throw broken(); if (!prevG(go, CO)) throw broken(); }
       }
       // histogram: a moved group facing a non-empty group on the other side is re-diffed with classic Myers in git
       if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end)) {
-        // oxlint-disable-next-line typescript/only-throw-error -- Undecided is a sentinel, not an Error (no stack to build)
-        if (rediff === 'undecided') throw undecided('compaction needs the classic-diff fallback');
+        if (rediff === 'undecided') return undecided('compaction needs the classic-diff fallback');
         // newer git: re-diff the merged group against the facing one with Myers (xdl_fall_back_diff on the two ranges)
-        else if (rediff === 'myers') classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1));
+        if (rediff === 'myers') classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1));
+        // 'skip' (older git): the shifted group stands. Not a switch with assertNever: a JS caller's unknown value reads
+        // as 'skip', as it always has (blobMerger refuses one).
       }
     }
-    if (!nextG(g, C, n)) break;
-    if (!nextG(go, CO, nO)) throw new Error('internal: group sync broken moving to next group');
+    if (!nextG(g, C, n)) return DONE;
+    if (!nextG(go, CO, nO)) throw broken();
   }
 }
 /* oxlint-enable eslint/max-params, eslint/no-param-reassign, eslint/complexity, eslint/max-depth */
@@ -414,7 +425,7 @@ function buildScript(ch1: Uint8Array, n1: number, ch2: Uint8Array, n2: number): 
 //   'myers' (default) — git ≥ 2.54 (verified against master, 2.56: every merge and every diff hunk agrees);
 //   'skip'  — git < 2.54 (verified against 2.43: every case agrees);
 //   'undecided' — conflict wherever the two differ: right against any version.
-export function diffScript(base: Lines, side: Lines, { rediff = 'myers' }: { readonly rediff?: Rediff } = {}): Change[] {
+export function diffScript(base: Lines, side: Lines, { rediff = 'myers' }: { readonly rediff?: Rediff } = {}): Diffed<Change[]> {
   const n1 = base.n;
   const n2 = side.n;
   const h1 = new Uint8Array(n1);
@@ -425,26 +436,29 @@ export function diffScript(base: Lines, side: Lines, { rediff = 'myers' }: { rea
   const renum = (ids: ArrayLike<number>): Int32Array => Int32Array.from(ids, id => { let k = local.get(id); if (k === undefined) { k = local.size; local.set(id, k); } return k; });
   const a = renum(base.ids);
   const b = renum(side.ids);
-  histogramDiff(a, b, h1, h2);
   const ch1 = new Uint8Array(n1 + 2);
   const ch2 = new Uint8Array(n2 + 2);
+  const h = histogramDiff(a, b, h1, h2); if (!h.ok) return h;
   ch1.set(h1, 1); ch2.set(h2, 1);
-  compact(a, ch1, n1, b, ch2, n2, rediff);
-  compact(b, ch2, n2, a, ch1, n1, rediff);
-  return buildScript(ch1, n1, ch2, n2);
+  const c1 = compact(a, ch1, n1, b, ch2, n2, rediff); if (!c1.ok) return c1;
+  const c2 = compact(b, ch2, n2, a, ch1, n1, rediff); if (!c2.ok) return c2;
+  return ok(buildScript(ch1, n1, ch2, n2));
 }
 
-// ---- xdl_do_merge + xdl_append_merge (modes: 0 conflict, 1 ours, 2 theirs, 4 identical-resolved) ----
-// A6 pass: mode becomes Hunk.kind = conflict | ours | theirs | both | identical.
-type Hunk = { mode: number; i0?: number; chg0?: number; i1: number; chg1: number; i2: number; chg2: number };
+// ---- xdl_do_merge + xdl_append_merge ----
+// A hunk of the merge: a conflict, a change on one side only (ours / theirs), or a conflict whose two sides refine to the
+// same lines (identical, git's mode 4). git's bitmask modes 0/1/2/4; its 3 (both, ours then theirs) exists only as
+// merge=union's reading of a conflict, in fill.
+export type HunkKind = 'conflict' | 'ours' | 'theirs' | 'identical';
+type Hunk = { kind: HunkKind; i0?: number; chg0?: number; i1: number; chg1: number; i2: number; chg2: number };
 type Merged = Hunk & { i0: number; chg0: number };
 // oxlint-disable-next-line eslint/max-params -- xdl_append_merge's argument list
-function appendMerge(list: Merged[], mode: number, i0: number, chg0: number, i1: number, chg1: number, i2: number, chg2: number): void {
+function appendMerge(list: Merged[], kind: HunkKind, i0: number, chg0: number, i1: number, chg1: number, i2: number, chg2: number): void {
   const m = list.at(-1);
   if (m && (i1 <= m.i1 + m.chg1 || i2 <= m.i2 + m.chg2)) {
-    if (mode !== m.mode) m.mode = 0;
+    if (kind !== m.kind) m.kind = 'conflict';
     m.chg0 = i0 + chg0 - m.i0; m.chg1 = i1 + chg1 - m.i1; m.chg2 = i2 + chg2 - m.i2;
-  } else list.push({ mode, i0, chg0, i1, chg1, i2, chg2 });
+  } else list.push({ kind, i0, chg0, i1, chg1, i2, chg2 });
 }
 const sameLines = (A: Records, i: number, B: Records, j: number, n: number): boolean => { for (let k = 0; k < n; k++) if (A.ids[i + k] !== B.ids[j + k]) return false; return true; };
 
@@ -454,8 +468,8 @@ function doMerge(base: Records, ours: Records, theirs: Records, s1: readonly Cha
   let y = 0;
   // a script holds no holes: a change is undefined only past its end
   for (let a = s1[x], b = s2[y]; a && b; a = s1[x], b = s2[y]) {
-    if (a.i1 + a.chg1 < b.i1) { appendMerge(c, 1, a.i1, a.chg1, a.i2, a.chg2, b.i2 - b.i1 + a.i1, a.chg1); x++; continue; }
-    if (b.i1 + b.chg1 < a.i1) { appendMerge(c, 2, b.i1, b.chg1, a.i2 - a.i1 + b.i1, b.chg1, b.i2, b.chg2); y++; continue; }
+    if (a.i1 + a.chg1 < b.i1) { appendMerge(c, 'ours', a.i1, a.chg1, a.i2, a.chg2, b.i2 - b.i1 + a.i1, a.chg1); x++; continue; }
+    if (b.i1 + b.chg1 < a.i1) { appendMerge(c, 'theirs', b.i1, b.chg1, a.i2 - a.i1 + b.i1, b.chg1, b.i2, b.chg2); y++; continue; }
     if (a.i1 !== b.i1 || a.chg1 !== b.chg1 || a.chg2 !== b.chg2 || !sameLines(ours, a.i2, theirs, b.i2, a.chg2)) {
       const off = a.i1 - b.i1;
       const ffo = off + a.chg1 - b.chg1;
@@ -467,30 +481,31 @@ function doMerge(base: Records, ours: Records, theirs: Records, s1: readonly Cha
       let chg1 = a.i2 + a.chg2 - i1;
       let chg2 = b.i2 + b.chg2 - i2;
       if (ffo < 0) { chg0 -= ffo; chg1 -= ffo; } else chg2 += ffo;
-      appendMerge(c, 0, i0, chg0, i1, chg1, i2, chg2);
+      appendMerge(c, 'conflict', i0, chg0, i1, chg1, i2, chg2);
     }
     const e1 = a.i1 + a.chg1;
     const e2 = b.i1 + b.chg1;
     if (e1 >= e2) y++;
     if (e2 >= e1) x++;
   }
-  for (const a of s1.slice(x)) appendMerge(c, 1, a.i1, a.chg1, a.i2, a.chg2, a.i1 + theirs.n - base.n, a.chg1);
-  for (const b of s2.slice(y)) appendMerge(c, 2, b.i1, b.chg1, b.i1 + ours.n - base.n, b.chg1, b.i2, b.chg2);
+  for (const a of s1.slice(x)) appendMerge(c, 'ours', a.i1, a.chg1, a.i2, a.chg2, a.i1 + theirs.n - base.n, a.chg1);
+  for (const b of s2.slice(y)) appendMerge(c, 'theirs', b.i1, b.chg1, b.i1 + ours.n - base.n, b.chg1, b.i2, b.chg2);
   return c;
 }
 
 // ---- xdl_refine_conflicts: re-diff each conflict's two sides (a fresh environment over just those lines, histogram +
-// compaction both ways); identical sides resolve (mode 4), otherwise the conflict becomes the script's hunks ----
-function refine(ours: Records, theirs: Records, c: readonly Hunk[], rediff: Rediff): Hunk[] {
+// compaction both ways); identical sides resolve, otherwise the conflict becomes the script's hunks ----
+function refine(ours: Records, theirs: Records, c: readonly Hunk[], rediff: Rediff): Diffed<Hunk[]> {
   const out: Hunk[] = [];
   for (const m of c) {
-    if (m.mode !== 0 || m.chg1 === 0 || m.chg2 === 0) { out.push(m); continue; }
+    if (m.kind !== 'conflict' || m.chg1 === 0 || m.chg2 === 0) { out.push(m); continue; }
     const sub = (F: Records, i: number, n: number): Lines => ({ ids: F.ids.slice(i, i + n), n });
-    const script = diffScript(sub(ours, m.i1, m.chg1), sub(theirs, m.i2, m.chg2), { rediff }).toSorted((p, q) => p.i1 - q.i1);
-    if (script.length === 0) { out.push({ ...m, mode: 4 }); continue; }
-    for (const x of script) out.push({ mode: 0, i1: x.i1 + m.i1, chg1: x.chg1, i2: x.i2 + m.i2, chg2: x.chg2 });
+    const script = diffScript(sub(ours, m.i1, m.chg1), sub(theirs, m.i2, m.chg2), { rediff });
+    if (!script.ok) return script;
+    if (script.value.length === 0) { out.push({ ...m, kind: 'identical' }); continue; }
+    for (const x of script.value.toSorted((p, q) => p.i1 - q.i1)) out.push({ kind: 'conflict', i1: x.i1 + m.i1, chg1: x.chg1, i2: x.i2 + m.i2, chg2: x.chg2 });
   }
-  return out;
+  return ok(out);
 }
 
 // ---- xdl_simplify_non_conflicts (level ZEALOUS: fuse two conflicts at most 3 lines apart, the gap included) ----
@@ -498,7 +513,7 @@ function simplify(c: readonly Hunk[]): Hunk[] {
   const out: Hunk[] = [];
   for (const m of c) {
     const prev = out.at(-1);
-    if (prev && prev.mode === 0 && m.mode === 0 && m.i1 - (prev.i1 + prev.chg1) <= 3) { prev.chg1 = m.i1 + m.chg1 - prev.i1; prev.chg2 = m.i2 + m.chg2 - prev.i2; }
+    if (prev?.kind === 'conflict' && m.kind === 'conflict' && m.i1 - (prev.i1 + prev.chg1) <= 3) { prev.chg1 = m.i1 + m.chg1 - prev.i1; prev.chg2 = m.i2 + m.chg2 - prev.i2; }
     else out.push({ ...m });
   }
   return out;
@@ -524,7 +539,7 @@ function crNeeded(base: Records, ours: Records, theirs: Records, m: Hunk): boole
   return r === 1;
 }
 // oxlint-disable-next-line eslint/max-params -- xdl_fill_merge_buffer's argument list
-function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[], favor = 0): Uint8Array {
+function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[], union: boolean): Uint8Array {
   const parts: Uint8Array[] = []; let size = 0;
   const push = (b: Uint8Array): void => { parts.push(b); size += b.length; };
   // oxlint-disable-next-line eslint/max-params -- (file, first, count) and the two newline flags
@@ -536,23 +551,26 @@ function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[],
     if (addNl && (e === s || F.bytes[e - 1] !== 10)) push(needsCr ? Uint8Array.of(13, 10) : Uint8Array.of(10));
   };
   let i = 0;
-  for (const m0 of c) {
-    const mode = favor && !m0.mode ? favor : m0.mode;
-    if (mode & 3) {
-      copy(ours, i, m0.i1 - i);
-      if (mode & 1) copy(ours, m0.i1, m0.chg1, crNeeded(base, ours, theirs, m0), (mode & 2) !== 0);
-      if (mode & 2) copy(theirs, m0.i2, m0.chg2);
-    } else continue;
-    i = m0.i1 + m0.chg1;
+  for (const m of c) {
+    // merge=union reads a conflict as both sides, ours then theirs (git's XDL_MERGE_FAVOR_UNION)
+    const kind = union && m.kind === 'conflict' ? 'both' : m.kind;
+    switch (kind) {
+      // a clean text merge holds no conflict; identical sides are ours, copied with the unchanged lines after them
+      case 'conflict': case 'identical': continue;
+      case 'ours': case 'theirs': case 'both': break;
+      default: return assertNever(kind);
+    }
+    copy(ours, i, m.i1 - i);
+    if (kind !== 'theirs') copy(ours, m.i1, m.chg1, crNeeded(base, ours, theirs, m), kind === 'both');
+    if (kind !== 'ours') copy(theirs, m.i2, m.chg2);
+    i = m.i1 + m.chg1;
   }
   copy(ours, i, ours.n - i);
   const out = new Uint8Array(size); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
 }
 
-// The only non-Error this module throws, read loosely (as errors.ts reads a thrown value's code).
-type LooseUndecided = { readonly undecided?: unknown; readonly detail: string } | null | undefined;
-
+const declined = ({ detail }: Undecided): MergeLinesResult => ({ clean: false, reason: 'undecided', detail });
 // The merge. `maxBytes` bounds each input (git's MAX_XDIFF_SIZE is ~1 GiB; a Worker's is much smaller).
 // driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
 // -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
@@ -560,23 +578,19 @@ type LooseUndecided = { readonly undecided?: unknown; readonly detail: string } 
 export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, { maxBytes = LIMIT_MERGE_BLOB, rediff = 'myers', driver = 'text' }: { readonly maxBytes?: number; readonly rediff?: Rediff; readonly driver?: Driver } = {}): MergeLinesResult {
   if (driver === 'binary') return { clean: false, reason: 'binary (merge attribute)' };
   if (Math.max(base.length, ours.length, theirs.length) > maxBytes) return { clean: false, reason: 'too large to merge' };
-  if (isBinary(base) || isBinary(ours) || isBinary(theirs)) return { clean: false, reason: 'binary' };
+  if ([base, ours, theirs].some(f => isBinary(f))) return { clean: false, reason: 'binary' };
   const cl = classifier();
   const B = records(base, cl);
   const O = records(ours, cl);
   const T = records(theirs, cl);
-  try {
-    const s1 = diffScript(B, O, { rediff });
-    const s2 = diffScript(B, T, { rediff });
-    if (s1.length === 0) return { clean: true, data: theirs, hunks: { ours: 0, theirs: s2.length } };
-    if (s2.length === 0) return { clean: true, data: ours, hunks: { ours: s1.length, theirs: 0 } };
-    const c = simplify(refine(O, T, doMerge(B, O, T, s1, s2), rediff));
-    const conflicts = c.filter(m => m.mode === 0).length;
-    if (conflicts && driver !== 'union') return { clean: false, reason: 'content', conflicts };
-    return { clean: true, data: fill(B, O, T, c, driver === 'union' ? 3 : 0), hunks: { ours: s1.length, theirs: s2.length }, ...(conflicts ? { unioned: conflicts } : {}) };
-  } catch (e) {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see LooseUndecided
-    if ((e as LooseUndecided)?.undecided === true) return { clean: false, reason: 'undecided', detail: (e as Undecided).detail };
-    throw e;
-  }
+  const s1 = diffScript(B, O, { rediff }); if (!s1.ok) return declined(s1.error);
+  const s2 = diffScript(B, T, { rediff }); if (!s2.ok) return declined(s2.error);
+  const hunks = { ours: s1.value.length, theirs: s2.value.length };
+  if (hunks.ours === 0) return { clean: true, data: theirs, hunks };
+  if (hunks.theirs === 0) return { clean: true, data: ours, hunks };
+  const r = refine(O, T, doMerge(B, O, T, s1.value, s2.value), rediff); if (!r.ok) return declined(r.error);
+  const c = simplify(r.value);
+  const conflicts = c.filter(m => m.kind === 'conflict').length;
+  if (conflicts && driver !== 'union') return { clean: false, reason: 'content', conflicts };
+  return { clean: true, data: fill(B, O, T, c, driver === 'union'), hunks, ...(conflicts ? { unioned: conflicts } : {}) };
 }
