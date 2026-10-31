@@ -36,7 +36,7 @@ export async function runPush(rendered, response = rendered.response) {
     if (t.sent === 0 && (e.code === 'bad_request' || e.code === 'limit_exceeded')) return { tag: 'preSend', code: e.code, what: e.what };
     if (t.sent === 0) return { tag: 'other', code: e.code, message: `nothing sent: ${e.message}` };
     if (e.code === 'ambiguous') return { tag: 'ambiguous' };
-    if (e.code === 'cas_conflict' || e.code === 'push_rejected') return { tag: 'rejected', code: e.code };
+    if (e.code === 'cas_conflict' || e.code === 'push_rejected' || e.code === 'not_fast_forward') return { tag: 'rejected', code: e.code };
     if (e.code === 'push_partial') return { tag: 'partial', landed: e.landed, rejected: e.rejected.map(r => r.ref) };
     return { tag: 'other', code: e.code, message: e.message };
   }
