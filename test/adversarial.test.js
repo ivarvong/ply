@@ -9,6 +9,7 @@
 //   I6b A credential a server echoes back reaches no error and no span.
 //   I6c A 3xx is never followed: no request (and no Authorization) reaches another origin.
 //   I6d URL userinfo is the Basic credential git sends for that URL, byte for byte, and reaches no error, span or URL.
+//   I6e Every credential cell (source × user × password × transport) has one stated outcome, git's where git has the input.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -24,6 +25,8 @@ import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { GitHttp } from '../src/client.js';
 import { createTransport } from '../src/http.js';
+import { createSshTransport, parseSshUrl } from '../src/sshgit.js';
+import { lsRefs } from '../src/lsrefs.js';
 import { fetchObject } from '../src/fetch.js';
 import { fetchPackTree0 } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -514,6 +517,201 @@ test('I6d unusable userinfo or a malformed URL is bad_request before any request
   const e = (() => { try { createTransport(`http://${GHP}@127.0.0.1:99999/r.git`); } catch (x) { return x; } })();
   assert.equal(e?.code, 'bad_request'); assert.equal(e.what, 'url');
   assert.ok(!reachableText(e).includes(GHP.slice(0, 12)) && !inspect(e, { showHidden: true }).includes(GHP.slice(0, 12)), 'credential in the error');
+});
+
+// ---- I6e (#40): the credential product space ----
+// Every (source × user × password × transport) cell has one expected outcome: the exact Authorization (HTTP) or login
+// name (SSH), anonymous, or `bad_request` before any request. git is the oracle wherever git has the same input: URL
+// userinfo as written; explicit fields as a credential helper's `username=`/`password=`; an explicit header as
+// `http.extraHeader`; an ssh:// URL through GIT_SSH_COMMAND (the login git hands to ssh). In no cell does a secret, or
+// any 12 characters of one, reach an error, a span, a URL attribute or `t.url`.
+const CRED_USER = { absent: undefined, short: 'ivar', secret: GHP, utf8: 'tëst', 'ctl-lf': 'iv\nar', 'ctl-soh': 'iv\x01ar' };
+const CRED_PASS = { absent: undefined, empty: '', ascii: 's3cret/Pass:word@0123456789', utf8: 'pässwörd€-0123456789' };
+const basicOf = (user, pass) => `Basic ${Buffer.from(`${user}:${pass}`, 'utf8').toString('base64')}`;
+const userinfoOf = (user, pass) => user === undefined && pass === undefined ? '' : `${encodeURIComponent(user ?? '')}${pass === undefined ? '' : `:${encodeURIComponent(pass)}`}@`;
+const fragments = s => s.length < 12 ? [s] : [s, ...Array.from({ length: s.length - 11 }, (_, i) => s.slice(i, i + 12))];
+
+// The expected outcome of a cell, stated without running anything.
+//   { header }    every request carries exactly this Authorization
+//   { anonymous } no Authorization (and so the gate's 401: `auth`)
+//   { refused }   `bad_request`, zero requests
+//   { login, url } SSH: the login name sent and the transport's `t.url`
+//   { na }        not expressible (createSshTransport takes no password: publickey only)
+function expectCell(source, uk, pk) {
+  const user = CRED_USER[uk], pass = CRED_PASS[pk];
+  if (source === 'url') {
+    if (user === undefined && pass === undefined) return { anonymous: true };
+    if (uk === 'ctl-lf') return { refused: 'url userinfo' };        // git: "credential url cannot be parsed"
+    return { header: basicOf(user ?? '', pass ?? '') };              // as written, percent-decoded to UTF-8 bytes (#39)
+  }
+  if (source === 'fields') {
+    if (uk === 'ctl-lf') return { refused: 'auth user' };
+    if (pass === undefined) return { refused: 'auth' };               // { user } alone, or {}: git's helper API asks for the password
+    if (pass === '' && user === undefined) return { refused: 'auth' }; // { token: '' }: nothing to send
+    return { header: basicOf(user ?? 'x-access-token', pass) };      // UTF-8 bytes, as git sends a helper's
+  }
+  if (source === 'header') {
+    if (user === undefined && pass === undefined) return { refused: 'auth' }; // header: ''
+    return { header: basicOf(user ?? '', pass ?? '') };              // verbatim
+  }
+  const redacted = login => `ssh://${login.length >= 16 ? '[redacted]' : login}@host.example/p.git`;
+  if (source === 'ssh-url') {
+    if (pass !== undefined) return { refused: 'ssh url' };           // git would log in as `user:pass`
+    if (uk === 'ctl-lf') return { refused: 'ssh user' };             // git hands ssh the raw LF
+    return { login: user ?? 'git', url: redacted(user ?? 'git') };
+  }
+  if (pass !== undefined) return { na: 'createSshTransport has no password option' };
+  if (uk === 'ctl-lf') return { refused: 'ssh user' };
+  return { login: user ?? 'git', url: redacted(user ?? 'git') };
+}
+const authFor = (source, user, pass) => {
+  if (source === 'fields') return { ...(user !== undefined && { user }), ...(pass !== undefined && { token: pass }) };
+  if (source === 'header') return { header: user === undefined && pass === undefined ? '' : basicOf(user ?? '', pass ?? '') };
+  return undefined;
+};
+// git with the same input: the Authorization values it sent (null for none) and its exit status.
+async function gitHttpOracle(gate, work, source, user, pass, repoPath) {
+  const host = new URL(gate.url).host;
+  let args, env = {};
+  if (source === 'url') args = ['ls-remote', `http://${userinfoOf(user, pass)}${host}${repoPath}`];
+  else if (source === 'fields') {
+    const u = user ?? (pass ? 'x-access-token' : undefined); // ply's documented default user
+    if (u !== undefined) env.PLY_U = u; if (pass !== undefined) env.PLY_P = pass;
+    args = ['-c', `credential.helper=!f() { [ "$1" = get ] || exit 0; [ -n "\${PLY_U+x}" ] && printf 'username=%s\\n' "$PLY_U"; [ -n "\${PLY_P+x}" ] && printf 'password=%s\\n' "$PLY_P"; true; }; f`, 'ls-remote', `http://${host}${repoPath}`];
+  } else args = ['-c', `http.extraHeader=Authorization: ${authFor('header', user, pass).header}`, 'ls-remote', `http://${host}${repoPath}`];
+  gate.seen.length = 0;
+  const r = await gitAsync(work, args, env);
+  return { status: r.status, sent: [...new Set(gate.seen.map(x => x.authorization).filter(Boolean))], stderr: r.stderr };
+}
+
+test('I6e the credential product: every source × user × password × transport cell gets its stated header, login or typed refusal, equal to git where git has the input, and leaks nothing', async () => {
+  const accept = await startAuthGate(srv.url);
+  const refuse = await startAuthGate(srv.url, () => false); // 401 echoing the header and its decoded form
+  const repo = freshRepo();
+  const repoPath = `/${repo.name}.git`;
+  const tally = { header: 0, anonymous: 0, refused: 0, login: 0, na: 0, oracle: 0 };
+  // one SSH login git would hand to ssh, read from a fake ssh that logs its arguments
+  const sshLog = join(root, 'fake-ssh.json'), sshBin = join(root, 'fake-ssh.mjs');
+  writeFileSync(sshBin, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(sshLog)}, JSON.stringify(process.argv.slice(2)) + '\\n'); process.exit(1);\n`);
+  const gitSshLogin = async url => {
+    writeFileSync(sshLog, '');
+    await gitAsync(repo.work, ['ls-remote', url], { GIT_SSH_COMMAND: `${process.execPath} ${sshBin}` });
+    const calls = (await import('node:fs')).readFileSync(sshLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(a => !a.includes('-G'));
+    return calls.at(-1).at(-2); // [user@]host as git hands it to ssh
+  };
+  const loginOf = dest => dest.includes('@') ? dest.slice(0, dest.lastIndexOf('@')) : null;
+  try {
+    for (const source of ['url', 'fields', 'header', 'ssh-url', 'ssh-fields']) for (const uk of Object.keys(CRED_USER)) for (const pk of Object.keys(CRED_PASS)) {
+      const cell = `${source} × user ${uk} × password ${pk}`;
+      const user = CRED_USER[uk], pass = CRED_PASS[pk];
+      const want = expectCell(source, uk, pk);
+      const secrets = [...(pass && pass.length >= 4 ? [pass] : []), ...(uk === 'secret' ? [GHP] : []), ...(want.header ? [want.header, want.header.slice(6)] : [])];
+      const noLeak = (text, where) => { for (const s of secrets) for (const f of fragments(s)) assert.ok(!text.includes(f), `${cell}: ${JSON.stringify(f)} in ${where}`); };
+      const errText = e => `${reachableText(e)}\n${String(e)}\n${inspect(e, { depth: 20, showHidden: true })}`;
+
+      if (source.startsWith('ssh')) {
+        if (want.na) { tally.na++; continue; }
+        const url = source === 'ssh-url' ? `ssh://${userinfoOf(user, pass)}host.example/p.git` : 'ssh://host.example/p.git';
+        let dials = 0;
+        // a server whose version line echoes the login, as a careless one might; the handshake fails on it
+        const connect = () => { dials++; let said = false; return { read: async () => { if (said) return null; said = true; return te.encode(`SSH-1.0-${t.ssh.user}\r\n`); }, write: async () => {}, close: () => {} }; };
+        const exporter = arrayExporter();
+        let t;
+        try { t = createSshTransport(url, { hostKey: new Uint8Array(32), connect, tracer: new Tracer({ exporter }), ...(source === 'ssh-fields' && user !== undefined && { user }) }); }
+        catch (e) {
+          assert.ok(want.refused, `${cell}: refused (${e.code} ${e.message}), expected ${JSON.stringify(want)}`);
+          assert.equal(e.code, 'bad_request', cell); assert.equal(e.what, want.refused, cell);
+          noLeak(errText(e), 'the error'); if (source === 'ssh-url' && userinfoOf(user, pass).length > 4) assert.ok(!errText(e).includes(userinfoOf(user, pass)), `${cell}: url echoed`);
+          assert.equal(dials, 0, cell);
+          if (source === 'ssh-url' && pass !== undefined) {
+            // why: git decodes the URL and hands ssh `user:pass@host`: the password goes to the server as the login
+            // name (or, when it decodes to a `/`, its first part becomes the host: `:s3cret`)
+            const dest = await gitSshLogin(url);
+            assert.ok(dest.startsWith(`${user ?? ''}:${pass.split('/')[0]}`), `${cell}: git's ssh destination ${JSON.stringify(dest)}`); tally.oracle++;
+          }
+          tally.refused++; continue;
+        }
+        assert.ok(want.login !== undefined, `${cell}: built a transport, expected ${JSON.stringify(want)}`);
+        assert.equal(t.ssh.user, want.login, `${cell}: login`);
+        assert.equal(t.url, want.url, `${cell}: t.url`);
+        if (source === 'ssh-url' && user !== undefined) { assert.equal(loginOf(await gitSshLogin(url)), want.login, `${cell}: git's ssh login`); tally.oracle++; }
+        const e = await lsRefs(t, ['refs/heads/']).catch(x => x);
+        assert.equal(e.code, 'unsupported', `${cell}: ${e.code} ${e.message}`);
+        const connectSpan = exporter.lines.flatMap(flattenLine).find(sp => sp.name === 'ssh.connect');
+        assert.equal(connectSpan.attrs['ssh.user'], want.login.length >= 16 ? '[redacted]' : want.login, `${cell}: ssh.user`);
+        noLeak(t.url, 't.url'); noLeak(errText(e), 'the error'); noLeak(JSON.stringify(exporter.lines), 'a span');
+        tally.login++; continue;
+      }
+
+      const auth = authFor(source, user, pass);
+      const urlOf = gate => `http://${source === 'url' ? userinfoOf(user, pass) : ''}${new URL(gate.url).host}${repoPath}`;
+      // 1. ply through the accepting gate
+      accept.seen.length = 0;
+      const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
+      const got = await readFile(urlOf(accept), { path: FILE }, { tracer, auth }).then(async r => { const parts = []; for await (const c of r.stream) parts.push(c); return new TextDecoder().decode(concat(parts)); }, e => e);
+      const spans = exporter.lines.flatMap(flattenLine);
+      if (want.refused) {
+        assert.equal(got?.code, 'bad_request', `${cell}: ${got?.code} ${got?.message}`); assert.equal(got.what, want.refused, cell);
+        assert.equal(accept.seen.length, 0, `${cell}: requests were sent`);
+        // #40.3: the root span is ended with the error recorded, and the caller can link to it
+        const rootSpan = spans.find(sp => sp.name === 'git.read');
+        assert.ok(rootSpan, `${cell}: root span not exported`);
+        assert.equal(rootSpan.attrs['git.read.outcome'], 'bad_request', cell); assert.equal(rootSpan.status.code, 2, cell);
+        assert.equal(got.span?.name, 'git.read', cell);
+        noLeak(errText(got), 'the error');
+        tally.refused++;
+      } else if (want.anonymous) {
+        assert.equal(got?.code, 'auth', `${cell}: ${got?.code}`);
+        assert.deepEqual([...new Set(accept.seen.map(x => x.authorization))], [null], cell);
+        tally.anonymous++;
+      } else {
+        assert.equal(got, ORIG, `${cell}: read failed: ${got?.code} ${got?.message}`);
+        assert.deepEqual([...new Set(accept.seen.map(x => x.authorization))], [want.header], `${cell}: ply's Authorization`);
+        tally.header++;
+      }
+      noLeak(JSON.stringify(exporter.lines), 'a span');
+      for (const sp of spans) for (const [k, v] of Object.entries(sp.attrs)) if (/url/.test(k)) assert.ok(String(v).startsWith(`${accept.url}${repoPath}`) && !String(v).includes('@'), `${cell}: ${k} = ${v}`);
+      if (!want.refused) { const t = createTransport(urlOf(accept), { auth }); assert.equal(t.url, `${accept.url}${repoPath}`, cell); noLeak(t.url, 't.url'); }
+      // 2. git with the same input, through the same gate
+      if (!(source === 'fields' && uk === 'ctl-lf') && !(source === 'header' && want.refused)) {
+        const g = await gitHttpOracle(accept, repo.work, source, user, pass, repoPath);
+        if (want.header) { assert.equal(g.status, 0, `${cell}: git: ${g.stderr}`); assert.deepEqual(g.sent, [want.header], `${cell}: git's Authorization`); }
+        else assert.deepEqual(g.sent, [], `${cell}: git sent ${JSON.stringify(g.sent)} where ply sends nothing`);
+        tally.oracle++;
+      }
+      // 3. a refusing server that echoes the credential: `auth`, and the echo is scrubbed everywhere
+      if (want.header) {
+        const ex2 = arrayExporter();
+        const e = await readFile(urlOf(refuse), { path: FILE }, { tracer: new Tracer({ exporter: ex2 }), auth }).catch(x => x);
+        assert.equal(e.code, 'auth', `${cell}: ${e.code} ${e.message}`);
+        assert.equal(refuse.seen.at(-1).authorization, want.header, cell);
+        if (secrets.length > 2) assert.match(e.message, /\[redacted\]/, `${cell}: the echo was not scrubbed: ${e.message}`);
+        noLeak(errText(e), 'the echoed error'); noLeak(JSON.stringify(ex2.lines), 'an echoed span');
+      }
+    }
+    // 5 sources × 6 users × 4 passwords = 120 cells. HTTP (72): url 19 headers + 1 anonymous + 4 refused (LF); fields 14
+    // headers + 10 refused (LF ×4, no token ×5, an empty token alone); header 23 + 1 refused (empty). SSH (48): url 5
+    // logins + 19 refused (a password ×18, LF); fields 5 logins + 1 refused (LF) + 18 with no password option.
+    // git ran on 89: every HTTP cell but the 4 a helper cannot carry (LF) and the refused header, and every ssh:// cell
+    // with a user or a password.
+    assert.deepEqual(tally, { header: 56, anonymous: 1, refused: 35, login: 10, na: 18, oracle: 89 }, JSON.stringify(tally));
+  } finally { await accept.close(); await refuse.close(); }
+});
+
+test('I6e an Authorization header or a Bearer token that fetch could not send is bad_request before any request; scp-like and ssh:// passwords are refused unquoted', async () => {
+  for (const [name, auth] of [['header, non-ASCII', { header: 'Bearer tök€n-0123456789' }], ['header, control', { header: 'Bearer t\x01k-0123456789' }], ['header, LF', { header: 'Bearer t\nk-0123456789' }],
+    ['bearer, non-ASCII', { bearer: 'tök€n-0123456789' }], ['bearer, control', { bearer: 't\x7fk-0123456789' }], ['bearer, empty', { bearer: '' }]]) {
+    let calls = 0;
+    const exporter = arrayExporter();
+    const e = await readFile('http://127.0.0.1:1/r.git', { path: FILE }, { tracer: new Tracer({ exporter }), auth, fetchImpl: async () => { calls++; throw new Error('sent'); } }).catch(x => x);
+    assert.equal(e.code, 'bad_request', `${name}: ${e.code} ${e.message}`); assert.equal(calls, 0, name);
+    assert.ok(!reachableText(e).includes('0123456789') && !JSON.stringify(exporter.lines).includes('0123456789'), `${name}: echoed`);
+  }
+  for (const url of ['ivar:s3cretpassw0rd@host:p.git', 'ssh://ivar:s3cretpassw0rd@host:2222/p.git', 'ssh://:s3cretpassw0rd@host/p.git', 'https://ivar:s3cretpassw0rd@host/p.git']) {
+    const e = (() => { try { parseSshUrl(url); } catch (x) { return x; } })();
+    assert.equal(e?.code, 'bad_request', url); assert.equal(e.what, 'ssh url', url);
+    assert.ok(!inspect(e, { showHidden: true }).includes('s3cretpassw0rd'), `${url}: echoed`);
+  }
 });
 
 test('#16 ls-refs attributes never override the parsed oid or name: oid:/name: extras leave the edit on the real head', async () => {

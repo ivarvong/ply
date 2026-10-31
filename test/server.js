@@ -82,8 +82,9 @@ export function startAuthGate(upstreamUrl, accept = () => true) {
 }
 
 // git itself, asynchronously (the gate runs in this process): no config, no credential helper, no prompt.
-export function gitAsync(cwd, args) {
-  const env = { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+// `extraEnv` reaches git and what it runs (a credential helper's values, GIT_SSH_COMMAND).
+export function gitAsync(cwd, args, extraEnv = {}) {
+  const env = { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', ...extraEnv };
   return new Promise(resolve => {
     const c = spawn('git', ['-c', 'credential.helper=', '-c', 'user.name=g', '-c', 'user.email=g@x', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
