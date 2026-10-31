@@ -3,7 +3,8 @@
   "testRunner": "vitest",
   "vitest": {
     "configFile": "vitest.stryker.config.ts",
-    "related": false
+    "related": false,
+    "pool": "forks"
   },
   "coverageAnalysis": "perTest",
   "tsconfigFile": ".stryker-no-tsconfig",
