@@ -3,8 +3,8 @@
 // (pktStep/pktFinish in the transport), its own consumers and its own error typing. No network, no server process.
 import { createTransport } from '../../src/http.js';
 import { Tracer } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.ts';
-import { isPlyCode } from '../../src/errors.ts';
+import { withLimits } from '../../src/limits.js';
+import { isPlyCode } from '../../src/errors.js';
 
 const te = new TextEncoder();
 export const enc = s => (typeof s === 'string' ? te.encode(s) : s);

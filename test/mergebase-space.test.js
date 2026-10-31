@@ -24,7 +24,7 @@
 //
 // Every tree is additive (each commit adds f/<name>), so every merge and rebase git performs is clean and the
 // expected tree is git's, not ours. maxMergeDepth is 32 for every cell.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { readFileSync, rmSync, mkdtempSync } from 'node:fs';
@@ -37,7 +37,7 @@ import { oracleRediff } from './gitversion.js';
 import { mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { createTransport } from '../src/http.js';
-import { withLimits } from '../src/limits.ts';
+import { withLimits } from '../src/limits.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 

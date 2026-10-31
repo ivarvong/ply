@@ -5,7 +5,7 @@
 // when both refuse (git cannot store or read the value, and ply's refusal is typed). A ply refusal where git succeeds is
 // allowed only with a reason listed in ALLOWED_REFUSALS. Strings carry bytes as bytes.js decodeBytes maps them:
 // well-formed UTF-8 as itself (a BOM anywhere stays), every other byte as U+DC00 + byte; encodeBytes is the inverse.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { writeFiles } from '../src/checkout-node.js';
 import { editFile } from '../src/edit.js';
 import { mergeBranch } from '../src/merge.js';
 import { decodeBytes, encodeBytes } from '../src/bytes.js';
-import { isPlyCode } from '../src/errors.ts';
+import { isPlyCode } from '../src/errors.js';
 import { Tracer } from '../src/otel.js';
 
 const O = (extra = {}) => ({ tracer: new Tracer(), ...extra });

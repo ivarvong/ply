@@ -11,7 +11,7 @@
 // exists (some commit at depth ≥ limit, from `git rev-list --parents`) for the omit-shallow cells: with a cut, dropping
 // the shallow lines is a withheld parent (`pack_corrupt`, #37); without one there are no shallow lines to drop and the
 // answer is git's. A foreign commit is always `pack_corrupt`.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
@@ -232,7 +232,7 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   await assert.rejects(readLog(url, { path: 'f0.txt' }, opts()), code('bad_request'), 'path is not supported');
   await assert.rejects(readLog(url, { ref: 'a..b' }, opts()), code('bad_request'));
   await assert.rejects(readLog(url, { ref: 7 }, opts()), code('bad_request'));
-  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.ts')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
+  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
 });
 
 test('readLog on blob:none: the trees are harvested; a following listTree on the same transport costs no fetch', async () => {

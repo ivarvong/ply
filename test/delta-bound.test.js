@@ -1,10 +1,10 @@
 // A delta that asks for a huge result must die before the output buffer exists, and the largest
 // expansion the caps allow is the one SAFETY.md I4 records. A chain is at most maxDeltaChain deltas in any pack order.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { applyDelta, parsePack, resolvePack, makeDelta } from '../src/packresolve.js';
 import { encodeVarint, encodeObjHeader, zlibDeflate } from '../src/pack.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.ts';
+import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import {
   DELTA_COPY, DELTA_COPY_MAX, PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, UINT32_BYTES,
   OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE,
