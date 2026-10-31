@@ -3,7 +3,7 @@
 export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, isLfsPointerPrefix, withCommitData } from './edit.js';
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
-export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode } from './read.js';
+export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, fetchCommit } from './read.js';
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
@@ -12,6 +12,10 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
 /**
  * 40 lowercase hex characters. git also accepts abbreviations, ref names, and uppercase hex; this type does not.
  * @typedef {import('./oid.js').Oid} Oid
+ */
+/**
+ * Why fetchCommit's not_found happened. `absent`: the server said the oid is not its ref. `not_commit`: the object is a tree, blob, or tag.
+ * @typedef {import('./commit.js').CommitMiss} CommitMiss
  */
 export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
 export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';

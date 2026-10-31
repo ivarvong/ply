@@ -8,9 +8,11 @@ import http from 'node:http';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
-import { readFile, listTree, readCommit, refCandidates } from '../src/read.js';
-import { parseIdent } from '../src/objects.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { readFile, listTree, readCommit, refCandidates, fetchCommit } from '../src/read.js';
+import { createTransport } from '../src/http.js';
+import { fetchObject } from '../src/fetch.js';
+import { parseIdent, TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 let root, cleanup, srv, R;
@@ -76,6 +78,58 @@ test('modes: symlink reads as its target (120000), executable 100755; gitlink an
   assert.equal(sh.mode, '100755');
   await assert.rejects(readFile(R.url, { path: 'vendor/sub' }, { tracer: tracer() }), e => e.code === 'not_found' && /submodule/.test(e.message));
   await assert.rejects(readFile(R.url, { path: 'a/b' }, { tracer: tracer() }), e => e.code === 'not_found' && /directory/.test(e.message));
+});
+
+test('fetchCommit matches git fetch and cat-file; a tree want of a blob stays pack_corrupt', async () => {
+  const tip = git(R.bare, ['rev-parse', 'main']).trim();
+  const tree = git(R.bare, ['rev-parse', `${tip}^{tree}`]).trim();
+  const blob = git(R.bare, ['rev-parse', `${tip}:README.md`]).trim();
+  const tag = git(R.bare, ['rev-parse', 'v1']).trim();
+  const dangling = git(R.bare, ['-c', 'user.name=seed', '-c', 'user.email=seed@x', 'commit-tree', tree, '-m', 'dangling']).trim();
+  const absent = 'ab'.repeat(20);
+  // gitAsync, not git(): execFileSync would block the event loop and deadlock the http-backend in this process.
+  const classify = async (oid) => {
+    const dir = join(root, `oracle-${oid.slice(0, 12)}`);
+    mkdirSync(dir);
+    git(dir, ['init', '-q']);
+    git(dir, ['remote', 'add', 'origin', R.url]);
+    const fetched = await gitAsync(dir, ['fetch', '--depth=1', 'origin', oid]);
+    const text = `${fetched.stdout}\n${fetched.stderr}`;
+    let typ = null;
+    try { typ = git(R.bare, ['cat-file', '-t', oid]).trim(); } catch { typ = null; }
+    if (fetched.status !== 0 && /not our ref|couldn't find remote ref/.test(text)) return { class: 'absent', typ };
+    if (fetched.status === 0 && typ !== 'commit') return { class: 'not_commit', typ };
+    if (fetched.status === 0 && typ === 'commit') return { class: 'ok', typ };
+    throw new Error(`unclassified ${oid} status ${fetched.status} type ${typ}: ${text}`);
+  };
+  const cases = [
+    ['tip', tip, 'ok'],
+    ['dangling', dangling, 'ok'],
+    ['tree', tree, 'not_commit'],
+    ['blob', blob, 'not_commit'],
+    ['tag', tag, 'not_commit'],
+    ['absent', absent, 'absent'],
+  ];
+  for (const [name, oid, want] of cases) {
+    const gitClass = await classify(oid);
+    assert.equal(gitClass.class, want, `${name}: git classified ${gitClass.class} (${gitClass.typ})`);
+    const got = await fetchCommit(createTransport(R.url, { tracer: tracer() }), oid);
+    if (want === 'ok') {
+      assert.equal(got.ok, true, name);
+      if (!got.ok) continue;
+      assert.ok(Buffer.from(got.value.data).equals(gitBuf(R.bare, ['cat-file', 'commit', oid])), name);
+      assert.equal(got.value.oid, oid, name);
+      assert.equal(got.value.commit.tree, git(R.bare, ['rev-parse', `${oid}^{tree}`]).trim(), name);
+    } else {
+      assert.equal(got.ok, false, name);
+      if (got.ok) continue;
+      assert.equal(got.error.code, 'not_found', `${name}: ${got.error.code} ${got.error.message}`);
+      assert.equal(got.error.miss?.kind, want, name);
+      assert.equal(got.error.miss?.oid, oid, name);
+      if (want === 'not_commit') assert.equal(got.error.miss.type, gitClass.typ, name);
+    }
+  }
+  await assert.rejects(fetchObject(createTransport(R.url, { tracer: tracer() }), { oid: blob, expectType: TYPE.TREE }), e => e.code === 'pack_corrupt' && e.message === 'expected tree, got blob' && e.miss === undefined);
 });
 
 test('not_found shapes: missing path, path through a file, missing ref, unknown oid; bad path is bad_request before I/O', async () => {

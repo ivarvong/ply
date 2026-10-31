@@ -27,12 +27,12 @@ import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
-import { parseCommit, TYPE, TYPE_NAME } from './objects.js';
+import { parseCommit, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, requireLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
-import { thrownCode, thrownMessageMatches } from './boundary.js';
+import { thrownCode, thrownReason } from './boundary.js';
 import type { TypeNames } from './boundary.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
@@ -76,11 +76,15 @@ export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterab
 async function fetchWindow(t: Transport, commit: string, limit: number): Promise<FetchedPack> {
   let r: FetchedPack;
   try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
-    if (thrownCode(e) === 'remote_error' && thrownMessageMatches(e, /not our ref/)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'absent', oid: commit } });
     throw e;
   }
   const want = r.objects?.get(commit);
-  if (want && want.type !== TYPE.COMMIT) throw fail('not_found', `${commit} is not a commit (${(TYPE_NAME as TypeNames)[want.type] ?? want.type})`);
+  if (want && want.type !== TYPE.COMMIT) {
+    const name = nonCommitType(want.type);
+    const shown = (TYPE_NAME as TypeNames)[want.type] ?? want.type;
+    throw fail('not_found', `${commit} is not a commit (${shown})`, name === null ? undefined : { miss: { kind: 'not_commit', oid: commit, type: name } });
+  }
   return r;
 }
 
