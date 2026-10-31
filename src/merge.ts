@@ -17,6 +17,7 @@
 import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
+import type { Extra } from './errors.js';
 import { thrown as fail } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -29,6 +30,10 @@ import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
 import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.js';
+
+// A merge_conflict's payload: Detail carries `conflicts`; reasons and bases are extras (errors.ts is shared; additive
+// detail is the steward's call).
+type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
 
 // The shapes this module reads from unconverted modules (objects, transport, operation, push, ls-refs); their own
 // clusters own the full types.
@@ -62,13 +67,12 @@ type Fetched = { readonly data: Uint8Array };
 export type PushObject = { readonly type: number; readonly data: Uint8Array };
 
 // The unconverted modules' functions as this module calls them. TS infers their parameter types from the JS defaults
-// (`expectType = null` reads as null, `parents = []` as never[]), which no caller satisfies. These go as they convert.
-/* oxlint-disable typescript/no-unsafe-type-assertion -- see above */
-const fetchObj = fetchObject as unknown as (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<Fetched>;
-const pushRef = push as unknown as (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
-const runOp = operation as unknown as <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-const commitBytes = encodeCommit as unknown as (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array<ArrayBuffer>;
-/* oxlint-enable typescript/no-unsafe-type-assertion */
+// (`expectType = null` reads as null, `parents = []` as never[]), which no caller satisfies. Each call casts to the
+// signature here (a type-only cast: an alias `const f = g as F` would cost bundle bytes). These go as they convert.
+type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<Fetched>;
+type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
+type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array<ArrayBuffer>;
 
 const EMPTY: readonly TreeEntry[] = [];
 // An entry absent on a side is undefined.
@@ -232,7 +236,8 @@ export async function mergeBase(t: Transport, a: string, b: string, { maxDepth }
 // oxlint-disable-next-line eslint/max-params -- the transport, the cache, the oid and the counter
 const cachedTree = async (t: Transport, cache: TreeCache, oid: string, fetched?: () => void): Promise<TreeEntry[]> => {
   let data = cache.get(oid);
-  if (!data) { data = (await fetchObj(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); fetched?.(); }
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  if (!data) { data = (await (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); fetched?.(); }
   return parseTree(data, t.limits);
 };
 const subtree = (e: Entry): string | null => (e?.mode === '40000' ? e.oid : null);
@@ -388,7 +393,8 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
   const fileOf = (dir: string): Promise<string | null> => once(dir, async () => {
     const oid = await treeOf(dir);
     const e = oid === null ? null : (await readTree(oid)).find(x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000');
-    return e ? bytesToStr((await fetchObj(t, { oid: e.oid, expectType: TYPE.BLOB })).data) : null;
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+    return e ? bytesToStr((await (fetchObject as unknown as FetchObject)(t, { oid: e.oid, expectType: TYPE.BLOB })).data) : null;
   });
   return async path => {
     const dirs = ['']; for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) dirs.push(path.slice(0, i));
@@ -417,7 +423,8 @@ export function blobMerger(t: Transport, { maxMergeBlobBytes = LIMIT_MERGE_BLOB,
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
-  const get = async (oid: string): Promise<Uint8Array> => made.get(oid) ?? (await fetchObj(bounded, { oid, expectType: TYPE.BLOB })).data;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  const get = async (oid: string): Promise<Uint8Array> => made.get(oid) ?? (await (fetchObject as unknown as FetchObject)(bounded, { oid, expectType: TYPE.BLOB })).data;
   const f = async ({ base, ours, theirs, path, driverFor = null }: BlobSpec): Promise<BlobMerge> => {
     if (ours === theirs || theirs === base) return { oid: ours };
     if (ours === base) return { oid: theirs };
@@ -459,7 +466,8 @@ export type AttributeSource = string | null;
 // a branch name as git's messages print it. Shared with rebase.ts.
 export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 // Effect: one commit by oid (deepen 1: the commit alone), as bytes or parsed. Shared with rebase.ts.
-export const commitBytesAt = (t: Transport, oid: string | null | undefined): Promise<Fetched> => fetchObj(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+export const commitBytesAt = (t: Transport, oid: string | null | undefined): Promise<Fetched> => (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
 export const commitAt = async (t: Transport, oid: string | null | undefined): Promise<Commit> => parseCommit((await commitBytesAt(t, oid)).data, t.limits);
 const isOid = (s: string): boolean => /^[0-9a-f]{40}$/u.test(s);
 export const validateAttributes = (a: unknown): void => {
@@ -485,11 +493,13 @@ export async function attributeTree(t: Transport, attributes: AttributeSource | 
 
 // Fast-forward `ref` to `to`, expecting it to be at `from` (CAS). Empty pack: the server already has the objects.
 export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: string; readonly from: string; readonly to: string }): Promise<PushResult> {
-  return pushRef(t, { ref, oldOid: from, newOid: to, objects: [] });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  return (push as unknown as Push)(t, { ref, oldOid: from, newOid: to, objects: [] });
 }
 
 export async function deleteBranch(t: Transport, { ref, oid }: { readonly ref: string; readonly oid: string }): Promise<PushResult> {
-  return pushRef(t, { ref, oldOid: oid, newOid: ZERO_OID, objects: [] });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  return (push as unknown as Push)(t, { ref, oldOid: oid, newOid: ZERO_OID, objects: [] });
 }
 
 export type MergeSpec = {
@@ -520,7 +530,8 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
   validatePushRef(ref, false); validateRef(from);
   const person: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== undefined && message !== null && message !== '') validateMessage(message); validateAttributes(attributes);
-  return runOp('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  return (operation as unknown as Operation)('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref, from]);
     const ours = refs.get(ref)?.oid;
     const theirs = refs.get(from)?.oid;
@@ -533,10 +544,9 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     if (ours === theirs) return upToDate(ours);
     const { base: one, bases, depth, verdict } = await mergeBase(t, ours, theirs);
     root.set({ 'git.merge.base': one ?? '', 'git.merge.bases': bases.length, 'git.merge.base.depth': depth });
-    const crissCross = { conflicts: [], reasons: Object.create(null), bases };
     // criss-cross history: git merges the bases into a virtual one (merge-ort, recursively); a single base can give a
     // clean result that differs from git's, so we refuse rather than guess
-    if (verdict.tag === 'criss-cross') throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, crissCross);
+    if (verdict.tag === 'criss-cross') throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases } as ConflictDetail);
     if (verdict.tag === 'unrelated') throw fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
     // only `found` is left: a verdict added without a base does not compile here
     const { base } = verdict;
@@ -556,16 +566,17 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     const merged = await mergeTrees(t, cache, { ...trees, mergeBlob, driverFor: attrTree === null ? null : attributeDrivers(t, cache, attrTree) });
     const newTrees = merged.objects.filter(o => o.type === TYPE.TREE).length;
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': newTrees, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
-    const conflicted = { conflicts: merged.conflicts, reasons: merged.reasons };
-    if (merged.conflicts.length > 0) throw fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, conflicted);
+    if (merged.conflicts.length > 0) throw fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
     const treeOid: string = merged.oid ?? hashObject('tree', encodeTree([]));
     if (!person) throw fail('bad_request', 'author is required for a merge commit');
     const who: string = ident(person);
-    let commitData = commitBytes({ tree: treeOid, parents: [ours, theirs], author: who, committer: who, message: (message ?? `Merge ${short(from)} into ${short(ref)}`).replace(/\n?$/u, '\n') });
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: treeOid, parents: [ours, theirs], author: who, committer: who, message: (message ?? `Merge ${short(from)} into ${short(ref)}`).replace(/\n?$/u, '\n') });
     if (signer) commitData = await signCommit(commitData, signer);
     const oid: string = hashObject('commit', commitData);
     const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: encodeTree([]), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
-    const r = await pushRef(t, { ref, oldOid: ours, newOid: oid, objects });
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+    const r = await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects });
     if (verify) await verifyRef(t, root, 'git.merge', ref, oid);
     return outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes });
   });

@@ -20,11 +20,12 @@ import { signCommit } from './sign.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 // The unconverted modules' functions as this module calls them (see merge.ts).
-/* oxlint-disable typescript/no-unsafe-type-assertion -- TS infers their parameter types from the JS defaults */
-const pushRef = push as unknown as (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
-const runOp = operation as unknown as <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-const commitBytes = encodeCommit as unknown as (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array<ArrayBuffer>;
-/* oxlint-enable typescript/no-unsafe-type-assertion */
+type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
+type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array<ArrayBuffer>;
+
+// A merge_conflict's payload: Detail carries `conflicts`; reasons, commit and replayed are extras.
+type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
 
 type Rediff = NonNullable<MergeOptions['rediff']>;
 
@@ -76,7 +77,8 @@ async function transplant(t: Transport, cache: TreeCache, { base, ours, theirs }
   out.fetched += m.fetched;
   if (m.conflicts.length > 0) return { conflicts: m.conflicts, reasons: m.reasons };
   const treeOid: string = m.oid ?? hashObject('tree', new Uint8Array(0));
-  let data = commitBytes({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  let data = (encodeCommit as unknown as EncodeCommit)({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
   if (signer) data = await signCommit(data, signer);
   const oid: string = hashObject('commit', data);
   out.contentMerged = (out.contentMerged ?? 0) + m.contentMerged;
@@ -123,24 +125,25 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
   const committerPerson: ValidatedIdent = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
   const authorPerson: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== null) validateMessage(message);
-  return runOp('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  return (operation as unknown as Operation)('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref, onto]);
     const tip = refs.get(ref)?.oid;
     const target = refs.get(onto)?.oid;
     if (tip === undefined) throw fail('not_found', `ref ${ref} not found`); if (target === undefined) throw fail('not_found', `ref ${onto} not found`);
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
     const { bases, commits, verdict } = await mergeBase(t, tip, target);
-    const several: Extra & { readonly bases: readonly string[] } = { bases };
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
     // so its chain is not linear
-    if (verdict.tag === 'criss-cross') throw fail('not_linear', `${ref} and ${onto} have ${bases.length} merge bases (criss-cross history); rebase needs a linear branch`, several);
+    if (verdict.tag === 'criss-cross') throw fail('not_linear', `${ref} and ${onto} have ${bases.length} merge bases (criss-cross history); rebase needs a linear branch`, { bases } as Extra & { readonly bases: readonly string[] });
     if (verdict.tag === 'unrelated') throw fail('unrelated_histories', `${ref} and ${onto} share no common ancestor within the search depth`);
     // only `found` is left: a verdict added without a base does not compile here
     const { base } = verdict;
     root.set({ 'git.rebase.base': base });
     if (base === target) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 });
     if (base === tip) { // the branch is behind: rebasing nothing onto target makes the branch equal to target
-      await pushRef(t, { ref, oldOid: tip, newOid: target, objects: [] });
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+      await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: target, objects: [] });
       return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 });
     }
     const chain = linearChain(commits, tip, base, requireLimit(limits, 'maxRebaseCommits'));
@@ -164,17 +167,15 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
       for (const c of chain) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- each commit replays onto the one before it
         const r = await transplant(t, cache, { base: parentTree(c), ours: curTree, theirs: c.tree }, { parent: cur, author: c.author, committer: who, message: c.message, encoding: c.encoding, extra: carriedExtra(c.extra) }, signer, out);
-        if (r.conflicts) {
-          const detail = { conflicts: r.conflicts, reasons: r.reasons, commit: c.oid, replayed };
-          throw fail('merge_conflict', `replaying ${c.oid.slice(0, 8)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).map(p => `${p} (${r.reasons[p]})`).join(', ')}`, detail);
-        }
+        if (r.conflicts) throw fail('merge_conflict', `replaying ${c.oid.slice(0, 8)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).map(p => `${p} (${r.reasons[p]})`).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons, commit: c.oid, replayed } as ConflictDetail);
         // git rebase --empty=drop (the default): a commit that did not start empty but becomes empty is dropped
         if (r.treeOid === curTree && c.tree !== parentTree(c)) { dropped.push(c.oid); continue; }
         objects.push(...r.objects); replayed.push({ from: c.oid, to: r.oid, tree: r.treeOid }); cur = r.oid; curTree = r.treeOid;
       }
     }
     root.set({ 'git.rebase.trees.fetched': out.fetched, 'git.rebase.objects': objects.length, 'git.rebase.dropped': dropped.length });
-    const pushed = await pushRef(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+    const pushed = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
     return outcome(squash ? 'squash' : 'rebase', { outcome: squash ? 'squash' : 'rebase', ref, oid: cur, oldTip: tip, onto: target, base, commits: chain.length, replayed, dropped, pushBytes: pushed.packBytes }, { 'git.rebase.new_tip': cur, 'git.rebase.push.bytes': pushed.packBytes });
   });
 }
@@ -200,7 +201,8 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
   if (!/^[0-9a-f]{40}$/u.test(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
-  return runOp(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit } }, async ({ t, outcome }): Promise<PickOutcome> => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+  return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit } }, async ({ t, outcome }): Promise<PickOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref]);
     const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`);
     const [cT, cC] = await Promise.all([target, commit].map(oid => commitBytesAt(t, oid)));
@@ -216,7 +218,8 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
       { parent: target, author: revert ? who : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
     if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
     if (r.treeOid === tInfo.tree) return outcome('empty', { outcome: 'empty', ref, oid: target });
-    const pushed = await pushRef(t, { ref, oldOid: target, newOid: r.oid, objects: uniqueObjects(r.objects) });
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+    const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: r.oid, objects: uniqueObjects(r.objects) });
     return outcome('ok', { outcome: 'ok', ref, oid: r.oid, tree: r.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: r.oid, [`${name}.tree`]: r.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
   });
 }
