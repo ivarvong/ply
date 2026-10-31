@@ -56,7 +56,11 @@ export type Extra = {
   // objects.ts: git fsck's message id on a refused commit, tag or duplicate header; the name a tree carries twice
   readonly msgId?: string;
   readonly entry?: string;
+  // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
+  // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts takeResult), so more bytes may complete it.
+  readonly reason?: Reason;
 };
+export type Reason = 'short_read';
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
 // Error instance carrying its fields (a stack for whoever logs it, and the exact shape today's thrown errors have, so
