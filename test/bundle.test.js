@@ -4,9 +4,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
+import { existsSync } from 'node:fs';
 
-const bundle = async entry => (await build({ entryPoints: [entry], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true }));
-const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, ''), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
+// A module converted to TypeScript is src/x.ts (docs/STACK.md); the names here stay x.js, as its importers' specifiers do.
+const src = p => (existsSync(p) ? p : p.replace(/\.js$/, '.ts'));
+const bundle = async entry => (await build({ entryPoints: [src(entry)], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true }));
+const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, '').replace(/\.ts$/, '.js'), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
 
 test('edit entry carries only what the edit path uses', async () => {
   const out = await bundle('src/edit.js');
@@ -59,7 +62,7 @@ test('edit entry carries only what the edit path uses', async () => {
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
   const edit = await bundle('src/edit.js');
   assert.ok(!/SSH-2\.0|curve25519|KEXINIT/.test(edit.outputFiles[0].text), 'no SSH in the edit bundle');
-  const ssh = await build({ entryPoints: ['src/sshgit.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets', 'node:net'] });
+  const ssh = await build({ entryPoints: [src('src/sshgit.js')], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets', 'node:net'] });
   const js = ssh.outputFiles[0].text;
   assert.ok(/curve25519-sha256/.test(js) && /aes128-gcm@openssh\.com/.test(js));
   assert.ok(!/node:net/.test(js), 'the ssh transport does not pick a socket implementation');
@@ -118,7 +121,7 @@ test('log entry: readLog carries no push, merge, pack building or rebase code', 
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
-  const out = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  const out = await build({ entryPoints: [src('src/index.js')], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   const js = out.outputFiles[0].text;
   assert.ok(!/node:/.test(js));
   for (const f of ['packresolve.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'discover.js', 'client.js', 'packcache.js', 'edit.js']) assert.ok(retained(out).map(([k]) => k).includes(f), `${f} missing from full bundle`);
@@ -187,13 +190,13 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-31: 69,891 B / 27,043 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 69_892, `tree bundle ${min} B exceeds budget`);
   assert.ok(gz < 27_044, `tree bundle ${gz} B gz exceeds budget`);
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  const full = await build({ entryPoints: [src('src/index.js')], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
-  const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  const node = await build({ entryPoints: [src('src/tree-node.js')], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
-  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
+  const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).map(f => f.replace(/\.ts$/, '.js')).sort();
   assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
 });
 
@@ -228,8 +231,8 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 52_918, `checkout bundle ${min} B exceeds budget`);
   assert.ok(gz < 20_912, `checkout bundle ${gz} B gz exceeds budget`);
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  const full = await build({ entryPoints: [src('src/index.js')], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
-  const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  const node = await build({ entryPoints: [src('src/checkout-node.js')], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
 });
