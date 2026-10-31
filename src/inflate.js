@@ -143,12 +143,12 @@ export function inflate(buf, pos = 0, opts = {}) {
       stats.stored++;
       bitbuf = 0; bitcnt = 0; // discard to byte boundary
       if (p + DEFLATE_STORED_HEADER_BYTES > buf.length) throw bad('inflate: truncated stored header');
-      const sh = take(buf, p, DEFLATE_STORED_HEADER_BYTES);
+      const sh = buf.subarray(p, p + DEFLATE_STORED_HEADER_BYTES); // in range: checked on the line above
       const len = sh[0] | (sh[1] << BYTE_SHIFT), nlen = sh[2] | (sh[3] << BYTE_SHIFT);
       if (len !== (~nlen & DEFLATE_STORED_LEN_MASK)) throw bad('inflate: stored length check failed');
       p += DEFLATE_STORED_HEADER_BYTES;
       if (p + len > buf.length) throw bad('inflate: truncated stored block');
-      ensure(len); out.set(take(buf, p, len), o); o += len; p += len;
+      ensure(len); out.set(buf.subarray(p, p + len), o); o += len; p += len; // in range: "truncated stored block" above
     } else if (type === DEFLATE_FIXED) {
       stats.fixed++;
       codes(FIXED_LIT, FIXED_DIST);
@@ -178,7 +178,7 @@ export function inflate(buf, pos = 0, opts = {}) {
   const result = out.subarray(0, o);
   if (!raw) {
     if (p + ADLER_BYTES > buf.length) throw bad('inflate: truncated adler32');
-    const ad = take(buf, p, ADLER_BYTES);
+    const ad = buf.subarray(p, p + ADLER_BYTES); // in range: checked on the line above
     const want = ((ad[0] << BE32_SHIFTS[0]) | (ad[1] << BE32_SHIFTS[1]) | (ad[2] << BE32_SHIFTS[2]) | ad[3]) >>> 0;
     if (verifyAdler && adler32(result) !== want) throw bad('inflate: adler32 mismatch');
     p += ADLER_BYTES;

@@ -1,8 +1,9 @@
 name: nightly
 
-# Deep fuzz against main with a seed that rotates daily (the UTC date as YYYYMMDD), the full `npm test`, and a full
-# Stryker run. A failure prints the seed, the failing case and a one-line reproduce command (NIGHTLY-FAIL lines),
-# and the report job opens or comments on the issue "nightly fuzz failure <date>".
+# Deep fuzz against main with a seed that rotates daily (the UTC date as YYYYMMDD), the full `npm test`, a full
+# Stryker run, and the pack-cut space with git's oracle on every cut (PACK_SPACE=full). A failure prints the seed, the
+# failing case and a one-line reproduce command (NIGHTLY-FAIL lines), and the report job opens or comments on the
+# issue "nightly fuzz failure <date>".
 on:
   schedule:
     - cron: "23 7 * * *"
@@ -141,9 +142,34 @@ jobs:
         run: |
           node scripts/mutate.mjs || { echo "NIGHTLY-FAIL stryker reproduce: npm run test:mutate"; exit 1; }
 
+  pack-cut-full:
+    # every ply path already runs every cut on each PR; this adds git index-pack --strict on every cut (~9,600 runs,
+    # ~90 s), where the PR run judges field boundaries and every 8th offset (~1,400 runs)
+    name: pack-cut (git oracle on every cut)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: pack-cut, full oracle
+        env:
+          PACK_SPACE: full
+        run: |
+          node --test test/space/pack-cut.test.js || { echo "NIGHTLY-FAIL pack-cut reproduce: PACK_SPACE=full node --test test/space/pack-cut.test.js"; exit 1; }
+
   report:
     name: report failure
-    needs: [seed, fuzz, test, mutate]
+    needs: [seed, fuzz, test, mutate, pack-cut-full]
     if: failure()
     runs-on: ubuntu-latest
     permissions:

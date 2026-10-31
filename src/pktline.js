@@ -1,7 +1,7 @@
 // pkt-line framing. 4 hex length (inclusive) + payload. 0000 flush, 0001 delim, 0002 response-end.
 // Decoder is a pure step function over an immutable state record.
 import { fail } from './errors.js';
-import { te, concat, take, encodeBytes } from './bytes.js';
+import { te, concat, encodeBytes } from './bytes.js';
 import {
   PKT_LEN_HEX, PKT_HEX_BASE, PKT_FLUSH, PKT_DELIM, PKT_LEN_INVALID,
   PKT_DATA_MIN, PKT_MAX_PAYLOAD, PKT_READ_MAX_PAYLOAD, PKT_LEN_SHIFTS, BYTE_VALUES,
@@ -10,10 +10,13 @@ import {
 export const MAX_PKT_PAYLOAD = PKT_MAX_PAYLOAD;
 const proto = msg => fail('protocol', msg);
 
+// The one pkt-line writer. A line longer than git's LARGE_PACKET_MAX is the caller's (a push option, a ref prefix, a
+// want or filter: fields without a length rule of their own), refused before any byte is written, as git's
+// format_packet dies "impossibly long line" (pkt-line.c). bad_request: no retry can make the line shorter.
 export function pkt(payload) {
   // a ref name read from ls-refs may hold escaped bytes (#43): encodeBytes writes them back as the server sent them
   const p = typeof payload === 'string' ? encodeBytes(payload, 'pkt-line') : payload;
-  if (p.length > MAX_PKT_PAYLOAD) throw new Error(`pkt-line payload too large: ${p.length}`);
+  if (p.length > MAX_PKT_PAYLOAD) throw fail('bad_request', `pkt-line payload too large: ${p.length} bytes, the most git frames is ${MAX_PKT_PAYLOAD}`, { what: 'pkt-line', got: p.length, max: MAX_PKT_PAYLOAD });
   const out = new Uint8Array(PKT_LEN_HEX + p.length);
   out.set(te.encode((p.length + PKT_LEN_HEX).toString(PKT_HEX_BASE).padStart(PKT_LEN_HEX, '0')));
   out.set(p, PKT_LEN_HEX);
@@ -34,15 +37,19 @@ export const pktInit = () => Object.freeze({
 });
 
 // (state, chunk) -> { state, frames: [{kind, payload?}] }. Carry is bounded by one max pkt.
+// The rules are git's reader, packet_read_with_status (pkt-line.c): a non-hex length byte (either case is hex) is "bad
+// line length character"; 0000/0001/0002 are flush/delim/response-end; 0003 is "bad line length"; a payload of
+// LARGE_PACKET_MAX bytes or more (the packet_buffer it reads into) is "bad line length" too, so the longest frame git
+// reads is 65523 bytes, three past the 65520 its writer emits. Every slice below is inside a length the loop has
+// already checked, so it is a view, not a bounded read: nothing here can be short.
 // @decoder pktStep prefix=pkt
 export function pktStep(st, chunk) {
   const frames = [];
   const buf = st.carry ? concat([st.carry, chunk]) : chunk;
   let p = 0, data = st.data, flush = st.flush, delim = st.delim, end = st.end, maxPayload = st.maxPayload;
   while (buf.length - p >= PKT_LEN_HEX) {
-    // Stryker disable next-line StringLiteral: the loop already proved PKT_LEN_HEX bytes remain, so take() cannot throw
-    const hex = take(buf, p, PKT_LEN_HEX, 'protocol');
-    const a = HEXV[hex[0]], b = HEXV[hex[1]], c = HEXV[hex[2]], d = HEXV[hex[3]];
+    const h = buf.subarray(p, p + PKT_LEN_HEX);
+    const a = HEXV[h[0]], b = HEXV[h[1]], c = HEXV[h[2]], d = HEXV[h[3]];
     if ((a | b | c | d) < 0) throw proto(`bad pkt-line length at byte ${st.bytes - (buf.length - chunk.length) + p}`);
     const len = (a << PKT_LEN_SHIFTS[0]) | (b << PKT_LEN_SHIFTS[1]) | (c << PKT_LEN_SHIFTS[2]) | d;
     if (len < PKT_DATA_MIN) {
@@ -57,16 +64,14 @@ export function pktStep(st, chunk) {
     // git's reader refuses a payload that does not fit its LARGE_PACKET_MAX buffer before reading it (pkt-line.c)
     if (len - PKT_LEN_HEX > PKT_READ_MAX_PAYLOAD) throw proto(`bad pkt-line length ${len - PKT_LEN_HEX}`);
     if (buf.length - p < len) break;
-    // Stryker disable next-line StringLiteral: the length check already proved the payload bytes remain, so take() cannot throw
-    const payload = take(buf, p + PKT_LEN_HEX, len - PKT_LEN_HEX, 'protocol');
+    const payload = buf.subarray(p + PKT_LEN_HEX, p + len);
     data++;
     // Stryker disable next-line EqualityOperator: a payload equal to the current maximum leaves the maximum unchanged
     if (payload.length > maxPayload) maxPayload = payload.length;
     frames.push({ kind: 'data', payload });
     p += len;
   }
-  // Stryker disable next-line StringLiteral: p < buf.length means the remainder is in range, so take() cannot throw
-  const carry = p < buf.length ? take(buf, p, buf.length - p, 'protocol').slice() : null;
+  const carry = p < buf.length ? buf.slice(p) : null;
   return {
     frames,
     state: Object.freeze({

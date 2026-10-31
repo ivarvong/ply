@@ -23,8 +23,13 @@ export function parseCapabilitiesV2(frames) {
   const text = f => td.decode(f.payload).replace(/\n$/, '');
   let i = 0;
   if (frames[0]?.kind === 'data' && text(frames[0]).startsWith(SERVICE)) {
-    if (frames[1]?.kind !== 'flush') throw proto('advertisement: no flush after the service line');
-    i = 2;
+    // check_smart_http: "The header can include additional metadata lines, up until a packet flush marker"
+    i = frames.findIndex(f => f.kind !== 'data');
+    if (frames[i]?.kind !== 'flush') throw proto('advertisement: no flush after the service line');
+    i++;
+    // a header and nothing after it: the v2 lines, if any, were read as metadata (a preamble with no flush of its own),
+    // and remote-curl refuses that response
+    if (i >= frames.length) throw proto('advertisement: nothing after the service line');
   }
   const first = frames[i]?.kind === 'data' ? text(frames[i]) : '';
   if (first.startsWith(ERR)) throw fail('remote_error', `remote: ${first.slice(ERR.length)}`);

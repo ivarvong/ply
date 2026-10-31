@@ -74,9 +74,11 @@ export function v2Step(st, frame) {
   const maxPack = requireLimit(st.limits, 'maxPackBytes');
   if (st.done) throw proto('v2: frame after flush');
   if (frame.kind === 'flush') return { state: { ...st, done: true }, pack: null };
-  if (frame.kind === 'end') return { state: st, pack: null };
+  if (frame.kind === 'end' && st.phase !== 'pack') return { state: st, pack: null };
   if (st.phase === 'pack') {
-    if (frame.kind !== 'data') return { state: st, pack: null };
+    // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
+    // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
+    if (frame.kind !== 'data') throw proto(`v2: ${frame.kind} inside the packfile section`);
     const band = parseSideband(frame.payload);
     if (band.band === SIDEBAND_PACK) {
       const band1 = st.band1 + band.body.length;
@@ -150,9 +152,9 @@ export async function* packStream(t, opts, span) {
 // Emits the zlib bytes of the single object, withholding the trailing 20-byte trailer, verifying it at finish.
 // @decoder parseSideband prefix=sideband
 export function parseSideband(payload) {
+  // an empty payload (0004) has no band byte: git's demultiplex_sideband "missing sideband designator"
   const band = take(payload, 0, SIDEBAND_CHANNEL_BYTES, 'protocol')[0];
-  // Stryker disable next-line ConditionalExpression,EqualityOperator,StringLiteral: a one-byte payload takes zero body bytes, the same empty result, and that read cannot be short
-  const body = payload.length > SIDEBAND_CHANNEL_BYTES ? take(payload, SIDEBAND_CHANNEL_BYTES, payload.length - SIDEBAND_CHANNEL_BYTES, 'protocol') : new Uint8Array(0);
+  const body = payload.subarray(SIDEBAND_CHANNEL_BYTES);
   return { band, body };
 }
 
@@ -168,9 +170,10 @@ export function spStep(st, chunk) {
     // (VARINT_MAX_SHIFT), so `head` never holds more than PACK_HEADER_BYTES + 9 bytes between chunks and the 22nd
     // byte of a pack whose object header never ends is `pack_corrupt` (#13: endless 0x80 used to grow `head` without bound).
     const head = concat([s.head, chunk]);
-    // need the pack header plus the first object-header byte; a short read means the chunk has not arrived
+    // need the pack header plus the first object-header byte; a short read means the chunk has not arrived. Past this
+    // check the header fields are views into `head`, not bounded reads: they cannot be short.
     if (head.length < PACK_HEADER_BYTES + 1) return { state: { ...s, head }, zlib: [] };
-    if (!take(head, 0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw fail('pack_corrupt', 'pack: bad signature');
+    if (!head.subarray(0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) throw fail('pack_corrupt', 'pack: bad signature');
     if (readUint32BE(head, PACK_SIGNATURE.length) !== PACK_VERSION) throw fail('pack_corrupt', 'pack: bad version');
     const count = readUint32BE(head, PACK_SIGNATURE.length + UINT32_BYTES);
     if (count !== 1) throw fail('pack_corrupt', `pack: expected 1 object, got ${count}`);
@@ -181,14 +184,14 @@ export function spStep(st, chunk) {
     if (header.type === TYPE.OFS_DELTA || header.type === TYPE.REF_DELTA) throw fail('pack_corrupt', 'pack: single-object pack is a delta');
     const p = header.next;
     s = { ...s, phase: 'body', type: header.type, size: header.size, head: new Uint8Array(0), headerBytes: p };
-    s.sha.update(take(head, 0, p));
-    data = take(head, p, head.length - p);
+    s.sha.update(head.subarray(0, p));
+    data = head.subarray(p);
   }
   // body: pass through with the trailer withheld
   const all = s.lag.length ? concat([s.lag, data]) : data;
   const emitLen = Math.max(0, all.length - PACK_TRAILER_BYTES);
-  const emit = emitLen ? take(all, 0, emitLen) : new Uint8Array(0);
-  const lag = take(all, emitLen, all.length - emitLen).slice();
+  const emit = all.subarray(0, emitLen);
+  const lag = all.slice(emitLen);
   // The zlib bytes of an object declared `size` may not run past zlibBound(size) (format.js). The declared-size check on
   // inflated bytes cannot see a stream that inflates to nothing (non-final empty stored blocks, 5 bytes in, 0 out), which
   // used to be accepted until the request timer; this refuses it on the chunk that crosses the bound, so a 10-byte blob
