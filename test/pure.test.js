@@ -216,8 +216,7 @@ test('span naming convention: every span and attribute key in a trace follows th
   //   span names:  git.<service> <command>  for wire round trips (git.upload-pack ls-refs, git.receive-pack, …)
   //                git.<op>                 operation roots (git.edit, git.merge, git.rebase, git.cherry_pick, git.revert)
   //                git.<op>.<phase>         operation children (git.edit.tree, git.edit.blob)
-  //                ssh.<phase>              transport phases (ssh.connect, ssh.userauth, ssh.exec)
-  //   attr keys:   dotted lowercase ascii with underscores, under one of: git. http. ssh. url. server. mem. error. ply. exception.
+  //   attr keys:   dotted lowercase ascii with underscores, under one of: git. http. url. server. mem. error. ply. exception.
   //   outcomes:    every root span has <name>.outcome (operation roots, and the spans that follow them: README "Span lifetimes")
   const { startGitServer, makeBareRepo, tmpRoot, commitFiles, git } = await import('./server.js');
   const { editFile } = await import('../src/edit.js');
@@ -229,8 +228,8 @@ test('span naming convention: every span and attribute key in a trace follows th
     const ex = arrayExporter();
     await editFile(`${srv.url}/nm.git`, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: { name: 'n', email: 'n@x' }, message: 'm' }, { tracer: new Tracer({ exporter: ex }), verify: true });
     const spans = ex.lines.flatMap(flattenLine);
-    const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?|ssh\.[a-z]+)$/;
-    const KEY = /^(git|http|ssh|url|server|mem|error|ply|exception)\.[a-z0-9_.-]+$/;
+    const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?)$/;
+    const KEY = /^(git|http|url|server|mem|error|ply|exception)\.[a-z0-9_.-]+$/;
     for (const s of spans) {
       assert.match(s.name, NAME, `span name ${s.name}`);
       for (const k of Object.keys(s.attrs)) assert.match(k, KEY, `attr ${k} on ${s.name}`);
@@ -257,9 +256,10 @@ test('error taxonomy: every fail(\'code\') literal in src/ is in the table (stat
   const { readdirSync, readFileSync } = await import('node:fs');
   const { CODES } = await import('../src/errors.js');
   const used = new Set();
-  for (const f of readdirSync('src')) if (/\.(?:js|ts)$/.test(f)) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
+  for (const f of readdirSync('src')) if (/\.[jt]s$/.test(f)) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
   for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);
-  assert.ok(used.size >= 20);
+  // a floor so a broken regex cannot pass on nothing: 19 literal codes since the SSH transport (the only `fail('auth'` site) left, 2026-10-31
+  assert.ok(used.size >= 19, `only ${used.size} fail('code') literals found`);
 });
 
 test('scrubError walks prototype-less maps (#16: merge reasons, report-status options) as it walks plain objects', () => {

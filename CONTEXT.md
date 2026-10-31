@@ -24,7 +24,7 @@ product; "… for Git" is the permitted form, so the tagline is *"ply — a git 
 ## 1. What ply is
 
 A zero-dependency JavaScript git client for Cloudflare Workers (and Node), speaking git's own wire protocols — smart
-HTTP (protocol v2 for fetch, v0 receive-pack for push) and SSH — with no clone, no working tree and no local object store.
+HTTP (protocol v2 for fetch, v0 receive-pack for push) — with no clone, no working tree and no local object store.
 
 What it does:
 
@@ -53,10 +53,10 @@ Layers, bottom up (each depends only on the ones below):
 |---|---|---|
 | Codecs (pure) | `bytes`, `pktline`, `inflate`, `sha1`, `objects`, `pack`, `packresolve`, `validate` | streaming where it matters (inflate reports bytes consumed; SHA-1 is incremental) |
 | Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
-| Transport contract | `transport`, `http`, `sshgit` (+ `ssh`, `ssh-node`, `ssh-workers`) | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; two implementations, no dispatch |
+| Transport contract | `transport`, `http` | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; one implementation (HTTP), no dispatch |
 | Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |
 | Operations | `operation`, `edit`, `tree`, `checkout`, `log`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
-| Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `checkout.js` (whole-tree read), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `ssh-node.js` (`node:net`), `tree-node.js` and `checkout-node.js` (`node:fs`) | `sideEffects: false` |
+| Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `checkout.js` (whole-tree read), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `tree-node.js` and `checkout-node.js` (`node:fs`) | `sideEffects: false` |
 | Telemetry | `otel` | minimal OTLP/JSON tracer; exporters pluggable (`test/jsonl.mjs` for files) |
 
 Key operation modules:
@@ -90,8 +90,7 @@ Key operation modules:
 ## 3. How the work was done (the process)
 
 **Git is the oracle.** Every behaviour that git defines is decided by running git, not by reading docs or reasoning:
-`git http-backend` behind a tiny Node shim (`test/server.js`), a fault-injecting proxy (`test/proxy.js`), a real OpenSSH
-`sshd` (`test/sshd.js`), `workerd` for the Workers runtime, and git's own commands as judges — `merge-tree --write-tree`,
+`git http-backend` behind a tiny Node shim (`test/server.js`), a fault-injecting proxy (`test/proxy.js`), `workerd` for the Workers runtime, and git's own commands as judges — `merge-tree --write-tree`,
 `merge`, `rebase`, `cherry-pick`, `revert`, `check-attr`, `rev-list --objects --filter`, `diff`, `fsck --strict`,
 `verify-commit`, `ssh-keygen -Y verify`, `index-pack`, `pack-objects`. A second git (master, 2.56, built from source) is
 used wherever behaviour differs by version.
@@ -134,8 +133,7 @@ Earlier sessions (summarised; details in SAFETY.md):
    WebCrypto; verified by git and ssh-keygen; also under workerd).
 6. Branch operations needed for merging (scope narrowed by the user from "PRs" to git ops): create, fast-forward, merge,
    delete; then rebase, squash, cherry-pick, revert.
-7. SSH transport: curve25519-sha256 KEX, pinned ssh-ed25519 host key (no TOFU), aes-gcm, publickey auth, `GIT_PROTOCOL`
-   env, per-channel serialization; proven against OpenSSH 9.6 and over `cloudflare:sockets` in workerd.
+7. SSH transport (removed 2026-10-31; history on branch archive/ssh).
 8. Layer review and refactor: the transport contract, `operation()`, the error table split, I26 (layering as a tested
    property).
 
@@ -161,11 +159,10 @@ This session (2026-10-19 → 20):
 |---|---|
 | readLog is first-parent, not git log's date order | the first `limit` first-parent commits are exactly inside a `deepen limit` window and `truncated` is the last commit's parent count, with no date heuristics; it is the history a branch view shows (one merge per landed branch). A date-ordered `git log -n` would need the whole window ranked by committer date (issue #56) |
 | readLog's window is held to the deepen contract like the merge-base walk's | a cut graph without `shallow` lines (or a foreign commit) is `pack_corrupt`, never a shorter or padded log: 90 cells in `test/log.test.js`, 50 of them predicted `pack_corrupt` from git's own graph |
-| Transport = plain record with two methods; HTTP and SSH implement it | operations never branch on transport; SSH added with zero changes above the contract |
+| Transport = plain record with two methods; HTTP implements it | operations never branch on transport; an SSH transport was added (and removed 2026-10-31, archive/ssh) with zero changes above the contract |
 | Errors: one table, codes validated at throw | retry policy is data; tests check docs ↔ table ↔ literals in source stay aligned |
 | After an acknowledged push, any read-back failure → `ambiguous` | the push may have landed; a transport code would invite a wrong retry (I25) |
 | Pack cache keyed by sha256(url, credential, body), wants-only | measured against GitHub: wants-only fetches are deterministic; poison → bust + one retry |
-| SSH host key pinned, no TOFU | first-use trust on an edge runtime has nowhere safe to remember keys |
 | Merge = tree merge + ported line merge, never "close enough" | clean results must equal `git merge-tree` byte for byte; anything uncertain is a conflict (superset) |
 | No rename detection; rename guards instead | porting merge-ort's rename detection is large; guards make every rename shape a conflict, never a wrong tree |
 | `rediff` option, default `myers` | git changed behaviour in 2.54; both are git; default follows current git, `skip`/`undecided` documented |
@@ -173,7 +170,7 @@ This session (2026-10-19 → 20):
 | `attributes` option, default `null` | measured: git 2.43 bare repos read HEAD's attributes, 2.46+ read none — there is no single "git's answer"; the caller names the source |
 | Merge bundle budget 66 KB (edit bundle 44 KB) | line merge ≈ 10.4 KB and attributes ≈ 5.5 KB are deliberate; the edit path carries neither (asserted) |
 | Git's GPL test vectors (t3070) run once, not shipped | licence; the result (380/380) is recorded in SAFETY.md |
-| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`); likewise checkoutTree yields streams and `ply/checkout-node` writes them | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `ssh-node.js`, `tree-node.js` and `checkout-node.js` |
+| pushTree takes files as data; the directory walk is a separate Node module (`ply/tree-node`); likewise checkoutTree yields streams and `ply/checkout-node` writes them | `src/` stays Web-APIs-only for Workers; the bundle test asserts `node:` appears only in `tree-node.js` and `checkout-node.js` |
 | pushTree's "server has it" set = oids named by the parent's trees it read | exact for one-commit deploys (push 2 == `git rev-list --objects new ^old`, 7 objects / 1,176 B on a 208-entry tree); objects only in older history are resent — correct, not minimal, no history walk |
 | checkoutTree fetches every tree in one `blob:none` pack, then blobs by wants list | 3 requests for a 22-entry fixture vs 72 for readCommit → listTree → readFile per file; `blob:none` is the one filter Artifacts serves, so the same 3 there. A `path` still fetches the whole commit's trees (one round trip beats a tree:0 walk; bounded by `maxPackBytes`) |
 | blob:none fallback: the caller's limits bind what it asked for; an extra over a limit is dropped, a malformed one fails the fetch | a tree:0 server never sends the extras, so failing on an honest big sibling directory made the answer depend on the host (#46: curl on Artifacts, 2,135-entry tests/data vs a 2,000 limit, 413 on every page); a malformed object means the response is untrusted (#18). Dropped extras are refetched as wanted objects if ever read. SAFETY I30 |
@@ -183,11 +180,10 @@ This session (2026-10-19 → 20):
 | Redirects never followed (`redirect: 'manual'`, 3xx → `http`); the credential scrub rides on the transport into every span and error | workerd 2026-10-23 forwards Authorization on a cross-origin redirect (measured); a server can echo the token in ERR/band 2/band 3/`ng` text. SAFETY I6b, I6c (issue #15) |
 | URL userinfo is sent as git sends it (`<token>@` → Basic `<token>:`, `:pass` → `:pass`, percent-decoded to bytes), not refused | measured on git 2.50 behind a Basic-auth gate: no prompt before the first credentialed request, the header byte-equal in every form; a library cannot prompt, so a refused one is `auth`. SAFETY I6d (issue #32) |
 | An explicit `auth` that sends nothing is `bad_request`; `{ user }` alone is refused, not `user:` | git's own credential API (a helper giving a username alone) asks for the password and sends nothing; a library cannot ask. `{ user, token: '' }` is the explicit `user:`. Explicit fields go out as UTF-8 bytes, as git sends a helper's. SAFETY I6e (issue #40) |
-| An ssh URL with a password is `bad_request`; ssh:// is percent-decoded as git does | git hands ssh `user:pass@host`, so the password reaches the server as the login name (measured through GIT_SSH_COMMAND); ply authenticates by key only. SAFETY I6e (issue #40) |
 
 ## 6. Verification — how to rerun everything
 
-Requirements: Node ≥ 22, git ≥ 2.43 on PATH, OpenSSH `sshd`/`ssh-keygen` for the SSH and signing suites, `workerd` (npm,
+Requirements: Node ≥ 22, git ≥ 2.43 on PATH, OpenSSH `ssh-keygen` for the signing suites, `workerd` (npm,
 pinned) for the Workers suite (skipped if absent).
 
 ```sh
@@ -222,7 +218,7 @@ make -j NO_CURL=1 NO_OPENSSL=1 NO_EXPAT=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_P
 
 ## 7. Numbers (2026-10-20)
 
-- Bundles (esbuild, minified): edit 42.6 KB (16.5 KB gz); SSH transport 21.5 KB; merge 63.9 KB; full 116 KB.
+- Bundles (esbuild, minified): edit 42.6 KB (16.5 KB gz); merge 63.9 KB; full 116 KB.
 - Line merge: 0 wrong across >40,000 random merges against 2.43 and 2.56; union 5,280 byte-identical; diff hunks identical
   on >1,400 diffs incl. 947 Myers heuristic splits and 160+ mxcost cutoffs.
 - Attributes: >40,000 paths equal to `check-attr` on both versions; 380/380 git wildmatch vectors.
@@ -235,15 +231,14 @@ In order of value:
 
 1. **Real keys**: a GitHub push run (receive-pack policy layer, protected branches, the exact `ng` wording the
    `cas_conflict` classifier relies on) and an observed run on the Workers edge (CPU, subrequest and memory limits).
-   GitHub over SSH has not been reachable from the build sandbox.
 2. **Rename detection** (merge-ort's): today every rename shape is a conflict — the largest source of conservative
    conflicts on real refactors.
 3. **Virtual merge base** for criss-cross histories (refused today).
 4. **Conflict output**: we refuse rather than produce markers/partial results; no resolution flow.
 5. Server-side configuration ply cannot see: `info/attributes`, custom merge drivers, `merge.default`.
 6. Rebase niceties: patch-id skipping of already-upstream commits; merges in the chain (`not_linear` today).
-7. Protocol/transport limits: SHA-256 repositories; servers without protocol v2; SSH supports Ed25519 keys only and
-   does not re-key.
+7. Protocol/transport limits: SHA-256 repositories; servers without protocol v2; no SSH transport (removed 2026-10-31;
+   history on branch archive/ssh).
 8. Features not built: annotated tags, multi-file edits on top of the parent tree (pushTree replaces the whole tree),
    LFS beyond the guard, merges of files over 8 MiB, a `ply push <dir>` CLI and `.gitignore` reading for `pushDir`;
    for checkoutTree: submodule recursion, `.gitattributes` (eol/filters) and LFS smudging, sparse fetching of only `path`'s

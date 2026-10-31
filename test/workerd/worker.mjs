@@ -7,9 +7,6 @@ import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
-import { createSshTransport } from '../../src/sshgit.js';
-import { workersStream } from '../../src/ssh-workers.js';
-import { lsRefs } from '../../src/lsrefs.js';
 
 // module-scoped: survives across requests within the isolate, like a real worker would hold it
 const packCache = typeof caches !== 'undefined' ? caches.default : null;
@@ -40,31 +37,6 @@ export default {
         const r = await c.fetchPack(body.req);
         return Response.json({ ok: true, objects: r.parsed?.stats.count ?? 0, ms: Date.now() - t0, spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, ms: s.durationMs, attrs: pick(s.attrs) })) });
       } catch (e) { return Response.json({ ok: false, code: e.code, message: e.message, ms: Date.now() - t0 }); }
-    }
-    if (u.pathname === '/ssh-edit') { // the whole pipeline over SSH from inside workerd, TCP via cloudflare:sockets
-      const body = await req.json();
-      const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
-      const hex = h => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
-      const privateKey = await crypto.subtle.importKey('pkcs8', hex(body.privateKeyPkcs8Hex), { name: 'Ed25519' }, false, ['sign']); // workerd rejects node's JWK (alg "Ed25519" vs "EdDSA")
-      const publicKeyRaw = hex(body.publicKeyHex);
-      const t = createSshTransport(body.url, { privateKey, publicKeyRaw, hostKey: body.hostKey, connect: workersStream, tracer });
-      const t0 = Date.now();
-      try {
-        const r = await editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: 'wd over ssh' }, { tracer, transport: t, verify: true });
-        await t.close();
-        return Response.json({ ok: true, ms: Date.now() - t0, newCommit: r.newCommit, pushBytes: r.pushBytes, stats: t.stats(), spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, attrs: pick(s.attrs) })) });
-      } catch (e) { await t.close().catch(() => {}); return Response.json({ ok: false, ms: Date.now() - t0, code: e.code, message: e.message }); }
-    }
-    if (u.pathname === '/ssh-bound') { // SAFETY I1 over cloudflare:sockets: one ls-refs under requestTimeoutMs and a signal aborted after abortMs
-      const body = await req.json();
-      const hex = h => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
-      const privateKey = await crypto.subtle.importKey('pkcs8', hex(body.privateKeyPkcs8Hex), { name: 'Ed25519' }, false, ['sign']);
-      const ac = new AbortController(); if (body.abortMs != null) setTimeout(() => ac.abort(), body.abortMs);
-      const t = createSshTransport(body.url, { privateKey, publicKeyRaw: hex(body.publicKeyHex), hostKey: body.hostKey, connect: workersStream, tracer: new Tracer(), limits: withLimits({ requestTimeoutMs: body.requestTimeoutMs }), signal: ac.signal });
-      const t0 = Date.now();
-      try { await lsRefs(t, ['HEAD']); return Response.json({ ok: true, ms: Date.now() - t0 }); }
-      catch (e) { return Response.json({ ok: false, ms: Date.now() - t0, code: e.code, message: e.message }); }
-      finally { await t.close().catch(() => {}); }
     }
     if (u.pathname === '/redirect') { // ply against a redirecting server; plus what workerd's own `follow` does with Authorization
       const body = await req.json();
@@ -111,4 +83,4 @@ export default {
     return new Response('not found', { status: 404 });
   },
 };
-const pick = a => Object.fromEntries(Object.entries(a).filter(([k]) => /outcome|mem\.|bytes|ms$|objects|cache_hits|match|ratio|status_code|pack\.cache|head\.hint|head\.outcome|attempt|hasher|cpu|ssh\./.test(k)));
+const pick = a => Object.fromEntries(Object.entries(a).filter(([k]) => /outcome|mem\.|bytes|ms$|objects|cache_hits|match|ratio|status_code|pack\.cache|head\.hint|head\.outcome|attempt|hasher|cpu/.test(k)));

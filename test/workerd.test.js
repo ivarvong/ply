@@ -1,4 +1,6 @@
-// The pipeline under workerd (the Workers runtime), against the local git server. Skipped if workerd is not installed.
+// The pipeline under workerd (the Workers runtime ply's main consumer runs on), against the local git server. The worker
+// is test/workerd/worker.mjs bundled with src by esbuild (test/workerd/build.mjs). Part of the default suite and CI.
+// workerd is a devDependency; without it the tests skip locally, and fail under CI (a skipped suite is a dead suite, #101).
 //   WORKERD=/path/to/workerd npx vitest run test/workerd.test.js      (default: looks in ./node_modules/.bin and ../wd/node_modules/.bin)
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
@@ -13,6 +15,7 @@ import { build } from './workerd/build.mjs';
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
 const WORKERD = candidates.find(p => existsSync(p));
 const PORT = 18790 + (process.pid % 100);
+if (!WORKERD && process.env.CI) throw new Error(`workerd not found (looked in ${candidates.join(', ')}); CI must run this suite`);
 
 let root, cleanup, srv, proc;
 before(async () => {
@@ -21,10 +24,12 @@ before(async () => {
   srv = await startGitServer(root);
   const cfg = build({ port: PORT, outDir: join(root, 'wd') });
   proc = spawn(WORKERD, ['serve', cfg], { stdio: ['ignore', 'pipe', 'pipe'] });
-  proc.stderr.on('data', d => { if (/error/i.test(String(d))) console.error('workerd:', String(d).slice(0, 300)); });
-  for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/ping`)).ok) break; } catch { } await new Promise(r => setTimeout(r, 100)); }
+  let stderr = '';
+  proc.stderr.on('data', d => { stderr = (stderr + d).slice(-4000); if (/error/i.test(String(d))) console.error('workerd:', String(d).slice(0, 300)); });
+  for (let i = 0; i < 100; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/ping`)).ok) return; } catch { } await new Promise(r => setTimeout(r, 100)); }
+  throw new Error(`workerd did not answer /ping on ${PORT} within 10 s (exit ${proc.exitCode}):\n${stderr}`);
 });
-after(async () => { if (!WORKERD) return; proc.kill(); await srv.close(); cleanup(); });
+after(async () => { if (!WORKERD) return; proc?.kill(); await srv?.close(); cleanup?.(); });
 
 const post = async (path, body, q = '') => (await fetch(`http://127.0.0.1:${PORT}${path}${q}`, { method: 'POST', body: JSON.stringify(body) })).json();
 
@@ -112,50 +117,6 @@ test('workerd: 10 concurrent writers in one isolate converge via cas_conflict re
   assert.ok(rs.some(r => r.tries > 0), 'contention actually occurred');
   assert.deepEqual(fsckProblems(bare), []);
   console.log(`  retries: ${rs.map(r => r.tries).join(',')}`);
-});
-
-test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd; git verifies', { skip: !WORKERD }, async () => {
-  const { startSshd } = await import('./sshd.js');
-  const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
-  const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
-  const privateKeyPkcs8Hex = [...new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey))].map(b => b.toString(16).padStart(2, '0')).join('');
-  const sshd = await startSshd(root, { publicKeyRaw });
-  try {
-    const bare = makeBareRepo(root, 'wssh'); const work = join(root, 'wwssh'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
-    commitFiles(work, bare, { 'a/b.txt': 'hello MARK\n' }, 'seed');
-    const r = await post('/ssh-edit', { url: `ssh://${sshd.user}@127.0.0.1:${sshd.port}${bare}`, hostKey: sshd.hostKeyLine, privateKeyPkcs8Hex, publicKeyHex: [...publicKeyRaw].map(b => b.toString(16).padStart(2, '0')).join(''), path: 'a/b.txt', find: 'MARK', replace: 'WORKERD-SSH' });
-    assert.ok(r.ok, JSON.stringify(r));
-    assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.newCommit);
-    assert.equal(gitBuf(bare, ['cat-file', 'blob', 'main:a/b.txt']).toString(), 'hello WORKERD-SSH\n');
-    assert.deepEqual(fsckProblems(bare), []);
-    const connect = r.spans.find(s => s.name === 'ssh.connect');
-    assert.equal(connect.attrs['ssh.cipher.c2s'], 'aes128-gcm@openssh.com'); assert.equal(connect.attrs['ssh.kex'], 'curve25519-sha256');
-    console.log(`  ssh edit under workerd: ${r.ms}ms, ${r.stats.bytesIn} B in / ${r.stats.bytesOut} B out, ${r.stats.packetsIn + r.stats.packetsOut} packets`);
-  } finally { await sshd.close(); }
-});
-
-test('workerd: I1 over SSH — a trickling server is cut at requestTimeoutMs and an aborted signal stops the exchange, typed as over HTTP', { skip: !WORKERD }, async () => {
-  const { startSshd, trickleProxy } = await import('./sshd.js');
-  const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
-  const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
-  const hexOf = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
-  const keys = { privateKeyPkcs8Hex: hexOf(new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey))), publicKeyHex: hexOf(publicKeyRaw) };
-  const sshd = await startSshd(join(root, 'bound'), { publicKeyRaw });
-  const px = await trickleProxy(sshd.port);
-  try {
-    const bare = makeBareRepo(root, 'wbound'); const work = join(root, 'wwbound'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
-    commitFiles(work, bare, { 'f.txt': 'x\n' }, 'seed');
-    const req = extra => post('/ssh-bound', { url: `ssh://${sshd.user}@127.0.0.1:${px.port}${bare}`, hostKey: sshd.hostKeyLine, ...keys, ...extra });
-    const ok = await req({ requestTimeoutMs: 5000 }); assert.ok(ok.ok, JSON.stringify(ok));
-    px.mode.trickle = 100; // one byte per 100 ms from the first: under workersStream's per-read idle timer, never done
-    const slow = await req({ requestTimeoutMs: 1000 });
-    const aborted = await req({ requestTimeoutMs: 30_000, abortMs: 300 });
-    console.log(`  workerd ssh: trickle ${JSON.stringify(slow)}; abort ${JSON.stringify(aborted)}`);
-    assert.deepEqual([slow.code, slow.message], ['timeout', 'request aborted: request exceeded 1000 ms']);
-    assert.ok(slow.ms >= 990 && slow.ms < 1500, `cut at ${slow.ms} ms`);
-    assert.equal(aborted.code, 'aborted'); assert.match(aborted.message, /^request aborted: The operation was aborted/); // workerd's default abort reason
-    assert.ok(aborted.ms >= 290 && aborted.ms < 800, `stopped at ${aborted.ms} ms`);
-  } finally { await px.close(); await sshd.close(); }
 });
 
 test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST; nothing reaches the other origin', { skip: !WORKERD }, async () => {

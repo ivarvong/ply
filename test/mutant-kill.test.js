@@ -22,8 +22,6 @@ import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
 import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
-import { kexInit, parseKexInit } from '../src/ssh.js';
-import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
@@ -770,24 +768,7 @@ test('ls-refs lines and report-status', () => {
   throws(() => parseReportStatus(['unpack ok', 'ok refs/heads/main', 'unpack ok']), 'protocol', 'report: duplicate unpack');
 });
 
-test('ssh url, kex, and gitattributes lines', () => {
-  assert.deepEqual(parseSshUrl('ssh://host/path'), { user: 'git', host: 'host', port: 22, path: '/path' });
-  assert.deepEqual(parseSshUrl('ssh://u@host/p'), { user: 'u', host: 'host', port: 22, path: '/p' });
-  assert.deepEqual(parseSshUrl('ssh://host:2222/p'), { user: 'git', host: 'host', port: 2222, path: '/p' });
-  assert.deepEqual(parseSshUrl('ssh://u@h:2222/a/b'), { user: 'u', host: 'h', port: 2222, path: '/a/b' });
-  assert.deepEqual(parseSshUrl('git@github.com:o/r.git'), { user: 'git', host: 'github.com', port: 22, path: 'o/r.git' });
-  assert.deepEqual(parseSshUrl('host:name'), { user: 'git', host: 'host', port: 22, path: 'name' });
-  throws(() => parseSshUrl('https://x/y'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  throws(() => parseSshUrl('ssh://host'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  throws(() => parseSshUrl('host:22/foo'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  const cookie = Uint8Array.from({ length: 16 }, (_, i) => i + 1);
-  const kex = parseKexInit(kexInit(cookie));
-  assert.deepEqual(kex.kex, ['curve25519-sha256', 'curve25519-sha256@libssh.org']);
-  assert.deepEqual(kex.hostKey, ['ssh-ed25519']);
-  assert.equal(kex.firstFollows, false);
-  assert.deepEqual(kex.langCS, []);
-  throws(() => parseKexInit(Uint8Array.of(1)), 'ssh', 'ssh: expected KEXINIT');
-
+test('gitattributes lines', () => {
   const no = { macrosOk: false };
   const yes = { macrosOk: true };
   assert.deepEqual(parseLine('*.txt text', no), { pat: { pattern: '*.txt', negative: false, mustBeDir: false, nodir: true, prefix: 0, endsWith: true }, states: [['text', true]] });
@@ -876,17 +857,6 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const streamed = spStep(opened.state, pack.subarray(PACK_HEADER_BYTES + 1));
   assert.equal(spFinish(streamed.state).zlibBytes, streamed.state.zlibBytes);
   assert.ok(streamed.state.zlibBytes > 0);
-
-  throws(() => parseSshUrl('xsssh://host/path'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  assert.equal(parseSshUrl('ssh://ab@host/p').user, 'ab');
-  throws(() => parseSshUrl('/git@github.com:o/r.git'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  throws(() => parseSshUrl('host:22'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  // #40: the refusal names its field and never quotes the URL (it may carry a credential)
-  for (const bad of ['https://x/y', 'ssh://host', 'host:22', 'ssh://host/path\n']) assert.throws(() => parseSshUrl(bad), e => { assert.equal(e.what, 'ssh url', bad); assert.ok(!e.message.includes(bad.trim()), bad); return true; });
-  for (const pw of ['ssh://u:p@h/x', 'u:p@h:x']) assert.throws(() => parseSshUrl(pw), e => e.code === 'bad_request' && e.what === 'ssh url' && e.message === 'invalid ssh url: a password in the userinfo is not supported (ply authenticates by public key); remove it');
-  assert.throws(() => parseSshUrl('ssh://%FF@h/x'), e => e.code === 'bad_request' && e.what === 'ssh url' && e.message === 'invalid ssh url: a percent-escape is not UTF-8');
-  assert.deepEqual(parseSshUrl('ssh://t%C3%ABst@h%73/p%20q%00%ZZ'), { user: 'tëst', host: 'hs', port: 22, path: '/p q%00%ZZ' });
-  assert.deepEqual(parseSshUrl('t%C3%ABst@h:p%20q'), { user: 't%C3%ABst', host: 'h', port: 22, path: 'p%20q' });
 
   const no = { macrosOk: false };
   const yes = { macrosOk: true };
@@ -1010,9 +980,6 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(parseLsRefLine(`${oid(4)}  refs/heads/a`), { oid: oid(4), name: '' });
   const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
-
-  throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
-  throws(() => parseSshUrl('host:name\n'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
 
   const hello = te.encode('hello hello hello hello');
   const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)));
@@ -1277,7 +1244,7 @@ const spanStub = { set() {}, event() {} };
 const tracerStub = { span: async (_name, _opts, fn) => fn(spanStub) };
 
 test('every DEFAULT_LIMITS key is read outside limits.js', () => {
-  const src = readdirSync('src').filter(f => /\.(?:js|ts)$/.test(f) && !/^limits\.[jt]s$/.test(f)).map(f => readFileSync(join('src', f), 'utf8')).join('\n');
+  const src = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && !f.startsWith('limits.')).map(f => readFileSync(join('src', f), 'utf8')).join('\n');
   for (const key of Object.keys(DEFAULT_LIMITS)) assert.match(src, new RegExp(key), key);
   assert.equal(DEFAULT_LIMITS.maxInflatedTotal, DEFAULT_LIMITS.maxObjectSize * 4);
   assert.equal(DEFAULT_LIMITS.maxPackObjects, 100_000);
@@ -1453,8 +1420,6 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   });
   await assert.rejects((async () => { for await (const frame of errHttp.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'upstream_5xx' && e.message.includes('xxx'));
   assert.ok(errPulls <= 3, `error body kept reading (${errPulls} chunks)`);
-  assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), limits: {}, connect() { throw new Error('connect'); } }), e => e.code === 'bad_request' && e.what === 'requestTimeoutMs');
-  assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), user: 'a\nb' }), e => e.code === 'bad_request' && e.what === 'ssh user');
 });
 
 test('encodeTree duplicate names and the pre-send push size refusal (issue #11)', async () => {

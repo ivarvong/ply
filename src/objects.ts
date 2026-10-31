@@ -378,7 +378,7 @@ export type CommitInput = {
   readonly tree: string; readonly parents?: readonly string[]; readonly author: string; readonly committer?: string;
   readonly encoding?: string | null; readonly message?: string | null; readonly extra?: readonly string[];
 };
-export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitInput): Uint8Array {
+export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitInput): Uint8Array<ArrayBuffer> {
   headerValue(tree, 'tree');
   for (const p of parents) headerValue(p, 'parent');
   headerValue(author, 'author');
