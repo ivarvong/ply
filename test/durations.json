@@ -42,5 +42,6 @@
   "test/space/refname.test.js": 10,
   "test/space/registry.test.js": 2,
   "test/span-contract.test.js": 4,
-  "test/wide-limits.test.js": 12
+  "test/wide-limits.test.js": 12,
+  "test/workerd.test.js": 12
 }
