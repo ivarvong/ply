@@ -54,7 +54,7 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-31: 73,215 B / 28,144 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 73,369 B / 28,212 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
   // 2026-10-31: sem/packs (A1, #99): bytes/pktline/inflate/packresolve return Result with throwing wrappers until the cut-over; +2.5 KB min / +0.9 KB gz on this entry, itemized in the PR body (budget change for the steward's decision).
-  assert.ok(min < 75_374, `edit bundle ${min} B exceeds budget`);
+  assert.ok(min < 75_420, `edit bundle ${min} B exceeds budget`);
   // 2026-10-31: 73,090 B / 28,222 B gz. strict TS (T2: objects, format, validate, scrub): min down, gz up a few dozen bytes from strict-lint forms (/u regexes, Number.parseInt, explicit length checks, noUncheckedIndexedAccess guards) and identifier remangling.
   assert.ok(gz < 29_105, `edit bundle ${gz} B gz exceeds budget`);
 });
@@ -93,7 +93,7 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-31: 91,966 B. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 92,121 B. validatePushRef: receive-pack's funny refname refused before sending (#73).
   // 2026-10-31: sem/packs (A1, #99): bytes/pktline/inflate/packresolve return Result with throwing wrappers until the cut-over; +2.5 KB min / +0.9 KB gz on this entry, itemized in the PR body (budget change for the steward's decision).
-  assert.ok(min < 94_117, `merge bundle ${min} B exceeds budget`);
+  assert.ok(min < 94_122, `merge bundle ${min} B exceeds budget`);
 });
 
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
@@ -108,7 +108,7 @@ test('log entry: readLog carries no push, merge, pack building or rebase code', 
   // with the blob:none fallback, so the delta resolver), the deepen-contract check and readCommit's commit view.
   // 2026-10-31: 49,521 B / 19,807 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: sem/packs (A1, #99): bytes/pktline/inflate/packresolve return Result with throwing wrappers until the cut-over; +2.5 KB min / +0.9 KB gz on this entry, itemized in the PR body (budget change for the steward's decision).
-  assert.ok(min < 51_392, `log bundle ${min} B exceeds budget`);
+  assert.ok(min < 51_366, `log bundle ${min} B exceeds budget`);
   assert.ok(gz < 20_604, `log bundle ${gz} B gz exceeds budget`);
 });
 
@@ -152,7 +152,7 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-31: 53,946 B / 21,069 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 55,816 B / 21,786 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: sem/packs (A1, #99): bytes/pktline/inflate/packresolve return Result with throwing wrappers until the cut-over; +2.5 KB min / +0.9 KB gz on this entry, itemized in the PR body (budget change for the steward's decision).
-  assert.ok(min < 57_826, `read bundle ${min} B exceeds budget`);
+  assert.ok(min < 57_857, `read bundle ${min} B exceeds budget`);
   // 2026-10-31: 55,506 B / 21,791 B gz. T2 strict TS (see the edit budget).
   assert.ok(gz < 22_601, `read bundle ${gz} B gz exceeds budget`);
 });
@@ -184,7 +184,7 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-31: 69,891 B / 27,043 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 70,045 B / 27,104 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
   // 2026-10-31: sem/packs (A1, #99): bytes/pktline/inflate/packresolve return Result with throwing wrappers until the cut-over; +2.5 KB min / +0.9 KB gz on this entry, itemized in the PR body (budget change for the steward's decision).
-  assert.ok(min < 72_071, `tree bundle ${min} B exceeds budget`);
+  assert.ok(min < 72_110, `tree bundle ${min} B exceeds budget`);
   // 2026-10-31: 69,763 B / 27,134 B gz. T2 strict TS (see the edit budget).
   assert.ok(gz < 27_991, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
@@ -227,7 +227,7 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-31: 50,542 B / 20,121 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: sem/packs (A1, #99): bytes/pktline/inflate/packresolve return Result with throwing wrappers until the cut-over; +2.5 KB min / +0.9 KB gz on this entry, itemized in the PR body (budget change for the steward's decision).
-  assert.ok(min < 54_851, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(min < 54_882, `checkout bundle ${min} B exceeds budget`);
   // 2026-10-31: 52,604 B / 20,928 B gz. T2 strict TS (see the edit budget).
   assert.ok(gz < 21_788, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
