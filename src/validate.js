@@ -58,10 +58,8 @@ export function validateRef(ref) {
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
 export function validatePushRef(ref, deleting) {
-  validateRef(ref);
-  const name = ref.slice('refs/'.length);
-  if (name === '@') throw bad('ref', 'refs/@ is a funny refname to receive-pack');
-  if (!deleting && !name.includes('/')) throw bad('ref', 'a push may only write refs/<dir>/<name> (receive-pack: funny refname)');
+  const name = validateRef(ref).slice(5); // after "refs/"
+  if (name === '@' || (!deleting && !name.includes('/'))) throw bad('ref', 'receive-pack refuses it (funny refname)');
   return ref;
 }
 
