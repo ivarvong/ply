@@ -23,8 +23,8 @@ export function rankedHoles(all, stored = ratchet().categories) {
   const gitE = new Map(all.man.entries.map(e => [e.id, e]));
   const out = [];
   for (const id of all.holes.git) { const e = gitE.get(id); out.push({ sev: severityOfGit(e), cat: 'git', id, where: `git ${e.file}:${e.line} ${e.fn}()`, what: `${e.kind}: ${e.text}` }); }
-  for (const id of all.holes.decisions) { const p = pts.get(id); out.push({ sev: severityOfPoint(p), cat: 'decisions', id, where: `${p.file}:${p.line} ${p.fn}()`, what: `${p.code}: ${p.what}` }); }
-  for (const id of stored.failsites?.ids ?? []) { const p = pts.get(id); if (p) out.push({ sev: severityOfPoint(p), cat: 'failsites', id, where: `${p.file}:${p.line} ${p.fn}()`, what: `${p.code}: ${p.what}` }); }
+  for (const id of all.holes.decisions) { const p = pts.get(id); out.push({ sev: severityOfPoint(p), cat: 'decisions', id, where: `${p.file} ${p.fn}()`, what: `${p.code}: ${p.what}` }); }
+  for (const id of stored.failsites?.ids ?? []) { const p = pts.get(id); if (p) out.push({ sev: severityOfPoint(p), cat: 'failsites', id, where: `${p.file} ${p.fn}()`, what: `${p.code}: ${p.what}` }); }
   for (const id of stored.claims?.ids ?? []) out.push({ sev: 2, cat: 'claims', id, where: '', what: 'the registry names a merged space that does not reach this site' });
   const kindRank = { git: 0, decisions: 1, failsites: 2, claims: 3 };
   return out.sort((a, b) => a.sev - b.sev || kindRank[a.cat] - kindRank[b.cat] || a.id.localeCompare(b.id));
@@ -91,7 +91,7 @@ export function renderMd(all) {
   for (const d of decs) {
     const r = all.dec.by.get(d.id);
     const st = !r ? (d.mode === 'lossless' ? 'unregistered' : '**HOLE (data path)**') : 'excluded' in r ? `excluded: ${esc(r.excluded)}` : `\`${r.space}\` / ${r.axisTag}`;
-    L.push(`| \`${d.file}:${d.line}\` ${d.fn}() | ${d.mode} | ${esc(d.via)} | ${st} |`);
+    L.push(`| \`${d.file}\` ${d.fn}() | ${d.mode} | ${esc(d.via)} | ${st} |`);
   }
   L.push('');
   const holes = rankedHoles(all, st);
