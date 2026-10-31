@@ -492,7 +492,7 @@ const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|in
 test('every exported decoder has a prefix-closure property', () => {
   const missing = [];
   const annotated = [];
-  for (const file of readdirSync('src').filter(f => f.endsWith('.js'))) {
+  for (const file of readdirSync('src').filter(f => /\.[jt]s$/.test(f))) {
     const text = readFileSync(join('src', file), 'utf8');
     const anns = [...text.matchAll(/@decoder\s+(\w+)\s+prefix=([\w-]+)/g)].map(m => ({ name: m[1], prefix: m[2] }));
     for (const a of anns) annotated.push({ file, ...a });

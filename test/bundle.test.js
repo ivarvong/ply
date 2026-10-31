@@ -6,7 +6,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const bundle = async entry => (await build({ entryPoints: [entry], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true }));
-const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, ''), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
+const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, '').replace(/\.ts$/, '.js'), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
 
 test('edit entry carries only what the edit path uses', async () => {
   const out = await bundle('src/edit.js');
@@ -193,7 +193,7 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
-  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
+  const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
   assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
 });
 
