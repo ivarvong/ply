@@ -1,10 +1,10 @@
 {
   "compilerOptions": {
     "target": "es2022",
-    "lib": ["es2023"],
+    "lib": ["es2023", "es2024.string", "dom", "dom.asynciterable"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "types": [],
+    "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
