@@ -92,7 +92,8 @@ try {
   if (root.status !== 200 || !root.text.includes('ply')) bad('prod GET /', `status ${root.status}`);
   const [tree] = await timed('prod /view tree', () => get('/view/github.com/ivarvong/ply?path=src'));
   const want = tree.text.match(/want=([0-9a-f]{40})/)?.[1] ?? null;
-  const shorts = [...tree.text.matchAll(/<td class="oid">([0-9a-f]{7,40})<\/td>/g)].map(m => m[1]);
+  // ply-web's stable scraping contract (ply-web README "Machine-readable markup"): one li[data-oid] per tree entry, full oids.
+  const shorts = [...tree.text.matchAll(/<li data-oid="([0-9a-f]{40})" data-mode="([0-7]{6})" data-type="(?:blob|tree|commit)" data-name="[^"]*">/g)].map(m => m[1]);
   run.prod.viewTree = { status: tree.status, ms: tree.ms, head: want, entries: shorts.length, timing: tree.h['server-timing'] ?? null, requestId: tree.h['x-ply-request-id'] ?? null, gitCalls: (tree.h['server-timing'] ?? '').split(',').length - 1 };
   if (tree.status !== 200) bad('prod /view tree', `status ${tree.status}`);
   if (gh0?.commit && want && want !== gh0.commit) bad('prod /view tree', `HEAD ${want} != ply/REST ${gh0.commit} (stale or lagging?)`);
