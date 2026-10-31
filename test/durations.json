@@ -40,6 +40,7 @@
   "test/space/push-outcome-boundary.test.js": 169,
   "test/space/push-outcome.test.js": 98,
   "test/space/refname.test.js": 10,
+  "test/space/registry.test.js": 2,
   "test/span-contract.test.js": 4,
   "test/wide-limits.test.js": 12,
   "test/workerd.test.js": 12
