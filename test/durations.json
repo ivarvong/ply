@@ -15,6 +15,7 @@
   "test/git-differential.test.js": 2,
   "test/linemerge.test.js": 1,
   "test/log.test.js": 11,
+  "test/lsrefs-unborn.test.js": 10,
   "test/merge.test.js": 33,
   "test/mergebase-space.test.js": 57,
   "test/mutant-kill-tree.test.js": 1,

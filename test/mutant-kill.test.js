@@ -19,7 +19,8 @@ import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } fr
 import { bestBases, mergeBase } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
-import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
+import { parseLsRefLine, parseUnbornLine, lsRefs, lsRefsBody } from '../src/lsrefs.js';
+import { lsRefs as lsRefsAsked } from '../src/client.js';
 import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
@@ -1398,6 +1399,55 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(lsRefs(framesOf([]), ['refs/heads/a\nb']), e => e.code === 'bad_request' && e.what === 'ref prefix');
   const payload = te.encode(refLine);
   await assert.rejects(lsRefs({ ...framesOf([{ kind: 'data', payload }, { kind: 'flush' }]), limits: withLimits({ maxLsRefsBytes: payload.length - 1 }) }), e => e.code === 'limit_exceeded' && e.what === 'ls-refs bytes');
+
+  // unborn (issue #103): the reader, the request argument, and the advertisement check that gates it
+  const M = { name: 'HEAD', target: 'refs/heads/main' };
+  assert.deepEqual(parseUnbornLine('unborn HEAD symref-target:refs/heads/main'), M);
+  assert.deepEqual(parseUnbornLine('unborn HEAD peeled:x symref-target:refs/heads/a symref-target:refs/heads/b'), { name: 'HEAD', target: 'refs/heads/a' });
+  assert.equal(parseUnbornLine('unborn HEAD', M), M, 'no target: the previous one stands');
+  assert.equal(parseUnbornLine('unborn HEAD symref-targe:refs/heads/x', M), M, 'not the attribute');
+  assert.equal(parseUnbornLine('unborn HEAD xsymref-target:refs/heads/x', M), M, 'the key starts the token');
+  assert.equal(parseUnbornLine('unborn HEAD'), null, 'prev defaults to null');
+  assert.equal(parseUnbornLine('unborn HEAD symref-target:', M), null, 'an empty target clears it');
+  assert.deepEqual(parseUnbornLine('unborn HEAD symref-target::x'), { name: 'HEAD', target: ':x' });
+  assert.equal(parseUnbornLine('unborn refs/heads/x symref-target:refs/heads/y', M), M, 'only HEAD');
+  assert.equal(parseUnbornLine('unborn  HEAD symref-target:refs/heads/y', M), M, 'a doubled space is an empty name');
+  assert.equal(parseUnbornLine(`${oid(1)} HEAD symref-target:refs/heads/y`, M), M, 'not an unborn line');
+  assert.equal(parseUnbornLine('unbornx HEAD symref-target:refs/heads/y', M), M);
+  const bodyOf = (...a) => td.decode(lsRefsBody(...a));
+  assert.equal(bodyOf(['HEAD'], { unborn: true }), '0014command=ls-refs\n00010009peel\n000csymrefs\n000bunborn\n0014ref-prefix HEAD\n0000');
+  assert.equal(bodyOf(['HEAD']), '0014command=ls-refs\n00010009peel\n000csymrefs\n0014ref-prefix HEAD\n0000');
+  assert.equal(bodyOf([], { unborn: false }), bodyOf([]));
+  const unbornFrames = [te.encode('unborn HEAD symref-target:refs/heads/a\n'), te.encode('unborn HEAD symref-target:refs/heads/b\n'), te.encode('unborn HEAD\n'), te.encode(refLine)];
+  const recording = (list, adv = null) => {
+    const sent = [], ads = [];
+    return { sent, ads, t: { ...framesOf(list), url: 'http://x/r.git', kind: 'http', async *frames(_svc, body) { sent.push(td.decode(body)); for (const f of list) yield f; }, async advertise() { ads.push(1); return adv; } } };
+  };
+  const listing = [...unbornFrames.map(p => ({ kind: 'data', payload: p })), { kind: 'flush' }];
+  const withReader = recording(listing);
+  const got = await lsRefs(withReader.t, [], { unborn: parseUnbornLine });
+  assert.deepEqual(got.unborn, { name: 'HEAD', target: 'refs/heads/b' }, 'the last target wins');
+  assert.equal(got.refs.size, 1);
+  assert.match(withReader.sent[0], /000bunborn\n/);
+  const noReader = recording(listing);
+  assert.equal((await lsRefs(noReader.t)).unborn, null);
+  assert.doesNotMatch(noReader.sent[0], /unborn/);
+  // the public lsRefs: unborn is sent only when the advertisement lists ls-refs=unborn (and only when asked)
+  const adv = feature => concat([pkt('version 2\n'), pkt('agent=git/2.50.0\n'), pkt(`ls-refs${feature}\n`), pkt('fetch=filter\n'), pkt('object-format=sha1\n'), FLUSH]);
+  for (const [feature, asked, sends] of [['=unborn', true, true], ['', true, false], ['=other', true, false], ['=unborn', false, false]]) {
+    const r = recording(listing, adv(feature));
+    const res = await lsRefsAsked(r.t, [], asked ? { unborn: true } : {});
+    assert.equal(/unborn/.test(r.sent[0]), sends, `${feature} asked=${asked}`);
+    assert.deepEqual(res.unborn, sends ? { name: 'HEAD', target: 'refs/heads/b' } : null, `${feature} asked=${asked}`);
+    assert.equal(r.ads.length, asked ? 1 : 0, 'the advertisement is fetched only when asked');
+  }
+  for (const lsRefsUnborn of [true, false]) {
+    const r = recording(listing, null);
+    const res = await lsRefsAsked(r.t, [], { unborn: true, info: { lsRefsUnborn } });
+    assert.equal(r.ads.length, 0, 'info in hand: no advertisement');
+    assert.equal(/unborn/.test(r.sent[0]), lsRefsUnborn);
+    assert.equal(res.unborn !== null, lsRefsUnborn);
+  }
 
   const reportLines = ['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'];
   const receipt = () => ({
