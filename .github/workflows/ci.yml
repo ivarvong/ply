@@ -40,12 +40,21 @@ jobs:
       - name: liar merge-base fuzzer
         run: node test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
 
-  mutate:
-    name: mutate
+  # Stryker over the src files a PR changed (all of src/ on main), split into 8 shards balanced by mutant count
+  # (scripts/mutate.mjs --plan 8). A file is the unit, and linemerge.js alone is 13% of src/, so 8 is where more
+  # shards stop shortening a full run. Shards only run Stryker; the job named `mutate` merges their reports and
+  # judges them with the same rules as an unsharded run. The 8 appears here three times; the merge refuses a
+  # missing or extra shard, so changing one and not the others fails the gate.
+  mutate-shard:
+    name: mutate-shard (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: write # setup-node persists the npm cache
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -60,7 +69,60 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
-        run: node scripts/mutate.mjs
+          SHARD: ${{ matrix.shard }}
+        run: node scripts/mutate.mjs --shard "${SHARD}/8"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-shard-${{ matrix.shard }}
+          path: reports/mutation/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # The gate. Its name stays `mutate` so anything waiting on that check still works. It runs even when a shard
+  # fails or is cancelled (a skipped required check would count as passing), and fails unless every shard succeeded.
+  mutate:
+    name: mutate
+    needs: mutate-shard
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # setup-node persists the npm cache
+    steps:
+      - name: every shard succeeded
+        env:
+          SHARDS: ${{ needs.mutate-shard.result }}
+        run: |
+          if [ "$SHARDS" != success ]; then
+            echo "mutate-shard result: $SHARDS"
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mutation-shard-*
+          path: shard-reports
+      - name: merge and judge
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: node scripts/mutate.mjs --merge shard-reports --shards 8
+      # The merged report, for per-file history (weights for a future partition, or a look at what survived).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: success() || failure()
+        with:
+          name: mutation-report
+          path: reports/mutation/mutation.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   supply-chain:
     name: actionlint
