@@ -23,13 +23,19 @@
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail } from './errors.js';
+import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { parseCommit, TYPE, TYPE_NAME } from './objects.js';
 import { DEFAULT_LIMITS, requireLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
-import type { Caught, FetchedPack, Operation, PackObjects, Transport, TypeNames } from './boundary.js';
+import type { FetchPackResult } from './fetchpack.js';
+import type { Transport } from './transport.js';
+import type { Caught, TypeNames } from './boundary.js';
+
+type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
+type PackObjects = NonNullable<FetchPackResult['objects']>;
 /* oxlint-disable require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 export const DEFAULT_LOG_LIMIT = 20;
@@ -89,8 +95,8 @@ export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions
   if (path !== undefined && path !== null) throw fail('bad_request', 'readLog: path filtering is not supported');
   const cap = requireLimit(opts.limits ?? DEFAULT_LIMITS, 'maxMergeDepth');
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap) throw fail('bad_request', `readLog: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: its options read as their defaults' types (boundary.ts)
-  return (operation as Operation)('read_log', url, { ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const r = await fetchWindow(t, commit, limit);
     const parsed = new Map<string, Parents>();

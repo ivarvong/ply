@@ -5,6 +5,7 @@
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
+import type { Extra } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -19,7 +20,13 @@ import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
-import type { Caught, EncodeCommit, FetchObject, Fetched, Operation, OperationOptions, PackObject, Push, Signer, SpState, Transport, TreeEntry } from './boundary.js';
+import type { OperationOpts } from './operation.js';
+import type { FetchedObject as Fetched, SpState } from './fetch.js';
+import type { PackObject } from './push.js';
+import type { Signer } from './sign.js';
+import type { Transport } from './transport.js';
+import type { TreeEntry } from './objects.js';
+import type { Bytes, Caught, EntryOptions } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -150,18 +157,18 @@ export type Level = { readonly treeOid: string; readonly data: Uint8Array; reado
 export type BlobEdit = {
   readonly oldOid: string;
   readonly newOid: string;
-  readonly delta: Uint8Array;
+  readonly delta: Bytes;
   readonly baseLen: number;
   readonly newLen: number;
   readonly matchOffset: number | undefined;
   readonly scan: ScanState;
   readonly inflated: number;
 };
-export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
+export type NewTree = { readonly type: number; readonly data: Bytes; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
 export type Built = {
   readonly trees: readonly NewTree[];
   readonly newTree: string;
-  readonly commitData: Uint8Array;
+  readonly commitData: Bytes;
   readonly newCommit: string;
   readonly objects: readonly PackObject[];
 };
@@ -180,13 +187,14 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
   for (const { treeOid: oldOid, data, entry } of levels.toReversed()) {
     const newData: Uint8Array = treeReplaceOid(data, entry, child);
     const newOid = hashObject('tree', newData);
-    const { delta } = spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) });
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
+    const delta = spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) }).delta as Bytes;
     trees.unshift({ type: TYPE.TREE, data: delta, baseOid: oldOid, newOid, newData });
     child = newOid;
   }
   const who = ident(validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz }));
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, prefer-template -- bundle budget: the JS's concatenation; objects.js is JS: `parents = []` reads as never[] (boundary.ts)
-  const commitData = (encodeCommit as unknown as EncodeCommit)({ tree: child, parents: [oldCommit], author: who, committer: who, message: message.endsWith('\n') ? message : message + '\n' });
+  // oxlint-disable-next-line prefer-template -- bundle budget: the JS's concatenation
+  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: who, message: message.endsWith('\n') ? message : message + '\n' });
   const newCommit = hashObject('commit', commitData);
   const objects: PackObject[] = [
     { type: TYPE.COMMIT, data: commitData },
@@ -198,7 +206,7 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
 }
 
 // Pure: the same build with a different commit object (e.g. the signed one): identity and pack entry follow the bytes.
-export function withCommitData(built: Built, commitData: Uint8Array): Built {
+export function withCommitData(built: Built, commitData: Bytes): Built {
   const newCommit = hashObject('commit', commitData);
   return { ...built, commitData, newCommit, objects: [{ type: TYPE.COMMIT, data: commitData }, ...built.objects.slice(1)] };
 }
@@ -244,7 +252,7 @@ const summarize = ({ oldCommit, commit, blob, hint, attempt, newCommit = oldComm
   ({ noop, oldCommit, newCommit, oldTree: commit.tree, newTree, oldBlob: blob.oldOid, newBlob: blob.newOid, matchOffset: blob.matchOffset, baseLen: blob.baseLen, newLen: blob.newLen, pushBytes, trees: trees.map(t => ({ old: t.baseOid, new: t.newOid })), hint, attempt });
 
 // The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …); these are the edit's own.
-export type EditOptions = Omit<OperationOptions, 'attrs' | 'onFinish' | 'link'> & {
+export type EditOptions = EntryOptions & {
   readonly head?: string | null;
   readonly strictHead?: boolean;
   readonly cache?: Map<string, Uint8Array>;
@@ -288,7 +296,8 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
       try {
         for await (const chunk of packStream(t, { wants: [blobOid] }, fetchSpan)) {
           const r = spStep(sp, chunk); sp = r.state;
-          for (const z of r.zlib) await writer.write(z);
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
+          for (const z of r.zlib) await writer.write(z as Bytes);
         }
         sp = spFinish(sp);
         await writer.close();
@@ -314,7 +323,8 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
         if (sha === null) {
           if (sp.phase !== 'body') throw fail('pack_corrupt', 'inflated bytes before header');
           const lfs = isLfsPointerPrefix(chunk); span.set({ 'git.edit.blob.lfs_pointer': lfs });
-          if (lfs && !allowLfsPointer) throw fail('lfs_pointer', `${blobOid} is a Git LFS pointer (${sp.size} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`, { size: sp.size });
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the pointer's size rides as an ad-hoc field (errors.ts Extra), as fetch.ts's size does
+          if (lfs && !allowLfsPointer) throw fail('lfs_pointer', `${blobOid} is a Git LFS pointer (${sp.size} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`, { size: sp.size } as Extra);
           sha = await begin();
         }
         const c0 = cpuNow();
@@ -337,7 +347,9 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     if (scan.count !== 1) throw fail('match_count', `expected exactly one match, found ${scan.count}`, { matches: scan.count });
     if (scan.emitted !== newLen) throw fail('internal', `emitted ${scan.emitted} != ${newLen}`);
     const newOid = await sha.hex();
-    const { delta, ops } = spliceDelta({ baseLen: sp.size, off: scan.matches[0], oldLen: find.length, insert: replace });
+    // exactly one match (checked above), so matches[0] is its offset; the delta is ArrayBuffer-backed (boundary.ts Bytes)
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const { delta, ops } = spliceDelta({ baseLen: sp.size, off: scan.matches[0] as number, oldLen: find.length, insert: replace }) as { readonly delta: Bytes; readonly ops: { readonly copy: number; readonly insert: number } };
     span.set({ 'git.edit.blob.new': newOid, 'git.edit.blob.match_offset': scan.matches[0], 'git.edit.blob.delta.bytes': delta.length, 'git.edit.blob.delta.copy_ops': ops.copy, 'git.edit.blob.delta.insert_ops': ops.insert });
     return { oldOid: blobOid, newOid, delta, baseLen: sp.size, newLen, matchOffset: scan.matches[0], scan, inflated };
   });
@@ -353,12 +365,11 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
   const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head ?? '', 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
   const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint ?? '', ...memAttrs({ objects: held, ...streamed }), ...(fetchImpl?.attrs ? fetchImpl.attrs() : {}) });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: `link = null` reads as the type null (boundary.ts)
-  return (operation as Operation)('edit', url, { ...opts, fetchImpl, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null }, async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('edit', url, ({ ...opts, fetchImpl, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fetch.js is JS: `expectType = null` reads as the type null (boundary.ts)
-    const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await (fetchObject as FetchObject)(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
+    const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // oxlint-disable-next-line promise-function-async -- bundle budget: the JS's own .then chain, byte for byte
@@ -410,8 +421,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     if (signer) { built = withCommitData(built, await signCommit(built.commitData, signer)); root.set({ 'git.edit.commit.signed': signer.kind, 'git.edit.commit.signer': signer.publicKeyLine ?? '' }); }
     for (const tr of built.trees) cache.set(tr.newOid, tr.newData);
     root.set({ 'git.edit.tree.new': built.newTree, 'git.edit.commit.new': built.newCommit, 'git.edit.commit.bytes': built.commitData.length });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- push.js is JS: `objects = []` reads as never[] (boundary.ts)
-    const pushed = await (push as unknown as Push)(t, { ref: s.ref, oldOid: s.create ? ZERO_OID : oldCommit, newOid: built.newCommit, objects: built.objects });
+    const pushed = await push(t, { ref: s.ref, oldOid: s.create ? ZERO_OID : oldCommit, newOid: built.newCommit, objects: built.objects });
     // report-status is the only receipt git offers, and a middlebox can forge it. verify: re-read the ref (one ~100 B
     // roundtrip) and require it to be our commit; a mismatch is 'ambiguous' (the push was acknowledged but not observed).
     if (verify) await verifyRef(t, root, 'git.edit', s.ref, built.newCommit);

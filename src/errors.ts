@@ -56,9 +56,8 @@ export type Extra = {
   // objects.ts: git fsck's message id on a refused commit, tag or duplicate header; the name a tree carries twice
   readonly msgId?: string;
   readonly entry?: string;
-  // edit.ts: the span attributes of a failed tree lookup (lookupEntry); an LFS pointer's size (lfs_pointer)
+  // edit.ts: the span attributes of a failed tree lookup (lookupEntry)
   readonly attrs?: Readonly<Record<string, unknown>>;
-  readonly size?: number;
 };
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an

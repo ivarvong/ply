@@ -13,6 +13,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 import { thrown as fail } from './errors.js';
+import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -27,8 +28,12 @@ import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, DELTA_SIZE_MIN } from './format.js';
-import type { Span, Tracer } from './otel.js';
-import type { Caught, EncodeCommit, FetchObject, Fetched, Operation, PackObject, Push, Pushed, Transport, TreeEntry } from './boundary.js';
+import type { Span } from './otel.js';
+import type { FetchedObject as Fetched } from './fetch.js';
+import type { PackObject, PushResult as Pushed } from './push.js';
+import type { Transport } from './transport.js';
+import type { TreeEntry } from './objects.js';
+import type { Bytes, Caught } from './boundary.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const BLOB_MODES: ReadonlySet<string> = new Set([MODE_BLOB, MODE_EXEC, MODE_LINK]);
@@ -73,7 +78,9 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Fi
       continue;
     }
     if (!BLOB_MODES.has(mode)) throw fail('bad_request', `${path}: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path });
-    const data: unknown = bytesOf(spec.data);
+    // the caller's value: bytesOf passes anything but a string through, and the test below refuses it
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const data: unknown = bytesOf(spec.data as string | Uint8Array);
     if (!(data instanceof Uint8Array)) throw fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
     if (data.length > maxObject) throw limitError('object size', data.length, maxObject);
     // a symlink target is a path: git cannot check out an empty one, and a NUL ends it on every platform
@@ -146,10 +153,11 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
     const base = old.get(dir);
     const delta = base ? makeDelta(base.data, t.data).delta : null;
     // git's patch_delta rejects a delta under DELTA_SIZE_MIN; a delta no smaller than the tree is not worth the base lookup
-    trees.push(delta && delta.length >= DELTA_SIZE_MIN && delta.length < t.data.length ? { type: TYPE.TREE, data: delta, baseOid: (base as { readonly oid: string }).oid } : { type: TYPE.TREE, data: t.data });
+    // ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
+    trees.push(delta && delta.length >= DELTA_SIZE_MIN && delta.length < t.data.length ? { type: TYPE.TREE, data: delta as Bytes, baseOid: (base as { readonly oid: string }).oid } : { type: TYPE.TREE, data: t.data as Bytes });
     for (const e of t.entries) {
       if (e.mode === MODE_TREE) walk(dir ? `${dir}/${e.name}` : e.name);
-      else if (BLOB_MODES.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Uint8Array }); }
+      else if (BLOB_MODES.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Bytes }); }
     }
   };
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
@@ -231,8 +239,7 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
   have.add(oldTree);
   const read = async (oid: string): Promise<Uint8Array> => {
     let data = cache.get(oid);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fetch.js is JS: `expectType = null` reads as the type null (boundary.ts)
-    if (data) k.hits++; else { data = (await (fetchObject as FetchObject)(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); k.read++; }
+    if (data) k.hits++; else { data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); k.read++; }
     return data;
   };
   const visit = async (dir: string, oid: string): Promise<void> => {
@@ -263,12 +270,10 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
   const limits = opts.limits ?? DEFAULT_LIMITS;
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head ?? '', 'git.push_tree.attempt': attempt };
-  // operation.js is JS: `link = null` reads as the type null (boundary.ts); the push is one sequence of protocol steps
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, complexity -- see above
-  return (operation as Operation)('push_tree', url, { ...opts, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint ?? '' }), link: linkTo ? { span: linkTo, kind: 'retry_of' } : null }, async ({ t, root, outcome }) => {
-    // fetch.js is JS: `expectType = null` reads as the type null (boundary.ts); its promise is returned as is
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, promise-function-async -- see above
-    const commitOf = (oid: string): Promise<Fetched> => (fetchObject as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
+  // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
+  return operation('push_tree', url, ({ ...opts, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint ?? '' }), link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
+    // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
+    const commitOf = (oid: string): Promise<Fetched> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     try {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
@@ -285,22 +290,20 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     if (oldTree === s.built.root && !s.create) return outcome('noop', summarize({ s, parent, oldTree, hint, attempt, noop: true }));
 
     // 2. what the server has: the parent's trees along every directory whose oid changed (cache by oid, immutable)
-    // the transport's tracer, as the JS used (a caller's transport carries its own); transport.js is JS (boundary.ts)
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, promise-function-async -- see above; parentTrees' promise, as before
-    const known = await (t.tracer as Tracer).span('git.push_tree.diff', { parent: root }, span => parentTrees(t, cache, s.built, oldTree, limits).then(k => { span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size }); return k; }));
+    // the transport's tracer, as the JS used (a caller's transport carries its own)
+    // oxlint-disable-next-line promise-function-async -- parentTrees' promise, as before
+    const known = await t.tracer.span('git.push_tree.diff', { parent: root }, span => parentTrees(t, cache, s.built, oldTree, limits).then(k => { span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size }); return k; }));
     const sel = selectObjects(s.built, known);
 
     // 3. the commit, then one push whose old oid is the CAS
     const who = ident(s.author);
-    // objects.js is JS: `parents = []` reads as never[] (boundary.ts); bundle budget: the JS's own truthy test and concatenation, byte for byte
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/strict-boolean-expressions, prefer-template -- see above
-    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: s.built.root, parents: parent ? [parent] : [], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
+    // oxlint-disable-next-line typescript/strict-boolean-expressions, prefer-template -- bundle budget: the JS's own truthy test and concatenation, byte for byte
+    let commitData = encodeCommit({ tree: s.built.root, parents: parent ? [parent] : [], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
     if (signer) { commitData = await signCommit(commitData, signer); root.set({ 'git.push_tree.commit.signed': signer.kind, 'git.push_tree.commit.signer': signer.publicKeyLine ?? '' }); }
     const newCommit = hashObject('commit', commitData);
     const objects = [{ type: TYPE.COMMIT, data: commitData }, ...sel.trees, ...sel.blobs];
     root.set({ 'git.push_tree.commit.new': newCommit, 'git.push_tree.send.trees': sel.trees.length, 'git.push_tree.send.tree_deltas': sel.deltas, 'git.push_tree.send.blobs': sel.blobs.length });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- push.js is JS: `objects = []` reads as never[] (boundary.ts)
-    const pushed = await (push as unknown as Push)(t, { ref: s.ref, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
+    const pushed = await push(t, { ref: s.ref, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
     for (const tr of s.built.trees.values()) cache.set(tr.oid, tr.data);
     if (verify) await verifyRef(t, root, 'git.push_tree', s.ref, newCommit);
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt, newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });

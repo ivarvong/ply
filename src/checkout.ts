@@ -30,6 +30,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 import { thrown as fail } from './errors.js';
+import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { resolveCommit, openBlob } from './read.js';
@@ -41,7 +42,12 @@ import { validatePath } from './validate.js';
 import { withParent } from './transport.js';
 import { MODE_TREE, MODE_COMMIT } from './format.js';
 import type { Span, Tracer } from './otel.js';
-import type { Caught, FetchedPack, Operation, PackObjects, Quirks, Transport, TreeEntry, TypeNames } from './boundary.js';
+import type { FetchPackResult as FetchedPack } from './fetchpack.js';
+import type { Transport } from './transport.js';
+import type { TreeEntry } from './objects.js';
+import type { Caught, CheckoutQuirks, TypeNames } from './boundary.js';
+
+type PackObjects = NonNullable<FetchedPack['objects']>;
 
 
 /* oxlint-disable no-magic-numbers -- a request-size default, not a wire-format fact */
@@ -152,7 +158,9 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
   for (const e of entries) if (e.mode !== MODE_COMMIT) { const l = byOid.get(e.oid); if (l) l.push(e); else byOid.set(e.oid, [e]); }
   const stat = { fetches: 0, buffered: 0, streamed: 0, splits: 0, bytes: 0 };
   span.set({ 'git.checkout.blobs.unique': byOid.size, 'git.checkout.blobs.paths': entries.length });
-  let single = t.quirks?.blobWants === 'single';
+  // checkout's quirk on the transport's quirks (boundary.ts CheckoutQuirks); tsc needs the assertion (TS2339), tsgolint reads it as a no-op
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/no-unnecessary-type-assertion -- see above
+  let single = (t.quirks as CheckoutQuirks | null | undefined)?.blobWants === 'single';
   // [oid, data | null] for each oid, in order; null means "stream it on its own"
   async function* group(oids: readonly string[]): AsyncGenerator<readonly [string, Uint8Array | null], void, undefined> {
     if (oids.length === 1 || single) { for (const oid of oids) yield [oid, null]; return; }
@@ -162,8 +170,9 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
       if ((e as Caught)?.code === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
       if (!isWantsRefusal(e)) throw e;
       single = true;
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/strict-boolean-expressions -- transport.js is JS: its quirks read as any (boundary.ts)
-      if (t.quirks) (t.quirks as Quirks).blobWants = 'single';
+      // transport.ts's Quirks does not name checkout's blobWants (boundary.ts CheckoutQuirks)
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+      if (t.quirks) (t.quirks as CheckoutQuirks).blobWants = 'single';
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
       span.set({ 'git.checkout.blobs.refused': (e as NonNullable<Caught>).code });
       yield* group(oids); return;
@@ -217,8 +226,8 @@ export async function checkoutTree(url: string, { ref = null, path = '' }: { rea
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = path === undefined || path === null || path === '' || path === '/' ? [] : validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
   if (!Number.isSafeInteger(batch) || batch < 1 || batch > requireLimit(limits, 'maxPackObjects')) throw fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: its options read as their defaults' types (boundary.ts)
-  return (operation as Operation)('checkout', url, { ...opts, attrs: { 'git.checkout.ref': ref ?? 'HEAD', 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } }, async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('checkout', url, ({ ...opts, attrs: { 'git.checkout.ref': ref ?? 'HEAD', 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const trees = await fetchTrees(t, commit, limits);
     const oid = subtree(trees.tree, trees.root, comps);

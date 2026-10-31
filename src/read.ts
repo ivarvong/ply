@@ -12,6 +12,7 @@
 // Annotated tags are peeled. `size` is known before the first content byte (the pack object header carries it), so a
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
 // or the server sends a different number of bytes than it declared: a consumer that saw `done` saw the right bytes.
+/* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
 import { operation } from './operation.js';
 import { lsRefs } from './lsrefs.js';
@@ -23,7 +24,11 @@ import type { Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
-import type { Caught, FetchObject, Operation, OperationOptions, SpState, Transport, TreeEntry, TypeNames } from './boundary.js';
+import type { OperationOpts } from './operation.js';
+import type { SpState } from './fetch.js';
+import type { Transport } from './transport.js';
+import type { TreeEntry } from './objects.js';
+import type { Bytes, Caught, EntryOptions, TypeNames } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable require-await -- the entry points are async so that a throw while checking arguments is a rejection, as before */
@@ -71,8 +76,7 @@ export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolve
 // Effect: the commit object alone (tree:0, deepen 1). A bare oid that is not a commit (or not on the server) is the
 // caller's not_found, not a corrupt pack.
 async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fetch.js is JS: `expectType = null` reads as the type null (boundary.ts)
-  const c = await (fetchObject as FetchObject)(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
+  const c = await fetchObject(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
     if ((e as Caught)?.code === 'pack_corrupt' && /expected commit/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `${commit} is not a commit`);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
@@ -110,14 +114,14 @@ export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): C
 }
 
 // The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …).
-export type ReadOptions = Omit<OperationOptions, 'attrs' | 'onFinish' | 'link'>;
+export type ReadOptions = EntryOptions;
 // Trees by oid, kept by the caller across reads (immutable: an oid names its bytes).
 export type TreeCache = Map<string, Uint8Array>;
 export type CommitResult = CommitView & { readonly ref: string; readonly oid: string };
 
 export async function readCommit(url: string, { ref = null }: { readonly ref?: RefSpec } = {}, opts: ReadOptions = {}): Promise<CommitResult> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: its options read as their defaults' types (boundary.ts)
-  return (operation as Operation)('read_commit', url, { ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } }, async ({ t, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const view = commitView(await fetchCommit(t, commit), t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
@@ -136,8 +140,7 @@ async function walk(t: Transport, root: Span, tracer: Tracer, { commit, comps, c
     entry = await tracer.span('git.read.tree', { parent: root, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': treeOid, 'git.read.tree.lookup': name } }, async span => {
       let data = cache.get(treeOid);
       span.set({ 'git.read.tree.cache_hit': !!data });
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fetch.js is JS: `expectType = null` reads as the type null (boundary.ts)
-      if (!data) { data = (await (fetchObject as FetchObject)(t, { oid: treeOid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(treeOid, data); }
+      if (!data) { data = (await fetchObject(t, { oid: treeOid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(treeOid, data); }
       const entries: readonly TreeEntry[] = parseTree(data, limits);
       const e = entries.find(x => x.name === name);
       span.set({ 'git.read.tree.entries': entries.length, 'git.read.tree.entry.found': !!e, 'git.read.tree.entry.mode': e?.mode ?? '' });
@@ -160,16 +163,15 @@ export type ListResult = { readonly ref: string; readonly commit: string; readon
 export async function listTree(url: string, { ref = null, path = '' }: { readonly ref?: RefSpec; readonly path?: string | null } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<ListResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: true });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: its options read as their defaults' types (boundary.ts)
-  return (operation as Operation)('ls_tree', url, { ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } }, async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('ls_tree', url, ({ ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     // the tracer operation() started the root span on (opts.tracer)
     const { tree, entry } = await walk(t, root, root.tracer, { commit, comps, cache, limits });
     if (entry && entry.mode !== '40000') throw fail('not_found', `${comps.join('/')} is not a directory (mode ${entry.mode})`);
     const oid = entry ? entry.oid : tree;
     let data = cache.get(oid);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fetch.js is JS: `expectType = null` reads as the type null (boundary.ts)
-    if (!data) { data = (await (fetchObject as FetchObject)(t, { oid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(oid, data); }
+    if (!data) { data = (await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(oid, data); }
     const entries: readonly TreeEntry[] = parseTree(data, limits);
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
   });
@@ -199,7 +201,9 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
       const { value, done } = await it.next();
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) throw fail('pack_corrupt', 'pack ended before the object header');
-      const r = spStep(sp, value); sp = r.state; early.push(...r.zlib);
+      const r = spStep(sp, value); sp = r.state;
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
+      early.push(...(r.zlib as Bytes[]));
     }
     if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${(TYPE_NAME as TypeNames)[sp.type] ?? sp.type}`);
   } catch (e) { await it.return?.().catch(() => { /* the read already failed */ }); throw failHere(e); }
@@ -214,7 +218,8 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- see above
       if (done) break;
       const r = spStep(sp, value); sp = r.state;
-      for (const z of r.zlib) await writer.write(z);
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
+      for (const z of r.zlib) await writer.write(z as Bytes);
     }
     sp = spFinish(sp); // pack trailer checksum
     fetchSpan.end();
@@ -276,8 +281,8 @@ export type FileResult = {
 export async function readFile(url: string, { ref = null, path }: { readonly ref?: RefSpec; readonly path?: string } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<FileResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: false });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: its options read as their defaults' types (boundary.ts)
-  return (operation as Operation)('read', url, { ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } }, async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read', url, ({ ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
     const { name, commit } = await resolveCommit(t, ref);
