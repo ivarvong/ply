@@ -1,6 +1,6 @@
 // Tree-shaking is a property we have to earn, so it is asserted: bundle the edit entry and check what it carries.
 // Every symbol in ABSENT is general-client machinery that must not ride along; the byte budget catches a slow creep.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';

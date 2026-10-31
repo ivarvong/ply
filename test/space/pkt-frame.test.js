@@ -18,7 +18,7 @@
 // frames it traces and the error it dies with must be the model's. ply's pktStep/pktFinish must then equal the model on
 // every framing cell (one chunk and byte by byte), and every position cell runs ply's real consumer over a real http
 // transport (test/space/wire.js) with the expected outcome below.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -335,6 +335,6 @@ test('writer: a field that frames past LARGE_PACKET_MAX is bad_request before an
 });
 
 test('census', t => {
-  t.diagnostic(`${LENGTHS.length} length classes × ${RELATIONS.length} relations: ${census.framing} framing cells (${census.gitObserved} with git's verdict observed to the end), ${census.positions} position cells over ${Object.keys(POS).length} positions, ${census.writer} writer cells`);
-  for (const [k, v] of Object.entries(census.outcomes).sort()) t.diagnostic(`  ${k}: ${v}`);
+  console.log(`${LENGTHS.length} length classes × ${RELATIONS.length} relations: ${census.framing} framing cells (${census.gitObserved} with git's verdict observed to the end), ${census.positions} position cells over ${Object.keys(POS).length} positions, ${census.writer} writer cells`);
+  for (const [k, v] of Object.entries(census.outcomes).sort()) console.log(`  ${k}: ${v}`);
 });

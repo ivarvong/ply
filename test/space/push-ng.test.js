@@ -3,7 +3,7 @@
 // table's outcome; every cell git can be made to write is observed from real git (push-ng.observed.js): git's bytes must
 // be the derived report, ply's outcome on them the table's, and the repository's refs must agree. SPACE.md's "Push ng
 // reasons" block is generated here (PUSH_NG_WRITE=1 rewrites it). PUSH_NG_ONLY=<reason tag> observes one reason.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as space from './push-ng.space.js';
@@ -105,6 +105,6 @@ test('SPACE.md\'s push-ng block is current', async t => {
     writeFileSync(SPACE_MD, next);
     return;
   }
-  assert.ok(i >= 0 && j > i, 'SPACE.md has no push-ng block: run PUSH_NG_WRITE=1 node --test test/space/push-ng.test.js');
-  assert.equal(md.slice(i, j + END.length), block, 'SPACE.md push-ng block is stale: run PUSH_NG_WRITE=1 node --test test/space/push-ng.test.js');
+  assert.ok(i >= 0 && j > i, 'SPACE.md has no push-ng block: run PUSH_NG_WRITE=1 npx vitest run test/space/push-ng.test.js');
+  assert.equal(md.slice(i, j + END.length), block, 'SPACE.md push-ng block is stale: run PUSH_NG_WRITE=1 npx vitest run test/space/push-ng.test.js');
 });

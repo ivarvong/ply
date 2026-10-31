@@ -6,7 +6,7 @@
 // accept the rest, except the allowed typed refusals in ALLOWED_REFUSAL (PR #7). A cell git only warns about is decided per msgId in WARN_DECISION; a warning without a decision
 // fails the test, so a new git msgId cannot slip through as "accept" by default.
 //
-//   FSCK_SPACE_LIST=1 node --test test/fsck-space.test.js   prints every disagreeing cell
+//   FSCK_SPACE_LIST=1 npx vitest run test/fsck-space.test.js   prints every disagreeing cell
 //
 // The space (git 2.50, fsck.h FOREACH_FSCK_MSG_ID, default severities under --strict):
 //   FATAL  nulInHeader unterminatedHeader                                                   error
@@ -20,7 +20,7 @@
 // fsck_commit stops reading headers after committer: anything later (encoding, gpgsig, mergetag, unknown headers, a
 // second tree/parent/author/committer, a line with no space) is not checked. fsck_tag stops after tagger the same way,
 // and never looks at the tag body: a NUL there is accepted, unlike in a commit.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';

@@ -2,7 +2,7 @@
 // listings, over git http-backend. Covers nested paths, every entry kind (regular, executable, symlink, gitlink, tree),
 // empty and multi-MiB blobs, every ref form (HEAD, full, short, annotated/lightweight tag, oid), the not_found shapes,
 // a lying server (wrong blob served → the stream errors), and credential hygiene (spans, echoed error bodies).
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { join } from 'node:path';

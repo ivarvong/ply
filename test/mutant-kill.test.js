@@ -1,6 +1,6 @@
 // Branch and message assertions for the mutation gate. Prefix and round-trip tests kill the happy path;
 // these kill a mutant that deletes one check, flips one comparison, or empties one error string.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -25,7 +25,7 @@ import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.ts';
+import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
 import { negotiate } from '../src/negotiate.js';
