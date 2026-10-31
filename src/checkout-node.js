@@ -95,3 +95,4 @@ export async function checkoutDir(url, { dir, ref = null, path = '' } = {}, opts
   const { files, ...rest } = await checkoutTree(url, { ref, path }, opts);
   return { ...rest, written: await writeFiles(dir, files, { limits: opts.limits ?? DEFAULT_LIMITS }) };
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

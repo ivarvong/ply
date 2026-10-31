@@ -187,3 +187,4 @@ export function inflate(buf, pos = 0, opts = {}) {
   if (p - start > maxInput) throw tooLong(p - start);
   return { out: result, consumed: p - start, stats };
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

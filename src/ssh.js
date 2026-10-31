@@ -341,3 +341,4 @@ export class SshClient {
 const CHANNEL_MSGS = [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE, MSG.CHANNEL_WINDOW_ADJUST, MSG.CHANNEL_DATA, MSG.CHANNEL_EXTENDED_DATA, MSG.CHANNEL_EOF, MSG.CHANNEL_CLOSE, MSG.CHANNEL_REQUEST, MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE];
 const equal = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 export async function fingerprint(raw) { const d = new Uint8Array(await crypto.subtle.digest('SHA-256', encodePub(raw))); return 'SHA256:' + btoa(String.fromCharCode(...d)).replace(/=+$/, ''); }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

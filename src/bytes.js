@@ -120,3 +120,4 @@ export function indexOfBytes(hay, needle, from = 0) {
 export function bytesOf(x) {
   return typeof x === 'string' ? te.encode(x) : x;
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

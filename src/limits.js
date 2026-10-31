@@ -119,3 +119,4 @@ export function finiteLimit(value, what) {
 export const requireLimit = (limits, key) => finiteLimit(limits?.[key], key);
 
 export const limitError = (what, got, max) => fail('limit_exceeded', `${what} ${got} exceeds limit ${max}`, { what, got, max });
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

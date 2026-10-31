@@ -439,3 +439,4 @@ export function mergeLines(base, ours, theirs, { maxBytes = LIMIT_MERGE_BLOB, re
     return { clean: true, data: fill(B, O, T, c, driver === 'union' ? 3 : 0), hunks: { ours: s1.length, theirs: s2.length }, ...(conflicts ? { unioned: conflicts } : {}) };
   } catch (e) { if (e?.undecided === true) return { clean: false, reason: 'undecided', detail: e.detail }; throw e; }
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

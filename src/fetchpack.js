@@ -73,3 +73,4 @@ export async function fetchPackOnce(t, opts, { external, resolve = true, attrs =
     return { parsed, objects: resolved?.objects ?? null, resolved, ...acks };
   } catch (e) { if (e && typeof e === 'object') e.cacheStatus = span.attrs['git.response.cache'] ?? ''; throw e; } }));
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

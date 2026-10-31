@@ -340,3 +340,4 @@ async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
     return once(true);
   }
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

@@ -231,3 +231,4 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
   };
   return t;
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

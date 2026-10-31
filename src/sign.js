@@ -64,3 +64,4 @@ export async function generateSigner() {
   const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
   return { signer: ed25519Signer({ privateKey: kp.privateKey, publicKeyRaw }), keyPair: kp, publicKeyRaw };
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

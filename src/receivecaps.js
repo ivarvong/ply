@@ -81,3 +81,4 @@ export async function pushWithOptions(t, opts) {
   }
   return push(t, opts);
 }
+// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)
