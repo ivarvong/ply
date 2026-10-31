@@ -2,7 +2,7 @@
 // wire data checks one of these before the buffer exists. A missing or non-finite field is a hard error:
 // `undefined > n` is false in JS, so a forgotten default must not silently disable the check.
 import type { ErrorOf } from './errors.js';
-import { orThrow, plyError } from './errors.js';
+import { plyError } from './errors.js';
 import type { Result } from './result.js';
 import { err, ok } from './result.js';
 
@@ -149,7 +149,14 @@ export const readLimit = (limits: Partial<Limits> | null | undefined, key: Limit
 export const limitExceeded = (what: string, got: number, max: number): ErrorOf<'limit_exceeded'> =>
   plyError('limit_exceeded', `${what} ${got} exceeds limit ${max}`, { what, got, max });
 
-// Migration boundary: the throwing forms unconverted modules call. Delete when their last caller converts.
-export const finiteLimit = (value: unknown, what: string): number => orThrow(checkLimit(value, what));
+// Migration boundary: the throwing forms unconverted modules call. finiteLimit repeats checkLimit's test rather than
+// calling it, so a bundle of unconverted callers carries no Result plumbing (bundle budgets); it goes away, with the
+// repetition, when the last caller converts.
+export const finiteLimit = (value: unknown, what: string): number => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value });
+  }
+  return value;
+};
 export const requireLimit = (limits: Partial<Limits> | null | undefined, key: LimitKey): number => finiteLimit(limits?.[key], key);
-export const limitError: (what: string, got: number, max: number) => ErrorOf<'limit_exceeded'> = limitExceeded;
+export { limitExceeded as limitError };

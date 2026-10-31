@@ -52,7 +52,7 @@ export type Extra = {
   readonly got?: unknown;
   readonly max?: number;
   readonly cause?: unknown;
-  readonly original?: Code | undefined;
+  readonly original?: unknown;
 };
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
@@ -66,38 +66,38 @@ export type ErrorOf<C extends Code> = Extract<PlyError, { readonly code: C }>;
 // Payload fields required by the code are required here; a code without a payload takes only Extra.
 type Payload<C extends Code> = unknown extends DetailOf<C> ? [extra?: Extra] : [detail: DetailOf<C> & Extra];
 
-export const isPlyCode = (code: unknown): code is Code => typeof code === 'string' && Object.hasOwn(RETRY, code);
-// A field of a value of unknown shape (a thrown value, a caller's object): undefined unless it is an object that has it.
-const field = (e: unknown, key: string): unknown => (e instanceof Object ? Reflect.get(e, key) : undefined);
+// `in`, as before: RETRY's keys are the codes (inherited names such as 'toString' also pass, as they always have).
+export const isPlyCode = (code: unknown): code is Code => typeof code === 'string' && code in RETRY;
+// A thrown value or a caller's object, read loosely: a missing field is undefined, and null/undefined read as nothing.
+type Loose = { readonly code?: unknown; readonly message?: unknown } | null | undefined;
 
 // Accepts a thrown value too (the public API throws until the Result cut-over; see docs/STACK.md).
 export const retryPolicy = (e: unknown): Retry => {
-  const code = field(e, 'code');
+  // A cast, not a guard: `?.` already makes the read safe for any value, and a guard costs bytes on every entry.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+  const code = (e as Loose)?.code;
   return isPlyCode(code) ? RETRY[code] : 'no';
 };
 export const isRetryable = (e: unknown): boolean => retryPolicy(e) === 'yes';
 
-// The one constructor, typed (plyError) and untyped (thrown, below). The code check guards untyped callers.
-const make = (code: string, message: string, extra?: object): Thrown => {
+// The one constructor. The typed signature is the error value for `code` with exactly its payload; `fail` wraps it in
+// an Err. Unconverted JS calls the same function as `thrown` (below), untyped; the code check is for those callers.
+// An overload, not a cast: the implementation returns Error & { code }, which each member of the union refines.
+export function plyError<C extends Code>(code: C, message: string, ...detail: Payload<C>): ErrorOf<C>;
+export function plyError(code: string, message: string, extra?: object): Thrown {
   if (!isPlyCode(code)) throw new Error(`internal: unknown error code ${code}`);
   return Object.assign(new Error(message), { code, ...extra });
-};
-// The error value for `code`; `fail` wraps it in an Err for a function returning Result. The same function as
-// `make` (the rest parameter is at most one object, so the arities agree): a union member built from a generic code
-// is the one place the compiler cannot follow, so the constructor's type is asserted once, here.
-export const plyError: <C extends Code>(code: C, message: string, ...detail: Payload<C>) => ErrorOf<C> =
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the constructor of the union; see above
-  make as unknown as <C extends Code>(code: C, message: string, ...detail: Payload<C>) => ErrorOf<C>;
+}
 export const fail = <C extends Code>(code: C, message: string, ...detail: Payload<C>): Err<ErrorOf<C>> =>
   err(plyError(code, message, ...detail));
 
 // ---- Migration boundary -------------------------------------------------------------------------------------
-// Unconverted modules (the .js files under src/, scripts/ts-ratchet.mjs) throw. A PlyError is already the Error they throw, so crossing the
-// boundary is `throw r.error`. Delete this section with the last .js file in src/.
+// Unconverted modules (the .js files under src/, scripts/ts-ratchet.mjs) throw. A PlyError is already the
+// Error they throw, so crossing the boundary is `throw r.error`. Delete this section with the last .js file in src/.
 
 export type Thrown = Error & { readonly code: Code };
 // The legacy constructor (`throw thrown(code, message, extra)`); unconverted modules import it as `fail`.
-export const thrown: (code: string, message: string, extra?: object) => Thrown = make;
+export { plyError as thrown };
 // A converted function's Result, at a call site that still throws.
 export const orThrow = <T>(r: Result<T, PlyError>): T => {
   if (r.ok) return r.value;
@@ -107,8 +107,10 @@ export const orThrow = <T>(r: Result<T, PlyError>): T => {
 // After a push body is on the wire, any failure to obtain a trustworthy report means the ref MAY have moved.
 // That includes our own limits: a report too large to read says nothing about whether the ref moved.
 export const ambiguousAfterPush = (e: unknown, message = 'push outcome unknown'): unknown => {
-  const code = field(e, 'code');
-  return code === 'ambiguous' ? e : thrown('ambiguous', `${message}: ${String(field(e, 'message') ?? e)}`, { cause: e, original: code });
+  if ((e as Loose)?.code === 'ambiguous') return e; // oxlint-disable-line typescript/no-unsafe-type-assertion -- a loose read, as in retryPolicy
+  // A thrown value of any type renders as String() renders it; the casts are the same loose read.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- see above
+  return plyError('ambiguous', `${message}: ${(e as Loose)?.message ?? e}`, { cause: e, original: (e as Loose)?.code });
 };
 
 // Rewrite every string an error carries through `scrub`, in place: message, stack, own fields, nested plain objects,
@@ -127,8 +129,12 @@ export function scrubError(e: unknown, scrub?: ((s: string) => string) | null): 
     seen.add(v);
     const keys = new Set(Object.keys(v));
     if (isErr) for (const k of ['message', 'stack', 'cause']) if (k in v) keys.add(k);
-    // A read-only field stays as it is: Reflect.set reports it instead of throwing.
-    for (const k of keys) Reflect.set(v, k, walk(Reflect.get(v, k)));
+    // A plain object or an Error, so its fields are a record. A read-only field stays as it is.
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+    const rec = v as Record<string, unknown>;
+    for (const k of keys) {
+      try { rec[k] = walk(rec[k]); } catch { /* read-only */ }
+    }
     return v;
   };
   return walk(e);

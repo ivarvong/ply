@@ -84,6 +84,8 @@ jobs:
       - name: git identity
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
+      - name: resolve hook for later steps (node runs src/*.ts; .js specifiers map to .ts)
+        run: echo "NODE_OPTIONS=--import=${GITHUB_WORKSPACE}/test/ts-resolve.mjs" >> "$GITHUB_ENV"
       - name: fuzz
         env:
           SEED: ${{ needs.seed.outputs.seed }}
@@ -116,6 +118,8 @@ jobs:
       - name: git identity
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
+      - name: resolve hook for later steps (node runs src/*.ts; .js specifiers map to .ts)
+        run: echo "NODE_OPTIONS=--import=${GITHUB_WORKSPACE}/test/ts-resolve.mjs" >> "$GITHUB_ENV"
       - name: npm test
         run: |
           # npm test's unseeded fuzz lines print their own `repro: ... --case <seed>` on a failure
@@ -165,7 +169,7 @@ jobs:
         env:
           PACK_SPACE: full
         run: |
-          node --test test/space/pack-cut.test.js || { echo "NIGHTLY-FAIL pack-cut reproduce: PACK_SPACE=full node --test test/space/pack-cut.test.js"; exit 1; }
+          npx vitest run test/space/pack-cut.test.js || { echo "NIGHTLY-FAIL pack-cut reproduce: PACK_SPACE=full npx vitest run test/space/pack-cut.test.js"; exit 1; }
 
   report:
     name: report failure

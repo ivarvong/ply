@@ -12,7 +12,7 @@ const describe = (e: PlyError): string => {
   switch (e.code) {
     case 'http': return `status ${e.status}`; // narrowed: status exists
     case 'limit_exceeded': return `${e.what} ${e.got} > ${e.max}`;
-    case 'ambiguous': return e.original ?? 'unknown';
+    case 'ambiguous': return String(e.original ?? 'unknown');
     case 'cas_conflict': return `${e.expected} != ${e.actual}`;
     case 'match_count': return String(e.matches);
     case 'merge_conflict': return e.conflicts.join(',');
