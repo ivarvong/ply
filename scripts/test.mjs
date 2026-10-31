@@ -6,8 +6,8 @@
 // Every file runs as its own `node --test FILE` process (what one `node --test a b c` does anyway: one child per file),
 // up to availableParallelism - 1 at once, heaviest first. A file's output is printed whole when it finishes; any file
 // failing fails the shard. The partition is longest-processing-time first over test/durations.json (seconds per file,
-// as this script measured them on a CI runner); a file with no entry weighs as the median known file until its
-// weight is recorded (each shard's log ends with the measured weights). The plan is a pure function of the file list and the
+// as this script measured them on a CI runner); a file with no entry weighs as the heaviest known file
+// (a runner nearly to itself) until its weight is recorded; each shard's log ends with the weights it measured. The plan is a pure function of the file list and the
 // weights, so the N shards of one commit cover every file exactly once; the workflow derives i and N from the matrix
 // (strategy.job-index, strategy.job-total), so the count cannot disagree with the matrix.
 import { spawn } from 'node:child_process';
@@ -18,12 +18,11 @@ const WEIGHTS = 'test/durations.json';
 
 function plan(files, n) {
   const known = existsSync(WEIGHTS) ? JSON.parse(readFileSync(WEIGHTS, 'utf8')) : {};
-  const sorted = Object.values(known).sort((a, b) => a - b);
-  const median = sorted.length ? sorted[sorted.length >> 1] : 1;
+  const heaviest = Math.max(1, ...Object.values(known));
   const uniq = [...new Set(files)].sort();
   if (uniq.length !== files.length) throw new Error('test: a file is listed twice');
   for (const f of uniq) if (!existsSync(f)) throw new Error(`test: no such file ${f}`);
-  const weighted = uniq.map(file => ({ file, weight: known[file] ?? median }))
+  const weighted = uniq.map(file => ({ file, weight: known[file] ?? heaviest }))
     .sort((a, b) => b.weight - a.weight || a.file.localeCompare(b.file));
   const shards = Array.from({ length: n }, () => ({ files: [], weight: 0 }));
   for (const { file, weight } of weighted) {
