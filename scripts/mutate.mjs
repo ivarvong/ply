@@ -1,6 +1,6 @@
-// Mutation gate. A full run on main; on a pull request, only the src files the PR
-// changed (a PR that does not touch src still passes). Surviving or uncovered mutants
-// inside a parser or a bounds check fail the build. An equivalent mutant is allowed
+// Mutation gate. A full run on main; on a pull request, only the mutants lying wholly inside the src lines the PR
+// changed (a PR that does not touch src still passes); the full run on every push to main catches the rest. Surviving
+// or uncovered mutants inside a parser or a bounds check fail the build. An equivalent mutant is allowed
 // only as `// Stryker disable next-line <Mutator>: <reason>` on that line — never
 // `Stryker disable all`, and never a parser file dropped from stryker.conf.json.
 //
@@ -10,7 +10,7 @@
 //                                            merge the N shard reports found under DIR and judge them
 //   node scripts/mutate.mjs --plan N         print the N-way partition (files and mutant counts) and exit
 //   node scripts/mutate.mjs --check          judge an existing reports/mutation/mutation.json
-//   node scripts/mutate.mjs --weights [REPORT]  rewrite scripts/mutate-weights.json from a full run's report
+//   node scripts/mutate.mjs --weights [REPORT...]  rewrite scripts/mutate-weights.json from full-run reports
 //
 // The rules live only in this file. Every mode judges with the same summarize() and the same
 // verdict(); a shard only runs Stryker. The merge recomputes the partition from the commit and
@@ -65,17 +65,37 @@ function owner(fns, line) {
   return name;
 }
 
-function filesToMutate() {
+// On a pull request, the src lines it changed: file -> [[from, to], ...] (1-based, inclusive, the PR's side; a pure
+// deletion borders the lines on either side of it). null on a full run (main, nightly, local).
+function changedRanges() {
   if (process.env.GITHUB_EVENT_NAME !== 'pull_request') return null;
   const base = process.env.MUTATE_BASE || 'origin/main';
   // --diff-filter=d: a file the PR deletes has nothing left to mutate.
-  const diff = spawnSync('git', ['diff', '--name-only', '--diff-filter=d', `${base}...HEAD`, '--', 'src'], { encoding: 'utf8' });
+  const diff = spawnSync('git', ['diff', '-U0', '--no-color', '--diff-filter=d', `${base}...HEAD`, '--', 'src'], { encoding: 'utf8', maxBuffer: 1 << 28 });
   if (diff.status !== 0) {
     console.error(diff.stderr || diff.stdout);
     process.exit(diff.status || 1);
   }
-  return diff.stdout.split('\n').map(s => s.trim()).filter(f => f.startsWith('src/') && f.endsWith('.js'));
+  const ranges = new Map();
+  let file = null;
+  for (const line of diff.stdout.split('\n')) {
+    if (line.startsWith('+++ ')) { const f = line.slice(4).replace(/^b\//, ''); file = f.startsWith('src/') && f.endsWith('.js') ? f : null; continue; }
+    const h = file && /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!h) continue;
+    const from = Number(h[1]), len = h[2] === undefined ? 1 : Number(h[2]);
+    const r = len === 0 ? [Math.max(1, from), from + 1] : [from, from + len - 1];
+    if (!ranges.has(file)) ranges.set(file, []);
+    ranges.get(file).push(r);
+  }
+  for (const [f, rs] of ranges) {
+    rs.sort((x, y) => x[0] - y[0]);
+    const merged = [];
+    for (const r of rs) { const last = merged.at(-1); if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]); else merged.push([...r]); }
+    ranges.set(f, merged);
+  }
+  return ranges;
 }
+const filesToMutate = () => { const r = changedRanges(); return r && [...r.keys()].sort(); };
 
 // Stryker applies `thresholds.break` itself, to whatever it mutated. On a pull request that is the changed files only,
 // so the full-library break would fail any PR touching a file the quick suites do not reach (read.js, checkout.js: 0%).
@@ -125,18 +145,32 @@ function allSrc() {
 }
 
 // Longest-processing-time first: heaviest unit to the lightest shard. Deterministic (ties by name, then by shard index),
-// so every shard and the gate compute the same plan from the same commit. A unit is a file, or, for a file costing more
-// than a shard's share (push.js, which runs the push-outcome space), a line range of it: `src/push.js:1-212`, which
-// Stryker's --mutate takes as is. A range ends only on a line no mutant spans past, so the ranges of a file hold every
-// one of its mutants exactly once; the merge checks that against the instrumenter's count.
+// so every shard and the gate compute the same plan from the same commit. A unit is a whole file on a full run; on a
+// pull request, a range of lines the PR changed (Stryker's --mutate file:a-b mutates the mutants lying wholly inside
+// it). A unit costing more than a shard's share is cut into ranges at lines no mutant inside it spans past (push.js runs
+// the push-outcome space for every mutant it reaches). The plan records how many mutants each file's units hold; the
+// merge checks the reports against that count.
 async function plan(n) {
-  const changed = filesToMutate();
-  const files = (changed ?? allSrc()).filter(f => existsSync(f)).sort();
+  const ranges = changedRanges();
+  const files = (ranges ? [...ranges.keys()] : allSrc()).filter(f => existsSync(f)).sort();
   const counts = await mutantCounts(files);
   const cost = costModel();
-  const costed = files.filter(f => counts.get(f).total > 0).map(f => ({ file: f, weight: cost(f, counts.get(f).active) }));
+  const expected = new Map();
+  const costed = [];
+  for (const f of files) {
+    const c = counts.get(f);
+    const byLine = cost(f, c);
+    for (const [from, to] of ranges?.get(f) ?? [[1, c.lines]]) {
+      const inside = c.spans.filter(([a, b]) => a >= from && b <= to);
+      if (!inside.length) continue;
+      expected.set(f, (expected.get(f) ?? 0) + inside.length);
+      let weight = 0;
+      for (let l = from; l <= to; l++) weight += byLine.get(l) ?? 0;
+      costed.push({ file: f, from, to, whole: !ranges, inside, byLine, weight });
+    }
+  }
   const share = costed.reduce((t, u) => t + u.weight, 0) / n;
-  const units = costed.flatMap(u => split(u, counts.get(u.file), Math.ceil(u.weight / share - 1e-9)))
+  const units = costed.flatMap(u => split(u, Math.ceil(u.weight / share - 1e-9)))
     .sort((a, b) => b.weight - a.weight || a.unit.localeCompare(b.unit));
   const shards = Array.from({ length: n }, () => ({ files: [], weight: 0 }));
   for (const { unit, weight } of units) {
@@ -146,62 +180,73 @@ async function plan(n) {
     shards[best].weight += weight;
   }
   for (const s of shards) s.files.sort();
-  return { full: changed === null, changed, files, counts, shards };
+  return { full: ranges === null, changed: ranges && files, files, expected, shards };
 }
 
-// A file as k line ranges of about equal mutant counts, each ending on a line no mutant spans past. k <= 1, or a file
-// with no such line near a cut, stays whole.
-function split({ file, weight }, { spans, lines, total }, k) {
-  if (k <= 1) return [{ unit: file, file, weight }];
+// A unit as k ranges of about equal measured cost, each ending on a line none of its mutants spans past. k <= 1, or a
+// unit with no such line near a cut, stays whole.
+function split({ file, from, to, whole, inside, byLine, weight }, k) {
+  const label = (a, b) => (whole && a === from && b === to ? file : `${file}:${a}-${b}`);
+  if (k <= 1) return [{ unit: label(from, to), weight }];
   const crossed = new Set();
-  for (const [a, b] of spans) for (let l = a; l < b; l++) crossed.add(l);
-  const starts = spans.map(([a]) => a).sort((x, y) => x - y);
+  for (const [a, b] of inside) for (let l = a; l < b; l++) crossed.add(l);
+  const upTo = new Map([[from - 1, 0]]); // cost of the unit's lines up to and including l
+  for (let l = from; l <= to; l++) upTo.set(l, upTo.get(l - 1) + (byLine.get(l) ?? 0));
   const cuts = [];
   for (let j = 1; j < k; j++) {
-    const want = Math.round((j * total) / k);
+    const want = (j * weight) / k, prev = upTo.get(cuts.at(-1) ?? from - 1);
     let best = null;
-    for (let b = (cuts.at(-1) ?? 0) + 1; b < lines; b++) {
-      if (crossed.has(b)) continue;
-      const before = starts.filter(a => a <= b).length;
-      if (before === 0 || before === total) continue;
-      if (best === null || Math.abs(before - want) < Math.abs(best.before - want)) best = { b, before };
+    for (let b = (cuts.at(-1) ?? from - 1) + 1; b < to; b++) {
+      if (crossed.has(b) || upTo.get(b) <= prev || upTo.get(b) >= weight) continue;
+      if (best === null || Math.abs(upTo.get(b) - want) < Math.abs(upTo.get(best) - want)) best = b;
     }
-    if (best && !cuts.includes(best.b)) cuts.push(best.b);
+    if (best !== null) cuts.push(best);
   }
-  if (!cuts.length) return [{ unit: file, file, weight }];
-  const bounds = [0, ...cuts, lines];
-  return bounds.slice(1).map((to, i) => {
-    const from = bounds[i] + 1;
-    const inside = starts.filter(a => a >= from && a <= to).length;
-    return { unit: `${file}:${from}-${to}`, file, weight: (weight * inside) / total };
-  });
+  const bounds = [from - 1, ...cuts, to];
+  return bounds.slice(1).map((b, i) => ({ unit: label(bounds[i] + 1, b), weight: upTo.get(b) - upTo.get(bounds[i]) }));
 }
 
 const unitFile = unit => unit.replace(/:\d+-\d+$/, '');
 
-// With per-test coverage a file's cost is not its mutant count: linemerge.js (13% of the mutants) is all NoCoverage and
-// costs nothing, while a push.js mutant can run the push-outcome space. scripts/mutate-weights.json holds each file's
-// measured cost (seconds of test time summed over its mutants, from a full run's report; refresh with --weights). A file
-// without an entry costs its active mutants times the median known seconds per mutant. Committed, so every shard and
-// the gate compute the same plan.
+// With per-test coverage a mutant's cost is the test files that reach it, not 1: linemerge.js (13% of the mutants) is all
+// NoCoverage and free, while a push.js mutant can run the push-outcome space. scripts/mutate-weights.json holds measured
+// seconds of test time per file and per line (by the line a mutant starts on), from full-run reports (refresh with
+// --weights REPORT...; the first report holding a file wins). A line with no entry costs the file's mean seconds per
+// mutant for each mutant starting there; a file with no entry, the median known rate. Committed, so every shard and the
+// gate compute the same plan.
 const WEIGHTS = 'scripts/mutate-weights.json';
 function costModel() {
   const known = existsSync(WEIGHTS) ? JSON.parse(readFileSync(WEIGHTS, 'utf8')) : {};
   const rates = Object.values(known).filter(w => w.mutants > 0).map(w => w.seconds / w.mutants).sort((a, b) => a - b);
-  const rate = rates.length ? rates[rates.length >> 1] : 1;
-  return (file, active) => known[file] ? known[file].seconds : active * rate;
+  const median = rates.length ? rates[rates.length >> 1] : 1;
+  // Seconds per line for this file's current mutants (spans from the instrumenter).
+  return (file, { spans }) => {
+    const w = known[file];
+    const rate = w?.mutants ? w.seconds / w.mutants : median;
+    const startsAt = new Map();
+    for (const [a] of spans) startsAt.set(a, (startsAt.get(a) ?? 0) + 1);
+    const byLine = new Map();
+    for (const [line, n] of startsAt) byLine.set(line, w?.byLine?.[line] ?? n * rate);
+    return byLine;
+  };
 }
 
-function writeWeights(path) {
-  const report = JSON.parse(readFileSync(path, 'utf8'));
+function writeWeights(paths) {
   const out = {};
-  for (const file of Object.keys(report.files ?? {}).sort()) {
-    const mutants = report.files[file].mutants ?? [];
-    const ms = mutants.reduce((t, m) => t + (m.duration ?? 0), 0);
-    out[file] = { seconds: Math.round(ms / 100) / 10, mutants: mutants.filter(m => m.status !== 'Ignored').length };
+  for (const path of paths) {
+    const files = JSON.parse(readFileSync(path, 'utf8')).files ?? {};
+    for (const [file, info] of Object.entries(files)) {
+      if (out[file]) continue;
+      const mutants = info.mutants ?? [];
+      const byLine = {};
+      for (const m of mutants) byLine[m.location.start.line] = (byLine[m.location.start.line] ?? 0) + (m.duration ?? 0) / 1000;
+      for (const k of Object.keys(byLine)) byLine[k] = Math.round(byLine[k] * 10) / 10;
+      out[file] = { seconds: Math.round(mutants.reduce((t, m) => t + (m.duration ?? 0), 0) / 100) / 10, mutants: mutants.filter(m => m.status !== 'Ignored').length, byLine };
+    }
   }
-  writeFileSync(WEIGHTS, JSON.stringify(out, null, 2) + '\n');
-  console.log(`mutate: wrote ${WEIGHTS} from ${path} (${Object.keys(out).length} files)`);
+  const sorted = Object.fromEntries(Object.keys(out).sort().map(k => [k, out[k]]));
+  writeFileSync(WEIGHTS, JSON.stringify(sorted) + '\n');
+  console.log(`mutate: wrote ${WEIGHTS} from ${paths.join(', ')} (${Object.keys(out).length} files)`);
 }
 
 function parseShard(arg) {
@@ -283,13 +328,13 @@ async function mergeReports(dir, n) {
   for (const file of new Set(p.shards.flatMap(sh => sh.files.map(unitFile)))) {
     const ms = merged.files[file]?.mutants ?? [];
     const keys = new Set(ms.map(m => `${m.location.start.line}:${m.location.start.column}-${m.location.end.line}:${m.location.end.column} ${m.mutatorName} ${m.replacement}`));
-    if (ms.length !== p.counts.get(file).total || keys.size !== ms.length) bad.push(`${file}: ${ms.length} mutant(s) reported (${keys.size} distinct), the instrumenter makes ${p.counts.get(file).total}`);
+    if (ms.length !== p.expected.get(file) || keys.size !== ms.length) bad.push(`${file}: ${ms.length} mutant(s) reported (${keys.size} distinct), the plan's ranges hold ${p.expected.get(file)}`);
   }
   if (bad.length) {
     console.error(`mutate: shard reports do not match the plan\n${bad.join('\n')}`);
     process.exit(1);
   }
-  console.log(`mutate: merged ${n} shard report(s), ${Object.keys(merged.files).length} file(s), every mutant once, of ${p.full ? 'full src/' : `${p.changed.length} changed`}`);
+  console.log(`mutate: merged ${n} shard report(s), ${Object.keys(merged.files).length} file(s), every planned mutant once, of ${p.full ? 'full src/' : `the lines ${p.changed.length} changed file(s) changed`}`);
   mkdirSync('reports/mutation', { recursive: true });
   writeFileSync(REPORT, JSON.stringify(merged));
   return merged;
@@ -374,7 +419,9 @@ if (problems.length) {
 }
 
 if (process.argv.includes('--weights')) {
-  writeWeights(argValue('--weights') ?? REPORT);
+  const k = process.argv.indexOf('--weights');
+  const paths = process.argv.slice(k + 1).filter(a => !a.startsWith('--'));
+  writeWeights(paths.length ? paths : [REPORT]);
 } else if (process.argv.includes('--plan')) {
   const n = Number(argValue('--plan'));
   if (!(n >= 1)) {
@@ -398,14 +445,14 @@ if (process.argv.includes('--weights')) {
   verdict(await mergeReports(dir, n));
 } else {
   if (!process.argv.includes('--check')) {
-    const files = filesToMutate();
-    if (files && files.length === 0) {
-      console.log('mutate: pull request does not change src/; skipping');
+    const units = filesToMutate() && (await plan(1)).shards[0].files;
+    if (units && units.length === 0) {
+      console.log('mutate: pull request changes no mutable src/ line; skipping');
       process.exit(0);
     }
-    if (files) console.log(`mutate: ${files.length} changed file(s)\n${files.join('\n')}`);
+    if (units) console.log(`mutate: the lines the pull request changed\n${units.join('\n')}`);
     else console.log('mutate: full src/');
-    runStryker(files);
+    runStryker(units);
   }
   verdict(loadReport());
 }

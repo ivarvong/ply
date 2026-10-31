@@ -3,7 +3,7 @@
   "testRunner": "tap",
   "tap": {
     "testFiles": ["test/format-facts.test.js", "test/prefix-closure.test.js", "test/props.test.js", "test/mutant-kill.test.js", "test/mutant-kill-tree.test.js", "test/space/push-outcome.test.js"],
-    "nodeArgs": ["--env-file=test/stryker.env", "--test-reporter=tap", "--test-skip-pattern=cells observed from git|every tag of every axis", "-r", "{{hookFile}}", "{{testFile}}"],
+    "nodeArgs": ["--env-file=test/stryker.env", "-r", "./test/stryker-parent-guard.cjs", "--test-reporter=tap", "--test-skip-pattern=cells observed from git|every tag of every axis", "-r", "{{hookFile}}", "{{testFile}}"],
     "forceBail": true
   },
   "coverageAnalysis": "perTest",
