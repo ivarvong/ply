@@ -42,8 +42,12 @@ export type Commit = {
   readonly extra: readonly string[];
 };
 export type PackObject = { readonly type: number; readonly data: Uint8Array; readonly oid: string };
-export type Transport = { readonly limits: Limits };
-export type Span = { set(attrs: Readonly<Record<string, unknown>>): unknown };
+// the transport every operation runs on (src/transport.ts); re-exported for rebase.ts
+export type { Transport } from './transport.js';
+import type { Transport } from './transport.js';
+// the span every operation records on (src/otel.js); re-exported for rebase.ts
+export type { Span } from './otel.js';
+import type { Span } from './otel.js';
 export type Outcome = <R>(kind: string, result: R, attrs?: Readonly<Record<string, unknown>>) => R;
 export type OpContext = { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits };
 export type PushResult = { readonly packBytes: number };

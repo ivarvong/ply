@@ -14,7 +14,7 @@ const proto = (msg: string): Thrown => fail('protocol', msg);
 // The one pkt-line writer. A line longer than git's LARGE_PACKET_MAX is the caller's (a push option, a ref prefix, a
 // want or filter: fields without a length rule of their own), refused before any byte is written, as git's
 // format_packet dies "impossibly long line" (pkt-line.c). bad_request: no retry can make the line shorter.
-export function pkt(payload: string | Uint8Array): Uint8Array {
+export function pkt(payload: string | Uint8Array): Uint8Array<ArrayBuffer> {
   // a ref name read from ls-refs may hold escaped bytes (#43): encodeBytes writes them back as the server sent them
   const p = typeof payload === 'string' ? encodeBytes(payload, 'pkt-line') : payload;
   if (p.length > MAX_PKT_PAYLOAD) throw fail('bad_request', `pkt-line payload too large: ${p.length} bytes, the most git frames is ${MAX_PKT_PAYLOAD}`, { what: 'pkt-line', got: p.length, max: MAX_PKT_PAYLOAD });
@@ -27,7 +27,7 @@ export const FLUSH: Uint8Array = te.encode('0000');
 export const DELIM: Uint8Array = te.encode('0001');
 
 export type PktsOptions = { readonly delimAfter?: number; readonly flush?: boolean };
-export const pkts = (lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Uint8Array =>
+export const pkts = (lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Uint8Array<ArrayBuffer> =>
   concat(lines.flatMap((l, i) => (i === delimAfter ? [pkt(l), DELIM] : [pkt(l)])).concat(flush ? [FLUSH] : []));
 
 // oxlint-disable-next-line no-magic-numbers -- sentinel: this byte is not a hex digit
