@@ -4,7 +4,7 @@ import { fail } from './errors.js';
 import { te, concat, take, encodeBytes } from './bytes.js';
 import {
   PKT_LEN_HEX, PKT_HEX_BASE, PKT_FLUSH, PKT_DELIM, PKT_LEN_INVALID,
-  PKT_DATA_MIN, PKT_MAX_PAYLOAD, PKT_LEN_SHIFTS, BYTE_VALUES,
+  PKT_DATA_MIN, PKT_MAX_PAYLOAD, PKT_READ_MAX_PAYLOAD, PKT_LEN_SHIFTS, BYTE_VALUES,
 } from './format.js';
 
 export const MAX_PKT_PAYLOAD = PKT_MAX_PAYLOAD;
@@ -54,6 +54,8 @@ export function pktStep(st, chunk) {
       p += PKT_LEN_HEX;
       continue;
     }
+    // git's reader refuses a payload that does not fit its LARGE_PACKET_MAX buffer before reading it (pkt-line.c)
+    if (len - PKT_LEN_HEX > PKT_READ_MAX_PAYLOAD) throw proto(`bad pkt-line length ${len - PKT_LEN_HEX}`);
     if (buf.length - p < len) break;
     // Stryker disable next-line StringLiteral: the length check already proved the payload bytes remain, so take() cannot throw
     const payload = take(buf, p + PKT_LEN_HEX, len - PKT_LEN_HEX, 'protocol');

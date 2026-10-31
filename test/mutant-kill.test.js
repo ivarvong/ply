@@ -640,16 +640,24 @@ test('ls-refs lines and report-status', () => {
   // the name is never read as an attribute, with or without attributes after it
   assert.deepEqual(parseLsRefLine(`${id} symref-target:refs/heads/x`), { oid: id, name: 'symref-target:refs/heads/x' });
   assert.deepEqual(parseLsRefLine(`${id} peeled:junk symref-target:refs/heads/main`), { oid: id, name: 'peeled:junk', 'symref-target': 'refs/heads/main' });
-  for (const bad of ['junk', 'AB'.repeat(20), `${oid(5)}0`, '']) {
+  // git reads an oid in either case (parse_oid_hex_algop: hexval); ply keeps it lower-case (the advertisement space, record=upperPeeled)
+  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 peeled:${'AB'.repeat(20)}`), { oid: id, name: 'refs/tags/v1', peeled: 'ab'.repeat(20) });
+  for (const bad of ['junk', 'GB'.repeat(20), `${oid(5)}0`, '']) {
     const line = `${id} refs/tags/v1 peeled:${bad}`;
     throws(() => parseLsRefLine(line), 'protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
   }
   throws(() => parseLsRefLine('ERR no such ref'), 'remote_error', 'remote: no such ref');
   throws(() => parseLsRefLine('nope'), 'protocol', 'ls-refs: malformed line "nope"');
-  throws(() => parseLsRefLine(`${id} `), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${id} `)}`);
+  // an empty second field is a ref named "" (process_ref_v2), and an `unborn` record is no ref (record=emptyName, unbornOther)
+  assert.deepEqual(parseLsRefLine(`${id} `), { oid: id, name: '' });
+  assert.equal(parseLsRefLine('unborn HEAD symref-target:refs/heads/main'), null);
+  assert.equal(parseLsRefLine('unborn '), null);
+  throws(() => parseLsRefLine('unborn'), 'protocol', 'ls-refs: malformed line "unborn"');
+  throws(() => parseLsRefLine(`${'zz'.repeat(20)} refs/heads/main`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${'zz'.repeat(20)} refs/heads/main`)}`);
   throws(() => parseLsRefLine(`${'ab'.repeat(32)} refs/heads/main`), 'unsupported', 'unsupported object-format: only sha1 repositories are supported');
   const upper = 'ab'.repeat(20).toUpperCase();
-  throws(() => parseLsRefLine(`${upper} refs/heads/main`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${upper} refs/heads/main`)}`);
+  assert.deepEqual(parseLsRefLine(`${upper} refs/heads/main`), { oid: 'ab'.repeat(20), name: 'refs/heads/main' });
+  throws(() => parseLsRefLine(`${'AB'.repeat(32)} refs/heads/main`), 'unsupported', 'unsupported object-format: only sha1 repositories are supported');
   const long = 'not a ref line '.repeat(8);
   throws(() => parseLsRefLine(long), 'protocol', `ls-refs: malformed line ${JSON.stringify(long.slice(0, 60))}`);
 
@@ -914,7 +922,8 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
 
   const ref = `${oid(4)} refs/heads/a :val`;
   assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a' });
-  throws(() => parseLsRefLine(`${oid(4)}  refs/heads/a`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${oid(4)}  refs/heads/a`)}`);
+  // a doubled space after the oid: an empty name, then `refs/heads/a` as an attribute token (process_ref_v2 splits on every space)
+  assert.deepEqual(parseLsRefLine(`${oid(4)}  refs/heads/a`), { oid: oid(4), name: '' });
   const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 

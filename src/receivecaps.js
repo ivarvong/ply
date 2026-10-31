@@ -1,5 +1,5 @@
-// v0 receive-pack capability advertisement (GET info/refs). Only needed to check optional capabilities (push-options)
-// before relying on them; the v2 fetch path never needs it.
+// v0 receive-pack capability advertisement (GET info/refs). Only needed to check optional capabilities (atomic,
+// push-options) before relying on them; the v2 fetch path never needs it.
 import { fail } from './errors.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep } from './pktline.js';
@@ -17,9 +17,26 @@ export async function receiveCaps(t) {
   }));
 }
 
-// push-options are not negotiable from the response: a server that does not advertise them reads our option lines
-// as the pack and fails with "unpacker error". Check the advertisement first (one extra GET, only when options are used).
+// What a push asks of the server that send-pack.c send_pack() checks against the advertisement before it sends a byte:
+// the repository's hash ("the receiving end does not support this repository's hash algorithm": ply is sha1-only, and an
+// advertisement without object-format is sha1), `atomic` ("does not support --atomic push") and `push-options` ("does
+// not support push options"). Pure: the first unmet need as a string, or null.
+// receive-pack ignores an `atomic` or `push-options` capability it did not advertise (builtin/receive-pack.c), so an
+// unchecked atomic push lands ref by ref, and unchecked option lines are read as the pack ("unpacker error").
+export function pushCapsProblem(caps, { atomic = false, pushOptions = [] } = {}) {
+  const format = [...caps].find(c => c.startsWith('object-format='))?.slice('object-format='.length) ?? 'sha1';
+  if (format !== 'sha1') return `server repository is object-format ${format}`;
+  if (atomic && !caps.has('atomic')) return 'server does not advertise atomic';
+  if (pushOptions.length && !caps.has('push-options')) return 'server does not advertise push-options';
+  return null;
+}
+
+// push(), after reading the advertisement when the push needs a capability (atomic, push-options): one extra GET, only then.
 export async function pushWithOptions(t, opts) {
-  if (opts.pushOptions?.length) { const caps = await receiveCaps(t); if (!caps.has('push-options')) throw fail('unsupported', 'server does not advertise push-options', { caps: [...caps] }); }
+  if (opts.atomic || opts.pushOptions?.length) {
+    const caps = await receiveCaps(t);
+    const problem = pushCapsProblem(caps, opts);
+    if (problem) throw fail('unsupported', problem, { caps: [...caps] });
+  }
   return push(t, opts);
 }
