@@ -223,5 +223,23 @@ export const DEFLATE_REPEAT17_BITS = 3;
 export const DEFLATE_REPEAT18_BASE = 11;
 export const DEFLATE_REPEAT18_BITS = 7;
 
+// ---- zlib stream length (zlib deflate.c deflateBound, compress.c compressBound) ----
+// RFC 1951 puts no ceiling on a deflate stream's length: a non-final empty stored block costs 5 bytes and produces nothing,
+// and may repeat forever (a fixed block holding only end-of-block, 10 bits, likewise). So "how long may the zlib stream
+// of an object declared S bytes be" is a policy, and the policy is zlib's own promise about its output: deflateBound(S)
+// is the most any level, strategy, windowBits or memLevel emits for S bytes under Z_FINISH/Z_NO_FLUSH (zlib.h). Its
+// conservative form (deflate.c, non-default parameters) is sourceLen + ((sourceLen + 7) >> 3) + ((sourceLen + 63) >> 6)
+// + 5 + a 6-byte wrapper: 9-bit literals in fixed blocks (RFC 1951 §3.2.6: literals 144–255) plus per-block overhead at
+// zlib's smallest blocks. The constant is compressBound's 13 (compress.c: the 2-byte header, the 4-byte Adler-32, and 7),
+// which also covers zlib 1.3's storelen (stored blocks of 127 bytes at memLevel 1, + 7) and fixedlen (+ 4) forms and the
+// 65535-byte stored blocks a level-0 encoder writes. zlibBound(S) = S + ⌈S/8⌉ + ⌈S/64⌉ + 13 is ≥ every one of those at
+// every S (test/format-facts.test.js checks the inequalities, mutant-kill.test.js node:zlib's actual output); an encoder
+// that flushes between tiny chunks could exceed it, and no git server does. Input past it is `pack_corrupt`.
+export const ZLIB_BOUND_LITERAL_DIV = 8;
+export const ZLIB_BOUND_BLOCK_DIV = 64;
+export const ZLIB_BOUND_SLACK = 13;
+/** The longest zlib stream accepted for an object whose inflated size is `size`. Finite for every finite size. */
+export const zlibBound = size => size + Math.ceil(size / ZLIB_BOUND_LITERAL_DIV) + Math.ceil(size / ZLIB_BOUND_BLOCK_DIV) + ZLIB_BOUND_SLACK;
+
 /** `2 ** shift` for a size-varint group. Defined once so the base is not recopied at each call site. */
 export const varintScale = shift => 2 ** shift;

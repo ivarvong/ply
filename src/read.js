@@ -200,6 +200,16 @@ export async function openBlob(t, tracer, parent, oid) {
       span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.outcome': 'ok' }).end();
     },
   });
-  const stream = ds.readable.pipeThrough(verify);
+  // DecompressionStream's own refusals (trailing junk after the deflate end, a bad block) are platform errors with no ply
+  // code; the consumer sees them as pack_corrupt like every other refusal on this path (I1: a code from the fixed set).
+  const inner = ds.readable.pipeThrough(verify).getReader();
+  const stream = new ReadableStream({
+    async pull(c) {
+      let r;
+      try { r = await inner.read(); } catch (e) { throw isPlyCode(e?.code) ? e : failHere(e); }
+      if (r.done) c.close(); else c.enqueue(r.value);
+    },
+    cancel(reason) { return inner.cancel(reason); },
+  }, { highWaterMark: 0 });
   return { size, stream };
 }

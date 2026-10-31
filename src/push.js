@@ -110,7 +110,7 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
     const lines = [];
     const maxReportLines = requireLimit(t.limits, 'maxReportLines');
     const maxReportBytes = requireLimit(t.limits, 'maxPackBytes');
-    let reportBytes = 0;
+    let reportBytes = 0, progressBytes = 0;
     const pushLine = payload => {
       reportBytes += payload.length;
       if (reportBytes > maxReportBytes) throw limitError('report bytes', reportBytes, maxReportBytes);
@@ -128,7 +128,12 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
         if (!sideband) { pushLine(f.payload); continue; }
         const { band, body: payload } = parseSideband(f.payload);
         if (band === SIDEBAND_PACK) { const r = pktStep(inner, payload); inner = r.state; for (const g of r.frames) if (g.kind === 'data') pushLine(g.payload); }
-        else if (band === SIDEBAND_PROGRESS) { band2Frames++; band2 = (band2 + td.decode(payload)).slice(-BAND_TAIL); }
+        else if (band === SIDEBAND_PROGRESS) {
+          // the same cap the report has: a band-2 flood used to be read until the request timer
+          progressBytes += payload.length;
+          if (progressBytes > maxReportBytes) throw limitError('progress bytes', progressBytes, maxReportBytes);
+          band2Frames++; band2 = (band2 + td.decode(payload)).slice(-BAND_TAIL);
+        }
         else if (band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(payload).trim()}`);
         else throw proto(`receive-pack: bad sideband ${band}`);
       }

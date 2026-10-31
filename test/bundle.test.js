@@ -41,11 +41,13 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 62,215 B / 23,900 B gz. the credential scrub (12-character fragments, the user rule) and the redirect refusal in http.js, the span scrub in otel.js (issue #15).
   // 2026-10-30: 62,420 B / 23,943 B gz. ls-refs keeps only symref-target and a checked peeled, report options and merge maps have no prototype, scrubError walks them (issue #16).
   // 2026-10-30: 62,836 B / 24,093 B gz. URL userinfo sent as git sends it (percent-decoded bytes, `user:` for a user alone), the token-as-user scrub rule, a typed bad URL (issue #32).
+  // 2026-10-30: 63,168 B / 24,230 B gz. v2Step caps band 1 and band 2 at maxPackBytes for every consumer, zlibBound in spStep and inflate, push caps band 2, the declared-size check before begin() in streamBlobEdit (issue #36).
   // 2026-10-30: 63,709 B / 24,444 B gz. Explicit credentials as UTF-8 bytes and refused when they send nothing, the scrub module shared with SSH (issue #40).
   // 2026-10-30: 63,197 B / 24,217 B gz. checkWide: the blob:none fallback drops an extra over a limit instead of failing (issue #46).
   // 2026-10-30: 64,070 B / 24,571 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 64_071, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 24_572, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 64,399 B / 24,708 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  assert.ok(min < 64_400, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 24_709, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -78,10 +80,12 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 80,435 B. The same, plus the [:class:] table as a Map (issue #16).
   // 2026-10-30: 80,904 B. The walk's packs held to the deepen contract and checked with assertFetched before harvest (issue #18).
   // 2026-10-30: 81,313 B. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 81,582 B. The same pack-byte cap in v2Step, zlib-length bound and push band-2 cap (issue #36).
   // 2026-10-30: 82,181 B. The same credential handling (issue #40).
   // 2026-10-30: 81,669 B. The same checkWide, also on the merge-base walk's blob:none packs (issue #46).
   // 2026-10-30: 82,537 B. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 82_538, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 82,807 B. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  assert.ok(min < 82_808, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -111,11 +115,13 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 47,398 B / 18,400 B gz. The same ls-refs attribute whitelist and scrub walk (issue #16).
   // 2026-10-30: 47,393 B / 18,399 B gz. openBlob's pump failure records itself and ends both spans (failHere); with #16 merged it minifies under the budget above.
   // 2026-10-30: 47,831 B / 18,565 B gz. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 48,307 B / 18,778 B gz. The same pack-byte cap and zlib-length bound, which is what caps openBlob's body; openBlob's stream wraps DecompressionStream's refusals as pack_corrupt (issue #36).
   // 2026-10-30: 48,703 B / 18,909 B gz. The same credential handling (issue #40).
   // 2026-10-30: 48,192 B / 18,710 B gz. The same checkWide (issue #46).
   // 2026-10-30: 49,064 B / 19,053 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 49_065, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_054, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 49,538 B / 19,272 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  assert.ok(min < 49_539, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 19_273, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -132,11 +138,13 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 58,891 B / 22,787 B gz. The same credential scrub and redirect refusal (issue #15).
   // 2026-10-30: 59,096 B / 22,842 B gz. The same (issue #16).
   // 2026-10-30: 59,520 B / 23,000 B gz. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 59,849 B / 23,158 B gz. The same pack-byte cap, zlib-length bound and push band-2 cap (issue #36).
   // 2026-10-30: 60,391 B / 23,353 B gz. The same credential handling (issue #40).
   // 2026-10-30: 59,881 B / 23,141 B gz. The same checkWide (issue #46).
   // 2026-10-30: 60,752 B / 23,494 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 60_753, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_495, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 61,079 B / 23,631 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  assert.ok(min < 61_080, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_632, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -164,11 +172,13 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 44,226 B / 17,576 B gz. The same ls-refs attribute whitelist and scrub walk (issue #16).
   // 2026-10-30: 44,221 B / 17,573 B gz. The same openBlob pump-failure span fix, with #16 merged.
   // 2026-10-30: 44,658 B / 17,768 B gz. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 45,292 B / 18,032 B gz. The same pack-byte cap, zlib-length bound and openBlob stream wrap (issue #36).
   // 2026-10-30: 45,530 B / 18,115 B gz. The same credential handling (issue #40).
   // 2026-10-30: 44,697 B / 17,804 B gz. fetchPackOnce takes a `check` for fetchPackTree0 (issue #46); checkWide itself is shaken out.
   // 2026-10-30: 45,569 B / 18,149 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 45_570, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_150, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 46,201 B / 18,389 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  assert.ok(min < 46_202, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 18_390, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
