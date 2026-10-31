@@ -150,12 +150,29 @@ errors       errors.js: every code, its retry policy; errors-doc.js: what each m
 
 Each layer is testable without the one below it, and `test/bundle.test.js` asserts the dependency direction. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*` / `ssh.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
 
-## Telemetry conventions (enforced by `test/pure.test.js`)
+## Telemetry conventions (enforced by `test/pure.test.js` and `test/span-contract.test.js`)
 
 - Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.push_tree`, `git.checkout`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children; `ssh.<phase>` for transport phases.
 - Attribute keys: dotted lowercase under `git.` `http.` `ssh.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
-- Every root span carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, …, or the error code).
+- Every trace root (operation roots and the spans that follow them, below) carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, `cancelled`, …, or the error code).
 - Every wire span carries `git.transport`, `git.request.bytes`, `git.response.bytes`, `server.address`.
+
+### Telemetry contract
+
+Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit), the wire spans and the SSH phases against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
+
+- **Removing or renaming** a span or key, changing a value's type, or moving a span is a **breaking change** for consumers' dashboards and alerts, and is called out as one in the PR and the release notes.
+- **Adding** one also fails the test until the snapshot is regenerated (`npm run test:spans:update`), so every addition is visible in review as a diff of `test/span-contract.json`.
+
+### Span lifetimes
+
+Some work is driven by the caller after the call returns: `readFile`'s `stream`, `checkoutTree`'s `files` iterator (and each streamed blob in it), and an SSH channel (`ssh.exec`, one git process reused across commands until it is closed). Their spans — `git.read.blob`, `git.checkout.blobs`, `ssh.exec` — **follow** the span that started them instead of being its children:
+
+- Each is the root of a trace of its own, with an OTLP link `ply.link=follows_from` to the span it follows, and that span carries `ply.link=followed_by` back if it was still open when the follower started (`git.read` → `git.read.blob`; `git.checkout.blobs` → each streamed `git.read.blob`). Links per span are capped at `maxEvents`, the rest counted in `droppedLinksCount`.
+- A follower is not an invocation (no `ply.isolate.*`), inherits its leader's credential scrubbing, and carries its own `<name>.outcome`. It ends when the work does: the stream read to the end (`ok`), failing (the error code), or cancelled by the consumer (`cancelled`). A stream neither read to the end nor cancelled never ends its span, and holds its connection, like an unread `fetch` body.
+- Every other span ends within its parent: no child outlives its parent (asserted over every trace in the contract test).
+
+Why not keep the root open until the stream ends: the root's duration would then be the consumer's read speed (a slow downstream client, a Worker's response piping out), not ply's work, and a stream the caller never drains would leave the root — the span dashboards key on — unexported. Why not a child that ends late: trace viewers draw and roll up durations by the root span, so a child past its parent's end renders outside it and the root's time undercounts the work under it (#35). This is OpenTracing's `FOLLOWS_FROM` reference (a parent that does not depend on its child's result), which OpenTelemetry represents as a span link; Jaeger, Tempo and Honeycomb show links as navigable references between traces. So the operation root measures what the caller awaited (until the result is ready; for `readFile`, until the stream is open and its size known), and the follower measures the transfer.
 
 ## Errors
 

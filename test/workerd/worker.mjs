@@ -1,6 +1,7 @@
 // The ply pipeline running inside workerd. POST /edit with {url, path, find, replace, n?} runs editFile n times
 // (sequentially, or concurrently with ?concurrent=1) and reports results, spans summary, and timing.
 import { editFile } from '../../src/edit.js';
+import { readFile } from '../../src/read.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
@@ -72,6 +73,18 @@ export default {
       for (const [k, op] of [['get', () => c.discover()], ['post', () => c.lsRefs()]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
       try { const r = await fetch(`${body.url}/info/refs?service=git-upload-pack`, { headers: { Authorization: 'Bearer workerd-follow-probe' } }); res.follow = { status: r.status, url: r.url }; await r.body?.cancel(); } catch (e) { res.follow = { error: e.message }; }
       return Response.json(res);
+    }
+    if (u.pathname === '/read') { // readFile's blob stream, drained or cancelled after one chunk: its follows span (#35)
+      const body = await req.json();
+      const exporter = arrayExporter();
+      try {
+        const r = await readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) });
+        let bytes = 0;
+        const rd = r.stream.getReader();
+        if (body.cancel) { const { value } = await rd.read(); bytes = value?.length ?? 0; await rd.cancel('enough'); }
+        else for (;;) { const { value, done } = await rd.read(); if (done) break; bytes += value.length; }
+        return Response.json({ ok: true, size: r.size, bytes, spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, traceId: s.traceId, spanId: s.spanId, parentSpanId: s.parentSpanId ?? null, links: s.links.map(l => [l.spanId, l.attrs['ply.link']]), outcome: s.attrs[`${s.name}.outcome`] ?? null })) });
+      } catch (e) { return Response.json({ ok: false, code: e.code, message: e.message }); }
     }
     if (u.pathname === '/edit') {
       const body = await req.json();

@@ -130,7 +130,8 @@ export async function listTree(url, { ref = null, path = '' } = {}, { cache = ne
 }
 
 // The root span ends when the stream is open (size known); the content's own span, `git.read.blob`, ends when the
-// stream does, with the bytes delivered and whether the oid verified.
+// stream does, with the bytes delivered and whether the oid verified. It outlives the root, so it is not the root's child
+// but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
 export async function readFile(url, { ref = null, path } = {}, { cache = new Map(), ...opts } = {}) {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: false });
@@ -149,12 +150,15 @@ export async function readFile(url, { ref = null, path } = {}, { cache = new Map
 // Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
 // through DecompressionStream and a verifying transform. Back-pressure: the pump awaits each write, so at most one
 // network chunk and one inflate chunk are in flight beyond what the consumer has taken.
-export async function openBlob(t, tracer, parent, oid) {
-  const span = tracer.start('git.read.blob', { parent, attrs: { 'git.read.blob.oid': oid } });
+// `opener` is the span the stream follows (the read root, or git.checkout.blobs): the consumer reads after it returns.
+export async function openBlob(t, tracer, opener, oid) {
+  const span = tracer.start('git.read.blob', { follows: opener, attrs: { 'git.read.blob.oid': oid } });
   const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   const it = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
   let sp = spInit(); const early = [];
-  const failHere = e => { const err = isPlyCode(e?.code) ? e : fail('pack_corrupt', `blob stream: ${e?.message ?? e}`, { cause: e }); fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); return err; };
+  // the first of failure, cancellation and verified end records the outcome; whatever follows (a cancel aborting the
+  // pump) leaves the ended spans alone
+  const failHere = e => { const err = isPlyCode(e?.code) ? e : fail('pack_corrupt', `blob stream: ${e?.message ?? e}`, { cause: e }); if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); } return err; };
   try {
     while (sp.phase !== 'body') {
       const { value, done } = await it.next();
@@ -200,6 +204,16 @@ export async function openBlob(t, tracer, parent, oid) {
       span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.outcome': 'ok' }).end();
     },
   });
-  const stream = ds.readable.pipeThrough(verify);
+  // The consumer's cancel() is an outcome of its own ('cancelled', not an error): without this hook a cancel after the
+  // pump has written its last chunk would leave both spans open forever, and one before it would read as pack_corrupt.
+  const piped = ds.readable.pipeThrough(verify).getReader();
+  const stream = new ReadableStream({
+    async pull(ctl) { const { value, done } = await piped.read(); if (done) ctl.close(); else ctl.enqueue(value); },
+    async cancel(reason) {
+      if (!span.ended) { fetchSpan.end(); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.outcome': 'cancelled' }).end(); }
+      await piped.cancel(reason).catch(() => {});
+      await it.return?.().catch(() => {});
+    },
+  }, { highWaterMark: 0 });
   return { size, stream };
 }

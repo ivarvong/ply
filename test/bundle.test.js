@@ -114,8 +114,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 48,703 B / 18,909 B gz. The same credential handling (issue #40).
   // 2026-10-30: 48,192 B / 18,710 B gz. The same checkWide (issue #46).
   // 2026-10-30: 49,064 B / 19,053 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 49_065, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_054, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 49,381 B / 19,155 B gz. git.read.blob follows the root and records a consumer's cancel (issue #35).
+  assert.ok(min < 49_382, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 19_156, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -167,8 +168,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 45,530 B / 18,115 B gz. The same credential handling (issue #40).
   // 2026-10-30: 44,697 B / 17,804 B gz. fetchPackOnce takes a `check` for fetchPackTree0 (issue #46); checkWide itself is shaken out.
   // 2026-10-30: 45,569 B / 18,149 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 45_570, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_150, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 45,887 B / 18,246 B gz. The same blob-stream cancel and follows spans (issue #35).
+  assert.ok(min < 45_888, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 18_247, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

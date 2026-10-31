@@ -32,7 +32,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - name: unit tests
-        run: node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js test/delta-bound.test.js test/git-differential.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/read.test.js test/artifacts-compat.test.js test/wide-limits.test.js
+        run: node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js test/delta-bound.test.js test/git-differential.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/read.test.js test/artifacts-compat.test.js test/wide-limits.test.js test/span-contract.test.js
       - name: below-hash fuzzer
         run: node test/fuzz/below-hash.mjs --n 20 --seed 1
       - name: git-semantic fuzzer

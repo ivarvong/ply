@@ -597,7 +597,9 @@ test('checkoutTree: one blob:none fetch for the trees, blobs in batches, gitlink
   ]);
   assert.deepEqual(r.fetches().slice(1).map(f => [f.wants.length, f.filter]), [[5, null]]);
   const blobs = e.span('git.checkout.blobs');
-  assert.equal(blobs.parentSpanId, root.spanId);
+  // consumed after checkoutTree returns: a root of its own trace that follows the checkout root (README "Span lifetimes")
+  assert.deepEqual([blobs.parentSpanId, blobs.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[root.traceId, root.spanId, 'follows_from']]]);
+  assert.notEqual(blobs.traceId, root.traceId);
   assert.deepEqual(Object.fromEntries(Object.entries(blobs.attrs).filter(([k]) => k.startsWith('git.checkout.'))), {
     'git.checkout.blobs.unique': 5, 'git.checkout.blobs.paths': 6, 'git.checkout.blobs.fetches': 1, 'git.checkout.blobs.buffered': 5, 'git.checkout.blobs.streamed': 0,
     'git.checkout.blobs.splits': 0, 'git.checkout.blobs.bytes': 26, 'git.checkout.blobs.single': false, 'git.checkout.blobs.outcome': 'ok',
@@ -685,7 +687,9 @@ test('checkoutTree: a batch over a cap splits in half; one left alone streams on
   const s = e.span('git.checkout.blobs').attrs;
   assert.deepEqual([s['git.checkout.blobs.splits'], s['git.checkout.blobs.fetches'], s['git.checkout.blobs.buffered'], s['git.checkout.blobs.streamed'], s['git.checkout.blobs.bytes']], [2, 2, 4, 1, 5]);
   assert.equal(e.all('git.read.blob').length, 1);
-  assert.equal(e.span('git.read.blob').parentSpanId, e.span('git.checkout.blobs').spanId);
+  const [rb, cb] = [e.span('git.read.blob'), e.span('git.checkout.blobs')];
+  assert.deepEqual([rb.parentSpanId, rb.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[cb.traceId, cb.spanId, 'follows_from']]]);
+  assert.deepEqual(cb.links.filter(l => l.attrs['ply.link'] === 'followed_by').map(l => l.spanId), [rb.spanId], 'the blobs span, open when the stream starts, links back');
 });
 
 test('checkoutTree: a host refusing many wants is asked one at a time from then on; a lie is never a reason to fall back', async () => {
@@ -916,7 +920,9 @@ test('readFile: the blob streamed and verified, its size first; directories and 
     ['HEAD', 'src/lib/b.js', 3, GIT.b, 2, '100644', 'ok']);
   const blob = e.span('git.read.blob');
   assert.deepEqual([blob.attrs['git.read.blob.oid'], blob.attrs['git.read.blob.size'], blob.attrs['git.read.blob.bytes'], blob.attrs['git.read.blob.verified'], blob.attrs['git.read.blob.outcome']], [GIT.b, 2, 2, true, 'ok']);
-  assert.equal(blob.parentSpanId, e.span('git.read').spanId);
+  const readRoot = e.span('git.read');
+  assert.deepEqual([blob.parentSpanId, blob.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[readRoot.traceId, readRoot.spanId, 'follows_from']]]);
+  assert.deepEqual(readRoot.links.map(l => [l.spanId, l.attrs['ply.link']]), [[blob.spanId, 'followed_by']]);
   // a big blob in 7-byte network chunks
   const big = await readFile('http://fake/r.git', { ref: 'main', path: 'big.txt' }, env(r).opts);
   assert.equal(big.size, 5000);

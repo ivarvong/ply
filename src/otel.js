@@ -45,8 +45,11 @@ export class Tracer {
     this.scope = scope;
     this.count = 0;
   }
-  start(name, { parent = null, kind = KIND.INTERNAL, attrs = {}, scrub = null } = {}) {
-    return new Span(this, { name, kind, attrs, parent, scrub });
+  // `follows`: start a span that measures work the caller drives after `follows` returns (a stream it reads, an iterator
+  // it drains). It is the root of a trace of its own with a 'follows_from' link to `follows` (and, while `follows` is
+  // still open, a 'followed_by' link back), so no child outlives its parent: README "Span lifetimes".
+  start(name, { parent = null, follows = null, kind = KIND.INTERNAL, attrs = {}, scrub = null } = {}) {
+    return new Span(this, { name, kind, attrs, parent, follows, scrub });
   }
   // Run fn(span) with automatic end/status.
   async span(name, opts, fn) {
@@ -64,7 +67,8 @@ export class Tracer {
 // export every string (attributes, event attributes, status) passes through it, and `error(e)` scrubs the error object
 // itself in place, so neither the trace nor the error the caller catches holds a credential a server echoed back.
 export class Span {
-  constructor(tracer, { name, kind, attrs, parent, scrub = null }) {
+  constructor(tracer, { name, kind, attrs, parent, follows = null, scrub = null }) {
+    if (parent && follows) throw new TypeError('a span has a parent or follows one, not both');
     this.tracer = tracer;
     this.traceId = parent ? parent.traceId : rand(16);
     this.spanId = rand(8);
@@ -73,13 +77,15 @@ export class Span {
     this.kind = kind;
     this.start = now();
     this.attrs = { ...attrs };
-    if (!parent) { invocations++; this.attrs['ply.isolate.invocation'] = invocations; this.attrs['ply.isolate.cold'] = invocations === 1; }
+    if (!parent && !follows) { invocations++; this.attrs['ply.isolate.invocation'] = invocations; this.attrs['ply.isolate.cold'] = invocations === 1; }
     this.events = [];
     this.links = [];
     this.droppedEvents = 0;
+    this.droppedLinks = 0;
     this.status = { code: 0 };
     this.ended = false;
-    this.scrub = scrub ?? parent?.scrub ?? null;
+    this.scrub = scrub ?? parent?.scrub ?? follows?.scrub ?? null;
+    if (follows) { this.link(follows, { 'ply.link': 'follows_from' }); if (!follows.ended) follows.link(this, { 'ply.link': 'followed_by' }); }
   }
   set(attrs) { Object.assign(this.attrs, attrs); return this; }
   // Bounded: a pack with 10k objects must not produce a 10k-event span. The count of dropped events is exported.
@@ -87,8 +93,12 @@ export class Span {
     if (this.events.length >= this.tracer.maxEvents) { this.droppedEvents++; return this; }
     this.events.push({ name, timeUnixNano: now(), attributes: kvs(attrs) }); return this;
   }
-  // OTLP span link: a causal relation to a span that is not the parent (e.g. the attempt this one retries).
-  link(span, attrs = {}) { this.links.push({ traceId: span.traceId, spanId: span.spanId, attributes: kvs(attrs) }); return this; }
+  // OTLP span link: a causal relation to a span that is not the parent (e.g. the attempt this one retries). Bounded like
+  // events: a checkout that streams 10k blobs must not produce a 10k-link span.
+  link(span, attrs = {}) {
+    if (this.links.length >= this.tracer.maxEvents) { this.droppedLinks++; return this; }
+    this.links.push({ traceId: span.traceId, spanId: span.spanId, attributes: kvs(attrs) }); return this;
+  }
   error(e, type) {
     scrubError(e, this.scrub);
     this.status = { code: 2, message: String(e?.message ?? e) };
@@ -108,7 +118,7 @@ export class Span {
       attributes: s ? scrubKvs(kvs(this.attrs), s) : kvs(this.attrs),
       events: s ? this.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : this.events,
       links: this.links, status: s && this.status.message ? { ...this.status, message: s(this.status.message) } : this.status,
-      droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: 0,
+      droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: this.droppedLinks,
     });
     return this;
   }
