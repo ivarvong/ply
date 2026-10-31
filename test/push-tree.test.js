@@ -93,7 +93,7 @@ test('first push creates the ref: tree == git write-tree, ls-tree modes/oids, fs
   assert.equal(res.objects.sent, 234); assert.equal(res.objects.treeDeltas, 0);
   console.log(`  push 1 (create): ${rp['git.push.pack.objects']} objects, ${rp['git.push.pack.bytes']} B pack`);
   // span names follow the written convention (test/pure.test.js), and the root carries its outcome
-  const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?|ssh\.[a-z]+)$/;
+  const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?)$/;
   for (const s of t.spans()) assert.match(s.name, NAME);
   assert.equal(t.spans().find(s => s.name === 'git.push_tree').attrs['git.push_tree.outcome'], 'ok');
 });

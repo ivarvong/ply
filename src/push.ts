@@ -247,7 +247,7 @@ export function decideOutcome(shape: ReportShape | Broken, { atomic = false, pac
 }
 const bandLines = (text: string): string[] => text.split(/\r?\n|\r/u).map(l => l.trim()).filter(Boolean).slice(-REPORT_KEEP);
 
-// The transport surface push reads (http.js, sshgit.js and test doubles provide more).
+// The transport surface push reads (http.ts and test doubles provide more).
 export type PushSpan = {
   set(attrs: Readonly<Record<string, unknown>>): unknown;
   event(name: string, attrs: Readonly<Record<string, unknown>>): unknown;
