@@ -8,7 +8,13 @@ export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
-export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, ZERO_OID, pushBody } from './client.js';
+export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody } from './client.js';
+/**
+ * 40 lowercase hex characters. git also accepts abbreviations, ref names, and uppercase hex; this type does not.
+ * @typedef {import('./oid.js').Oid} Oid
+ */
+export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
+export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';
 export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';

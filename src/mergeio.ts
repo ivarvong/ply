@@ -8,6 +8,7 @@ import { thrown as fail } from './errors.js';
 import { fetchObject } from './fetch.js';
 import { parseCommit, TYPE } from './objects.js';
 import { validateIdent, validateRef } from './validate.js';
+import { parseOid, ZERO_OID } from './oid.js';
 
 // fetch.ts's JS-default signature, cast at the call (type-only; see merge.ts)
 type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<{ readonly data: Uint8Array }>;
@@ -19,12 +20,12 @@ export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 export const commitBytesAt = async (t: Transport, oid: string | null | undefined): Promise<{ readonly data: Uint8Array }> => (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
 export const commitAt = async (t: Transport, oid: string | null | undefined): Promise<Commit> => parseCommit((await commitBytesAt(t, oid)).data, t.limits);
 
-export const isOid = (s: string): boolean => /^[0-9a-f]{40}$/u.test(s);
+export const isOid = (s: string): boolean => parseOid(s).ok;
 // A merge `from` or rebase `onto`, as read.js's resolveCommit takes a name (#103 item 4): a 40-hex commit id is taken as
 // given (returned; the all-zero id names nothing), anything else is a ref name (validated; null: ask ls-refs).
 export const givenOid = (name: string, what: string): string | null => {
   if (!isOid(name)) { validateRef(name); return null; }
-  if (/^0+$/u.test(name)) throw fail('bad_request', `${what} must not be the zero oid`, { what });
+  if (name === ZERO_OID) throw fail('bad_request', `${what} must not be the zero oid`, { what });
   return name;
 };
 // Effect: a given commit id is a commit on the server, fetched alone (deepen 1). One the server does not have ('not our

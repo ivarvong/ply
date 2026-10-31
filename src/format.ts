@@ -7,6 +7,14 @@
 export const OID_BYTES = 20;
 /** Hex digits in a SHA-1 object name. Two hex chars per byte. */
 export const OID_HEX_CHARS: number = OID_BYTES * 2;
+/** ASCII `'0'` and `'9'`: a decimal hex digit. */
+export const HEX_DIGIT_MIN = 0x30;
+export const HEX_DIGIT_MAX = 0x39;
+/** ASCII `'a'` and `'f'`: a lowercase hex letter. Uppercase is not an object id here. */
+export const HEX_LOWER_MIN = 0x61;
+export const HEX_LOWER_MAX = 0x66;
+/** Forty `'0'` characters: the object id that means "ref does not exist" in a compare-and-swap. */
+export const ZERO_OID: string = '0'.repeat(OID_HEX_CHARS);
 /** SHA-256 object names, rejected: gitprotocol-v2 object-format. */
 export const SHA256_HEX_CHARS = 64;
 
@@ -29,6 +37,8 @@ export const MODE_EXEC = '100755';
 export const MODE_LINK = '120000';
 export const MODE_TREE = '40000';
 export const MODE_COMMIT = '160000';
+/** Blob, executable, and symlink. A tree (`40000`) and a gitlink (`160000`) are not blob modes. */
+export const BLOB_MODES: readonly [typeof MODE_BLOB, typeof MODE_EXEC, typeof MODE_LINK] = Object.freeze([MODE_BLOB, MODE_EXEC, MODE_LINK]);
 /**
  * fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for its mode: the file-type bits (S_IFMT) of
  * the low 16 bits (fsck keeps the mode in an `unsigned short`) are S_IFDIR. `40755` sorts as a directory; `160000`

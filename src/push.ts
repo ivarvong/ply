@@ -8,7 +8,7 @@ import type { Result } from './result.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { parseSideband } from './fetch.js';
-import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS } from './format.js';
+import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS, ZERO_OID } from './format.js';
 import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
@@ -26,7 +26,7 @@ const OK_REF = 'ok ';
 const NG_REF = 'ng ';
 const OID = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`, 'u');
 
-export const ZERO_OID: string = '0'.repeat(OID_HEX_CHARS);
+export { ZERO_OID };
 
 // One ref update. create: oldOid = zeros; delete: newOid = zeros.
 export type Command = { readonly ref: string; readonly oldOid: string; readonly newOid: string };

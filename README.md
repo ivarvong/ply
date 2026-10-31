@@ -174,6 +174,8 @@ Every thrown error has a `code` from `errors.js`, whose `RETRY` table says what 
 
 ## Shape
 
+`parseOid` returns a 40-character lowercase hex object id as an `Oid` (`bad_request` otherwise). `parseCommitId` is that check and also rejects `ZERO_OID`. git's `rev-parse` also accepts abbreviations, ref names, and uppercase hex; ply does not. `MODE_BLOB`, `MODE_EXEC`, `MODE_LINK`, `MODE_TREE`, `MODE_COMMIT`, and `BLOB_MODES` are the modes git writes in a tree (`BLOB_MODES` is the file modes: blob, executable, symlink).
+
 Two entry points, one codebase. `ply/edit` is the pipeline and imports only the free functions it uses; `ply` is the full client (negotiation, delta resolution, multi-ref pushes, advertisements). Nothing is a class on the hot path — `createTransport()` returns a record and `lsRefs`, `packStream`, `fetchObject`, `fetchPack`, `negotiate`, `push`, `discover` are functions over it — so a bundler keeps only what you import. `GitHttp` wraps all of them for scripts and tests. `test/bundle.test.js` asserts the edit bundle carries no resolver, negotiation, advertisement or class code and stays under budget (39 KB min / 15 KB gz; full: 58 KB / 21 KB).
 
 `edit.js` is pure decisions between thin effects: `validateSpec`, `decideHead`, `lookupEntry`, `buildCommitObjects`, `memFromScan` are functions of their arguments and unit-tested against git without a server (`test/pure.test.js`); ls-refs, fetch, the blob stream, push and verify are the only places the client is touched.
