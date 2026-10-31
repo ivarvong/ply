@@ -13,7 +13,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
@@ -89,7 +89,7 @@ function checkInvariants(r, { stage, allowMoved = false, requireError = false })
     assert.ok(!requireError, `expected an error for ${stage}, got success`);
     assert.equal(r.head, r.result.newCommit, 'I3: ref == our commit');
     assert.equal(r.content, EXPECTED, 'I3: content');
-    assert.equal(git(r.repo.bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+    assert.deepEqual(fsckProblems(r.repo.bare), []);
   }
 }
 

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { Rng } from './fuzz/prng.js';
 import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
@@ -109,7 +109,7 @@ test('outcomes: up-to-date, fast-forward, ff-only refusal, no-ff merge commit, c
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:d/y.txt']).stdout, 'y2\n'); assert.equal(sh(r.bare, ['cat-file', '-p', 'main:a.txt']).stdout, 'a2\n');
   const rootSpan = ex3.lines.flatMap(flattenLine).find(s => s.name === 'git.merge');
   assert.equal(rootSpan.attrs['git.merge.base'], feat2); assert.equal(m.newTrees, 2, 'root + d/ rewritten'); assert.ok(rootSpan.attrs['git.merge.trees.fetched'] <= 6, 'only differing directories fetched');
-  assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
   // conflict: both modify a.txt differently
   const ours4 = branchCommit(r, 'main', 'main', { 'a.txt': 'a3\n' }, 'ours4');
   const theirs4 = branchCommit(r, 'feat', 'feat', { 'a.txt': 'a4\n', 'f.txt': 'f\n' }, 'theirs4');
@@ -145,7 +145,7 @@ test('line merge and renames, judged by git: disjoint edits to one file merge to
     const g = gitMergeTree(r.bare, ours, theirs);
     assert.equal(g.clean, gitClean, `${name}: the case means what it says (git ${g.clean ? 'clean' : 'conflicts'})`);
     let m = null, err = null; try { m = await merge(r); } catch (e) { err = e; }
-    if (gitClean) { assert.ok(m, `${name}: git merges cleanly, so must we (${err?.message})`); assert.equal(m.tree, g.tree, `${name}: tree == git merge-tree`); assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), ''); }
+    if (gitClean) { assert.ok(m, `${name}: git merges cleanly, so must we (${err?.message})`); assert.equal(m.tree, g.tree, `${name}: tree == git merge-tree`); assert.deepEqual(fsckProblems(r.bare), []); }
     else assert.equal(err?.code, 'merge_conflict', `${name}: git conflicts, so must we`);
   }
 });
@@ -315,7 +315,7 @@ test('branch workflow: editFile creates the branch from main (CAS: must not exis
   assert.equal(sh(r.bare, ['rev-parse', 'refs/heads/tmp']).stdout.trim(), base, 'tmp still there');
   await assert.rejects(deleteBranch(t, { ref: 'refs/heads/main', oid: e.newCommit }), e => e.code === 'push_rejected' && /current branch/.test(e.message));
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit, 'main still there');
-  assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), '');
+  assert.deepEqual(fsckProblems(r.bare), []);
 });
 
 test('property: random three-way tree edits — clean merges equal git merge-tree; our conflicts ⊇ git\'s, and never a wrong tree', async () => {
@@ -374,7 +374,7 @@ test('property: random three-way tree edits — clean merges equal git merge-tre
       assert.ok(g.clean, `case ${i}: we merged cleanly but git conflicts on ${g.conflicts}`);
       const tree = m.outcome === 'merge' ? m.tree : sh(r.bare, ['rev-parse', `${m.oid}^{tree}`]).stdout.trim();
       assert.equal(tree, g.tree, `case ${i}: tree differs from git merge-tree (outcome ${m.outcome})`);
-      assert.equal(sh(r.bare, ['fsck', '--strict', '--no-dangling']).stdout.trim(), '');
+      assert.deepEqual(fsckProblems(r.bare), []);
     } else if (nBases > 1) {
       // criss-cross: git merges the bases into a virtual one; we refuse, whatever git's verdict
       assert.ok(err.bases?.length === nBases, `case ${i}: ${nBases} merge bases must be refused as such (${err.message})`); stats.criss++;

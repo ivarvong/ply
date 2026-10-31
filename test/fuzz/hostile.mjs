@@ -3,7 +3,7 @@
 //   node test/fuzz/hostile.mjs [--n 300] [--seed 1] [--case <seed>]
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './mutate.js';
 import { Rng } from './prng.js';
@@ -82,7 +82,7 @@ try {
     } else {
       if (nowHead !== result.newCommit) problems.push('success but ref != our commit');
       if (content !== EXPECTED) problems.push('success but wrong content');
-      const fsck = git(bare, ['fsck', '--strict', '--no-dangling']).trim(); if (fsck) problems.push(`fsck ${fsck}`);
+      const fsck = fsckProblems(bare); if (fsck.length) problems.push(`fsck ${fsck.join(' | ')}`);
       silentOk++;
     }
     const code = error ? error.code : 'ok';

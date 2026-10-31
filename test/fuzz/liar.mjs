@@ -4,7 +4,7 @@
 //   node test/fuzz/liar.mjs [--n 200] [--seed 1] [--case <seed>]
 import { join } from 'node:path';
 import { mkdirSync, rmSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { Rng } from './prng.js';
 import { editFile } from '../../src/edit.js';
@@ -107,8 +107,8 @@ try {
     const problems = [];
     const nowHead = git(bare, ['rev-parse', 'main']).trim();
     const content = gitBuf(bare, ['cat-file', 'blob', `main:${FILE}`]).toString();
-    const fsck = git(bare, ['fsck', '--strict', '--no-dangling']).trim();
-    if (fsck) problems.push(`fsck: ${fsck.split('\n')[0]}`);
+    const fsck = fsckProblems(bare);
+    if (fsck.length) problems.push(`fsck: ${fsck[0]}`);
     if (error) {
       if (!CODES.has(error.code)) problems.push(`untyped ${error.code}: ${error.message}`);
       if (error.code === 'ambiguous') { if (nowHead !== head && content !== EXPECTED) problems.push(`ambiguous but ref moved to wrong content ${JSON.stringify(content)}`); }

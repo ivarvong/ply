@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot } from './server.js';
+import { git, gitBuf, tmpRoot, fsckProblemsOf } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
@@ -18,12 +18,11 @@ let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });
 after(() => cleanup());
 
-// fsck verdict for one object: filter fsck's output to this oid (fsck scans the whole store)
+// fsck verdict for one object (fsck scans the whole store, which holds every earlier case): its msgId, or 'ok'. Read
+// whatever fsck exits with: a warning (badFilemode, …) exits 0 and was 'ok' when only a non-zero exit was read.
 function fsckOf(oid) {
-  let out = '';
-  try { git(repo, ['fsck', '--strict', '--no-dangling']); } catch (e) { out = (e.stderr || '').toString() + (e.stdout || '').toString(); }
-  const line = out.split('\n').find(l => l.includes(oid) && /^(error|warning)/.test(l));
-  return line ? line.replace(/^(error|warning) in \w+ [0-9a-f]+: /, '').split(':')[0] : 'ok';
+  const line = fsckProblemsOf(repo, oid)[0];
+  return line ? line.match(/^(?:error|warning) in \w+ [0-9a-f]{40}: (\w+):/)?.[1] ?? line : 'ok';
 }
 const writeLiterally = (type, data) => { try { return gitBuf(repo, ['hash-object', '-t', type, '-w', '--stdin', '--literally'], data).toString().trim(); } catch { return null; } };
 

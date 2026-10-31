@@ -1,12 +1,50 @@
 // Real git as the oracle: `git http-backend` behind a tiny Node HTTP→CGI shim.
 import http from 'node:http';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export const git = (cwd, args, opts = {}) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...opts });
 export const gitBuf = (cwd, args, input) => execFileSync('git', args, { cwd, input, stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 1 << 28 });
+
+// ---- git fsck as the oracle: the one definition every suite uses (self-tested in test/fsck-oracle.test.js) ----
+// git 2.50 writes fsck's verdict in these shapes, on two streams; an object problem never starts with "error:":
+//   stderr  `error in <type> <oid>: <msgId>: <text>`    exit 1 (--strict turns WARN ids into errors)
+//           `warning in <type> <oid>: <msgId>: <text>`  exit 0 (INFO ids stay warnings even under --strict:
+//                                                        badFilemode, missingTaggerEntry, gitmodulesParse)
+//           `error: <text>`, `fatal: <text>`            (a damaged object file, a bad argument)
+//   stdout  `broken link from <type> <oid>` + an indented `to <type> <oid>` line, `missing <type> <oid>`  exit 2
+//           `dangling <type> <oid>`                     exit 0 (silenced by --no-dangling)
+// `notice:` lines (unborn HEAD, no refs) are the only output that says nothing about an object. A continuation line
+// (leading whitespace) is folded into the line before it. --connectivity-only skips every format check (a
+// duplicate-entry tree passes it with exit 0), so it is refused here.
+export function fsck(cwd, args = []) {
+  if (args.includes('--connectivity-only')) throw new Error('fsck --connectivity-only checks no object format; it is not an oracle');
+  const r = spawnSync('git', ['fsck', '--strict', ...args], { cwd, encoding: 'utf8', maxBuffer: 1 << 28 });
+  if (r.error) throw r.error;
+  const lines = [];
+  for (const l of `${r.stdout}\n${r.stderr}`.split('\n')) {
+    if (!l.trim() || l.startsWith('notice:')) continue;
+    if (/^\s/.test(l) && lines.length) lines[lines.length - 1] += ` ${l.trim()}`; else lines.push(l.trim());
+  }
+  return { status: r.status, lines };
+}
+// Every problem in the store: [] iff fsck --strict exits 0 and prints nothing but notices. Assert it with
+// `assert.deepEqual(fsckProblems(bare), [])`. `dangling: true` keeps dangling objects as problems.
+export function fsckProblems(cwd, { dangling = false, args = [] } = {}) {
+  const { status, lines } = fsck(cwd, [...(dangling ? [] : ['--no-dangling']), ...args]);
+  return status === 0 && !lines.length ? [] : [...lines, ...(status !== 0 ? [`(git fsck exit ${status})`] : [])];
+}
+// The problems git reports about one object, in a store that may hold other (bad) objects on purpose. The oid must be
+// full: an abbreviation can match another object's line. Exit bits beyond 1 (object) and 2 (connectivity) are a
+// store or git failure no line can be pinned to, so they throw.
+export function fsckProblemsOf(cwd, oid) {
+  if (!/^[0-9a-f]{40}$/.test(oid)) throw new Error(`fsckProblemsOf needs a full oid, got ${JSON.stringify(oid)}`);
+  const { status, lines } = fsck(cwd, ['--no-dangling']);
+  if (status === null || (status & ~3) !== 0) throw new Error(`git fsck failed (exit ${status}): ${lines.join(' | ')}`);
+  return lines.filter(l => l.includes(oid));
+}
 
 export function startGitServer(root, extraEnv = {}) {
   const server = http.createServer((req, res) => {

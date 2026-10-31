@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { editFile, buildCommitObjects, withCommitData } from '../src/edit.js';
 import { generateSigner, signCommit, withGpgsig, armor } from '../src/sign.js';
 import { encodeCommit, hashObject, parseCommit } from '../src/objects.js';
@@ -53,9 +53,10 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
   // 4. tamper: same signature over a different message must fail
   const bad = withGpgsig(encodeCommit({ ...parseCommit(new TextEncoder().encode(payload)), author: parseCommit(new TextEncoder().encode(payload)).author, committer: parseCommit(new TextEncoder().encode(payload)).committer, message: 'tampered\n' }), sigText);
   const badOid = execFileSync('git', ['-C', bare, 'hash-object', '-t', 'commit', '-w', '--stdin'], { input: bad, encoding: 'utf8' }).trim();
-  assert.equal(verifyCommit(badOid).ok, false);
+  const tampered = verifyCommit(badOid);
+  assert.equal(tampered.ok, false); assert.match(tampered.out, /incorrect signature/, 'rejected for the signature, not for some other reason');
   // 5. fsck is clean with the signed commit in history
-  assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+  assert.deepEqual(fsckProblems(bare), []);
   assert.equal(git(bare, ['cat-file', '-p', 'main:f.txt']), 'hello SIGNED\n');
 });
 
