@@ -45,6 +45,12 @@ export type Detail = {
 // `unknown` is the identity of `&`: a code without a payload adds nothing to its member.
 type DetailOf<C extends Code> = C extends keyof Detail ? Detail[C] : unknown;
 
+// Why a commit id is not_found (#112). `absent`: upload-pack said the oid is not its ref. `not_commit`: the object
+// arrived and it is a tree, blob, or tag. Every other failure keeps its own code (a corrupt pack stays pack_corrupt).
+export type CommitMiss =
+  | { readonly kind: 'absent'; readonly oid: string }
+  | { readonly kind: 'not_commit'; readonly oid: string; readonly type: 'tree' | 'blob' | 'tag' };
+
 // Optional context any error may carry: what was checked, the offending path, the underlying cause (a platform
 // error, or another PlyError for `ambiguous`), and the code an `ambiguous` replaced. Unconverted modules attach
 // more ad-hoc fields to thrown errors; they are not part of the typed surface until their module converts.
@@ -65,11 +71,14 @@ export type Extra = {
   readonly hookOutput?: string;
   // receivecaps.ts: the capabilities the server advertised, beside an `unsupported` push
   readonly caps?: readonly string[];
+  // fetchCommit's not_found (#112). Absent on every other not_found (a missing ref, a missing path).
+  readonly miss?: CommitMiss;
   // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
   // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts takeResult), so more bytes may complete it.
+  // 'not_our_ref': upload-pack's ERR or band 3 said the wanted oid is not its ref (v2Step). Any other remote_error has none.
   readonly reason?: Reason;
 };
-export type Reason = 'short_read';
+export type Reason = 'short_read' | 'not_our_ref';
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
 // Error instance carrying its fields (a stack for whoever logs it, and the exact shape today's thrown errors have, so
@@ -84,6 +93,8 @@ type Payload<C extends Code> = unknown extends DetailOf<C> ? [extra?: Extra] : [
 
 // `in`, as before: RETRY's keys are the codes (inherited names such as 'toString' also pass, as they always have).
 export const isPlyCode = (code: unknown): code is Code => typeof code === 'string' && code in RETRY;
+// A PlyError is the Error plyError builds. A thrown number, a string, or an Error with no code is not one.
+export const isPlyError = (e: unknown): e is PlyError => e instanceof Error && 'code' in e && isPlyCode(e.code);
 // A thrown value or a caller's object, read loosely: a missing field is undefined, and null/undefined read as nothing.
 type Loose = { readonly code?: unknown; readonly message?: unknown } | null | undefined;
 

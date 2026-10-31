@@ -13,7 +13,7 @@
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
 // or the server sends a different number of bytes than it declared: a consumer that saw `done` saw the right bytes.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { thrown as fail, isPlyCode } from './errors.js';
+import { thrown as fail, isPlyCode, orThrow } from './errors.js';
 import { operation } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -29,7 +29,8 @@ import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCode, thrownMessage, thrownMessageMatches } from './boundary.js';
+import { thrownCode, thrownMessage } from './boundary.js';
+import { fetchCommit, type FetchedCommit, type CommitMiss } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
@@ -75,16 +76,7 @@ export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolve
   throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${typeof ref === 'string' ? ref : ''} not found`);
 }
 
-// Effect: the commit object alone (tree:0, deepen 1). A bare oid that is not a commit (or not on the server) is the
-// caller's not_found, not a corrupt pack.
-async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
-  const c = await fetchObject(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
-    if (thrownCode(e) === 'pack_corrupt' && thrownMessageMatches(e, /expected commit/)) throw fail('not_found', `${commit} is not a commit`);
-    if (thrownCode(e) === 'remote_error' && thrownMessageMatches(e, /not our ref/)) throw fail('not_found', `commit ${commit} not found on the remote`);
-    throw e;
-  });
-  return c.data;
-}
+export { fetchCommit, type FetchedCommit, type CommitMiss };
 
 // An ident for JSON. `time` is ISO-8601 UTC, `epoch` the raw seconds, `tz` the offset as written (+0530).
 export type IdentView = { readonly name: string; readonly email: string; readonly time: string | null; readonly epoch: number | null; readonly tz: string };
@@ -123,7 +115,7 @@ export async function readCommit(url: string, { ref = null }: { readonly ref?: R
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
   return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
-    const view = commitView(await fetchCommit(t, commit), t.limits);
+    const view = commitView(orThrow(await fetchCommit(t, commit)).data, t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
   });
 }
@@ -131,7 +123,7 @@ export async function readCommit(url: string, { ref = null }: { readonly ref?: R
 // Effect: walk `comps` from the commit's root tree. Returns { tree, entry } where entry is the last
 // component's tree entry (null for the root: comps = []).
 async function walk(t: Transport, root: Span, tracer: Tracer, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<{ readonly tree: string; readonly entry: TreeEntry | null }> {
-  const info: { readonly tree: string } = parseCommit(await fetchCommit(t, commit), limits);
+  const info: { readonly tree: string } = parseCommit(orThrow(await fetchCommit(t, commit)).data, limits);
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.tree });
   let treeOid = info.tree;
   let entry: TreeEntry | null = null;

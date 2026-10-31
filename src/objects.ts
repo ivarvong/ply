@@ -29,6 +29,14 @@ export const TYPE_ID: {
   readonly commit: typeof OBJ_COMMIT; readonly tree: typeof OBJ_TREE; readonly blob: typeof OBJ_BLOB; readonly tag: typeof OBJ_TAG;
 } = Object.freeze({ commit: OBJ_COMMIT, tree: OBJ_TREE, blob: OBJ_BLOB, tag: OBJ_TAG });
 
+// A pack type that is an object and not a commit. A commit, a delta, or an unknown type id is null.
+export function nonCommitType(type: number): 'tree' | 'blob' | 'tag' | null {
+  if (type === TYPE.TREE) return 'tree';
+  if (type === TYPE.BLOB) return 'blob';
+  if (type === TYPE.TAG) return 'tag';
+  return null;
+}
+
 export const objectHeader = (typeName: string, len: number): Uint8Array => te.encode(`${typeName} ${len}\0`);
 
 export function hashObject(typeName: string, data: Uint8Array): string {

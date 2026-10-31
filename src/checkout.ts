@@ -35,7 +35,7 @@ import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { resolveCommit, openBlob } from './read.js';
 import type { ReadOptions, RefSpec } from './read.js';
-import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME } from './objects.js';
+import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePath } from './validate.js';
@@ -45,7 +45,7 @@ import type { Span, Tracer } from './otel.js';
 import type { FetchPackResult as FetchedPack } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCode, thrownMessageMatches } from './boundary.js';
+import { thrownCode, thrownReason } from './boundary.js';
 import type { TypeNames } from './boundary.js';
 
 type PackObjects = NonNullable<FetchedPack['objects']>;
@@ -100,13 +100,16 @@ type Trees = { readonly root: string; readonly tree: (oid: string) => readonly T
 // parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Trees> {
   const r: FetchedPack = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }).catch((e: unknown) => {
-    if (thrownCode(e) === 'remote_error' && thrownMessageMatches(e, /not our ref/)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'absent', oid: commit } });
     throw e;
   });
   const objects: PackObjects = r.objects ?? new Map();
   const c = objects.get(commit);
   if (!c) throw fail('pack_corrupt', `commit ${commit} not in the blob:none pack (${objects.size} objects)`);
-  if (c.type !== TYPE.COMMIT) throw fail('not_found', `${commit} is not a commit`);
+  if (c.type !== TYPE.COMMIT) {
+    const name = nonCommitType(c.type);
+    throw fail('not_found', `${commit} is not a commit`, name === null ? undefined : { miss: { kind: 'not_commit', oid: commit, type: name } });
+  }
   const tree = (oid: string): readonly TreeEntry[] => {
     const o = objects.get(oid);
     if (o?.type !== TYPE.TREE) throw fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
