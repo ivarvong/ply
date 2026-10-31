@@ -9,7 +9,7 @@
 import { fail } from './errors.js';
 import { SshClient, hostKeyFromLine } from './ssh.js';
 import { pktInit, pktStep, FLUSH } from './pktline.js';
-import { td, te, concat } from './bytes.js';
+import { td, te, concat, decodeStrict } from './bytes.js';
 import { scrubber, secretUser, REDACTED } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
@@ -21,7 +21,6 @@ import { wrapNet } from './transport.js';
 // an invalid escape (`%ZZ`), kept too. The scp-like form is not decoded (git: `iv%40ar@host:p` logs in as `iv%40ar`).
 // SSH strings are UTF-8 (RFC 4252), so bytes that are not are refused.
 const SSH_URL = 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path';
-const strict = new TextDecoder('utf-8', { fatal: true });
 const sshDecode = s => {
   if (!s.includes('%')) return s;
   const parts = s.split(/(%[0-9a-f]{2})/i);
@@ -30,7 +29,7 @@ const sshDecode = s => {
     if (/^%[0-9a-f]{2}$/i.test(p) && p !== '%00') bytes.push(parseInt(p.slice(1), 16));
     else for (const b of te.encode(p)) bytes.push(b);
   }
-  try { return strict.decode(Uint8Array.from(bytes)); } catch { throw fail('bad_request', 'invalid ssh url: a percent-escape is not UTF-8', { what: 'ssh url' }); }
+  try { return decodeStrict(Uint8Array.from(bytes)); } catch { throw fail('bad_request', 'invalid ssh url: a percent-escape is not UTF-8', { what: 'ssh url' }); }
 };
 // A `:` in the userinfo is a password. ply authenticates by public key only, and git hands `user:pass@host` to ssh,
 // which logs in as `user:pass`: the password goes to the server as the login name (measured, every form: `ivar:@`,

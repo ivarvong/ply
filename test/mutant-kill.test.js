@@ -1609,7 +1609,7 @@ function graphServer(edges) {
     async *frames(service, body) {
       // the pkt-lines up to the first flush (a receive-pack body carries the raw pack after it)
       const lines = []; for (let p = 0; p + 4 <= body.length;) { const n = parseInt(td.decode(body.subarray(p, p + 4)), 16); if (n === 0) break; if (n > 1) lines.push(td.decode(body.subarray(p + 4, p + n)).replace(/\n$/, '')); p += Math.max(n, 4); }
-      if (service === 'git-receive-pack') { yield sideband(pkt('unpack ok\n')); for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield sideband(pkt(`ok ${m[2]}\n`)); } } yield { kind: 'flush' }; return; }
+      if (service === 'git-receive-pack') { yield sideband(pkt('unpack ok\n')); for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield sideband(pkt(`ok ${m[2]}\n`)); } } yield sideband(FLUSH); yield { kind: 'flush' }; return; } // git's shape: the report's flush inside band 1, then the outer flush (I36)
       if (lines[0] === 'command=ls-refs') { const prefixes = lines.filter(l => l.startsWith('ref-prefix ')).map(l => l.slice(11)); for (const [ref, o] of t.refs) if (prefixes.some(p => ref.startsWith(p))) yield line(`${o} ${ref}\n`); yield { kind: 'flush' }; return; }
       const want = lines.find(l => l.startsWith('want '))?.slice(5), deepen = +(lines.find(l => l.startsWith('deepen '))?.slice(7) ?? 0);
       const filter = lines.find(l => l.startsWith('filter '))?.slice(7) ?? null;

@@ -2,7 +2,7 @@
 // is the one effect. Any failure after the body is on the wire is 'ambiguous' (the ref may have moved).
 import { fail, ambiguousAfterPush } from './errors.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
-import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
+import { td, concat, decodeBytes, decodeChunk, decodeStrict } from './bytes.js';
 import { parseSideband } from './fetch.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS } from './format.js';
 
@@ -112,7 +112,6 @@ export const GIT_UNPACK_ERRORS = Object.freeze([
   'index-pack abnormal exit',
 ]);
 const UNPACKER_ERROR = 'unpacker error';
-const strict = new TextDecoder('utf-8', { fatal: true });
 const malformed = why => ({ tag: 'malformed', why });
 // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrayDeclaration: classifyReport calls it on "ng <rest>" only; with no space or a leading one, every split names no commanded ref
 const splitOnce = (s, sep) => { const i = s.indexOf(sep); return i < 0 ? [s] : [s.slice(0, i), s.slice(i + sep.length)]; };
@@ -121,7 +120,7 @@ export function classifyReport(payloads, commands) {
   const lines = [];
   for (const p of payloads) {
     let l;
-    try { l = strict.decode(p); } catch { return malformed('a line is not UTF-8'); }
+    try { l = decodeStrict(p); } catch { return malformed('a line is not UTF-8'); }
     const body = l.slice(0, l.length - 1);
     if (!l.endsWith('\n') || body.includes('\n')) return malformed('a line is not one LF-terminated line');
     lines.push(body);
