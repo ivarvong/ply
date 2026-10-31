@@ -16,9 +16,9 @@ export { lsRefsBody, lsRefs } from './lsrefs.js';
 export { fetchBody, v2Init, v2Step, v2Attrs, packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 export { fetchPack, packAttrs } from './fetchpack.js';
 export { negotiate } from './negotiate.js';
-export { ZERO_OID, pushBody, parseReportStatus, checkReport, push } from './push.js';
-export { receiveCaps, pushWithOptions } from './receivecaps.js';
-export { discover } from './discover.js';
+export { ZERO_OID, pushBody, parseReportStatus, classifyReport, decideOutcome, push } from './push.js';
+export { receiveCaps, pushCapsProblem, pushWithOptions } from './receivecaps.js';
+export { discover, parseCapabilitiesV2, capLookup } from './discover.js';
 
 export class GitHttp {
   constructor(url, opts = {}) { this.t = createTransport(url, opts); }
@@ -31,7 +31,7 @@ export class GitHttp {
   fetchObject(opts) { return fetchObject(this.t, opts); }
   fetchPack(opts, extra) { return fetchPack(this.t, opts, extra); }
   negotiate(opts, extra) { return negotiate(this.t, opts, extra); }
-  push(opts) { return opts.pushOptions?.length ? pushWithOptions(this.t, opts) : push(this.t, opts); }
+  push(opts) { return opts.atomic || opts.pushOptions?.length ? pushWithOptions(this.t, opts) : push(this.t, opts); }
   receiveCaps() { return receiveCaps(this.t); }
   discover() { return discover(this.t); }
 }

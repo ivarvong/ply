@@ -125,6 +125,38 @@ forAll('single-object pack stream: chunking-invariant, trailer verified, zlib by
   assert.throws(() => { let s = spInit(); const r = spStep(s, bad); s = r.state; spFinish(s); });
 }, Math.min(60, N));
 
+// The zlib-length bound in spStep (zlibBound(size), format.js) is a pure function of the bytes seen: the same stream, split
+// into 1-byte chunks, 64 KiB chunks or at random, either finishes with the same state or throws the same error (code and
+// message carry no chunk-dependent count). The stream is k non-final empty stored blocks (5 bytes in, 0 bytes out) before a
+// real stored block: at the bound it inflates (node:zlib agrees on the bytes), one block past it is refused.
+forAll('single-object pack stream: the zlib-length bound is chunking-invariant and exact (I10)', rng => {
+  const data = rng.bytes(rng.int(0, 600));
+  const bound = data.length + Math.ceil(data.length / 8) + Math.ceil(data.length / 64) + 13;
+  const storedBlock = (d, final) => concat([Uint8Array.of(final ? 1 : 0, d.length & 0xff, d.length >> 8, ~d.length & 0xff, (~d.length >> 8) & 0xff), d]);
+  const adler = (() => { let a = 1, b = 0; for (const x of data) { a = (a + x) % 65521; b = (b + a) % 65521; } return Uint8Array.of(b >>> 8, b & 0xff, a >>> 8, a & 0xff); })();
+  const fixed = 2 + 5 + data.length + 4;                       // header, the final stored block, Adler-32
+  const room = Math.floor((bound - fixed) / 5);                // empty stored blocks that still fit under the bound (0 for an empty blob)
+  const streamOf = k => concat([Uint8Array.of(0x78, 0x01), ...Array.from({ length: k }, () => storedBlock(new Uint8Array(0), false)), storedBlock(data, true), adler]);
+  const packOf = z => { const body = concat([Uint8Array.of(0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1), encodeObjHeader(3, data.length), z]); return concat([body, new Sha1().update(body).digest()]); };
+  const run = (pack, chunks) => {
+    let st = spInit(); const z = [];
+    try { for (const c of chunks) { const r = spStep(st, c); st = r.state; z.push(...r.zlib); } st = spFinish(st); }
+    catch (e) { return { threw: `${e.code}: ${e.message}` }; }
+    return { threw: null, zlib: concat(z), size: st.size, zlibBytes: st.zlibBytes };
+  };
+  // whole (what a 64 KiB chunk delivers for a pack this size), 1-byte, random, and two halves
+  const splits = pack => [[pack], Array.from(pack, b => Uint8Array.of(b)), [...splitRandom(rng, pack, { maxChunks: 40 })], [pack.subarray(0, pack.length >> 1), pack.subarray(pack.length >> 1)]];
+  const under = packOf(streamOf(room)), over = packOf(streamOf(room + 1));
+  assert.ok(under.length - 32 - encodeObjHeader(3, data.length).length <= bound && over.length - 32 - encodeObjHeader(3, data.length).length > bound);
+  const okRuns = splits(under).map(c => run(under, c));
+  for (const r of okRuns) { assert.equal(r.threw, null); assert.equal(r.size, data.length); assert.ok(r.zlibBytes <= bound); assert.deepEqual([...zlib.inflateSync(r.zlib)], [...data]); assert.deepEqual([...inflate(r.zlib, 0, { expectedSize: data.length }).out], [...data]); }
+  const badRuns = splits(over).map(c => run(over, c));
+  for (const r of badRuns) assert.equal(r.threw, `pack_corrupt: pack: zlib stream longer than its declared size allows (${data.length}-byte object, ${bound}-byte bound)`);
+  // the buffered inflate agrees with the streamed parser on both sides of the bound
+  assert.equal(inflate(streamOf(room), 0, { expectedSize: data.length }).consumed, under.length - 32 - encodeObjHeader(3, data.length).length);
+  assert.throws(() => inflate(streamOf(room + 1), 0, { expectedSize: data.length }), e => e.code === 'pack_corrupt' && /zlib stream longer than its declared size allows/.test(e.message));
+}, Math.min(60, N));
+
 forAll('pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-delta + thin)', async rng => {
   const base = genBlob(rng, rng.pick(['tiny', 'text', 'random']));
   const target = concat([base.subarray(0, base.length >> 1), rng.bytes(rng.int(0, 200)), base.subarray(base.length >> 1)]);

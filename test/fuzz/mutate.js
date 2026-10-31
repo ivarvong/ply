@@ -2,6 +2,7 @@
 // Protocol-aware ones locate pkt-line length fields, sideband band bytes and pack object headers so the
 // fuzzer reaches parser branches that random bit flips rarely hit.
 import { concat } from '../../src/bytes.js';
+import { encodeObjHeader } from '../../src/pack.js';
 
 const te = new TextEncoder();
 const splice = (b, at, del, ins = new Uint8Array(0)) => concat([b.subarray(0, at), ins, b.subarray(at + del)]);
@@ -42,6 +43,12 @@ export const MUTATORS = {
   zlib_bomb: (rng, b) => inPack(b, () => { // 1 object claiming 1 MiB of zeros, honest zlib (so adler passes) but declared size differs from header
     const hdr = new Uint8Array(12); hdr.set([0x50, 0x41, 0x43, 0x4b]); new DataView(hdr.buffer).setUint32(4, 2); new DataView(hdr.buffer).setUint32(8, 1);
     return concat([hdr, Uint8Array.from([0x30 | 0x80 | 0x0f, 0xff, 0x3f]), ZEROS_1M]); }),
+  zlib_endless_stored: (rng, b) => inPack(b, () => { // a valid blob header, then non-final empty stored blocks (5 bytes in, 0 bytes out), usually far past zlibBound(size)
+    const hdr = new Uint8Array(12); hdr.set([0x50, 0x41, 0x43, 0x4b]); new DataView(hdr.buffer).setUint32(4, 2); new DataView(hdr.buffer).setUint32(8, 1);
+    const size = rng.pick([0, 10, 1000, 70000]);
+    const n = rng.pick([1, 4, 100, rng.int(1000, 60000)]);
+    const blocks = new Uint8Array(5 * n); for (let i = 0; i < blocks.length; i += 5) blocks.set([0, 0, 0, 0xff, 0xff], i);
+    return concat([hdr, encodeObjHeader(3, size), Uint8Array.of(0x78, 0x01), blocks, new Uint8Array(rng.bool() ? 20 : 0)]); }),
 };
 export const MUTATOR_NAMES = Object.keys(MUTATORS);
 

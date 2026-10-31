@@ -2,7 +2,7 @@
 // fixture lives in a bare repo behind `git http-backend`; the clone and ply's checkout must be `diff -r` identical, and
 // a walk of both compares every entry's type, permission bits, bytes and symlink target. Round trips are counted at
 // the fetch boundary and compared with the per-file baseline (readCommit → listTree per directory → readFile per blob,
-// examples/checkout-tree.mjs). Also: a blob:none-only host (Artifacts), a host that refuses many wants, lying servers
+// the first examples/checkout-tree.mjs, before checkoutDir). Also: a blob:none-only host (Artifacts), a host that refuses many wants, lying servers
 // (wrong blob, unwanted object, wrong commit, duplicate tree entry), `path`, the limits, and the writer's path rules.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -102,7 +102,7 @@ test('checkoutDir == git clone: diff -r and modes; 3 round trips against the per
   const trips = t.spans().filter(s => s.attrs['git.request.bytes'] != null).length;
   assert.equal(trips, 3);
 
-  // the baseline (examples/checkout-tree.mjs): readCommit once, listTree per directory, readFile per blob, by commit oid
+  // the baseline (what the first examples/checkout-tree.mjs did): readCommit once, listTree per directory, readFile per blob, by commit oid
   const base = counting(), opts = { tracer: new Tracer(), fetchImpl: base.f, cache: new Map(), quirks: {} };
   const { oid } = await readCommit(R.url, { ref: 'main' }, opts);
   let read = 0;
@@ -217,32 +217,54 @@ test('a tree naming one entry twice (a symlink `a` beside a directory `a`) is re
   assert.deepEqual(readdirSync(dir), []);
 });
 
-test('limits: entries walked, depth, the tree pack, and blob batches split down to streams under maxPackBytes', async () => {
+test('limits: entries walked, depth, the tree pack, blob batches split under maxPackBytes, a single blob over it refused', async () => {
   // the tree pack is 15 objects (commit + 14 trees); walking it visits 36 entries (22 files + 13 trees + 1 gitlink)
   await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), limits: withLimits({ maxPackObjects: 20 }), batch: 5 }), e => e.code === 'limit_exceeded' && e.what === 'checkout entries' && e.got === 21);
   await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), limits: withLimits({ maxPathDepth: 4 }) }), e => e.code === 'limit_exceeded' && e.what === 'path depth');
   await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), limits: withLimits({ maxPackBytes: 512 }) }), e => e.code === 'limit_exceeded' && e.what === 'pack bytes');
   for (const batch of [0, 1.5, 'x', 200_001]) await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), batch }), e => e.code === 'bad_request' && e.what === 'batch');
-  // a cap the tree pack fits under but the blob batch (3 MiB big.bin, 58 KiB deflated) does not: split, the big blob streams alone
-  const max = 16 * 1024, t = traced(), dir = fresh();
+  // a cap the tree pack fits under but the whole blob batch does not, by one byte: split in half, both halves refetched
+  // under the cap and buffered (every fetch, streamed or buffered, stays under maxPackBytes)
+  const t0 = traced();
+  await checkoutDir(R.url, { dir: fresh() }, { tracer: t0.tracer });
+  const whole = t0.spans().find(s => s.name === 'git.upload-pack fetch' && s.attrs['git.fetch.filter'] === '').attrs['git.pack.bytes'];
+  const max = whole - 1, t = traced(), dir = fresh();
   await checkoutDir(R.url, { dir }, { tracer: t.tracer, limits: withLimits({ maxPackBytes: max }) });
   sameTree(clone(), dir);
   const blobs = t.spans().find(s => s.name === 'git.checkout.blobs').attrs;
-  assert.ok(blobs['git.checkout.blobs.splits'] >= 1, 'the batch was split'); assert.ok(blobs['git.checkout.blobs.streamed'] >= 1, 'big.bin streamed');
+  assert.equal(blobs['git.checkout.blobs.splits'], 1, 'the batch was split once'); assert.equal(blobs['git.checkout.blobs.fetches'], 2); assert.equal(blobs['git.checkout.blobs.streamed'], 0);
   for (const s of t.spans().filter(x => x.name === 'git.upload-pack fetch' && x.attrs['git.pack.bytes'] != null)) assert.ok(s.attrs['git.pack.bytes'] <= max, `a buffered pack of ${s.attrs['git.pack.bytes']} B`);
-  const read = t.spans().find(s => s.name === 'git.read.blob' && s.attrs['git.read.blob.size'] === 3 << 20);
+  // a cap under big.bin's own pack (3 MiB, 58 KiB deflated): the batch splits down to big.bin alone, whose stream is then
+  // over the cap too — limit_exceeded, never a stream read past maxPackBytes (before the endless-body fix it streamed)
+  const t2 = traced(), dir2 = fresh();
+  const err = await checkoutDir(R.url, { dir: dir2 }, { tracer: t2.tracer, limits: withLimits({ maxPackBytes: 16 * 1024 }) }).catch(e => e);
+  assert.equal(err.code, 'limit_exceeded', err.message); assert.equal(err.what, 'pack bytes'); assert.equal(err.max, 16 * 1024);
+  const b2 = t2.spans().find(s => s.name === 'git.checkout.blobs').attrs;
+  // "fetched alone" is read from openBlob's own span, not `streamed`: that counter moves only once openBlob returns, and
+  // whether the cap trips while it reads the object header (one network chunk past 16 KiB) or later in the pump depends
+  // on chunk sizes (CI: the former). Either way failHere ends a git.read.blob span as limit_exceeded.
+  assert.ok(b2['git.checkout.blobs.splits'] >= 1, 'the batch was split');
+  assert.ok(t2.spans().some(s => s.name === 'git.read.blob' && s.attrs['git.read.blob.outcome'] === 'limit_exceeded'), 'big.bin was fetched alone');
+  assert.ok(!existsSync(join(dir2, 'big.bin')), 'the refused blob left no file');
+  // a single blob under the cap still streams: batch 1 with the cap just above big.bin's pack
+  const t3 = traced(), dir3 = fresh();
+  await checkoutDir(R.url, { dir: dir3 }, { tracer: t3.tracer, limits: withLimits({ maxPackBytes: 64 * 1024 }), batch: 1 });
+  sameTree(clone(), dir3);
+  const read = t3.spans().find(s => s.name === 'git.read.blob' && s.attrs['git.read.blob.size'] === 3 << 20);
   assert.equal(read.attrs['git.read.blob.verified'], true);
 });
 
 test('the pure steps: canonMode is git\'s canon_mode; treeFiles bounds a tree reused at many paths', () => {
   assert.equal(canonMode('100644'), '100644'); assert.equal(canonMode('100664'), '100644'); assert.equal(canonMode('100755'), '100755'); assert.equal(canonMode('100775'), '100755');
   assert.equal(canonMode('120000'), '120000'); assert.equal(canonMode('160000'), '160000'); assert.equal(canonMode('40000'), '40000');
-  for (const m of ['140000', '100', '1006440', '60000']) assert.equal(canonMode(m), null, m);
+  for (const m of ['140000', '100', '1006440', '60000']) assert.equal(canonMode(m), '160000', m); // git ls-tree: every unknown type is a gitlink
+  for (const m of ['0100644', '10x644', '']) assert.equal(canonMode(m), null, m);
   const oid = i => String(i).padStart(40, '0');
   // tree k names tree k+1 twice: 2^20 paths from 21 objects
   const trees = new Map(Array.from({ length: 21 }, (_, k) => [oid(k), k === 20 ? [{ name: 'f', mode: '100644', oid: oid(99) }] : [{ name: 'l', mode: '40000', oid: oid(k + 1) }, { name: 'r', mode: '40000', oid: oid(k + 1) }]]));
   assert.throws(() => treeFiles(o => trees.get(o), oid(0), { limits: withLimits({ maxPackObjects: 1000 }) }), e => e.code === 'limit_exceeded' && e.what === 'checkout entries' && e.got === 1001);
-  assert.throws(() => treeFiles(() => [{ name: 'x', mode: '140000', oid: oid(1) }], oid(0)), e => e.code === 'pack_corrupt' && /cannot check out/.test(e.message));
+  assert.throws(() => treeFiles(() => [{ name: 'x', mode: '0100644', oid: oid(1) }], oid(0)), e => e.code === 'pack_corrupt' && /cannot check out/.test(e.message));
+  assert.deepEqual(treeFiles(() => [{ name: 'x', mode: '140000', oid: oid(1) }], oid(0)), [{ path: 'x', mode: '160000', oid: oid(1) }]);
   assert.deepEqual(treeFiles(o => trees.get(o) ?? [], oid(19)).map(e => e.path), ['l/f', 'r/f']);
 });
 
@@ -271,4 +293,51 @@ test('writeFiles refuses traversal, .git, absolute paths, a non-empty dir, and w
   const { c, f } = counting();
   await assert.rejects(checkoutDir(R.url, { dir: full }, { tracer: new Tracer(), fetchImpl: f }), e => e.code === 'bad_request' && e.what === 'dir');
   assert.equal(c.requests, 0);
+});
+
+// Hole #4 (space/fsck-tree): modes git only warns about are checked out as git checks them out (canon_mode: 100664 and
+// 100600 are 100644, 100700 is 100755, 7100644 is 100644, 40755 is a directory, a type git does not know is a gitlink),
+// and a tree git refuses to check out (a .gitmodules symlink) is refused before anything is written.
+test('odd modes check out as git clone checks them out; a .gitmodules symlink is refused as git refuses it', async () => {
+  const lit = (bare, type, data) => gitBuf(bare, ['hash-object', '-t', type, '-w', '--stdin', '--literally'], data).toString().trim();
+  const entry = (mode, name, oid) => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(oid, 'hex')]);
+  const commit = (bare, tree) => { const c = lit(bare, 'commit', Buffer.from(`tree ${tree}\nauthor A <a@b.c> 1700000000 +0000\ncommitter A <a@b.c> 1700000000 +0000\n\nodd\n`)); git(bare, ['update-ref', 'refs/heads/main', c]); return c; };
+  const bare = makeBareRepo(root, 'odd');
+  const blob = lit(bare, 'blob', Buffer.from('#!/bin/sh\necho odd\n'));
+  const sub = lit(bare, 'tree', entry('100644', 'f', blob));
+  const prev = commit(bare, sub);
+  // tree order: a directory sorts as name + '/'
+  const tree = lit(bare, 'tree', Buffer.concat([
+    entry('100600', 'a600', blob), entry('100664', 'a664', blob), entry('100700', 'a700', blob), entry('7100644', 'a7100644', blob),
+    entry('40755', 'd755', sub), entry('1', 'g1', prev), entry('140000', 'g140000', prev),
+  ]));
+  commit(bare, tree);
+  const want = fresh(); git(root, ['-c', 'transfer.fsckObjects=false', 'clone', '-q', bare, want]);
+  const got = fresh();
+  const r = await checkoutDir(`${srv.url}/odd.git`, { dir: got }, { tracer: new Tracer() });
+  assert.deepEqual(r.entries.map(e => `${e.mode} ${e.path}`), ['100644 a600', '100644 a664', '100755 a700', '100644 a7100644', '100644 d755/f', '160000 g1', '160000 g140000']);
+  assert.equal(sameTree(want, got), 8);
+  // .gitmodules as a symlink: fsck --strict gitmodulesSymlink, and git's checkout refuses the path (verify_path)
+  const bad = makeBareRepo(root, 'gitmodules-link');
+  const target = lit(bad, 'blob', Buffer.from('/etc/passwd'));
+  commit(bad, lit(bad, 'tree', Buffer.concat([entry('120000', '.gitmodules', target), entry('100644', 'a', target)])));
+  const gitDir = fresh();
+  assert.throws(() => git(root, ['-c', 'transfer.fsckObjects=false', 'clone', '-q', bad, gitDir], { stdio: 'pipe' }), /invalid path '\.gitmodules'/);
+  const plyDir = fresh();
+  await assert.rejects(checkoutDir(`${srv.url}/gitmodules-link.git`, { dir: plyDir }, { tracer: new Tracer() }), e => e.code === 'pack_corrupt' && /\.gitmodules is a symbolic link/.test(e.message));
+  assert.deepEqual(readdirSync(plyDir), []);
+});
+
+test('writeFiles on Windows refuses what git for Windows refuses: a backslash (`..\\x` leaves the directory), a stream, a device name', async () => {
+  const s = text => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); } });
+  const one = (...files) => (async function* () { yield* files; })();
+  for (const path of ['..\\escape', 'a\\.git\\hooks\\post-checkout', 'x/.git:stream', 'con', 'd/NUL.txt', 'trailing.', 'a<b']) {
+    const dir = fresh();
+    await assert.rejects(writeFiles(dir, one({ path, mode: '100644', stream: s('x') }), { platform: 'win32' }), e => (e.code === 'unsupported' && e.what === 'checkout path') || (e.code === 'bad_request' && e.what === 'path'), path);
+    assert.deepEqual(readdirSync(dir), [], path);
+  }
+  // on Linux a backslash is a name byte, as git writes it
+  const dir = fresh();
+  await writeFiles(dir, one({ path: 'a\\b', mode: '100644', stream: s('x') }), { platform: 'linux' });
+  assert.deepEqual(readdirSync(dir), ['a\\b']);
 });

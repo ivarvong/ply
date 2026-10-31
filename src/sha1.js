@@ -1,7 +1,7 @@
 // Streaming SHA-1. Needed because crypto.subtle.digest is whole-buffer only,
 // and pack trailers / object ids must be computed over data we never hold at once.
 
-const te = new TextEncoder();
+import { encodeBytes } from './bytes.js';
 
 export class Sha1 {
   constructor() {
@@ -13,7 +13,7 @@ export class Sha1 {
   }
 
   update(data) {
-    if (typeof data === 'string') data = te.encode(data);
+    if (typeof data === 'string') data = encodeBytes(data);
     this.len += data.length;
     let i = 0;
     if (this.bufLen) {

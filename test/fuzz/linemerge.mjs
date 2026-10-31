@@ -78,8 +78,12 @@ for (let i = 0; i < N; i++) {
   if (eq(B, O) || eq(B, T) || eq(O, T)) continue; // trivial: git never runs a content merge
   const cb = commit(B), co = commit(O, cb), ct = commit(T, cb);
   const g = git(['-c', `attr.tree=${co}`, 'merge-tree', '--write-tree', '--name-only', co, ct]);
+  // exit 0 clean, 1 conflicts; anything else is git failing, which must not count as agreeing with a ply conflict
+  if (g.status !== 0 && g.status !== 1) { console.log(`case ${i}: git merge-tree failed (exit ${g.status}): ${g.err}`); process.exit(1); }
   const gitClean = g.status === 0;
-  const gitBytes = gitClean ? git(['cat-file', 'blob', `${g.out.toString().split('\n')[0]}:f.txt`]).out : null;
+  const cat = gitClean ? git(['cat-file', 'blob', `${g.out.toString().split('\n')[0]}:f.txt`]) : null;
+  if (cat && cat.status !== 0) { console.log(`case ${i}: git cat-file failed: ${cat.err}`); process.exit(1); }
+  const gitBytes = cat ? cat.out : null;
   const m = mergeLines(B, O, T, { rediff: REDIFF, driver: DRIVER });
   let v;
   if (m.clean && gitClean) v = eq(m.data, new Uint8Array(gitBytes)) ? 'agree-clean' : 'WRONG';

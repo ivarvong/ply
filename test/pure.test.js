@@ -94,18 +94,25 @@ test('deflate only: a stored-block zlib stream never beats CompressionStream (th
 });
 
 test('scanStep counts every match and keeps the first MATCH_OFFSETS_KEPT offsets; each hit is O(1) (#13)', () => {
+  // CPU time, not wall clock, so load on the box does not count; scaling 16 -> 128 KiB, so a slow machine cancels.
+  // Linear is ~8x (measured 4-7x); the old per-hit offset copy was quadratic (64x and up). A noisy 24-64x is re-measured.
   const run = n => {
     const data = new Uint8Array(n).fill(0x61);
     let st = scanInit({ find: Uint8Array.of(0x61), replace: Uint8Array.of(0x62) });
-    const t0 = performance.now();
+    const t0 = process.cpuUsage();
     for (let o = 0; o < n; o += 16384) st = scanStep(st, data.subarray(o, o + 16384)).state;
-    return { st, ms: performance.now() - t0 };
+    const d = process.cpuUsage(t0);
+    return { st, ms: (d.user + d.system) / 1000 };
   };
-  const { st, ms } = run(128 << 10);
+  run(16 << 10); // warm-up
+  const small = Math.max(Math.min(run(16 << 10).ms, run(16 << 10).ms, run(16 << 10).ms), 0.05);
+  let big = run(128 << 10);
+  for (let k = 0; k < 2 && big.ms >= 24 * small && big.ms < 64 * small; k++) { const r = run(128 << 10); if (r.ms < big.ms) big = r; }
+  assert.ok(big.ms < 24 * small, `128 KiB of matches cost ${big.ms.toFixed(2)} ms CPU, ${(big.ms / small).toFixed(1)}x 16 KiB (${small.toFixed(2)} ms); linear is ~8x`);
+  const { st } = big;
   assert.equal(st.count, 128 << 10);
   assert.equal(st.emitted, 128 << 10);
   assert.deepEqual(st.matches, Array.from({ length: MATCH_OFFSETS_KEPT }, (_, i) => i));
-  assert.ok(ms < 500, `128 KiB of matches took ${ms.toFixed(0)} ms`);
   const two = scanStep(scanInit({ find: Uint8Array.of(1), replace: new Uint8Array(0) }), Uint8Array.of(1, 0, 1)).state;
   assert.equal(two.count, 2);
   assert.deepEqual(two.matches, [0, 2]);
@@ -129,6 +136,26 @@ test('otel: links, event cap, isolate counter, flatten round-trip', () => {
   assert.equal(fb.attrs['ply.isolate.invocation'], fa.attrs['ply.isolate.invocation'] + 1); assert.equal(fb.attrs['ply.isolate.cold'], false);
   const c = t.start('c', { parent: b }); c.end();
   assert.equal(ex.lines.flatMap(flattenLine)[2].attrs['ply.isolate.invocation'], undefined, 'child spans do not count as invocations');
+});
+
+test('otel: a follows span is the root of its own trace, linked both ways while the followed span is open; links are capped', () => {
+  const ex = arrayExporter(); const t = new Tracer({ exporter: ex, maxEvents: 2 });
+  const op = t.start('git.op', { scrub: s => s.replaceAll('SECRET', '[redacted]') });
+  const f = t.start('git.op.stream', { follows: op, attrs: { 'git.op.stream.note': 'SECRET' } });
+  assert.notEqual(f.traceId, op.traceId); assert.equal(f.parentSpanId, undefined);
+  op.end();
+  const late = t.start('git.op.late', { follows: op }); late.end(); // op already exported: no link back
+  t.start('x', { follows: f }); t.start('y', { follows: f }); // f has follows_from + 2 followed_by → the second is dropped
+  f.end();
+  const [fo, fl, ff] = ex.lines.map(l => l.resourceSpans[0].scopeSpans[0].spans[0]);
+  const flat = ex.lines.flatMap(flattenLine);
+  assert.deepEqual(flat[0].links.map(l => [l.spanId, l.attrs['ply.link']]), [[f.spanId, 'followed_by']]);
+  assert.deepEqual(flat[1].links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']]), [[op.traceId, op.spanId, 'follows_from']]);
+  assert.deepEqual(flat[2].links.map(l => l.attrs['ply.link']), ['follows_from', 'followed_by']);
+  assert.deepEqual([fo.droppedLinksCount, fl.droppedLinksCount, ff.droppedLinksCount], [0, 0, 1]);
+  assert.equal(flat[2].attrs['git.op.stream.note'], '[redacted]', 'a follower inherits the scrub of the span it follows');
+  assert.equal(flat[2].attrs['ply.isolate.invocation'], undefined, 'a follower is not an invocation');
+  assert.throws(() => t.start('z', { parent: op, follows: op }), TypeError);
 });
 
 test('inflate: an incomplete huffman table with a hole is rejected (invalid huffman code), and zlib agrees', () => {
@@ -191,7 +218,7 @@ test('span naming convention: every span and attribute key in a trace follows th
   //                git.<op>.<phase>         operation children (git.edit.tree, git.edit.blob)
   //                ssh.<phase>              transport phases (ssh.connect, ssh.userauth, ssh.exec)
   //   attr keys:   dotted lowercase ascii with underscores, under one of: git. http. ssh. url. server. mem. error. ply. exception.
-  //   outcomes:    every root span has <name>.outcome
+  //   outcomes:    every root span has <name>.outcome (operation roots, and the spans that follow them: README "Span lifetimes")
   const { startGitServer, makeBareRepo, tmpRoot, commitFiles, git } = await import('./server.js');
   const { editFile } = await import('../src/edit.js');
   const { join } = await import('node:path'); const { mkdirSync } = await import('node:fs');
@@ -221,7 +248,9 @@ test('error taxonomy: runtime table and documentation agree; fail refuses unknow
   assert.throws(() => fail('not_a_code', 'x'), /unknown error code/);
   assert.equal(retryPolicy(fail('cas_conflict', 'x')), 'fresh'); assert.equal(retryPolicy(fail('ambiguous', 'x')), 'read'); assert.equal(retryPolicy({ code: 'nope' }), 'no');
   assert.equal(ambiguousAfterPush(fail('network', 'dropped')).code, 'ambiguous'); assert.equal(ambiguousAfterPush(fail('network', 'dropped')).original, 'network');
-  assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).code, 'limit_exceeded', 'our own pre-send refusals keep their code');
+  // a limit hit while reading the report is after the send: the ref may have moved (pre-send refusals never reach it)
+  assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).code, 'ambiguous'); assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).original, 'limit_exceeded');
+  const amb = fail('ambiguous', 'y'); assert.equal(ambiguousAfterPush(amb), amb);
 });
 
 test('error taxonomy: every fail(\'code\') literal in src/ is in the table (static)', async () => {

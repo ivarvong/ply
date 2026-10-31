@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { take, indexOfBytes, bytesOf, te, td, concat } from '../src/bytes.js';
+import { take, indexOfBytes, bytesOf, te, td, concat, decodeBytes, encodeBytes, decodeChunk } from '../src/bytes.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, assertFetched, encodeTree, encodeCommit, encodeTag, TYPE, hashObject, ident,
 } from '../src/objects.js';
@@ -16,8 +16,11 @@ import {
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
+import { bestBases, mergeBase } from '../src/merge.js';
+import { rebaseBranch } from '../src/rebase.js';
+import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
-import { parseReportStatus, checkReport, push, ZERO_OID } from '../src/push.js';
+import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
@@ -29,7 +32,7 @@ import { negotiate } from '../src/negotiate.js';
 import {
   OID_BYTES, OID_HEX_CHARS, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
-  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS,
+  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
 
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
@@ -83,67 +86,187 @@ test('parseTree error strings and the boundaries next to them', () => {
     ['100644 ..\0', 'tree: bad name'],
     ['100644 .git\0', 'tree: bad name'],
     ['100644 .GIT\0', 'tree: bad name'],
+    ['100644 .git:x\0', 'tree: bad name'],
+    ['100644 a\\.git\0', 'tree: bad name'],
+    [`100644 ${'l'.repeat(4097)}\0`, 'tree: large pathname'],
+    ['120000 .gitmodules\0', 'tree: .gitmodules is a symbolic link'],
+    ['40000 GITMOD~1\0', 'tree: .gitmodules is not a blob'],
+    ['160000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
   ];
   for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
   throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
   throws(() => parseTree(data(raw('100644 b\0'), raw('100644 a\0'))), 'pack_corrupt', 'tree: not strictly sorted');
-  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
-  // a file and a directory of one name sort apart ('d' < 'd/'): the order check passes it. encodeTree refuses to write
-  // it (git fsck duplicateEntries), so the bytes are built by hand.
-  const tree = data(raw('100644 d\0', oidBytes(2)), raw('40000 d\0', oidBytes(1)));
-  assert.deepEqual(parseTree(tree).map(e => e.name), ['d', 'd']);
+  // canon_mode, as git ls-tree prints it; a 4096-byte name is the longest fsck allows
+  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100644');
+  assert.equal(parseTree(raw(`100644 ${'l'.repeat(4096)}\0`))[0].name.length, 4096);
+  throws(() => parseTree(raw('100644 a\0', new Uint8Array(OID_BYTES))), 'pack_corrupt', 'tree: null sha1');
+  assert.equal(parseTree(raw('100644 a\0', Uint8Array.of(...new Uint8Array(OID_BYTES - 1), 1)))[0].name, 'a');
+  for (const ok of ['120000 .gitattributes', '120000 .gitignore', '120000 .mailmap', '100644 .gitmodules', '100644 git~2', '40000 a\\.gitattributes']) assert.equal(parseTree(raw(`${ok}\0`)).length, 1, ok);
+  // issue #34: one name twice is git fsck duplicateEntries whatever the modes, next to each other or not. A file and a
+  // directory of one name sort apart ('d' < 'd.x' < 'd/'), so the old neighbour-only check passed them. encodeTree
+  // refuses to write such a tree, so the bytes are built by hand.
+  const e = (mode, name, n = 1) => raw(`${mode} ${name}\0`, oidBytes(n));
+  throws(() => parseTree(data(e('100644', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('100644', 'd', 2), e('100644', 'd.x'), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('120000', 'd', 2), e('100644', 'd-'), e('100644', 'd.x'), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('160000', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('40000', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  // the same name in a later, unrelated position is still the duplicate, reported before the order it also breaks
+  throws(() => parseTree(data(e('100644', 'a'), e('100644', 'b'), e('100644', 'a'))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  // order: a directory sorts as name + '/'. S_ISDIR of the mode decides, as in fsck: `40755` is a directory, a gitlink
+  // is not. Either way round, one of the two lists is out of order.
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40000', 'd'))).map(x => x.name), ['d.x', 'd']);
+  throws(() => parseTree(data(e('40000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40755', 'd'))).map(x => x.mode), ['100644', '40000'], 'canon_mode: 40755 reads as a tree');
+  throws(() => parseTree(data(e('40755', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  // fsck keeps the mode in an unsigned short: `1040000` is a directory there, `140000` (S_IFSOCK) is not
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('1040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'only the low 16 bits of a mode count');
+  throws(() => parseTree(data(e('1040000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(e('140000', 'd'), e('100644', 'd.x'))).map(x => x.name), ['d', 'd.x']);
+  // past 2^53 a whole-string parse loses the low bits; the last six digits keep them
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('777777777777777777777777040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'a long mode is read from its last six digits');
+  assert.deepEqual(parseTree(data(e('100644', 'd'), e('160000', 'd.x'))).map(x => x.mode), ['100644', '160000']);
+  throws(() => parseTree(data(e('100644', 'd.x'), e('160000', 'd'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(e('40000', 'd'), e('100644', 'd0'))).map(x => x.name), ['d', 'd0'], "'/' sorts below '0'");
+  throws(() => parseTree(data(e('100644', 'd0'), e('40000', 'd'))), 'pack_corrupt', 'tree: not strictly sorted');
+  // case-only and NFC/NFD twins are two names to git and to ply
+  assert.deepEqual(parseTree(data(e('100644', 'D'), e('100644', 'd'))).map(x => x.name), ['D', 'd']);
+  assert.deepEqual(parseTree(data(e('100644', 'e\u0301'), e('100644', '\u00e9'))).map(x => x.name), ['e\u0301', '\u00e9']);
+  // order is on the raw bytes; byte-distinct names stay distinct (decodeBytes is lossless, #43), so the decode-twin refusal
+  // #34 had (U+FFFD twins, a dropped leading BOM) cannot arise and is gone: these parse as two names, as in git
+  const rawE = (mode, bytes) => data(te.encode(`${mode} `), Uint8Array.from(bytes), Uint8Array.of(0), oidBytes(1));
+  throws(() => parseTree(data(rawE('100644', [0x64, 0xff]), rawE('100644', [0x64, 0xfe]))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xfe]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\udcfe', 'd\udcff']);
+  assert.deepEqual(parseTree(data(rawE('100644', [0x61]), rawE('100644', [0xef, 0xbb, 0xbf, 0x61]))).map(x => x.name), ['a', '\ufeffa']);
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xc3, 0xa9]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\u00e9', 'd\udcff'], 'raw bytes: 0xc3 < 0xff (0xff decodes to its escape U+DCFF, #43)');
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xef, 0xbf, 0xbe]), rawE('100644', [0x64, 0xf0]))).map(x => x.name.length), [2, 2]);
+  throws(() => parseTree(data(rawE('100644', [0x64, 0xf0]), rawE('100644', [0x64, 0xef, 0xbf, 0xbe]))), 'pack_corrupt', 'tree: not strictly sorted');
+  // a leading U+FEFF is a byte of the name to git; the default TextDecoder would drop it and `README` would be found (#43)
+  assert.equal(parseTree(raw('100644 \ufeffREADME\0'))[0].name, '\ufeffREADME');
+  assert.equal(td.decode(te.encode('\ufeffX')), '\ufeffX');
+  // and a mode is not a name: `\ufeff100644` is malformed, as git's ls-tree says
+  throws(() => parseTree(raw('\ufeff100644 a\0')), 'pack_corrupt', 'tree: malformed mode');
+  // ill-formed UTF-8 names are escaped byte by byte, sort and re-encode as their bytes
+  const latin = data(Uint8Array.from([...te.encode('100644 caf'), 0xe9, 0]), oidBytes(1), Uint8Array.from([...te.encode('100644 caf'), 0xe9, 0x41, 0]), oidBytes(2));
+  assert.deepEqual(parseTree(latin).map(e => e.name), ['caf\udce9', 'caf\udce9A']);
+  assert.deepEqual(encodeTree(parseTree(latin)), latin);
+  // a directory sorts as name + '/' on the raw bytes: `a\xff` (file) after `a/`-keyed dir `a`
+  assert.deepEqual(parseTree(data(raw('40000 a\0', oidBytes(1)), Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2))).map(e => e.name), ['a', 'a\udcff']);
+  throws(() => parseTree(data(Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2), raw('40000 a\0', oidBytes(1)))), 'pack_corrupt', 'tree: not strictly sorted');
+});
+
+test('decodeBytes / encodeBytes: a bijection on bytes; decodeChunk holds a cut sequence (#43)', () => {
+  const cases = [[0xef, 0xbb, 0xbf, 0x52], [0x63, 0xe9], [0xc0, 0xae], [0xe0, 0x80, 0xae], [0xed, 0xa0, 0x80], [0xed, 0x9f, 0xbf], [0xf0, 0x8f, 0xbf, 0xbf], [0xf0, 0x90, 0x80, 0x80], [0xf4, 0x8f, 0xbf, 0xbf], [0xf4, 0x90, 0x80, 0x80], [0xf5, 0x80], [0xc1, 0xbf], [0xc2, 0x80], [0xdf, 0xbf], [0xe2, 0x82], [0x80], [0xff], [0x41, 0, 0x0d], [0xc3, 0xa9, 0xff]];
+  const want = ['\ufeffR', 'c\udce9', '\udcc0\udcae', '\udce0\udc80\udcae', '\udced\udca0\udc80', '\ud7ff', '\udcf0\udc8f\udcbf\udcbf', '\u{10000}', '\u{10ffff}', '\udcf4\udc90\udc80\udc80', '\udcf5\udc80', '\udcc1\udcbf', '\u0080', '\u07ff', '\udce2\udc82', '\udc80', '\udcff', 'A\0\r', '\u00e9\udcff'];
+  cases.forEach((c, i) => {
+    const b = Uint8Array.from(c);
+    assert.equal(decodeBytes(b), want[i], c.join(' '));
+    assert.deepEqual(encodeBytes(want[i]), b, c.join(' '));
+  });
+  for (const [s, msg] of [['\ud800', 'x: lone surrogate U+D800 is no byte sequence'], ['a\udfff', 'x: lone surrogate U+DFFF is no byte sequence'], ['\udc7f', 'x: lone surrogate U+DC7F is no byte sequence'], ['\udcc3\udca9', 'x: escaped bytes spell well-formed UTF-8; pass the characters']]) throws(() => encodeBytes(s, 'x'), 'bad_request', msg);
+  throws(() => encodeBytes(1, 'x'), 'bad_request', 'x must be a string');
+  assert.deepEqual(encodeBytes('\u{1f680}\udcff'), Uint8Array.from([0xf0, 0x9f, 0x9a, 0x80, 0xff]));
+  // a well-formed string takes the TextEncoder path; a lone escape at either end is still found
+  assert.deepEqual(encodeBytes('\udcffa'), Uint8Array.from([0xff, 0x61]));
+  let d = decodeChunk(new Uint8Array(0), Uint8Array.from([0x61, 0xf0, 0x9f]));
+  assert.deepEqual([d.text, [...d.carry]], ['a', [0xf0, 0x9f]]);
+  d = decodeChunk(d.carry, Uint8Array.from([0x9a, 0x80, 0xe2]));
+  assert.deepEqual([d.text, [...d.carry]], ['\u{1f680}', [0xe2]]);
+  d = decodeChunk(d.carry, Uint8Array.from([0x82, 0xac]));
+  assert.deepEqual([d.text, [...d.carry]], ['\u20ac', []]);
+  // a complete sequence at the end is not held; nor a stray continuation byte
+  assert.deepEqual([...decodeChunk(new Uint8Array(0), Uint8Array.from([0xc3, 0xa9])).carry], []);
+  assert.equal(decodeChunk(new Uint8Array(0), Uint8Array.from([0x80])).text, '\ufffd');
+  assert.deepEqual([...decodeChunk(new Uint8Array(0), Uint8Array.from([0xe2, 0x82, 0x80, 0x80])).carry], []);
 });
 
 test('commit and tag headers, idents, and assertFetched', () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => parseCommit(te.encode('tree')), 'pack_corrupt', 'commit: truncated header line');
-  throws(() => parseCommit(te.encode('nospace\n')), 'pack_corrupt', 'commit: truncated header line');
-  throws(() => parseCommit(te.encode(`tree ${tree}\n parent-sig\n\n`)), 'pack_corrupt', 'commit: bad header order');
+  const C = 'commit: ', T = 'tag: ';
+  // verify_headers: a NUL before the blank line, and a header that does not end in a newline
+  throws(() => parseCommit(te.encode('tree')), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
+  throws(() => parseCommit(new Uint8Array(0)), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\0\n\n`)), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 45`);
+  throws(() => parseCommit(te.encode('\0')), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 0`);
+  throws(() => parseCommit(te.encode('nospace\n')), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => parseCommit(te.encode('\n\nbody')), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => parseCommit(te.encode(`tree\n${tree}\n`)), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\n`)), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\n parent-sig\n\n`)), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\n`)), 'pack_corrupt', `${C}missingCommitter: invalid format - expected 'committer' line`);
+  // the tree and parent ids: 40 hex digits of either case, then the newline; git prints the id lowercase
+  throws(() => parseCommit(te.encode(`tree zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree.slice(1)}g\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree} \nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree.slice(1)}\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nparent zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nparent ${oid(2)}x\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
+  const upper = parseCommit(te.encode(`tree ${'AB'.repeat(20)}\nparent ${'Cd'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n\n`));
+  assert.equal(upper.tree, 'ab'.repeat(20));
+  assert.deepEqual(upper.parents, ['cd'.repeat(20)]);
+  assert.equal(parseCommit(te.encode(`tree ${'9f'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n`)).tree, '9f'.repeat(20));
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}multipleAuthors: invalid format - multiple 'author' lines`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor Ada\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingEmail: invalid author line - missing email`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', `${C}missingEmail: invalid committer line - missing email`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor Ada <ada@ex>\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingSpaceBeforeDate: invalid author line - missing space before date`);
+  // the body: no NUL anywhere in a commit (nulInCommit is WARN, an error under --strict)
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\nsub\0ject\n`)), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\0`)), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
   const cont = parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n parent-sig\n\n`));
   assert.deepEqual(cont.extra, [' parent-sig']);
   assert.equal(cont.encoding, null);
   assert.equal(cont.message, '');
-  const blankFirst = parseCommit(te.encode('\n\nbody'));
-  assert.deepEqual(blankFirst.head ?? blankFirst.extra, []);
-  assert.equal(blankFirst.message, 'body');
-  assert.equal(parseCommit(te.encode(`tree ${tree}\n`)).message, null);
+  const noBody = parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\nsubject\n`));
+  assert.deepEqual(noBody.extra, ['subject']);
+  assert.equal(noBody.message, null);
+  assert.deepEqual(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n`)).extra, []);
+  assert.equal(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\nm`)).message, '\nm');
+  // a leading BOM is a byte before `tree`, as git reads it
+  throws(() => parseCommit(concat([Uint8Array.of(0xef, 0xbb, 0xbf), te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n`)])), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
 
   const commit = encodeCommit({ tree, parents: [oid(2)], author, message: 'hi\n' });
   assert.equal(parseCommit(commit).tree, tree);
   assert.deepEqual(parseCommit(commit).parents, [oid(2)]);
-  throws(() => assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: bad header order');
-  throws(() => assertFetched('commit', te.encode('\n\n')), 'pack_corrupt', 'commit: missing or bad tree');
-  throws(() => assertFetched('commit', te.encode(`tree zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: missing or bad tree');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nparent zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: bad parent');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: bad header order');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\n\n`)), 'pack_corrupt', 'commit: missing author');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\n\n`)), 'pack_corrupt', 'commit: missing committer');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex>\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad date');
   assertFetched('commit', commit);
+  throws(() => assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
   assert.equal(assertFetched('blob', te.encode('x')), undefined);
   assert.equal(assertFetched('ofs_delta', te.encode('x')), undefined);
   assert.equal(assertFetched('ref_delta', te.encode('x')), undefined);
   throws(() => assertFetched('submodule', te.encode('x')), 'pack_corrupt', 'object: bad type submodule');
   throws(() => assertFetched('tree', data(' a\0', oidBytes(1))), 'pack_corrupt', 'tree: empty mode');
+  throws(() => assertFetched('tag', te.encode('x')), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
 
   const tagger = author;
   const tag = encodeTag({ object: oid(3), type: 'commit', tag: 'v1', tagger, message: 'rel\n' });
   assert.equal(parseTag(tag).tag, 'v1');
-  throws(() => parseTag(te.encode(`object ${oid(3)}\nobject ${oid(4)}\ntype commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: duplicate object');
-  throws(() => assertFetched('tag', te.encode(`type commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => assertFetched('tag', te.encode('\n\n')), 'pack_corrupt', 'tag: missing or bad object');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\n\n`)), 'pack_corrupt', 'tag: missing type');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\n\n`)), 'pack_corrupt', 'tag: missing name');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\ntag v1\n\n`)), 'pack_corrupt', 'tag: missing tagger');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger Ada\n\n`)), 'pack_corrupt', 'tagger: missing email');
   assertFetched('tag', tag);
+  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\0\n`)), 'pack_corrupt', `${T}nulInHeader: unterminated header: NUL at offset 47`);
+  throws(() => parseTag(te.encode('\n\n')), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
+  throws(() => parseTag(te.encode(`type commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3).slice(2)}\ntype commit\n\n`)), 'pack_corrupt', `${T}badObjectSha1: invalid 'object' line format - bad sha1`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\n\n`)), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
+  for (const bad of ['commi', '', 'commit ', 'Commit', 'ofs_delta', 'constructor', 'toString'])
+    throws(() => parseTag(te.encode(`object ${oid(3)}\ntype ${bad}\ntag v1\n\n`)), 'pack_corrupt', `${T}badType: invalid 'type' value`);
+  for (const type of ['commit', 'tree', 'blob', 'tag']) assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype ${type}\ntag v1\n`)).type, type);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\n\n`)), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger Ada\n\n`)), 'pack_corrupt', `${T}missingEmail: invalid tagger line - missing email`);
+  // INFO under --strict, so accepted: no tagger (missingTaggerEntry) and a name that is not a refname (badTagName)
+  const old = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v0.99\n\nold\n`));
+  assert.equal(old.tagger, null);
+  assert.equal(old.message, 'old\n');
+  assert.deepEqual(old.extra, []);
+  assert.deepEqual(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\nfoo bar\n\n`)).extra, ['foo bar']);
   assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag \ntagger ${tagger}\n\n`)).tag, '');
+  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1..2\ntagger ${tagger}\n\n`)).tag, 'v1..2');
+  // fsck never reads a tag's body: a NUL there is accepted, unlike in a commit
+  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${tagger}\n\nr\0l\n`)).message, 'r\0l\n');
+  assert.equal(parseTag(te.encode(`object ${'AB'.repeat(20)}\ntype commit\ntag v1\n`)).object, 'ab'.repeat(20));
 
   assert.equal(parseIdent(1), null);
   assert.deepEqual(parseIdent('  bare name  '), { name: 'bare name', email: '', time: null, tz: '' });
@@ -153,7 +276,7 @@ test('commit and tag headers, idents, and assertFetched', () => {
   assert.deepEqual(parseIdent('Ada  <ada@ex> nope +0100'), { name: 'Ada', email: 'ada@ex', time: null, tz: '+0100' });
 });
 
-test('duplicate and out-of-order commit and tag headers are rejected', () => {
+test('headers after the committer and the tagger are kept, not judged, except a second copy (PR #7)', () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const other = 'Bea <bea@ex> 1700000001 +0000';
   const tree = oid(1);
@@ -167,6 +290,7 @@ test('duplicate and out-of-order commit and tag headers are rejected', () => {
   assert.equal(ok.committer, committer);
   assert.equal(ok.encoding, 'UTF-8');
   assert.deepEqual(ok.extra, ['gpgsig -----BEGIN', ' signature', 'mergetag object x']);
+  assert.equal(ok.message, 'msg\n');
   const again = parseCommit(encodeCommit(ok));
   assert.equal(again.encoding, 'UTF-8');
   assert.deepEqual(again.extra, ok.extra);
@@ -188,103 +312,136 @@ test('duplicate and out-of-order commit and tag headers are rejected', () => {
   assert.equal(plainHeaders[ci + 1].startsWith('gpgsig '), true);
   assert.equal(plainHeaders[ci + 2], 'x-custom v');
   assert.equal(parseCommit(withGpgsig(bare, 'SIG\n')).extra[0].startsWith('gpgsig '), true);
-  const dup = (label, lines) => throws(() => parseCommit(body(lines)), 'pack_corrupt', label);
-  const bad = (lines) => throws(() => parseCommit(body(lines)), 'pack_corrupt', 'commit: bad header order');
-  dup('commit: duplicate tree', [`tree ${tree}`, `tree ${tree2}`, `author ${author}`, `committer ${committer}`]);
-  dup('commit: duplicate tree', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, `tree ${tree2}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `author ${other}`, `committer ${committer}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, `author ${other}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', `author ${other}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x', `author ${other}`]);
-  dup('commit: duplicate committer', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, `committer ${other}`]);
-  dup('commit: duplicate committer', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', `committer ${other}`]);
-  dup('commit: duplicate committer', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x', `committer ${other}`]);
-  dup('commit: duplicate encoding', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', 'encoding ISO-8859-1']);
-  dup('commit: duplicate encoding', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', 'gpgsig x', 'encoding ISO-8859-1']);
-  bad([`parent ${oid(3)}`, `tree ${tree}`, `author ${author}`, `committer ${committer}`]);
-  bad([`author ${author}`, `tree ${tree}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, `author ${author}`, 'encoding UTF-8', `committer ${committer}`]);
-  bad([`tree ${tree}`, 'encoding UTF-8', `author ${author}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, `author ${author}`, `committer ${committer}`, `parent ${oid(3)}`]);
-  bad([`tree ${tree}`, `author ${author}`, `parent ${oid(3)}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, ' parent-sig', `author ${author}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, 'x-custom v', `author ${author}`, `committer ${committer}`]);
+  // after the committer fsck reads nothing, but a second tree, parent, author, committer or encoding is a copy git's
+  // views disagree on (pretty's %an/%cn read the last, %T and the date the first): refused, typed (PR #7)
+  const after = (...lines) => parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, ...lines]));
+  const dup = (label, lines) => assert.throws(() => after(...lines), e => e.code === 'pack_corrupt' && e.message === label && e.msgId === 'duplicateHeader');
+  dup('commit: duplicate tree', [`tree ${tree2}`]);
+  dup('commit: duplicate tree', ['gpgsig x', `tree ${tree2}`]);
+  dup('commit: bad header order', [`parent ${oid(3)}`]);
+  dup('commit: duplicate author', [`author ${other}`]);
+  dup('commit: duplicate author', ['encoding UTF-8', `author ${other}`]);
+  dup('commit: duplicate committer', [`committer ${other}`]);
+  dup('commit: duplicate committer', ['committer garbage']);
+  dup('commit: duplicate encoding', ['encoding ISO-8859-1', 'encoding UTF-8']);
+  dup('commit: duplicate encoding', ['encoding ISO-8859-1', 'gpgsig x', 'encoding UTF-8']);
+  assert.deepEqual(after('foo').extra, ['foo']);
+  assert.deepEqual(after('treehouse x', 'authors y', ' tree z').extra, ['treehouse x', 'authors y', ' tree z']);
+  assert.equal(after('gpgsig x', ' y', 'encoding ISO-8859-1').encoding, 'ISO-8859-1');
+  assert.equal(after(' encoding ISO-8859-1').encoding, null);
+  assert.equal(after('encodingISO').encoding, null);
+  // before the committer, the order is fsck's: tree, parents, one author, committer
+  const bad = (lines, msgId, why) => throws(() => parseCommit(body(lines)), 'pack_corrupt', `commit: ${msgId}: ${why}`);
+  const noAuthor = ['missingAuthor', "invalid format - expected 'author' line"];
+  const noCommitter = ['missingCommitter', "invalid format - expected 'committer' line"];
+  bad([`parent ${oid(3)}`, `tree ${tree}`, `author ${author}`, `committer ${committer}`], 'missingTree', "invalid format - expected 'tree' line");
+  bad([`author ${author}`, `tree ${tree}`, `committer ${committer}`], 'missingTree', "invalid format - expected 'tree' line");
+  bad([`tree ${tree}`, `tree ${tree2}`, `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, 'encoding UTF-8', `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, ' parent-sig', `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, 'x-custom v', `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, `committer ${committer}`, `author ${author}`], ...noAuthor);
+  bad([`tree ${tree}`, `author ${author}`, 'encoding UTF-8', `committer ${committer}`], ...noCommitter);
+  bad([`tree ${tree}`, `author ${author}`, `parent ${oid(3)}`, `committer ${committer}`], ...noCommitter);
   const twoParents = parseCommit(body([`tree ${tree}`, `parent ${oid(3)}`, `parent ${oid(3)}`, `author ${author}`, `committer ${committer}`]));
   assert.deepEqual(twoParents.parents, [oid(3), oid(3)]);
+
   const tags = parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc']));
   assert.equal(tags.object, oid(5));
   assert.equal(tags.type, 'commit');
   assert.equal(tags.tag, 'v1');
   assert.equal(tags.tagger, author);
   assert.deepEqual(tags.extra, ['gpgsig abc']);
+  assert.equal(tags.message, 'msg\n');
   assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc', ' more'])).extra, ['gpgsig abc', ' more']);
-  const tagDup = (label, lines) => throws(() => parseTag(body(lines)), 'pack_corrupt', label);
-  const tagBad = (lines) => throws(() => parseTag(body(lines)), 'pack_corrupt', 'tag: bad header order');
-  tagDup('tag: duplicate object', [`object ${oid(5)}`, `object ${oid(6)}`, 'type commit', 'tag v1', `tagger ${author}`]);
-  tagDup('tag: duplicate object', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, `object ${oid(6)}`]);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'type blob', 'tag v1', `tagger ${author}`]);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'tag v1', 'type blob']);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'type blob']);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig x', 'type blob']);
-  tagDup('tag: duplicate tag', [`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`]);
-  tagDup('tag: duplicate tag', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'tag v2']);
-  tagDup('tag: duplicate tag', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig x', 'tag v2']);
-  tagDup('tag: duplicate tagger', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, `tagger ${other}`]);
-  tagDup('tag: duplicate tagger', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig x', `tagger ${other}`]);
-  tagBad(['type commit', `object ${oid(5)}`, 'tag v1', `tagger ${author}`]);
-  tagBad(['tag v1', `object ${oid(5)}`, 'type commit', `tagger ${author}`]);
-  tagBad([`object ${oid(5)}`, 'type commit', `tagger ${author}`]);
-  tagBad([`object ${oid(5)}`, 'type commit', 'tag v1', 'foo bar', `tagger ${author}`]);
-  tagBad(['gpgsig x', `object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`]);
-  assert.equal(parseCommit(te.encode(`tree ${tree}\nparent ${oid(3)}\n`)).message, null);
-  assert.equal(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\n`)).author, author);
+  // after the tagger fsck reads nothing (extraHeaderEntry is IGNORE), but a second object, type, tag or tagger is
+  // refused like a second author (PR #7)
+  const tagAfter = (...lines) => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, ...lines]));
+  assert.throws(() => tagAfter(`tagger ${other}`), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger' && e.msgId === 'duplicateHeader');
+  assert.throws(() => tagAfter('gpgsig x', `tagger ${other}`), e => e.message === 'tag: duplicate tagger');
+  assert.throws(() => tagAfter(`object ${oid(6)}`), e => e.message === 'tag: duplicate object' && e.msgId === 'duplicateHeader');
+  assert.throws(() => tagAfter('type blob'), e => e.message === 'tag: duplicate type');
+  assert.throws(() => tagAfter('gpgsig x', 'tag v2'), e => e.message === 'tag: duplicate tag');
+  assert.deepEqual(tagAfter('objection x', 'typed y', 'tagline z').extra, ['objection x', 'typed y', 'tagline z']);
+  const tagBad = (lines, msgId, why) => throws(() => parseTag(body(lines)), 'pack_corrupt', `tag: ${msgId}: ${why}`);
+  tagBad([`object ${oid(5)}`, `object ${oid(6)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingTypeEntry', "invalid format - expected 'type' line");
+  tagBad([`object ${oid(5)}`, 'type commit', 'type blob', 'tag v1', `tagger ${author}`], 'missingTagEntry', "invalid format - expected 'tag' line");
+  tagBad(['type commit', `object ${oid(5)}`, 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
+  tagBad(['gpgsig x', `object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
+  // a tag line followed by anything but a tagger: missingTaggerEntry (INFO), so the rest is extra, but a second copy
+  // of a tag header further down (a tagger git's %(tagger) would show while fsck saw none) is refused
+  assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y'])).extra, ['x y']);
+  assert.throws(() => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])), e => e.message === 'tag: duplicate tag');
+  assert.throws(() => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y', `tagger ${author}`])), e => e.message === 'tag: duplicate tagger');
   assert.equal(parseTag(te.encode(`object ${oid(5)}\ntype commit\ntag \n`)).tag, '');
 });
 
-test('fsck badTimezone: a sign, four digits, then the end of the ident line', () => {
+test('fsck_ident: every rule, in git\'s order, on every role', () => {
   const tree = oid(1);
   const who = tz => `A <a@b.c> 1700000000 ${tz}`;
   const commit = (author, committer = who('+0000')) => te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${committer}\n\nm\n`);
   const tag = tagger => te.encode(`object ${tree}\ntype commit\ntag v1\ntagger ${tagger}\n\n`);
-  for (const tz of ['+0000', '-0000', '+0530', '-1200', '+1400', '+9999', '+1560', '+2400', '+0059']) {
-    assertFetched('commit', commit(who(tz)));
-    assertFetched('tag', tag(who(tz)));
-  }
-  // fsck skips spaces and tabs before the timestamp, and a timestamp of 0 must not be confused with a zero in the zone
-  assertFetched('commit', commit('A <a@b.c>  1700000000 +0000'));
-  assertFetched('commit', commit('A <a@b.c> \t1700000000 +0530'));
-  assertFetched('commit', commit('A <a@b.c> 0 -1200'));
-  assertFetched('commit', commit('A <a@b.c> 1700000009 +0000'));
-  const bad = ['+000', '+00000', '+00', '+', '0000', '+0a00', '+00:00', 'Z', '+0000x', '+0000 ', '+0000\t', ' +0000', '+00 00', '++000', '+-000', '+0000 extra'];
-  for (const tz of bad) {
-    throws(() => assertFetched('commit', commit(who(tz))), 'pack_corrupt', 'author: bad time zone');
-    throws(() => assertFetched('commit', commit(who('+0000'), who(tz))), 'pack_corrupt', 'committer: bad time zone');
-    throws(() => assertFetched('tag', tag(who(tz))), 'pack_corrupt', 'tagger: bad time zone');
-  }
-  throws(() => assertFetched('commit', commit('A <a@b.c> 1700000000')), 'pack_corrupt', 'author: bad date');
-  throws(() => assertFetched('commit', commit('A <a@b.c>1700000000 +0000')), 'pack_corrupt', 'author: bad date');
-  throws(() => assertFetched('commit', commit('A <a@b.c> 12:34 +0000')), 'pack_corrupt', 'author: bad date');
-  throws(() => assertFetched('commit', commit('Ada <ada@ex> soon +0000')), 'pack_corrupt', 'author: bad date');
+  const all = (ident, msgId, why) => {
+    throws(() => assertFetched('commit', commit(ident)), 'pack_corrupt', `commit: ${msgId}: invalid author line - ${why}`);
+    throws(() => assertFetched('commit', commit(who('+0000'), ident)), 'pack_corrupt', `commit: ${msgId}: invalid committer line - ${why}`);
+    throws(() => assertFetched('tag', tag(ident)), 'pack_corrupt', `tag: ${msgId}: invalid tagger line - ${why}`);
+  };
+  const fine = ident => { assertFetched('commit', commit(ident)); assertFetched('commit', commit(who('+0000'), ident)); assertFetched('tag', tag(ident)); };
+  for (const tz of ['+0000', '-0000', '+0530', '-1200', '+1400', '+9999', '+1560', '+2400', '+0059']) fine(who(tz));
+  // fsck skips spaces and tabs before the timestamp; a timestamp of 0 is not zero-padded; any name and email bytes
+  fine('A <a@b.c>  1700000000 +0000');
+  fine('A <a@b.c> \t1700000000 +0530');
+  fine('A <a@b.c> 0 -1200');
+  fine('A <a@b.c> 1700000009 +0000');
+  fine('A <a@b.c> 9223372036854775807 +0000');
+  fine(' <a@b.c> 1700000000 +0000');
+  fine('A <> 1700000000 +0000');
+  fine('A <a b> 1700000000 +0000');
+  fine('A\t <a@b.c> 1700000000 +0000');
+  const badTz = ['+000', '+00000', '+00', '+', '0000', '+0a00', '+00:00', 'Z', '+0000x', '+0000 ', '+0000\t', ' +0000', '+00 00', '++000', '+-000', '+0000 extra', '+000a', 'a0000'];
+  for (const tz of badTz) all(who(tz), 'badTimezone', 'bad time zone');
+  all('A <a@b.c> 1700000000', 'badDate', 'bad date');
+  all('A <a@b.c> 12:34 +0000', 'badDate', 'bad date');
+  all('Ada <ada@ex> soon +0000', 'badDate', 'bad date');
+  all('A <a@b.c> +0000', 'badDate', 'bad date');
+  all('A <a@b.c> 1700000000\t+0000', 'badDate', 'bad date');
+  all('A <a@b.c> \t', 'badDate', 'bad date');
+  all('A <a@b.c> 01700000000 +0000', 'zeroPaddedDate', 'zero-padded date');
+  all('A <a@b.c> 00 +0000', 'zeroPaddedDate', 'zero-padded date');
+  all('A <a@b.c> 0x +0000', 'zeroPaddedDate', 'zero-padded date');
+  all('A <a@b.c> 9223372036854775808 +0000', 'badDateOverflow', 'date causes integer overflow');
+  all('A <a@b.c> 99999999999999999999999 +0000', 'badDateOverflow', 'date causes integer overflow');
+  all('A <a@b.c> 99999999999999999999999x +0000', 'badDateOverflow', 'date causes integer overflow');
+  all('A <a@b.c>1700000000 +0000', 'missingSpaceBeforeDate', 'missing space before date');
+  all('A <a@b.c>', 'missingSpaceBeforeDate', 'missing space before date');
+  all('A <a@b.c 1700000000 +0000', 'badEmail', 'bad email');
+  all('A <a<b@c> 1700000000 +0000', 'badEmail', 'bad email');
+  all('A <a@b.c', 'badEmail', 'bad email');
   // a space is required immediately before '<'. commit#23000087 replaced it with '!'; commit#19000059 with 0x9E.
-  throws(() => assertFetched('commit', commit('A<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  throws(() => assertFetched('commit', commit('A!<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  throws(() => assertFetched('commit', commit('<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  throws(() => assertFetched('commit', commit('A\t<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  assertFetched('commit', commit(' <a@b.c> 1700000000 +0000'));
+  all('A<a@b.c> 1700000000 +0000', 'missingSpaceBeforeEmail', 'missing space before email');
+  all('A!<a@b.c> 1700000000 +0000', 'missingSpaceBeforeEmail', 'missing space before email');
+  all('A\t<a@b.c> 1700000000 +0000', 'missingSpaceBeforeEmail', 'missing space before email');
+  all('<a@b.c> 1700000000 +0000', 'missingNameBeforeEmail', 'missing space before email');
+  all('A > <a@b.c> 1700000000 +0000', 'badName', 'bad name');
+  all('A a@b.c> 1700000000 +0000', 'badName', 'bad name');
+  all('A U Thor 1700000000 +0000', 'missingEmail', 'missing email');
+  all('', 'missingEmail', 'missing email');
   const glued = concat([
     te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +0000\ncommitter A `),
     Uint8Array.of(0x9e),
     te.encode('<a@b.c> 1700000000 +0000\n\nm\n'),
   ]);
-  throws(() => assertFetched('commit', glued), 'pack_corrupt', 'committer: missing space before email');
+  throws(() => assertFetched('commit', glued), 'pack_corrupt', 'commit: missingSpaceBeforeEmail: invalid committer line - missing space before email');
   // commit#1000022: 0xC1 inserted into the author zone, Latin-1 "+00Á00"
   const poison = concat([
     te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +00`),
     Uint8Array.of(0xc1),
     te.encode('00\ncommitter A <a@b.c> 1700000000 +0000\n\nm\n'),
   ]);
-  throws(() => assertFetched('commit', poison), 'pack_corrupt', 'author: bad time zone');
+  throws(() => assertFetched('commit', poison), 'pack_corrupt', 'commit: badTimezone: invalid author line - bad time zone');
+  // a non-UTF-8 name is bytes git accepts
+  assertFetched('commit', concat([te.encode(`tree ${tree}\nauthor J`), Uint8Array.of(0xf6), te.encode(`rg <j@b.c> 1 +0000\ncommitter ${who('+0000')}\n\n`)]));
 });
 
 test('pkt-line kinds, counters, and length errors', () => {
@@ -503,7 +660,9 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
 
   st = v2Init(limits);
   feed(line('packfile'));
-  assert.equal(feed({ kind: 'delim' }).pack, null);
+  // a delim or response-end inside the packfile section ends git's demultiplexer: refused, not skipped
+  throws(() => feed({ kind: 'delim' }), 'protocol', 'v2: delim inside the packfile section');
+  throws(() => feed({ kind: 'end' }), 'protocol', 'v2: end inside the packfile section');
   const body = te.encode('xyz');
   const band = n => ({ kind: 'data', payload: concat([Uint8Array.of(n), body]) });
   const pack = feed(band(SIDEBAND_PACK));
@@ -565,16 +724,24 @@ test('ls-refs lines and report-status', () => {
   // the name is never read as an attribute, with or without attributes after it
   assert.deepEqual(parseLsRefLine(`${id} symref-target:refs/heads/x`), { oid: id, name: 'symref-target:refs/heads/x' });
   assert.deepEqual(parseLsRefLine(`${id} peeled:junk symref-target:refs/heads/main`), { oid: id, name: 'peeled:junk', 'symref-target': 'refs/heads/main' });
-  for (const bad of ['junk', 'AB'.repeat(20), `${oid(5)}0`, '']) {
+  // git reads an oid in either case (parse_oid_hex_algop: hexval); ply keeps it lower-case (the advertisement space, record=upperPeeled)
+  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 peeled:${'AB'.repeat(20)}`), { oid: id, name: 'refs/tags/v1', peeled: 'ab'.repeat(20) });
+  for (const bad of ['junk', 'GB'.repeat(20), `${oid(5)}0`, '']) {
     const line = `${id} refs/tags/v1 peeled:${bad}`;
     throws(() => parseLsRefLine(line), 'protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
   }
   throws(() => parseLsRefLine('ERR no such ref'), 'remote_error', 'remote: no such ref');
   throws(() => parseLsRefLine('nope'), 'protocol', 'ls-refs: malformed line "nope"');
-  throws(() => parseLsRefLine(`${id} `), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${id} `)}`);
+  // an empty second field is a ref named "" (process_ref_v2), and an `unborn` record is no ref (record=emptyName, unbornOther)
+  assert.deepEqual(parseLsRefLine(`${id} `), { oid: id, name: '' });
+  assert.equal(parseLsRefLine('unborn HEAD symref-target:refs/heads/main'), null);
+  assert.equal(parseLsRefLine('unborn '), null);
+  throws(() => parseLsRefLine('unborn'), 'protocol', 'ls-refs: malformed line "unborn"');
+  throws(() => parseLsRefLine(`${'zz'.repeat(20)} refs/heads/main`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${'zz'.repeat(20)} refs/heads/main`)}`);
   throws(() => parseLsRefLine(`${'ab'.repeat(32)} refs/heads/main`), 'unsupported', 'unsupported object-format: only sha1 repositories are supported');
   const upper = 'ab'.repeat(20).toUpperCase();
-  throws(() => parseLsRefLine(`${upper} refs/heads/main`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${upper} refs/heads/main`)}`);
+  assert.deepEqual(parseLsRefLine(`${upper} refs/heads/main`), { oid: 'ab'.repeat(20), name: 'refs/heads/main' });
+  throws(() => parseLsRefLine(`${'AB'.repeat(32)} refs/heads/main`), 'unsupported', 'unsupported object-format: only sha1 repositories are supported');
   const long = 'not a ref line '.repeat(8);
   throws(() => parseLsRefLine(long), 'protocol', `ls-refs: malformed line ${JSON.stringify(long.slice(0, 60))}`);
 
@@ -652,15 +819,13 @@ test('ssh url, kex, and gitattributes lines', () => {
 test('boundaries between a thrown error and its neighbour', async () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing space before email');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badEmail: invalid author line - bad email');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: missingNameBeforeEmail: invalid author line - missing space before email');
   assertFetched('commit', te.encode(`tree ${tree}\nauthor  <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
-  assert.equal(parseCommit(new Uint8Array(0)).message, null);
   throws(() => parseTree(data('100644 a', oidBytes(4))), 'pack_corrupt', 'tree: malformed entry');
   throws(() => parseTree(data('g7 a\0', oidBytes(4))), 'pack_corrupt', 'tree: malformed mode');
-  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', 'tag: truncated header line');
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\nfoo bar\n\n`)), 'pack_corrupt', 'tag: bad header order');
+  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', 'tag: unterminatedHeader: unterminated header');
   const extra = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\nfoo bar\n\n`));
   assert.equal(extra.tagger, author);
   assert.deepEqual(extra.extra, ['foo bar']);
@@ -777,13 +942,13 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(parseIdent('a><b@c> 1 +0000'), { name: 'a>', email: 'b@c', time: '1', tz: '+0000' });
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'committer: missing email');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'commit: missingEmail: invalid committer line - missing email');
   const id = oid(3);
   const tagger = author;
-  throws(() => parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => parseTag(te.encode(`tag v1\nobject ${id}\ntype blob\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
+  throws(() => parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingObject: invalid format - expected 'object' line");
+  throws(() => parseTag(te.encode(`object ${id}\ntag v1\ntype blob\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingTypeEntry: invalid format - expected 'type' line");
 
   const onlyDelim = pktStep(pktInit(), DELIM);
   assert.equal(onlyDelim.state.delim, 1);
@@ -839,7 +1004,8 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
 
   const ref = `${oid(4)} refs/heads/a :val`;
   assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a' });
-  throws(() => parseLsRefLine(`${oid(4)}  refs/heads/a`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${oid(4)}  refs/heads/a`)}`);
+  // a doubled space after the oid: an empty name, then `refs/heads/a` as an attribute token (process_ref_v2 splits on every space)
+  assert.deepEqual(parseLsRefLine(`${oid(4)}  refs/heads/a`), { oid: oid(4), name: '' });
   const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 
@@ -888,9 +1054,7 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.equal(parseLine('a text', no).pat.endsWith, false);
   assert.deepEqual(parseLine('*.c text=', no).states, [['text', '']]);
   assert.deepEqual(parseIdent('  Ada <ada@ex'), { name: 'Ada <ada@ex', email: '', time: null, tz: '' });
-  throws(() => parseTag(te.encode(`type commit\ntype blob\nobject ${id}\ntag v1\ntag v2\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntype blob\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: duplicate type');
-  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntag v1\ntag v2\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: duplicate tag');
+  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntype blob\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingTagEntry: invalid format - expected 'tag' line");
 
   throws(() => pktStep(pktInit(), te.encode('0000zzzz')), 'protocol', 'bad pkt-line length at byte 4');
   const line = s => ({ kind: 'data', payload: te.encode(s) });
@@ -1212,9 +1376,9 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(() => negotiate({}, { wants: [oid(1)], haves: [oid(2)], batch: 0 }), e => e.code === 'bad_request' && e.what === 'negotiateBatch');
 
   const commands = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
-  const mixed = { unpack: 'ok', refs: [{ ref: 'refs/heads/a', ok: true, reason: '' }, { ref: 'refs/heads/b', ok: false, reason: 'failed to lock' }] };
-  assert.equal(checkReport(mixed, commands, { atomic: true }), 'atomic push split: some refs ok, some ng');
-  assert.equal(checkReport(mixed, commands), null);
+  const mixed = classifyReport(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'].map(l => te.encode(l)), commands);
+  assert.deepEqual(decideOutcome(mixed, { atomic: true }), { tag: 'ambiguous', why: 'atomic push split: some refs ok, some ng' });
+  assert.deepEqual(decideOutcome(mixed), { tag: 'partial', landed: ['refs/heads/a'], rejected: [{ ref: 'refs/heads/b', reason: 'failed to lock' }] });
 
   const refLine = `${oid(4)} refs/heads/main\n`;
   const framesOf = list => ({
@@ -1226,6 +1390,11 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(lsRefs(framesOf([{ kind: 'delim' }])), e => e.code === 'protocol' && e.message === 'ls-refs: unexpected delim in ref listing');
   const listed = await lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }]));
   assert.equal(listed.refs.get('refs/heads/main').oid, oid(4));
+  // ref names are bytes (#43): a trailing U+FEFF or U+00A0 stays (trim() ate both), two Latin-1 names stay two refs
+  const odd = [te.encode(`${oid(1)} refs/heads/x\ufeff\n`), te.encode(`${oid(2)} refs/heads/y\u00a0\n`), Uint8Array.from([...te.encode(`${oid(3)} refs/heads/`), 0xe9, 0x0a]), Uint8Array.from([...te.encode(`${oid(5)} refs/heads/`), 0xe8, 0x0a]), te.encode(`${oid(6)} refs/heads/cr\r\n`)];
+  const oddRefs = (await lsRefs(framesOf([...odd.map(payload => ({ kind: 'data', payload })), { kind: 'flush' }]))).refs;
+  assert.deepEqual([...oddRefs.keys()], ['refs/heads/x\ufeff', 'refs/heads/y\u00a0', 'refs/heads/\udce9', 'refs/heads/\udce8', 'refs/heads/cr\r']);
+  assert.deepEqual(pkt('refs/heads/\udce9'), Uint8Array.from([...te.encode('0010refs/heads/'), 0xe9]));
   await assert.rejects(lsRefs(framesOf([]), ['refs/heads/a\nb']), e => e.code === 'bad_request' && e.what === 'ref prefix');
   const payload = te.encode(refLine);
   await assert.rejects(lsRefs({ ...framesOf([{ kind: 'data', payload }, { kind: 'flush' }]), limits: withLimits({ maxLsRefsBytes: payload.length - 1 }) }), e => e.code === 'limit_exceeded' && e.what === 'ls-refs bytes');
@@ -1233,14 +1402,14 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const reportLines = ['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'];
   const receipt = () => ({
     limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; },
+    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; yield { kind: 'flush' }; },
   });
   const deletes = [
     { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID },
     { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
   ];
   await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: true }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'cas_conflict');
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
   await assert.rejects(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false }), e => e.code === 'bad_request' && e.what === 'ref');
   await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, pushOptions: ['a\nb'] }), e => e.code === 'bad_request' && e.what === 'push option');
   await assert.rejects(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push commands');
@@ -1328,4 +1497,276 @@ test('size varints stop at 64 bits: a header that never ends is pack_corrupt at 
   throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
   throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+});
+
+
+
+// The zlib stream of an object declared S bytes may not run past zlibBound(S) = S + ⌈S/8⌉ + ⌈S/64⌉ + 13 (format.js; the
+// inequalities against zlib's deflateBound forms are in format-facts.test.js). Before this bound, a stream of non-final
+// empty stored blocks (`00 00 00 ff ff`: 5 bytes in, 0 bytes out) was accepted by every path until the request timer:
+// readFile took 793.6 MiB and editFile 632.7 MiB in 8 s, both `timeout`. Now the buffered inflate refuses it at the first
+// block boundary past the bound (and a stream that ends past the bound, at its end), spStep refuses the streamed body on
+// the chunk that crosses it, and the same empty stored blocks exactly at the bound still inflate.
+test('zlib stream length is bounded by the declared size: inflate (both checks), spStep; exactly at the bound passes, one past fails', async () => {
+  const { Sha1 } = await import('../src/sha1.js');
+  const storedBlock = (data, final) => concat([Uint8Array.of(final ? 1 : 0, data.length & 0xff, data.length >> 8, ~data.length & 0xff, (~data.length >> 8) & 0xff), data]);
+  const adlerBytes = n => Uint8Array.of(n >>> 24, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+  const emptyBlocks = k => Array.from({ length: k }, () => storedBlock(new Uint8Array(0), false));
+  const streamOf = (data, k) => concat([Uint8Array.of(0x78, 0x01), ...emptyBlocks(k), storedBlock(data, true), adlerBytes(adler32(data))]);
+  const ten = te.encode('0123456789');
+  assert.equal(zlibBound(10), 26);
+  const exact = streamOf(ten, 1), over = streamOf(ten, 2);                          // 2 + 5·k + 15 + 4: 26 at k = 1, 31 at k = 2
+  assert.equal(exact.length, 26); assert.equal(over.length, 31);
+  assert.deepEqual([...zlib.inflateSync(exact)], [...ten]); assert.deepEqual([...zlib.inflateSync(over)], [...ten], 'zlib itself accepts both: the bound is ours');
+
+  // the empirical half of the bound: node's zlib (every level, strategy, memLevel 1/2/8/9 and windowBits 9/15 — the memLevel
+  // 1 and 2 cases are the storelen/fixedlen regimes) never emits more than zlibBound(S) for S bytes, incompressible or not
+  const rnd = n => { const b = new Uint8Array(n); let x = 0x9e3779b9 ^ n; for (let i = 0; i < n; i++) { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; b[i] = x & 0xff; } return b; };
+  const inputs = [...Array.from({ length: 70 }, (_, n) => n), 127, 128, 255, 256, 1000, 4096, 65535, 65536, 1 << 20].flatMap(n => [rnd(n), new Uint8Array(n).fill(0x61), te.encode('ab'.repeat(n >> 1))]);
+  let deflates = 0;
+  for (const d of inputs) for (const level of [-1, 0, 1, 6, 9]) for (const strategy of [0, 1, 2, 3, 4]) for (const memLevel of d.length > 5000 ? [8] : [1, 2, 8, 9]) for (const windowBits of [9, 15]) {
+    const z = zlib.deflateSync(d, { level, strategy, memLevel, windowBits }); deflates++;
+    assert.ok(z.length <= zlibBound(d.length), `zlib emitted ${z.length} B for ${d.length} B (bound ${zlibBound(d.length)}) at level ${level} strategy ${strategy} memLevel ${memLevel} windowBits ${windowBits}`);
+  }
+  assert.ok(deflates > 10_000, `${deflates} deflates`);
+
+  // inflate, end check: consumed > bound is pack_corrupt even though every block started inside the bound (at 2, 7, 12 ≤ 26).
+  // `pos` is non-zero so the consumed count is measured from the stream's start, not the buffer's.
+  const junk = new Uint8Array(7).fill(0xee);
+  const ok = inflate(concat([junk, exact]), junk.length, { expectedSize: 10 });
+  assert.equal(ok.consumed, 26); assert.deepEqual([...ok.out], [...ten]);
+  throws(() => inflate(concat([junk, over]), junk.length, { expectedSize: 10 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 26 for 10 bytes)');
+  // without an expected size the output cap stands in for the declared size: zlibBound(14) = 30 < 31 = zlibBound(15)
+  throws(() => inflate(over, 0, { maxOutput: 14 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 30 for 14 bytes)');
+  assert.equal(inflate(over, 0, { maxOutput: 15 }).consumed, 31);
+  // an expected size of 0 is a size, not an absent one: zlibBound(0) = 13 (zlib's own empty stream is 8 bytes; a stored one 11)
+  const empty = new Uint8Array(0);
+  assert.equal(inflate(streamOf(empty, 0), 0, { expectedSize: 0 }).consumed, 11);
+  throws(() => inflate(streamOf(empty, 1), 0, { expectedSize: 0 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (16 > 13 for 0 bytes)');
+
+  // inflate, block-start check (what ends an endless stream): zlibBound(2) = 17 and block boundaries fall at 2, 7, 12, 17, 22.
+  // A stream cut at 17 is still "unexpected end" (17 is not past the bound); one cut at 22 is refused as too long before the
+  // reader asks for more input; 1 MiB of empty stored blocks is refused by the same check at the same byte, in microseconds.
+  const two = te.encode('ab');
+  assert.equal(zlibBound(2), 17);
+  const blocks = k => concat([Uint8Array.of(0x78, 0x01), ...emptyBlocks(k)]);
+  throws(() => inflate(concat([junk, blocks(3)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(concat([junk, blocks(4)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  assert.equal(inflate(streamOf(two, 0), 0, { expectedSize: 2 }).consumed, 13);
+  throws(() => inflate(streamOf(two, 1), 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (18 > 17 for 2 bytes)');
+  const mib = new Uint8Array(1 << 20); mib.set([0x78, 0x01]); for (let i = 2; i + 5 <= mib.length; i += 5) mib.set([0, 0, 0, 0xff, 0xff], i);
+  const t0 = performance.now();
+  throws(() => inflate(mib, 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  assert.ok(performance.now() - t0 < 100, 'the endless stream was walked, not refused');
+  // parsePack (the buffered path) takes the same refusal through inflate for the first object
+  const hostile = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), encodeObjHeader(TYPE.BLOB, 2), blocks(20), new Uint8Array(20)]);
+  throws(() => parsePack(hostile), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+
+  // spStep: the streamed body is refused on the byte that takes the zlib bytes (the body minus the 20-byte trailer lag) past
+  // the bound. The message carries no byte count, so it is the same whatever the chunking (I10, props.test.js).
+  const packOf = z => { const body = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), encodeObjHeader(TYPE.BLOB, 10), z]); return concat([body, new Sha1().update(body).digest()]); };
+  const atBound = spFinish(spStep(spInit(), packOf(exact)).state);
+  assert.equal(atBound.zlibBytes, 26); assert.equal(atBound.size, 10);
+  const longer = 'pack: zlib stream longer than its declared size allows (10-byte object, 26-byte bound)';
+  throws(() => spStep(spInit(), packOf(over)), 'pack_corrupt', longer);
+  assert.throws(() => spStep(spInit(), packOf(over)), e => e.got === 31 && e.max === 26 && e.size === 10, 'the fields carry the count the message leaves out');
+  const hdrLen = PACK_HEADER_BYTES + encodeObjHeader(TYPE.BLOB, 10).length;
+  let sp = spInit(), at = -1;
+  const bytes = packOf(over);
+  for (let i = 0; i < bytes.length && at < 0; i++) {
+    try { sp = spStep(sp, bytes.subarray(i, i + 1)).state; } catch (e) { assert.equal(e.code, 'pack_corrupt'); assert.equal(e.message, longer); assert.deepEqual([e.got, e.max, e.size], [27, 26, 10]); at = i; }
+  }
+  assert.equal(sp.zlibBytes, 26, 'the state before the refusing byte is exactly at the bound');
+  assert.equal(at, hdrLen + 26 + 20, 'the 27th zlib byte is body byte 47 (20 of them are still the withheld trailer lag)');
+});
+
+// Every consumer of packStream (fetchSingle, fetchWide, fetchPackOnce, streamBlobEdit, openBlob, checkoutTree's streams)
+// gets limits.maxPackBytes from v2Step, before the frame is yielded: band 1 as 'pack bytes', band 2 as 'progress bytes'.
+// A consumer cannot forget the cap, and a missing limit is bad_request on the first frame.
+const sidebandFrame = (n, len) => ({ kind: 'data', payload: concat([Uint8Array.of(n), new Uint8Array(len).fill(0x78)]) });
+test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of packStream', () => {
+  const line = s => ({ kind: 'data', payload: te.encode(s) });
+  const band = sidebandFrame;
+  const limits = withLimits({ maxPackBytes: 10 });
+  let st = v2Step(v2Init(limits), line('packfile')).state;
+  const feed = f => { const r = v2Step(st, f); st = r.state; return r; };
+  assert.equal(feed(band(SIDEBAND_PACK, 6)).pack.length, 6);
+  assert.equal(feed(band(SIDEBAND_PACK, 4)).pack.length, 4);
+  assert.equal(st.band1, 10);
+  assert.equal(feed(band(SIDEBAND_PROGRESS, 10)).pack, null);
+  assert.equal(st.band2, 10);
+  assert.throws(() => feed(band(SIDEBAND_PACK, 1)), e => e.code === 'limit_exceeded' && e.message === 'pack bytes 11 exceeds limit 10' && e.what === 'pack bytes' && e.got === 11 && e.max === 10);
+  assert.throws(() => feed(band(SIDEBAND_PROGRESS, 1)), e => e.code === 'limit_exceeded' && e.message === 'progress bytes 11 exceeds limit 10' && e.what === 'progress bytes' && e.got === 11 && e.max === 10);
+  assert.equal(feed(band(SIDEBAND_PACK, 0)).pack.length, 0, 'an empty frame at the cap is not past it');
+  throws(() => v2Step({ ...v2Init(), limits: { maxSectionLines: 1 } }, line('packfile')), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
+});
+
+// receive-pack's band 2 (hook stderr, the host's explanation) is held to maxPackBytes: a flood of it used to be read until
+// the request timer, with the tail kept but the bytes unbounded (issue #36). Since the push outcome space (I36) every
+// response frame, band 1, 2 or 3, counts toward one 'report bytes' cap, and a limit hit after the body is sent is
+// `ambiguous` (original `limit_exceeded`): the ref may have moved. (Merge of #49 and #51: #49's separate 'progress bytes'
+// counter became this shared one.)
+test('push holds band 2 to maxPackBytes, counted with its report', async () => {
+  const band = sidebandFrame;
+  const del = [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }];
+  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt('ok refs/heads/a\n'), FLUSH]) };
+  const fl = [band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }];
+  const total = fl.reduce((n, f) => n + (f.payload?.length ?? 0), 0);
+  const pushT = (frames, max) => ({ limits: withLimits({ maxPackBytes: max }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
+  const fits = await push(pushT(fl, total), { commands: del, sideband: true });
+  assert.equal(fits.report.ok, true); assert.equal(fits.hookOutput.length, 50);
+  await assert.rejects(push(pushT(fl, total - 1), { commands: del, sideband: true }),
+    e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.got === total && e.cause.max === total - 1);
+  // an endless band 2 is cut at the cap, not read until the timer: reading stops on the frame that crosses it
+  let pulled = 0;
+  const flood = { limits: withLimits({ maxPackBytes: 10_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) { pulled++; yield band(SIDEBAND_PROGRESS, 999); } } };
+  await assert.rejects(push(flood, { commands: del, sideband: true }), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
+  assert.equal(pulled, 11, 'ten 1,000-byte frames fit, the eleventh crosses the cap');
+});
+
+test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare', async () => {
+  const two = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
+  const cls = (lines, commands = two) => classifyReport(lines.map(l => (typeof l === 'string' ? te.encode(l) : l)), commands);
+  const why = (lines, commands) => cls(lines, commands).why;
+  assert.equal(why([Uint8Array.of(0xff)]), 'a line is not one LF-terminated line');
+  // a ref name's bytes >= 0x80 are legal to git and echoed as sent (#43): `\xff` is the ref the command spelled `\udcff`,
+  // never one spelled with U+FFFD
+  assert.equal(why([data('unpack ok\n'), data('ok refs/heads/', Uint8Array.of(0xff), '\n')], [{ ref: 'refs/heads/\ufffd' }]), 'status for a ref not commanded');
+  assert.deepEqual(cls([data('unpack ok\n'), data('ok refs/heads/', Uint8Array.of(0xe9, 0xe8), '\n')], [{ ref: 'refs/heads/\udce9\udce8' }]), { tag: 'statuses', refs: [{ ref: 'refs/heads/\udce9\udce8', ok: true, reason: '' }] });
+  assert.equal(why(['unpack ok\n', data('ng refs/heads/a caf', Uint8Array.of(0xe9), '\n'), 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a');
+  assert.equal(why(['unpack ok']), 'a line is not one LF-terminated line');
+  assert.equal(why(['unpack ok\nx\n']), 'a line is not one LF-terminated line');
+  for (const l of [[], ['unpack ok*\n'], ['ok refs/heads/a\n']]) assert.equal(why(l), 'no git unpack line first');
+  assert.equal(why(['unpack ok\n', 'nf refs/heads/a hook declined\n', 'ok refs/heads/b\n']), 'a line is not a ref status');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/zz\n', 'ok refs/heads/b\n']), 'status for a ref not commanded');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/a\n']), 'two statuses for refs/heads/a');
+  for (const r of ['', 'hook\x01declined', '\x01x', 'x\x01', 'caf\u00e9']) assert.equal(why(['unpack ok\n', `ng refs/heads/a ${r}\n`, 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a', JSON.stringify(r));
+  assert.equal(why(['unpack ok\n', 'ng refs/heads/a\n', 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n']), 'no status for refs/heads/b');
+  assert.equal(why(['unpack index-pack abnormal exit\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), 'unpack failed, a ref is not "unpacker error"');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), '"unpacker error" beside "unpack ok"');
+  for (const status of GIT_UNPACK_ERRORS) assert.deepEqual(cls([`unpack ${status}\n`, 'ng refs/heads/a unpacker error\n', 'ng refs/heads/b unpacker error\n']), { tag: 'unpackFailed', status });
+  assert.equal(GIT_UNPACK_ERRORS.length, 8);
+  assert.deepEqual(cls(['unpack ok\n', 'ng refs/heads/b hook declined\n', 'ok refs/heads/a\n']), { tag: 'statuses', refs: [{ ref: 'refs/heads/b', ok: false, reason: 'hook declined' }, { ref: 'refs/heads/a', ok: true, reason: '' }] });
+
+  const failed = { tag: 'unpackFailed', status: 'index-pack abnormal exit' };
+  assert.deepEqual(decideOutcome(failed), { tag: 'rejected', code: 'push_rejected' });
+  assert.deepEqual(decideOutcome(failed, { pack: false }), { tag: 'ambiguous', why: 'unpack failed but no pack was sent' });
+  assert.deepEqual(decideOutcome({ tag: 'malformed', why: 'w' }), { tag: 'ambiguous', why: 'w' });
+  assert.deepEqual(decideOutcome({ tag: 'weird' }), { tag: 'ambiguous', why: 'report shape weird' });
+  const ngs = (...reasons) => ({ unpack: 'ok', refs: reasons.map(reason => ({ ok: false, reason })) });
+  assert.equal(rejectionCode(ngs('failed to update ref')), 'cas_conflict');
+  for (const r of ['xfailed to update ref', 'failed to update refs', 'a bad ref', 'bad refs']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
+  assert.equal(rejectionCode({ unpack: 'unpack-objects abnormal exit', refs: [{ ok: false, reason: 'failed to update ref' }] }), 'push_rejected');
+  assert.equal(rejectionCode({ unpack: 'ok', refs: [{ ok: true }, { ok: false, reason: 'stale ref' }] }), 'cas_conflict');
+  // the class table (test/space/push-ng.space.js): an atomic CAS loss, git >= 2.51's batched texts, denyNonFastForwards,
+  // a proc-receive hook that did not answer, and the precedence refusal > non-fast-forward > cas
+  for (const r of ['atomic transaction failed', 'bad ref', 'incorrect old value provided', 'reference already exists', 'reference does not exist']) assert.equal(rejectionCode(ngs(r)), 'cas_conflict', r);
+  for (const r of ['refname conflict', 'hook declined', 'funny refname', 'atomic push failure']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
+  assert.equal(rejectionCode(ngs('non-fast-forward')), 'not_fast_forward');
+  assert.equal(rejectionCode(ngs('non-fast-forward', 'atomic push failure')), 'not_fast_forward');
+  assert.equal(rejectionCode(ngs('non-fast-forward', 'failed to update ref')), 'not_fast_forward');
+  assert.equal(rejectionCode(ngs('non-fast-forward', 'hook declined')), 'push_rejected');
+  assert.equal(rejectionCode(ngs('failed to update ref', 'atomic push failure')), 'cas_conflict');
+  assert.equal(rejectionCode(ngs('proc-receive failed to report status')), 'ambiguous');
+  assert.equal(rejectionCode(ngs('fail to run proc-receive hook', 'hook declined')), 'push_rejected');
+  assert.equal(rejectionCode(ngs('rejected: non-fast-forward')), 'cas_conflict', 'a host\'s wording keeps its heuristic');
+  const sts = (...rs) => ({ tag: 'statuses', refs: rs.map(([ref, ok, reason]) => ({ ref, ok, reason })) });
+  assert.deepEqual(decideOutcome(sts(['a', true, ''], ['b', false, 'fail to run proc-receive hook'])), { tag: 'ambiguous', why: 'proc-receive: fail to run proc-receive hook' });
+  assert.deepEqual(decideOutcome(sts(['a', false, 'proc-receive failed to report status'])), { tag: 'ambiguous', why: 'proc-receive: proc-receive failed to report status' });
+  assert.deepEqual(decideOutcome(sts(['a', false, 'non-fast-forward'])), { tag: 'rejected', code: 'not_fast_forward' });
+
+  // band 2 is kept as a 4096-character tail, counted per frame
+  let st = streamInit(true);
+  assert.equal(st.band2, '');
+  for (const n of [3000, 2000]) st = streamStep(st, { kind: 'data', payload: data(Uint8Array.of(2), 'x'.repeat(n - 1) + 'y') });
+  assert.equal(st.band2.length, 4096); assert.ok(st.band2.endsWith('xy')); assert.equal(st.band2Frames, 2);
+
+  // through push(): the error a caller sees
+  const sb = (...frames) => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null, async *frames() { for (const f of frames) yield f === null ? { kind: 'flush' } : { kind: 'data', payload: f }; } });
+  const band = (b, ...parts) => data(Uint8Array.of(b), ...parts);
+  const report = (...lines) => band(1, ...lines.map(l => pkt(l)), FLUSH);
+  const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
+  await assert.rejects(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
+  await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report.unpack === 'ok*');
+  await assert.rejects(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
+  await assert.rejects(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
+  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  await assert.rejects(push(many, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
+  const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
+  await assert.rejects(push(big, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
+  const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes
+  const ok = await push(fits, del);
+  assert.equal(ok.report.ok, true); assert.equal(ok.hookOutput, '');
+});
+
+// A commit-only v2 server over a hand graph ({ name: [parent names] }), answering `want` + `deepen N` + `filter tree:0`
+// as upload-pack does: the commits within N of the want (the want is depth 1), those at depth N as `shallow` lines; a
+// want of the empty tree answers it; ls-refs from `t.refs`; receive-pack answers every command `ok` and moves the ref
+// (the pack is not inspected) — enough for mergeBase and rebaseBranch. Ported from research/18 (7b21380).
+function graphServer(edges) {
+  const author = ident(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }));
+  const tree = hashObject('tree', new Uint8Array(0));
+  const oids = new Map(), datas = new Map();
+  const build = name => { if (oids.has(name)) return oids.get(name); const d = encodeCommit({ tree, parents: edges[name].map(build), author, committer: author, message: `${name}\n` }); const o = hashObject('commit', d); oids.set(name, o); datas.set(o, d); return o; };
+  for (const name of Object.keys(edges)) build(name);
+  const parentsOf = new Map([...oids].map(([name, o]) => [o, edges[name].map(n => oids.get(n))]));
+  const requests = [];
+  const line = str => ({ kind: 'data', payload: te.encode(str) });
+  const sideband = b => ({ kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), b]) });
+  const t = { limits: DEFAULT_LIMITS, tracer: new Tracer(), parent: null, objects: new Map(), quirks: {}, requests, refs: new Map(), url: 'stub://graph',
+    async *frames(service, body) {
+      // the pkt-lines up to the first flush (a receive-pack body carries the raw pack after it)
+      const lines = []; for (let p = 0; p + 4 <= body.length;) { const n = parseInt(td.decode(body.subarray(p, p + 4)), 16); if (n === 0) break; if (n > 1) lines.push(td.decode(body.subarray(p + 4, p + n)).replace(/\n$/, '')); p += Math.max(n, 4); }
+      if (service === 'git-receive-pack') { yield sideband(pkt('unpack ok\n')); for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield sideband(pkt(`ok ${m[2]}\n`)); } } yield sideband(FLUSH); yield { kind: 'flush' }; return; } // git's shape: the report's flush inside band 1, then the outer flush (I36)
+      if (lines[0] === 'command=ls-refs') { const prefixes = lines.filter(l => l.startsWith('ref-prefix ')).map(l => l.slice(11)); for (const [ref, o] of t.refs) if (prefixes.some(p => ref.startsWith(p))) yield line(`${o} ${ref}\n`); yield { kind: 'flush' }; return; }
+      const want = lines.find(l => l.startsWith('want '))?.slice(5), deepen = +(lines.find(l => l.startsWith('deepen '))?.slice(7) ?? 0);
+      const filter = lines.find(l => l.startsWith('filter '))?.slice(7) ?? null;
+      requests.push({ want, deepen, filter });
+      if (want === tree) { const { pack } = await buildPack([{ type: TYPE.TREE, data: new Uint8Array(0) }]); yield line('packfile\n'); yield sideband(pack); yield { kind: 'flush' }; return; }
+      const depth = new Map([[want, 1]]); const q = [want];
+      for (let i = 0; i < q.length; i++) { const c = q[i]; if (depth.get(c) >= deepen) continue; for (const p of parentsOf.get(c) ?? []) if (!depth.has(p)) { depth.set(p, depth.get(c) + 1); q.push(p); } }
+      const window = [...depth.keys()], shallow = window.filter(c => depth.get(c) === deepen && parentsOf.get(c).length);
+      const { pack } = await buildPack(window.map(c => ({ type: TYPE.COMMIT, data: datas.get(c) })));
+      if (shallow.length) { yield line('shallow-info\n'); for (const c of shallow) yield line(`shallow ${c}\n`); yield { kind: 'delim' }; }
+      yield line('packfile\n');
+      for (let i = 0; i < pack.length; i += 65000) yield sideband(pack.subarray(i, Math.min(i + 65000, pack.length)));
+      yield { kind: 'flush' };
+    } };
+  return { t, oid: name => oids.get(name) };
+}
+const chain = (name, n, below) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${name}${i + 1}`, [i + 1 < n ? `${name}${i + 2}` : below]]));
+
+test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was only named, and a cut below two candidates deepens', async () => {
+  // #41: the base exactly at the window's cut (8 a side) is named by both sides' children, never fetched by mergeBase; it
+  // is fetched once (deepen 1) before the first replay. With the base inside the window (7) it is not fetched again.
+  for (const n of [8, 7]) {
+    const s = graphServer({ root: [], ...chain('f', n, 'root'), ...chain('m', n, 'root') });
+    s.t.refs.set('refs/heads/feat', s.oid('f1')); s.t.refs.set('refs/heads/main', s.oid('m1'));
+    const res = await rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+    assert.deepEqual([res.outcome, res.commits, res.base, res.onto], ['rebase', n, s.oid('root'), s.oid('m1')]);
+    assert.equal(s.t.refs.get('refs/heads/feat'), res.oid, 'the branch was force-updated to the new tip');
+    assert.equal(s.t.requests.filter(q => q.want === s.oid('root') && q.deepen === 1).length, n === 8 ? 1 : 0, 'base fetched once at the cut (n=8), not when the window held it (n=7)');
+  }
+  // #42: a,b → [c, z]; c → p1..p6 → x → z. Depth 8 cuts x: {c, z} looks criss-cross; one more window shows z below c.
+  { const s = graphServer({ a: ['c', 'z'], b: ['c', 'z'], ...chain('p', 6, 'x'), c: ['p1'], x: ['z'], z: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.base, res.bases, res.depth], [s.oid('c'), [s.oid('c')], 16]); }
+  // a true criss-cross with nothing cut below it is final at the first window (two bases, not a deeper search)
+  { const s = graphServer({ a: ['x', 'y'], b: ['y', 'x'], x: ['r'], y: ['r'], r: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.base, res.bases, res.depth], [null, [s.oid('x'), s.oid('y')].sort(), 8]); }
+  // ...nor over deep shared history: a cut both bases reach cannot join them (the research rule deepened to the cap here:
+  // limit_exceeded where git answers two bases)
+  { const s = graphServer({ a: ['x', 'y'], b: ['y', 'x'], x: ['h1'], y: ['h1'], ...chain('h', 40, 'r'), r: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'), { maxDepth: 16 });
+    assert.deepEqual([res.base, res.bases, res.depth], [null, [s.oid('x'), s.oid('y')].sort(), 8]); }
+  // a single base over a settled cut stays final at the first window
+  { const s = graphServer({ a: ['c'], b: ['c'], ...chain('p', 9, 'r'), c: ['p1'], r: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.base, res.depth], [s.oid('c'), 8]); }
+  const G = o => new Map(Object.entries(o).map(([k, parents]) => [k, { parents }]));
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['x'] }), 'a', 'b'), { best: ['c', 'z'], truncated: false }, 'a cut both bases reach');
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['w'] }), 'a', 'b'), { best: ['c', 'z'], truncated: true }, 'each base reaches a cut the other does not');
 });

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync, chmodSync, readFileSync, lstatSync, readlinkSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblemsOf, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { pushTree, buildTree, fileEntries, selectObjects } from '../src/tree.js';
 import { filesFromDir, pushDir } from '../src/tree-node.js';
@@ -31,7 +31,7 @@ const counting = (hook = () => {}) => {
   const f = async (url, init) => { const kind = String(url).split('/').pop(); c[kind] = (c[kind] ?? 0) + 1; await hook(kind, c); return fetch(url, init); };
   return { c, f };
 };
-const fsck = bare => assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), '');
+const fsck = bare => assert.deepEqual(fsckProblems(bare), []);
 
 // deterministic incompressible-ish content (an LCG's hex), so pack sizes are stable across runs
 const text = (seed, len) => { let x = (seed + 1) >>> 0, s = ''; while (s.length < len) { x = (Math.imul(x, 1103515245) + 12345) >>> 0; s += x.toString(16).padStart(8, '0'); } return s.slice(0, len) + '\n'; };
@@ -220,8 +220,8 @@ test('duplicate names: encodeTree refuses them (git fsck duplicateEntries); push
   gitBuf(dir, ['hash-object', '-w', '-t', 'tree', '--stdin'], Buffer.alloc(0));
   for (const bytes of [concat([entry('100644', 'a', oid), entry('100644', 'a', oid)]), concat([entry('100644', 'a', oid), entry('100644', 'a.b', oid), entry('40000', 'a', '4b825dc642cb6eb9a060e54bf8d69288fbee4904')])]) {
     const tree = gitBuf(dir, ['hash-object', '--literally', '-w', '-t', 'tree', '--stdin'], Buffer.from(bytes)).toString().trim();
-    let out = ''; try { git(dir, ['fsck', '--strict', '--no-dangling', tree]); } catch (e) { out = e.stderr + e.stdout; }
-    assert.match(out, /duplicateEntries/, 'git fsck rejects it');
+    const out = fsckProblemsOf(dir, tree);
+    assert.ok(out.some(l => /^error in tree [0-9a-f]{40}: duplicateEntries: /.test(l)), `git fsck rejects it: ${out.join(' | ')}`);
   }
   // pushTree: the same mistakes in `files` are bad_request before a request is made
   const { c, f } = counting();

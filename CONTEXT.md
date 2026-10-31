@@ -55,7 +55,7 @@ Layers, bottom up (each depends only on the ones below):
 | Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
 | Transport contract | `transport`, `http`, `sshgit` (+ `ssh`, `ssh-node`, `ssh-workers`) | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; two implementations, no dispatch |
 | Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |
-| Operations | `operation`, `edit`, `tree`, `checkout`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
+| Operations | `operation`, `edit`, `tree`, `checkout`, `log`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
 | Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `checkout.js` (whole-tree read), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `ssh-node.js` (`node:net`), `tree-node.js` and `checkout-node.js` (`node:fs`) | `sideEffects: false` |
 | Telemetry | `otel` | minimal OTLP/JSON tracer; exporters pluggable (`test/jsonl.mjs` for files) |
 
@@ -74,6 +74,10 @@ Key operation modules:
   `openBlob`; a host refusing many wants gets one per request (`quirks.blobWants`). Returns `entries` and a `files` async
   iterator. `checkout-node.js` (`writeFiles`, `checkoutDir`) writes a directory as `git clone` lays it out and never
   writes through a symlink. Issue #12.
+- `log.js` — `readLog(url, { ref, limit }, opts)`: first-parent history (`git rev-list --first-parent -n`) from one
+  `deepen <limit>` fetch through `fetchPackTree0` (`tree:0`, else `blob:none` with the trees harvested). `logWindow` (pure)
+  holds the window to the #37 deepen contract (the want present; every commit an ancestor; a missing parent only under a
+  `shallow` line, else `pack_corrupt`) and sets `truncated` from the last commit's parents. No `path` filter. Issue #56.
 - `merge.js` — `mergeBranch`, `fastForward`, `deleteBranch`, `mergeTrees` (trivial-merge rules per directory, only differing
   subtrees fetched), `bestBases` (git's `merge-base --all` with a completeness check), rename guards, `blobMerger`,
   `attributeDrivers`/`attributeTree`.
@@ -155,6 +159,8 @@ This session (2026-10-19 → 20):
 
 | Decision | Why (evidence) |
 |---|---|
+| readLog is first-parent, not git log's date order | the first `limit` first-parent commits are exactly inside a `deepen limit` window and `truncated` is the last commit's parent count, with no date heuristics; it is the history a branch view shows (one merge per landed branch). A date-ordered `git log -n` would need the whole window ranked by committer date (issue #56) |
+| readLog's window is held to the deepen contract like the merge-base walk's | a cut graph without `shallow` lines (or a foreign commit) is `pack_corrupt`, never a shorter or padded log: 90 cells in `test/log.test.js`, 50 of them predicted `pack_corrupt` from git's own graph |
 | Transport = plain record with two methods; HTTP and SSH implement it | operations never branch on transport; SSH added with zero changes above the contract |
 | Errors: one table, codes validated at throw | retry policy is data; tests check docs ↔ table ↔ literals in source stay aligned |
 | After an acknowledged push, any read-back failure → `ambiguous` | the push may have landed; a transport code would invite a wrong retry (I25) |
@@ -171,8 +177,9 @@ This session (2026-10-19 → 20):
 | pushTree's "server has it" set = oids named by the parent's trees it read | exact for one-commit deploys (push 2 == `git rev-list --objects new ^old`, 7 objects / 1,176 B on a 208-entry tree); objects only in older history are resent — correct, not minimal, no history walk |
 | checkoutTree fetches every tree in one `blob:none` pack, then blobs by wants list | 3 requests for a 22-entry fixture vs 72 for readCommit → listTree → readFile per file; `blob:none` is the one filter Artifacts serves, so the same 3 there. A `path` still fetches the whole commit's trees (one round trip beats a tree:0 walk; bounded by `maxPackBytes`) |
 | blob:none fallback: the caller's limits bind what it asked for; an extra over a limit is dropped, a malformed one fails the fetch | a tree:0 server never sends the extras, so failing on an honest big sibling directory made the answer depend on the host (#46: curl on Artifacts, 2,135-entry tests/data vs a 2,000 limit, 413 on every page); a malformed object means the response is untrusted (#18). Dropped extras are refetched as wanted objects if ever read. SAFETY I30 |
-| Blob batches are buffered and split on a cap, not streamed | a multi-object pack cannot be cut into objects without inflating each one (zlib end is found only by inflating); a batch is bounded by the same caps as any buffered pack, and a blob alone streams in O(1) memory. A split re-downloads up to `maxPackBytes` — the cost of not knowing blob sizes in advance (trees do not carry them) |
+| Blob batches are buffered and split on a cap, not streamed | a multi-object pack cannot be cut into objects without inflating each one (zlib end is found only by inflating); a batch is bounded by the same caps as any buffered pack, and a blob alone streams in O(1) memory (still under `maxPackBytes` on the wire: since issue #36 every fetch is). A split re-downloads up to `maxPackBytes` — the cost of not knowing blob sizes in advance (trees do not carry them) |
 | Every push refuses a pack over `maxPackBytes` before sending | a capped host (Artifacts 62–93 MiB) would otherwise take the upload and answer 4xx; `limit_exceeded` carries the measured size |
+| `maxPackBytes` is enforced in `v2Step` (band 1 and band 2), not by each consumer; every object's zlib stream is capped at `zlibBound(size)` in `spStep` and `inflate` | the streamed blob paths had no body cap at all: endless empty stored blocks (5 bytes in, 0 out) were read at ~90 MiB/s until the request timer (shown: 793.6 MiB / 8 s). One choke point means a new consumer cannot forget the cap; the per-object bound (zlib's own `deflateBound`, since RFC 1951 has no ceiling) means a 10-byte blob costs ≤ 26 zlib bytes plus one chunk whatever `maxPackBytes` is, and a buffered pack's parse is linear in declared sizes |
 | Redirects never followed (`redirect: 'manual'`, 3xx → `http`); the credential scrub rides on the transport into every span and error | workerd 2026-10-23 forwards Authorization on a cross-origin redirect (measured); a server can echo the token in ERR/band 2/band 3/`ng` text. SAFETY I6b, I6c (issue #15) |
 | URL userinfo is sent as git sends it (`<token>@` → Basic `<token>:`, `:pass` → `:pass`, percent-decoded to bytes), not refused | measured on git 2.50 behind a Basic-auth gate: no prompt before the first credentialed request, the header byte-equal in every form; a library cannot prompt, so a refused one is `auth`. SAFETY I6d (issue #32) |
 | An explicit `auth` that sends nothing is `bad_request`; `{ user }` alone is refused, not `user:` | git's own credential API (a helper giving a username alone) asks for the password and sends nothing; a library cannot ask. `{ user, token: '' }` is the explicit `user:`. Explicit fields go out as UTF-8 bytes, as git sends a helper's. SAFETY I6e (issue #40) |

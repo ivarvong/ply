@@ -9,7 +9,8 @@
 //     entries: [{ path, mode, oid }]                            every non-tree entry under `path`, in tree order
 //     files:   AsyncIterable<{ path, mode, oid, size, stream }> one per entry; stream: ReadableStream<Uint8Array>
 //
-// Paths are relative to `path`. Modes are git's canonical ones (canon_mode: 1006xx → 100644, 1007xx → 100755):
+// Paths are relative to `path`. Modes are git's canonical ones (canon_mode, from parseTree: 100664 → 100644, 40755 → a
+// directory, any type git does not know → 160000):
 // 100644, 100755, 120000 (a symlink; the stream is its target) and 160000 (a gitlink: the submodule's commit is not
 // in this repository, so size 0 and stream null). Directories are implied by the paths (git has no empty ones).
 //
@@ -21,32 +22,31 @@
 // Memory. The tree pack is one buffered fetch (maxPackBytes, maxInflatedTotal, maxPackObjects); the entries walked are
 // bounded by maxPackObjects (a tree reused at many paths cannot multiply them past it) and the depth by maxPathDepth.
 // A blob batch is one buffered fetch under the same caps; one that hits a cap is split in half and refetched, down to
-// single blobs, which stream in O(1) memory whatever their size. The iterator holds at most the batch it is yielding
-// (and the previous one while its streams are unread).
+// single blobs, which stream in O(1) memory. Every fetch, streamed or buffered, delivers at most maxPackBytes of pack
+// (v2Step): a single blob whose pack is over it is limit_exceeded, not fetched (the default, 128 MiB, is above GitHub's
+// 100 MiB file cap). The iterator holds at most the batch it is yielding (and the previous one while its streams are unread).
 //
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
 import { fail } from './errors.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { resolveCommit, openBlob } from './read.js';
-import { parseCommit, parseTree, TYPE, TYPE_NAME } from './objects.js';
+import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME } from './objects.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validatePath } from './validate.js';
 import { withParent } from './transport.js';
-import { MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT } from './format.js';
+import { MODE_TREE, MODE_COMMIT } from './format.js';
 
-/* oxlint-disable no-magic-numbers -- a request-size default and git's permission bit, not wire-format facts */
+/* oxlint-disable no-magic-numbers -- a request-size default, not a wire-format fact */
 const BATCH = 1000;
-const OWNER_EXEC = 0o100;
 /* oxlint-enable no-magic-numbers */
-const REGULAR = /^100[0-7]{3}$/;
+const TREE_MODE = /^[1-7][0-7]*$/;
 
-// Pure: git's canon_mode for a tree entry, or null for a mode git cannot check out.
-export const canonMode = mode => {
-  if (mode === MODE_LINK || mode === MODE_COMMIT || mode === MODE_TREE) return mode;
-  if (!REGULAR.test(mode)) return null;
-  return parseInt(mode, 8) & OWNER_EXEC ? MODE_EXEC : MODE_BLOB;
-};
+// Pure: git's canon_mode for a tree entry's mode (objects.js canonMode: the low 16 bits, as tree-walk keeps them), or
+// null for a mode git does not parse at all or errors on under fsck --strict (empty, not octal, zero-padded). parseTree
+// already returns canonical modes; this is the same function for a caller holding a raw one. Every type that is not a
+// regular file, a symlink or a directory is a gitlink to git (`git ls-tree` shows 140000, 100 and 200644 as 160000).
+export const canonMode = mode => (typeof mode === 'string' && TREE_MODE.test(mode) ? canonModeOf(mode) : null);
 
 // Pure: every non-tree entry under `oid`, depth first in tree order. `tree(oid)` → parsed entries. Each tree is checked
 // for a name given twice (git fsck duplicateEntries: a symlink `a` beside a directory `a` would route a later write
@@ -139,9 +139,11 @@ const isWantsRefusal = e => ['http', 'remote_error', 'protocol'].includes(e?.cod
 const bytesStream = data => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
 // The files iterator. Gitlinks first (nothing to fetch), then the unique blobs in `batch`-sized wants lists; every path
-// naming a blob is yielded with it. Its span, `git.checkout.blobs`, ends when the iteration does.
-async function* blobFiles(transport, tracer, parent, entries, batch) {
-  const span = tracer.start('git.checkout.blobs', { parent });
+// naming a blob is yielded with it. Its span, `git.checkout.blobs`, starts at the first next() and ends when the
+// iteration does, both after the checkout root has ended: it is the root of its own trace with a follows_from link to
+// the checkout root (README "Span lifetimes"), and each streamed blob's git.read.blob follows it in turn.
+async function* blobFiles(transport, tracer, opener, entries, batch) {
+  const span = tracer.start('git.checkout.blobs', { follows: opener });
   const t = withParent(transport, span);
   const byOid = new Map();
   for (const e of entries) if (e.mode !== MODE_COMMIT) { const l = byOid.get(e.oid); if (l) l.push(e); else byOid.set(e.oid, [e]); }
