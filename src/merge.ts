@@ -25,11 +25,11 @@ import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
+import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
-import { short, commitAt, commitBytesAt } from './mergeio.js';
+import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.js';
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons and bases are extras (errors.ts is shared; additive
@@ -59,7 +59,8 @@ export type Outcome = <R>(kind: string, result: R, attrs?: Readonly<Record<strin
 export type OpContext = { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits };
 export type PushResult = { readonly packBytes: number };
 export type Refs = { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }> };
-export type Author = { readonly name: string; readonly email: string; readonly tz?: string };
+// a commit stamp: `time` (unix seconds) defaults to the operation's `time`, `tz` (+HHMM / -HHMM) to +0000
+export type Author = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number };
 // a commit signer (src/sign.ts); re-exported for rebase.ts
 export type { Signer } from './sign.js';
 import type { Signer } from './sign.js';
@@ -259,6 +260,8 @@ async function addedPaths(read: ReadTree, base: string | null | undefined, side:
   return out;
 }
 
+// a path list as one comparable value (paths hold no NUL)
+const pathSet = (l: readonly string[]): string => [...l].toSorted().join('\0');
 export type DriverFor = (path: string) => Promise<Driver>;
 // Why a path conflicts. The text is the reason a caller reads in merge_conflict's `reasons`.
 export type ContentReason =
@@ -350,20 +353,28 @@ export async function mergeTrees(t: Transport, cache: TreeCache, { base, ours, t
     if (sub.oid !== null) entries.push({ mode: '40000', name, oid: sub.oid }); // an empty merged subtree drops the directory, as git does
   }
   if (top) for (const p of out.dirAdds) if (!(p in out.reasons)) conflict(p, 'possible directory rename (added inside a directory the other side removed)');
+  const data: Uint8Array = encodeTree(entries);
+  const oid: string = hashObject('tree', data);
   // deletedOne is set only beside a conflict
   if (top && (out.deletedBoth.length > 0 || out.deletedOne === true)) {
     // Every path either side added, across the whole tree — the walk above skips directories only one side changed, and a
     // rename target can be anywhere. Fetched only when a deletion is in play.
-    const added = [...new Set([...await addedPaths(read, base, ours), ...await addedPaths(read, base, theirs)])];
-    if (added.length > 0) for (const p of out.deletedBoth) conflict(p, 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)');
+    const addedOurs = await addedPaths(read, base, ours);
+    const addedTheirs = await addedPaths(read, base, theirs);
+    const added = [...new Set([...addedOurs, ...addedTheirs])];
+    // G1 stands down when the rename is already applied (#103): the rename-blind merge is ours' tree (every change theirs
+    // made is in ours) and both sides added and deleted exactly the same paths, so git pairs the same renames on both
+    // sides and finds nothing to conflict (a cherry-pick of it is empty). An add or delete on ours alone could let git
+    // pair a different source or target there (rename/rename, rename/delete), so the guard stays.
+    const sameChanges = async (): Promise<boolean> => pathSet(addedOurs) === pathSet(addedTheirs) && pathSet(await addedPaths(read, ours, base)) === pathSet(await addedPaths(read, theirs, base));
+    const applied = out.conflicts.length === 0 && oid === ours && await sameChanges();
+    if (added.length > 0 && !applied) for (const p of out.deletedBoth) conflict(p, 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)');
     // Naming: git reports a rename's conflict at the rename target (rename/delete, rename/rename, or a content conflict
     // after following a rename onto a modify/delete). When this merge conflicts with a deletion in play, every added path
     // is a possible target, so it is listed too. This adds names to a conflicting merge; it never makes one conflict.
     if (out.conflicts.length > 0) for (const p of added) if (!(p in out.reasons)) conflict(p, 'possible rename target (added while the merge has a deletion conflict)');
   }
   if (out.conflicts.length > 0 || entries.length === 0) return { oid: null, ...out };
-  const data: Uint8Array = encodeTree(entries);
-  const oid: string = hashObject('tree', data);
   if (oid !== ours && oid !== theirs && oid !== base) out.objects.push({ type: TYPE.TREE, data, oid });
   cache.set(oid, data);
   return { oid, ...out };
@@ -463,7 +474,6 @@ export const uniqueObjects = <O extends { readonly oid: string }>(objects: reado
 // 2.43–2.45 in a bare repository whose HEAD is the target branch); a ref name or commit oid → its tree (attr.tree=<rev>).
 // 'ours' | 'theirs' | 'base', a ref name or a commit oid, or null
 export type AttributeSource = string | null;
-const isOid = (s: string): boolean => /^[0-9a-f]{40}$/u.test(s);
 export const validateAttributes = (a: unknown): void => {
   if (a === null || a === undefined) return;
   if (typeof a !== 'string') throw fail('bad_request', 'attributes must be null, ours, theirs, base, a ref or a commit oid');
@@ -500,6 +510,8 @@ export type MergeSpec = {
   readonly ref?: string;
   readonly from: string;
   readonly author?: Author | null;
+  // defaults to the author (one identity, one time, as before)
+  readonly committer?: Author | null;
   readonly message?: string | null;
   readonly time?: number;
   readonly fastForwardOnly?: boolean;
@@ -520,19 +532,21 @@ export type MergeOutcome =
   | Sides & { readonly outcome: 'merge'; readonly tree: string; readonly base: string; readonly pushBytes: number; readonly newTrees: number; readonly contentMerged: number };
 
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
-export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
-  validatePushRef(ref, false); validateRef(from);
-  const person: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
+  validatePushRef(ref, false); const fromOid = givenOid(from, 'from');
+  const person: ValidatedIdent | null = author ? stamp(author, time) : null;
+  const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;
   if (message !== undefined && message !== null && message !== '') validateMessage(message); validateAttributes(attributes);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
-    const { refs }: Refs = await lsRefs(t, [ref, from]);
+    const { refs }: Refs = await lsRefs(t, fromOid === null ? [ref, from] : [ref]);
     const ours = refs.get(ref)?.oid;
-    const theirs = refs.get(from)?.oid;
+    const theirs = fromOid ?? refs.get(from)?.oid;
     if (ours === undefined) throw fail('not_found', `ref ${ref} not found`); if (theirs === undefined) throw fail('not_found', `ref ${from} not found`);
     // ls-refs names an annotated tag's object, not a commit; `git merge <tag>` records the tag in a mergetag header, which
     // ply does not write. Refused by name (it read as a missing commit, pack_corrupt, before #43's matrix ran it).
     for (const r of [ref, from]) { const peeled = refs.get(r)?.peeled; if (peeled !== undefined) throw fail('unsupported', `${r} is an annotated tag (git merge writes a mergetag header ply does not); merge its commit ${peeled}`, { what: r === ref ? 'ref' : 'from' }); }
+    if (fromOid !== null) await assertCommit(t, fromOid, 'from');
     root.set({ 'git.merge.ours': ours, 'git.merge.theirs': theirs });
     const upToDate = (base: string): MergeOutcome => outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
     if (ours === theirs) return upToDate(ours);
@@ -562,10 +576,9 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': newTrees, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
     if (merged.conflicts.length > 0) throw fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
     const treeOid: string = merged.oid ?? hashObject('tree', encodeTree([]));
-    if (!person) throw fail('bad_request', 'author is required for a merge commit');
-    const who: string = ident(person);
+    if (!person || !committerPerson) throw fail('bad_request', 'author is required for a merge commit');
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: treeOid, parents: [ours, theirs], author: who, committer: who, message: (message ?? `Merge ${short(from)} into ${short(ref)}`).replace(/\n?$/u, '\n') });
+    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: treeOid, parents: [ours, theirs], author: ident(person), committer: ident(committerPerson), message: (message ?? `Merge ${short(from)} into ${short(ref)}`).replace(/\n?$/u, '\n') });
     if (signer) commitData = await signCommit(commitData, signer);
     const oid: string = hashObject('commit', commitData);
     const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: encodeTree([]), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
