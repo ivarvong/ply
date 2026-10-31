@@ -714,6 +714,12 @@ test('boundaries between a thrown error and its neighbour', async () => {
   assert.equal(parseSshUrl('ssh://ab@host/p').user, 'ab');
   throws(() => parseSshUrl('/git@github.com:o/r.git'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
   throws(() => parseSshUrl('host:22'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  // #40: the refusal names its field and never quotes the URL (it may carry a credential)
+  for (const bad of ['https://x/y', 'ssh://host', 'host:22', 'ssh://host/path\n']) assert.throws(() => parseSshUrl(bad), e => { assert.equal(e.what, 'ssh url', bad); assert.ok(!e.message.includes(bad.trim()), bad); return true; });
+  for (const pw of ['ssh://u:p@h/x', 'u:p@h:x']) assert.throws(() => parseSshUrl(pw), e => e.code === 'bad_request' && e.what === 'ssh url' && e.message === 'invalid ssh url: a password in the userinfo is not supported (ply authenticates by public key); remove it');
+  assert.throws(() => parseSshUrl('ssh://%FF@h/x'), e => e.code === 'bad_request' && e.what === 'ssh url' && e.message === 'invalid ssh url: a percent-escape is not UTF-8');
+  assert.deepEqual(parseSshUrl('ssh://t%C3%ABst@h%73/p%20q%00%ZZ'), { user: 'tëst', host: 'hs', port: 22, path: '/p q%00%ZZ' });
+  assert.deepEqual(parseSshUrl('t%C3%ABst@h:p%20q'), { user: 't%C3%ABst', host: 'h', port: 22, path: 'p%20q' });
 
   const no = { macrosOk: false };
   const yes = { macrosOk: true };
