@@ -83,7 +83,7 @@ export class Sha1 {
       const t = (((a << 5) | (a >>> 27)) + f + e + k + (w[i] as number)) | 0;
       e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
     }
-    (h[0] as number) += a; (h[1] as number) += b; (h[2] as number) += c; (h[3] as number) += d; (h[4] as number) += e;
+    h[0] = (h[0] as number) + a; h[1] = (h[1] as number) + b; h[2] = (h[2] as number) + c; h[3] = (h[3] as number) + d; h[4] = (h[4] as number) + e;
   }
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
 
