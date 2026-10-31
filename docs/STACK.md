@@ -92,7 +92,7 @@ by hand. The ratchet refuses to pass once `src/` has no `.js` and these are stil
    a stack for whoever logs it, and the exact shape thrown errors have today, so the migration boundary is the
    identity (`orThrow(r)` is `if (!r.ok) throw r.error`). Nothing reads it as a class; its type is the union.
 4. **Pure functions where possible; I/O at the edges.** Parsers, encoders, validators, planners and merges take
-   bytes/values and return values. Network, timers, crypto and the filesystem live in the transport, http, ssh and
+   bytes/values and return values. Network, timers, crypto and the filesystem live in the transport, http and
    `*-node.ts` modules, and are passed in, not imported, where a pure module needs them.
 5. **State machines are tagged unions with transition functions.** A stream parser is
    `type State = { tag: 'header'; … } | { tag: 'body'; … } | { tag: 'done'; … }` and

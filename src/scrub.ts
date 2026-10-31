@@ -1,5 +1,4 @@
-// Credential redaction, shared by both transports (http.js builds one from its Authorization; sshgit.js from a
-// secret-shaped login name). Its own module so the SSH entry does not carry the HTTP transport.
+// Credential redaction (http.ts builds one from its Authorization). Its own module: pure, and testable without a transport.
 
 // The Basic user is a name on most hosts (`x-access-token`, `oauth2`, `git`, a login) and a secret on some (a deploy
 // token, a PAT given as the user). Scrubbing a name would mangle legitimate server text ("denied to ivar"), so the user
