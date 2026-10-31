@@ -136,10 +136,15 @@ Evidence and the alternative we rejected are in the PR description.
 
 ## Tests
 
-vitest runs every `test/**/*.test.js` file that `node --test` ran before (`vitest.config.ts`); the fuzzers in
-`test/fuzz/` stay node scripts. `npm test` = vitest + the fuzzer chain. CI shards vitest (`--shard i/N`).
-Mutation testing: `@stryker-mutator/vitest-runner`, `mutate: src/**/*.{js,ts}`; the gate (`scripts/mutate.mjs`) is
-unchanged: parser and bounds survivors fail a PR, 8 shards balanced by mutant count. `tsconfigFile` points at a file
+vitest runs every `test/**/*.test.js` file that `node --test` ran before (`vitest.config.ts`: `forks` pool, files in
+parallel, no default timeout, as under node:test); `test/workerd.test.js` runs alone (`vitest.workerd.config.ts`). The
+fuzzers in `test/fuzz/` stay node scripts (`node --import ./test/ts-resolve.mjs test/fuzz/<f>.mjs`). `npm test` = vitest
++ the fuzzer chain. CI: `npx vitest run --shard i/4`, partitioned longest-first by measured seconds per file
+(`test/durations.json`, the sequencer in `vitest.config.ts`); each shard uploads its vitest JSON report.
+Mutation testing: `@stryker-mutator/vitest-runner` over `vitest.stryker.config.ts` (the mutation-killing files, quick
+sizes, push-outcome on its own thread, `test/stryker-parent-guard.cjs` preloaded to kill a test process past 3 GB),
+`mutate: src/**/*.{js,ts}`, per-test coverage. The gate (`scripts/mutate.mjs`) is unchanged: changed lines on a PR,
+everything on main, parser and bounds survivors fatal, 16 cost-balanced shards. `tsconfigFile` points at a file
 that does not exist on purpose: Stryker's tsconfig preprocessor calls the TypeScript JS API
 (`ts.parseConfigFileTextToJson`), which TypeScript 7 does not ship (`TypeError: ts.parseConfigFileTextToJson is not a
 function`); the rewrite only matters for `extends`/references outside the sandbox, which ply has none of.

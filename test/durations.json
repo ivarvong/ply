@@ -30,6 +30,7 @@
   "test/push.test.js": 53,
   "test/read.test.js": 10,
   "test/rebase.test.js": 19,
+  "test/result.test.js": 1,
   "test/sign.test.js": 0,
   "test/space/advertisement.test.js": 22,
   "test/space/fsck-tree.test.js": 11,
