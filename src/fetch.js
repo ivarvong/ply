@@ -202,9 +202,38 @@ export const spAttrs = (st, prefix = 'git.pack') => ({ [`${prefix}.objects`]: 1,
 const OID_RE = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
 export const isFilterRejection = e => ['http', 'remote_error', 'protocol'].includes(e?.code) && /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i.test(String(e?.message ?? ''));
 
+// Check a wide (blob:none) pack's commits, trees and tags before any of it is returned or harvested (#18, #46).
+// `wanted(oid, o)` names what a tree:0 server would have sent — what the caller asked for. Those pass assertFetched
+// under the caller's limits exactly as a single-object fetch would, and any failure is the fetch's. The rest are extras
+// only the widening brought, and the two ways one can fail are treated differently:
+//   - limit_exceeded (say a sibling directory with more than maxTreeEntries entries): the extra is dropped from the
+//     pack, so it is neither returned nor harvested, and counted. A limit is the caller's bound on what it will parse for
+//     what it reads; an honest repository can hold a tree past it that the caller never reads, and a tree:0 server would
+//     never have sent it. Failing on it made the answer depend on the server's filter support (#46: one 2,135-entry
+//     directory failed every read of curl on Artifacts). Dropping it is safe: the caller never sees it, and a later
+//     want of it is a fetch of its own that applies the limits to it as the wanted object. Whether its bytes past the
+//     limit are well formed is unobservable, since checking them would mean parsing past the limit.
+//   - pack_corrupt (malformed; git fsck would refuse it): the fetch fails, as #18 decided. This server sent bytes no
+//     honest git server holds, hash-verified or not, so nothing from this response is trusted, including its other
+//     objects; pack_corrupt is retryable (and a cached response is refetched once past the cache).
+// maxPackBytes, maxPackObjects and maxInflatedTotal have already bounded the whole pack. Returns the skipped extras.
+export function checkWide(objects, wanted, limits) {
+  const skipped = [];
+  for (const [oid, o] of objects) {
+    if (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE && o.type !== TYPE.TAG) continue;
+    try { assertFetched(TYPE_NAME[o.type], o.data, limits); } catch (e) {
+      if (e?.code !== 'limit_exceeded' || wanted(oid, o)) throw e;
+      skipped.push({ oid, what: e.what, bytes: o.data.length });
+    }
+  }
+  for (const s of skipped) objects.delete(s.oid);
+  return skipped;
+}
+export const skippedAttrs = skipped => ({ 'git.fetch.wide.skipped': skipped.length, 'git.fetch.wide.skipped_reason': [...new Set(skipped.map(s => s.what))].join(',') });
+
 // Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack);
-// every caller has run assertFetched over the pack's commits, trees and tags first, since fetchObject serves the harvest
-// without another look.
+// every caller has run checkWide over the pack first (what is left passed assertFetched under the transport's limits),
+// since fetchObject serves the harvest without another look.
 export function harvest(t, objects, skip = null) {
   const store = t.objects; if (!store) return { kept: 0, bytes: 0 };
   let kept = 0, bytes = 0; store.bytes ??= 0;
@@ -276,14 +305,14 @@ async function fetchWide(t, { oid, deepen, expectType, learned = false }) {
       }
       const parsed = parsePack(concat(parts), packParseOpts(t.limits));
       const { objects } = resolvePack(parsed, undefined, t.limits);
-      for (const o of objects.values()) if (o.type === TYPE.COMMIT || o.type === TYPE.TREE || o.type === TYPE.TAG) assertFetched(TYPE_NAME[o.type], o.data, t.limits);
+      const skipped = checkWide(objects, k => k === oid, t.limits);
       const want = objects.get(oid);
       if (!want) throw fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
       if (want.data.length > maxObject) throw limitError('object size', want.data.length, maxObject);
       if (expectType !== null && want.type !== expectType) throw fail('pack_corrupt', `expected ${TYPE_NAME[expectType]}, got ${TYPE_NAME[want.type]}`);
-      let extraBytes = 0, blobs = 0; for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
+      let extraBytes = skipped.reduce((n, x) => n + x.bytes, 0), blobs = 0; for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
       const h = harvest(t, objects, oid);
-      span.set({ 'git.pack.objects': parsed.stats.count, 'git.pack.bytes': total, 'git.object.oid': oid, 'git.object.type': TYPE_NAME[want.type], 'git.fetch.wide.objects': objects.size, 'git.fetch.wide.extra_objects': objects.size - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes });
+      span.set({ 'git.pack.objects': parsed.stats.count, 'git.pack.bytes': total, 'git.object.oid': oid, 'git.object.type': TYPE_NAME[want.type], 'git.fetch.wide.objects': objects.size + skipped.length, 'git.fetch.wide.extra_objects': objects.size + skipped.length - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes, ...skippedAttrs(skipped) });
       return { type: want.type, data: want.data, oid, size: want.data.length, bust, wide: true };
     } catch (e) { if (e && typeof e === 'object') e.cacheStatus = span.attrs['git.response.cache'] ?? ''; throw e; }
   }));
