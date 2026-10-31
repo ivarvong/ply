@@ -608,9 +608,9 @@ test('ssh url, kex, and gitattributes lines', () => {
   assert.deepEqual(parseSshUrl('ssh://u@h:2222/a/b'), { user: 'u', host: 'h', port: 2222, path: '/a/b' });
   assert.deepEqual(parseSshUrl('git@github.com:o/r.git'), { user: 'git', host: 'github.com', port: 22, path: 'o/r.git' });
   assert.deepEqual(parseSshUrl('host:name'), { user: 'git', host: 'host', port: 22, path: 'name' });
-  throws(() => parseSshUrl('https://x/y'), 'bad_request', 'not an ssh git url: https://x/y');
-  throws(() => parseSshUrl('ssh://host'), 'bad_request', 'not an ssh git url: ssh://host');
-  throws(() => parseSshUrl('host:22/foo'), 'bad_request', 'not an ssh git url: host:22/foo');
+  throws(() => parseSshUrl('https://x/y'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('ssh://host'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('host:22/foo'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
   const cookie = Uint8Array.from({ length: 16 }, (_, i) => i + 1);
   const kex = parseKexInit(kexInit(cookie));
   assert.deepEqual(kex.kex, ['curve25519-sha256', 'curve25519-sha256@libssh.org']);
@@ -710,10 +710,10 @@ test('boundaries between a thrown error and its neighbour', async () => {
   assert.equal(spFinish(streamed.state).zlibBytes, streamed.state.zlibBytes);
   assert.ok(streamed.state.zlibBytes > 0);
 
-  throws(() => parseSshUrl('xsssh://host/path'), 'bad_request', 'not an ssh git url: xsssh://host/path');
+  throws(() => parseSshUrl('xsssh://host/path'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
   assert.equal(parseSshUrl('ssh://ab@host/p').user, 'ab');
-  throws(() => parseSshUrl('/git@github.com:o/r.git'), 'bad_request', 'not an ssh git url: /git@github.com:o/r.git');
-  throws(() => parseSshUrl('host:22'), 'bad_request', 'not an ssh git url: host:22');
+  throws(() => parseSshUrl('/git@github.com:o/r.git'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('host:22'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
 
   const no = { macrosOk: false };
   const yes = { macrosOk: true };
@@ -837,8 +837,8 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 
-  throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'not an ssh git url: ssh://host/path\n');
-  throws(() => parseSshUrl('host:name\n'), 'bad_request', 'not an ssh git url: host:name\n');
+  throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('host:name\n'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
 
   const hello = te.encode('hello hello hello hello');
   const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)));

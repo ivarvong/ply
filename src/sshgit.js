@@ -9,21 +9,47 @@
 import { fail } from './errors.js';
 import { SshClient, hostKeyFromLine } from './ssh.js';
 import { pktInit, pktStep, FLUSH } from './pktline.js';
-import { td, concat } from './bytes.js';
+import { td, te, concat } from './bytes.js';
+import { scrubber, secretUser, REDACTED } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
 import { wrapNet } from './transport.js';
 
 
+// An ssh:// URL is percent-decoded as git decodes it (git 2.50, measured through GIT_SSH_COMMAND): `%XX` is that byte
+// in the user, host and path (`t%C3%ABst` → `tëst`, `p%20q` → `p q`), except `%00`, which git keeps as written, and
+// an invalid escape (`%ZZ`), kept too. The scp-like form is not decoded (git: `iv%40ar@host:p` logs in as `iv%40ar`).
+// SSH strings are UTF-8 (RFC 4252), so bytes that are not are refused.
+const SSH_URL = 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path';
+const strict = new TextDecoder('utf-8', { fatal: true });
+const sshDecode = s => {
+  if (!s.includes('%')) return s;
+  const parts = s.split(/(%[0-9a-f]{2})/i);
+  const bytes = [];
+  for (const p of parts) {
+    if (/^%[0-9a-f]{2}$/i.test(p) && p !== '%00') bytes.push(parseInt(p.slice(1), 16));
+    else for (const b of te.encode(p)) bytes.push(b);
+  }
+  try { return strict.decode(Uint8Array.from(bytes)); } catch { throw fail('bad_request', 'invalid ssh url: a percent-escape is not UTF-8', { what: 'ssh url' }); }
+};
+// A `:` in the userinfo is a password. ply authenticates by public key only, and git hands `user:pass@host` to ssh,
+// which logs in as `user:pass`: the password goes to the server as the login name (measured, every form: `ivar:@`,
+// `ivar:pass@`, `:pass@`; the scp-like `ivar:pass@host:p` git reads as host `ivar`). Refused, and never quoted: no
+// error from here echoes the URL.
+const noPassword = user => { if (user?.includes(':')) throw fail('bad_request', 'invalid ssh url: a password in the userinfo is not supported (ply authenticates by public key); remove it', { what: 'ssh url' }); return user; };
+
 // @decoder parseSshUrl prefix=ssh-url
 export function parseSshUrl(url) {
   let m = String(url).match(/^ssh:\/\/(?:([^@/]+)@)?([^/:]+)(?::(\d+))?\/(.*)$/);
-  if (m) return { user: m[1] ?? 'git', host: m[2], port: m[3] ? +m[3] : 22, path: '/' + m[4] };
+  if (m) return { user: m[1] === undefined ? 'git' : sshDecode(noPassword(m[1])), host: sshDecode(m[2]), port: m[3] ? +m[3] : 22, path: '/' + sshDecode(m[4]) };
   m = String(url).includes('://') ? null : String(url).match(/^(?:([^@/]+)@)?([^/:]+):(?!\d+(?:\/|$))(.+)$/); // scp-like: no scheme, host:path
-  if (m) return { user: m[1] ?? 'git', host: m[2], port: 22, path: m[3] };
-  throw fail('bad_request', `not an ssh git url: ${url}`);
+  if (m) return { user: noPassword(m[1]) ?? 'git', host: m[2], port: 22, path: m[3] };
+  throw fail('bad_request', SSH_URL, { what: 'ssh url' });
 }
-export const sshRedact = ({ user, host, port, path }) => `ssh://${user}@${host}${port === 22 ? '' : `:${port}`}${path.startsWith('/') ? '' : '/'}${path}`;
+// The login name is not a credential under publickey auth, but one that is secret-shaped (a token pasted into an ssh URL,
+// `ssh://ghp_…@host`) is treated as one, by the rule HTTP applies to a user with no password (scrub.js): it is sent to
+// the server as the login, and replaced by '[redacted]' in `t.url`, spans and errors.
+export const sshRedact = ({ user, host, port, path }) => `ssh://${secretUser(user, false) ? REDACTED : user}@${host}${port === 22 ? '' : `:${port}`}${path.startsWith('/') ? '' : '/'}${path}`;
 
 // `connect(host, port) → stream` is the platform's TCP (ssh-node.js / ssh-workers.js); the key is a WebCrypto Ed25519 pair.
 export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, connect, tracer, parent = null, limits = DEFAULT_LIMITS, signal = null, user: userOverride } = {}) {
@@ -61,7 +87,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     return () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); };
   };
   const t = {
-    kind: 'ssh', url: sshRedact(u), ssh: u, tracer, parent, limits, signal, quirks: {}, objects: new Map(),
+    kind: 'ssh', url: sshRedact(u), ssh: u, tracer, parent, limits, signal, quirks: {}, objects: new Map(), scrub: secretUser(u.user, false) ? scrubber([u.user]) : null,
     async connectOnce(span) {
       if (st.client) return st.client;
       const conn = st.conn;
@@ -95,7 +121,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     async openChannel(service, span) {
       const c = await t.connectOnce(span);
       const quoted = `'${u.path.replace(/'/g, `'\\''`)}'`;
-      const chSpan = tracer.start('ssh.exec', { parent: span ?? t.parent, attrs: { 'ssh.command': `${service} ${quoted}`, 'git.service': service } });
+      const chSpan = tracer.start('ssh.exec', { parent: span ?? t.parent, scrub: t.scrub, attrs: { 'ssh.command': `${service} ${quoted}`, 'git.service': service } });
       try {
         const ch = await c.exec(`${service} ${quoted}`, { env: service === 'git-upload-pack' ? { GIT_PROTOCOL: 'version=2' } : {} });
         const entry = { ch, pkt: pktInit(), carry: [], carryAt: 0, adv: null, caps: null, span: chSpan, bytesIn: 0, bytesOut: 0, lock: Promise.resolve() };
