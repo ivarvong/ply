@@ -43,8 +43,20 @@ class WeightedSequencer extends BaseSequencer {
   }
 }
 
+// Gate c (test/space/failsite-hook.mjs): with PLY_FAILSITES set, src/errors.ts is served instrumented to the test
+// files too, and each fork names its test file as the runner of what it records. Without it, nothing changes.
+const failsites = Boolean(process.env['PLY_FAILSITES']);
+const { ERRORS, instrument } = failsites ? await import('./test/space/failsite-instrument.mjs') : { ERRORS: '', instrument: (s: string): string => s };
+
 export default defineConfig({
+  plugins: failsites ? [{
+    name: 'ply-failsite',
+    enforce: 'pre',
+    // same line, columns after the insertion only: no source map needed for errors.ts (its own frames are not sites)
+    transform: (code: string, id: string) => (id === ERRORS ? { code: instrument(code), map: null } : null),
+  }] : [],
   test: {
+    setupFiles: failsites ? ['test/space/failsite-setup.js'] : [],
     include: ['test/**/*.test.js'],
     exclude: ['**/node_modules/**'],
     // node:test had no default timeout and the space/oracle tests run for minutes; a test that needs a bound states it

@@ -1,7 +1,7 @@
 // Streaming SHA-1. Needed because crypto.subtle.digest is whole-buffer only,
 // and pack trailers / object ids must be computed over data we never hold at once.
 
-import { encodeBytes } from './bytes.js';
+import { encodeBytes, HEXV } from './bytes.js';
 
 // Workers' crypto.DigestStream: a WritableStream whose `digest` is a promise of the ArrayBuffer. Not in lib.dom, and
 // absent on node and in browsers, hence optional.
@@ -19,9 +19,17 @@ export function toHex(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i++) s += HEX[bytes[i] as number] as string;
   return s;
 }
+// Table-driven (bytes.ts HEXV): 4.8× faster than parseInt per byte (PR body). A pair that is not two hex digits keeps
+// parseInt's reading, so any string maps to the bytes it always did; fromHex has never validated (callers check oids).
 export function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length >> 1);
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < out.length; i++) {
+    // oxlint-disable-next-line unicorn/prefer-code-point -- a code unit indexes the byte table; one past it reads -1
+    const hi = HEXV[hex.charCodeAt(2 * i)] ?? -1;
+    // oxlint-disable-next-line unicorn/prefer-code-point -- see above
+    const lo = HEXV[hex.charCodeAt(2 * i + 1)] ?? -1;
+    out[i] = (hi | lo) < 0 ? Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16) : (hi << 4) | lo;
+  }
   return out;
 }
 
@@ -71,6 +79,8 @@ export class Sha1 {
     let c = h[2] as number;
     let d = h[3] as number;
     let e = h[4] as number;
+    // One loop with a branch per round, not one loop per 20-round phase: the phase-unrolled form measured 50% slower
+    // on V8 (PR body), against the audit's −18% guess.
     for (let i = 0; i < 80; i++) {
       let f: number;
       let k: number;

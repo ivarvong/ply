@@ -7,7 +7,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mergeLines, isBinary, records, classifier, diffScript } from '../src/linemerge.js';
+import { mergeLines, isBinary, records, classifier, diffScript, compact } from '../src/linemerge.js';
+import { retryPolicy, isPlyCode } from '../src/errors.js';
 import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
 
@@ -93,14 +94,22 @@ test('git 2.54 changed compaction: the smallest input that separates the two mod
   //   git 2.56: +c  a -b +a  c           (insert c; b → a; the shifted group re-diffed) = rediff 'myers' (default)
   const enc = s => new TextEncoder().encode(s), cl = classifier();
   const A = records(enc('a\nb\nc\n'), cl), B = records(enc('c\na\na\nc\n'), cl);
-  const hunks = mode => diffScript(A, B, { rediff: mode }).map(x => [x.i1, x.chg1, x.i2, x.chg2]).sort((p, q) => p[0] - q[0]);
+  const hunks = mode => diffScript(A, B, { rediff: mode }).value.map(x => [x.i1, x.chg1, x.i2, x.chg2]).sort((p, q) => p[0] - q[0]);
   assert.deepEqual(hunks('skip'), [[0, 2, 0, 3]]);
   assert.deepEqual(hunks('myers'), [[0, 0, 0, 1], [1, 1, 2, 1]]);
-  assert.throws(() => diffScript(A, B, { rediff: 'undecided' }), e => e.undecided === true);
+  // declining is a value, not a thrown non-Error (#80)
+  assert.deepEqual(diffScript(A, B, { rediff: 'undecided' }), { ok: false, error: { undecided: true, detail: 'compaction needs the classic-diff fallback' } });
+  assert.deepEqual(mergeLines(enc('a\nb\nc\n'), enc('c\na\na\nc\n'), enc('a\nb\nc\nZ\n'), { rediff: 'undecided' }), { clean: false, reason: 'undecided', detail: 'compaction needs the classic-diff fallback' });
   assert.deepEqual(hunks(undefined), hunks('myers'), 'default follows current git');
   // and the installed git agrees with the mode its version implies (the shape of its -U1 hunk body)
   writeFileSync(join(dir, 'A'), 'a\nb\nc\n'); writeFileSync(join(dir, 'B'), 'c\na\na\nc\n');
   const out = spawnSync(process.env.GIT_BIN ?? 'git', ['diff', '--no-index', '--no-color', '--histogram', '--no-indent-heuristic', '-U1', 'A', 'B'], { cwd: dir }).stdout.toString();
   const body = out.slice(out.indexOf('@@')).split('\n').slice(1).filter(Boolean).map(l => l[0]).join('');
   assert.equal(body, rediff === 'myers' ? '+ -+ ' : '--+++ ', `git's hunk shape matches rediff '${rediff}'`);
+});
+
+test('a broken invariant of the port is a typed internal error, never a bare Error (#80)', () => {
+  // compact's two sides must hold the same number of unchanged lines; feed it sides that do not
+  const ids = Int32Array.of(1, 2); const ch = new Uint8Array(4); const chO = new Uint8Array(3);
+  assert.throws(() => compact(ids, ch, 2, Int32Array.of(1), chO, 1, 'myers'), e => e instanceof Error && isPlyCode(e.code) && e.code === 'internal' && retryPolicy(e) === 'no' && e.message === 'linemerge: groups out of step');
 });

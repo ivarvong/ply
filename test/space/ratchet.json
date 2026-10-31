@@ -1,0 +1,106 @@
+{
+ "note": "Holes per category (test/space/holes.js). Only ever lowered: npm run spaces -- --ratchet. A category at 0 is enforced.",
+ "categories": {
+  "decisions": {
+   "count": 32,
+   "ids": [
+    "src/bytes.ts#decodeStrict:decode:strict:b",
+    "src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string",
+    "src/checkout-node.js#slurp:limit_exceeded:symlink target",
+    "src/checkout-node.js#writeFiles:bad_request:already exists",
+    "src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …",
+    "src/fetch.ts#once:pack_corrupt:expected …, got …#2",
+    "src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)",
+    "src/http.ts#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))",
+    "src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol",
+    "src/merge.ts#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …",
+    "src/merge.ts#attributeTree:not_found:attributes ref … not found",
+    "src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …",
+    "src/merge.ts#mergeBranch:bad_request:author is required for a merge commit",
+    "src/merge.ts#mergeBranch:not_found:ref … not found",
+    "src/merge.ts#mergeBranch:not_found:ref … not found#2",
+    "src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer",
+    "src/objects.ts#parseTree:pack_corrupt:<data>, <p>, <sp - p>",
+    "src/objects.ts#parseTree:pack_corrupt:<data>, <sp><1>, <nul - (sp + 1)>",
+    "src/read.js#flush:pack_corrupt:blob content hashes to …, not …",
+    "src/rebase.ts#linearChain:limit_exceeded:rebase chain",
+    "src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid",
+    "src/rebase.ts#pickCommit:not_found:ref … not found",
+    "src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …",
+    "src/rebase.ts#rebaseBranch:not_found:ref … not found",
+    "src/rebase.ts#rebaseBranch:not_found:ref … not found#2",
+    "src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth",
+    "src/transport.ts#coded:<code>:<String((e as Loose)?.message ?? e)>",
+    "src/tree-node.js#keep:limit_exceeded:directory bytes",
+    "src/tree-node.js#keep:limit_exceeded:files",
+    "src/validate.ts#validateMessage:bad_request:message",
+    "src/validate.ts#validatePath:bad_request:path#6",
+    "src/validate.ts#validateRef:bad_request:ref#3"
+   ]
+  },
+  "git": {
+   "count": 2,
+   "ids": [
+    "fsck:unknownType",
+    "upload-pack.c:die:send_err_and_die:%s"
+   ]
+  },
+  "failsites": {
+   "count": 40,
+   "ids": [
+    "src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string",
+    "src/checkout-node.js#slurp:limit_exceeded:symlink target",
+    "src/checkout-node.js#writeFiles:bad_request:already exists",
+    "src/edit.js#begin:pack_corrupt:expected blob, got type …",
+    "src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header",
+    "src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …",
+    "src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …",
+    "src/fetch.ts#once:limit_exceeded:object size#2",
+    "src/fetch.ts#once:pack_corrupt:expected …, got …#2",
+    "src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)",
+    "src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol",
+    "src/merge.ts#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …",
+    "src/merge.ts#attributeTree:not_found:attributes ref … not found",
+    "src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …",
+    "src/merge.ts#mergeBranch:bad_request:author is required for a merge commit",
+    "src/merge.ts#mergeBranch:not_found:ref … not found",
+    "src/merge.ts#mergeBranch:not_found:ref … not found#2",
+    "src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer",
+    "src/objects.ts#parseTree:pack_corrupt:<data>, <p>, <sp - p>",
+    "src/objects.ts#parseTree:pack_corrupt:<data>, <sp><1>, <nul - (sp + 1)>",
+    "src/push.ts#planPush:bad_request:push: oids must be 40-hex",
+    "src/read.js#flush:<rethrown or pack_corrupt>:<e>",
+    "src/read.js#flush:pack_corrupt:blob content hashes to …, not …",
+    "src/read.js#flush:pack_corrupt:inflated … != declared …",
+    "src/read.js#openBlob:<rethrown or pack_corrupt>:<e>",
+    "src/read.js#transform:pack_corrupt:server streamed more than the … bytes it declared",
+    "src/rebase.ts#linearChain:limit_exceeded:rebase chain",
+    "src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid",
+    "src/rebase.ts#pickCommit:not_found:ref … not found",
+    "src/rebase.ts#pickCommit:not_linear:… has … parents; only single-parent commits are picked",
+    "src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …",
+    "src/rebase.ts#rebaseBranch:not_found:ref … not found",
+    "src/rebase.ts#rebaseBranch:not_found:ref … not found#2",
+    "src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth",
+    "src/transport.ts#coded:<code>:<String((e as Loose)?.message ?? e)>",
+    "src/tree-node.js#keep:limit_exceeded:directory bytes",
+    "src/tree-node.js#keep:limit_exceeded:files",
+    "src/validate.ts#validateMessage:bad_request:message",
+    "src/validate.ts#validatePath:bad_request:path#6",
+    "src/validate.ts#validateRef:bad_request:ref#3"
+   ]
+  },
+  "claims": {
+   "count": 0,
+   "ids": []
+  },
+  "linux": {
+   "count": 0,
+   "ids": []
+  },
+  "stale": {
+   "count": 0,
+   "ids": []
+  }
+ }
+}

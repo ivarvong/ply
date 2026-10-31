@@ -13,7 +13,7 @@ import { editFile } from '../src/edit.js';
 import { readFile, listTree } from '../src/read.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
-import { parseReportStatus, rejectionCode } from '../src/push.js';
+import { classifyReport, decideOutcome } from '../src/push.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -36,14 +36,16 @@ async function repo(files, fault = artifactsFault()) {
 const spansOf = ex => ex.lines.flatMap(flattenLine);
 const tree = (bare, rev) => git(bare, ['rev-parse', `${rev}^{tree}`]).trim();
 
+// the rejection code of an all-ng report (the refs it names are the commands)
+const outcomeOf = lines => decideOutcome(classifyReport(['unpack ok', ...lines].map(l => new TextEncoder().encode(`${l}\n`)), lines.map(l => ({ ref: l.split(' ')[1] })))).code;
 test('stale ref (Artifacts wording) is cas_conflict; git\'s wordings unchanged', () => {
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main stale ref'])), 'cas_conflict');
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/a stale ref', 'ng refs/heads/b stale ref'])), 'cas_conflict', 'every multi-ref push is atomic on Artifacts');
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main failed to update ref'])), 'cas_conflict');
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main incorrect old value provided'])), 'cas_conflict');
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main refname conflict'])), 'push_rejected');
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main pre-receive hook declined'])), 'push_rejected');
-  assert.equal(rejectionCode(parseReportStatus(['unpack ok', 'ng refs/heads/main stale ref', 'ng refs/heads/x pre-receive hook declined'])), 'push_rejected');
+  assert.equal(outcomeOf(['ng refs/heads/main stale ref']), 'cas_conflict');
+  assert.equal(outcomeOf(['ng refs/heads/a stale ref', 'ng refs/heads/b stale ref']), 'cas_conflict', 'every multi-ref push is atomic on Artifacts');
+  assert.equal(outcomeOf(['ng refs/heads/main failed to update ref']), 'cas_conflict');
+  assert.equal(outcomeOf(['ng refs/heads/main incorrect old value provided']), 'cas_conflict');
+  assert.equal(outcomeOf(['ng refs/heads/main refname conflict']), 'push_rejected');
+  assert.equal(outcomeOf(['ng refs/heads/main pre-receive hook declined']), 'push_rejected');
+  assert.equal(outcomeOf(['ng refs/heads/main stale ref', 'ng refs/heads/x pre-receive hook declined']), 'push_rejected');
 });
 
 test('editFile: a stale-ref rejection on the first push is retried from a fresh ls-refs and lands', async () => {

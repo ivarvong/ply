@@ -7,6 +7,7 @@
   "test/concurrency.test.js": 4,
   "test/delta-bound.test.js": 16,
   "test/edges.test.js": 13,
+  "test/encode-tag.test.js": 4,
   "test/examples.test.js": 2,
   "test/format-facts.test.js": 0,
   "test/fsck-oracle.test.js": 1,
@@ -15,6 +16,7 @@
   "test/git-differential.test.js": 2,
   "test/linemerge.test.js": 1,
   "test/log.test.js": 11,
+  "test/lsrefs-unborn.test.js": 10,
   "test/merge.test.js": 33,
   "test/mergebase-space.test.js": 57,
   "test/mutant-kill-tree.test.js": 1,
@@ -40,6 +42,7 @@
   "test/space/push-outcome-boundary.test.js": 169,
   "test/space/push-outcome.test.js": 98,
   "test/space/refname.test.js": 10,
+  "test/space/registry.test.js": 2,
   "test/span-contract.test.js": 4,
   "test/wide-limits.test.js": 12,
   "test/workerd.test.js": 12
