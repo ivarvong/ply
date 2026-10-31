@@ -91,8 +91,11 @@ export function treeReplaceOid(data, entry, newOidHex) {
 // `git fsck --strict` reports an error for, with git's msgId in the message (`commit: badDate: …`). The decision space
 // and git's verdict on every cell are in test/fsck-space.test.js. What fsck does not read, ply does not judge: a commit
 // is checked up to its committer line and a tag up to its tagger; every later header line is kept verbatim in `extra`.
-// Fields git reads first-wins (encoding, a second tree/author/committer after the committer) are first-wins here; the
-// later copies stay in `extra`. A missing tagger and a tag name that is not a refname are warnings git accepts (INFO
+// One allowed typed refusal (PR #7): a second copy of a single-valued header after the committer or tagger (tree,
+// parent, author, committer, encoding; object, type, tag, tagger) is fsck-clean, but git's own views of that object disagree (pretty.c's
+// %an/%cn show the last author/committer line, %T, %e and the commit date the first; cat-file shows a late parent that
+// %P ignores, and a second tag object/type/name that the parsed tag ignores), so whatever ply showed, some git view would contradict it: an author-spoofing differential. Those throw
+// `duplicateHeader` (`commit: duplicate tree`). A missing tagger and a tag name that is not a refname are warnings git accepts (INFO
 // under --strict), so ply accepts them too. The object is decoded as UTF-8 without dropping a leading BOM, so a BOM
 // before `tree` is a missing tree, as in git; a non-UTF-8 byte reads as U+FFFD, which no rule here matches, and can
 // never form a NUL, a newline or any other delimiter.
@@ -165,6 +168,15 @@ function rest(s, p, blank) {
   return { extra: tail.length ? tail.slice(0, tail.length - 1).split('\n') : [], message: blank === NO_BODY ? null : s.slice(blank + BLANK_LINE.length) };
 }
 
+// The allowed typed refusal above: fsck accepts the object, git's views of it disagree, ply refuses. A line after the
+// committer that starts `parent ` is a parent cat-file shows and %P does not; PR #7 named it a bad header order.
+const COMMIT_SHADOWED = [COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER];
+const TAG_SHADOWED = [TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER];
+const duplicate = (kind, key) => fail('pack_corrupt', key === COMMIT_HEADER_PARENT && kind === 'commit' ? 'commit: bad header order' : `${kind}: duplicate ${key}`, { msgId: 'duplicateHeader' });
+function refuseShadowed(kind, extra, keys) {
+  for (const l of extra) for (const key of keys) if (l.startsWith(`${key} `)) throw duplicate(kind, key);
+}
+
 // @decoder parseCommit prefix=commit
 export function parseCommit(data, limits = DEFAULT_LIMITS) {
   const maxParents = requireLimit(limits, 'maxCommitParents');
@@ -195,9 +207,11 @@ export function parseCommit(data, limits = DEFAULT_LIMITS) {
   // fsck_commit's last check is over the whole object; verify_headers already refused a NUL in the header
   if (s.includes('\0')) throw corrupt('commit', 'nulInCommit', 'NUL byte in the commit object body');
   const { extra, message } = rest(s, next, blank);
-  // git's readers take the first `encoding` header (find_commit_header); a later one is an extra like any other
+  refuseShadowed('commit', extra, COMMIT_SHADOWED);
   const at = extra.findIndex(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `));
   const encoding = at < 0 ? null : extra.splice(at, 1)[0].slice(COMMIT_HEADER_ENCODING.length + 1);
+  // a second encoding is a second copy of a single-valued header
+  if (extra.some(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `))) throw duplicate('commit', COMMIT_HEADER_ENCODING);
   return { tree, parents, author: authors[0], committer, encoding, extra, message };
 }
 
@@ -251,6 +265,7 @@ export function parseTag(data) {
   if (has(p, TAG_HEADER_TAGGER)) [tagger, p] = fsckIdent(s, p + TAG_HEADER_TAGGER.length + 1, 'tag', TAG_HEADER_TAGGER);
   // extraHeaderEntry is IGNORE, and fsck never reads a tag's body: a NUL there is accepted, unlike in a commit
   const { extra, message } = rest(s, p, blank);
+  refuseShadowed('tag', extra, TAG_SHADOWED);
   return { object, type, tag, tagger, extra, message };
 }
 

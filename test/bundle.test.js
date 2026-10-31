@@ -44,9 +44,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 63,709 B / 24,444 B gz. Explicit credentials as UTF-8 bytes and refused when they send nothing, the scrub module shared with SSH (issue #40).
   // 2026-10-30: 63,197 B / 24,217 B gz. checkWide: the blob:none fallback drops an extra over a limit instead of failing (issue #46).
   // 2026-10-30: 64,070 B / 24,571 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  // 2026-10-31: 64,968 B / 24,915 B gz. parseCommit/parseTag are fsck.c's commit, tag and ident checks rule for rule, with git's msgIds (issue #59).
-  assert.ok(min < 64_969, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 24_916, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 65,316 B / 25,041 B gz. parseCommit/parseTag are fsck.c's commit, tag and ident checks rule for rule, with git's msgIds, and still refuse a duplicate header (issue #59, PR #7).
+  assert.ok(min < 65_317, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 25_042, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -82,8 +82,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 82,181 B. The same credential handling (issue #40).
   // 2026-10-30: 81,669 B. The same checkWide, also on the merge-base walk's blob:none packs (issue #46).
   // 2026-10-30: 82,537 B. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  // 2026-10-31: 83,426 B. The same fsck commit/tag parser (issue #59).
-  assert.ok(min < 83_427, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-31: 83,774 B. The same fsck commit/tag parser (issue #59).
+  assert.ok(min < 83_775, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -116,9 +116,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 48,703 B / 18,909 B gz. The same credential handling (issue #40).
   // 2026-10-30: 48,192 B / 18,710 B gz. The same checkWide (issue #46).
   // 2026-10-30: 49,064 B / 19,053 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  // 2026-10-31: 50,324 B / 19,513 B gz. The same fsck commit/tag parser, which commitView reads through (issue #59).
-  assert.ok(min < 50_325, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_514, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 50,672 B / 19,641 B gz. The same fsck commit/tag parser, which commitView reads through (issue #59).
+  assert.ok(min < 50_673, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 19_642, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -138,9 +138,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 60,391 B / 23,353 B gz. The same credential handling (issue #40).
   // 2026-10-30: 59,881 B / 23,141 B gz. The same checkWide (issue #46).
   // 2026-10-30: 60,752 B / 23,494 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  // 2026-10-31: 61,638 B / 23,839 B gz. The same fsck commit/tag parser (issue #59).
-  assert.ok(min < 61_639, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_840, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 61,986 B / 23,970 B gz. The same fsck commit/tag parser (issue #59).
+  assert.ok(min < 61_987, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_971, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -171,9 +171,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 45,530 B / 18,115 B gz. The same credential handling (issue #40).
   // 2026-10-30: 44,697 B / 17,804 B gz. fetchPackOnce takes a `check` for fetchPackTree0 (issue #46); checkWide itself is shaken out.
   // 2026-10-30: 45,569 B / 18,149 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  // 2026-10-31: 47,362 B / 18,749 B gz. The same fsck commit/tag parser (issue #59).
-  assert.ok(min < 47_363, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_750, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 47,681 B / 18,847 B gz. The same fsck commit/tag parser (issue #59).
+  assert.ok(min < 47_682, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 18_848, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

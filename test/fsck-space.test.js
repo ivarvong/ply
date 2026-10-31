@@ -3,7 +3,7 @@
 // rule sees. The cells are the product of the axes: each is built byte for byte, written by `git hash-object -t <type>
 // --literally`, and judged by `git fsck --strict` (both streams, the exit code, `error in` and `warning in` lines,
 // never --connectivity-only). ply must refuse exactly the cells git reports an error for, with the same msgId, and
-// accept the rest. A cell git only warns about is decided per msgId in WARN_DECISION; a warning without a decision
+// accept the rest, except the allowed typed refusals in ALLOWED_REFUSAL (PR #7). A cell git only warns about is decided per msgId in WARN_DECISION; a warning without a decision
 // fails the test, so a new git msgId cannot slip through as "accept" by default.
 //
 //   FSCK_SPACE_LIST=1 node --test test/fsck-space.test.js   prints every disagreeing cell
@@ -190,6 +190,10 @@ const TAG_HEADER = {
   'tag-name-empty': t => [`object ${P1}`, 'type commit', 'tag ', `tagger ${t}`],
   'tagger-missing': () => [`object ${P1}`, 'type commit', 'tag v1'],
   'tagger-missing-extra': () => [`object ${P1}`, 'type commit', 'tag v1', 'x-foo bar'],
+  'tagger-missing-extra-tagger': t => [`object ${P1}`, 'type commit', 'tag v1', 'tag v2', `tagger ${t}`],
+  'object-after-tagger': t => [`object ${P1}`, 'type commit', 'tag v1', `tagger ${t}`, `object ${P2}`],
+  'type-after-tagger': t => [`object ${P1}`, 'type commit', 'tag v1', `tagger ${t}`, 'type blob'],
+  'tag-after-tagger': t => [`object ${P1}`, 'type commit', 'tag v1', `tagger ${t}`, 'tag v2'],
   'tagger-twice': t => [`object ${P1}`, 'type commit', 'tag v1', `tagger ${t}`, `tagger ${CANON2}`],
   'unknown-after': t => [`object ${P1}`, 'type commit', 'tag v1', `tagger ${t}`, 'x-foo bar'],
   'unknown-nospace': t => [`object ${P1}`, 'type commit', 'tag v1', `tagger ${t}`, 'foo'],
@@ -223,11 +227,27 @@ function* cells() {
 //   missingTaggerEntry accept: tags older than git 0.99.1 have no tagger (git.git's own v0.99 is one); git reads them.
 const WARN_DECISION = { badTagName: 'accept', missingTaggerEntry: 'accept' };
 
+// An object git accepts that ply refuses on purpose, with the typed msgId it refuses with and why. Every other
+// accepted cell must be accepted.
+//   duplicateHeader    a second tree, parent, author, committer or encoding after the committer, or a second
+//                      object, type, tag or tagger after the tagger:
+//                      fsck-clean, but git's views of the object disagree (pretty.c's %an/%cn show the last
+//                      author/committer line, %T and the commit date the first; cat-file shows a late parent %P
+//                      ignores, and a late tag object/type/name the parsed tag ignores), so any value ply showed is contradicted by some git view: an author-spoofing
+//                      differential. Refused since PR #7 ("Reject duplicate commit/tag headers (git differential)").
+const ALLOWED_REFUSAL = { duplicateHeader: 'PR #7: git views of the object disagree' };
+// The header shapes those refusals may come from; a refusal anywhere else is a disagreement.
+const ALLOWED_REFUSAL_HEADERS = new Set([
+  'commit:tree-after-committer', 'commit:parent-after-committer', 'commit:author-after-committer', 'commit:committer-twice',
+  'commit:encoding-twice', 'commit:garbage-after-committer', 'tag:tagger-twice', 'tag:tagger-missing-extra-tagger',
+  'tag:object-after-tagger', 'tag:type-after-tagger', 'tag:tag-after-tagger',
+]);
+
 const msgIdOf = line => /^(?:error|warning) in \w+ [0-9a-f]{40}: (\w+):/.exec(line)?.[1] ?? null;
 const plyVerdict = (fn) => {
   try { fn(); return { verdict: 'accept', msgId: null }; } catch (e) {
     if (e?.code !== 'pack_corrupt') throw e;
-    return { verdict: 'reject', msgId: /^\w+: (\w+):/.exec(e.message)?.[1] ?? e.message };
+    return { verdict: 'reject', msgId: e.msgId ?? /^\w+: (\w+):/.exec(e.message)?.[1] ?? e.message };
   }
 };
 
@@ -326,7 +346,7 @@ test('commit, tag and ident space: ply refuses exactly what git fsck --strict re
   for (const c of all) c.git = packed.get(c.oid);
 
   const tally = { error: 0, warn: 0, ok: 0 };
-  const wrong = [], wrongMsg = [], wrongView = [];
+  const wrong = [], wrongMsg = [], wrongView = [], designed = [];
   for (const c of all) {
     const { verdict: gitVerdict, errors, warnings } = classify(c.git);
     tally[gitVerdict]++;
@@ -340,15 +360,19 @@ test('commit, tag and ident space: ply refuses exactly what git fsck --strict re
     const parsed = plyVerdict(() => (c.type === 'commit' ? parseCommit(c.data) : parseTag(c.data)));
     const view = c.type === 'commit' ? plyVerdict(() => commitView(c.data)) : parsed;
     const row = { oid: c.oid, type: c.type, axes: c.labels[0], git: c.git, ply };
-    if (ply.verdict !== expect) wrong.push(row);
+    const allowed = expect === 'accept' && ply.verdict === 'reject' && ALLOWED_REFUSAL[ply.msgId] && c.labels.every(l => ALLOWED_REFUSAL_HEADERS.has(`${c.type}:${l.header}`));
+    if (allowed) designed.push(row);
+    else if (ply.verdict !== expect) wrong.push(row);
     else if (ply.verdict === 'reject' && gitMsg && ply.msgId !== gitMsg) wrongMsg.push({ ...row, gitMsg });
     if (parsed.verdict !== ply.verdict || view.verdict !== ply.verdict) wrongView.push({ ...row, parsed, view });
   }
-  const summary = `${product} product cells, loose sample ${sample.length}, ${all.length} distinct objects (commit ${all.filter(c => c.type === 'commit').length}, tag ${all.filter(c => c.type === 'tag').length}); git: ${tally.error} error, ${tally.warn} warning-only, ${tally.ok} clean; ply disagrees on ${wrong.length} verdicts, ${wrongMsg.length} msgIds, ${wrongView.length} read paths`;
+  const summary = `${product} product cells, loose sample ${sample.length}, ${all.length} distinct objects (commit ${all.filter(c => c.type === 'commit').length}, tag ${all.filter(c => c.type === 'tag').length}); git: ${tally.error} error, ${tally.warn} warning-only, ${tally.ok} clean; ply agrees on ${all.length - wrong.length - designed.length}, refuses ${designed.length} as designed (${Object.keys(ALLOWED_REFUSAL).join(', ')}), disagrees on ${wrong.length} verdicts, ${wrongMsg.length} msgIds, ${wrongView.length} read paths`;
   console.log(summary);
   if (process.env.FSCK_SPACE_LIST) for (const w of [...wrong, ...wrongMsg, ...wrongView]) console.log(JSON.stringify(w));
   const show = rows => rows.slice(0, 5).map(r => `${r.type} ${JSON.stringify(r.axes)} git=${r.git.join(' | ') || 'clean'} ply=${r.ply.verdict}${r.ply.msgId ? `:${r.ply.msgId}` : ''}${r.gitMsg ? ` want ${r.gitMsg}` : ''}`).join('\n');
   assert.equal(wrong.length, 0, `verdicts:\n${show(wrong)}`);
+  // every header shape in the allowed class is refused in at least one cell (the class is not vacuous)
+  for (const h of ALLOWED_REFUSAL_HEADERS) assert.ok(designed.some(r => `${r.type}:${r.axes.header}` === h), `no designed refusal from ${h}`);
   assert.equal(wrongMsg.length, 0, `msgIds:\n${show(wrongMsg)}`);
   assert.equal(wrongView.length, 0, `parseCommit/parseTag/commitView disagree with assertFetched:\n${show(wrongView)}`);
 });

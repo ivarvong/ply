@@ -21,18 +21,9 @@ import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 const short = r => r.replace(/^refs\/heads\//, '');
 
 // Pure: headers to carry over when a commit is re-created. A signature does not survive a new tree/parent (git drops it).
-// A tree, parent, author, committer or encoding line among the extras is a second copy fsck never read (parseCommit
-// keeps the first, as git does): carried into a new commit it would be a stale value one git reader shows
-// (pretty.c's %an/%cn take the last author/committer line), so it is dropped.
-const SHADOWED = /^(?:tree|parent|author|committer|encoding) /;
 export function carriedExtra(extra) {
   const out = []; let dropping = false;
-  for (const l of extra) {
-    if (l.startsWith('gpgsig')) { dropping = true; continue; }
-    if (dropping && l.startsWith(' ')) continue;
-    dropping = false;
-    if (!SHADOWED.test(l)) out.push(l);
-  }
+  for (const l of extra) { if (l.startsWith('gpgsig')) { dropping = true; continue; } if (dropping && l.startsWith(' ')) continue; dropping = false; out.push(l); }
   return out;
 }
 

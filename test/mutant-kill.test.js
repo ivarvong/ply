@@ -190,7 +190,7 @@ test('commit and tag headers, idents, and assertFetched', () => {
   assert.deepEqual(parseIdent('Ada  <ada@ex> nope +0100'), { name: 'Ada', email: 'ada@ex', time: null, tz: '+0100' });
 });
 
-test('headers after the committer and the tagger are kept, not judged; first-wins like git', () => {
+test('headers after the committer and the tagger are kept, not judged, except a second copy (PR #7)', () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const other = 'Bea <bea@ex> 1700000001 +0000';
   const tree = oid(1);
@@ -226,19 +226,21 @@ test('headers after the committer and the tagger are kept, not judged; first-win
   assert.equal(plainHeaders[ci + 1].startsWith('gpgsig '), true);
   assert.equal(plainHeaders[ci + 2], 'x-custom v');
   assert.equal(parseCommit(withGpgsig(bare, 'SIG\n')).extra[0].startsWith('gpgsig '), true);
-  // after the committer fsck reads nothing: a second tree, parent, author, committer or encoding is an extra line,
-  // and the value is the first (git's %T, %P, %e and commit date read the first; only pretty's %an/%cn read the last)
+  // after the committer fsck reads nothing, but a second tree, parent, author, committer or encoding is a copy git's
+  // views disagree on (pretty's %an/%cn read the last, %T and the date the first): refused, typed (PR #7)
   const after = (...lines) => parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, ...lines]));
-  assert.equal(after(`tree ${tree2}`).tree, tree);
-  assert.deepEqual(after(`tree ${tree2}`).extra, [`tree ${tree2}`]);
-  assert.deepEqual(after(`parent ${oid(3)}`).parents, []);
-  assert.equal(after(`author ${other}`).author, author);
-  assert.equal(after(`committer ${other}`).committer, committer);
-  assert.equal(after('committer garbage').committer, committer);
+  const dup = (label, lines) => assert.throws(() => after(...lines), e => e.code === 'pack_corrupt' && e.message === label && e.msgId === 'duplicateHeader');
+  dup('commit: duplicate tree', [`tree ${tree2}`]);
+  dup('commit: duplicate tree', ['gpgsig x', `tree ${tree2}`]);
+  dup('commit: bad header order', [`parent ${oid(3)}`]);
+  dup('commit: duplicate author', [`author ${other}`]);
+  dup('commit: duplicate author', ['encoding UTF-8', `author ${other}`]);
+  dup('commit: duplicate committer', [`committer ${other}`]);
+  dup('commit: duplicate committer', ['committer garbage']);
+  dup('commit: duplicate encoding', ['encoding ISO-8859-1', 'encoding UTF-8']);
+  dup('commit: duplicate encoding', ['encoding ISO-8859-1', 'gpgsig x', 'encoding UTF-8']);
   assert.deepEqual(after('foo').extra, ['foo']);
-  const twoEnc = after('encoding ISO-8859-1', 'gpgsig x', 'encoding UTF-8');
-  assert.equal(twoEnc.encoding, 'ISO-8859-1');
-  assert.deepEqual(twoEnc.extra, ['gpgsig x', 'encoding UTF-8']);
+  assert.deepEqual(after('treehouse x', 'authors y', ' tree z').extra, ['treehouse x', 'authors y', ' tree z']);
   assert.equal(after('gpgsig x', ' y', 'encoding ISO-8859-1').encoding, 'ISO-8859-1');
   assert.equal(after(' encoding ISO-8859-1').encoding, null);
   assert.equal(after('encodingISO').encoding, null);
@@ -267,19 +269,25 @@ test('headers after the committer and the tagger are kept, not judged; first-win
   assert.deepEqual(tags.extra, ['gpgsig abc']);
   assert.equal(tags.message, 'msg\n');
   assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc', ' more'])).extra, ['gpgsig abc', ' more']);
-  // after the tagger fsck reads nothing (extraHeaderEntry is IGNORE): a second object, type, tag or tagger is kept
+  // after the tagger fsck reads nothing (extraHeaderEntry is IGNORE), but a second object, type, tag or tagger is
+  // refused like a second author (PR #7)
   const tagAfter = (...lines) => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, ...lines]));
-  assert.equal(tagAfter(`tagger ${other}`).tagger, author);
-  assert.deepEqual(tagAfter(`object ${oid(6)}`, 'type blob', 'tag v2').extra, [`object ${oid(6)}`, 'type blob', 'tag v2']);
-  assert.equal(tagAfter('type blob').type, 'commit');
+  assert.throws(() => tagAfter(`tagger ${other}`), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger' && e.msgId === 'duplicateHeader');
+  assert.throws(() => tagAfter('gpgsig x', `tagger ${other}`), e => e.message === 'tag: duplicate tagger');
+  assert.throws(() => tagAfter(`object ${oid(6)}`), e => e.message === 'tag: duplicate object' && e.msgId === 'duplicateHeader');
+  assert.throws(() => tagAfter('type blob'), e => e.message === 'tag: duplicate type');
+  assert.throws(() => tagAfter('gpgsig x', 'tag v2'), e => e.message === 'tag: duplicate tag');
+  assert.deepEqual(tagAfter('objection x', 'typed y', 'tagline z').extra, ['objection x', 'typed y', 'tagline z']);
   const tagBad = (lines, msgId, why) => throws(() => parseTag(body(lines)), 'pack_corrupt', `tag: ${msgId}: ${why}`);
   tagBad([`object ${oid(5)}`, `object ${oid(6)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingTypeEntry', "invalid format - expected 'type' line");
   tagBad([`object ${oid(5)}`, 'type commit', 'type blob', 'tag v1', `tagger ${author}`], 'missingTagEntry', "invalid format - expected 'tag' line");
   tagBad(['type commit', `object ${oid(5)}`, 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
   tagBad(['gpgsig x', `object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
-  // a tag line followed by anything but a tagger: missingTaggerEntry (INFO), so the rest is extra
-  assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])).extra, ['tag v2', `tagger ${author}`]);
-  assert.equal(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])).tagger, null);
+  // a tag line followed by anything but a tagger: missingTaggerEntry (INFO), so the rest is extra, but a second copy
+  // of a tag header further down (a tagger git's %(tagger) would show while fsck saw none) is refused
+  assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y'])).extra, ['x y']);
+  assert.throws(() => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])), e => e.message === 'tag: duplicate tag');
+  assert.throws(() => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y', `tagger ${author}`])), e => e.message === 'tag: duplicate tagger');
   assert.equal(parseTag(te.encode(`object ${oid(5)}\ntype commit\ntag \n`)).tag, '');
 });
 
@@ -725,7 +733,7 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const extra = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\nfoo bar\n\n`));
   assert.equal(extra.tagger, author);
   assert.deepEqual(extra.extra, ['foo bar']);
-  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\ntagger second <s@ex> 1 +0000\n\n`)).tagger, author);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\ntagger second <s@ex> 1 +0000\n\n`)), 'pack_corrupt', 'tag: duplicate tagger');
   assert.deepEqual(parseIdent('>a <b@c> 1 +0000'), { name: '>a', email: 'b@c', time: '1', tz: '+0000' });
   assert.deepEqual(parseIdent('Ada <a@b>'), { name: 'Ada', email: 'a@b', time: null, tz: '' });
   assert.deepEqual(parseIdent('Ada <a@b> 1  +0100'), { name: 'Ada', email: 'a@b', time: '1', tz: '+0100' });

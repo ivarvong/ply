@@ -1,9 +1,5 @@
-// fsck stops reading a commit at its committer line and a tag at its tagger, so a second `tree`, `encoding`,
-// `committer`, `parent` or `tagger` after them is fsck-clean. ply accepts what fsck accepts (issue #59;
-// test/fsck-space.test.js) and reads each field the way git's own readers do: first-wins for the tree (%T), the
-// encoding (%e), the parents (only the lines right after the tree, %P) and the tagger (%(tagger)). The one git reader
-// that disagrees is pretty.c's %an/%cn, which shows the last author/committer line; ply keeps the first, the one fsck
-// checked, and the later copy stays in `extra`. These objects are the ones a red-team audit used.
+// git is first-wins for a second `tree` and still fsck-clean, so a last-wins parser reads a different tree than
+// `git log --format=%T`. These objects are the ones a red-team audit used. ply rejects them on purpose.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -51,7 +47,7 @@ function fsckErrors(dir, oid) {
   return r.err.split('\n').map(l => l.trim()).filter(l => l.startsWith('error:') && l.includes(oid));
 }
 
-test('a second tree header is fsck-clean and git shows the first; so does ply', () => {
+test('a second tree header is fsck-clean and git shows the first; ply rejects it', () => {
   withRepo((dir, empty) => {
     const otherTree = 'a'.repeat(40);
     const text = `tree ${empty}\nauthor ${author}\ncommitter ${author}\ntree ${otherTree}\n\nmsg\n`;
@@ -64,9 +60,7 @@ test('a second tree header is fsck-clean and git shows the first; so does ply', 
     const shown = git(dir, ['log', '-1', '--no-walk', '--format=%T', oid]);
     assert.equal(shown.code, 0, shown.err);
     assert.equal(shown.out.trim(), empty);
-    const c = parseCommit(te.encode(text));
-    assert.equal(c.tree, empty);
-    assert.deepEqual(c.extra, [`tree ${otherTree}`]);
+    assert.throws(() => parseCommit(te.encode(text)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate tree');
   });
 });
 
@@ -77,16 +71,14 @@ test('duplicate encoding, duplicate committer, and a parent after committer', ()
     assert.deepEqual(fsckErrors(dir, encOid), []);
     const encLog = git(dir, ['log', '-1', '--no-walk', '--format=%e', encOid]);
     assert.equal(encLog.out.trim(), 'ISO-8859-1');
-    assert.equal(parseCommit(te.encode(enc)).encoding, 'ISO-8859-1');
+    assert.throws(() => parseCommit(te.encode(enc)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate encoding');
 
     const com = `tree ${empty}\nauthor ${author}\ncommitter ${author}\ncommitter ${other}\n\nmsg\n`;
     const comOid = literally(dir, 'commit', com);
     assert.deepEqual(fsckErrors(dir, comOid), []);
     const comLog = git(dir, ['log', '-1', '--no-walk', '--format=%cn', comOid]);
     assert.equal(comLog.out.trim(), 'B');
-    // pretty.c is last-wins for %cn; ply keeps the committer fsck checked (the first) and the copy in extra
-    assert.equal(parseCommit(te.encode(com)).committer, author);
-    assert.deepEqual(parseCommit(te.encode(com)).extra, [`committer ${other}`]);
+    assert.throws(() => parseCommit(te.encode(com)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate committer');
 
     const parent = 'b'.repeat(40);
     const late = `tree ${empty}\nauthor ${author}\ncommitter ${author}\nparent ${parent}\n\nmsg\n`;
@@ -94,7 +86,7 @@ test('duplicate encoding, duplicate committer, and a parent after committer', ()
     assert.deepEqual(fsckErrors(dir, lateOid), []);
     const parents = git(dir, ['log', '-1', '--no-walk', '--format=%P', lateOid]);
     assert.equal(parents.out.trim(), '');
-    assert.deepEqual(parseCommit(te.encode(late)).parents, []);
+    assert.throws(() => parseCommit(te.encode(late)), e => e.code === 'pack_corrupt' && e.message === 'commit: bad header order');
   });
 });
 
@@ -119,6 +111,6 @@ test('a commit git writes round-trips, and a duplicate tagger is fsck-clean firs
     assert.deepEqual(fsckErrors(dir, tagOid), []);
     const shown = git(dir, ['for-each-ref', '--format=%(tagger)', 'refs/tags/v1']);
     assert.equal(shown.out.trim(), author);
-    assert.equal(parseTag(te.encode(tag)).tagger, author);
+    assert.throws(() => parseTag(te.encode(tag)), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger');
   });
 });

@@ -144,8 +144,9 @@ export const IDENT_TIMESTAMP_MAX = 0x7fffffffffffffffn;
 // ---- commit headers (Documentation/gitformat-commit; fsck.c fsck_commit) ----
 // fsck_commit reads exactly one tree, then any parent lines, then author lines (exactly one allowed), then one
 // committer, and stops: whatever follows (encoding, gpgsig, mergetag, unknown headers, a second tree or committer) is
-// not checked. git's readers are first-wins for the tree, author, committer and encoding, and only the parent lines
-// right after the tree are parents, so ply takes the same values and keeps every later line in `extra`.
+// not checked by fsck. ply keeps those lines in `extra`, except a second tree, parent, author, committer or encoding:
+// git's views of such an object disagree (pretty.c is last-wins for %an/%cn, %T and the date are first-wins), so ply
+// refuses it (PR #7, an allowed typed refusal in test/fsck-space.test.js).
 export const COMMIT_HEADER_TREE = 'tree';
 export const COMMIT_HEADER_PARENT = 'parent';
 export const COMMIT_HEADER_AUTHOR = 'author';
@@ -153,7 +154,8 @@ export const COMMIT_HEADER_COMMITTER = 'committer';
 export const COMMIT_HEADER_ENCODING = 'encoding';
 
 // ---- tag headers (fsck.c fsck_tag_standalone) ----
-// An annotated tag is object, type, tag, then tagger (optional: tags before git 0.99.1 have none), then anything.
+// An annotated tag is object, type, tag, then tagger (optional: tags before git 0.99.1 have none), then anything but a
+// second object, type, tag or tagger (refused like a second commit author, PR #7).
 export const TAG_HEADER_OBJECT = 'object';
 export const TAG_HEADER_TYPE = 'type';
 export const TAG_HEADER_TAG = 'tag';
