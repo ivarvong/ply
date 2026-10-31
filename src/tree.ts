@@ -27,7 +27,7 @@ import { validateIdent, validateRef, validatePushRef, validatePath, validateMess
 import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
-import { MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, DELTA_SIZE_MIN } from './format.js';
+import { MODE_BLOB, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES, DELTA_SIZE_MIN } from './format.js';
 import type { Span } from './otel.js';
 import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
@@ -36,7 +36,7 @@ import type { TreeEntry } from './objects.js';
 import { thrownCode } from './boundary.js';
 
 const OID = /^[0-9a-f]{40}$/;
-const BLOB_MODES: ReadonlySet<string> = new Set([MODE_BLOB, MODE_EXEC, MODE_LINK]);
+const BLOB_MODE_SET: ReadonlySet<string> = new Set(BLOB_MODES);
 
 // The caller's files, in either shape (below): a record or Map of path → content, or an iterable of file specs.
 export type FileSpec = { readonly path: string; readonly mode?: string; readonly data?: string | Uint8Array; readonly oid?: string };
@@ -77,7 +77,7 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Fi
       out.push({ path, comps, mode, oid });
       continue;
     }
-    if (!BLOB_MODES.has(mode)) throw fail('bad_request', `${path}: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path });
+    if (!BLOB_MODE_SET.has(mode)) throw fail('bad_request', `${path}: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path });
     const raw = spec.data;
     if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) throw fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
     const data = bytesOf(raw);
@@ -155,7 +155,7 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
     trees.push(delta && delta.length >= DELTA_SIZE_MIN && delta.length < t.data.length ? { type: TYPE.TREE, data: delta, baseOid: (base as { readonly oid: string }).oid } : { type: TYPE.TREE, data: t.data });
     for (const e of t.entries) {
       if (e.mode === MODE_TREE) walk(dir ? `${dir}/${e.name}` : e.name);
-      else if (BLOB_MODES.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Uint8Array }); }
+      else if (BLOB_MODE_SET.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Uint8Array }); }
     }
   };
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */

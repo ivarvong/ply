@@ -25,6 +25,7 @@ import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamF
 import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
+import { parseOid, parseCommitId } from '../src/oid.js';
 
 const covered = new Set();
 const property = (id, name, fn) => { covered.add(id); test(name, fn); };
@@ -458,6 +459,26 @@ property('attr-file', 'a gitattributes file prefix is a prefix of its patterns',
       if (j < got.length - 1 || text[i - 1] === '\n') assert.equal(p, full[j]);
       else assert.ok(full[j].startsWith(p));
     });
+  }
+});
+
+property('oid', 'a prefix of an object id is not an object id', () => {
+  const full = 'a'.repeat(OID_HEX_CHARS);
+  assert.equal(parseOid(full).ok, true);
+  for (let i = 0; i < full.length; i++) {
+    const r = parseOid(full.slice(0, i));
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.code, 'bad_request');
+  }
+});
+
+property('commit-id', 'a prefix of a commit id is not a commit id', () => {
+  const full = 'b'.repeat(OID_HEX_CHARS);
+  assert.equal(parseCommitId(full).ok, true);
+  for (let i = 0; i < full.length; i++) {
+    const r = parseCommitId(full.slice(0, i));
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.code, 'bad_request');
   }
 });
 

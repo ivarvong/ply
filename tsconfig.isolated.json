@@ -1,5 +1,6 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "noEmit": true, "isolatedDeclarations": true, "declaration": true, "allowJs": false, "noImplicitAny": false, "rootDir": "." },
-  "include": ["src/**/*.ts", "test/types"]
+  "include": ["src/**/*.ts", "test/types"],
+  "exclude": ["test/types/oid-entry.typetest.ts"]
 }
