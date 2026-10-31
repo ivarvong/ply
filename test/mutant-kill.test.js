@@ -1762,6 +1762,8 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   advOk([dat(`shallow ${oid(1)}\0report-status\n`), FL], ['report-status']);
   advOk([dat(`${oid(1)} refs/heads/a\0report-status\n`), dat(`${oid(2)} refs/heads/b\0extra\n`), FL], ['report-status']);
   advOk([dat(`${oid(1)} refs/heads/a\n`), dat(`${oid(2)} refs/heads/b\0extra\n`), FL], []);
+  advErr([dat('\0report-status\n'), FL], 'receive-pack advertisement: unexpected line ""');
+  advOk([dat(`${oid(1)} refs/heads/a\0 report-status atomic \n`), FL], ['report-status', 'atomic']);
   // object-format=sha256 widens every oid to 64 hex
   advOk([dat(`${'ab'.repeat(32)} refs/heads/a\0object-format=sha256\n`), dat(`${'cd'.repeat(32)} refs/heads/b\n`), FL], ['object-format=sha256']);
   advErr([dat(`${'ab'.repeat(32)} refs/heads/a\0report-status\n`), FL], `receive-pack advertisement: unexpected line "${'ab'.repeat(30)}"`);
