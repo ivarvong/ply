@@ -6,7 +6,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const bundle = async entry => (await build({ entryPoints: [entry], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true }));
-const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, ''), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
+const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, '').replace(/\.ts$/, '.js'), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
 
 test('edit entry carries only what the edit path uses', async () => {
   const out = await bundle('src/edit.js');
