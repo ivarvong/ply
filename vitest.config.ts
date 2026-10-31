@@ -1,5 +1,5 @@
-// The unit, oracle and space suites. Fuzzers (test/fuzz/*.mjs) stay node scripts; test/workerd.test.js runs on its own
-// (`npm run test:workerd`: it needs the workerd binary and is not in CI's suite).
+// The unit, oracle, space and workerd suites. Fuzzers (test/fuzz/*.mjs) stay node scripts. test/workerd.test.js runs
+// the pipeline inside workerd (a devDependency) and is in CI's shards like any other file (#101).
 import { existsSync, readFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,7 +46,7 @@ class WeightedSequencer extends BaseSequencer {
 export default defineConfig({
   test: {
     include: ['test/**/*.test.js'],
-    exclude: ['test/workerd.test.js', '**/node_modules/**'],
+    exclude: ['**/node_modules/**'],
     // node:test had no default timeout and the space/oracle tests run for minutes; a test that needs a bound states it
     // in its own options ({ timeout }), exactly as before. 0 disables vitest's 5 s / 10 s defaults.
     testTimeout: 0,
