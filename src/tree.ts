@@ -27,7 +27,7 @@ import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, DELTA_SIZE_MIN } from './format.js';
-import type { Span } from './otel.js';
+import type { Span, Tracer } from './otel.js';
 import type { Caught, EncodeCommit, FetchObject, Fetched, Operation, PackObject, Push, Pushed, Transport, TreeEntry } from './boundary.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -77,13 +77,11 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Fi
     if (!(data instanceof Uint8Array)) throw fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
     if (data.length > maxObject) throw limitError('object size', data.length, maxObject);
     // a symlink target is a path: git cannot check out an empty one, and a NUL ends it on every platform
-    if (mode === MODE_LINK && (!data.length || data.includes(0))) throw fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
+    if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) throw fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
     out.push({ path, comps, mode, data, oid: hashObject('blob', data) });
   }
   return out;
 }
-
-const depth = (dir: string): number => (dir === '' ? 0 : dir.split('/').length);
 
 // A directory entry of a built tree; the built trees by directory ('' is the root) and the blobs by oid.
 export type DirEntry = { readonly mode: string; readonly name: string; readonly oid: string };
@@ -117,6 +115,8 @@ export function buildTree(entries: readonly FileEntry[], limits: Limits = DEFAUL
   }
   // deepest first, so every subtree's oid exists before its parent is encoded
   const trees = new Map<string, BuiltDir>();
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- bundle budget: where the JS had it
+  const depth = (dir: string): number => (dir === '' ? 0 : dir.split('/').length);
   for (const dir of [...dirs.keys()].toSorted((a, b) => depth(b) - depth(a))) {
     const list = [...(dirs.get(dir) as Map<string, DirEntry | null>)].map(([name, e]) => e ?? { mode: MODE_TREE, name, oid: (trees.get(dir ? `${dir}/${name}` : name) as BuiltDir).oid });
     const data = encodeTree(list);
@@ -134,9 +134,9 @@ export type Selected = { readonly trees: PackObject[]; readonly blobs: PackObjec
 // parent's tree bytes at that path, a REF_DELTA base. A tree the server has is skipped with everything under it; a
 // blob or tree reached twice is sent once (receive-pack refuses a pack with an object twice). Gitlinks send nothing.
 export function selectObjects(built: BuiltTree, { have = new Set(), old = new Map() }: Partial<Known> = {}): Selected {
-  const blobs: PackObject[] = [];
   const sent = new Set<string>();
   const trees: PackObject[] = [];
+  const blobs: PackObject[] = [];
   // every dir walked is a key of built.trees (the root, or a tree entry of one), and every blob entry's oid a key of built.blobs
   /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md) */
   const walk = (dir: string): void => {
@@ -285,8 +285,9 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     if (oldTree === s.built.root && !s.create) return outcome('noop', summarize({ s, parent, oldTree, hint, attempt, noop: true }));
 
     // 2. what the server has: the parent's trees along every directory whose oid changed (cache by oid, immutable)
-    // oxlint-disable-next-line promise-function-async -- parentTrees' promise, as before
-    const known = await root.tracer.span('git.push_tree.diff', { parent: root }, span => parentTrees(t, cache, s.built, oldTree, limits).then(k => { span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size }); return k; }));
+    // the transport's tracer, as the JS used (a caller's transport carries its own); transport.js is JS (boundary.ts)
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, promise-function-async -- see above; parentTrees' promise, as before
+    const known = await (t.tracer as Tracer).span('git.push_tree.diff', { parent: root }, span => parentTrees(t, cache, s.built, oldTree, limits).then(k => { span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size }); return k; }));
     const sel = selectObjects(s.built, known);
 
     // 3. the commit, then one push whose old oid is the CAS
