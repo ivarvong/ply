@@ -15,9 +15,9 @@ import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
+import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
-import { short, commitAt, commitBytesAt } from './mergeio.js';
+import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 // The unconverted modules' functions as this module calls them (see merge.ts).
@@ -122,16 +122,17 @@ export type RebaseOutcome =
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 /* oxlint-disable eslint/complexity -- one operation's steps in order; the A6 pass makes the replay a RebaseState machine */
 export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time = Math.floor(Date.now() / 1000), squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
-  validateAttributes(attributes); validatePushRef(ref, false); validateRef(onto);
-  const committerPerson: ValidatedIdent = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
-  const authorPerson: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+  validateAttributes(attributes); validatePushRef(ref, false); const ontoOid = givenOid(onto, 'onto');
+  const committerPerson: ValidatedIdent = stamp(committer, time);
+  const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
   if (message !== null) validateMessage(message);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
-    const { refs }: Refs = await lsRefs(t, [ref, onto]);
+    const { refs }: Refs = await lsRefs(t, ontoOid === null ? [ref, onto] : [ref]);
     const tip = refs.get(ref)?.oid;
-    const target = refs.get(onto)?.oid;
+    const target = ontoOid ?? refs.get(onto)?.oid;
     if (tip === undefined) throw fail('not_found', `ref ${ref} not found`); if (target === undefined) throw fail('not_found', `ref ${onto} not found`);
+    if (ontoOid !== null) await assertCommit(t, ontoOid, 'onto');
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
     const { bases, commits, verdict } = await mergeBase(t, tip, target);
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
@@ -162,7 +163,7 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
     const last = chain.at(-1);
     if (squash && first && last) {
       const r = await transplant(t, cache, { base: commits.get(base)?.tree, ours: targetTree, theirs: last.tree }, { parent: target, author: authorPerson ? ident(authorPerson) : first.author, committer: who, message: message ?? `${chain.map(c => (c.message ?? '').replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n`, extra: [] }, signer, out);
-      if (r.conflicts) throw fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
+      if (r.conflicts) throw fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons } as ConflictDetail);
       objects.push(...r.objects); cur = r.oid; replayed.push({ from: last.oid, to: r.oid, tree: r.treeOid });
     } else {
       for (const c of chain) {
@@ -186,6 +187,8 @@ export type PickSpec = {
   readonly ref?: string;
   readonly commit: string;
   readonly committer?: Author;
+  // a revert's author (git: the one reverting); defaults to the committer. A cherry-pick keeps the commit's author.
+  readonly author?: Author | null;
   readonly time?: number;
   readonly revert?: boolean;
   readonly message?: string | null;
@@ -195,11 +198,12 @@ export type PickOutcome =
   | { readonly outcome: 'ok'; readonly ref: string; readonly oid: string; readonly tree: string; readonly onto: string; readonly pushBytes: number };
 
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
-export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, time = Math.floor(Date.now() / 1000), revert = false, message = null }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
+export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time = Math.floor(Date.now() / 1000), revert = false, message = null }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
   validateAttributes(attributes); validatePushRef(ref, false);
-  const committerPerson: ValidatedIdent = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
+  const committerPerson: ValidatedIdent = stamp(committer, time);
+  const revertAuthor: ValidatedIdent = author ? stamp(author, time) : committerPerson;
   if (message !== null) validateMessage(message);
-  if (!/^[0-9a-f]{40}$/u.test(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');
+  if (!isOid(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
@@ -216,8 +220,8 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
     const subject = (c.message ?? '').split('\n')[0] ?? '';
     const r = await transplant(t, cache,
       revert ? { base: c.tree, ours: tInfo.tree, theirs: p.tree } : { base: p.tree, ours: tInfo.tree, theirs: c.tree },
-      { parent: target, author: revert ? who : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
-    if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
+      { parent: target, author: revert ? ident(revertAuthor) : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
+    if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons } as ConflictDetail);
     if (r.treeOid === tInfo.tree) return outcome('empty', { outcome: 'empty', ref, oid: target });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: r.oid, objects: uniqueObjects(r.objects) });
