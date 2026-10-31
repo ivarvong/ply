@@ -126,6 +126,18 @@ test('typed misses match git: ref, unborn HEAD, path, directory, submodule', asy
   assert.deepEqual(sub.miss, { kind: 'submodule', path: 'vendor/sub', commit: subOid });
 });
 
+// A commit whose object is a tree, blob, or tag is not_found (refuseNonCommit). The pack_corrupt line that remains is a
+// want whose expected type is not a commit: walking a path from a blob asks for a tree and the object is a blob.
+test('a path walk that starts at a blob is pack_corrupt (expected tree, got blob)', async () => {
+  const blob = git(R.bare, ['rev-parse', 'HEAD:README.md']).trim();
+  const walked = await walkPath(createTransport(R.url, { tracer: tracer() }), blob, ['x']);
+  assert.equal(walked.ok, false);
+  if (!walked.ok) {
+    assert.equal(walked.error.code, 'pack_corrupt');
+    assert.match(walked.error.message, /expected tree, got blob/);
+  }
+});
+
 test('ply does not classify a not_found by matching its own message', async () => {
   const { readdirSync, readFileSync } = await import('node:fs');
   // The classifiers ply-web used, and the ones this tree used to rethrow not_found. The messages themselves stay;
