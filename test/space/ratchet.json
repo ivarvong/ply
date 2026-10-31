@@ -2,7 +2,7 @@
  "note": "Holes per category (test/space/holes.js). Only ever lowered: node scripts/spaces.mjs --ratchet. A category at 0 is enforced.",
  "categories": {
   "decisions": {
-   "count": 88,
+   "count": 97,
    "ids": [
     "src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string",
     "src/checkout-node.js#slurp:limit_exceeded:symlink target",
@@ -21,10 +21,12 @@
     "src/fetch.js#spStep:pack_corrupt:<head>, <p>, <head.length - p>",
     "src/http.js#advertise:network:<e>, <sig.signal>",
     "src/http.js#advertise:not_git:unexpected content-type from … advertisement",
+    "src/http.js#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))",
     "src/inflate.js#codes:pack_corrupt:inflate: bad distance symbol",
     "src/inflate.js#inflate:pack_corrupt:<buf>, <p>, <ADLER_BYTES>",
     "src/inflate.js#inflate:pack_corrupt:<buf>, <p>, <DEFLATE_STORED_HEADER_BYTES>",
     "src/inflate.js#inflate:pack_corrupt:<buf>, <p>, <len>",
+    "src/lsrefs.js#lsRefs:decode:replacement:f.payload",
     "src/merge.js#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …",
     "src/merge.js#attributeTree:not_found:attributes ref … not found",
     "src/merge.js#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …",
@@ -32,8 +34,10 @@
     "src/merge.js#mergeBranch:not_found:ref … not found",
     "src/merge.js#mergeBranch:not_found:ref … not found#2",
     "src/negotiate.js#negotiate:bad_request:negotiate rounds must be an integer",
+    "src/objects.js#parseTree:decode:replacement:take(data, sp + 1, nul - (sp + 1))",
     "src/objects.js#parseTree:pack_corrupt:<data>, <p>, <sp - p>",
     "src/objects.js#parseTree:pack_corrupt:<data>, <sp><1>, <nul - (sp + 1)>",
+    "src/objects.js#splitHeaders:decode:replacement:data",
     "src/packresolve.js#applyDelta:pack_corrupt:<base>, <off>, <len>",
     "src/packresolve.js#applyDelta:pack_corrupt:<delta>, <p>, <c>",
     "src/packresolve.js#makeDelta:pack_corrupt:<target>, <p>, <target.length - s - p>",
@@ -50,6 +54,7 @@
     "src/pktline.js#pktStep:protocol:<buf>, <p>, <PKT_LEN_HEX>",
     "src/pktline.js#pktStep:protocol:<buf>, <p>, <buf.length - p>",
     "src/pktline.js#pktStep:protocol:<buf>, <p><PKT_LEN_HEX>, <len - PKT_LEN_HEX>",
+    "src/push.js#pushLine:decode:replacement:payload",
     "src/read.js#flush:pack_corrupt:blob content hashes to …, not …",
     "src/rebase.js#linearChain:limit_exceeded:rebase chain",
     "src/rebase.js#pickCommit:bad_request:commit must be a 40-hex oid",
@@ -58,6 +63,7 @@
     "src/rebase.js#rebaseBranch:not_found:ref … not found",
     "src/rebase.js#rebaseBranch:not_found:ref … not found#2",
     "src/rebase.js#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth",
+    "src/sign.js#withGpgsig:decode:replacement:commitBytes",
     "src/ssh-node.js#nodeStream:timeout:socket timeout",
     "src/ssh-workers.js#armed:timeout:socket timeout",
     "src/ssh.js#authenticate:ssh:ssh: expected SERVICE_ACCEPT, got …",
@@ -85,7 +91,10 @@
     "src/ssh.js#readMessage:unsupported:ssh: server requested rekeying; ply sessions are short e…",
     "src/ssh.js#write:network:ssh: channel closed while writing",
     "src/sshgit.js#openChannel:</denied|not found|does not appear|no suc>:ssh: … sent no advertisement…",
+    "src/sshgit.js#openChannel:decode:replacement:f.payload",
+    "src/sshgit.js#openChannel:decode:replacement:first.payload",
     "src/sshgit.js#readUntilFlush:limit_exceeded:advertisement bytes",
+    "src/sshgit.js#sshDecode:decode:strict:Uint8Array.from(bytes)",
     "src/transport.js#coded:<code>:<String(e?.message ?? e)>",
     "src/tree-node.js#keep:limit_exceeded:directory bytes",
     "src/tree-node.js#keep:limit_exceeded:files",
@@ -290,6 +299,10 @@
    ]
   },
   "claims": {
+   "count": 0,
+   "ids": []
+  },
+  "linux": {
    "count": 0,
    "ids": []
   },

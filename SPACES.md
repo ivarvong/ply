@@ -15,67 +15,106 @@ The procedure is enforced, not remembered:
 
 | category | holes (ratchet) | mode |
 |---|---:|---|
-| decisions | 88 | REPORT |
+| decisions | 97 | REPORT |
 | git | 81 | REPORT |
 | failsites | 104 | REPORT |
 | claims | 0 | ENFORCE |
+| linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **410** (375 fail sites, 16 produced codes, 6 untyped throws, 13 exported parse/decode/classify/decide functions). Covered by a merged space 297, by a pending PR 18, excluded 7, unregistered 88. Fail sites no cell reaches: 104 of 375. Of the registered points, 40 are claimed by an enumerated space, 24 only by a random one and 251 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **433** (375 fail sites, 16 produced codes, 6 untyped throws, 13 exported parse/decode/classify/decide functions). Covered by a merged space 297, by a pending PR 18, excluded 21, unregistered 97. Fail sites no cell reaches: 104 of 375. Of the registered points, 40 are claimed by an enumerated space, 24 only by a random one and 251 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 92, by a pending PR 64, excluded 140, uncovered 81. Claimed by an enumerated space 136, random 8, curated 12.
 
 ## Spaces
 
-| space | status | kind | axes | cells | observed / derived | oracle | decision points | git checks | run |
-|---|---|---|---|---:|---|---|---:|---:|---|
-| `fetch-protocol` | main | enumerated | want(8) × have(11) × deepen(6) × filter(9) × server(3) × cycled | 14,256 | 14,256 / 0 | git pack-objects as upload-pack invokes it (exact object set) + the bound required ⊆ got ⊆ required ∪ had + invocation capture | 2 | 32 | ci (`test/protocol.test.js`) |
-| `ident-alphabet` | main | enumerated | name × email | 4,767 | 4,767 / 0 | index-pack --strict (fsck_ident) on a commit carrying the ident | 1 | 2 | ci (`test/compliance.test.js`) |
-| `refname-alphabet` | main | enumerated | component × shape | 1,431 | 1,431 / 0 | git check-ref-format | 2 | 18 | ci (`test/compliance.test.js`) |
-| `tree-name-alphabet` | main | enumerated | name | 924 | 924 / 0 | index-pack --strict + fsck --strict on a tree with the name | 2 | 10 | ci (`test/compliance.test.js`) |
-| `tree-encoding` | main | enumerated | pair(600) × modes(5) × order(2) | 6,000 | 6,000 / 0 | git mktree / write-tree | 0 | 5 | ci (`test/compliance.test.js`) |
-| `push-parity` | main | enumerated | config(6) × hook(4) × command(8) × caps(4) | 768 | 1 in 8 per day (seeded); 768 with PUSH_MATRIX=full / 0 | `git push` on a twin repo: same refs, same accept/reject | 6 | 5 | ci (`test/push.test.js`) |
-| `credential-cells` | main | enumerated | source(5) × user(6) × password(4) | 120 | 89 / 31 | git 2.50 behind a Basic-auth gate (what it sends), stated outcome elsewhere (#40, #48) | 4 | 0 | ci (`test/adversarial.test.js`) |
-| `wide-limits` | main | enumerated | server(2) × wanted(3) × sibling(4) × op(5) | 120 | 120 / 0 | git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47) | 5 | 0 | ci (`test/wide-limits.test.js`) |
-| `push-outcome` | pending #51 | enumerated | event(14) × framing(2) × delivery(13) × refs(3) × commands(2) × atomic(2) × format(4) × unpack(6) × status(10) × spread(31) | 4.3M (412,008 wrong on main) | scenarios from git 2.50 (push-outcome.observed.js) / the rest, from git source | expected() derived rule by rule from git v2.50.0 receive-pack/send-pack, checked against observed git | 4 | 33 | ci (`test/space/push-outcome.test.js`, `test/space/push-outcome-boundary.test.js`) |
-| `fsck-commit` | pending #62 | enumerated | ident(36) × role × body(9) × eol(2) × commitHeader(29) × tagHeader(18) | 51,338 objects (3,598 wrong verdicts on main) | 51,338 / 0 | git fsck --strict (both streams, exit code, msgId) on hash-object --literally objects (#59) | 1 | 27 | ci (`test/fsck-space.test.js`) |
-| `mergebase` | pending #52 | enumerated | position(4) × multiplicity(4) × settled(3) × server(7) × op(3) | ≤ 1,008 (product; rebase only where git has one base on the honest server) | — | git merge-base --all, merge-tree --write-tree, git rebase (#41, #42) | 1 | 0 | ci (`test/mergebase-space.test.js`) |
-| `git-bytes` | pending #55 | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 0 | 0 | ci (`test/git-bytes.test.js`) |
-| `streamed-body` | pending #49 | enumerated | path(6) × shape(7) × size(5) × rel(3) | 630 | 630 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36) | 12 | 0 | ci (`test/adversarial.test.js`) |
-| `tree-dups` | pending #50 | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) |
-| `fsck-oracle` | pending #53 | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) |
-| `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 68 | 8 | ci (`test/adversarial.test.js`) |
-| `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 5 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) |
-| `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 6 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) |
-| `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) |
-| `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) |
-| `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) |
-| `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 5 | 0 | ci (`test/packcache.test.js`) |
-| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 34 | 0 | ci (`test/pure.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 68 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) |
-| `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) |
-| `ssh` | main | curated | case | cases | — | OpenSSH sshd + git over ssh | 13 | 0 | ci (`test/sshgit.test.js`) |
-| `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 1 | 0 | ci (`test/sign.test.js`) |
-| `read` | main | curated | case | cases | — | git cat-file / ls-tree | 7 | 0 | ci (`test/read.test.js`, `test/artifacts-compat.test.js`) |
-| `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 21 | 6 | ci (`test/props.test.js`) |
-| `edit-fuzz` | main | random | repo × edit | seeded | — | git: ref, blob splice, diff --name-only, fsck --strict (I3) | 0 | 0 | local (`test/fuzz/run.mjs`) |
-| `hostile-fuzz` | main | random | exchange × mutation | seeded | — | safety invariants against git (I1, I2) | 0 | 0 | local (`test/fuzz/hostile.mjs`) |
-| `below-hash` | main | random | object × mutation | seeded | — | git fsck --strict on the same bytes | 0 | 0 | ci (`test/fuzz/below-hash.mjs`) |
-| `git-semantic` | main | random | object × header-mutation | seeded | — | git cat-file fields; fsck --strict | 0 | 0 | ci (`test/fuzz/git-semantic.mjs`) |
-| `liar` | main | random | exchange × lie | seeded | — | oid verification, size contracts, CAS: no bad push | 1 | 0 | local (`test/fuzz/liar.mjs`) |
-| `fetch-protocol-random` | main | random | dag × want × have × deepen × filter × server | seeded | — | as fetch-protocol, on generated DAGs | 0 | 0 | local (`test/fuzz/protocol.mjs`) |
-| `pack-read` | main | random | dag × pack-objects-options | seeded | — | git cat-file truth; verify-pack -v offsets and chain depths | 0 | 0 | local (`test/fuzz/packs.mjs`) |
-| `pack-write` | main | random | repo × path × edit | seeded | — | index-pack --fix-thin --strict; objects == git's (I12) | 0 | 2 | local (`test/fuzz/packgen.mjs`) |
-| `codec` | main | random | codec × input | seeded | — | node:zlib, node:crypto, git patch_delta (I13) | 0 | 0 | local (`test/fuzz/codec.mjs`) |
-| `usergiven` | main | random | shape(4) × repo | seeded | — | git rev-list --objects --filter | 0 | 0 | local (`test/fuzz/usergiven.mjs`) |
-| `attributes` | main | random | tree × gitattributes | seeded | — | git check-attr --source -a -z | 2 | 0 | local (`test/fuzz/attributes.mjs`) |
-| `linemerge` | main | random | base × ours × theirs × driver | seeded | — | git merge-tree --write-tree; git diff --histogram | 0 | 0 | local (`test/fuzz/linemerge.mjs`, `test/fuzz/diffscript.mjs`) |
+| space | status | kind | axes | cells | observed / derived | oracle | decision points | git checks | run | OS |
+|---|---|---|---|---:|---|---|---:|---:|---|---|
+| `fetch-protocol` | main | enumerated | want(8) × have(11) × deepen(6) × filter(9) × server(3) × cycled | 14,256 | 14,256 / 0 | git pack-objects as upload-pack invokes it (exact object set) + the bound required ⊆ got ⊆ required ∪ had + invocation capture | 2 | 32 | ci (`test/protocol.test.js`) | — |
+| `ident-alphabet` | main | enumerated | name × email | 4,767 | 4,767 / 0 | index-pack --strict (fsck_ident) on a commit carrying the ident | 1 | 2 | ci (`test/compliance.test.js`) | — |
+| `refname-alphabet` | main | enumerated | component × shape | 1,431 | 1,431 / 0 | git check-ref-format | 2 | 18 | ci (`test/compliance.test.js`) | — |
+| `tree-name-alphabet` | main | enumerated | name | 924 | 924 / 0 | index-pack --strict + fsck --strict on a tree with the name | 2 | 10 | ci (`test/compliance.test.js`) | dependent¹ |
+| `tree-encoding` | main | enumerated | pair(600) × modes(5) × order(2) | 6,000 | 6,000 / 0 | git mktree / write-tree | 0 | 5 | ci (`test/compliance.test.js`) | — |
+| `push-parity` | main | enumerated | config(6) × hook(4) × command(8) × caps(4) | 768 | 1 in 8 per day (seeded); 768 with PUSH_MATRIX=full / 0 | `git push` on a twin repo: same refs, same accept/reject | 6 | 5 | ci (`test/push.test.js`) | — |
+| `credential-cells` | main | enumerated | source(5) × user(6) × password(4) | 120 | 89 / 31 | git 2.50 behind a Basic-auth gate (what it sends), stated outcome elsewhere (#40, #48) | 4 | 0 | ci (`test/adversarial.test.js`) | — |
+| `wide-limits` | main | enumerated | server(2) × wanted(3) × sibling(4) × op(5) | 120 | 120 / 0 | git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47) | 5 | 0 | ci (`test/wide-limits.test.js`) | — |
+| `push-outcome` | pending #51 | enumerated | event(14) × framing(2) × delivery(13) × refs(3) × commands(2) × atomic(2) × format(4) × unpack(6) × status(10) × spread(31) | 4.3M (412,008 wrong on main) | scenarios from git 2.50 (push-outcome.observed.js) / the rest, from git source | expected() derived rule by rule from git v2.50.0 receive-pack/send-pack, checked against observed git | 4 | 33 | ci (`test/space/push-outcome.test.js`, `test/space/push-outcome-boundary.test.js`) | — |
+| `fsck-commit` | pending #62 | enumerated | ident(36) × role × body(9) × eol(2) × commitHeader(29) × tagHeader(18) | 51,338 objects (3,598 wrong verdicts on main) | 51,338 / 0 | git fsck --strict (both streams, exit code, msgId) on hash-object --literally objects (#59) | 1 | 27 | ci (`test/fsck-space.test.js`) | — |
+| `mergebase` | pending #52 | enumerated | position(4) × multiplicity(4) × settled(3) × server(7) × op(3) | ≤ 1,008 (product; rebase only where git has one base on the honest server) | — | git merge-base --all, merge-tree --write-tree, git rebase (#41, #42) | 1 | 0 | ci (`test/mergebase-space.test.js`) | — |
+| `git-bytes` | pending #55 | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 0 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
+| `streamed-body` | pending #49 | enumerated | path(6) × shape(7) × size(5) × rel(3) | 630 | 630 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36) | 12 | 0 | ci (`test/adversarial.test.js`) | — |
+| `tree-dups` | pending #50 | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) | — |
+| `fsck-oracle` | pending #53 | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) | — |
+| `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 68 | 8 | ci (`test/adversarial.test.js`) | — |
+| `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 5 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
+| `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 6 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) | — |
+| `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) | — |
+| `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
+| `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
+| `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 5 | 0 | ci (`test/packcache.test.js`) | — |
+| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 34 | 0 | ci (`test/pure.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 68 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
+| `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
+| `ssh` | main | curated | case | cases | — | OpenSSH sshd + git over ssh | 13 | 0 | ci (`test/sshgit.test.js`) | — |
+| `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 1 | 0 | ci (`test/sign.test.js`) | — |
+| `read` | main | curated | case | cases | — | git cat-file / ls-tree | 7 | 0 | ci (`test/read.test.js`, `test/artifacts-compat.test.js`) | — |
+| `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 21 | 6 | ci (`test/props.test.js`) | — |
+| `edit-fuzz` | main | random | repo × edit | seeded | — | git: ref, blob splice, diff --name-only, fsck --strict (I3) | 0 | 0 | local (`test/fuzz/run.mjs`) | dependent¹ |
+| `hostile-fuzz` | main | random | exchange × mutation | seeded | — | safety invariants against git (I1, I2) | 0 | 0 | local (`test/fuzz/hostile.mjs`) | — |
+| `below-hash` | main | random | object × mutation | seeded | — | git fsck --strict on the same bytes | 0 | 0 | ci-step (`test/fuzz/below-hash.mjs`) | — |
+| `git-semantic` | main | random | object × header-mutation | seeded | — | git cat-file fields; fsck --strict | 0 | 0 | ci-step (`test/fuzz/git-semantic.mjs`) | — |
+| `liar` | main | random | exchange × lie | seeded | — | oid verification, size contracts, CAS: no bad push | 1 | 0 | local (`test/fuzz/liar.mjs`) | — |
+| `fetch-protocol-random` | main | random | dag × want × have × deepen × filter × server | seeded | — | as fetch-protocol, on generated DAGs | 0 | 0 | local (`test/fuzz/protocol.mjs`) | — |
+| `pack-read` | main | random | dag × pack-objects-options | seeded | — | git cat-file truth; verify-pack -v offsets and chain depths | 0 | 0 | local (`test/fuzz/packs.mjs`) | — |
+| `pack-write` | main | random | repo × path × edit | seeded | — | index-pack --fix-thin --strict; objects == git's (I12) | 0 | 2 | local (`test/fuzz/packgen.mjs`) | — |
+| `codec` | main | random | codec × input | seeded | — | node:zlib, node:crypto, git patch_delta (I13) | 0 | 0 | local (`test/fuzz/codec.mjs`) | — |
+| `usergiven` | main | random | shape(4) × repo | seeded | — | git rev-list --objects --filter | 0 | 0 | local (`test/fuzz/usergiven.mjs`) | — |
+| `attributes` | main | random | tree × gitattributes | seeded | — | git check-attr --source -a -z | 2 | 0 | local (`test/fuzz/attributes.mjs`) | — |
+| `linemerge` | main | random | base × ours × theirs × driver | seeded | — | git merge-tree --write-tree; git diff --histogram | 0 | 0 | local (`test/fuzz/linemerge.mjs`, `test/fuzz/diffscript.mjs`) | — |
 
-## Holes (273)
+¹ OS-dependent cells: expectations come from what the git server does on that run, fixtures keep refs in reftable (git ≥ 2.46, fix/43-bom 716cd77), and the Linux run in CI is the pass of record (the `linux` gate: every merged CI space's runners must have a Linux record; a macOS pass never counts).
+
+- `tree-name-alphabet`: core.protectHFS / protectNTFS default per platform (HFS on macOS, NTFS on Windows): the same name can be refused by a checkout on one OS and not another
+- `git-bytes`: APFS cannot store a non-UTF-8 ref name as a loose ref file (EILSEQ): on macOS with the files backend those cells degrade to both-refuse; reftable fixtures since 716cd77
+- `push-tree`: filesFromDir reads the local filesystem (exec bits, symlinks, case): what exists to push differs by OS
+- `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
+- `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
+
+## Decode sites (23: lossless 0, strict 1, replacement 22)
+
+git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
+
+| where | mode | via | registry |
+|---|---|---|---|
+| `src/discover.js:14` discover() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
+| `src/fetch.js:78` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
+| `src/fetch.js:79` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
+| `src/fetch.js:83` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
+| `src/http.js:34` utf8() | replacement | td | **HOLE (data path)** |
+| `src/http.js:171` post() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
+| `src/lsrefs.js:69` lsRefs() | replacement | td | **HOLE (data path)** |
+| `src/objects.js:48` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
+| `src/objects.js:49` parseTree() | replacement | td | **HOLE (data path)** |
+| `src/objects.js:96` splitHeaders() | replacement | td | **HOLE (data path)** |
+| `src/packcache.js:19` isCacheableFetch() | replacement | new TextDecoder | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
+| `src/push.js:118` pushLine() | replacement | td | **HOLE (data path)** |
+| `src/push.js:131` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
+| `src/push.js:132` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
+| `src/receivecaps.js:14` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
+| `src/sign.js:43` withGpgsig() | replacement | new TextDecoder | **HOLE (data path)** |
+| `src/ssh.js:31` text() | replacement | td | excluded: protocol/display: ssh algorithm names (compared to ASCII constants) and disconnect descriptions |
+| `src/ssh.js:178` connect() | replacement | td | excluded: display/protocol: the ssh version line, checked for its ASCII "SSH-2.0-" prefix |
+| `src/ssh.js:300` dispatch() | replacement | td | excluded: display-only: the channel's stderr tail quoted in errors |
+| `src/sshgit.js:33` sshDecode() | strict | strict | **HOLE (data path)** |
+| `src/sshgit.js:132` openChannel() | replacement | td | **HOLE (data path)** |
+| `src/sshgit.js:135` openChannel() | replacement | td | **HOLE (data path)** |
+| `src/sshgit.js:138` openChannel() | replacement | td | excluded: protocol: the capability list after the NUL (ASCII keywords) |
+
+## Holes (282)
 
 Ranked by severity, then category (`git`: a git check with no space; `decisions`: a ply decision point with no registry entry; `failsites`: a fail site no cell reaches; `claims`: a registry claim its space does not back). Fail-site and claim holes are the ratchet's, from the last recorded run.
 
-### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (173)
+### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (182)
 
 | category | id | where | what |
 |---|---|---|---|
@@ -164,12 +203,16 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;0>, &lt;PACK_SIGNATURE.length>` | src/fetch.js:159 spStep() | pack_corrupt: &lt;head>, &lt;0>, &lt;PACK_SIGNATURE.length> |
 | decisions | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;p>, &lt;head.length - p>` | src/fetch.js:171 spStep() | pack_corrupt: &lt;head>, &lt;p>, &lt;head.length - p> |
 | decisions | `src/http.js#advertise:not_git:unexpected content-type from … advertisement` | src/http.js:209 advertise() | not_git: unexpected content-type from … advertisement |
+| decisions | `src/http.js#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.js:34 utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
 | decisions | `src/inflate.js#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.js:115 codes() | pack_corrupt: inflate: bad distance symbol |
 | decisions | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;ADLER_BYTES>` | src/inflate.js:173 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;ADLER_BYTES> |
 | decisions | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;DEFLATE_STORED_HEADER_BYTES>` | src/inflate.js:138 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;DEFLATE_STORED_HEADER_BYTES> |
 | decisions | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;len>` | src/inflate.js:143 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;len> |
+| decisions | `src/lsrefs.js#lsRefs:decode:replacement:f.payload` | src/lsrefs.js:69 lsRefs() | &lt;decode:replacement>: f.payload |
+| decisions | `src/objects.js#parseTree:decode:replacement:take(data, sp + 1, nul - (sp + 1))` | src/objects.js:49 parseTree() | &lt;decode:replacement>: take(data, sp + 1, nul - (sp + 1)) |
 | decisions | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.js:48 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
 | decisions | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.js:49 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
+| decisions | `src/objects.js#splitHeaders:decode:replacement:data` | src/objects.js:96 splitHeaders() | &lt;decode:replacement>: data |
 | decisions | `src/packresolve.js#applyDelta:pack_corrupt:&lt;base>, &lt;off>, &lt;len>` | src/packresolve.js:165 applyDelta() | pack_corrupt: &lt;base>, &lt;off>, &lt;len> |
 | decisions | `src/packresolve.js#applyDelta:pack_corrupt:&lt;delta>, &lt;p>, &lt;c>` | src/packresolve.js:169 applyDelta() | pack_corrupt: &lt;delta>, &lt;p>, &lt;c> |
 | decisions | `src/packresolve.js#makeDelta:pack_corrupt:&lt;target>, &lt;p>, &lt;target.length - s - p>` | src/packresolve.js:185 makeDelta() | pack_corrupt: &lt;target>, &lt;p>, &lt;target.length - s - p> |
@@ -185,7 +228,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>, &lt;buf.length - p>` | src/pktline.js:66 pktStep() | protocol: &lt;buf>, &lt;p>, &lt;buf.length - p> |
 | decisions | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>, &lt;PKT_LEN_HEX>` | src/pktline.js:43 pktStep() | protocol: &lt;buf>, &lt;p>, &lt;PKT_LEN_HEX> |
 | decisions | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>&lt;PKT_LEN_HEX>, &lt;len - PKT_LEN_HEX>` | src/pktline.js:58 pktStep() | protocol: &lt;buf>, &lt;p>&lt;PKT_LEN_HEX>, &lt;len - PKT_LEN_HEX> |
+| decisions | `src/push.js#pushLine:decode:replacement:payload` | src/push.js:118 pushLine() | &lt;decode:replacement>: payload |
 | decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:199 flush() | pack_corrupt: blob content hashes to …, not … |
+| decisions | `src/sign.js#withGpgsig:decode:replacement:commitBytes` | src/sign.js:43 withGpgsig() | &lt;decode:replacement>: commitBytes |
 | decisions | `src/ssh.js#authenticate:ssh:ssh: expected SERVICE_ACCEPT, got …` | src/ssh.js:230 authenticate() | ssh: ssh: expected SERVICE_ACCEPT, got … |
 | decisions | `src/ssh.js#connect:host_key_mismatch:ssh: host key signature over the exchange hash does not …` | src/ssh.js:214 connect() | host_key_mismatch: ssh: host key signature over the exchange hash does not verify |
 | decisions | `src/ssh.js#connect:ssh:ssh: all-zero shared secret` | src/ssh.js:210 connect() | ssh: ssh: all-zero shared secret |
@@ -200,6 +245,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/ssh.js#exec:ssh:ssh: channel open failed (…): …` | src/ssh.js:253 exec() | ssh: ssh: channel open failed (…): … |
 | decisions | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)` | src/ssh.js:138 openPacket() | ssh: ssh: packet too large (…) |
 | decisions | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2` | src/ssh.js:144 openPacket() | ssh: ssh: packet too large (…) |
+| decisions | `src/sshgit.js#openChannel:decode:replacement:f.payload` | src/sshgit.js:135 openChannel() | &lt;decode:replacement>: f.payload |
+| decisions | `src/sshgit.js#openChannel:decode:replacement:first.payload` | src/sshgit.js:132 openChannel() | &lt;decode:replacement>: first.payload |
+| decisions | `src/sshgit.js#sshDecode:decode:strict:Uint8Array.from(bytes)` | src/sshgit.js:33 sshDecode() | &lt;decode:strict>: Uint8Array.from(bytes) |
 | failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js:244 begin() | pack_corrupt: expected blob, got type … |
 | failsites | `src/edit.js#streamBlobEdit:pack_corrupt:blob stream: …` | src/edit.js:269 streamBlobEdit() | pack_corrupt: blob stream: … |
 | failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js:275 streamBlobEdit() | pack_corrupt: inflated … != header size … |

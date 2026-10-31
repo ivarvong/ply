@@ -8,6 +8,9 @@
 //   producer  a literal error code from src/errors.js produced outside a site: returned, a conditional's branch, a `code:`
 //             property, an assignment (`e.code = code` in `coded`), a default parameter. Comparisons are not producers.
 //   untyped   a `throw new Error(...)` in src/: an error with no code from errors.js (SAFETY I1 says every error has one).
+//   decode    every bytes-to-string decode, with its mode: lossless (decodeBytes), strict (TextDecoder fatal,
+//             decodeURIComponent: throws on non-UTF-8), replacement (default TextDecoder: non-UTF-8 becomes U+FFFD).
+//             Whether a decode is display-only is the registry's call (an exclusion with that reason).
 //   export    every exported parse*/decode*/classify*/decide* function.
 //
 // Every entry has a stable id `<file>#<function>:<code>:<message stem>` (line numbers move on every edit; the id moves
@@ -94,6 +97,19 @@ function functionsOf(f) {
   return fns;
 }
 
+// A TextDecoder's mode: `fatal: true` throws on bytes that are not UTF-8 (strict); the default replaces them with
+// U+FFFD (replacement: the bytes are lost). Both differ from git, which passes names, messages and paths as raw bytes.
+const decoderMode = n => (n.arguments[1]?.type === 'ObjectExpression' && n.arguments[1].properties.some(p => keyName(p.key) === 'fatal' && p.value.value === true) ? 'strict' : 'replacement');
+// name -> mode for every TextDecoder bound at a module's top level, and `td` imported from bytes.js
+const decoderCache = new Map();
+function decoders(f) {
+  if (decoderCache.has(f.file)) return decoderCache.get(f.file);
+  const m = new Map();
+  walk(f.ast, n => { if (n.type === 'VariableDeclarator' && n.init?.type === 'NewExpression' && n.init.callee.name === 'TextDecoder' && n.id.type === 'Identifier') m.set(n.id.name, decoderMode(n.init)); });
+  for (const st of f.ast.body) if (st.type === 'ImportDeclaration' && st.source.value === './bytes.js') for (const sp of st.specifiers) if (sp.imported?.name === 'td') m.set(sp.local.name, 'replacement');
+  decoderCache.set(f.file, m);
+  return m;
+}
 // The innermost named function around a node: a callback (`.map(x => ...)`) is part of the function that wrote it.
 const nameAt = (f, anc) => {
   for (let i = anc.length - 1; i >= 0; i--) if (isFn(anc[i])) { const n = f.fns.find(x => x.node === anc[i])?.name; if (n) return n; }
@@ -188,7 +204,7 @@ export function inventory() {
     return a ? messageText(text, a) : args.map(x => messageText(text, x)).join(', ');
   };
 
-  const sites = [], producers = [], exports = [], untyped = [];
+  const sites = [], producers = [], exports = [], untyped = [], decodes = [];
   for (const f of files) {
     const siteCalls = new Set();
     walk(f.ast, (n, anc) => {
@@ -222,6 +238,21 @@ export function inventory() {
       const fname = nameAt(f, anc);
       producers.push({ file: f.file, line: n.loc.start.line, fn: fname, kind: 'producer', ctx, code: n.value, what: src(f.text, anc.findLast(a => a.type.endsWith('Statement') || a.type === 'VariableDeclarator') ?? n).replace(/\s+/g, ' ').slice(0, 80) });
     });
+    // decoders: every `<decoder>.decode(...)`, `decodeURIComponent(...)`, `decodeBytes(...)`, with the decoder's mode
+    walk(f.ast, (n, anc) => {
+      if (n.type !== 'CallExpression') return;
+      let mode = null, via = null;
+      const c = n.callee;
+      if (c.type === 'Identifier' && (c.name === 'decodeURIComponent' || c.name === 'decodeURI')) { mode = 'strict'; via = c.name; }
+      else if (c.type === 'Identifier' && c.name === 'decodeBytes') { mode = 'lossless'; via = 'decodeBytes'; }
+      else if (c.type === 'MemberExpression' && keyName(c.property) === 'decode') {
+        const o = c.object;
+        if (o.type === 'NewExpression' && o.callee.name === 'TextDecoder') { mode = decoderMode(o); via = 'new TextDecoder'; }
+        else if (o.type === 'Identifier') { const d = decoders(f).get(o.name); if (d) { mode = d; via = o.name; } }
+      }
+      if (!mode) return;
+      decodes.push({ file: f.file, line: n.loc.start.line, fn: nameAt(f, anc), kind: 'decode', mode, via, code: `<decode:${mode}>`, what: src(f.text, n.arguments[0] ?? n).replace(/\s+/g, ' ').slice(0, 60) });
+    });
     if (f.file !== 'src/errors.js') walk(f.ast, (n, anc) => {
       if (n.type !== 'NewExpression' || n.callee.type !== 'Identifier' || !/^(Error|TypeError|RangeError)$/.test(n.callee.name)) return;
       untyped.push({ file: f.file, line: n.loc.start.line, fn: nameAt(f, anc), kind: 'untyped', code: '<untyped>', what: messageText(f.text, n.arguments[0]) });
@@ -242,18 +273,18 @@ export function inventory() {
   // stable ids
   const seen = new Map();
   const idOf = e => {
-    const base = e.kind === 'untyped' ? `${e.file}#${e.fn}:untyped:${stemOf(e.what)}` : e.kind === 'export' ? `${e.file}#${e.fn}:export` : `${e.file}#${e.fn}:${e.kind === 'producer' ? `${e.ctx}=` : ''}${e.code}:${stemOf(e.what)}`;
+    const base = e.kind === 'decode' ? `${e.file}#${e.fn}:decode:${e.mode}:${stemOf(e.what)}` : e.kind === 'untyped' ? `${e.file}#${e.fn}:untyped:${stemOf(e.what)}` : e.kind === 'export' ? `${e.file}#${e.fn}:export` : `${e.file}#${e.fn}:${e.kind === 'producer' ? `${e.ctx}=` : ''}${e.code}:${stemOf(e.what)}`;
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     return n === 1 ? base : `${base}#${n}`;
   };
-  for (const list of [sites, producers, exports, untyped]) for (const e of list.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || (a.col ?? 0) - (b.col ?? 0))) e.id = idOf(e);
+  for (const list of [sites, producers, exports, untyped, decodes]) for (const e of list.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || (a.col ?? 0) - (b.col ?? 0))) e.id = idOf(e);
   const wrapperList = [...wrappers.entries()].map(([k, ws]) => ({ wrapper: k, lines: ws.map(w => w.fn.node.loc.start.line) }));
-  return { sites, producers, exports, untyped, wrappers: wrapperList };
+  return { sites, producers, exports, untyped, decodes, wrappers: wrapperList };
 }
 
 // The decision points the registry must account for: every site, every producer, every untyped throw, every export.
-export const decisionPoints = inv => [...inv.sites, ...inv.producers, ...inv.untyped, ...inv.exports];
+export const decisionPoints = inv => [...inv.sites, ...inv.producers, ...inv.untyped, ...inv.decodes, ...inv.exports];
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const inv = inventory();
@@ -263,7 +294,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 function printTable(inv) {
   const pad = (s, n) => String(s).padEnd(n);
   console.log(`wrappers: ${inv.wrappers.map(w => w.wrapper.replace('src/', '')).join(' ')}`);
-  console.log(`sites ${inv.sites.length} (fail ${inv.sites.filter(s => s.kind === 'fail').length}, failHere ${inv.sites.filter(s => s.kind === 'failHere').length}, wrapper calls ${inv.sites.filter(s => s.kind === 'wrapper').length}), producers ${inv.producers.length}, untyped ${inv.untyped.length}, exports ${inv.exports.length}\n`);
+  console.log(`sites ${inv.sites.length} (fail ${inv.sites.filter(s => s.kind === 'fail').length}, failHere ${inv.sites.filter(s => s.kind === 'failHere').length}, wrapper calls ${inv.sites.filter(s => s.kind === 'wrapper').length}), producers ${inv.producers.length}, untyped ${inv.untyped.length}, decodes ${inv.decodes.length} (${['lossless', 'strict', 'replacement'].map(m => `${m} ${inv.decodes.filter(d => d.mode === m).length}`).join(', ')}), exports ${inv.exports.length}\n`);
   console.log(`${pad('file:line', 26)} ${pad('kind', 16)} ${pad('code', 18)} ${pad('function', 22)} what`);
-  for (const e of decisionPoints(inv)) console.log(`${pad(`${e.file.replace('src/', '')}:${e.line}`, 26)} ${pad(e.kind === 'wrapper' ? `wrapper:${e.via}` : e.kind === 'producer' ? `producer:${e.ctx}` : e.kind, 16)} ${pad(e.code, 18)} ${pad(e.fn, 22)} ${e.what.slice(0, 70)}`);
+  for (const e of decisionPoints(inv)) console.log(`${pad(`${e.file.replace('src/', '')}:${e.line}`, 26)} ${pad(e.kind === 'wrapper' ? `wrapper:${e.via}` : e.kind === 'producer' ? `producer:${e.ctx}` : e.kind === 'decode' ? `decode:${e.mode}` : e.kind, 16)} ${pad(e.code, 18)} ${pad(e.fn, 22)} ${e.what.slice(0, 70)}`);
 }

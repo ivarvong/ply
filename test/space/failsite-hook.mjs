@@ -8,8 +8,8 @@
 // chain, so a wrapper (`proto(msg)`, `take(..., code)`) would hide the decision that called it. A stack names every
 // call site on the way, so the wrapper's caller is recorded as the site it is.
 //
-// Each process writes <dir>/<pid>-<n>.json at exit: { runner: the script or test file, frames: { "src/x.js:L:C": n } },
-// one count per src/ frame of every recorded stack. test/space/gates.test.js maps frames to inventory sites.
+// Each process writes <dir>/<pid>-<n>.json at exit: { runner: the script or test file, platform, frames: { "src/x.js:L:C": n } },
+// one count per src/ frame of every recorded stack. test/space/holes.js maps frames to inventory sites.
 import { register } from 'node:module';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, relative, isAbsolute } from 'node:path';
@@ -41,10 +41,10 @@ if (DIR && !globalThis[KEY]) {
     }
   };
   let n = 0;
+  // written even with no frames: the record also says which runner ran on which platform (the Linux gate)
   process.on('exit', () => {
-    if (!frames.size) return;
     const runner = process.argv[1] ? relative(ROOT, process.argv[1]) : '(eval)';
-    writeFileSync(join(out, `${process.pid}-${n++}.json`), JSON.stringify({ runner, frames: Object.fromEntries(frames) }));
+    writeFileSync(join(out, `${process.pid}-${n++}.json`), JSON.stringify({ runner, platform: process.platform, frames: Object.fromEntries(frames) }));
   });
   register('./failsite-loader.mjs', import.meta.url, { data: { errors: pathToFileURL(join(ROOT, 'src/errors.js')).href } });
 }

@@ -8,7 +8,12 @@
 //   kind  enumerated: the full product of its axes is walked (or a seeded sample of it, said in `run`)
 //         curated:    a hand-picked list of cases (one axis, `case`); a space in name only, until it is enumerated
 //         random:     seeded random cells of a product too big to walk; finds bugs, cannot prove a class gone
-//   run   ci (every PR), nightly, local (npm test only), manual (an env var or a flag)
+//   run   ci (every PR, inside the recorded unit-test run), ci-step (a separate CI step, outside it), nightly, local
+//         (npm test only), manual (an env var or a flag)
+//   osDependent  why the space's cells can differ by OS (a filesystem that cannot store a name, git defaults that
+//         differ per platform). Expectations come from what the git server observably does on that run, never from a
+//         model of it; fixtures put refs in reftable (`git refs migrate`, git >= 2.46, as fix/43-bom 716cd77 does) so no
+//         filesystem hides a ref name. The Linux run in CI is the pass of record (test/space/failsites.test.js).
 //
 // A rule: { match, space, axisTag } or { match, excluded: '<reason>' }. `match` is an id (scripts/decision-points.mjs
 // or git-manifest.json), or a glob with `*`. An exact id wins over a glob; among globs the first listed wins.
@@ -29,7 +34,8 @@ export const SPACES = [
     cells: 1431, observed: 1431, derived: 0, oracle: 'git check-ref-format' },
   { name: 'tree-name-alphabet', status: 'main', kind: 'enumerated', runners: ['test/compliance.test.js'], run: 'ci',
     axes: [{ tag: 'name', doc: 'alphabet², .git variants, NTFS/HFS forms' }],
-    cells: 924, observed: 924, derived: 0, oracle: 'index-pack --strict + fsck --strict on a tree with the name' },
+    cells: 924, observed: 924, derived: 0, oracle: 'index-pack --strict + fsck --strict on a tree with the name',
+    osDependent: 'core.protectHFS / protectNTFS default per platform (HFS on macOS, NTFS on Windows): the same name can be refused by a checkout on one OS and not another' },
   { name: 'tree-encoding', status: 'main', kind: 'enumerated', runners: ['test/compliance.test.js'], run: 'ci',
     axes: [{ tag: 'pair', n: 600, doc: 'name pairs' }, { tag: 'modes', n: 5 }, { tag: 'order', n: 2 }],
     cells: 6000, observed: 6000, derived: 0, oracle: 'git mktree / write-tree' },
@@ -55,6 +61,7 @@ export const SPACES = [
     cells: '≤ 1,008 (product; rebase only where git has one base on the honest server)', oracle: 'git merge-base --all, merge-tree --write-tree, git rebase (#41, #42)' },
   { name: 'git-bytes', status: 'pending', pending: '#55', kind: 'enumerated', runners: ['test/git-bytes.test.js'], run: 'ci',
     axes: [{ tag: 'content', n: 8 }, { tag: 'field', n: 6 }, { tag: 'op', n: 6 }],
+    osDependent: 'APFS cannot store a non-UTF-8 ref name as a loose ref file (EILSEQ): on macOS with the files backend those cells degrade to both-refuse; reftable fixtures since 716cd77',
     cells: '288 (product)', oracle: 'ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43)' },
   { name: 'streamed-body', status: 'pending', pending: '#49', kind: 'enumerated', runners: ['test/adversarial.test.js'], run: 'ci',
     axes: [{ tag: 'path', n: 6 }, { tag: 'shape', n: 7 }, { tag: 'size', n: 5 }, { tag: 'rel', n: 3 }],
@@ -71,8 +78,8 @@ export const SPACES = [
   curated('commit-shapes', ['test/compliance.test.js', 'test/git-differential.test.js'], 'git cat-file / log on every commit shape git writes; fsck --strict on header variants'),
   curated('edges', ['test/edges.test.js', 'test/oracle.test.js', 'test/concurrency.test.js'], 'git state after each edit (ref, blob, fsck), concurrency convergence'),
   curated('parity', ['test/parity.test.js'], 'git clone/fetch over file:// vs ply over HTTP against the same upload-pack'),
-  curated('push-tree', ['test/push-tree.test.js'], 'git write-tree, ls-tree, rev-list, fsck --strict, clone'),
-  curated('checkout-tree', ['test/checkout-tree.test.js'], 'git clone + diff -r'),
+  curated('push-tree', ['test/push-tree.test.js'], 'git write-tree, ls-tree, rev-list, fsck --strict, clone', { osDependent: 'filesFromDir reads the local filesystem (exec bits, symlinks, case): what exists to push differs by OS' }),
+  curated('checkout-tree', ['test/checkout-tree.test.js'], 'git clone + diff -r', { osDependent: 'writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart' }),
   curated('packcache', ['test/packcache.test.js'], 'the outcome with and without the cache'),
   curated('unit', ['test/pure.test.js', 'test/format-facts.test.js', 'test/prefix-closure.test.js', 'test/delta-bound.test.js', 'test/bundle.test.js'], 'stated values (format facts from git source, delta bounds)'),
   curated('mutant-kill', ['test/mutant-kill.test.js', 'test/mutant-kill-tree.test.js'], 'stated values chosen to kill Stryker mutants'),
@@ -85,10 +92,10 @@ export const SPACES = [
     cells: 'seeded', oracle: 'the unsplit run (I10: every pure step is chunking-invariant)' },
 
   // ---- random, merged ----
-  random('edit-fuzz', ['test/fuzz/run.mjs'], [{ tag: 'repo' }, { tag: 'edit' }], 'git: ref, blob splice, diff --name-only, fsck --strict (I3)'),
+  random('edit-fuzz', ['test/fuzz/run.mjs'], [{ tag: 'repo' }, { tag: 'edit' }], 'git: ref, blob splice, diff --name-only, fsck --strict (I3)', { osDependent: 'the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)' }),
   random('hostile-fuzz', ['test/fuzz/hostile.mjs'], [{ tag: 'exchange' }, { tag: 'mutation', doc: '1-3 composed wire mutations' }], 'safety invariants against git (I1, I2)'),
-  random('below-hash', ['test/fuzz/below-hash.mjs'], [{ tag: 'object' }, { tag: 'mutation', doc: 'decompressed-object byte mutations, re-hashed' }], 'git fsck --strict on the same bytes', { run: 'ci' }),
-  random('git-semantic', ['test/fuzz/git-semantic.mjs'], [{ tag: 'object' }, { tag: 'header-mutation' }], 'git cat-file fields; fsck --strict', { run: 'ci' }),
+  random('below-hash', ['test/fuzz/below-hash.mjs'], [{ tag: 'object' }, { tag: 'mutation', doc: 'decompressed-object byte mutations, re-hashed' }], 'git fsck --strict on the same bytes', { run: 'ci-step' }),
+  random('git-semantic', ['test/fuzz/git-semantic.mjs'], [{ tag: 'object' }, { tag: 'header-mutation' }], 'git cat-file fields; fsck --strict', { run: 'ci-step' }),
   random('liar', ['test/fuzz/liar.mjs'], [{ tag: 'exchange' }, { tag: 'lie', doc: 'well-formed wrong answers' }], 'oid verification, size contracts, CAS: no bad push'),
   random('fetch-protocol-random', ['test/fuzz/protocol.mjs'], [{ tag: 'dag' }, { tag: 'want' }, { tag: 'have' }, { tag: 'deepen' }, { tag: 'filter' }, { tag: 'server' }], 'as fetch-protocol, on generated DAGs'),
   random('pack-read', ['test/fuzz/packs.mjs'], [{ tag: 'dag' }, { tag: 'pack-objects-options' }], 'git cat-file truth; verify-pack -v offsets and chain depths'),
@@ -123,6 +130,22 @@ export const DECISIONS = [
   { match: 'src/objects.js#parseCommit:export', space: 'commit-shapes', axisTag: 'case' },
   { match: 'src/objects.js#parseTag:export', space: 'commit-shapes', axisTag: 'case' },
   { match: 'src/objects.js#parseIdent:export', space: 'fsck-commit', axisTag: 'ident' },
+  // decode sites (scripts/decision-points.mjs `decode`). A strict or replacement decode of bytes git passes through raw
+  // (ref names, tree entry names, messages, idents, URL paths, userinfo) is a hole until it is lossless and a space with
+  // a non-UTF-8 content axis (git-bytes, #55) reaches it; those are deliberately not registered. Only display text and
+  // protocol keywords are excluded here, each with why the bytes cannot differ from git's.
+  { match: 'src/discover.js#discover:decode:*', excluded: 'display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on)' },
+  { match: 'src/fetch.js#v2Step:decode:replacement:band.body*', excluded: 'display-only: band 2 progress and the band 3 message, quoted into a span or an error' },
+  { match: 'src/fetch.js#v2Step:decode:replacement:frame.payload', excluded: 'protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git' },
+  { match: 'src/http.js#post:decode:*', excluded: 'display-only: the body preview quoted in an HTTP error' },
+  { match: 'src/objects.js#parseTree:decode:replacement:take(data, p, sp - p)', excluded: 'the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git\'s mode parse' },
+  { match: 'src/packcache.js#isCacheableFetch:decode:*', excluded: 'protocol: the request body ply built itself, matched for keywords and hex oids' },
+  { match: 'src/push.js#push:decode:*', excluded: 'display-only: band 2 progress and the band 3 message' },
+  { match: 'src/receivecaps.js#receiveCaps:decode:*', excluded: 'protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored' },
+  { match: 'src/ssh.js#text:decode:*', excluded: 'protocol/display: ssh algorithm names (compared to ASCII constants) and disconnect descriptions' },
+  { match: 'src/ssh.js#connect:decode:*', excluded: 'display/protocol: the ssh version line, checked for its ASCII "SSH-2.0-" prefix' },
+  { match: 'src/ssh.js#dispatch:decode:*', excluded: 'display-only: the channel\'s stderr tail quoted in errors' },
+  { match: 'src/sshgit.js#openChannel:decode:replacement:first.payload.subarray(nul + 1)', excluded: 'protocol: the capability list after the NUL (ASCII keywords)' },
   // generated, reviewed
   { match: "src/bytes.js#take:*", space: 'chunking', axisTag: 'input' },
   { match: "src/checkout-node.js#collision:*", space: 'checkout-tree', axisTag: 'case' },

@@ -40,7 +40,7 @@ test('no stale rules: every registry rule still names something', gate('stale', 
 test('the git manifest is the pinned git version and the ratchet lists every category', () => {
   assert.equal(all.man.git.tag, 'v2.50.0');
   assert.ok(all.man.entries.length > 300, 'the manifest lost entries');
-  for (const c of ['decisions', 'git', 'failsites', 'claims', 'stale']) assert.ok(ratchet().categories[c], `ratchet.json has no ${c}`);
+  for (const c of ['decisions', 'git', 'failsites', 'claims', 'linux', 'stale']) assert.ok(ratchet().categories[c], `ratchet.json has no ${c}`);
 });
 
 test('SPACES.md is generated from the registry (node scripts/spaces.mjs --md)', () => {

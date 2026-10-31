@@ -65,14 +65,28 @@ export function renderMd(all) {
   L.push(`Decision points: **${fmt(all.points.length)}** (${fmt(sites)} fail sites, ${fmt(all.inv.producers.length)} produced codes, ${fmt(all.inv.untyped.length)} untyped throws, ${fmt(all.inv.exports.length)} exported parse/decode/classify/decide functions). Covered by a merged space ${fmt(cov.decisions.main)}, by a pending PR ${fmt(cov.decisions.pending)}, excluded ${fmt(cov.decisions.excluded)}, unregistered ${fmt(cov.decisions.none)}. Fail sites no cell reaches: ${fmt(st.failsites.count)} of ${fmt(sites)}. Of the registered points, ${fmt(cov.decisionKinds.enumerated)} are claimed by an enumerated space, ${fmt(cov.decisionKinds.random)} only by a random one and ${fmt(cov.decisionKinds.curated)} only by a curated list: a curated or random claim says a case exists, not that the class is gone.`, '');
   L.push(`git ${all.man.git.tag} checks: **${fmt(all.man.entries.length)}** (${Object.entries(all.man.counts).map(([k, n]) => `${k} ${n}`).join(', ')}). Covered by a merged space ${fmt(cov.git.main)}, by a pending PR ${fmt(cov.git.pending)}, excluded ${fmt(cov.git.excluded)}, uncovered ${fmt(cov.git.none)}. Claimed by an enumerated space ${fmt(cov.gitKinds.enumerated)}, random ${fmt(cov.gitKinds.random)}, curated ${fmt(cov.gitKinds.curated)}.`, '');
   L.push('## Spaces', '');
-  L.push('| space | status | kind | axes | cells | observed / derived | oracle | decision points | git checks | run |', '|---|---|---|---|---:|---|---|---:|---:|---|');
+  L.push('| space | status | kind | axes | cells | observed / derived | oracle | decision points | git checks | run | OS |', '|---|---|---|---|---:|---|---|---:|---:|---|---|');
   const countBy = by => { const m = new Map(); for (const r of by.values()) if (r.space) m.set(r.space, (m.get(r.space) ?? 0) + 1); return m; };
   const dN = countBy(all.dec.by), gN = countBy(all.git.by);
   for (const s of SPACES) {
     const axes = s.axes.map(a => `${a.tag}${a.n ? `(${a.n})` : ''}`).join(' × ');
     const cells = typeof s.cells === 'number' ? fmt(s.cells) : esc(s.cells ?? '?');
     const od = s.observed === undefined ? '—' : `${typeof s.observed === 'number' ? fmt(s.observed) : esc(s.observed)} / ${typeof s.derived === 'number' ? fmt(s.derived) : esc(s.derived ?? '—')}`;
-    L.push(`| \`${s.name}\` | ${s.status === 'main' ? 'main' : `pending ${s.pending}`} | ${s.kind} | ${esc(axes)} | ${cells} | ${od} | ${esc(s.oracle)} | ${dN.get(s.name) ?? 0} | ${gN.get(s.name) ?? 0} | ${s.run}${s.runners?.length ? ` (${s.runners.map(r => `\`${r}\``).join(', ')})` : ''} |`);
+    L.push(`| \`${s.name}\` | ${s.status === 'main' ? 'main' : `pending ${s.pending}`} | ${s.kind} | ${esc(axes)} | ${cells} | ${od} | ${esc(s.oracle)} | ${dN.get(s.name) ?? 0} | ${gN.get(s.name) ?? 0} | ${s.run}${s.runners?.length ? ` (${s.runners.map(r => `\`${r}\``).join(', ')})` : ''} | ${s.osDependent ? 'dependent¹' : '—'} |`);
+  }
+  L.push('');
+  L.push('¹ OS-dependent cells: expectations come from what the git server does on that run, fixtures keep refs in reftable (git ≥ 2.46, fix/43-bom 716cd77), and the Linux run in CI is the pass of record (the `linux` gate: every merged CI space\'s runners must have a Linux record; a macOS pass never counts).', '');
+  for (const s of SPACES.filter(x => x.osDependent)) L.push(`- \`${s.name}\`: ${esc(s.osDependent)}`);
+  L.push('');
+  // decode sites: every bytes-to-string decode with its mode and what the registry says about it
+  const decs = all.inv.decodes;
+  L.push(`## Decode sites (${decs.length}: ${['lossless', 'strict', 'replacement'].map(m => `${m} ${decs.filter(d => d.mode === m).length}`).join(', ')})`, '');
+  L.push('git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.', '');
+  L.push('| where | mode | via | registry |', '|---|---|---|---|');
+  for (const d of decs) {
+    const r = all.dec.by.get(d.id);
+    const st = !r ? (d.mode === 'lossless' ? 'unregistered' : '**HOLE (data path)**') : 'excluded' in r ? `excluded: ${esc(r.excluded)}` : `\`${r.space}\` / ${r.axisTag}`;
+    L.push(`| \`${d.file}:${d.line}\` ${d.fn}() | ${d.mode} | ${esc(d.via)} | ${st} |`);
   }
   L.push('');
   const holes = rankedHoles(all, st);

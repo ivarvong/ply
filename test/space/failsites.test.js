@@ -31,3 +31,6 @@ test('the recorder ran: stacks were recorded by the runners of this suite', { sk
 });
 test('gate c: every fail() site in src/ is reached by a cell', { skip }, gate('failsites', 'fail site(s) no cell reached'));
 test('gate c: every fail site the registry gives a merged space is reached by that space', { skip }, gate('claims', 'registry claim(s) the named space does not reach'));
+// CI is Linux. A macOS pass hides cells (APFS cannot store a non-UTF-8 ref name as a file, #43), so it never counts.
+const notLinux = !skip && all.holes.linux === null ? `these records are from ${[...new Set([...records.platforms.values()].flatMap(p => [...p]))].join(', ')}, not Linux: this pass does not count for the Linux gate (CI decides)` : false;
+test('every merged CI space has run on Linux (each of its runners recorded on linux)', { skip: skip || notLinux }, gate('linux', 'merged CI space runner(s) with no Linux record'));
