@@ -21,6 +21,7 @@ const MUTATION_FILES = [
   'test/mutant-kill.test.js',
   'test/mutant-kill-tree.test.js',
   'test/space/push-outcome.test.js',
+  'test/result.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {
