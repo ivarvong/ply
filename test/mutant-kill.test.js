@@ -578,7 +578,9 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
 
   st = v2Init(limits);
   feed(line('packfile'));
-  assert.equal(feed({ kind: 'delim' }).pack, null);
+  // a delim or response-end inside the packfile section ends git's demultiplexer: refused, not skipped
+  throws(() => feed({ kind: 'delim' }), 'protocol', 'v2: delim inside the packfile section');
+  throws(() => feed({ kind: 'end' }), 'protocol', 'v2: end inside the packfile section');
   const body = te.encode('xyz');
   const band = n => ({ kind: 'data', payload: concat([Uint8Array.of(n), body]) });
   const pack = feed(band(SIDEBAND_PACK));

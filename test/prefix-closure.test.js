@@ -19,6 +19,7 @@ import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packr
 import { inflate } from '../src/inflate.js';
 import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
 import { parseLsRefLine } from '../src/lsrefs.js';
+import { parseCapabilitiesV2 } from '../src/discover.js';
 import { parseReportStatus, classifyReport, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl } from '../src/sshgit.js';
@@ -366,6 +367,13 @@ property('ls-ref', 'an ls-refs line prefix is a typed error or a field prefix', 
     assert.equal(got.oid, full.oid);
     assert.ok(full.name.startsWith(got.name));
   }
+});
+
+property('caps', 'a v2 capability advertisement cut anywhere is a typed error: its flush comes last', () => {
+  const data = l => ({ kind: 'data', payload: te.encode(l) });
+  const frames = [data('# service=git-upload-pack\n'), { kind: 'flush' }, data('version 2\n'), data('agent=git/2.50.0\n'), data('ls-refs=unborn\n'), data('fetch=shallow wait-for-done filter\n'), data('object-format=sha1\n'), { kind: 'flush' }];
+  assert.deepEqual(parseCapabilitiesV2(frames), ['agent=git/2.50.0', 'ls-refs=unborn', 'fetch=shallow wait-for-done filter', 'object-format=sha1']);
+  for (let i = 0; i < frames.length; i++) assert.throws(() => parseCapabilitiesV2(frames.slice(0, i)), e => CODES.has(e.code), `${i} frames`);
 });
 
 property('report', 'a prefix of report-status lines is a prefix of the ref statuses', () => {
