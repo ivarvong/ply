@@ -102,7 +102,7 @@ export const SPACES = [
   curated('checkout-tree', ['test/checkout-tree.test.js'], 'git clone + diff -r', { osDependent: 'writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart' }),
   curated('packcache', ['test/packcache.test.js'], 'the outcome with and without the cache'),
   curated('unit', ['test/pure.test.js', 'test/result.test.js', 'test/format-facts.test.js', 'test/prefix-closure.test.js', 'test/delta-bound.test.js', 'test/bundle.test.js'], 'stated values (format facts from git source, delta bounds)'),
-  curated('mutant-kill', ['test/mutant-kill.test.js', 'test/mutant-kill-tree.test.js'], 'stated values chosen to kill Stryker mutants'),
+  curated('mutant-kill', ['test/mutant-kill.test.js', 'test/mutant-kill-tree.test.js', 'test/mutant-kill-packs.test.js'], 'stated values chosen to kill Stryker mutants'),
   curated('merge', ['test/merge.test.js', 'test/rebase.test.js', 'test/linemerge.test.js'], 'git merge-tree --write-tree, git rebase, git merge-file'),
   curated('sign', ['test/sign.test.js'], 'git verify-commit / ssh-keygen -Y verify'),
   { name: 'refname', status: 'main', kind: 'enumerated', runners: ['test/space/refname.test.js'], run: 'ci',
@@ -188,7 +188,7 @@ export const DECISIONS = [
   // release #71: fail sites added by train/1, #57 and #62, each given to the space whose runners reach it (recorded run, macOS)
   // sem/packs (A1, #99): the packs cluster's Result cores (`xResult`) and their wrappers; spaces as before the rename
   { match: "src/bytes.ts#take:*", space: 'chunking', axisTag: 'input' },
-  { match: "src/inflate.ts#bad:*", space: 'chunking', axisTag: 'input' },
+  { match: "src/inflate.ts#bad:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/inflate.ts#bits:*", space: 'pack-cut', axisTag: 'cut' },
   { match: "src/inflate.ts#decode:*", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#corrupt:*", space: 'chunking', axisTag: 'input' },
@@ -255,7 +255,6 @@ export const DECISIONS = [
   { match: "src/bytes.ts#shortRead:<code>:<shortReadMessage(off, n, have)>", space: 'chunking', axisTag: 'input' },
   { match: "src/inflate.ts#corrupt:pack_corrupt:<msg>", space: 'chunking', axisTag: 'input' },
   { match: "src/inflate.ts#over:limit_exceeded:<msg>", space: 'mutant-kill', axisTag: 'case' },
-  { match: "src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/packresolve.ts#varintLong:pack_corrupt:…: size varint longer than … bits", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#readVarint:pack_corrupt:<what>", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#readOfsDeltaResult:pack_corrupt:pack: ofs delta offset longer than … bits", space: 'mutant-kill', axisTag: 'case' },

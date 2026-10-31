@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **423** (361 fail sites, 19 produced codes, 2 untyped throws, 17 exported parse/decode/classify/decide functions). Covered by a merged space 363, by a pending PR 9, excluded 22, unregistered 29. Fail sites no cell reaches: 40 of 361. Of the registered points, 162 are claimed by an enumerated space, 14 only by a random one and 196 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **423** (361 fail sites, 19 produced codes, 2 untyped throws, 17 exported parse/decode/classify/decide functions). Covered by a merged space 362, by a pending PR 9, excluded 22, unregistered 30. Fail sites no cell reaches: 40 of 361. Of the registered points, 162 are claimed by an enumerated space, 13 only by a random one and 196 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -58,13 +58,13 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 17 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 13 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 54 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 54 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
 | `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
 | `claims-owed` | pending #81 | curated | site | none yet | — | owed: cells in the owning space that reach each site (issue #81); then the rule moves back and this entry is deleted | 9 | 0 | ci | — |
 | `read` | main | curated | case | cases | — | git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56) | 16 | 0 | ci (`test/read.test.js`, `test/log.test.js`, `test/artifacts-compat.test.js`) | — |
-| `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 11 | 0 | ci (`test/props.test.js`) | — |
+| `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 10 | 0 | ci (`test/props.test.js`) | — |
 | `edit-fuzz` | main | random | repo × edit | seeded | — | git: ref, blob splice, diff --name-only, fsck --strict (I3) | 0 | 0 | local (`test/fuzz/run.mjs`) | dependent¹ |
 | `hostile-fuzz` | main | random | exchange × mutation | seeded | — | safety invariants against git (I1, I2) | 0 | 0 | local (`test/fuzz/hostile.mjs`) | — |
 | `below-hash` | main | random | object × mutation | seeded | — | git fsck --strict on the same bytes | 0 | 0 | ci-step (`test/fuzz/below-hash.mjs`) | — |
@@ -117,11 +117,11 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/receivecaps.ts:58` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/sign.ts:54` withGpgsig() | lossless | decodeBytes | `sign` / case |
 
-## Holes (70)
+## Holes (71)
 
 Ranked by severity, then category (`git`: a git check with no space; `decisions`: a ply decision point with no registry entry; `failsites`: a fail site no cell reaches; `claims`: a registry claim its space does not back). Fail-site and claim holes are the ratchet's, from the last recorded run.
 
-### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements) (18)
+### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements) (19)
 
 | category | id | where | what |
 |---|---|---|---|
@@ -129,6 +129,7 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:404 once() | pack_corrupt: expected …, got … |
 | decisions | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:402 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
 | decisions | `src/http.ts#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.ts:48 utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
+| decisions | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts:181 codes() | pack_corrupt: inflate: bad distance symbol |
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts:94 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts:96 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
 | decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:203 flush() | pack_corrupt: blob content hashes to …, not … |
