@@ -3,7 +3,7 @@
 // objects (duplicate entry, zero-padded mode, bad mode, bad ident, missing tagger, missing object, damaged object
 // file, dangling) and it must say so; a clean store must say nothing. The old `l.startsWith('error:')` filter returned
 // [] for every one of these object problems, so its `assert.deepEqual(..., [])` could not fail.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';

@@ -18,7 +18,7 @@
 //   - else listTree/checkoutTree of the file top.txt: not_found;
 //   - else ok, and git agrees (cat-file, ls-tree, the edited blob, merge-tree --write-tree).
 // Wherever the sibling is not malformed, tree0 and blobnone give the same answer, oid for oid.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { cpSync } from 'node:fs';
@@ -30,7 +30,7 @@ import { readFile, listTree } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits } from '../src/limits.ts';
+import { withLimits } from '../src/limits.js';
 
 const L = 10; // maxTreeEntries; every "over" directory holds L + 1 entries, the issue's core cell (limit = size − 1)
 const LIMITS = withLimits({ maxTreeEntries: L });
@@ -171,7 +171,7 @@ test('#46 every cell of server × wanted × sibling × op: the caller\'s limits 
     const key = x => (x.got === 'ok' ? x.answer : x.got);
     if (key(a) !== key(b)) wrong.push(`parity ${op} ${wanted} ${sibling}: tree0 ${a.answer} | blobnone ${b.answer}`);
   }
-  t.diagnostic(`cells ${rows.length}, as expected ${rows.length - new Set(wrong.filter(w => !w.startsWith('parity')).map(w => w.split(':')[0])).size}`);
-  for (const r of rows) t.diagnostic(`CELL ${r.op.padEnd(12)} ${r.wanted.padEnd(5)} ${r.sibling.padEnd(9)} ${r.server.padEnd(8)} expect ${expected(r).padEnd(14)} got ${r.got.padEnd(14)} skipped [${r.skipped}] ${r.got === 'ok' ? '' : r.answer.slice(0, 90)}`);
+  console.log(`cells ${rows.length}, as expected ${rows.length - new Set(wrong.filter(w => !w.startsWith('parity')).map(w => w.split(':')[0])).size}`);
+  for (const r of rows) console.log(`CELL ${r.op.padEnd(12)} ${r.wanted.padEnd(5)} ${r.sibling.padEnd(9)} ${r.server.padEnd(8)} expect ${expected(r).padEnd(14)} got ${r.got.padEnd(14)} skipped [${r.skipped}] ${r.got === 'ok' ? '' : r.answer.slice(0, 90)}`);
   assert.deepEqual(wrong, []);
 });

@@ -1,7 +1,7 @@
 // Merging, decided by git: fast-forward / up-to-date / merge-commit / conflict outcomes against `git merge-tree
 // --write-tree` (the merged tree oid) and `git merge` in a clone (the commit), over hand-built cases and a seeded
 // property run of random three-way edits. Branch create via editFile `base`, and delete, round-trip through receive-pack.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
@@ -14,7 +14,7 @@ const rediff = oracleRediff();
 import { editFile } from '../src/edit.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { mergeBranch, deleteBranch, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
-import { DEFAULT_LIMITS } from '../src/limits.ts';
+import { DEFAULT_LIMITS } from '../src/limits.js';
 import { attributesFor } from '../src/attributes.js';
 import { createTransport } from '../src/http.js';
 import { GitHttp } from '../src/client.js';

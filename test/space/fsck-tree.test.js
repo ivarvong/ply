@@ -11,7 +11,7 @@
 // FSCK_TREE_SRC=<dir> runs ply's side against another copy of src/ (`git archive <rev> src | tar -x -C <dir>`), to count
 // what that revision got wrong. FSCK_TREE_LIST=1 prints every disagreeing cell. FSCK_TREE_LARGE=1 adds the three
 // 100 MiB .gitattributes cells (about 300 MB of blobs).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';

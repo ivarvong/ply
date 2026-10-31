@@ -1,6 +1,6 @@
 // git is first-wins for a second `tree` and still fsck-clean, so a last-wins parser reads a different tree than
 // `git log --format=%T`. These objects are the ones a red-team audit used. ply rejects them on purpose.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';

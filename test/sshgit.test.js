@@ -1,7 +1,7 @@
 // git over SSH against a real sshd: edit/merge/rebase/sign/verify on one connection; parity with git's own ssh client
 // (clone + push through `ssh`); every failure typed (pinned host key mismatch before any auth, refused key, server
 // without AcceptEnv GIT_PROTOCOL, missing repo, bad url); byte mutation of the encrypted stream always fails closed.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync } from 'node:fs';
@@ -16,8 +16,8 @@ import { createSshTransport, parseSshUrl, sshRedact, refusalCode } from '../src/
 import { nodeStream } from '../src/ssh-node.js';
 import { SshClient, hostKeyLine, hostKeyFromLine, padded, unpad, mpint, str, u32, parseKexInit, kexInit, fingerprint } from '../src/ssh.js';
 import { createTransport } from '../src/http.js';
-import { withLimits } from '../src/limits.ts';
-import { retryPolicy } from '../src/errors.ts';
+import { withLimits } from '../src/limits.js';
+import { retryPolicy } from '../src/errors.js';
 import { concat, td } from '../src/bytes.js';
 import { readFile } from '../src/read.js';
 import { editFile } from '../src/edit.js';

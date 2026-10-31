@@ -662,7 +662,7 @@ Observable from real git: **791** cells (git's report byte for byte = the derive
 | `broken symref` (1684) | rejected | ambiguous, partial, rejected(push_rejected) | 36 (36) | the ref is a symbolic ref the server cannot resolve (a loop): no value of the old oid makes it writable; the repository needs repair |
 | `inconsistent aliased update` (1711) | rejected | ambiguous, partial, rejected(push_rejected) | 20 (20) | one push names a symbolic ref and its target with different updates: the request contradicts itself, and resending it is refused again |
 | `shallow update not allowed` (2425) | rejected | ambiguous, partial, rejected(push_rejected) | 36 (36) | the pushed history ends at a shallow boundary the server lacks and receive.shallowUpdate is off: the same history is refused again (ply never sends shallow lines; a git client from a shallow clone does) |
-| `funny refname` (1481) | rejected | partial, rejected(push_rejected) | 10 (10) | the server refuses the ref name itself (check_refname_format): no retry can succeed; ply's validateRef lets refs/<one level> and refs/@ through, git does not |
+| `funny refname` (1481) | rejected | preSend(bad_request) | 10 (10) | the server refuses the ref name itself (check_refname_format(name + 5), one level allowed only for a delete): no retry can succeed, so ply refuses the push before sending a byte (validatePushRef, #73; every name checked against git in test/space/refname.test.js); git's report is still observed byte for byte |
 | `branch is currently checked out` (1501) | rejected | partial, rejected(push_rejected) | 28 (28) | receive.denyCurrentBranch refuses the non-bare repository's checked-out branch, whatever its value |
 | `bad pack` (1515) | rejected | partial, rejected(push_rejected) | 36 (36) | the new object is not in the repository after unpack (only with the connectivity check skipped): the same pack fails again |
 | `deletion prohibited` (1522) | rejected | partial, rejected(push_rejected) | 6 (6) | receive.denyDeletes: branch deletion is off on this server |
@@ -706,6 +706,18 @@ git >= 2.51 batched texts (era v2.51+, the non-atomic commit failure):
 | `unknown failure` | rejected | a batched rejection that is not a lost race (a bad new value, a symref expectation, a case-only clash, an unclassified failure): resending is refused again |
 
 <!-- push-ng: end generated -->
+
+## Ref names
+
+The space of ref names a caller can hand ply (test/space/refname.space.js, #73): `refs/` + 1, 2 or 3 components, each one of 16 shapes (`a`, `@`, `@a`, `@{a`, `{a`, `.`, `..`, `.a`, `a.`, `a.lock`, `a.lockb`, `-a`, the empty component, a control character, a space, non-ASCII), 16 + 256 + 4,096 names, plus one name per code point U+0001–U+00FF inside a component (254, LF excluded: it cannot be framed): **4,622 cells**. Every cell asks real git three questions and ply must give git's answer on every one (test/space/refname.test.js):
+
+| question | git's oracle | ply |
+|---|---|---|
+| format | `git check-ref-format <name>` (refs.c check_refname_format(name, 0)) | `validateRef` |
+| create | a real `git receive-pack` answering a create of the name: `ng <name> funny refname` or not (receive-pack.c update(): check_refname_format(name + 5, 0)) | `validatePushRef(name, false)`; push() refuses before sending |
+| delete | the same for a delete (check_refname_format(name + 5, REFNAME_ALLOW_ONELEVEL)) | `validatePushRef(name, true)` |
+
+Git v2.50.0 accepts 726 names as refs, 719 for a create and 725 for a delete. The create/delete gap is receive-pack's, not check-ref-format's: `refs/<one level>` (refs/stash is one) is a valid ref and can be deleted by a push but never created or updated, and `refs/@` is a valid ref no push can touch (`@` alone is refused as a whole refname). Before #73 ply validated a push's ref with `validateRef` alone and disagreed with receive-pack on 8 cells, all of them those two shapes; git refused them as `funny refname`.
 
 ## SSH handshake faults and SSH service outcomes
 
