@@ -60,7 +60,8 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-31: 73,369 B / 28,212 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
   size('edit', 'min', min, 73_370);
   // 2026-10-31: 73,090 B / 28,222 B gz. strict TS (T2: objects, format, validate, scrub): min down, gz up a few dozen bytes from strict-lint forms (/u regexes, Number.parseInt, explicit length checks, noUncheckedIndexedAccess guards) and identifier remangling.
-  size('edit', 'gz', gz, 28_223);
+  // 2026-10-31: 72,968 B / 28,246 B gz. lsRefs reads an unborn HEAD through an injected reader (issue #103): the edit path pays for the result field and the request flag (+99 B min, +25 B gz), not the parser or the advertisement probe.
+  size('edit', 'gz', gz, 28_247);
 });
 
 test('merge entry: the line merge rides with merge/rebase only, under its own budget', async () => {
@@ -155,7 +156,8 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-31: 55,816 B / 21,786 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   size('read', 'min', min, 55_817);
   // 2026-10-31: 55,506 B / 21,791 B gz. T2 strict TS (see the edit budget).
-  size('read', 'gz', gz, 21_792);
+  // 2026-10-31: 55,484 B / 21,805 B gz. lsRefs' unborn field and request flag (issue #103; see the edit budget).
+  size('read', 'gz', gz, 21_806);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
