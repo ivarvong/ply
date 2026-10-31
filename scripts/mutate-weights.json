@@ -1,0 +1,170 @@
+{
+  "src/attributes.js": {
+    "seconds": 322.4,
+    "mutants": 933
+  },
+  "src/bytes.js": {
+    "seconds": 565.5,
+    "mutants": 240
+  },
+  "src/checkout-node.js": {
+    "seconds": 0,
+    "mutants": 136
+  },
+  "src/checkout.js": {
+    "seconds": 242.7,
+    "mutants": 283
+  },
+  "src/client.js": {
+    "seconds": 2.6,
+    "mutants": 17
+  },
+  "src/discover.js": {
+    "seconds": 27.1,
+    "mutants": 186
+  },
+  "src/edit.js": {
+    "seconds": 96.5,
+    "mutants": 489
+  },
+  "src/errors-doc.js": {
+    "seconds": 0,
+    "mutants": 85
+  },
+  "src/errors.js": {
+    "seconds": 973.6,
+    "mutants": 108
+  },
+  "src/fetch.js": {
+    "seconds": 1155.9,
+    "mutants": 727
+  },
+  "src/fetchpack.js": {
+    "seconds": 222.5,
+    "mutants": 119
+  },
+  "src/format.js": {
+    "seconds": 5.5,
+    "mutants": 35
+  },
+  "src/http.js": {
+    "seconds": 724.9,
+    "mutants": 408
+  },
+  "src/inflate.js": {
+    "seconds": 363.1,
+    "mutants": 324
+  },
+  "src/limits.js": {
+    "seconds": 136,
+    "mutants": 32
+  },
+  "src/linemerge.js": {
+    "seconds": 2.5,
+    "mutants": 1472
+  },
+  "src/log.js": {
+    "seconds": 0,
+    "mutants": 153
+  },
+  "src/lsrefs.js": {
+    "seconds": 330.7,
+    "mutants": 157
+  },
+  "src/merge.js": {
+    "seconds": 587.4,
+    "mutants": 894
+  },
+  "src/negotiate.js": {
+    "seconds": 40.7,
+    "mutants": 58
+  },
+  "src/objects.js": {
+    "seconds": 841.3,
+    "mutants": 761
+  },
+  "src/operation.js": {
+    "seconds": 79,
+    "mutants": 57
+  },
+  "src/otel.js": {
+    "seconds": 953.2,
+    "mutants": 245
+  },
+  "src/pack.js": {
+    "seconds": 278.5,
+    "mutants": 139
+  },
+  "src/packcache.js": {
+    "seconds": 0,
+    "mutants": 153
+  },
+  "src/packresolve.js": {
+    "seconds": 682.8,
+    "mutants": 413
+  },
+  "src/pktline.js": {
+    "seconds": 321.3,
+    "mutants": 137
+  },
+  "src/push.js": {
+    "seconds": 3051.4,
+    "mutants": 616
+  },
+  "src/read.js": {
+    "seconds": 418.3,
+    "mutants": 374
+  },
+  "src/rebase.js": {
+    "seconds": 306.2,
+    "mutants": 307
+  },
+  "src/receivecaps.js": {
+    "seconds": 4.4,
+    "mutants": 159
+  },
+  "src/scrub.js": {
+    "seconds": 77.1,
+    "mutants": 97
+  },
+  "src/sha1.js": {
+    "seconds": 442.1,
+    "mutants": 147
+  },
+  "src/sign.js": {
+    "seconds": 81.1,
+    "mutants": 91
+  },
+  "src/ssh-node.js": {
+    "seconds": 0,
+    "mutants": 50
+  },
+  "src/ssh-workers.js": {
+    "seconds": 0,
+    "mutants": 22
+  },
+  "src/ssh.js": {
+    "seconds": 77.7,
+    "mutants": 824
+  },
+  "src/sshgit.js": {
+    "seconds": 56.9,
+    "mutants": 424
+  },
+  "src/transport.js": {
+    "seconds": 212.8,
+    "mutants": 66
+  },
+  "src/tree-node.js": {
+    "seconds": 0,
+    "mutants": 56
+  },
+  "src/tree.js": {
+    "seconds": 122.1,
+    "mutants": 420
+  },
+  "src/validate.js": {
+    "seconds": 1320.5,
+    "mutants": 639
+  }
+}

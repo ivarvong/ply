@@ -130,11 +130,12 @@ jobs:
             exit 1
           fi
 
-  # Stryker over the src files a PR changed (all of src/ on main), split into 8 shards balanced by mutant count
-  # (scripts/mutate.mjs --plan 8). A file is the unit, and linemerge.js alone is 13% of src/, so 8 is where more
-  # shards stop shortening a full run. Shards only run Stryker; the job named `mutate` merges their reports and
-  # judges them with the same rules as an unsharded run. The 8 appears here three times; the merge refuses a
-  # missing or extra shard, so changing one and not the others fails the gate.
+  # Stryker over the src files a PR changed (all of src/ on main), split into 8 shards balanced by measured cost
+  # (scripts/mutate.mjs --plan 8, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
+  # costing more than a shard's share. Shards only run Stryker; the job named `mutate` merges their reports, checks
+  # every mutant of every planned file is there exactly once, and judges them with the same rules as an unsharded run.
+  # The 8 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
+  # fails the gate.
   mutate-shard:
     name: mutate-shard (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
