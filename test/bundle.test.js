@@ -50,8 +50,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 65,439 B / 25,067 B gz. The push outcome as an allowlist: the response stream as a step machine (streamStep), the report classified against git's exact grammar (classifyReport), an exhaustive decideOutcome, push_partial (SPACE.md, SAFETY.md I36).
   // 2026-10-30: 64,903 B / 24,908 B gz. names, messages, idents and ref names as bytes (decodeBytes/encodeBytes, surrogate-escaped), BOM kept, sideband text decoded across frames (issue #43).
   // 2026-10-30: 68,764 B / 26,407 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
-  assert.ok(min < 68_765, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 26_408, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 71,208 B / 27,424 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
+  assert.ok(min < 71_209, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 27_425, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -95,7 +96,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // rebase fetches a base named only at the window's cut (#41).
   // 2026-10-30: 83,592 B. The same, plus .gitattributes paths matched on their bytes and an annotated tag refused by name (issue #43).
   // 2026-10-30: 87,511 B. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
-  assert.ok(min < 87_512, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-31: 89,918 B. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
+  assert.ok(min < 89_919, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -135,8 +137,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 49,816 B / 19,369 B gz. The same bytes-as-strings mapping (issue #43).
   // 2026-10-30: 49,381 B / 19,155 B gz. git.read.blob follows the root and records a consumer's cancel (issue #35).
   // 2026-10-30: 51,502 B / 20,042 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
-  assert.ok(min < 51_503, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 20_043, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 53,946 B / 21,069 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
+  assert.ok(min < 53_947, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 21_070, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -162,8 +165,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 62,111 B / 23,985 B gz. The same push outcome allowlist (SAFETY.md I36).
   // 2026-10-30: 61,621 B / 23,854 B gz. The same (issue #43).
   // 2026-10-30: 65,489 B / 25,330 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
-  assert.ok(min < 65_490, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 25_331, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 67,878 B / 26,343 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
+  assert.ok(min < 67_879, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 26_344, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -201,8 +205,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 46,321 B / 18,459 B gz. The same (issue #43).
   // 2026-10-30: 45,887 B / 18,246 B gz. The same blob-stream cancel and follows spans (issue #35).
   // 2026-10-30: 48,181 B / 19,164 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
-  assert.ok(min < 48_182, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_165, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 50,542 B / 20,121 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
+  assert.ok(min < 50_543, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 20_122, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

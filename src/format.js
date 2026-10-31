@@ -36,6 +36,12 @@ export const MODE_COMMIT = '160000';
  */
 export const MODE_S_IFMT = 0o170000;
 export const MODE_S_IFDIR = 0o040000;
+export const MODE_S_IFREG = 0o100000;
+export const MODE_S_IFLNK = 0o120000;
+/** ce_permissions: a regular file is executable (100755) when the owner-execute bit is set. */
+export const MODE_OWNER_EXEC = 0o100;
+/** fsck.c max_tree_entry_len (fsck.largePathname): a longer name is largePathname (WARN, an error under --strict). */
+export const TREE_MAX_NAME_BYTES = 4096;
 export const MODE_BITS = 0xffff;
 /** Octal digits that cover MODE_BITS: the low 18 bits are exact from the last six digits, however long the mode. */
 export const MODE_LOW_DIGITS = 6;

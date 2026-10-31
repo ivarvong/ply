@@ -86,13 +86,24 @@ test('parseTree error strings and the boundaries next to them', () => {
     ['100644 ..\0', 'tree: bad name'],
     ['100644 .git\0', 'tree: bad name'],
     ['100644 .GIT\0', 'tree: bad name'],
+    ['100644 .git:x\0', 'tree: bad name'],
+    ['100644 a\\.git\0', 'tree: bad name'],
+    [`100644 ${'l'.repeat(4097)}\0`, 'tree: large pathname'],
+    ['120000 .gitmodules\0', 'tree: .gitmodules is a symbolic link'],
+    ['40000 GITMOD~1\0', 'tree: .gitmodules is not a blob'],
+    ['160000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
   ];
   for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
   throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
   throws(() => parseTree(data(raw('100644 b\0'), raw('100644 a\0'))), 'pack_corrupt', 'tree: not strictly sorted');
   throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
+  // canon_mode, as git ls-tree prints it; a 4096-byte name is the longest fsck allows
+  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100644');
+  assert.equal(parseTree(raw(`100644 ${'l'.repeat(4096)}\0`))[0].name.length, 4096);
+  throws(() => parseTree(raw('100644 a\0', new Uint8Array(OID_BYTES))), 'pack_corrupt', 'tree: null sha1');
+  assert.equal(parseTree(raw('100644 a\0', Uint8Array.of(...new Uint8Array(OID_BYTES - 1), 1)))[0].name, 'a');
+  for (const ok of ['120000 .gitattributes', '120000 .gitignore', '120000 .mailmap', '100644 .gitmodules', '100644 git~2', '40000 a\\.gitattributes']) assert.equal(parseTree(raw(`${ok}\0`)).length, 1, ok);
   // issue #34: one name twice is git fsck duplicateEntries whatever the modes, next to each other or not. A file and a
   // directory of one name sort apart ('d' < 'd.x' < 'd/'), so the old neighbour-only check passed them. encodeTree
   // refuses to write such a tree, so the bytes are built by hand.
@@ -108,7 +119,7 @@ test('parseTree error strings and the boundaries next to them', () => {
   // is not. Either way round, one of the two lists is out of order.
   assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40000', 'd'))).map(x => x.name), ['d.x', 'd']);
   throws(() => parseTree(data(e('40000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
-  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40755', 'd'))).map(x => x.mode), ['100644', '40755']);
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40755', 'd'))).map(x => x.mode), ['100644', '40000'], 'canon_mode: 40755 reads as a tree');
   throws(() => parseTree(data(e('40755', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
   // fsck keeps the mode in an unsigned short: `1040000` is a directory there, `140000` (S_IFSOCK) is not
   assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('1040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'only the low 16 bits of a mode count');
