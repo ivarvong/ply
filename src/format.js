@@ -30,6 +30,17 @@ export const MODE_LINK = '120000';
 export const MODE_TREE = '40000';
 export const MODE_COMMIT = '160000';
 /**
+ * fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for its mode: the file-type bits (S_IFMT) of
+ * the low 16 bits (fsck keeps the mode in an `unsigned short`) are S_IFDIR. `40755` sorts as a directory; `160000`
+ * (gitlink) as a file. A tree sorts a directory by its name followed by `/`.
+ */
+export const MODE_S_IFMT = 0o170000;
+export const MODE_S_IFDIR = 0o040000;
+export const MODE_BITS = 0xffff;
+/** Octal digits that cover MODE_BITS: the low 18 bits are exact from the last six digits, however long the mode. */
+export const MODE_LOW_DIGITS = 6;
+export const TREE_SORT_SLASH = 0x2f;
+/**
  * Shortest well-framed entry: one octal mode digit, the separating space, one name byte, NUL, and the object id.
  * git's tree-walk rejects anything shorter (`too-short tree object`).
  */
