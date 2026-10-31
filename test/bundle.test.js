@@ -51,8 +51,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 64,903 B / 24,908 B gz. names, messages, idents and ref names as bytes (decodeBytes/encodeBytes, surrogate-escaped), BOM kept, sideband text decoded across frames (issue #43).
   // 2026-10-30: 68,764 B / 26,407 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 71,208 B / 27,424 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
-  assert.ok(min < 71_209, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 27_425, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 73,215 B / 28,144 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
+  assert.ok(min < 73_216, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 28_145, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -97,7 +98,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 83,592 B. The same, plus .gitattributes paths matched on their bytes and an annotated tag refused by name (issue #43).
   // 2026-10-30: 87,511 B. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 89,918 B. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
-  assert.ok(min < 89_919, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-31: 91,966 B. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
+  assert.ok(min < 91_967, `merge bundle ${min} B exceeds budget`);
 });
 
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
@@ -110,8 +112,9 @@ test('log entry: readLog carries no push, merge, pack building or rebase code', 
   console.log(`  log bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
   // 2026-10-30: 43,164 B / 17,227 B gz, first measured (issue #56): ls-refs, the commit-only window (fetchPackTree0
   // with the blob:none fallback, so the delta resolver), the deepen-contract check and readCommit's commit view.
-  assert.ok(min < 43_165, `log bundle ${min} B exceeds budget`);
-  assert.ok(gz < 17_228, `log bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 49,521 B / 19,807 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
+  assert.ok(min < 49_522, `log bundle ${min} B exceeds budget`);
+  assert.ok(gz < 19_808, `log bundle ${gz} B gz exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -152,8 +155,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 49,381 B / 19,155 B gz. git.read.blob follows the root and records a consumer's cancel (issue #35).
   // 2026-10-30: 51,502 B / 20,042 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 53,946 B / 21,069 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
-  assert.ok(min < 53_947, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 21_070, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 55,816 B / 21,786 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
+  assert.ok(min < 55_817, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 21_787, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -180,8 +184,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 61,621 B / 23,854 B gz. The same (issue #43).
   // 2026-10-30: 65,489 B / 25,330 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 67,878 B / 26,343 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
-  assert.ok(min < 67_879, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 26_344, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 69,891 B / 27,043 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
+  assert.ok(min < 69_892, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 27_044, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -220,8 +225,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 45,887 B / 18,246 B gz. The same blob-stream cancel and follows spans (issue #35).
   // 2026-10-30: 48,181 B / 19,164 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
   // 2026-10-31: 50,542 B / 20,121 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
-  assert.ok(min < 50_543, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 20_122, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
+  assert.ok(min < 52_918, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 20_912, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
