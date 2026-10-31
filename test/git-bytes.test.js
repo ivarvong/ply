@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { readFile, listTree, readCommit } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
@@ -73,9 +74,14 @@ const drain = async stream => { const parts = []; for await (const c of stream) 
 // (the read target); attributesPattern, a .gitattributes line `<pattern> merge=union` on both sides and a file the
 // pattern names that both sides change, so the merge is clean only when the pattern matches; tagName, an annotated tag
 // object at S1 whose `tag` header and ref carry the bytes (the read target).
+// Refs live in reftable where git has it (2.46: `git refs migrate`), so no filesystem refuses a ref name and every
+// host runs the cells git accepts (on APFS a loose ref file with a non-UTF-8 name is EILSEQ, which hid #43's push
+// report bug until Linux CI ran it). REF_FORMAT=files forces the files backend; expectations follow what git does.
+const REF_FORMAT = process.env.REF_FORMAT ?? (() => { const d = mkdtempSync(join(tmpdir(), 'ply-reftable-')); try { return run(d, ['init', '-q', '--bare']).status === 0 && run(d, ['refs', 'migrate', '--ref-format=reftable']).status === 0 ? 'reftable' : 'files'; } finally { rmSync(d, { recursive: true, force: true }); } })();
 const F_BASE = 'line1\nline2\nline3\n';
 function fixture(root, id, content, field) {
   const bare = makeBareRepo(root, id);
+  if (REF_FORMAT === 'reftable') gitOk(bare, ['refs', 'migrate', '--ref-format=reftable']);
   const blob = data => hash(bare, 'blob', B(data));
   const hostile = s => CONTENT[content](s);
   const f0 = blob(F_BASE), f1 = blob('LINE1\nline2\nline3\n'), fs1 = blob('line1\nline2\nLINE3\n'), g = blob('g\n');
@@ -108,6 +114,8 @@ function fixture(root, id, content, field) {
   }
   // packed-refs, not update-ref: a loose ref is a file, and the filesystem may refuse its name (APFS: EILSEQ)
   refs.sort((a, b) => Buffer.compare(a[0], b[0]));
+  // reftable: one update-ref per name; a name git refuses to store (a CR) is simply absent, as it is to for-each-ref
+  if (REF_FORMAT === 'reftable') { for (const [n, o] of refs) run(bare, ['update-ref', '--stdin'], { input: B('update ', n, ` ${o}\n`) }); fx.refsBefore = refList(bare); return fx; }
   writeFileSync(join(bare, 'packed-refs'), B('# pack-refs with: peeled fully-peeled sorted \n', ...refs.flatMap(([n, o]) => [`${o} `, n, '\n', ...(peeled.has(n.toString('latin1')) ? [`^${peeled.get(n.toString('latin1'))}\n`] : [])])));
   fx.refsBefore = refList(bare);
   return fx;
@@ -256,6 +264,7 @@ test(`git bytes: ${Object.keys(CONTENT).length} contents × ${FIELDS.length} fie
   const bad = results.filter(r => !['same', 'refused-as-git', 'refused'].includes(r.v));
   const table = {};
   for (const r of results) { const k = `${r.field}`; table[k] ??= {}; table[k][r.op] = (table[k][r.op] ?? '') + (r.v === 'same' ? '=' : r.v === 'refused-as-git' ? 'g' : r.v === 'refused' ? 'r' : 'X'); }
+  console.log(`# ref format: ${REF_FORMAT}`);
   console.log(`# ${results.length} cells (contents in order ${Object.keys(CONTENT).join(' ')}; '=' same as git, 'g' both refuse, 'r' allowed refusal, 'X' fails)`);
   for (const [field, ops] of Object.entries(table)) console.log(`# ${field.padEnd(18)} ${OPS.map(op => `${op}:${ops[op]}`).join(' ')}`);
   const counts = {}; for (const r of results) counts[r.v] = (counts[r.v] ?? 0) + 1;
