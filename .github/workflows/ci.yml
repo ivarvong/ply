@@ -7,36 +7,19 @@ on:
 
 permissions: {}
 
-jobs:
-  # Types, lint, the TS ratchet and the dist build. Fast; runs beside the test shards.
-  check:
-    name: check
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write # setup-node persists the npm cache
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: typecheck (tsc, isolated declarations, TS ratchet)
-        env:
-          RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: npm run typecheck
-      - run: npm run lint
-      - name: dist is what consumers import
-        run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"
+# A new push to a pull request cancels the run it supersedes (it holds up to 23 runners against the account's
+# concurrent-job limit); runs on main are grouped by commit, so none is ever cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-  # vitest, split by file into 4 shards (`--shard i/4`). NODE_OPTIONS loads the .js -> .ts resolve hook into every
-  # node process a test starts (workers, children); vitest itself resolves src/*.ts.
-  test:
-    name: test (${{ matrix.shard }}/4)
+jobs:
+  # The suite (vitest), split across 4 runners by measured per-file duration: vitest.config.ts's sequencer partitions
+  # `--shard i/N` longest-first over test/durations.json instead of vitest's count-based split.
+  # One job was 6-15 min; a shard is one file's worth (the slowest file bounds it). i and N come from the matrix itself,
+  # so the partition cannot disagree with the number of shards, and the plan covers every file listed here exactly once.
+  test-shard:
+    name: test-shard (${{ matrix.shard }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,14 +46,62 @@ jobs:
       - run: npm ci
       - name: vitest
         env:
-          SHARD: ${{ matrix.shard }}
-        run: npx vitest run --shard "${SHARD}/4"
+          INDEX: ${{ strategy.job-index }}
+          TOTAL: ${{ strategy.job-total }}
+        run: npx vitest run --shard "$((INDEX + 1))/${TOTAL}" --reporter=default --reporter=json --outputFile.json="reports/vitest/shard-$((INDEX + 1)).json"
+      # Per-file test counts and durations from a real runner (test/durations.json is refreshed from these).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: success() || failure()
+        with:
+          name: vitest-shard-${{ matrix.shard }}
+          path: reports/vitest/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Types (tsc, isolated declarations, the TS ratchet against the PR base), lint, the dist build consumers import, and
+  # three fuzzers. The fuzzers run src/*.ts under node's type stripping; --import ./test/ts-resolve.mjs maps the .js
+  # specifiers to .ts (GitHub refuses NODE_OPTIONS through $GITHUB_ENV, so each command names the hook).
+  lint-fuzz:
+    name: lint + fuzz
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # setup-node persists the npm cache
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: typecheck (tsc, isolated declarations, TS ratchet)
+        env:
+          RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: npm run typecheck
+      - run: npm run lint
+      - name: dist is what consumers import
+        run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"
+      - name: below-hash fuzzer
+        run: node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
+      - name: git-semantic fuzzer
+        run: node --import ./test/ts-resolve.mjs test/fuzz/git-semantic.mjs --n 20 --seed 1
+      - name: liar merge-base fuzzer
+        run: node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
 
   fuzz:
     # Deterministic fuzz, fixed seeds and sizes, in parallel with `test`, so it adds no PR wall time. The deep,
     # date-seeded runs are in nightly.yml. hostile --case 2366521731 is the pinned case npm test also runs.
-    # The fuzzers run src/*.ts under node's type stripping; NODE_OPTIONS (set after npm ci, absolute) adds the
-    # .js -> .ts resolve hook to every later node process.
+    # Each command names the .js -> .ts resolve hook (see lint-fuzz).
     name: fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -93,34 +124,46 @@ jobs:
       - name: git identity
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
-      - name: resolve hook for later steps
-        run: echo "NODE_OPTIONS=--import=${GITHUB_WORKSPACE}/test/ts-resolve.mjs" >> "$GITHUB_ENV"
       - name: hostile fuzzer
-        run: node test/fuzz/hostile.mjs --n 180 --seed 1 && node test/fuzz/hostile.mjs --case 2366521731
-      - name: below-hash fuzzer
-        run: node test/fuzz/below-hash.mjs --n 20 --seed 1 && node test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
-      - name: git-semantic fuzzer
-        run: node test/fuzz/git-semantic.mjs --n 20 --seed 1
-      - name: liar merge-base fuzzer
-        run: node test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n 180 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --case 2366521731
       - name: liar fuzzer
-        run: node test/fuzz/liar.mjs --n 120 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --n 120 --seed 1
       - name: protocol fuzzer
-        run: node test/fuzz/protocol.mjs --n 300 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n 300 --seed 1
       - name: packs fuzzer
-        run: node test/fuzz/packs.mjs --n 36 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n 36 --seed 1
       - name: codec fuzzer
-        run: node test/fuzz/codec.mjs --n 15000 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs --n 15000 --seed 1
       - name: attributes fuzzer
-        run: node test/fuzz/attributes.mjs --n 120 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 120 --seed 1
 
-  # Stryker over the src files a PR changed (all of src/ on main), split into 8 shards balanced by mutant count
-  # (scripts/mutate.mjs --plan 8). A file is the unit, and linemerge.js alone is 13% of src/, so 8 is where more
-  # shards stop shortening a full run. Shards only run Stryker; the job named `mutate` merges their reports and
-  # judges them with the same rules as an unsharded run. The 8 appears here three times; the merge refuses a
-  # missing or extra shard, so changing one and not the others fails the gate.
+  # The gate. Its name stays `test` so anything waiting on that check still works. It runs even when a shard fails or
+  # is cancelled (a skipped check would count as passing), and fails unless every shard and lint + fuzz succeeded.
+  test:
+    name: test
+    needs: [test-shard, lint-fuzz]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: every shard succeeded
+        env:
+          SHARDS: ${{ needs.test-shard.result }}
+          LINT_FUZZ: ${{ needs.lint-fuzz.result }}
+        run: |
+          if [ "$SHARDS" != success ] || [ "$LINT_FUZZ" != success ]; then
+            echo "test-shard: $SHARDS, lint-fuzz: $LINT_FUZZ"
+            exit 1
+          fi
+
+  # Stryker over the src files a PR changed (all of src/ on main), split into 16 shards balanced by measured cost
+  # (scripts/mutate.mjs --plan 16, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
+  # costing more than a shard's share. Shards only run Stryker; the job named `mutate` merges their reports, checks
+  # every mutant of every planned file is there exactly once, and judges them with the same rules as an unsharded run.
+  # The 16 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
+  # fails the gate.
   mutate-shard:
-    name: mutate-shard (${{ matrix.shard }}/8)
+    name: mutate-shard (${{ matrix.shard }}/16)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -128,7 +171,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -144,7 +187,7 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           SHARD: ${{ matrix.shard }}
-        run: node scripts/mutate.mjs --shard "${SHARD}/8"
+        run: node scripts/mutate.mjs --shard "${SHARD}/16"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mutation-shard-${{ matrix.shard }}
@@ -188,7 +231,7 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
-        run: node scripts/mutate.mjs --merge shard-reports --shards 8
+        run: node scripts/mutate.mjs --merge shard-reports --shards 16
       # The merged report, for per-file history (weights for a future partition, or a look at what survived).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: success() || failure()

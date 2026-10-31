@@ -60,7 +60,7 @@ export function decodeBytes(b: Uint8Array): string {
   return s + strict.decode(b.subarray(run));
 }
 
-export function concat(parts: readonly Uint8Array[]): Uint8Array {
+export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   let n = 0;
   for (const p of parts) n += p.length;
   const out = new Uint8Array(n);
@@ -69,7 +69,7 @@ export function concat(parts: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
-export function encodeBytes(s: unknown, what = 'string'): Uint8Array {
+export function encodeBytes(s: unknown, what = 'string'): Uint8Array<ArrayBuffer> {
   if (typeof s !== 'string') throw fail('bad_request', `${what} must be a string`, { what });
   if (s.isWellFormed()) return te.encode(s);
   const parts: Uint8Array[] = [];
