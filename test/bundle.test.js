@@ -91,7 +91,23 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-31: 89,918 B. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 91,966 B. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 92,121 B. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  assert.ok(min < 92_122, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-31: 92,107 B / 36,252 B gz (gz budgeted from here). New behaviour, #106 (#103 items 3-4): an already-applied
+  // rename picks empty (the guard's two extra tree walks), author and committer stamps each with time and zone, merge
+  // from / rebase onto a commit id (checked to be a commit). sem/merge (#96) measured 91,527 B / 35,996 B gz.
+  assert.ok(min < 92_108, `merge bundle ${min} B exceeds budget`);
+  assert.ok(gz < 36_253, `merge bundle ${gz} B gz exceeds budget`);
+});
+
+test('rebase entry: carries the merge cluster, under its own budget', async () => {
+  const out = await bundle('src/rebase.ts');
+  const js = out.outputFiles[0].text;
+  assert.ok(!/node:|\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/.test(js), 'no node builtins or classes');
+  const min = js.length, gz = gzipSync(js, { level: 9 }).length;
+  console.log(`  rebase bundle: ${min} B min, ${gz} B gz`);
+  // 2026-10-31: 94,051 B / 36,744 B gz (first budget). #106 (#103 items 3-4), as the merge entry above; sem/merge (#96)
+  // measured 93,557 B / 36,562 B gz.
+  assert.ok(min < 94_052, `rebase bundle ${min} B exceeds budget`);
+  assert.ok(gz < 36_745, `rebase bundle ${gz} B gz exceeds budget`);
 });
 
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
@@ -114,7 +130,12 @@ test('full entry is the superset and still carries no node builtins', async () =
   const js = out.outputFiles[0].text;
   assert.ok(!/node:/.test(js));
   for (const f of ['packresolve.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'discover.js', 'client.js', 'packcache.js', 'edit.js']) assert.ok(retained(out).map(([k]) => k).includes(f), `${f} missing from full bundle`);
-  console.log(`  full bundle: ${js.length} B min, ${gzipSync(js, { level: 9 }).length} B gz`);
+  const min = js.length, gz = gzipSync(js, { level: 9 }).length;
+  console.log(`  full bundle: ${min} B min, ${gz} B gz`);
+  // 2026-10-31: 149,903 B / 56,116 B gz (first budget). #106 (#103 items 3-4), as the merge entry above; sem/merge (#96)
+  // measured 149,354 B / 55,877 B gz.
+  assert.ok(min < 149_904, `full bundle ${min} B exceeds budget`);
+  assert.ok(gz < 56_117, `full bundle ${gz} B gz exceeds budget`);
 });
 
 test('read entry: readFile/listTree carry no push, merge, pack building or rebase code', async () => {
