@@ -8,7 +8,7 @@
 //             invocation upload-pack makes). ply runs over real HTTP against the same server. Real http-backend
 //             configurations (uploadpack.*, lsrefs.unborn, transfer.advertiseSID, a sha256 repository, receive.*) check
 //             that the renderer writes what git writes.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { join } from 'node:path';
@@ -75,8 +75,8 @@ test('caps: every cell through discover() (derived from the table)', async t => 
     if (w) { const k = wrongClass(want.ply, got); classes[k] = (classes[k] ?? 0) + 1; wrong.push(wrong.length < 20 ? `${S.capsCellId(c)}: ${w}` : ''); }
   }
   Error.stackTraceLimit = 10;
-  t.diagnostic(`caps cells=${cells.length} ${Object.entries(tally).map(([k, n]) => `${k}=${n}`).join(' ')}`);
-  if (wrong.length) t.diagnostic(`wrong: ${census(classes)}`);
+  console.log(`caps cells=${cells.length} ${Object.entries(tally).map(([k, n]) => `${k}=${n}`).join(' ')}`);
+  if (wrong.length) console.log(`wrong: ${census(classes)}`);
   assert.deepEqual(rule, [], 'the rule');
   assert.equal(wrong.length, 0, `${wrong.length} wrong:\n${wrong.slice(0, 20).join('\n')}`);
 });
@@ -93,8 +93,8 @@ test('refs: every cell through lsRefs() (derived from the table)', async t => {
     const w = judge(want.ply, got);
     if (w) { const k = wrongClass(want.ply, got); classes[k] = (classes[k] ?? 0) + 1; wrong.push(`${S.refsCellId(c)}: ${w}`); }
   }
-  t.diagnostic(`refs cells=${cells.length} ${Object.entries(tally).map(([k, n]) => `${k}=${n}`).join(' ')}`);
-  if (wrong.length) t.diagnostic(`wrong: ${census(classes)}`);
+  console.log(`refs cells=${cells.length} ${Object.entries(tally).map(([k, n]) => `${k}=${n}`).join(' ')}`);
+  if (wrong.length) console.log(`wrong: ${census(classes)}`);
   assert.deepEqual(rule, [], 'the rule');
   assert.deepEqual(wrong, []);
 });
@@ -208,13 +208,13 @@ test('real git http-backend configurations advertise exactly what the renderer w
     assert.equal(res.headers.get('content-type'), 'application/x-git-upload-pack-advertisement');
     const unmodelled = [];
     const real = advLines(Buffer.from(await res.arrayBuffer()), unmodelled);
-    if (unmodelled.length) t.diagnostic(`${rc.name}: capabilities with no axis (this git is newer than the model): ${unmodelled.join(', ')}`);
+    if (unmodelled.length) console.log(`${rc.name}: capabilities with no axis (this git is newer than the model): ${unmodelled.join(', ')}`);
     const cell = capsCell(rc.cell);
     assert.deepEqual(real, advLines(S.renderCaps(cell, fx).body), rc.name);
     const got = await outcomeOf(() => ply(`${backend.url}/${name}.git`).discover(), capsOk);
     if (got.info) { got.info.agent = got.info.agent.replace(/^git\/.*/, S.AGENT); got.info.fetch = got.info.fetch.filter(x => S.FETCH_FEATURES.includes(x)); if (got.info.sessionId) got.info.sessionId = 'sid-1'; }
     assert.equal(judge(S.expectedCaps(cell).ply, got), null, `${rc.name}: ply discover`);
-    t.diagnostic(`${rc.name}: ${S.capsCellId(cell)} → ${got.tag}`);
+    console.log(`${rc.name}: ${S.capsCellId(cell)} → ${got.tag}`);
   }
 });
 
@@ -253,7 +253,7 @@ test('caps: every cell within one deviation of git\'s default, judged by git ls-
     }
     observed.caps++;
   }
-  t.diagnostic(`caps observed=${cells.length}`);
+  console.log(`caps observed=${cells.length}`);
   assert.deepEqual(bad, []);
 });
 const freshPartial = () => { const d = freshRepo('partial'); git(d, ['config', 'extensions.partialClone', 'origin']); git(d, ['config', 'remote.origin.promisor', 'true']); return d; };
@@ -277,7 +277,7 @@ test('refs: every cell, judged by git ls-remote; a duplicate ref resolves to its
     }
     observed.refs++;
   }
-  t.diagnostic(`refs observed=${observed.refs}`);
+  console.log(`refs observed=${observed.refs}`);
   assert.deepEqual(bad, []);
 });
 
@@ -310,7 +310,7 @@ test('push: request × advertised atomic × advertised push-options × object-fo
     if (want.ply.tag === 'unsupported' && !new RegExp({ hash: 'object-format sha256', atomic: 'advertise atomic', options: 'advertise push-options' }[want.ply.why]).test(got.message)) bad.push(`${S.pushCellId(c)}: ply's refusal names the wrong need: ${got.message}`);
     observed.push++;
   }
-  t.diagnostic(`push observed=${observed.push}`);
+  console.log(`push observed=${observed.push}`);
   assert.deepEqual(bad, []);
 });
 
@@ -361,7 +361,7 @@ test('request: fetch arguments ply sends, judged by git fetch\'s own request and
       if (norm(pb.args) !== norm(gb.args)) bad.push(`${id}: request lines differ:\n  git ${norm(gb.args).replace(/\n/g, ' | ')}\n  ply ${norm(pb.args).replace(/\n/g, ' | ')}`);
       const plyHook = hook();
       if (!gitHook || plyHook.args !== gitHook.args || plyHook.stdin !== gitHook.stdin) bad.push(`${id}: pack-objects invocation differs: git ${JSON.stringify(gitHook)} ply ${JSON.stringify(plyHook)}`);
-      t.diagnostic(`${id}: pack-objects ${plyHook.args}`);
+      console.log(`${id}: pack-objects ${plyHook.args}`);
     }
     observed.request++;
   }

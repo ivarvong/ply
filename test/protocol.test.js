@@ -2,7 +2,7 @@
 //   want kind × have kind × deepen × filter × server mode   (thin, ofs-delta, done and client-shallow cycle deterministically)
 // Every cell checks: required ⊆ got ⊆ required ∪ had (model bound), got == pack-objects (git oracle), object
 // types/sizes, shallow/unshallow lines, thin bases derivable from haves, no OFS when not requested, chain ≤ pack.depth.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';

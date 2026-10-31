@@ -4,7 +4,7 @@
 //   paths   → tree built from the path, then `git fsck --strict` (protectNTFS/HFS defaults)
 //   trees   → our encodeTree hash == `git write-tree` over all name pairs × modes
 //   commits → parseCommit on every commit shape git can write (merges, gpgsig, mergetag, encoding, extra headers)
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, fsckProblemsOf } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
-import { DEFAULT_LIMITS } from '../src/limits.ts';
+import { DEFAULT_LIMITS } from '../src/limits.js';
 
 let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });

@@ -45,7 +45,7 @@ async function runShard(k, w) {
 if (!isMainThread) {
   runShard(workerData.k, workerData.w).then(r => parentPort.postMessage(r));
 } else {
-  const { test } = await import('node:test');
+  const { test } = await import('vitest');
   const assert = (await import('node:assert/strict')).default;
 
   test('every tag of every axis has a meaning and a renderer (the match is exhaustive)', () => {

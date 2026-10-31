@@ -87,8 +87,8 @@ export const REASONS = [
 
   // --- inside update() ---
   { id: 'receive-pack.c:reject:funny refname', stage: 'update', cls: 'rejected', commands: ['create', 'delete'], three: { delete: 'refs/@ is the one name validateRef accepts that check_refname_format refuses even with REFNAME_ALLOW_ONELEVEL (deletes)' },
-    names: (i, cmd) => (cmd === 'delete' ? 'refs/@' : `refs/funny${i}`),
-    next: 'the server refuses the ref name itself (check_refname_format): no retry can succeed; ply\'s validateRef lets refs/<one level> and refs/@ through, git does not' },
+    names: (i, cmd) => (cmd === 'delete' ? 'refs/@' : `refs/funny${i}`), preSend: 'bad_request',
+    next: 'the server refuses the ref name itself (check_refname_format(name + 5), one level allowed only for a delete): no retry can succeed, so ply refuses the push before sending a byte (validatePushRef, #73; every name checked against git in test/space/refname.test.js); git\'s report is still observed byte for byte' },
   { id: 'receive-pack.c:reject:branch is currently checked out', stage: 'update', cls: 'rejected', commands: ALL, three: ONE_CURRENT,
     next: 'receive.denyCurrentBranch refuses the non-bare repository\'s checked-out branch, whatever its value' },
   { id: 'receive-pack.c:reject:bad pack', stage: 'update', cls: 'rejected', commands: NON_DELETE, three: true,
@@ -298,7 +298,8 @@ export function outcomeOf(rep, { atomic }) {
   const code = cls.some(k => k === 'rejected' || k === 'unpack') ? 'push_rejected' : cls.includes('nff') ? 'not_fast_forward' : cls.includes('cas') ? 'cas_conflict' : 'push_rejected';
   return { tag: 'rejected', code };
 }
-export const expected = c => outcomeOf(gitReport(c), { atomic: c.atomic.tag === 'on' });
+// a reason ply refuses before sending (preSend: the request names what git would refuse): nothing is sent, whatever git would write
+export const expected = c => (c.reason.reason.preSend ? { tag: 'preSend', code: c.reason.reason.preSend, what: 'ref' } : outcomeOf(gitReport(c), { atomic: c.atomic.tag === 'on' }));
 
 // ---- rendering for push() over the fake transport (test/space/harness.js) ----
 export function render(c) {

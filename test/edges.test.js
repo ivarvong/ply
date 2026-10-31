@@ -1,5 +1,5 @@
 // Structural edges: depth, width, modes, odd names, odd refs, REF_DELTA packs, large blobs, exact limits.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
@@ -7,7 +7,7 @@ import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckPr
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits } from '../src/limits.ts';
+import { withLimits } from '../src/limits.js';
 import { TYPE_NAME } from '../src/objects.js';
 
 let root, cleanup, srv, n = 0;
