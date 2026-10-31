@@ -21,7 +21,8 @@ import { inflate } from '../src/inflate.js';
 import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
 import { parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
-import { parseReportStatus, classifyReport, streamInit, streamStep, streamFinish } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
+import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 
@@ -393,17 +394,23 @@ test('caps: a v0/v1 answer is unsupported and a pkt after the flush is refused, 
   assert.throws(() => parseCapabilitiesV2(trailing), e => e.code === 'protocol' && e.message === "advertisement: delim after the capabilities' flush");
 });
 
-property('report', 'a prefix of report-status lines is a prefix of the ref statuses', () => {
-  const lines = ['unpack ok', 'ok refs/heads/main', 'ng refs/heads/other hook declined', 'option old-oid abcdef'];
-  const full = parseReportStatus(lines);
-  for (let i = 0; i <= lines.length; i++) {
-    const got = parseReportStatus(lines.slice(0, i));
-    if (got.unpack !== null) assert.ok(full.unpack.startsWith(got.unpack));
-    assert.ok(got.refs.length <= full.refs.length);
-    got.refs.forEach((r, j) => { assert.equal(r.ref, full.refs[j].ref); assert.equal(r.ok, full.refs[j].ok); });
-  }
-  const partial = parseReportStatus(['unpack o']);
-  assert.equal(partial.unpack, 'o');
+property('advertisement', 'a receive-pack advertisement cut anywhere is a typed Err: its flush comes last', () => {
+  const data = l => ({ kind: 'data', payload: te.encode(l) });
+  const frames = [data('# service=git-receive-pack\n'), { kind: 'flush' }, data(`${oid(1)} refs/heads/main\0report-status atomic\n`), data(`${oid(2)} refs/heads/x\n`), data(`shallow ${oid(3)}\n`), { kind: 'flush' }];
+  assert.deepEqual(parseReceiveAdvert(frames), { ok: true, value: new Set(['report-status', 'atomic']) });
+  for (let i = 0; i < frames.length; i++) { const r = parseReceiveAdvert(frames.slice(0, i)); assert.equal(r.ok, false, `${i} frames`); assert.ok(CODES.has(r.error.code), `${i} frames`); }
+});
+
+property('report', 'the report machine steps line by line: a prefix that is malformed stays malformed, and a statuses prefix only grows', () => {
+  const commands = [{ ref: 'refs/heads/main' }, { ref: 'refs/heads/other' }];
+  const lines = ['unpack ok\n', 'ok refs/heads/main\n', 'ng refs/heads/other hook declined\n', 'option old-oid abcdef\n'].map(l => te.encode(l));
+  let st = reportInit(commands);
+  const seen = [];
+  for (const l of lines) { st = reportStep(st, l); seen.push(st.tag === 'refs' ? st.seen.size : st.tag); }
+  // option lines are not git's plain report (proc-receive only): the machine becomes malformed there and stays so
+  assert.deepEqual(seen, [0, 1, 2, 'malformed']);
+  assert.equal(reportStep(st, lines[0]), st);
+  assert.deepEqual(classifyReport([te.encode('unpack o\n')], commands), { tag: 'malformed', why: 'no git unpack line first' });
 });
 
 property('report', 'a proper prefix of a git report never classifies as definite', () => {

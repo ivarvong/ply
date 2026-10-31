@@ -39,6 +39,8 @@ export type Detail = {
   readonly cas_conflict: { readonly expected: string | null; readonly actual: string | null };
   readonly match_count: { readonly matches: number };
   readonly merge_conflict: { readonly conflicts: readonly string[] };
+  // push.ts: the refs that moved, and the refused ones with git's reason
+  readonly push_partial: { readonly landed: readonly string[]; readonly rejected: ReadonlyArray<{ readonly ref: string; readonly reason: string }> };
 };
 // `unknown` is the identity of `&`: a code without a payload adds nothing to its member.
 type DetailOf<C extends Code> = C extends keyof Detail ? Detail[C] : unknown;
@@ -56,6 +58,11 @@ export type Extra = {
   // objects.ts: git fsck's message id on a refused commit, tag or duplicate header; the name a tree carries twice
   readonly msgId?: string;
   readonly entry?: string;
+  // push.ts: the receive-pack report as classified (null when it was not git's) and band 2 (hook stderr) as received
+  readonly report?: { readonly tag: string; readonly refs: ReadonlyArray<{ readonly ref: string; readonly ok: boolean; readonly reason: string }> } | null;
+  readonly hookOutput?: string;
+  // receivecaps.ts: the capabilities the server advertised, beside an `unsupported` push
+  readonly caps?: readonly string[];
   // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
   // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts takeResult), so more bytes may complete it.
   readonly reason?: Reason;
