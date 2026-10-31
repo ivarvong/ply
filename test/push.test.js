@@ -114,7 +114,10 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
         const reasons = [...ourRejects.values()];
         const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref|incorrect old value provided)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r); // 'bad ref': denyNonFastForwards could not parse the (stale, unknown) old oid. 'incorrect old value provided': git ≥ 2.50.
         const expectCas = reasons.length && reasons.every(isCas) && reasons.some(r => r !== 'atomic push failure');
-        assert.equal(err.code, expectCas ? 'cas_conflict' : 'push_rejected', `${label}: code for ${JSON.stringify(reasons)}`);
+        // a non-atomic push git applied in part is push_partial, naming what landed (SAFETY.md I33)
+        const landed = err.report?.refs?.filter(r => r.ok).map(r => r.ref) ?? [];
+        if (landed.length && !ours.atomic) { assert.equal(err.code, 'push_partial', `${label}: ${err.message}`); assert.deepEqual(err.landed, landed, label); }
+        else assert.equal(err.code, expectCas ? 'cas_conflict' : 'push_rejected', `${label}: code for ${JSON.stringify(reasons)}`);
       } else stats.ok++;
       // 5. hook output on band 2 when requested
       if (caps.sideband && hk === 'pre-receive-accept-noisy') assert.match((err?.hookOutput ?? res.hookOutput), /hello from hook\r?\nline two/, `${label}: band 2`);

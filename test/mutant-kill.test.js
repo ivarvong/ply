@@ -17,7 +17,7 @@ import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '.
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
-import { parseReportStatus, checkReport, push, ZERO_OID } from '../src/push.js';
+import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
@@ -1246,9 +1246,9 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(() => negotiate({}, { wants: [oid(1)], haves: [oid(2)], batch: 0 }), e => e.code === 'bad_request' && e.what === 'negotiateBatch');
 
   const commands = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
-  const mixed = { unpack: 'ok', refs: [{ ref: 'refs/heads/a', ok: true, reason: '' }, { ref: 'refs/heads/b', ok: false, reason: 'failed to lock' }] };
-  assert.equal(checkReport(mixed, commands, { atomic: true }), 'atomic push split: some refs ok, some ng');
-  assert.equal(checkReport(mixed, commands), null);
+  const mixed = classifyReport(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'].map(l => te.encode(l)), commands);
+  assert.deepEqual(decideOutcome(mixed, { atomic: true }), { tag: 'ambiguous', why: 'atomic push split: some refs ok, some ng' });
+  assert.deepEqual(decideOutcome(mixed), { tag: 'partial', landed: ['refs/heads/a'], rejected: [{ ref: 'refs/heads/b', reason: 'failed to lock' }] });
 
   const refLine = `${oid(4)} refs/heads/main\n`;
   const framesOf = list => ({
@@ -1267,14 +1267,14 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const reportLines = ['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'];
   const receipt = () => ({
     limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; },
+    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; yield { kind: 'flush' }; },
   });
   const deletes = [
     { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID },
     { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
   ];
   await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: true }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'cas_conflict');
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
   await assert.rejects(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false }), e => e.code === 'bad_request' && e.what === 'ref');
   await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, pushOptions: ['a\nb'] }), e => e.code === 'bad_request' && e.what === 'push option');
   await assert.rejects(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push commands');
@@ -1466,18 +1466,81 @@ test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of pack
   throws(() => v2Step({ ...v2Init(), limits: { maxSectionLines: 1 } }, line('packfile')), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
 });
 
-// receive-pack's band 2 (hook stderr, the host's explanation) is held to the cap its band-1 report already had: a flood of it
-// used to be read until the request timer, with the tail kept but the bytes unbounded.
-test('push holds band 2 to maxPackBytes, the same cap as its report', async () => {
+// receive-pack's band 2 (hook stderr, the host's explanation) is held to maxPackBytes: a flood of it used to be read until
+// the request timer, with the tail kept but the bytes unbounded (issue #36). Since the push outcome space (I36) every
+// response frame, band 1, 2 or 3, counts toward one 'report bytes' cap, and a limit hit after the body is sent is
+// `ambiguous` (original `limit_exceeded`): the ref may have moved. (Merge of #49 and #51: #49's separate 'progress bytes'
+// counter became this shared one.)
+test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const band = sidebandFrame;
-  const deletes = [{ ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID }];
-  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt('ok refs/heads/a\n')]) };
-  const pushT = frames => ({ limits: withLimits({ maxPackBytes: 50 }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
-  const fifty = await push(pushT([band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }]), { commands: deletes, sideband: true });
-  assert.equal(fifty.report.ok, true); assert.equal(fifty.hookOutput.length, 50);
-  await assert.rejects(push(pushT([band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), band(SIDEBAND_PROGRESS, 1), report, { kind: 'flush' }]), { commands: deletes, sideband: true }),
-    e => e.code === 'limit_exceeded' && e.what === 'progress bytes' && e.got === 51 && e.max === 50);
-  // the report's own cap (band 1), already there, with the same numbers
-  const wide = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt(`ok refs/heads/a${' '.repeat(60)}\n`)]) };
-  await assert.rejects(push(pushT([wide, { kind: 'flush' }]), { commands: deletes, sideband: true }), e => e.code === 'limit_exceeded' && e.what === 'report bytes' && e.max === 50);
+  const del = [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }];
+  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt('ok refs/heads/a\n'), FLUSH]) };
+  const fl = [band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }];
+  const total = fl.reduce((n, f) => n + (f.payload?.length ?? 0), 0);
+  const pushT = (frames, max) => ({ limits: withLimits({ maxPackBytes: max }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
+  const fits = await push(pushT(fl, total), { commands: del, sideband: true });
+  assert.equal(fits.report.ok, true); assert.equal(fits.hookOutput.length, 50);
+  await assert.rejects(push(pushT(fl, total - 1), { commands: del, sideband: true }),
+    e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.got === total && e.cause.max === total - 1);
+  // an endless band 2 is cut at the cap, not read until the timer: reading stops on the frame that crosses it
+  let pulled = 0;
+  const flood = { limits: withLimits({ maxPackBytes: 10_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) { pulled++; yield band(SIDEBAND_PROGRESS, 999); } } };
+  await assert.rejects(push(flood, { commands: del, sideband: true }), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
+  assert.equal(pulled, 11, 'ten 1,000-byte frames fit, the eleventh crosses the cap');
+});
+
+test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare', async () => {
+  const two = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
+  const cls = (lines, commands = two) => classifyReport(lines.map(l => (typeof l === 'string' ? te.encode(l) : l)), commands);
+  const why = (lines, commands) => cls(lines, commands).why;
+  assert.equal(why([Uint8Array.of(0xff)]), 'a line is not UTF-8');
+  assert.equal(why([data('ok refs/heads/', Uint8Array.of(0xff), '\n')], [{ ref: 'refs/heads/\ufffd' }]), 'a line is not UTF-8', 'a byte that is not UTF-8 never matches a ref named with U+FFFD');
+  assert.equal(why(['unpack ok']), 'a line is not one LF-terminated line');
+  assert.equal(why(['unpack ok\nx\n']), 'a line is not one LF-terminated line');
+  for (const l of [[], ['unpack ok*\n'], ['ok refs/heads/a\n']]) assert.equal(why(l), 'no git unpack line first');
+  assert.equal(why(['unpack ok\n', 'nf refs/heads/a hook declined\n', 'ok refs/heads/b\n']), 'a line is not a ref status');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/zz\n', 'ok refs/heads/b\n']), 'status for a ref not commanded');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/a\n']), 'two statuses for refs/heads/a');
+  for (const r of ['', 'hook\x01declined', '\x01x', 'x\x01', 'caf\u00e9']) assert.equal(why(['unpack ok\n', `ng refs/heads/a ${r}\n`, 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a', JSON.stringify(r));
+  assert.equal(why(['unpack ok\n', 'ng refs/heads/a\n', 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n']), 'no status for refs/heads/b');
+  assert.equal(why(['unpack index-pack abnormal exit\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), 'unpack failed, a ref is not "unpacker error"');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), '"unpacker error" beside "unpack ok"');
+  for (const status of GIT_UNPACK_ERRORS) assert.deepEqual(cls([`unpack ${status}\n`, 'ng refs/heads/a unpacker error\n', 'ng refs/heads/b unpacker error\n']), { tag: 'unpackFailed', status });
+  assert.equal(GIT_UNPACK_ERRORS.length, 8);
+  assert.deepEqual(cls(['unpack ok\n', 'ng refs/heads/b hook declined\n', 'ok refs/heads/a\n']), { tag: 'statuses', refs: [{ ref: 'refs/heads/b', ok: false, reason: 'hook declined' }, { ref: 'refs/heads/a', ok: true, reason: '' }] });
+
+  const failed = { tag: 'unpackFailed', status: 'index-pack abnormal exit' };
+  assert.deepEqual(decideOutcome(failed), { tag: 'rejected', code: 'push_rejected' });
+  assert.deepEqual(decideOutcome(failed, { pack: false }), { tag: 'ambiguous', why: 'unpack failed but no pack was sent' });
+  assert.deepEqual(decideOutcome({ tag: 'malformed', why: 'w' }), { tag: 'ambiguous', why: 'w' });
+  assert.deepEqual(decideOutcome({ tag: 'weird' }), { tag: 'ambiguous', why: 'report shape weird' });
+  const ngs = (...reasons) => ({ unpack: 'ok', refs: reasons.map(reason => ({ ok: false, reason })) });
+  assert.equal(rejectionCode(ngs('failed to update ref')), 'cas_conflict');
+  for (const r of ['xfailed to update ref', 'failed to update refs', 'a bad ref', 'bad refs']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
+  assert.equal(rejectionCode({ unpack: 'unpack-objects abnormal exit', refs: [{ ok: false, reason: 'failed to update ref' }] }), 'push_rejected');
+  assert.equal(rejectionCode({ unpack: 'ok', refs: [{ ok: true }, { ok: false, reason: 'stale ref' }] }), 'cas_conflict');
+
+  // band 2 is kept as a 4096-character tail, counted per frame
+  let st = streamInit(true);
+  assert.equal(st.band2, '');
+  for (const n of [3000, 2000]) st = streamStep(st, { kind: 'data', payload: data(Uint8Array.of(2), 'x'.repeat(n - 1) + 'y') });
+  assert.equal(st.band2.length, 4096); assert.ok(st.band2.endsWith('xy')); assert.equal(st.band2Frames, 2);
+
+  // through push(): the error a caller sees
+  const sb = (...frames) => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null, async *frames() { for (const f of frames) yield f === null ? { kind: 'flush' } : { kind: 'data', payload: f }; } });
+  const band = (b, ...parts) => data(Uint8Array.of(b), ...parts);
+  const report = (...lines) => band(1, ...lines.map(l => pkt(l)), FLUSH);
+  const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
+  await assert.rejects(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
+  await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report.unpack === 'ok*');
+  await assert.rejects(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
+  await assert.rejects(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
+  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  await assert.rejects(push(many, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
+  const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
+  await assert.rejects(push(big, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
+  const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes
+  const ok = await push(fits, del);
+  assert.equal(ok.report.ok, true); assert.equal(ok.hookOutput, '');
 });

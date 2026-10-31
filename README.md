@@ -159,7 +159,7 @@ Each layer is testable without the one below it, and `test/bundle.test.js` asser
 
 ## Errors
 
-Every thrown error has a `code` from `errors.js`, whose `RETRY` table says what to do: `yes` (retry as-is), `fresh` (re-resolve the parent: `cas_conflict`), `no`, or `read` (`ambiguous`: the push may have landed — read the ref back before anything else). After an acknowledged push, any failure to confirm — a forged report, a transport error on the read-back — is `ambiguous`, enforced in one place (`operation.js/verifyRef`, `push.js/ambiguousAfterPush`).
+Every thrown error has a `code` from `errors.js`, whose `RETRY` table says what to do: `yes` (retry as-is), `fresh` (re-resolve the parent: `cas_conflict`), `no`, or `read` (`ambiguous`: the push may have landed — read the ref back before anything else). A push says landed (resolves), not landed (`cas_conflict`, `push_rejected`) or partly landed (`push_partial`, a non-atomic multi-ref push: `err.landed` and `err.rejected` name the refs) only on a report exactly as git's receive-pack writes it; every other state after the request may have reached the server — a cut, trailing bytes, band 3, a near-miss line, option lines, a limit hit while reading — is `ambiguous` (SAFETY.md I36; the space and every cell's outcome: SPACE.md). After an acknowledged push, any failure to confirm — a forged report, a transport error on the read-back — is `ambiguous`, enforced in one place (`operation.js/verifyRef`, `push.js/ambiguousAfterPush`).
 
 ## Shape
 
