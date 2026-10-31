@@ -19,7 +19,7 @@ import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packr
 import { inflate } from '../src/inflate.js';
 import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
 import { parseLsRefLine } from '../src/lsrefs.js';
-import { parseReportStatus } from '../src/push.js';
+import { parseReportStatus, classifyReport, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl } from '../src/sshgit.js';
 import { parseLine, parseFile } from '../src/attributes.js';
@@ -379,6 +379,30 @@ property('report', 'a prefix of report-status lines is a prefix of the ref statu
   }
   const partial = parseReportStatus(['unpack o']);
   assert.equal(partial.unpack, 'o');
+});
+
+property('report', 'a proper prefix of a git report never classifies as definite', () => {
+  const commands = [{ ref: 'refs/heads/main' }, { ref: 'refs/heads/other' }];
+  const lines = ['unpack ok\n', 'ok refs/heads/main\n', 'ng refs/heads/other hook declined\n'].map(l => te.encode(l));
+  assert.equal(classifyReport(lines, commands).tag, 'statuses');
+  for (let i = 0; i < lines.length; i++) assert.equal(classifyReport(lines.slice(0, i), commands).tag, 'malformed', `${i} lines`);
+  const last = lines.at(-1);
+  for (let j = 0; j < last.length; j++) assert.equal(classifyReport([...lines.slice(0, -1), last.subarray(0, j)], commands).tag, 'malformed', `last line cut at ${j}`);
+});
+
+property('stream', 'a proper prefix of a git response stream is never a report', () => {
+  const inner = concat([pkt('unpack ok\n'), pkt('ok refs/heads/main\n'), FLUSH]);
+  const shapes = {
+    plain: { sideband: false, frames: [{ kind: 'data', payload: te.encode('unpack ok\n') }, { kind: 'data', payload: te.encode('ok refs/heads/main\n') }, { kind: 'flush' }] },
+    sideband: { sideband: true, frames: [{ kind: 'data', payload: concat([Uint8Array.of(2), te.encode('hook\n')]) }, { kind: 'data', payload: concat([Uint8Array.of(1), inner]) }, { kind: 'data', payload: Uint8Array.of(1) }, { kind: 'flush' }] },
+  };
+  for (const [name, { sideband, frames }] of Object.entries(shapes)) {
+    const run = fs => { let st = streamInit(sideband); for (const f of fs) st = streamStep(st, f); return streamFinish(st); };
+    assert.equal(run(frames).tag, 'report', name);
+    assert.equal(run(frames).lines.length, 2, name);
+    for (let i = 0; i < frames.length; i++) assert.equal(run(frames.slice(0, i)).tag, 'broken', `${name}: ${i} frames`);
+    if (sideband) for (let j = 1; j < inner.length; j++) assert.equal(run([frames[0], { kind: 'data', payload: concat([Uint8Array.of(1), inner.subarray(0, j)]) }, { kind: 'flush' }]).tag, 'broken', `band 1 cut at ${j}`);
+  }
 });
 
 property('kex', 'a KEXINIT prefix throws ssh until the reserved tail', () => {

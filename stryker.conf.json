@@ -2,7 +2,7 @@
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "testRunner": "command",
   "commandRunner": {
-    "command": "PROP_N=4 node --test --test-concurrency=1 test/props.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js"
+    "command": "PROP_N=4 node --test --test-concurrency=1 test/props.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js && PUSH_SPACE=quick PUSH_SPACE_WORKERS=1 node --test --test-name-pattern='every cell|unpack failure strings' test/space/push-outcome.test.js"
   },
   "coverageAnalysis": "off",
   "mutate": ["src/**/*.js"],

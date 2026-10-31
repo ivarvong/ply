@@ -22,6 +22,7 @@ export const CODE_DOCS = Object.freeze({
   lfs_pointer: { where: 'content', what: 'the blob is a Git LFS pointer (pass allowLfsPointer to edit it)' },
   cas_conflict: { where: 'remote', what: 'the ref moved under us (receive-pack compare-and-swap lost)' },
   push_rejected: { where: 'remote', what: 'a hook or policy refused the push; see hookOutput / remote messages' },
+  push_partial: { where: 'remote', what: 'a non-atomic multi-ref push was partly applied: `landed` lists the refs updated, `rejected` the refs refused with their reasons' },
   merge_conflict: { where: 'content', what: 'both sides changed a path; `conflicts` lists them' },
   not_fast_forward: { where: 'content', what: 'fastForwardOnly was requested and a merge commit would be needed' },
   unrelated_histories: { where: 'content', what: 'no common ancestor within the search depth' },

@@ -16,7 +16,7 @@ export { lsRefsBody, lsRefs } from './lsrefs.js';
 export { fetchBody, v2Init, v2Step, v2Attrs, packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 export { fetchPack, packAttrs } from './fetchpack.js';
 export { negotiate } from './negotiate.js';
-export { ZERO_OID, pushBody, parseReportStatus, checkReport, push } from './push.js';
+export { ZERO_OID, pushBody, parseReportStatus, classifyReport, decideOutcome, push } from './push.js';
 export { receiveCaps, pushWithOptions } from './receivecaps.js';
 export { discover } from './discover.js';
 

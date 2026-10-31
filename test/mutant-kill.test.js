@@ -17,7 +17,7 @@ import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '.
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
-import { parseReportStatus, checkReport, push, ZERO_OID } from '../src/push.js';
+import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
@@ -1206,9 +1206,9 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(() => negotiate({}, { wants: [oid(1)], haves: [oid(2)], batch: 0 }), e => e.code === 'bad_request' && e.what === 'negotiateBatch');
 
   const commands = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
-  const mixed = { unpack: 'ok', refs: [{ ref: 'refs/heads/a', ok: true, reason: '' }, { ref: 'refs/heads/b', ok: false, reason: 'failed to lock' }] };
-  assert.equal(checkReport(mixed, commands, { atomic: true }), 'atomic push split: some refs ok, some ng');
-  assert.equal(checkReport(mixed, commands), null);
+  const mixed = classifyReport(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'].map(l => te.encode(l)), commands);
+  assert.deepEqual(decideOutcome(mixed, { atomic: true }), { tag: 'ambiguous', why: 'atomic push split: some refs ok, some ng' });
+  assert.deepEqual(decideOutcome(mixed), { tag: 'partial', landed: ['refs/heads/a'], rejected: [{ ref: 'refs/heads/b', reason: 'failed to lock' }] });
 
   const refLine = `${oid(4)} refs/heads/main\n`;
   const framesOf = list => ({
@@ -1227,14 +1227,14 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const reportLines = ['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'];
   const receipt = () => ({
     limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; },
+    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; yield { kind: 'flush' }; },
   });
   const deletes = [
     { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID },
     { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
   ];
   await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: true }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'cas_conflict');
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
   await assert.rejects(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false }), e => e.code === 'bad_request' && e.what === 'ref');
   await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, pushOptions: ['a\nb'] }), e => e.code === 'bad_request' && e.what === 'push option');
   await assert.rejects(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push commands');
@@ -1322,4 +1322,60 @@ test('size varints stop at 64 bits: a header that never ends is pack_corrupt at 
   throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
   throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+});
+
+test('push outcome (SAFETY.md I35): the exact report shapes, the decision, and the fields the enumerator does not compare', async () => {
+  const two = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
+  const cls = (lines, commands = two) => classifyReport(lines.map(l => (typeof l === 'string' ? te.encode(l) : l)), commands);
+  const why = (lines, commands) => cls(lines, commands).why;
+  assert.equal(why([Uint8Array.of(0xff)]), 'a line is not UTF-8');
+  assert.equal(why([data('ok refs/heads/', Uint8Array.of(0xff), '\n')], [{ ref: 'refs/heads/\ufffd' }]), 'a line is not UTF-8', 'a byte that is not UTF-8 never matches a ref named with U+FFFD');
+  assert.equal(why(['unpack ok']), 'a line is not one LF-terminated line');
+  assert.equal(why(['unpack ok\nx\n']), 'a line is not one LF-terminated line');
+  for (const l of [[], ['unpack ok*\n'], ['ok refs/heads/a\n']]) assert.equal(why(l), 'no git unpack line first');
+  assert.equal(why(['unpack ok\n', 'nf refs/heads/a hook declined\n', 'ok refs/heads/b\n']), 'a line is not a ref status');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/zz\n', 'ok refs/heads/b\n']), 'status for a ref not commanded');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/a\n']), 'two statuses for refs/heads/a');
+  for (const r of ['', 'hook\x01declined', '\x01x', 'x\x01', 'caf\u00e9']) assert.equal(why(['unpack ok\n', `ng refs/heads/a ${r}\n`, 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a', JSON.stringify(r));
+  assert.equal(why(['unpack ok\n', 'ng refs/heads/a\n', 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n']), 'no status for refs/heads/b');
+  assert.equal(why(['unpack index-pack abnormal exit\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), 'unpack failed, a ref is not "unpacker error"');
+  assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), '"unpacker error" beside "unpack ok"');
+  for (const status of GIT_UNPACK_ERRORS) assert.deepEqual(cls([`unpack ${status}\n`, 'ng refs/heads/a unpacker error\n', 'ng refs/heads/b unpacker error\n']), { tag: 'unpackFailed', status });
+  assert.equal(GIT_UNPACK_ERRORS.length, 8);
+  assert.deepEqual(cls(['unpack ok\n', 'ng refs/heads/b hook declined\n', 'ok refs/heads/a\n']), { tag: 'statuses', refs: [{ ref: 'refs/heads/b', ok: false, reason: 'hook declined' }, { ref: 'refs/heads/a', ok: true, reason: '' }] });
+
+  const failed = { tag: 'unpackFailed', status: 'index-pack abnormal exit' };
+  assert.deepEqual(decideOutcome(failed), { tag: 'rejected', code: 'push_rejected' });
+  assert.deepEqual(decideOutcome(failed, { pack: false }), { tag: 'ambiguous', why: 'unpack failed but no pack was sent' });
+  assert.deepEqual(decideOutcome({ tag: 'malformed', why: 'w' }), { tag: 'ambiguous', why: 'w' });
+  assert.deepEqual(decideOutcome({ tag: 'weird' }), { tag: 'ambiguous', why: 'report shape weird' });
+  const ngs = (...reasons) => ({ unpack: 'ok', refs: reasons.map(reason => ({ ok: false, reason })) });
+  assert.equal(rejectionCode(ngs('failed to update ref')), 'cas_conflict');
+  for (const r of ['xfailed to update ref', 'failed to update refs', 'a bad ref', 'bad refs']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
+  assert.equal(rejectionCode({ unpack: 'unpack-objects abnormal exit', refs: [{ ok: false, reason: 'failed to update ref' }] }), 'push_rejected');
+  assert.equal(rejectionCode({ unpack: 'ok', refs: [{ ok: true }, { ok: false, reason: 'stale ref' }] }), 'cas_conflict');
+
+  // band 2 is kept as a 4096-character tail, counted per frame
+  let st = streamInit(true);
+  assert.equal(st.band2, '');
+  for (const n of [3000, 2000]) st = streamStep(st, { kind: 'data', payload: data(Uint8Array.of(2), 'x'.repeat(n - 1) + 'y') });
+  assert.equal(st.band2.length, 4096); assert.ok(st.band2.endsWith('xy')); assert.equal(st.band2Frames, 2);
+
+  // through push(): the error a caller sees
+  const sb = (...frames) => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null, async *frames() { for (const f of frames) yield f === null ? { kind: 'flush' } : { kind: 'data', payload: f }; } });
+  const band = (b, ...parts) => data(Uint8Array.of(b), ...parts);
+  const report = (...lines) => band(1, ...lines.map(l => pkt(l)), FLUSH);
+  const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
+  await assert.rejects(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
+  await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report.unpack === 'ok*');
+  await assert.rejects(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
+  await assert.rejects(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
+  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  await assert.rejects(push(many, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
+  const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
+  await assert.rejects(push(big, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
+  const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes
+  const ok = await push(fits, del);
+  assert.equal(ok.report.ok, true); assert.equal(ok.hookOutput, '');
 });

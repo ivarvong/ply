@@ -221,7 +221,9 @@ test('error taxonomy: runtime table and documentation agree; fail refuses unknow
   assert.throws(() => fail('not_a_code', 'x'), /unknown error code/);
   assert.equal(retryPolicy(fail('cas_conflict', 'x')), 'fresh'); assert.equal(retryPolicy(fail('ambiguous', 'x')), 'read'); assert.equal(retryPolicy({ code: 'nope' }), 'no');
   assert.equal(ambiguousAfterPush(fail('network', 'dropped')).code, 'ambiguous'); assert.equal(ambiguousAfterPush(fail('network', 'dropped')).original, 'network');
-  assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).code, 'limit_exceeded', 'our own pre-send refusals keep their code');
+  // a limit hit while reading the report is after the send: the ref may have moved (pre-send refusals never reach it)
+  assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).code, 'ambiguous'); assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).original, 'limit_exceeded');
+  const amb = fail('ambiguous', 'y'); assert.equal(ambiguousAfterPush(amb), amb);
 });
 
 test('error taxonomy: every fail(\'code\') literal in src/ is in the table (static)', async () => {
