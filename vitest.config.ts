@@ -51,7 +51,7 @@ export default defineConfig({
     // in its own options ({ timeout }), exactly as before. 0 disables vitest's 5 s / 10 s defaults.
     testTimeout: 0,
     hookTimeout: 0,
-    // One file per child process, files in parallel (node --test's model). The tests spawn git, sshd, http servers and
+    // One file per child process, files in parallel (node --test's model). The tests spawn git, http servers and
     // worker_threads that load src/*.ts under node's type stripping; `forks` measured faster than `threads` here
     // (scripts/to-vitest.mjs header, PR body) and keeps process-global state (process.on('exit'), env) per file.
     pool: 'forks',
