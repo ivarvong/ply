@@ -194,4 +194,3 @@ export function validateMessage(message) {
   return message;
 }
 
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

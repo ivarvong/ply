@@ -283,4 +283,3 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     return { oldOid: blobOid, newOid, delta, baseLen: sp.size, newLen, matchOffset: scan.matches[0], scan, inflated };
   });
 }
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

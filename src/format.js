@@ -245,4 +245,3 @@ export const zlibBound = size => size + Math.ceil(size / ZLIB_BOUND_LITERAL_DIV)
 
 /** `2 ** shift` for a size-varint group. Defined once so the base is not recopied at each call site. */
 export const varintScale = shift => 2 ** shift;
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

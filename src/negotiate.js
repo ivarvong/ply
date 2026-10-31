@@ -26,4 +26,3 @@ export async function negotiate(t, { wants, haves = [], batch = NEGOTIATE_BATCH,
   const r = await fetchPack(t, { ...opts, wants, haves: [...acked], done: true }, { external, resolve });
   return { ...r, rounds, common: [...acked] };
 }
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

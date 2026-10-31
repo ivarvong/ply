@@ -340,4 +340,3 @@ export async function mergeBranch(url, { ref = 'refs/heads/main', from, author, 
     return outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees: merged.objects.filter(o => o.type === TYPE.TREE).length, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes });
   });
 }
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

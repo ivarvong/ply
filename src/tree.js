@@ -219,4 +219,3 @@ const summarize = ({ s, parent, oldTree, hint, attempt, newCommit = parent, sel 
   pushBytes: pushed?.packBytes ?? 0, treesRead,
   objects: { files: s.files, trees: s.built.trees.size, sent: pushed?.entries.length ?? 0, sentTrees: sel?.trees.length ?? 0, sentBlobs: sel?.blobs.length ?? 0, treeDeltas: sel?.deltas ?? 0 },
 });
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

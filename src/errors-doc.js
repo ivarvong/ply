@@ -30,4 +30,3 @@ export const CODE_DOCS = Object.freeze({
   ambiguous: { where: 'remote', what: 'the push was sent and may have been applied, but no trustworthy confirmation was obtained' },
   internal: { where: 'local', what: 'an invariant of this library failed; please report' },
 });
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

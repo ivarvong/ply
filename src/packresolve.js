@@ -272,4 +272,3 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
   return { objects: resolved, stats };
 }
 
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

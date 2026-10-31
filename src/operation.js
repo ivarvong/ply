@@ -43,4 +43,3 @@ export async function verifyRef(t, root, prefix, ref, expected) {
   if (seen !== expected) throw fail('ambiguous', `push reported ok but ${ref} is ${seen ?? 'absent'}, not ${expected}`, { seen: seen ?? null, expected });
   return seen;
 }
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

@@ -368,4 +368,3 @@ export function encodeTag({ object, type, tag, tagger, message = null, extra = [
   ];
   return encodeBytes(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message), 'tag');
 }
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)

@@ -93,4 +93,3 @@ export async function buildPack(objects) {
 
 // General-purpose parsing/resolution, kept out of this module so bundles of the edit path do not carry it.
 export { parsePack, applyDelta, makeDelta, resolvePack, readObjHeader, readOfsDelta, readUint32BE, packParseOpts } from './packresolve.js';
-// ci/fast probe 2: whole-file mutation of every src file (reverted in the next commit)
