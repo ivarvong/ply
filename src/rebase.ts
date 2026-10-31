@@ -162,7 +162,7 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
     const last = chain.at(-1);
     if (squash && first && last) {
       const r = await transplant(t, cache, { base: commits.get(base)?.tree, ours: targetTree, theirs: last.tree }, { parent: target, author: authorPerson ? ident(authorPerson) : first.author, committer: who, message: message ?? `${chain.map(c => (c.message ?? '').replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n`, extra: [] }, signer, out);
-      if (r.conflicts) throw fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
+      if (r.conflicts) throw fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons } as ConflictDetail);
       objects.push(...r.objects); cur = r.oid; replayed.push({ from: last.oid, to: r.oid, tree: r.treeOid });
     } else {
       for (const c of chain) {
@@ -217,7 +217,7 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
     const r = await transplant(t, cache,
       revert ? { base: c.tree, ours: tInfo.tree, theirs: p.tree } : { base: p.tree, ours: tInfo.tree, theirs: c.tree },
       { parent: target, author: revert ? who : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
-    if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts });
+    if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons } as ConflictDetail);
     if (r.treeOid === tInfo.tree) return outcome('empty', { outcome: 'empty', ref, oid: target });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: r.oid, objects: uniqueObjects(r.objects) });

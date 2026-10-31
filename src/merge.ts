@@ -259,6 +259,8 @@ async function addedPaths(read: ReadTree, base: string | null | undefined, side:
   return out;
 }
 
+// a path list as one comparable value (paths hold no NUL)
+const pathSet = (l: readonly string[]): string => [...l].toSorted().join('\0');
 export type DriverFor = (path: string) => Promise<Driver>;
 // Why a path conflicts. The text is the reason a caller reads in merge_conflict's `reasons`.
 export type ContentReason =
@@ -350,20 +352,28 @@ export async function mergeTrees(t: Transport, cache: TreeCache, { base, ours, t
     if (sub.oid !== null) entries.push({ mode: '40000', name, oid: sub.oid }); // an empty merged subtree drops the directory, as git does
   }
   if (top) for (const p of out.dirAdds) if (!(p in out.reasons)) conflict(p, 'possible directory rename (added inside a directory the other side removed)');
+  const data: Uint8Array = encodeTree(entries);
+  const oid: string = hashObject('tree', data);
   // deletedOne is set only beside a conflict
   if (top && (out.deletedBoth.length > 0 || out.deletedOne === true)) {
     // Every path either side added, across the whole tree — the walk above skips directories only one side changed, and a
     // rename target can be anywhere. Fetched only when a deletion is in play.
-    const added = [...new Set([...await addedPaths(read, base, ours), ...await addedPaths(read, base, theirs)])];
-    if (added.length > 0) for (const p of out.deletedBoth) conflict(p, 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)');
+    const addedOurs = await addedPaths(read, base, ours);
+    const addedTheirs = await addedPaths(read, base, theirs);
+    const added = [...new Set([...addedOurs, ...addedTheirs])];
+    // G1 stands down when the rename is already applied (#103): the rename-blind merge is ours' tree (every change theirs
+    // made is in ours) and both sides added and deleted exactly the same paths, so git pairs the same renames on both
+    // sides and finds nothing to conflict (a cherry-pick of it is empty). An add or delete on ours alone could let git
+    // pair a different source or target there (rename/rename, rename/delete), so the guard stays.
+    const sameChanges = async (): Promise<boolean> => pathSet(addedOurs) === pathSet(addedTheirs) && pathSet(await addedPaths(read, ours, base)) === pathSet(await addedPaths(read, theirs, base));
+    const applied = out.conflicts.length === 0 && oid === ours && await sameChanges();
+    if (added.length > 0 && !applied) for (const p of out.deletedBoth) conflict(p, 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)');
     // Naming: git reports a rename's conflict at the rename target (rename/delete, rename/rename, or a content conflict
     // after following a rename onto a modify/delete). When this merge conflicts with a deletion in play, every added path
     // is a possible target, so it is listed too. This adds names to a conflicting merge; it never makes one conflict.
     if (out.conflicts.length > 0) for (const p of added) if (!(p in out.reasons)) conflict(p, 'possible rename target (added while the merge has a deletion conflict)');
   }
   if (out.conflicts.length > 0 || entries.length === 0) return { oid: null, ...out };
-  const data: Uint8Array = encodeTree(entries);
-  const oid: string = hashObject('tree', data);
   if (oid !== ours && oid !== theirs && oid !== base) out.objects.push({ type: TYPE.TREE, data, oid });
   cache.set(oid, data);
   return { oid, ...out };
