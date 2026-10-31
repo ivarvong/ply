@@ -28,6 +28,9 @@ const run = (cmd, args, env) => new Promise(res => {
 });
 
 // The forced command: one outcome per repository name, the real service for the rest.
+// emptyAdvertisement drains stdin before it exits, as a real service reads its client's commands. Exiting right after
+// the flush races git's push against ssh's exit: git's write lands in ssh's still-open stdin pipe (ok), meets the closed
+// pipe (EPIPE, refused) or dies of SIGPIPE (exit 141) by whichever runs first, and all three showed up on CI (#83).
 const FORCED = `#!/bin/sh
 cmd="$SSH_ORIGINAL_COMMAND"
 case "$cmd" in
@@ -35,7 +38,7 @@ case "$cmd" in
   *"/hostNotFound.git'") echo "ERROR: Repository not found." >&2; exit 1 ;;
   *"/hostDenied.git'") echo "ERROR: Permission to o/r.git denied to u." >&2; exit 1 ;;
   *"/silent.git'") exit 1 ;;
-  *"/emptyAdvertisement.git'") printf 0000; exit 0 ;;
+  *"/emptyAdvertisement.git'") printf 0000; cat >/dev/null; exit 0 ;;
   *"/warning.git'") echo "warning: this host is in maintenance" >&2; exec /bin/sh -c "$cmd" ;;
   *) exec /bin/sh -c "$cmd" ;;
 esac

@@ -749,12 +749,15 @@ honours and ply refuses (`unsupported`): ply sessions are one operation, under O
 **ssh-service** (`test/space/ssh-service.space.js`, enumerator `test/space/ssh-service.test.js`). Axes: service
 {upload-pack, receive-pack} × outcome {exists, missing, notRepo, unreadable, absent (no git on PATH), hostNotFound
 ("ERROR: Repository not found."), hostDenied ("ERROR: Permission to o/r.git denied to u."), silent (exit 1), warning,
-emptyAdvertisement}: **20 cells**, a real sshd whose forced command produces each outcome. git types none of them
+emptyAdvertisement (a lone flush, then the command drains stdin and exits 0)}: **20 cells**, a real sshd whose forced command produces each outcome. git types none of them
 (it prints the server's line and "fatal: Could not read from remote repository."); ply types them from the line as
 HTTP types a status (`refusalCode`): missing → `not_found`, denied → `auth`, anything else → `remote_error`, with the
 exit status and the server's line in the message, and the test checks git's stderr and ply's message carry the same
-line. One divergence: `uploadPack/emptyAdvertisement`, git's v0 empty-repository advertisement, which git lists as
-nothing and ply refuses (`unsupported`: ply speaks only v2 over ssh).
+line. Two divergences, both the lone flush: `uploadPack/emptyAdvertisement`, git's v0 empty-repository
+advertisement, which git lists as nothing and ply refuses (`unsupported`: ply speaks only v2 over ssh); and
+`receivePack/emptyAdvertisement`, where git pushes blind (no report-status, so "[new branch]" and exit 0 for an update
+nobody confirmed) and ply refuses (`protocol`). The forced command drains stdin before it exits: exiting right after
+the flush made git's push race ssh's exit (ok, refused, or killed by SIGPIPE; #83).
 
 **Where train/1 (77eb2c0) disagreed with the tables**: 29 of 107 fault cells and 15 of 20 service cells.
 

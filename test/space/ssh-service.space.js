@@ -21,7 +21,7 @@ export const OUTCOME = { name: 'outcome', doc: 'what the host does with the comm
   { tag: 'hostDenied', why: 'a hosting forced command refusing a repository the key may not use: "ERROR: Permission to o/r.git denied to u." (GitHub\'s text)' },
   { tag: 'silent', why: 'a forced command that exits 1 and says nothing' },
   { tag: 'warning', why: 'a forced command that writes a warning to stderr, then runs the service' },
-  { tag: 'emptyAdvertisement', why: 'stdout is a lone flush-pkt "0000", exit 0: git\'s v0 advertisement of an empty repository with no capability line' },
+  { tag: 'emptyAdvertisement', why: 'stdout is a lone flush-pkt "0000", then the command reads its stdin to the end and exits 0: git\'s v0 advertisement of an empty repository with no capability line, from a server that takes whatever the client sends' },
 ] };
 
 export const AXES = [SERVICE, OUTCOME];
@@ -35,6 +35,7 @@ export const serverLine = (c, path) => ({
 }[c.outcome.tag] ?? null);
 
 export const DIVERGENCE = {
+  'receivePack/emptyAdvertisement': 'git reads a lone flush as an empty repository with no capabilities and pushes blind: without report-status it never learns whether the server took the update, prints "[new branch]" and exits 0 when the transport does. ply refuses an advertisement with no capability line (`protocol`): it will not send a pack it cannot confirm',
   'uploadPack/emptyAdvertisement': 'git reads a lone flush as a v0 advertisement of an empty repository and lists nothing (exit 0). ply speaks only protocol v2 over ssh and refuses a server that answered in v0 (`unsupported`), as it does for a server without AcceptEnv GIT_PROTOCOL',
 };
 
