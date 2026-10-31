@@ -256,6 +256,7 @@ export function spStep(st: SpState, chunk: Uint8Array): { readonly state: SpStat
     data = head.subarray(p);
   }
   // body: pass through with the trailer withheld
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: equivalent: concat([empty lag, data]) is a copy of data, byte for byte
   const all = s.lag.length > 0 ? concat([s.lag, data]) : data;
   const emitLen = Math.max(0, all.length - PACK_TRAILER_BYTES);
   const emit = all.subarray(0, emitLen);
