@@ -1,7 +1,7 @@
 // The ported xdiff merge, judged by git (`git merge-tree --write-tree`) on hand-built edge cases. The random campaign is
 // test/fuzz/linemerge.mjs; this file pins the boundaries: the histogram hash-chain limit (64 clean, 65 → git fails),
 // binary sniffing, the size cap, CRLF, a last line without '\n', and identical changes on both sides.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';

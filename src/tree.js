@@ -19,7 +19,7 @@ import { makeDelta } from './packresolve.js';
 import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
-import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { decideHead } from './edit.js';
 import { signCommit } from './sign.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, DELTA_SIZE_MIN } from './format.js';
@@ -122,7 +122,7 @@ export function selectObjects(built, { have = new Set(), old = new Map() } = {})
 // parent (default `ref`); base ≠ ref creates `ref` (zero old oid). base = ref and the ref absent: the first commit of a
 // new ref, no parent, zero old oid — a deploy's first push.
 export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, author, message, time = Math.floor(Date.now() / 1000) }, limits, head = null) {
-  validateRef(ref); validateRef(base);
+  validatePushRef(ref, false); validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');

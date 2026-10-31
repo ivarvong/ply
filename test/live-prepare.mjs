@@ -8,7 +8,7 @@ import { spliceDelta, buildPack } from '../src/pack.js';
 import { Sha1, fromHex } from '../src/sha1.js';
 import { te } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits } from '../src/limits.ts';
+import { withLimits } from '../src/limits.js';
 import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish } from '../src/edit.js';
 
 export async function prepare({ url, ref = 'refs/heads/main', path, find, replace, author = { name: 'ply', email: 'ply@edge' }, message = 'ply edit', auth, fetchImpl, head: hint = null }) {

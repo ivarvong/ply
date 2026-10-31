@@ -10,11 +10,11 @@
 //   I6c A 3xx is never followed: no request (and no Authorization) reaches another origin.
 //   I6d URL userinfo is the Basic credential git sends for that URL, byte for byte, and reaches no error, span or URL.
 //   I6e Every credential cell (source × user × password × transport) has one stated outcome, git's where git has the input.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
+import { git, gitBuf, gitAsync, gitWithCred, gitUserinfoCred, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
@@ -31,7 +31,7 @@ import { lsRefs } from '../src/lsrefs.js';
 import { fetchObject } from '../src/fetch.js';
 import { fetchPack, fetchPackTree0 } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits, DEFAULT_LIMITS } from '../src/limits.ts';
+import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1 } from '../src/sha1.js';
@@ -447,11 +447,14 @@ test('I6d URL userinfo authenticates fetch and push with the Authorization git s
     for (const [name, ui, secrets] of USERINFO) {
       const repo = freshRepo();
       const url = `http://${ui}${new URL(gate.url).host}/${repo.name}.git`;
-      // git: ls-remote and push through the gate; its credentialed requests carry one Authorization value
+      // git: the userinfo decoded by git, then ls-remote and push through the gate; its credentialed requests carry
+      // one Authorization value
+      const { cred, config, refused } = await gitUserinfoCred(repo.work, url);
+      assert.equal(refused, undefined, `${name}: git credential fill: ${refused}`);
       gate.seen.length = 0;
-      const ls = await gitAsync(repo.work, ['ls-remote', url]);
+      const ls = await gitWithCred(repo.work, ['ls-remote', `${gate.url}/${repo.name}.git`], cred, config);
       assert.equal(ls.status, 0, `${name}: git ls-remote: ${ls.stderr}`);
-      const push = await gitAsync(repo.work, ['push', '-q', url, 'HEAD:refs/heads/by-git']);
+      const push = await gitWithCred(repo.work, ['push', '-q', `${gate.url}/${repo.name}.git`, 'HEAD:refs/heads/by-git'], cred, config);
       assert.equal(push.status, 0, `${name}: git push: ${push.stderr}`);
       const gitAuth = [...new Set(gate.seen.map(r => r.authorization).filter(Boolean))];
       assert.equal(gitAuth.length, 1, `${name}: git sent ${JSON.stringify(gitAuth)}`);
@@ -573,18 +576,24 @@ const authFor = (source, user, pass) => {
   if (source === 'header') return { header: user === undefined && pass === undefined ? '' : basicOf(user ?? '', pass ?? '') };
   return undefined;
 };
-// git with the same input: the Authorization values it sent (null for none) and its exit status.
+// git with the same input: the Authorization values it sent (null for none) and its exit status. No credential is in
+// the URL git dials (see gitWithCred): URL userinfo is decoded by git (`git credential fill`) and handed to its helper;
+// explicit fields are the helper's `username=`/`password=`; an explicit header is `http.extraHeader`.
 async function gitHttpOracle(gate, work, source, user, pass, repoPath) {
-  const host = new URL(gate.url).host;
-  let args, env = {};
-  if (source === 'url') args = ['ls-remote', `http://${userinfoOf(user, pass)}${host}${repoPath}`];
-  else if (source === 'fields') {
+  const plain = `${gate.url}${repoPath}`;
+  let cred = null; const config = [];
+  if (source === 'url') {
+    if (userinfoOf(user, pass)) {
+      const d = await gitUserinfoCred(work, `http://${userinfoOf(user, pass)}${new URL(gate.url).host}${repoPath}`);
+      if (d.refused) return { status: null, sent: [], stderr: d.refused };
+      cred = d.cred; config.push(...d.config);
+    }
+  } else if (source === 'fields') {
     const u = user ?? (pass ? 'x-access-token' : undefined); // ply's documented default user
-    if (u !== undefined) env.PLY_U = u; if (pass !== undefined) env.PLY_P = pass;
-    args = ['-c', `credential.helper=!f() { [ "$1" = get ] || exit 0; [ -n "\${PLY_U+x}" ] && printf 'username=%s\\n' "$PLY_U"; [ -n "\${PLY_P+x}" ] && printf 'password=%s\\n' "$PLY_P"; true; }; f`, 'ls-remote', `http://${host}${repoPath}`];
-  } else args = ['-c', `http.extraHeader=Authorization: ${authFor('header', user, pass).header}`, 'ls-remote', `http://${host}${repoPath}`];
+    cred = Buffer.from(`${u === undefined ? '' : `username=${u}\n`}${pass === undefined ? '' : `password=${pass}\n`}`, 'utf8');
+  } else config.push(['http.extraHeader', `Authorization: ${authFor('header', user, pass).header}`]);
   gate.seen.length = 0;
-  const r = await gitAsync(work, args, env);
+  const r = await gitWithCred(work, ['ls-remote', plain], cred, config);
   return { status: r.status, sent: [...new Set(gate.seen.map(x => x.authorization).filter(Boolean))], stderr: r.stderr };
 }
 
@@ -681,6 +690,7 @@ test('I6e the credential product: every source × user × password × transport 
         const g = await gitHttpOracle(accept, repo.work, source, user, pass, repoPath);
         if (want.header) { assert.equal(g.status, 0, `${cell}: git: ${g.stderr}`); assert.deepEqual(g.sent, [want.header], `${cell}: git's Authorization`); }
         else assert.deepEqual(g.sent, [], `${cell}: git sent ${JSON.stringify(g.sent)} where ply sends nothing`);
+        if (want.refused && source === 'url') assert.match(g.stderr, /credential url cannot be parsed/, `${cell}: git refuses the userinfo: ${g.stderr}`);
         tally.oracle++;
       }
       // 3. a refusing server that echoes the credential: `auth`, and the echo is scrubbed everywhere
@@ -795,7 +805,7 @@ test('#18 merge base over a cut graph: a server that withholds ancestors without
   for (const [name, lie] of Object.entries(lies)) {
     const R = cutHistoryRepo();
     const r = await mergeVia(R, walkLie(lie(R)));
-    t.diagnostic(`${name}: ${r.error ? r.error.code : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
+    console.log(`${name}: ${r.error ? r.error.code : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
     const ok = r.error?.code === 'pack_corrupt' && /withheld and [0-9a-f]{40} not reported shallow/.test(r.error.message) && r.main === R.M && !r.counts['receive-pack'];
     if (!ok) wrong.push(`${name}: ${r.result ? `${r.result.outcome} with base ${r.result.base} (git: X ${R.X}; P ${R.P}), main:g=${JSON.stringify(gitBuf(R.bare, ['cat-file', 'blob', 'main:g']).toString())}` : `${r.error.code}: ${r.error.message}`}; requests ${JSON.stringify(r.counts)}`);
     // rebase walks the same way: a linear branch y10 ← … ← X onto main fails closed the same, the branch untouched
@@ -818,7 +828,7 @@ test('#18 the walk\'s pack holds only what was asked for, well-formed: an extra 
   for (const [name, lie] of Object.entries(cases)) {
     const R = cutHistoryRepo();
     const r = await mergeVia(R, walkLie(lie(R)));
-    t.diagnostic(`${name}: ${r.error ? `${r.error.code} (${r.error.message})` : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
+    console.log(`${name}: ${r.error ? `${r.error.code} (${r.error.message})` : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
     if (r.error?.code !== 'pack_corrupt' || r.main !== R.M || r.counts['receive-pack']) wrong.push(`${name}: ${r.result ? `${r.result.outcome} (base ${r.result.base})` : `${r.error.code}: ${r.error.message}`}; requests ${JSON.stringify(r.counts)}`);
   }
   assert.deepEqual(wrong, []);

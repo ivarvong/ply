@@ -1,5 +1,5 @@
 // Real-git oracles for the codec layer: our bytes vs git's bytes, our parse vs git's pack writer.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';

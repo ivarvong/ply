@@ -16,7 +16,7 @@ import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validateIdent, validateMessage } from './validate.js';
+import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
@@ -122,7 +122,7 @@ export type RebaseOutcome =
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 /* oxlint-disable eslint/complexity -- one operation's steps in order; the A6 pass makes the replay a RebaseState machine */
 export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time = Math.floor(Date.now() / 1000), squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
-  validateAttributes(attributes); validateRef(ref); validateRef(onto);
+  validateAttributes(attributes); validatePushRef(ref, false); validateRef(onto);
   const committerPerson: object = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
   const authorPerson: object | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== null) validateMessage(message);
@@ -196,7 +196,7 @@ export type PickOutcome =
 
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
 export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, time = Math.floor(Date.now() / 1000), revert = false, message = null }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
-  validateAttributes(attributes); validateRef(ref);
+  validateAttributes(attributes); validatePushRef(ref, false);
   const committerPerson: object = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
   if (message !== null) validateMessage(message);
   if (!/^[0-9a-f]{40}$/u.test(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');

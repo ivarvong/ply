@@ -23,7 +23,7 @@ import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validateIdent, validateMessage } from './validate.js';
+import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
@@ -464,7 +464,7 @@ export type MergeOutcome =
 
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
 export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
-  validateRef(ref); validateRef(from);
+  validatePushRef(ref, false); validateRef(from);
   const person: object | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== undefined && message !== null) validateMessage(message); validateAttributes(attributes);
   return runOp('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {

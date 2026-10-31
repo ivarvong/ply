@@ -1,7 +1,7 @@
 // Rebase / squash / cherry-pick / revert, decided by git: per-commit trees equal `git rebase` in a clone, authors and
 // messages preserved, committer ours; cherry-pick and revert trees equal `git cherry-pick` / `git revert`; conflicts where
 // git conflicts; the branch update is a CAS on the old tip.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';

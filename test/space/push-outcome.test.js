@@ -45,10 +45,11 @@ async function runShard(k, w) {
 if (!isMainThread) {
   runShard(workerData.k, workerData.w).then(r => parentPort.postMessage(r));
 } else {
-  const { test } = await import('node:test');
+  const { test } = await import('vitest');
   const assert = (await import('node:assert/strict')).default;
 
-  test('every tag of every axis has a meaning and a renderer (the match is exhaustive)', () => {
+  // MUTATION=1 (vitest.stryker.config.ts): the two tests that are not about src/ are left out of the mutation run.
+  test('every tag of every axis has a meaning and a renderer (the match is exhaustive)', { skip: !!process.env.MUTATION }, () => {
     for (const a of space.AXES) {
       const tags = space.TAGS[a.name];
       assert.deepEqual(Object.keys(space.MEANING[a.name]).sort(), [...tags].sort(), `MEANING.${a.name} covers exactly its tags`);
@@ -65,7 +66,7 @@ if (!isMainThread) {
     assert.deepEqual([...GIT_UNPACK_ERRORS], space.GIT_UNPACK_ERRORS);
   });
 
-  test('cells observed from git: git\'s bytes are the cell\'s rendering, ply\'s outcome is the table\'s, the server agrees', { timeout: 300_000 }, async () => {
+  test('cells observed from git: git\'s bytes are the cell\'s rendering, ply\'s outcome is the table\'s, the server agrees', { timeout: 300_000, skip: !!process.env.MUTATION }, async () => {
     const { observeAll } = await import('./push-outcome.observed.js');
     const obs = await observeAll();
     const ids = new Set();
@@ -84,9 +85,11 @@ if (!isMainThread) {
   });
 
   test('push outcome: every cell of the space through push(), against the table', { timeout: 600_000 }, async () => {
+    // PUSH_SPACE_WORKERS=0: every cell on this thread (the mutation run: Stryker's per-test coverage is recorded by the
+    // test process's main thread, so code reached only in a worker would count as uncovered).
     const w = +(process.env.PUSH_SPACE_WORKERS ?? Math.min(4, availableParallelism()));
     const t0 = performance.now();
-    const shards = await Promise.all(Array.from({ length: w }, (_, k) => new Promise((resolve, reject) => {
+    const shards = w === 0 ? [await runShard(0, 1)] : await Promise.all(Array.from({ length: w }, (_, k) => new Promise((resolve, reject) => {
       const wk = new Worker(new URL(import.meta.url), { workerData: { k, w } });
       wk.once('message', resolve); wk.once('error', reject);
     })));

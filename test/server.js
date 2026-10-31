@@ -1,7 +1,7 @@
 // Real git as the oracle: `git http-backend` behind a tiny Node HTTP→CGI shim.
 import http from 'node:http';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -120,15 +120,63 @@ export function startAuthGate(upstreamUrl, accept = () => true) {
 }
 
 // git itself, asynchronously (the gate runs in this process): no config, no credential helper, no prompt.
-// `extraEnv` reaches git and what it runs (a credential helper's values, GIT_SSH_COMMAND).
-export function gitAsync(cwd, args, extraEnv = {}) {
-  const env = { PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', ...extraEnv };
+// `extraEnv` reaches git and what it runs (GIT_SSH_COMMAND, a credential helper's file). `config` ([key, value]
+// pairs) reaches git through GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n after the defaults, never argv,
+// so a credential under test is in no process listing (a later `credential.helper=` would reset an earlier helper,
+// and env config is read before `-c`). `input` is written to stdin; `out` is stdout as raw bytes.
+export function gitAsync(cwd, args, extraEnv = {}, { config = [], input } = {}) {
+  const cfg = [['credential.helper', ''], ['user.name', 'g'], ['user.email', 'g@x'], ...config];
+  const env = {
+    PATH: process.env.PATH, HOME: cwd, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_COUNT: String(cfg.length), ...Object.fromEntries(cfg.flatMap(([k, v], i) => [[`GIT_CONFIG_KEY_${i}`, k], [`GIT_CONFIG_VALUE_${i}`, v]])),
+    ...extraEnv,
+  };
   return new Promise(resolve => {
-    const c = spawn('git', ['-c', 'credential.helper=', '-c', 'user.name=g', '-c', 'user.email=g@x', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    c.stdout.on('data', d => { stdout += d; }); c.stderr.on('data', d => { stderr += d; });
-    c.on('close', status => resolve({ status, stdout, stderr }));
+    const c = spawn('git', args, { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const out = []; let stderr = '';
+    c.stdout.on('data', d => { out.push(d); }); c.stderr.on('data', d => { stderr += d; });
+    if (input !== undefined) c.stdin.end(input);
+    c.on('close', status => { const buf = Buffer.concat(out); resolve({ status, stdout: buf.toString(), out: buf, stderr }); });
   });
+}
+
+// git as the oracle, with no credential in any URL, argv or config value it is handed. Given a URL with userinfo, git
+// passes it to curl and compares what it asked for with CURLINFO_EFFECTIVE_URL; a libcurl that reports the effective
+// URL without the userinfo (GitHub's ubuntu-26.04 image 20261018.50: git 2.55.0, curl 8.18.0-1ubuntu2.7) looks like a
+// redirect to http.c's update_url_from_redirect, which rebuilds the credential from the userinfo-free URL: "warning:
+// redirecting to http://127.0.0.1:…/adv648.git/" then "fatal: could not read Username". So git decodes the userinfo
+// with its own parser (`git credential fill`: credential_from_url, the decoder http.c applies to a URL) and sends it
+// from a credential helper. The helper is set through GIT_CONFIG_* env; the bytes travel in a file (`%FF` decodes to
+// a byte no env string carries), and a run that took a redirect fails here, not as a missing credential later.
+const CRED_HELPER = '!f() { test "$1" = get || exit 0; cat "$PLY_CRED"; }; f';
+export async function gitWithCred(cwd, args, cred, config = []) { // cred: username=/password= lines as bytes, or null
+  const dir = mkdtempSync(join(tmpdir(), 'ply-cred-')), file = join(dir, 'cred');
+  writeFileSync(file, cred ?? '', { mode: 0o600 });
+  const r = await gitAsync(cwd, args, { PLY_CRED: file }, { config: [...(cred ? [['credential.helper', CRED_HELPER]] : []), ...config] });
+  rmSync(dir, { recursive: true, force: true });
+  if (/redirecting/.test(r.stderr)) throw new Error(`git ${args[0]} took a redirect: ${r.stderr}`);
+  return r;
+}
+// git's decoding of a URL's userinfo, ready for gitWithCred: { cred } (username=/password= lines for the helper) or
+// { refused: stderr }. A user alone gets an empty password: what git sends for `user@` (curl's `user:`, git 2.50
+// measured: no prompt). An empty user (`:pass@`, `:@`) is sent by git from a URL as Basic `:pass` (git 2.50 measured,
+// SAFETY I6d), but git's helper path sends nothing for an empty username (http.c init_curl_http_auth), so there the
+// bytes git decoded go out as `http.extraHeader`, framed `Basic base64(user ":" pass)` (RFC 7617).
+export async function gitUserinfoCred(cwd, url) {
+  const r = await gitAsync(cwd, ['credential', 'fill'], {}, { input: `url=${url}\n\n`, config: [['credential.helper', '!f() { test "$1" = get && echo password=; }; f']] });
+  if (r.status !== 0) return { refused: r.stderr };
+  const keep = []; let o = 0;
+  while (o < r.out.length) {
+    const e = r.out.indexOf(10, o) < 0 ? r.out.length - 1 : r.out.indexOf(10, o);
+    const line = r.out.subarray(o, e + 1);
+    if (/^(username|password)=/.test(line.toString('latin1'))) keep.push(line);
+    o = e + 1;
+  }
+  const field = k => { const l = keep.find(x => x.toString('latin1').startsWith(`${k}=`)); return l ? l.subarray(k.length + 1, l.at(-1) === 10 ? -1 : undefined) : null; };
+  const user = field('username'), pass = field('password');
+  if (!user || !pass) throw new Error(`git credential fill gave ${keep.length} fields`);
+  if (user.length > 0) return { cred: Buffer.concat(keep), config: [] };
+  return { cred: null, config: [['http.extraHeader', `Authorization: Basic ${Buffer.concat([user, Buffer.from(':'), pass]).toString('base64')}`]] };
 }
 
 // A bare repo configured for v2 partial fetch of arbitrary objects + push.
