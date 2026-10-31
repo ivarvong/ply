@@ -135,7 +135,8 @@ export function gitAsync(cwd, args, extraEnv = {}, { config = [], input } = {}) 
     const c = spawn('git', args, { cwd, env, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     const out = []; let stderr = '';
     c.stdout.on('data', d => { out.push(d); }); c.stderr.on('data', d => { stderr += d; });
-    if (input !== undefined) c.stdin.end(input);
+    // git may exit before it reads all of stdin: EPIPE then means nothing, its status says it all
+    if (input !== undefined) { c.stdin.on('error', () => {}); c.stdin.end(input); }
     c.on('close', status => { const buf = Buffer.concat(out); resolve({ status, stdout: buf.toString(), out: buf, stderr }); });
   });
 }

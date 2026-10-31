@@ -45,6 +45,8 @@ function run(cmd, args, { cwd, input } = {}) {
     p.stderr.on('data', d => err.push(d));
     p.on('error', reject);
     p.on('close', status => resolve({ status, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
+    // git may exit before it reads stdin (a command that takes none): EPIPE then means nothing, its status says it all
+    p.stdin.on('error', e => { if (e.code !== 'EPIPE') reject(e); });
     p.stdin.end(input ?? '');
   });
 }
