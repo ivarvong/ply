@@ -158,7 +158,7 @@ jobs:
       - run: npm ci
       - name: stryker
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_NAME: push # probe 3: full run on the PR (reverted next)
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           SHARD: ${{ matrix.shard }}
         run: node scripts/mutate.mjs --shard "${SHARD}/16"
@@ -203,7 +203,7 @@ jobs:
           path: shard-reports
       - name: merge and judge
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_NAME: push # probe 3: full run on the PR (reverted next)
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
         run: node scripts/mutate.mjs --merge shard-reports --shards 16
       # The merged report, for per-file history (weights for a future partition, or a look at what survived).
