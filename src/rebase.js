@@ -131,4 +131,3 @@ export async function pickCommit(url, { ref = 'refs/heads/main', commit, committ
 }
 export const cherryPick = (url, spec, opts) => pickCommit(url, { ...spec, revert: false }, opts);
 export const revertCommit = (url, spec, opts) => pickCommit(url, { ...spec, revert: true }, opts);
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

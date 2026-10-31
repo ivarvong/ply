@@ -148,4 +148,3 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
     return { report, packBytes: pack?.length ?? 0, entries, hookOutput: band2 };
   }));
 }
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

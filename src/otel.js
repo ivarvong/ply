@@ -136,4 +136,3 @@ export function flattenLine(line) {
     links: (s.links ?? []).map(l => ({ traceId: l.traceId, spanId: l.spanId, attrs: flattenKvs(l.attributes) })),
   }))));
 }
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

@@ -86,4 +86,3 @@ export const pktAttrs = (st, prefix = 'git.pkt') => ({
   [`${prefix}.delim`]: st.delim, [`${prefix}.end`]: st.end, [`${prefix}.bytes`]: st.bytes,
   [`${prefix}.payload.max`]: st.maxPayload, [`${prefix}.carry.max`]: st.carryMax,
 });
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

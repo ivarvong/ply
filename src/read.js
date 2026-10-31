@@ -203,4 +203,3 @@ export async function openBlob(t, tracer, parent, oid) {
   const stream = ds.readable.pipeThrough(verify);
   return { size, stream };
 }
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

@@ -17,4 +17,3 @@ export function nodeStream(host, port, { timeoutMs = 30000 } = {}) {
     }));
   });
 }
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

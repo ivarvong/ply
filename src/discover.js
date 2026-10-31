@@ -26,4 +26,3 @@ export async function discover(t) {
     return info;
   }));
 }
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

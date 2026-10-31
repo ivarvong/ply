@@ -35,4 +35,3 @@ export class GitHttp {
   receiveCaps() { return receiveCaps(this.t); }
   discover() { return discover(this.t); }
 }
-// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)
