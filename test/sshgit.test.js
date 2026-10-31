@@ -12,9 +12,9 @@ import http from 'node:http';
 import { git, tmpRoot, makeBareRepo, commitFiles, fsckProblems } from './server.js';
 import { startSshd, freePort, trickleProxy } from './sshd.js';
 import { Rng } from './fuzz/prng.js';
-import { createSshTransport, parseSshUrl, sshRedact } from '../src/sshgit.js';
+import { createSshTransport, parseSshUrl, sshRedact, refusalCode } from '../src/sshgit.js';
 import { nodeStream } from '../src/ssh-node.js';
-import { SshClient, hostKeyLine, hostKeyFromLine, padded, mpint, str, u32, parseKexInit, kexInit, fingerprint } from '../src/ssh.js';
+import { SshClient, hostKeyLine, hostKeyFromLine, padded, unpad, mpint, str, u32, parseKexInit, kexInit, fingerprint } from '../src/ssh.js';
 import { createTransport } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 import { retryPolicy } from '../src/errors.js';
@@ -58,6 +58,17 @@ test('pure: url forms, host key line codec, packet padding, mpint, KEXINIT round
   assert.equal(await fingerprint(hostKeyFromLine(sshd.hostKeyLine)), execFileSync('ssh-keygen', ['-l', '-E', 'sha256', '-f', join(sshd.dir, 'host_ed25519.pub')], { encoding: 'utf8' }).split(' ')[1], 'fingerprint == ssh-keygen -l');
   for (const [block, lengthCounts] of [[8, true], [16, false]]) for (let len = 0; len < 70; len++) { const p = padded(new Uint8Array(len), block, lengthCounts); const total = lengthCounts ? p.length : p.length - 4; assert.equal(total % block, 0); assert.ok(p[4] >= 4 && p[4] < block + 4); }
   assert.deepEqual([...mpint(Uint8Array.from([0, 0, 0x80, 1]))], [0, 0, 0, 3, 0, 0x80, 1]); assert.deepEqual([...mpint(Uint8Array.from([0x7f]))], [0, 0, 0, 1, 0x7f]); assert.deepEqual([...mpint(new Uint8Array(0))], [0, 0, 0, 0]);
+  // unpad: [padding_length][payload][padding]; at least 4 bytes of padding and a 1-byte payload (RFC 4253 §6)
+  for (let padLen = 0; padLen < 12; padLen++) {
+    const body = Uint8Array.from([padLen, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+    if (padLen >= 4 && padLen <= body.length - 2) assert.deepEqual([...unpad(body, body.length)], [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].slice(0, body.length - 1 - padLen));
+    else assert.throws(() => unpad(body, body.length), e => e.code === 'ssh' && new RegExp(`bad padding \\(${padLen} in a 11-byte packet\\)`).test(e.message), `padLen ${padLen}`);
+  }
+  assert.throws(() => unpad(new Uint8Array(0), 0), e => e.code === 'ssh' && /bad padding/.test(e.message));
+  // a service's refusal, typed from its text (test/space/ssh-service.* holds the observed lines)
+  for (const [line, code] of [["fatal: '/x.git' does not appear to be a git repository", 'not_found'], ['ERROR: Repository not found.', 'not_found'], ['fatal: not a git repository', 'not_found'],
+    ['ERROR: Permission to o/r.git denied to u.', 'auth'], ['Access denied', 'auth'], ['remote: Forbidden', 'auth'], ['permission denied (publickey)', 'auth'],
+    ['sh: 1: git-upload-pack: not found', 'remote_error'], ['bash: git-upload-pack: command not found', 'remote_error'], ['', 'remote_error'], ['the repository is archived', 'remote_error']]) assert.equal(refusalCode(line), code, line);
   const k = parseKexInit(kexInit(new Uint8Array(16))); assert.deepEqual(k.kex, ['curve25519-sha256', 'curve25519-sha256@libssh.org']); assert.deepEqual(k.encCS, ['aes128-gcm@openssh.com', 'aes256-gcm@openssh.com']);
 });
 
@@ -132,7 +143,7 @@ test('failures are typed: host key mismatch (before auth), unauthorized key, no 
   assert.doesNotMatch(sshd.log().slice(logBefore), /Accepted publickey/, 'no credential was presented to an unverified host');
   const kp2 = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']); const pub2 = new Uint8Array(await crypto.subtle.exportKey('raw', kp2.publicKey));
   await assert.rejects(lsRefs(transport(r.url, { privateKey: kp2.privateKey, publicKeyRaw: pub2, connect: counting }), ['HEAD']), e => e.code === 'auth' && /publickey authentication refused/.test(e.message));
-  await assert.rejects(lsRefs(transport(`ssh://${sshd.user}@127.0.0.1:${sshd.port}${root}/does-not-exist.git`, { connect: counting }), ['HEAD']), e => (e.code === 'not_found' || e.code === 'remote_error') && /does-not-exist|not appear|no such|denied/i.test(e.message));
+  await assert.rejects(lsRefs(transport(`ssh://${sshd.user}@127.0.0.1:${sshd.port}${root}/does-not-exist.git`, { connect: counting }), ['HEAD']), e => e.code === 'not_found' && /does-not-exist.* does not appear to be a git repository/.test(e.message));
   await assert.rejects(editFile(r.url, { path: 'f.txt', find: 'x', replace: 'y', author, message: 'm' }, { tracer: new Tracer(), transport: transport(r.url, { connect: () => { throw Object.assign(new Error('ECONNREFUSED'), { code: 'network' }); } }) }), e => e.code === 'network');
   assert.throws(() => createSshTransport(r.url, { privateKey: kp.privateKey, publicKeyRaw: pub, connect: nodeStream, tracer: new Tracer() }), e => e.code === 'bad_request' && /hostKey is required/.test(e.message));
   // a server that drops GIT_PROTOCOL answers in v0: we refuse rather than guess

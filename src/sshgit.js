@@ -50,6 +50,14 @@ export function parseSshUrl(url) {
 // the server as the login, and replaced by '[redacted]' in `t.url`, spans and errors.
 export const sshRedact = ({ user, host, port, path }) => `ssh://${secretUser(user, false) ? REDACTED : user}@${host}${port === 22 ? '' : `:${port}`}${path.startsWith('/') ? '' : '/'}${path}`;
 
+// A service that ends before writing a byte refused the command: git prints the server's stderr and "Could not read from
+// remote repository" for every such refusal; ply types it from that text as HTTP types a status. A missing repository
+// is `not_found` (git's own "does not appear to be a git repository", a host's "Repository not found"), a denied one
+// `auth` (HTTP 403: "Permission to o/r.git denied", "access denied"), anything else the server said `remote_error`
+// (a shell's "git-upload-pack: command not found" is the host lacking git, not the repository missing).
+export const refusalCode = stderr => /does not appear to be a git repository|repository not found|not a git repository/i.test(stderr) ? 'not_found'
+  : /permission denied|access denied|denied to |forbidden/i.test(stderr) ? 'auth' : 'remote_error';
+
 // `connect(host, port) → stream` is the platform's TCP (ssh-node.js / ssh-workers.js); the key is a WebCrypto Ed25519 pair.
 export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, connect, tracer, parent = null, limits = DEFAULT_LIMITS, signal = null, user: userOverride } = {}) {
   const u = parseSshUrl(url); if (userOverride) u.user = userOverride;
@@ -97,7 +105,9 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
         opening.then(raw => { if (conn.reason) try { raw.close(); } catch { /* closing */ } }, () => {});
         const raw = conn.raw = await Promise.race([opening, conn.dead]);
         if (conn.reason) { try { raw.close(); } catch { /* closing */ } throw conn.reason; }
-        const stream = { read: () => Promise.race([raw.read(), conn.dead]), write: bytes => Promise.race([raw.write(bytes), conn.dead]), close: () => raw.close() };
+        // a platform stream's own failure (a reset, a write after the peer went) is `network`, as HTTP types it
+        const net = e => { throw wrapNet(e); };
+        const stream = { read: () => Promise.race([raw.read(), conn.dead]).catch(net), write: bytes => Promise.race([raw.write(bytes), conn.dead]).catch(net), close: () => raw.close() };
         const c = new SshClient(stream, { user: u.user, privateKey, publicKeyRaw, hostKey: pinned, tracer, parent: span ?? t.parent });
         try { await c.connect(); await c.authenticate(); } catch (e) { try { raw.close(); } catch { /* closing */ } throw e; } // a failed handshake holds no socket
         st.client = c; return c;
@@ -137,7 +147,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
         } else {
           const nul = first ? first.payload.indexOf(0) : -1;
           entry.caps = nul >= 0 ? td.decode(first.payload.subarray(nul + 1)).trim().split(' ') : [];
-          if (!first) { const err = ch.stderr().trim(); throw fail(/denied|not found|does not appear|no such|fatal/i.test(err) ? 'not_found' : 'remote_error', `ssh: ${service} sent no advertisement${err ? `: ${err.slice(0, 200)}` : ''}`); }
+          if (!first) throw fail('protocol', `ssh: ${service} sent an empty advertisement (no ref line, no capabilities)`);
         }
         chSpan.set({ 'git.advertisement.bytes': entry.adv.length, 'git.advertisement.caps': entry.caps.slice(0, 32) });
         st.channels.set(service, entry);
@@ -167,8 +177,10 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
         let i = 0;
         for (; i < r.frames.length; i++) { yield r.frames[i]; if (r.frames[i].kind === 'flush') { entry.carry.push(...r.frames.slice(i + 1)); return; } }
       }
-      const err = entry.ch.stderr().trim();
-      throw fail(err ? 'remote_error' : 'protocol', `ssh: ${entry.span.attrs['git.service']} ended before the response was complete${err ? `: ${err.slice(0, 300)}` : ''}`, { exit: await entry.ch.exit() });
+      // the exit status first: stderr can still be arriving when stdout ends
+      const exit = await entry.ch.exit(), err = entry.ch.stderr().trim(), service = entry.span.attrs['git.service'];
+      if (rawOut && !advBytes) throw fail(refusalCode(err), `ssh: ${service} ended before its advertisement (exit ${exit ?? 'unknown'})${err ? `: ${err.slice(0, 300)}` : ''}`, { exit });
+      throw fail(err ? 'remote_error' : 'protocol', `ssh: ${service} ended before the response was complete${err ? `: ${err.slice(0, 300)}` : ''}`, { exit });
     },
     // A channel is one git process reading commands in order: concurrent callers (editFile overlaps ls-refs with a
     // speculative fetch) are serialized here, each taking the channel from body write to the closing flush.
