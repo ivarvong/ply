@@ -142,8 +142,8 @@ export const take = (buf: Uint8Array | null | undefined, off: number, n: number,
 // oxlint-disable-next-line no-magic-numbers -- sentinel: this byte is not a hex digit
 export const HEXV: Int8Array = new Int8Array(BYTE_VALUES).fill(-1);
 // ASCII digits: a code unit is the code point
-// oxlint-disable-next-line unicorn/prefer-code-point -- see above
-for (let i = 0; i < PKT_HEX_BASE; i++) { HEXV['0123456789abcdef'.charCodeAt(i)] = i; HEXV['0123456789ABCDEF'.charCodeAt(i)] = i; }
+// Stryker disable next-line EqualityOperator: one more pass reads charCodeAt(16), NaN, and a typed array ignores a NaN key
+for (let i = 0; i < PKT_HEX_BASE; i++) { HEXV['0123456789abcdef'.charCodeAt(i)] = i; HEXV['0123456789ABCDEF'.charCodeAt(i)] = i; } // oxlint-disable-line unicorn/prefer-code-point -- see above
 
 // First index of needle in hay at or after from; -1 if none.
 export function indexOfBytes(hay: Uint8Array, needle: Uint8Array, from = 0): number {

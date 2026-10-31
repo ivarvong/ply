@@ -189,6 +189,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
       if (len > stats.maxLen) stats.maxLen = len;
       // A match that does not overlap its own output is one copy; an overlapping one repeats its last d bytes, so it is
       // copied byte by byte (the overlap is the encoding: `d = 1, len = 258` is a run of one byte).
+      // Stryker disable next-line EqualityOperator,ConditionalExpression,ArithmeticOperator: at d = len, or with the byte loop for every match, the bytes are the same; a longer copyWithin end only writes past o, which the next symbol overwrites or the result's subarray leaves out
       if (d >= len) { out.copyWithin(o, o - d, o - d + len); o += len; }
       else { let from = o - d; for (let i = 0; i < len; i++) out[o++] = out[from++] as number; }
     }
@@ -240,6 +241,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
         return;
       }
       case undefined: throw bad('inflate: invalid block type');
+      // Stryker disable next-line ConditionalExpression,BlockStatement: unreachable, the compiler's exhaustiveness check
       default: assertNever(type);
     }
   };
@@ -254,9 +256,10 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
       block(type);
     } while (!last);
   } catch (e) {
-    if (e === STOP && failure) return err(failure);
-    throw e;
+    if (e !== STOP) throw e;
   }
+  // set exactly when STOP was thrown
+  if (failure) return err(failure);
 
   const result = out.subarray(0, o);
   if (!raw) {

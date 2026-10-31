@@ -60,13 +60,14 @@ function readVarint(buf: Uint8Array, start: number, what: string, n0 = 0, shift0
   return ok([n, p]);
 }
 
+// Four bytes at off, big-endian, where the caller has checked they are there.
+const be32 = (b: Uint8Array, off: number): number =>
+  // b holds four bytes at off and BE32_SHIFTS (format.js) has four entries: in range, see above
+  /* oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, no-magic-numbers -- see above; off + 1 and off + 2 are the middle bytes */
+  (((b[off] as number) << (BE32_SHIFTS[0] as number)) | ((b[off + 1] as number) << (BE32_SHIFTS[1] as number)) | ((b[off + 2] as number) << (BE32_SHIFTS[2] as number)) | (b[off + BE32_SHIFTS.length - 1] as number)) >>> 0;
 export function readUint32BEResult(buf: Uint8Array, off: number): Result<number, Corrupt> {
   const r = takeResult(buf, off, BE32_SHIFTS.length);
-  if (!r.ok) return r;
-  const b = r.value;
-  // b and BE32_SHIFTS (format.js) both have four entries: in range, see above
-  /* oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above */
-  return ok((((b[0] as number) << (BE32_SHIFTS[0] as number)) | ((b[1] as number) << (BE32_SHIFTS[1] as number)) | ((b[2] as number) << (BE32_SHIFTS[2] as number)) | (b[BE32_SHIFTS.length - 1] as number)) >>> 0);
+  return r.ok ? ok(be32(buf, off)) : r;
 }
 export const readUint32BE = (buf: Uint8Array, off: number): number => orThrow(readUint32BEResult(buf, off));
 
@@ -172,13 +173,9 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
   const minPack = PACK_HEADER_BYTES + PACK_TRAILER_BYTES;
   // Past the minPack check the header is a view, not a bounded read; the object loop's reads are bounded.
   if (buf.length < minPack || !buf.subarray(0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) return corrupt('pack: bad signature');
-  // both reads are inside minPack bytes (above), so neither can be short
-  const versionR = readUint32BEResult(buf, PACK_SIGNATURE.length);
-  const countR = readUint32BEResult(buf, PACK_SIGNATURE.length + UINT32_BYTES);
-  if (!versionR.ok) return versionR;
-  if (!countR.ok) return countR;
-  const version = versionR.value;
-  const count = countR.value;
+  // both reads are inside minPack bytes (above): views, not bounded reads
+  const version = be32(buf, PACK_SIGNATURE.length);
+  const count = be32(buf, PACK_SIGNATURE.length + UINT32_BYTES);
   if (version !== PACK_VERSION) return corrupt(`pack: unsupported version ${version}`);
   // A hostile count must fail before the loop allocates one object record.
   if (count > maxObjects) return err(limitError('pack objects', count, maxObjects));
@@ -209,13 +206,14 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
         break;
       }
       case 'ref_delta': {
-        const id = takeResult(buf, p, OID_BYTES);
-        if (!id.ok) return id;
-        baseOid = toHex(id.value); p += OID_BYTES;
+        // a view: the pack's 20-byte trailer is still ahead of p (buf holds minPack bytes, and every object header byte
+        // read so far came before the trailer), so OID_BYTES at p are inside buf; the trailer check below places them
+        baseOid = toHex(buf.subarray(p, p + OID_BYTES)); p += OID_BYTES;
         stats.refDelta++;
         break;
       }
       case undefined: return corrupt(`pack: bad object type ${type} at ${offset}`);
+      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
       default: return assertNever(kind);
     }
     if (size > maxObjectSize) return err(limitError('pack object size', size, maxObjectSize));
@@ -441,6 +439,7 @@ export function resolvePackResult(
         case 'resolved': break;
         case 'waiting': next.push(o); missing ??= s.oid; break;
         case 'failed': return err(s.error);
+        // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
         default: return assertNever(s);
       }
     }

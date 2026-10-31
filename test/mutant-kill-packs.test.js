@@ -305,3 +305,25 @@ test('pktFinish refuses only a carry; parsePack refuses an ofs delta naming itse
   const sha = (await import('node:crypto')).createHash('sha1').update(body).digest();
   errOf(parsePackResult(concat([body, sha])), 'pack_corrupt', `pack: ofs delta at ${PACK_HEADER_BYTES} is its own base`);
 });
+
+test('parsePackResult passes each part\'s Err through: object header, ofs offset, ref id, zlib body', () => {
+  const crypto = globalThis.process.getBuiltinModule('node:crypto');
+  const packOf = (...obj) => { const body = concat([te.encode('PACK'), Uint8Array.of(0, 0, 0, 2, 0, 0, 0, 1), ...obj]); return concat([body, crypto.createHash('sha1').update(body).digest()]); };
+  // an object header that never ends: the varint cap, not a TypeError on a missing header
+  errOf(parsePackResult(packOf(new Uint8Array(12).fill(0x80))), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  // an ofs delta whose offset never ends
+  errOf(parsePackResult(packOf(Uint8Array.of(0x62), new Uint8Array(12).fill(0x80))), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
+  // a ref delta whose base id runs into the trailer: the id is read (the trailer is 20 bytes, an id's length), and the
+  // object then has no zlib body before the end
+  errOf(parsePackResult(packOf(Uint8Array.of(0x72), new Uint8Array(4))), 'pack_corrupt');
+  // a blob whose zlib body is not zlib
+  errOf(parsePackResult(packOf(Uint8Array.of(0x32), Uint8Array.of(0x78, 0x00, 0, 0, 0, 0))), 'pack_corrupt', 'zlib: bad header check');
+});
+
+test('inflateResult converts only its own STOP: a bug inside the block loop propagates', () => {
+  // a plain array has no subarray: the stored block's copy throws a TypeError inside the loop, which is not an Err
+  assert.throws(() => inflateResult([0b001, 1, 0, 0xfe, 0xff, 0x41], 0, { raw: true }), TypeError);
+  // and a refusal is an Err, not a throw, from the same place
+  errOf(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xfe, 0x41), 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
+  assert.equal(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xff, 0x41), 0, { raw: true }).value.out[0], 0x41);
+});
