@@ -2,7 +2,7 @@
 // is the one effect. Any failure after the body is on the wire is 'ambiguous' (the ref may have moved).
 import { fail, ambiguousAfterPush } from './errors.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
-import { td, concat } from './bytes.js';
+import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { parseSideband } from './fetch.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS } from './format.js';
 
@@ -115,9 +115,9 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
       reportBytes += payload.length;
       if (reportBytes > maxReportBytes) throw limitError('report bytes', reportBytes, maxReportBytes);
       if (lines.length >= maxReportLines) throw limitError('report lines', lines.length + 1, maxReportLines);
-      lines.push(td.decode(payload).replace(/\n$/, ''));
+      lines.push(decodeBytes(payload).replace(/\n$/, ''));
     };
-    let band2 = '', band2Frames = 0, inner = pktInit(), report;
+    let band2 = '', band2Carry = new Uint8Array(0), band2Frames = 0, inner = pktInit(), report;
     // The request body (commands + pack) is on the wire. From here, ANY failure to obtain a trustworthy report —
     // transport, HTTP status, wrong content-type, malformed framing, bad sideband, band-3 error, a report the parser
     // rejects — means the ref may have moved: the outcome is 'ambiguous'. Only our own pre-send refusals keep their codes.
@@ -128,12 +128,13 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
         if (!sideband) { pushLine(f.payload); continue; }
         const { band, body: payload } = parseSideband(f.payload);
         if (band === SIDEBAND_PACK) { const r = pktStep(inner, payload); inner = r.state; for (const g of r.frames) if (g.kind === 'data') pushLine(g.payload); }
-        else if (band === SIDEBAND_PROGRESS) { band2Frames++; band2 = (band2 + td.decode(payload)).slice(-BAND_TAIL); }
+        else if (band === SIDEBAND_PROGRESS) { band2Frames++; const d = decodeChunk(band2Carry, payload); band2Carry = d.carry; band2 = (band2 + d.text).slice(-BAND_TAIL); }
         else if (band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(payload).trim()}`);
         else throw proto(`receive-pack: bad sideband ${band}`);
       }
       report = parseReportStatus(lines);
     } catch (e) { throw ambiguousAfterPush(e); }
+    if (band2Carry.length) band2 = (band2 + td.decode(band2Carry)).slice(-BAND_TAIL);
     const remoteMessages = bandLines(band2);
     const malformed = checkReport(report, commands, { atomic });
     if (malformed) {
