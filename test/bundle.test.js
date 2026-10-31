@@ -49,8 +49,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 63,148 B / 24,220 B gz. parseTree refuses one name twice anywhere in a tree, orders on raw bytes with fsck's S_ISDIR, and refuses decode-twins (issue #34).
   // 2026-10-30: 65,439 B / 25,067 B gz. The push outcome as an allowlist: the response stream as a step machine (streamStep), the report classified against git's exact grammar (classifyReport), an exhaustive decideOutcome, push_partial (SPACE.md, SAFETY.md I36).
   // 2026-10-30: 64,903 B / 24,908 B gz. names, messages, idents and ref names as bytes (decodeBytes/encodeBytes, surrogate-escaped), BOM kept, sideband text decoded across frames (issue #43).
-  assert.ok(min < 64_904, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 24_909, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 68,855 B / 26,458 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 68_856, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 26_459, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -93,7 +94,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 81,773 B. A settled cut one best base reaches and another does not keeps the merge-base walk going (#42);
   // rebase fetches a base named only at the window's cut (#41).
   // 2026-10-30: 83,592 B. The same, plus .gitattributes paths matched on their bytes and an annotated tag refused by name (issue #43).
-  assert.ok(min < 83_593, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 87,602 B. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 87_603, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -132,8 +134,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 47,849 B / 18,572 B gz. errors.js gains push_partial (SAFETY.md I36); no push code rides along.
   // 2026-10-30: 49,816 B / 19,369 B gz. The same bytes-as-strings mapping (issue #43).
   // 2026-10-30: 49,381 B / 19,155 B gz. git.read.blob follows the root and records a consumer's cancel (issue #35).
-  assert.ok(min < 49_382, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_156, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 51,498 B / 20,041 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 51_499, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 20_042, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -158,8 +161,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 59,847 B / 23,153 B gz. The same parseTree duplicate and order rules (issue #34).
   // 2026-10-30: 62,111 B / 23,985 B gz. The same push outcome allowlist (SAFETY.md I36).
   // 2026-10-30: 61,621 B / 23,854 B gz. The same (issue #43).
-  assert.ok(min < 61_622, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_855, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 65,581 B / 25,382 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 65_582, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 25_383, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -196,8 +200,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 44,676 B / 17,775 B gz. errors.js gains push_partial (SAFETY.md I36); no push code rides along.
   // 2026-10-30: 46,321 B / 18,459 B gz. The same (issue #43).
   // 2026-10-30: 45,887 B / 18,246 B gz. The same blob-stream cancel and follows spans (issue #35).
-  assert.ok(min < 45_888, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_247, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 48,177 B / 19,163 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 48_178, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 19_164, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
