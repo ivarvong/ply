@@ -7,6 +7,8 @@ export const te = new TextEncoder();
 // git itself only prints (sideband progress, remote errors): an invalid sequence there becomes U+FFFD.
 export const td = new TextDecoder('utf-8', { ignoreBOM: true });
 const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+// Well-formed UTF-8 or a throw; a leading BOM is kept (it is a byte of the text to git, #43).
+export const decodeStrict = b => strict.decode(b);
 
 // ---- git bytes as strings, losslessly (#43) ----
 // Names, messages, idents and ref names are bytes to git; it never requires UTF-8 and never interprets a BOM. ply hands
