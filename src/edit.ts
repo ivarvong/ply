@@ -185,8 +185,8 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
     child = newOid;
   }
   const who = ident(validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz }));
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- objects.js is JS: `parents = []` reads as never[] (boundary.ts)
-  const commitData = (encodeCommit as unknown as EncodeCommit)({ tree: child, parents: [oldCommit], author: who, committer: who, message: message.endsWith('\n') ? message : `${message}\n` });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, prefer-template -- bundle budget: the JS's concatenation; objects.js is JS: `parents = []` reads as never[] (boundary.ts)
+  const commitData = (encodeCommit as unknown as EncodeCommit)({ tree: child, parents: [oldCommit], author: who, committer: who, message: message.endsWith('\n') ? message : message + '\n' });
   const newCommit = hashObject('commit', commitData);
   const objects: PackObject[] = [
     { type: TYPE.COMMIT, data: commitData },
@@ -390,7 +390,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
         span.set({ 'git.edit.tree.cache_hit': hit });
         try { const { entry, attrs: found } = lookupEntry(data, name, last, limits); span.set(found); return { treeOid, data, entry }; }
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-        catch (e) { const { attrs: failed } = e as { readonly attrs?: Attrs }; if (failed) span.set(failed); throw e; }
+        catch (e) { if ((e as { readonly attrs?: Attrs }).attrs) span.set((e as { readonly attrs: Attrs }).attrs); throw e; }
       });
       levels.push(lvl);
       treeOid = lvl.entry.oid;
@@ -416,8 +416,8 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     // roundtrip) and require it to be our commit; a mismatch is 'ambiguous' (the push was acknowledged but not observed).
     if (verify) await verifyRef(t, root, 'git.edit', s.ref, built.newCommit);
     return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt, newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: pushed.packBytes }), { 'git.edit.push.bytes': pushed.packBytes, 'git.edit.push.ratio': pushed.packBytes / Math.max(1, blob.newLen) });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown object gets the attempt's fields, as before
-    } catch (e) { if (typeof e === 'object' && e !== null) { (e as Tagged).attempt = attempt; (e as Tagged).hint = hint; } throw e; }
+    // oxlint-disable-next-line typescript/strict-boolean-expressions, typescript/no-unsafe-type-assertion -- bundle budget: the JS's own test, byte for byte; a thrown object gets the attempt's fields, as before
+    } catch (e) { if (e && typeof e === 'object') { (e as Tagged).attempt = attempt; (e as Tagged).hint = hint; } throw e; }
   });
 }
 
