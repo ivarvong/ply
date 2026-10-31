@@ -89,7 +89,9 @@ test('parseTree error strings and the boundaries next to them', () => {
     [`100644 ${'l'.repeat(4097)}\0`, 'tree: large pathname'],
     ['120000 .gitmodules\0', 'tree: .gitmodules is a symbolic link'],
     ['40000 GITMOD~1\0', 'tree: .gitmodules is not a blob'],
+    ['160000 .gitmodules\0', 'tree: .gitmodules is not a blob'],
     ['160000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
+    ['40000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
   ];
   for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
   throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
@@ -1333,6 +1335,17 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   throws(() => encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\0b' }), 'bad_request', 'message must not contain NUL');
   assert.ok(encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\nb\n' }).byteLength > 0);
   throws(() => encodeTag({ object: tree, type: 'commit', tag: 'v\n1', tagger: 'A <a@b.c> 1 +0000' }), 'bad_request', 'tag must not contain NUL or newline');
+  // encodeTag refuses what git hash-object -t tag refuses (fsck_tag_standalone), as a bad request (issue #103)
+  const tagOf = f => encodeTag({ object: tree, type: 'commit', tag: 'v1', tagger: 'A <a@b.c> 1 +0000', message: 'm\n', ...f });
+  assert.equal(td.decode(tagOf({})), `object ${tree}\ntype commit\ntag v1\ntagger A <a@b.c> 1 +0000\n\nm\n`);
+  assert.equal(td.decode(tagOf({ tag: 'release/v1', message: null, extra: ['x y'] })), `object ${tree}\ntype commit\ntag release/v1\ntagger A <a@b.c> 1 +0000\nx y\n`);
+  for (const tag of ['', 'v 1', 'a..b', 'v1.lock', 'v1/', 'v*']) throws(() => tagOf({ tag }), 'bad_request', "tag: badTagName: invalid 'tag' name");
+  throws(() => tagOf({ object: 'zz'.repeat(20) }), 'bad_request', "tag: badObjectSha1: invalid 'object' line format - bad sha1");
+  throws(() => tagOf({ type: 'bogus' }), 'bad_request', "tag: badType: invalid 'type' value");
+  throws(() => tagOf({ tagger: 'A a@b.c 1 +0000' }), 'bad_request', 'tag: missingEmail: invalid tagger line - missing email');
+  throws(() => tagOf({ extra: ['tag v2'] }), 'bad_request', 'tag: duplicate tag');
+  assert.throws(() => tagOf({ type: 'bogus' }), e => e.what === 'tag');
+  assert.throws(() => tagOf({ tag: '' }), e => e.what === 'tag');
 
   throws(() => fetchBody({ wants: ['abc\n'] }), 'bad_request', 'invalid want: must be a string without NUL, CR, or LF');
   throws(() => fetchBody({ wants: [oid(1)], deepen: -1 }), 'bad_request', 'invalid deepen: must be a non-negative safe integer');
