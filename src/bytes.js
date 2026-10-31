@@ -6,6 +6,7 @@ export const te = new TextEncoder();
 // does not find `\ufeffREADME`), so no decoder here swallows it the way the default one does (#43). `td` is for text
 // git itself only prints (sideband progress, remote errors): an invalid sequence there becomes U+FFFD.
 export const td = new TextDecoder('utf-8', { ignoreBOM: true });
+const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 // ---- git bytes as strings, losslessly (#43) ----
 // Names, messages, idents and ref names are bytes to git; it never requires UTF-8 and never interprets a BOM. ply hands
