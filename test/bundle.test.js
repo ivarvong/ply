@@ -25,7 +25,7 @@ test('edit entry carries only what the edit path uses', async () => {
   };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the edit bundle (${re})`);
   const files = retained(out).map(([k]) => k);
-  for (const f of ['fetchpack.js', 'negotiate.js', 'receivecaps.js', 'discover.js', 'client.js', 'packcache.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js']) assert.ok(!files.includes(f), `${f} is in the edit bundle`);
+  for (const f of ['fetchpack.js', 'negotiate.js', 'receivecaps.js', 'discover.js', 'client.js', 'packcache.js', 'merge.ts', 'linemerge.ts', 'rebase.ts', 'attributes.ts']) assert.ok(!files.includes(f), `${f} is in the edit bundle`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
   console.log(`  edit bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
   // 2026-10-23: 49.9 KB / 18.9 KB gz (was 42.6 / 16.5): +4.2 KB packresolve.js, +2.6 KB fetch.js for the blob:none fallback
@@ -69,9 +69,9 @@ test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has non
 });
 
 test('merge entry: the line merge rides with merge/rebase only, under its own budget', async () => {
-  const out = await bundle('src/merge.js');
+  const out = await bundle('src/merge.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  assert.ok(files.includes('linemerge.js'));
+  assert.ok(files.includes('linemerge.ts'));
   assert.ok(!/node:|\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/.test(js), 'no node builtins or classes');
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
   console.log(`  merge bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
@@ -107,7 +107,7 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
   const out = await bundle('src/log.js');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js', 'tree.js', 'checkout.js']) assert.ok(!files.includes(f), `${f} is in the log bundle`);
+  for (const f of ['push.js', 'pack.js', 'merge.ts', 'linemerge.ts', 'rebase.ts', 'attributes.ts', 'edit.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js', 'tree.js', 'checkout.js']) assert.ok(!files.includes(f), `${f} is in the log bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the log bundle (${re})`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
@@ -130,7 +130,7 @@ test('full entry is the superset and still carries no node builtins', async () =
 test('read entry: readFile/listTree carry no push, merge, pack building or rebase code', async () => {
   const out = await bundle('src/read.js');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the read bundle`);
+  for (const f of ['push.js', 'pack.js', 'merge.ts', 'linemerge.ts', 'rebase.ts', 'attributes.ts', 'edit.js', 'sign.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the read bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'line merge': /histogram|xdl_/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the read bundle (${re})`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
@@ -165,7 +165,7 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
   const out = await bundle('src/tree.js');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['tree-node.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'read.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the tree bundle`);
+  for (const f of ['tree-node.js', 'merge.ts', 'linemerge.ts', 'rebase.ts', 'attributes.ts', 'read.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the tree bundle`);
   assert.ok(!/node:|\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/.test(js), 'no node builtins or classes');
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
   console.log(`  tree bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
@@ -196,14 +196,14 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
-  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
+  const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
   assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
 });
 
 test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {
   const out = await bundle('src/checkout.js');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['checkout-node.js', 'tree-node.js', 'tree.js', 'push.js', 'pack.js', 'edit.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the checkout bundle`);
+  for (const f of ['checkout-node.js', 'tree-node.js', 'tree.js', 'push.js', 'pack.js', 'edit.js', 'merge.ts', 'linemerge.ts', 'rebase.ts', 'attributes.ts', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the checkout bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the checkout bundle (${re})`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
