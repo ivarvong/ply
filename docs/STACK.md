@@ -9,7 +9,7 @@ A fast, small, proven core. The shipped code is TypeScript compiled to plain ESM
 | oxlint + oxlint-tsgolint | 1.90.0 + 7.0.2005 | lint, type-aware rules (tsgolint runs TypeScript 7) |
 | vitest | 5.0.5 | test runner |
 | Stryker + vitest runner | 10.1.1 | mutation testing of `src/**/*.{js,ts}` |
-| esbuild | 0.28.2 | bundle budgets (test/bundle.test.js), workerd tests |
+| esbuild | 0.28.2 | bundle budgets (test/bundle.test.js), the workerd test worker (test/workerd/build.mjs) |
 
 Runtime dependencies: none, ever. Node ≥ 22.18 runs `src/*.ts` directly (type stripping) for tests and fuzzers;
 consumers get `dist/` (plain `.js` + `.d.ts`), so `engines.node` stays `>=20`.
@@ -137,7 +137,7 @@ Evidence and the alternative we rejected are in the PR description.
 ## Tests
 
 vitest runs every `test/**/*.test.js` file that `node --test` ran before (`vitest.config.ts`: `forks` pool, files in
-parallel, no default timeout, as under node:test); `test/workerd.test.js` runs alone (`vitest.workerd.config.ts`). The
+parallel, no default timeout, as under node:test), `test/workerd.test.js` included (the worker bundled by esbuild). The
 fuzzers in `test/fuzz/` stay node scripts (`node --import ./test/ts-resolve.mjs test/fuzz/<f>.mjs`). `npm test` = vitest
 + the fuzzer chain. CI: `npx vitest run --shard i/4`, partitioned longest-first by measured seconds per file
 (`test/durations.json`, the sequencer in `vitest.config.ts`); each shard uploads its vitest JSON report.

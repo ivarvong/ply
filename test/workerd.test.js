@@ -1,4 +1,6 @@
-// The pipeline under workerd (the Workers runtime), against the local git server. Skipped if workerd is not installed.
+// The pipeline under workerd (the Workers runtime ply's main consumer runs on), against the local git server. The worker
+// is test/workerd/worker.mjs bundled with src by esbuild (test/workerd/build.mjs). Part of the default suite and CI.
+// workerd is a devDependency; without it the tests skip locally, and fail under CI (a skipped suite is a dead suite, #101).
 //   WORKERD=/path/to/workerd npx vitest run test/workerd.test.js      (default: looks in ./node_modules/.bin and ../wd/node_modules/.bin)
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
@@ -13,6 +15,7 @@ import { build } from './workerd/build.mjs';
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
 const WORKERD = candidates.find(p => existsSync(p));
 const PORT = 18790 + (process.pid % 100);
+if (!WORKERD && process.env.CI) throw new Error(`workerd not found (looked in ${candidates.join(', ')}); CI must run this suite`);
 
 let root, cleanup, srv, proc;
 before(async () => {
@@ -21,10 +24,12 @@ before(async () => {
   srv = await startGitServer(root);
   const cfg = build({ port: PORT, outDir: join(root, 'wd') });
   proc = spawn(WORKERD, ['serve', cfg], { stdio: ['ignore', 'pipe', 'pipe'] });
-  proc.stderr.on('data', d => { if (/error/i.test(String(d))) console.error('workerd:', String(d).slice(0, 300)); });
-  for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/ping`)).ok) break; } catch { } await new Promise(r => setTimeout(r, 100)); }
+  let stderr = '';
+  proc.stderr.on('data', d => { stderr = (stderr + d).slice(-4000); if (/error/i.test(String(d))) console.error('workerd:', String(d).slice(0, 300)); });
+  for (let i = 0; i < 100; i++) { try { if ((await fetch(`http://127.0.0.1:${PORT}/ping`)).ok) return; } catch { } await new Promise(r => setTimeout(r, 100)); }
+  throw new Error(`workerd did not answer /ping on ${PORT} within 10 s (exit ${proc.exitCode}):\n${stderr}`);
 });
-after(async () => { if (!WORKERD) return; proc.kill(); await srv.close(); cleanup(); });
+after(async () => { if (!WORKERD) return; proc?.kill(); await srv?.close(); cleanup?.(); });
 
 const post = async (path, body, q = '') => (await fetch(`http://127.0.0.1:${PORT}${path}${q}`, { method: 'POST', body: JSON.stringify(body) })).json();
 

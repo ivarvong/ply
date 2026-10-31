@@ -44,5 +44,6 @@
   "test/space/ssh-service.test.js": 6,
   "test/span-contract.test.js": 4,
   "test/sshgit.test.js": 24,
-  "test/wide-limits.test.js": 12
+  "test/wide-limits.test.js": 12,
+  "test/workerd.test.js": 12
 }
