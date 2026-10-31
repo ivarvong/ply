@@ -87,6 +87,7 @@
   },
   "devDependencies": {
     "@stryker-mutator/core": "^10.1.1",
+    "@stryker-mutator/tap-runner": "^10.1.1",
     "esbuild": "^0.24.0",
     "oxlint": "^1.89.0",
     "workerd": "1.20261018.1"
