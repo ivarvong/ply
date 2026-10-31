@@ -104,7 +104,10 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   const tree = (oid: string): readonly TreeEntry[] => {
     const o = objects.get(oid);
     if (o?.type !== TYPE.TREE) throw fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
-    return parseTree(o.data, limits);
+    // `o` is set here: the test above narrows it under tsconfig.check.json, not under tsconfig.isolated.json (where
+    // objects.js's TYPE is any); bundle budget: the JS's own optional chain
+    // oxlint-disable-next-line typescript/no-unnecessary-type-assertion, typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    return parseTree((o as NonNullable<typeof o>).data, limits);
   };
   let trees = 0; for (const o of objects.values()) if (o.type === TYPE.TREE) trees++;
   return { root: parseCommit(c.data, limits).tree, tree, objects: objects.size, trees };

@@ -245,7 +245,7 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
     for (const e of (built.trees.get(dir) as BuiltDir).entries) {
       const was = before.get(e.name);
-      if (e.mode === MODE_TREE && was?.mode === MODE_TREE && was.oid !== e.oid) next.push(visit(dir ? `${dir}/${e.name}` : e.name, was.oid));
+      if (e.mode === MODE_TREE && was && was.mode === MODE_TREE && was.oid !== e.oid) next.push(visit(dir ? `${dir}/${e.name}` : e.name, was.oid));
     }
     await Promise.all(next);
   };
