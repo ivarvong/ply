@@ -285,9 +285,8 @@ export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_
   const { extra, message } = rest(s, next, blank);
   refuseShadowed('commit', extra, COMMIT_SHADOWED);
   const at = extra.findIndex(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `));
-  // extra[-1] is undefined: no encoding line
-  // splice returns the one line it removed; join('') is that line
-  const encoding = at < 0 ? null : extra.splice(at, 1).join('').slice(COMMIT_HEADER_ENCODING.length + 1);
+  // splice returns a one-element array; String() of it is that line
+  const encoding = at < 0 ? null : String(extra.splice(at, 1)).slice(COMMIT_HEADER_ENCODING.length + 1);
   // a second encoding is a second copy of a single-valued header
   if (extra.some(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `))) throw duplicate('commit', COMMIT_HEADER_ENCODING);
   return { tree, parents, author, committer, encoding, extra, message };

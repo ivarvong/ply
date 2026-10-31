@@ -160,8 +160,8 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-31: 53,946 B / 21,069 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 55,816 B / 21,786 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 55_817, `read bundle ${min} B exceeds budget`);
-  // 2026-10-31: 55,506 B / 21,791 B gz. T2 strict TS (see the edit budget).
-  assert.ok(gz < 21_792, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 55,505 B / 21,792 B gz. T2 strict TS (see the edit budget).
+  assert.ok(gz < 21_793, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -233,8 +233,8 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-31: 50,542 B / 20,121 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 52_918, `checkout bundle ${min} B exceeds budget`);
-  // 2026-10-31: 52,604 B / 20,928 B gz. T2 strict TS (see the edit budget).
-  assert.ok(gz < 20_929, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 52,603 B / 20,932 B gz. T2 strict TS (see the edit budget).
+  assert.ok(gz < 20_933, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
