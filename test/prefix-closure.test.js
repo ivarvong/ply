@@ -384,6 +384,15 @@ property('caps', 'a v2 capability advertisement cut anywhere is a typed error: i
   for (let i = 0; i < frames.length; i++) assert.throws(() => parseCapabilitiesV2(frames.slice(0, i)), e => CODES.has(e.code), `${i} frames`);
 });
 
+test('caps: a v0/v1 answer is unsupported and a pkt after the flush is refused, each by its own check', () => {
+  const data = l => ({ kind: 'data', payload: te.encode(l) });
+  // a v0 ref advertisement ends in a flush too: only the version check refuses it
+  const v0 = [data(`${'a'.repeat(40)} HEAD\0multi_ack\n`), data(`${'a'.repeat(40)} refs/heads/main\n`), { kind: 'flush' }];
+  assert.throws(() => parseCapabilitiesV2(v0), e => e.code === 'unsupported' && e.message === `server did not answer protocol v2 (first line ${JSON.stringify(`${'a'.repeat(40)} HEAD\0multi_ack`)})` && e.lines.length === 1);
+  const trailing = [data('version 2\n'), data('agent=git/2.50.0\n'), { kind: 'flush' }, { kind: 'delim' }];
+  assert.throws(() => parseCapabilitiesV2(trailing), e => e.code === 'protocol' && e.message === "advertisement: delim after the capabilities' flush");
+});
+
 property('report', 'a prefix of report-status lines is a prefix of the ref statuses', () => {
   const lines = ['unpack ok', 'ok refs/heads/main', 'ng refs/heads/other hook declined', 'option old-oid abcdef'];
   const full = parseReportStatus(lines);
