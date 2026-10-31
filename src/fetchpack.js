@@ -1,23 +1,28 @@
 // Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 import { concat } from './bytes.js';
-import { TYPE_NAME } from './objects.js';
+import { TYPE, TYPE_NAME } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { limitError, requireLimit } from './limits.js';
 import { coded, clientSpan } from './transport.js';
-import { packStream, isFilterRejection, harvest } from './fetch.js';
+import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs } from './fetch.js';
 
 // fetchPack for a `filter tree:0` request (commit-only history walks) with the blob:none fallback of fetch.js: a server
 // that refuses tree:0 gets blob:none, which also carries every tree of every commit in the window — far more bytes on a
 // deep window (bounded by limits.maxPackBytes; the attrs say how much). The trees are harvested for later tree fetches.
+// Every commit, tree and tag in the pack is checked as fetchObject checks one (assertFetched), inside the fetch's span,
+// so a malformed object fails the fetch (`pack_corrupt`) instead of reaching a caller or the harvest. On the tree:0
+// path all of it is what was asked for. On the blob:none path the trees are extras a tree:0 server would not have sent
+// (the walk reads commits only): checkWide drops one that is over a limit instead of failing the walk (#46; see there).
+const commitsAndTags = (_oid, o) => o.type !== TYPE.TREE;
 export async function fetchPackTree0(t, opts) {
   const wide = async learned => {
-    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
+    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check: objects => skippedAttrs(checkWide(objects, commitsAndTags, t.limits)), attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
     if (r.objects) harvest(t, r.objects);
     return r;
   };
   if (t.quirks?.treeFilter === 'blob:none') return wide(false);
-  try { return await fetchPack(t, opts); } catch (e) {
+  try { return await fetchPack(t, opts, { check: objects => { checkWide(objects, () => true, t.limits); return {}; } }); } catch (e) {
     if (!isFilterRejection(e)) throw e;
     if (t.quirks) t.quirks.treeFilter = 'blob:none';
     return wide(true);
@@ -43,7 +48,9 @@ export async function fetchPack(t, opts, extra = {}) {
   }
 }
 
-export async function fetchPackOnce(t, opts, { external, resolve = true, attrs = {} } = {}) {
+// `check(objects)`, when given, runs over the resolved objects inside the span (it may drop some, or throw) and returns
+// attrs for it.
+export async function fetchPackOnce(t, opts, { external, resolve = true, attrs = {}, check = null } = {}) {
   return coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': !!opts.bypassCache, ...attrs }), async span => { try {
     const maxPack = requireLimit(t.limits, 'maxPackBytes');
     const parts = []; let total = 0;
@@ -62,6 +69,7 @@ export async function fetchPackOnce(t, opts, { external, resolve = true, attrs =
     });
     const resolved = resolve ? resolvePack(parsed, external, t.limits) : null;
     span.set(packAttrs(parsed, resolved));
+    if (check && resolved) span.set(check(resolved.objects));
     return { parsed, objects: resolved?.objects ?? null, resolved, ...acks };
   } catch (e) { if (e && typeof e === 'object') e.cacheStatus = span.attrs['git.response.cache'] ?? ''; throw e; } }));
 }

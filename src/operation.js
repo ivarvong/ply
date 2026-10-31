@@ -17,10 +17,14 @@ export async function operation(op, url, { auth, tracer, parent = null, fetchImp
   const name = `git.${op}`;
   const root = tracer.start(name, { parent, attrs: { [`${name}.url`]: transport?.url ?? redactUrl(url), ...attrs } });
   if (link) root.link(link.span, { 'ply.link': link.kind });
-  const t = transport ? withParent(transport, root) : createTransport(url, { auth, tracer, parent: root, fetchImpl, limits, signal, quirks });
   const finish = extra => { if (onFinish) root.set(onFinish()); root.set(extra); return root; };
   const outcome = (kind, result, extra = {}) => { finish({ ...extra, [`${name}.outcome`]: kind }).end(); return result; };
   try {
+    // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
+    // error recorded, like any other failure, instead of leaving it open and missing from the trace.
+    const t = transport ? withParent(transport, root) : createTransport(url, { auth, tracer, parent: root, fetchImpl, limits, signal, quirks });
+    // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
+    if (t.scrub) root.scrub = t.scrub;
     return await body({ t, root, outcome, limits });
   } catch (e) {
     finish({ [`${name}.outcome`]: e?.code ?? 'error' }).error(e, e?.code).end();

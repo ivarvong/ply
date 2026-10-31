@@ -4,9 +4,10 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles } from './server.js';
 import { build } from './workerd/build.mjs';
 
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
@@ -131,4 +132,66 @@ test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd;
     assert.equal(connect.attrs['ssh.cipher.c2s'], 'aes128-gcm@openssh.com'); assert.equal(connect.attrs['ssh.kex'], 'curve25519-sha256');
     console.log(`  ssh edit under workerd: ${r.ms}ms, ${r.stats.bytesIn} B in / ${r.stats.bytesOut} B out, ${r.stats.packetsIn + r.stats.packetsOut} packets`);
   } finally { await sshd.close(); }
+});
+
+test('workerd: I1 over SSH — a trickling server is cut at requestTimeoutMs and an aborted signal stops the exchange, typed as over HTTP', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const { startSshd, trickleProxy } = await import('./sshd.js');
+  const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+  const hexOf = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+  const keys = { privateKeyPkcs8Hex: hexOf(new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey))), publicKeyHex: hexOf(publicKeyRaw) };
+  const sshd = await startSshd(join(root, 'bound'), { publicKeyRaw });
+  const px = await trickleProxy(sshd.port);
+  try {
+    const bare = makeBareRepo(root, 'wbound'); const work = join(root, 'wwbound'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    commitFiles(work, bare, { 'f.txt': 'x\n' }, 'seed');
+    const req = extra => post('/ssh-bound', { url: `ssh://${sshd.user}@127.0.0.1:${px.port}${bare}`, hostKey: sshd.hostKeyLine, ...keys, ...extra });
+    const ok = await req({ requestTimeoutMs: 5000 }); assert.ok(ok.ok, JSON.stringify(ok));
+    px.mode.trickle = 100; // one byte per 100 ms from the first: under workersStream's per-read idle timer, never done
+    const slow = await req({ requestTimeoutMs: 1000 });
+    const aborted = await req({ requestTimeoutMs: 30_000, abortMs: 300 });
+    console.log(`  workerd ssh: trickle ${JSON.stringify(slow)}; abort ${JSON.stringify(aborted)}`);
+    assert.deepEqual([slow.code, slow.message], ['timeout', 'request aborted: request exceeded 1000 ms']);
+    assert.ok(slow.ms >= 990 && slow.ms < 1500, `cut at ${slow.ms} ms`);
+    assert.equal(aborted.code, 'aborted'); assert.match(aborted.message, /^request aborted: The operation was aborted/); // workerd's default abort reason
+    assert.ok(aborted.ms >= 290 && aborted.ms < 800, `stopped at ${aborted.ms} ms`);
+  } finally { await px.close(); await sshd.close(); }
+});
+
+test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST; nothing reaches the other origin', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const listen = h => new Promise(ok => { const s = http.createServer(h); s.listen(0, '127.0.0.1', () => ok(s)); });
+  const seen = [];
+  const other = await listen((req, res) => { seen.push({ url: req.url, authorization: req.headers.authorization ?? null }); res.writeHead(200, { 'content-type': 'text/plain' }); res.end('x'); });
+  const red = await listen((req, res) => { res.writeHead(307, { location: `http://127.0.0.1:${other.address().port}${req.url}` }); res.end(); });
+  try {
+    const r = await post('/redirect', { url: `http://127.0.0.1:${red.address().port}/r.git`, auth: { token: 'ghp_workerdRedirect0123456789' } });
+    assert.equal(r.get.code, 'http', JSON.stringify(r.get)); assert.equal(r.get.status, 307);
+    assert.equal(r.post.code, 'http', JSON.stringify(r.post)); assert.equal(r.post.status, 307);
+    assert.match(r.post.message, /redirected to .*\/r\.git\/git-upload-pack; ply does not follow redirects/);
+    const plyHits = seen.filter(h => h.authorization !== 'Bearer workerd-follow-probe');
+    assert.deepEqual(plyHits, [], 'ply requests reached the redirect target');
+    // Not ply: what this workerd does under the default `follow` with an Authorization header, cross-origin (recorded).
+    const probe = seen.find(h => h.authorization === 'Bearer workerd-follow-probe') ?? seen.find(h => h.url.includes('info/refs'));
+    console.log(`  workerd default follow, cross-origin: ${probe ? `target reached, Authorization ${probe.authorization ? 'FORWARDED' : 'stripped'}` : 'target not reached'} (${JSON.stringify(r.follow)})`);
+  } finally { other.close(); red.close(); }
+});
+
+test('workerd: a token given as the URL user authenticates the edit with the Authorization git sends; it reaches no span (#32)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const bare = makeBareRepo(root, 'ui'); const work = join(root, 'wui'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  commitFiles(work, bare, { 'a.txt': 'hello MARK\n' }, 'seed');
+  const TOKEN = 'glpat-WorkerdUserOnlyToken';
+  const gate = await startAuthGate(srv.url);
+  try {
+    const url = `http://${TOKEN}@${new URL(gate.url).host}/ui.git`;
+    const ls = await gitAsync(work, ['ls-remote', url]);
+    assert.equal(ls.status, 0, ls.stderr);
+    const gitAuth = [...new Set(gate.seen.map(x => x.authorization).filter(Boolean))];
+    assert.deepEqual(gitAuth, [`Basic ${btoa(`${TOKEN}:`)}`]);
+    gate.seen.length = 0;
+    const r = await post('/edit', { url, path: 'a.txt', find: 'MARK', replace: 'WORKERD', dump: true });
+    assert.ok(r.results[0].ok, JSON.stringify(r.results[0]));
+    assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.results[0].newCommit);
+    assert.deepEqual([...new Set(gate.seen.map(x => x.authorization))], gitAuth);
+    for (const s of [TOKEN, gitAuth[0].slice(6), `${TOKEN}@`]) assert.ok(!r.dump.includes(s), `${s} in a span`);
+  } finally { await gate.close(); }
 });

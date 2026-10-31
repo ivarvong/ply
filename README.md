@@ -20,7 +20,7 @@ const r = await editFile('https://github.com/o/r.git', {
 // r.newCommit, r.pushBytes (≈ 300 + |replace| + 80·depth), r.noop
 ```
 
-Credentials: `auth: { token }` (Basic `x-access-token:<token>`), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim). None reaches a span or an error message, even when a server echoes it.
+Credentials: `auth: { token, user? }` (Basic `<user>:<token>`, user defaulting to `x-access-token`, sent as UTF-8 bytes as git sends a credential helper's), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim; it and a bearer token must be printable ASCII). An `auth` that would send nothing is `bad_request`: `{}`, an empty token with no user, and `{ user }` alone (git's credential API asks for the password there; `{ user, token: '' }` sends Basic `<user>:`, the `https://<user>@host` form). Without `auth`, userinfo in the URL is sent as git sends it, byte for byte (percent-decoded): `https://user:pass@host/…` is Basic `user:pass`, a token as the user (`https://<token>@host/…`, the GitHub and GitLab form) is Basic `<token>:`, `https://:pass@host/…` is `:pass`; a NUL, CR or LF in it, or a URL that does not parse, is `bad_request` before any request. None reaches a span, a URL attribute or an error message, even when a server echoes it (the Basic user too, when it is token-shaped or the whole credential). Redirects are never followed: a 3xx is an `http` error naming the target, so no credential can follow it to another origin.
 
 Outcomes are typed on `err.code`: `cas_conflict` (retry), `match_count` (find ≠ exactly once), `not_found`, `auth`, `rate_limited`, `pack_corrupt`, `remote_error`, `upstream_5xx`. A `find === replace` edit returns `{ noop: true }` and pushes nothing.
 
@@ -52,6 +52,48 @@ Also: `client.discover()` is a capability canary (agent, object-format, `fetch=`
 ## Reading without a clone
 
 `readFile(url, { ref, path }, opts)` → `{ ref, commit, blob, mode, size, stream }`: ls-refs → commit (`tree:0`, deepen 1) → one tree per level → the blob as a `ReadableStream`, never held, hash-checked as it passes (the stream errors rather than ends if the bytes are not the blob's). `size` is known before the first byte. `listTree(url, { ref, path })` → `{ tree, entries: [{ name, mode, oid, type }] }` as `git ls-tree` prints them. `ref` is `HEAD` (default), a full ref, a short name (git's order: tags before branches), or a commit oid; tags are peeled. `import { readFile, listTree } from 'ply/read'` (36 KB min, no push or merge code).
+
+## Pushing a whole tree (deploy from a directory, no git binary)
+
+`pushTree(url, { ref, base?, files, author, message }, opts)` commits exactly `files` as the new tree, on the current head of `ref` (or `base`), and pushes it with the same rules as `editFile`: `head` hint, one fresh retry on `cas_conflict`, `strictHead`, `verify` (an acknowledged push that does not read back is `ambiguous`), `signer`, `cache`. An absent `ref` is created as a root commit (zero old oid: the CAS means "must not exist"). Identical files are `{ noop: true }`, nothing pushed.
+
+```js
+import { pushTree } from 'ply/tree';            // Workers-safe
+import { pushDir } from 'ply/tree-node';         // Node: walks a directory (node:fs)
+
+await pushTree(url, { ref: 'refs/heads/main', author, message: 'deploy', files: {
+  'index.html': '<h1>hi</h1>',                                  // string or Uint8Array → 100644
+  'bin/build': { data: script, mode: '100755' },
+  'latest': { mode: '120000', data: 'v2/index.html' },          // symlink: the target is the blob
+  'vendor/lib': { mode: '160000', oid: submoduleCommit },       // gitlink: no data; the server need not have the commit
+} }, { auth, tracer, head: lastCommit });
+await pushDir(url, { dir: './dist', ref: 'refs/heads/main', author, message: 'deploy' }, { auth, tracer });
+```
+
+`files` is an object, a `Map`, or an iterable of `{ path, mode?, data?, oid? }`. Paths are validated like `editFile`'s (no `.git`, `..`, empty components); a path given twice, or as both a file and a directory, is `bad_request` before any request (git's fsck calls that tree `duplicateEntries`; `encodeTree` now refuses it too). `README` and `readme` are two names to git and are accepted: they collide only on a case-insensitive checkout. Each blob is bounded by `maxObjectSize`, the file count by `maxPackObjects`, each directory by `maxTreeEntries`.
+
+Repeat pushes are thin: ply reads the parent's trees only where the new tree differs (one `tree:0` fetch per changed directory, cached by oid; on Artifacts the first `blob:none` fetch carries them all), sends only blobs no such tree names, and sends each changed tree as a `REF_DELTA` against the tree it replaces. Measured on a 208-entry tree (207 blobs, 26 trees) (`test/push-tree.test.js`): push 1 is 234 objects / ≈116.9 KB; push 2 (one file changed, one added, one deleted) is 7 objects / 1,176 B, exactly `git rev-list --objects new ^old`; push 3 (a one-byte change, `head` hint + `cache`) is 4 objects / 841 B with two upload-pack requests (ls-refs and the hinted commit, concurrent). Only the parent's trees are consulted, so a blob that exists on the server only in older history is sent again (correct, not minimal). Any push whose pack exceeds `limits.maxPackBytes` is refused before the upload starts: `limit_exceeded`, `what: 'push pack bytes'`, `got` = the measured pack size (set `maxPackBytes` under a host's cap, e.g. Artifacts' 62–93 MiB).
+
+`pushDir` / `filesFromDir(dir, { filter, limits })` read a directory as git's index would: the owner's execute bit makes `100755`, a symlink is `120000` with its target (never followed), empty directories vanish, `.git` is skipped, anything else (FIFO, socket) is `bad_request`. `filter(path, { directory, symlink })` → `false` leaves a path out; `.gitignore` is not read, and there is no `ply push` CLI. Gitlinks come only from `files` (`{ mode: '160000', oid }`): a nested checkout is walked as a plain directory. A tree oid from `filesFromDir` equals `git add -A && git write-tree` on the same directory (tested).
+
+## Checking out a whole tree (no git binary, no clone)
+
+`checkoutTree(url, { ref, path? }, opts)` → `{ ref, commit, tree, path, entries, files }`: ls-refs → one `blob:none` fetch of the commit (deepen 1: the commit and every tree under it — on Artifacts, the only filter it serves anyway) → the blobs, up to `batch` (default 1,000) wants per request. `entries` is every non-tree entry under `path` as `[{ path, mode, oid }]` in `git ls-tree -r` order, paths relative to `path`; `files` is an async iterator of `{ path, mode, oid, size, stream }`. Modes are git's canonical `100644`, `100755`, `120000` (a symlink: the stream is its target) and `160000` (a gitlink: `size` 0, `stream` null, the submodule's commit is not in this repository).
+
+```js
+import { checkoutTree } from 'ply/checkout';       // Workers-safe
+import { checkoutDir } from 'ply/checkout-node';    // Node: writes a directory (node:fs)
+
+const r = await checkoutTree(url, { ref: 'main', path: 'site' }, { auth, tracer });
+for await (const f of r.files) if (f.stream) await env.BUCKET.put(f.path, f.stream, { httpMetadata: { contentLength: f.size } });
+await checkoutDir(url, { dir: './out', ref: 'v1.2.0' }, { auth, tracer });  // == git clone, minus .git
+```
+
+Every object is checked against its oid: a blob batch is delta-resolved and keyed by computed hash before any file is yielded (an object nobody asked for is `pack_corrupt`); a blob fetched alone streams through `readFile`'s verifier (the stream errors rather than ends on wrong bytes). A batch that hits `maxPackBytes`, `maxInflatedTotal` or `maxObjectSize` is split in half and refetched, down to single blobs, which stream in O(1) memory whatever their size; a host that refuses a many-wants fetch (an HTTP error, `ERR`) gets one blob per request from then on (`quirks.blobWants = 'single'`). A wrong blob is never a reason to fall back. Entries walked are bounded by `maxPackObjects` (a tree reused at many paths cannot multiply past it), depth by `maxPathDepth`, and a tree naming one entry twice (a symlink `a` beside a directory `a`) is `pack_corrupt`.
+
+Measured against `git http-backend` (`test/checkout-tree.test.js`, 22 entries: nested and unicode paths, exec bits, four symlinks, a gitlink, a 3 MiB blob, one blob at two paths): 3 requests (ls-refs, trees, blobs), the same behind an Artifacts-like `blob:none`-only proxy, against 72 for the per-file loop (`readCommit` → `listTree` per directory → `readFile` per blob, as in `examples/checkout-tree.mjs`). A commit oid as `ref` skips ls-refs.
+
+`checkoutDir` / `writeFiles(dir, files)` lay the files out as `git clone` does — `diff -r --no-dereference` identical to a clone of the same ref, permission bits included (100755 is created 0777 & ~umask, others 0666 & ~umask; symlinks never followed; a gitlink is an empty directory). `dir` must be absent or empty. Paths go through `validatePath` again (no `..`, absolute, empty or `.git` component); each directory is made one level at a time and must be a real directory (a symlink there — one this checkout made, or the same name on a case-insensitive filesystem — is `bad_request`, `what: 'checkout path'`); files are opened `O_EXCL`, so nothing is overwritten or written through a link. A file whose stream fails verification is removed before the error is rethrown; a checkout that throws leaves `dir` partial. No index, no `.git`, no working-tree updates: a one-shot materialisation.
 
 ## Hosts that refuse `filter tree:0` (Cloudflare Artifacts)
 
@@ -97,7 +139,7 @@ Proven against a real `sshd` (OpenSSH 9.6) in `test/sshgit.test.js`: edits, merg
 ## Layers
 
 ```
-operations   edit · merge · rebase · cherry-pick · revert         operation.js: root span, transport, outcome, verify rule
+operations   edit · push tree · merge · rebase · cherry-pick · revert        operation.js: root span, transport, outcome, verify rule
 commands     lsRefs · packStream/fetchObject · fetchPack/negotiate · push · discover · receiveCaps   free functions over a transport
 transport    the contract (transport.js): t.frames(service, body, span, hints) · t.advertise(service, span)
              implementations: http.js (one POST per command) · sshgit.js (one channel per service, over ssh.js)
@@ -110,7 +152,7 @@ Each layer is testable without the one below it, and `test/bundle.test.js` asser
 
 ## Telemetry conventions (enforced by `test/pure.test.js`)
 
-- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children; `ssh.<phase>` for transport phases.
+- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.push_tree`, `git.checkout`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children; `ssh.<phase>` for transport phases.
 - Attribute keys: dotted lowercase under `git.` `http.` `ssh.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
 - Every root span carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, …, or the error code).
 - Every wire span carries `git.transport`, `git.request.bytes`, `git.response.bytes`, `server.address`.

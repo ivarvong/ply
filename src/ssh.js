@@ -86,11 +86,11 @@ export const hostKeyFromLine = line => {
 };
 
 export class SshClient {
-  constructor(stream, { user, privateKey, publicKeyRaw, hostKey, tracer, parent = null, clientVersion = 'SSH-2.0-ply_0.1.0', windowSize = 2 * 1024 * 1024, maxPacket = 32768, timeoutMs = 30000 } = {}) {
+  constructor(stream, { user, privateKey, publicKeyRaw, hostKey, tracer, parent = null, clientVersion = 'SSH-2.0-ply_0.1.0', windowSize = 2 * 1024 * 1024, maxPacket = 32768 } = {}) {
     if (!hostKey) throw fail('bad_request', 'hostKey is required: an SSH client in a Worker cannot trust-on-first-use');
     this.s = stream; this.user = user; this.privateKey = privateKey; this.publicKeyRaw = publicKeyRaw;
     this.hostKeyPinned = hostKey instanceof Uint8Array ? hostKey : hostKeyFromLine(hostKey);
-    this.tracer = tracer; this.parent = parent; this.vC = clientVersion; this.windowSize = windowSize; this.maxPacket = maxPacket; this.timeoutMs = timeoutMs;
+    this.tracer = tracer; this.parent = parent; this.vC = clientVersion; this.windowSize = windowSize; this.maxPacket = maxPacket;
     this.rbuf = new Uint8Array(0); this.enc = null; this.dec = null; this.seqIn = 0; this.seqOut = 0;
     this.sessionId = null; this.channels = new Map(); this.nextChannel = 0; this.closed = false; this.stats = { packetsIn: 0, packetsOut: 0, bytesIn: 0, bytesOut: 0 };
     this.pending = []; // messages for channels not yet consumed
@@ -109,20 +109,30 @@ export class SshClient {
   async send(bytes) { this.stats.bytesOut += bytes.length; await this.s.write(bytes); }
 
   // ---- packet layer ----
-  async writePacket(payload) {
+  // One packet at a time each way, whoever calls: two channels, a WINDOW_ADJUST beside a command, a reply to a server
+  // request. A packet's nonce is claimed (copied and bumped) before the first await, and the next packet is not sealed
+  // until this one is on the wire, so packets leave in nonce order and no nonce is used twice (concurrent callers once
+  // sealed two CHANNEL_OPENs under one nonce: GCM's confidentiality and integrity are gone for both). Reads likewise:
+  // the stream buffer and the decrypt nonce belong to one reader at a time. A packet that fails either way (bad tag, short
+  // read, failed send) leaves the stream out of step, so the connection is dead: every later packet fails with that error
+  // at once (a reader that went on would take ciphertext for a length and wait for bytes the server never sends).
+  writePacket(payload) { const p = (this.wq ?? Promise.resolve()).then(() => this.live(() => this.sealPacket(payload))); this.wq = p.catch(() => {}); return p; }
+  readPacket() { const p = (this.rq ?? Promise.resolve()).then(() => this.live(() => this.openPacket())); this.rq = p.catch(() => {}); return p; }
+  async live(f) { if (this.dead) throw this.dead; try { return await f(); } catch (e) { this.dead ??= e; throw e; } }
+  async sealPacket(payload) {
     let pkt;
     if (!this.enc) pkt = padded(payload, 8, true);
     else {
       const body = padded(payload, 16, false); // [len(4)][padlen][payload][pad]; len is AAD, the rest is sealed
       const lengthField = body.subarray(0, 4), plain = body.subarray(4);
-      const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: this.enc.nonce, additionalData: lengthField, tagLength: 128 }, this.enc.key, plain));
-      this.enc.bump();
+      const iv = this.enc.nonce.slice(); this.enc.bump();
+      const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: lengthField, tagLength: 128 }, this.enc.key, plain));
       pkt = concat([lengthField, sealed]);
     }
     this.seqOut++; this.stats.packetsOut++;
     await this.send(pkt);
   }
-  async readPacket() {
+  async openPacket() {
     if (!this.dec) {
       await this.fill(4); const len = new Reader(this.rbuf).u32();
       if (len > 256 * 1024 + 64) throw sshErr(`ssh: packet too large (${len})`);
@@ -133,10 +143,11 @@ export class SshClient {
     await this.fill(4); const lengthField = this.take(4).slice(); const len = new Reader(lengthField).u32();
     if (len > 256 * 1024 + 64) throw sshErr(`ssh: packet too large (${len})`);
     await this.fill(len + 16); const sealed = this.take(len + 16);
+    const iv = this.dec.nonce.slice(); this.dec.bump();
     let plain;
-    try { plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: this.dec.nonce, additionalData: lengthField, tagLength: 128 }, this.dec.key, sealed)); }
+    try { plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: lengthField, tagLength: 128 }, this.dec.key, sealed)); }
     catch { throw sshErr('ssh: packet authentication failed (bad tag)'); }
-    this.dec.bump(); this.seqIn++; this.stats.packetsIn++;
+    this.seqIn++; this.stats.packetsIn++;
     const padLen = plain[0];
     return plain.subarray(1, plain.length - padLen);
   }
@@ -235,7 +246,7 @@ export class SshClient {
   // Run a command on a session channel. Returns { stdout: AsyncIterable<Uint8Array>, write(bytes), eof(), stderr(): string, exit(): Promise<number|null> }.
   async exec(command, { env = {} } = {}) {
     const id = this.nextChannel++;
-    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], waiters: [], eof: false, closed: false, stderr: '', exit: null, exitWaiters: [], winWaiters: [] };
+    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], queued: 0, replies: [], waiters: [], eof: false, closed: false, stderr: '', exit: null, exitWaiters: [], winWaiters: [] };
     this.channels.set(id, ch);
     await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_OPEN]), str('session'), u32(id), u32(this.windowSize), u32(this.maxPacket)]));
     const conf = await this.readChannelMsg(ch, [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE]);
@@ -254,38 +265,49 @@ export class SshClient {
           while (ch.winRemote === 0 && !ch.closed) await self.pumpOnce(ch);
           if (ch.closed) throw fail('network', 'ssh: channel closed while writing');
           const n = Math.min(bytes.length - off, ch.winRemote, ch.maxRemote || 32768, 32768);
+          ch.winRemote -= n; // claimed before the await: a concurrent writer sees what is left
           await self.writePacket(concat([Uint8Array.from([MSG.CHANNEL_DATA]), u32(ch.remote), str(bytes.subarray(off, off + n))]));
-          ch.winRemote -= n; off += n;
+          off += n;
         }
       },
       async eof() { if (!ch.sentEof) { ch.sentEof = true; await self.writePacket(concat([Uint8Array.from([MSG.CHANNEL_EOF]), u32(ch.remote)])); } },
-      async *stdout() { for (;;) { if (ch.queue.length) { yield ch.queue.shift(); continue; } if (ch.eof || ch.closed) return; await self.pumpOnce(ch); } },
+      async *stdout() { for (;;) { if (ch.queue.length) { const d = ch.queue.shift(); ch.queued -= d.length; await self.consumed(ch); yield d; continue; } if (ch.eof || ch.closed) return; await self.pumpOnce(ch); } },
       stderr: () => ch.stderr,
       async exit() { while (ch.exit === null && !ch.closed) await self.pumpOnce(ch); return ch.exit; },
       async close() { if (!ch.closed && !ch.sentClose) { ch.sentClose = true; try { await self.writePacket(concat([Uint8Array.from([MSG.CHANNEL_CLOSE]), u32(ch.remote)])); } catch { /* closing */ } } },
     };
   }
 
-  // Read messages until one of `types` arrives for this channel (other channel traffic is dispatched meanwhile).
+  // Wait for one of `types` for this channel: open and request replies are kept per channel by dispatch, whoever read them.
   async readChannelMsg(ch, types) {
-    for (;;) { const m = await this.readMessage(); if (types.includes(m[0])) { const r = new Reader(m); r.byte(); if (r.u32() === ch.id) return m; } this.dispatch(m); }
+    for (;;) { const i = ch.replies.findIndex(m => types.includes(m[0])); if (i >= 0) return ch.replies.splice(i, 1)[0]; await this.pumpOnce(); }
   }
-  async pumpOnce(ch) { if (ch.closed) return; const m = await this.readMessage(); await this.dispatch(m); }
+  // Read and dispatch one message. Concurrent waiters share the read in flight, then re-check their own condition: what
+  // arrived went to its channel, whichever waiter read it (a second reader would block on a message nobody sends).
+  pumpOnce(ch) {
+    if (ch?.closed) return Promise.resolve();
+    this.pumping ??= this.readMessage().then(m => this.dispatch(m)).finally(() => { this.pumping = null; });
+    return this.pumping;
+  }
   async dispatch(m) {
     const type = m[0];
     const r = new Reader(m); r.byte();
-    const chanMsgs = [MSG.CHANNEL_WINDOW_ADJUST, MSG.CHANNEL_DATA, MSG.CHANNEL_EXTENDED_DATA, MSG.CHANNEL_EOF, MSG.CHANNEL_CLOSE, MSG.CHANNEL_REQUEST, MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE];
+    const chanMsgs = [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE, MSG.CHANNEL_WINDOW_ADJUST, MSG.CHANNEL_DATA, MSG.CHANNEL_EXTENDED_DATA, MSG.CHANNEL_EOF, MSG.CHANNEL_CLOSE, MSG.CHANNEL_REQUEST, MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE];
     if (!chanMsgs.includes(type)) throw sshErr(`ssh: unexpected message ${type}`);
     const ch = this.channels.get(r.u32()); if (!ch) return;
-    if (type === MSG.CHANNEL_DATA) { const d = r.string().slice(); ch.queue.push(d); await this.consumed(ch, d.length); }
-    else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); ch.stderr = (ch.stderr + td.decode(d)).slice(-8192); await this.consumed(ch, d.length); }
+    if (type === MSG.CHANNEL_OPEN_CONFIRMATION || type === MSG.CHANNEL_OPEN_FAILURE || type === MSG.CHANNEL_SUCCESS || type === MSG.CHANNEL_FAILURE) ch.replies.push(m);
+    else if (type === MSG.CHANNEL_DATA) { const d = r.string(); this.arrived(ch, d.length); ch.queue.push(d.slice()); ch.queued += d.length; }
+    else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); this.arrived(ch, d.length); ch.stderr = (ch.stderr + td.decode(d)).slice(-8192); await this.consumed(ch); }
     else if (type === MSG.CHANNEL_WINDOW_ADJUST) ch.winRemote += r.u32();
     else if (type === MSG.CHANNEL_EOF) ch.eof = true;
     else if (type === MSG.CHANNEL_CLOSE) { ch.closed = true; ch.eof = true; if (!ch.sentClose) { ch.sentClose = true; try { await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_CLOSE]), u32(ch.remote)])); } catch { /* peer gone */ } } }
     else if (type === MSG.CHANNEL_REQUEST) { const name = r.text(); const wantReply = r.bool(); if (name === 'exit-status') ch.exit = r.u32(); else if (name === 'exit-signal') { ch.exit = -1; ch.exitSignal = r.text(); } if (wantReply) await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_FAILURE]), u32(ch.remote)])); }
   }
-  // Give the window back as data is consumed (we buffer at most one channel's worth; git streams are consumed promptly)
-  async consumed(ch, n) { ch.winLocal -= n; if (ch.winLocal < this.windowSize / 2) { const add = this.windowSize - ch.winLocal; ch.winLocal += add; await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_WINDOW_ADJUST]), u32(ch.remote), u32(add)])); } }
+  // Flow control bounds what we hold: data takes window as it arrives and gets it back only once stdout() hands it on (stderr
+  // is consumed on arrival, as an 8 KiB tail), so queued + winLocal ≤ windowSize. Data past the window is a server that
+  // ignores flow control (RFC 4254 §5.2): refused before it is copied, whatever message we were waiting for.
+  arrived(ch, n) { if (n > ch.winLocal) throw sshErr(`ssh: server sent ${n} bytes with ${ch.winLocal} left in the channel window`, { window: this.windowSize, queued: ch.queued }); ch.winLocal -= n; }
+  async consumed(ch) { const add = this.windowSize - ch.winLocal - ch.queued; if (ch.winLocal < this.windowSize / 2 && add > 0) { ch.winLocal += add; await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_WINDOW_ADJUST]), u32(ch.remote), u32(add)])); } }
 
   async disconnect(reason = 'done') {
     if (this.closed) return; this.closed = true;

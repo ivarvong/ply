@@ -80,6 +80,10 @@ export const OBJ_CONTINUE = 0x80;
 export const OBJ_SIZE_FIRST_BASE = 16;
 export const OBJ_SIZE_NEXT_BASE = 128;
 export const VARINT_BITS = 7;
+/** A size varint's 7-bit group may start at bit 63 at most: git refuses `bitsizeof(size_t) <= shift` ("bad object header",
+ *  packfile.c) and dies on a delta size that overflows size_t (st_left_shift). An object header is then ≤ 10 bytes
+ *  (4 + 9 × 7 bits), a delta size ≤ 10 bytes (10 × 7), and every decoded size is finite. */
+export const VARINT_MAX_SHIFT = 63;
 
 // ---- delta (gitformat-pack(5) "Deltified representation"; patch-delta.c DELTA_SIZE_MIN) ----
 /** git rejects a delta shorter than 4 bytes. */

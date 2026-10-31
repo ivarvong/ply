@@ -8,11 +8,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './fuzz/prng.js';
-import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep } from '../src/edit.js';
+import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep, MATCH_OFFSETS_KEPT } from '../src/edit.js';
 import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { fail, scrubError } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
@@ -90,6 +91,24 @@ test('deflate only: a stored-block zlib stream never beats CompressionStream (th
     // zlib's own stored blocks are ~16 KiB, ours 64 KiB: deflate can lose by ≤5 bytes per 16 KiB on incompressible input, nothing more
     assert.ok(zd.length <= zs.length + 5 * Math.ceil(n / 16384), `n=${n}: deflate ${zd.length} vs stored ${zs.length}`);
   }
+});
+
+test('scanStep counts every match and keeps the first MATCH_OFFSETS_KEPT offsets; each hit is O(1) (#13)', () => {
+  const run = n => {
+    const data = new Uint8Array(n).fill(0x61);
+    let st = scanInit({ find: Uint8Array.of(0x61), replace: Uint8Array.of(0x62) });
+    const t0 = performance.now();
+    for (let o = 0; o < n; o += 16384) st = scanStep(st, data.subarray(o, o + 16384)).state;
+    return { st, ms: performance.now() - t0 };
+  };
+  const { st, ms } = run(128 << 10);
+  assert.equal(st.count, 128 << 10);
+  assert.equal(st.emitted, 128 << 10);
+  assert.deepEqual(st.matches, Array.from({ length: MATCH_OFFSETS_KEPT }, (_, i) => i));
+  assert.ok(ms < 500, `128 KiB of matches took ${ms.toFixed(0)} ms`);
+  const two = scanStep(scanInit({ find: Uint8Array.of(1), replace: new Uint8Array(0) }), Uint8Array.of(1, 0, 1)).state;
+  assert.equal(two.count, 2);
+  assert.deepEqual(two.matches, [0, 2]);
 });
 
 test('memFromScan/memAttrs: whole-edit accounting from what was held', () => {
@@ -212,4 +231,12 @@ test('error taxonomy: every fail(\'code\') literal in src/ is in the table (stat
   for (const f of readdirSync('src')) if (f.endsWith('.js')) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
   for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);
   assert.ok(used.size >= 20);
+});
+
+test('scrubError walks prototype-less maps (#16: merge reasons, report-status options) as it walks plain objects', () => {
+  const options = Object.create(null); options.__proto__ = 'tok SECRET'; options['old-oid'] = 'SECRET';
+  const reasons = Object.create(null); reasons['a.txt'] = 'SECRET';
+  const e = scrubError(fail('push_rejected', 'x', { report: { refs: [{ options }] }, reasons }), s => s.replaceAll('SECRET', '[redacted]'));
+  assert.deepEqual(Object.entries(e.report.refs[0].options), [['__proto__', 'tok [redacted]'], ['old-oid', '[redacted]']]);
+  assert.equal(e.reasons['a.txt'], '[redacted]');
 });

@@ -42,9 +42,9 @@ export function parseReportStatus(lines, limits = DEFAULT_LIMITS) {
       if (r.unpack !== null) throw fail('protocol', 'report: duplicate unpack');
       r.unpack = l.slice(UNPACK.length);
     }
-    else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: {} });
-    else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: {} }); }
-    else if (l.startsWith(OPTION) && r.refs.length) { const [k, v] = l.slice(OPTION.length).split(' '); r.refs[r.refs.length - 1].options[k] = v ?? true; } // report-status-v2
+    else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: Object.create(null) });
+    else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: Object.create(null) }); }
+    else if (l.startsWith(OPTION) && r.refs.length) { const [k, v] = l.slice(OPTION.length).split(' '); r.refs[r.refs.length - 1].options[k] = v ?? true; } // report-status-v2; option names are the server's, so options has no prototype
   }
   r.ok = r.unpack === 'ok' && r.refs.length > 0 && r.refs.every(x => x.ok);
   return r;
@@ -98,6 +98,10 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
     const { pack, entries } = needPack ? await buildPack(objects) : { pack: null, entries: [] };
     span.set({ 'git.push.pack.bytes': pack?.length ?? 0, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => e.baseOid), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
     entries.forEach((e, i) => span.event('git.push.object', { 'git.object.index': i, 'git.object.type': e.typeName, 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': e.baseOid ?? '', 'git.object.bytes': e.bytes }));
+    // Refuse before the first byte is sent: a host with a push cap (Artifacts: 62–93 MiB) would otherwise take the whole
+    // upload and answer 4xx. The measured size is the pack as built, so `got` is what the server would have received.
+    const maxPack = requireLimit(t.limits, 'maxPackBytes');
+    if (pack && pack.length > maxPack) throw limitError('push pack bytes', pack.length, maxPack);
     let body = pushBody({ commands, caps }, pack);
     if (pushOptions.length) { // push-options follow the command flush, then another flush, then the pack
       const head = body.subarray(0, body.length - (pack?.length ?? 0));

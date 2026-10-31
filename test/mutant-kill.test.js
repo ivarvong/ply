@@ -90,7 +90,9 @@ test('parseTree error strings and the boundaries next to them', () => {
   throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: not strictly sorted');
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
   assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
-  const tree = encodeTree([{ mode: '40000', name: 'd', oid: oid(1) }, { mode: '100644', name: 'd', oid: oid(2) }]);
+  // a file and a directory of one name sort apart ('d' < 'd/'): the order check passes it. encodeTree refuses to write
+  // it (git fsck duplicateEntries), so the bytes are built by hand.
+  const tree = data(raw('100644 d\0', oidBytes(2)), raw('40000 d\0', oidBytes(1)));
   assert.deepEqual(parseTree(tree).map(e => e.name), ['d', 'd']);
 });
 
@@ -553,7 +555,20 @@ test('ls-refs lines and report-status', () => {
   assert.deepEqual(parseLsRefLine(`${id} HEAD symref-target:refs/heads/main peeled:${id}`), {
     oid: id, name: 'HEAD', 'symref-target': 'refs/heads/main', peeled: id,
   });
-  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 bare`), { oid: id, name: 'refs/tags/v1', bare: '' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 bare`), { oid: id, name: 'refs/tags/v1' });
+  // #16: only symref-target and peeled are kept; a server attribute never overrides the parsed oid or name
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:junk name:refs/heads/other`), { oid: id, name: 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:${oid(5)} name:HEAD __proto__:x constructor:y`), { oid: id, name: 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled symref-target`), { oid: id, name: 'refs/heads/main' }, 'no colon: not the attribute (git skip_prefix)');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled_ symref-target_`), { oid: id, name: 'refs/heads/main' }, 'no colon: never a key cut one char short');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main  peeled:${id}  `), { oid: id, name: 'refs/heads/main', peeled: id }, 'doubled spaces');
+  // the name is never read as an attribute, with or without attributes after it
+  assert.deepEqual(parseLsRefLine(`${id} symref-target:refs/heads/x`), { oid: id, name: 'symref-target:refs/heads/x' });
+  assert.deepEqual(parseLsRefLine(`${id} peeled:junk symref-target:refs/heads/main`), { oid: id, name: 'peeled:junk', 'symref-target': 'refs/heads/main' });
+  for (const bad of ['junk', 'AB'.repeat(20), `${oid(5)}0`, '']) {
+    const line = `${id} refs/tags/v1 peeled:${bad}`;
+    throws(() => parseLsRefLine(line), 'protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
+  }
   throws(() => parseLsRefLine('ERR no such ref'), 'remote_error', 'remote: no such ref');
   throws(() => parseLsRefLine('nope'), 'protocol', 'ls-refs: malformed line "nope"');
   throws(() => parseLsRefLine(`${id} `), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${id} `)}`);
@@ -572,6 +587,11 @@ test('ls-refs lines and report-status', () => {
   assert.equal(ng.refs[1].ref, 'refs/heads/other');
   assert.equal(ng.refs[1].reason, 'failed to lock');
   assert.equal(ng.refs[1].options['old-oid'], 'abc');
+  // #16: option names are the server's; a `__proto__` or `constructor` option is recorded, and an absent one reads as absent
+  const named = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'option __proto__ x', 'option constructor']);
+  assert.deepEqual(Object.entries(named.refs[0].options), [['__proto__', 'x'], ['constructor', true]]);
+  assert.equal(ok.refs[0].options.constructor, undefined);
+  assert.equal('toString' in ok.refs[0].options, false);
   assert.equal(ng.refs[1].options.quiet, true);
   assert.equal(parseReportStatus(['unpack error']).ok, false);
   assert.equal(parseReportStatus(['unpack ok']).unpack, 'ok');
@@ -588,9 +608,9 @@ test('ssh url, kex, and gitattributes lines', () => {
   assert.deepEqual(parseSshUrl('ssh://u@h:2222/a/b'), { user: 'u', host: 'h', port: 2222, path: '/a/b' });
   assert.deepEqual(parseSshUrl('git@github.com:o/r.git'), { user: 'git', host: 'github.com', port: 22, path: 'o/r.git' });
   assert.deepEqual(parseSshUrl('host:name'), { user: 'git', host: 'host', port: 22, path: 'name' });
-  throws(() => parseSshUrl('https://x/y'), 'bad_request', 'not an ssh git url: https://x/y');
-  throws(() => parseSshUrl('ssh://host'), 'bad_request', 'not an ssh git url: ssh://host');
-  throws(() => parseSshUrl('host:22/foo'), 'bad_request', 'not an ssh git url: host:22/foo');
+  throws(() => parseSshUrl('https://x/y'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('ssh://host'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('host:22/foo'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
   const cookie = Uint8Array.from({ length: 16 }, (_, i) => i + 1);
   const kex = parseKexInit(kexInit(cookie));
   assert.deepEqual(kex.kex, ['curve25519-sha256', 'curve25519-sha256@libssh.org']);
@@ -690,10 +710,16 @@ test('boundaries between a thrown error and its neighbour', async () => {
   assert.equal(spFinish(streamed.state).zlibBytes, streamed.state.zlibBytes);
   assert.ok(streamed.state.zlibBytes > 0);
 
-  throws(() => parseSshUrl('xsssh://host/path'), 'bad_request', 'not an ssh git url: xsssh://host/path');
+  throws(() => parseSshUrl('xsssh://host/path'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
   assert.equal(parseSshUrl('ssh://ab@host/p').user, 'ab');
-  throws(() => parseSshUrl('/git@github.com:o/r.git'), 'bad_request', 'not an ssh git url: /git@github.com:o/r.git');
-  throws(() => parseSshUrl('host:22'), 'bad_request', 'not an ssh git url: host:22');
+  throws(() => parseSshUrl('/git@github.com:o/r.git'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('host:22'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  // #40: the refusal names its field and never quotes the URL (it may carry a credential)
+  for (const bad of ['https://x/y', 'ssh://host', 'host:22', 'ssh://host/path\n']) assert.throws(() => parseSshUrl(bad), e => { assert.equal(e.what, 'ssh url', bad); assert.ok(!e.message.includes(bad.trim()), bad); return true; });
+  for (const pw of ['ssh://u:p@h/x', 'u:p@h:x']) assert.throws(() => parseSshUrl(pw), e => e.code === 'bad_request' && e.what === 'ssh url' && e.message === 'invalid ssh url: a password in the userinfo is not supported (ply authenticates by public key); remove it');
+  assert.throws(() => parseSshUrl('ssh://%FF@h/x'), e => e.code === 'bad_request' && e.what === 'ssh url' && e.message === 'invalid ssh url: a percent-escape is not UTF-8');
+  assert.deepEqual(parseSshUrl('ssh://t%C3%ABst@h%73/p%20q%00%ZZ'), { user: 'tëst', host: 'hs', port: 22, path: '/p q%00%ZZ' });
+  assert.deepEqual(parseSshUrl('t%C3%ABst@h:p%20q'), { user: 't%C3%ABst', host: 'h', port: 22, path: 'p%20q' });
 
   const no = { macrosOk: false };
   const yes = { macrosOk: true };
@@ -710,7 +736,8 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const id = oid(9);
   throws(() => parseLsRefLine(` ${id}`), 'protocol', `ls-refs: malformed line ${JSON.stringify(` ${id}`)}`);
   assert.equal(parseLsRefLine(`${id} refs/heads/a`).name, 'refs/heads/a');
-  assert.equal(parseLsRefLine(`${id} refs/heads/a sym:val`).sym, 'val');
+  assert.equal(parseLsRefLine(`${id} refs/heads/a symref-target:val`)['symref-target'], 'val');
+  assert.equal(parseLsRefLine(`${id} refs/heads/a sym:val`).sym, undefined);
   const report = parseReportStatus(['unpack ok', 'ok refs/heads/main']);
   assert.equal(report.ok, true);
   assert.equal(report.refs[0].ref, 'refs/heads/main');
@@ -811,15 +838,13 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.equal(parseReportStatus(['unpack ok', 'ng refs/heads/a no']).ok, false);
 
   const ref = `${oid(4)} refs/heads/a :val`;
-  assert.equal(parseLsRefLine(ref)[''], 'val');
+  assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a' });
   throws(() => parseLsRefLine(`${oid(4)}  refs/heads/a`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${oid(4)}  refs/heads/a`)}`);
-  const spaced = parseLsRefLine(`${oid(4)} refs/heads/a a:b  c:d`);
-  assert.equal(spaced.a, 'b');
-  assert.equal(spaced.c, 'd');
-  assert.equal(spaced[''], undefined);
+  const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
+  assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 
-  throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'not an ssh git url: ssh://host/path\n');
-  throws(() => parseSshUrl('host:name\n'), 'bad_request', 'not an ssh git url: host:name\n');
+  throws(() => parseSshUrl('ssh://host/path\n'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
+  throws(() => parseSshUrl('host:name\n'), 'bad_request', 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path');
 
   const hello = te.encode('hello hello hello hello');
   const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)));
@@ -1259,4 +1284,48 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   assert.ok(errPulls <= 3, `error body kept reading (${errPulls} chunks)`);
   assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), limits: {}, connect() { throw new Error('connect'); } }), e => e.code === 'bad_request' && e.what === 'requestTimeoutMs');
   assert.throws(() => createSshTransport('ssh://git@h/r.git', { hostKey: new Uint8Array(32), user: 'a\nb' }), e => e.code === 'bad_request' && e.what === 'ssh user');
+});
+
+test('encodeTree duplicate names and the pre-send push size refusal (issue #11)', async () => {
+  const blob = oid(1), dir = oid(2);
+  throws(() => encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a', oid: blob }]), 'bad_request', 'tree: duplicate entry "a"');
+  throws(() => encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a.b', oid: blob }, { mode: '40000', name: 'a', oid: dir }]), 'bad_request', 'tree: duplicate entry "a"');
+  assert.equal(encodeTree([{ mode: '100644', name: 'README', oid: blob }, { mode: '100644', name: 'readme', oid: blob }]).length, 2 * (OID_BYTES + 'README'.length + '100644 \0'.length), 'case-only twins are two names');
+  let sent = 0;
+  const t = { limits: withLimits({ maxPackBytes: 40 }), tracer: tracerStub, parent: null, async *frames() { sent++; for (const f of []) yield f; } };
+  const objects = [{ type: TYPE.BLOB, data: te.encode('x'.repeat(64)) }];
+  await assert.rejects(push(t, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push pack bytes' && e.max === 40 && e.got > 40);
+  assert.equal(sent, 0, 'nothing reached the transport');
+  const fits = { ...t, limits: withLimits({ maxPackBytes: 1 << 20 }) };
+  await assert.rejects(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'ambiguous');
+  assert.equal(sent, 1, 'under the cap the body is sent');
+});
+
+test('size varints stop at 64 bits: a header that never ends is pack_corrupt at its 11th byte, never a NaN size (#13)', () => {
+  const ones = n => new Uint8Array(n).fill(0x80);
+  // ten bytes is the longest legal object header (4 + 9 × 7 bits), and every size it can carry is finite
+  assert.deepEqual(readObjHeader(concat([Uint8Array.of(0xb0), ones(8), Uint8Array.of(0)]), 0), { type: TYPE.BLOB, size: 0, next: 10 });
+  assert.ok(Number.isFinite(readObjHeader(concat([Uint8Array.of(0xbf), new Uint8Array(8).fill(0xff), Uint8Array.of(0x7f)]), 0).size));
+  throws(() => readObjHeader(concat([Uint8Array.of(0xb0), ones(9), Uint8Array.of(0)]), 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  // the probe: 200 continuation bytes used to decode to NaN, which every `size > limit` check lets through
+  throws(() => readObjHeader(concat([Uint8Array.of(0xb0), ones(200), Uint8Array.of(0)]), 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  throws(() => parsePack(concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0), ones(200), new Uint8Array(40)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+
+  // a delta size may take ten groups (bits 0..69); the tenth starts at bit 63, the eleventh is refused
+  assert.deepEqual([...applyDelta(new Uint8Array(0), concat([ones(9), Uint8Array.of(0, 1, 1, 0x41)])).out], [0x41]);
+  assert.throws(() => applyDelta(new Uint8Array(0), concat([Uint8Array.of(0), new Uint8Array(9).fill(0xff), Uint8Array.of(1, 1, 0x41)])), e => e.code === 'limit_exceeded' && /^delta result size \d+ exceeds limit/.test(e.message));
+  throws(() => applyDelta(new Uint8Array(0), concat([ones(10), Uint8Array.of(0, 1, 1, 0x41)])), 'pack_corrupt', 'delta: size varint longer than 64 bits');
+  // the probe: an over-long result size was NaN; NaN passed the limit, and the copy ended in an untyped RangeError
+  const base = Uint8Array.of(9, 8, 7);
+  throws(() => applyDelta(base, concat([encodeVarint(base.length), ones(200), Uint8Array.of(0, DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 0, 3)])), 'pack_corrupt', 'delta: size varint longer than 64 bits');
+
+  // the streamed single-object parser: its header phase holds ≤ 21 bytes, for every caller (fetchSingle, edit, read, checkout)
+  const packHead = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0);
+  let sp = spInit(), held = 0;
+  for (const b of concat([packHead, ones(8)])) { sp = spStep(sp, Uint8Array.of(b)).state; held = Math.max(held, sp.head.length); }
+  assert.equal(sp.phase, 'header');
+  assert.equal(held, PACK_HEADER_BYTES + 9);
+  throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
+  throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
 });

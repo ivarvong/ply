@@ -15,14 +15,21 @@ import {
   DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_BYTE2_SHIFT,
   OBJ_TYPE_SHIFT, OBJ_TYPE_MASK, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
-  OBJ_SIZE_NEXT_BASE, VARINT_BITS, varintScale, BE32_SHIFTS,
+  OBJ_SIZE_NEXT_BASE, VARINT_BITS, VARINT_MAX_SHIFT, varintScale, BE32_SHIFTS,
 } from './format.js';
 
 const corrupt = msg => fail('pack_corrupt', msg);
 
+// Past VARINT_MAX_SHIFT a group used to scale by Infinity, and 0 × Infinity is NaN: every `size > limit` check is false
+// on NaN, so the size reached callers (#13). Checked before the byte is read, so a hostile header costs ≤ 10 bytes.
+function varintRoom(shift, what) {
+  if (shift > VARINT_MAX_SHIFT) throw corrupt(`${what}: size varint longer than ${VARINT_MAX_SHIFT + 1} bits`);
+}
+
 function readVarint(buf, p) {
   let n = 0, shift = 0, c;
   do {
+    varintRoom(shift, 'delta');
     c = take(buf, p, 1)[0];
     p += 1;
     n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
@@ -44,6 +51,7 @@ export function readObjHeader(buf, p) {
   let shift = OBJ_TYPE_SHIFT;
   p += 1;
   while (c & OBJ_CONTINUE) {
+    varintRoom(shift, 'pack');
     c = take(buf, p, 1)[0];
     p += 1;
     size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
@@ -217,12 +225,16 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
           base = { type: ext.type, data: ext.data, chain: 0 };
         }
       }
+      // Chain length, not recursion depth: a base resolved earlier comes back from memo, so depth alone let a chain
+      // emitted base-first grow without bound (#14). An external base is chain 0.
+      const chain = base.chain + 1;
+      if (chain > maxChain) throw limitError('delta chain depth', chain, maxChain);
       // The result buffer does not exist until applyDelta passes maxResult. Room is what the aggregate cap has left.
       const room = inflatedCap - held;
       if (room < 0) throw limitError('pack inflated bytes', held, inflatedCap);
       const { out, ops } = applyDelta(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
       held += out.length;
-      r = { type: base.type, data: out, chain: base.chain + 1, deltaOps: ops };
+      r = { type: base.type, data: out, chain, deltaOps: ops };
     } else r = { type: obj.type, data: obj.data, chain: 0 };
     r.oid = hashObject(TYPE_NAME[r.type], r.data);
     r.offset = obj.offset; r.size = obj.size; r.compressed = obj.compressed;
@@ -235,8 +247,11 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
   };
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject(TYPE_NAME[o.type], o.data);
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) { byOid.set(o.oid, o); resolveObj(o); }
+  // Until nothing is pending: a pass either resolves something, or switches to external bases once, or throws. A REF
+  // chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check above
+  // (≤ 2 · maxDeltaChain + 2), not by a pass ceiling that used to return the tail unresolved without an error (#14).
   let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
-  for (let pass = 0; pending.length && pass < maxChain; pass++) {
+  while (pending.length) {
     const next = [];
     for (const o of pending) {
       try { resolveObj(o); }

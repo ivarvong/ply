@@ -13,7 +13,6 @@ import { git, gitBuf, tmpRoot } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
-import { Rng } from './fuzz/prng.js';
 
 let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });
@@ -123,7 +122,16 @@ test('parseCommit recovers tree/parents/author/committer/message from every comm
     const [t, ...parents] = git(sub, ['rev-list', '--parents', '-n1', oid]).trim().split(' ').slice(1).length ? [git(sub, ['rev-parse', `${oid}^{tree}`]).trim(), ...git(sub, ['rev-list', '--parents', '-n1', oid]).trim().split(' ').slice(1)] : [git(sub, ['rev-parse', `${oid}^{tree}`]).trim()];
     assert.equal(c.tree, t, oid); assert.deepEqual(c.parents, parents, oid);
     assert.equal(c.author, git(sub, ['log', '-1', '--format=%an <%ae> %at %ai', oid]).trim().replace(/ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d /, ' '), oid);
-    assert.equal((c.message ?? '').replace(/\n+$/, ''), git(sub, ['log', '-1', '--format=%B', oid]).replace(/\n+$/, ''), oid); // %B appends newlines of its own
+    // message oracle from the raw object: git's header parser stops at the first empty line, and the
+    // message is everything after it; with no empty line the message is empty (git's %s and %b are both '').
+    // %B is consulted only when the empty line exists: without one, pretty.c leaves message_off at the
+    // NUL terminator and %B prints from message_off + 1, one byte past the buffer (stray bytes, ~half of
+    // runs on homebrew git 2.50.0; issue #33).
+    const end = data.findIndex((b, i) => b === 10 && (i === 0 || data[i - 1] === 10)); // empty line: "\n" at 0 or "\n\n"
+    const message = end < 0 ? '' : Buffer.from(data.subarray(end + 1)).toString('utf8');
+    assert.equal(c.message ?? '', message, oid);
+    if (end < 0) assert.equal(git(sub, ['log', '-1', '--format=%s%b', oid]), '\n', oid);
+    else assert.equal(message.replace(/\n+$/, ''), git(sub, ['log', '-1', '--format=%B', oid]).replace(/\n+$/, ''), oid); // %B appends newlines of its own
     // re-encoding a commit we did not write must be byte-identical when it has only standard headers
     // parse ∘ encode is the identity for every shape, including multi-line continuation headers (gpgsig, mergetag)
     assert.deepEqual([...encodeCommit(c)], [...data], `roundtrip ${oid}`);

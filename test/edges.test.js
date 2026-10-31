@@ -172,6 +172,25 @@ test('empty blob: find on a 0-byte file is match_count (0 matches), never a push
   await assert.rejects(editFile(r.url, { path: 'one.txt', find: 'M', replace: 'back', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'match_count');
 });
 
+test('a one-byte find over 128 KiB of that byte (#13): match_count with the full count in linear time, never a push', { timeout: 60_000 }, async () => {
+  const r = repo();
+  commitFiles(r.work, r.bare, { 'run.txt': 'a'.repeat(128 << 10) }, 's');
+  const head = git(r.bare, ['rev-parse', 'main']).trim();
+  const ex = arrayExporter();
+  const t0 = performance.now();
+  const err = await editFile(r.url, { path: 'run.txt', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }).then(() => null, e => e);
+  const ms = performance.now() - t0;
+  assert.equal(err?.code, 'match_count', err?.message);
+  assert.equal(err.matches, 128 << 10);
+  assert.equal(err.message, `expected exactly one match, found ${128 << 10}`);
+  // the scan used to keep every offset in a fresh array per hit: 400 s at this size; the span keeps the first 16
+  assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+  const blob = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit.blob');
+  assert.equal(blob.attrs['git.edit.blob.scan.matches'], 128 << 10);
+  assert.deepEqual(blob.attrs['git.edit.blob.scan.match_offsets'], Array.from({ length: 16 }, (_, i) => i));
+  assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), head, 'ref untouched');
+});
+
 test('strictHead: a moved ref is cas_conflict before any push and is not retried; a current head lands', async () => {
   const r = repo();
   const h0 = commitFiles(r.work, r.bare, { 'f.txt': 'MARK\n' }, 's');

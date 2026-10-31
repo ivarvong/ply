@@ -2,7 +2,8 @@
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
 import { fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
-import { concat, td } from './bytes.js';
+import { concat, td, te } from './bytes.js';
+import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
 import { UA, wrapNet } from './transport.js';
@@ -15,6 +16,73 @@ const ERROR_PREVIEW = 4096;
 const ERROR_QUOTE = 200;
 
 const headerField = (value, what) => { if (value != null) validateWire(value, what); };
+
+// URL userinfo → the bytes git sends for it (git 2.50, measured against http-backend behind Basic auth), as a byte
+// string `btoa` takes as is: `%XX` is that byte (`%FF` → 0xFF, UTF-8 as its bytes), anything else as written (`%ZZ`
+// stays `%ZZ`; WHATWG URL has already percent-encoded every non-ASCII character). A NUL, CR or LF is refused: git
+// refuses LF ("credential url cannot be parsed") and NUL (curl: "bad/illegal format") and sends CR; Basic would carry
+// any of them, but no host means one.
+const userinfo = s => {
+  const b = s.replace(/%([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  if (/[\0\r\n]/.test(b)) throw fail('bad_request', 'invalid url userinfo: must not contain NUL, CR, or LF', { what: 'url userinfo' });
+  return b;
+};
+// WHATWG URL drops an empty userinfo (`http://@h`, `http://:@h` → `http://h/`); git sends Basic `:` for both (measured).
+// A `\` ends the authority of a special URL, as `/` does.
+const emptyUserinfo = url => /^[a-z][a-z0-9+.-]*:\/\/[^/?#\\]*@/i.test(String(url));
+const latin1 = bytes => { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return s; };
+const utf8 = b => td.decode(Uint8Array.from(b, c => c.charCodeAt(0)));
+// An Authorization value or a Bearer token goes on the wire as written: printable ASCII (and tab) only. A raw
+// non-ASCII or control character is refused before any request: fetch throws an untyped TypeError on a character past
+// U+00FF, git sends UTF-8 as raw bytes (measured, `http.extraHeader`) that no grammar for either scheme admits, and a
+// control character is a 400 from a strict server (measured: git's `Bearer t\x01k` → HTTP 400). Basic credentials are
+// any text (below).
+const ASCII_VALUE = /^[\t\x20-\x7e]+$/;
+const noCredential = why => fail('bad_request', `invalid auth: ${why}`, { what: 'auth' });
+
+// The explicit `auth` → [Authorization value, its Basic parts or null]. Every form yields a credential or is refused:
+// an `auth` that sends nothing is the silent trap #32 was (every request anonymous, a 401 saying nothing about why).
+//   { header }        the value verbatim (a proxy forwarding its caller's credential)
+//   { token, user? }  Basic `user:token`, user defaulting to `x-access-token`; the text is sent as its UTF-8 bytes, as git
+//                     sends a credential helper's (measured: `username=tëst password=päss` → those bytes)
+//   { bearer }        Bearer
+//   { user }          refused. git's own credential API asks for the password when a helper gives a user alone (measured:
+//                     "could not read Password", nothing sent) and a library cannot ask; `token: ''` is the explicit
+//                     empty password and sends `user:` (git, helper `password=` empty: `ivar:`), the URL `user@` form.
+function explicitAuth({ header, token, user, bearer }) {
+  if (header != null) {
+    if (!ASCII_VALUE.test(header)) throw noCredential('the authorization header must be non-empty printable ASCII');
+    return [header, null];
+  }
+  if (token != null) {
+    if (token === '' && user == null) throw noCredential('an empty token with no user carries no credential');
+    const name = user ?? 'x-access-token';
+    return [`Basic ${btoa(latin1(te.encode(`${name}:${token}`)))}`, { user: name, pass: token }];
+  }
+  if (bearer != null) {
+    if (!ASCII_VALUE.test(bearer)) throw noCredential('the bearer token must be non-empty printable ASCII');
+    return [`Bearer ${bearer}`, null];
+  }
+  if (user != null) throw noCredential('a user with no token; pass the token, or token: \'\' to send the user alone (Basic `user:`)');
+  throw noCredential('no token, bearer or header; omit auth to send none');
+}
+
+// A 3xx is never followed (fetch `redirect: 'manual'`), same-origin or not. Following hands the Authorization header to
+// whatever the server names, under the runtime's own rules: undici strips it cross-origin, workerd 2026-10-23 forwards it
+// (measured, SAFETY I6c). A 301/302 also turns the POST into a GET, which surfaced as a content-type error. git follows
+// only on the initial info/refs and then rebases every request on the new URL; ply's first request is usually the v2
+// POST, so following on the GET alone would not make a moved repository work. A moved remote is a URL the caller
+// updates: the error names where the server pointed (origin and path only, scrubbed). Browsers answer `manual` with an
+// opaque redirect (status 0): same error.
+const isRedirect = res => res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
+function redirectError(res, url, what, scrub) {
+  let to = '';
+  const loc = res.headers.get('location');
+  if (loc) try { const x = new URL(loc, url); to = `${x.origin}${x.pathname}`; } catch { /* unparseable Location */ }
+  if (scrub) to = scrub(to);
+  try { res.body?.cancel?.(); } catch { /* unopened */ }
+  return fail('http', `HTTP ${res.status} ${what}: redirected${to ? ` to ${to}` : ''}; ply does not follow redirects (update the remote URL)`, { status: res.status, location: to });
+}
 
 // Read a body without ever holding more than `max` bytes. `truncate` keeps a prefix (error pages);
 // otherwise the first chunk that would pass the cap throws and is not retained.
@@ -43,19 +111,28 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
   headerField(auth?.token, 'token');
   headerField(auth?.bearer, 'bearer');
   headerField(auth?.user, 'auth user');
-  // userinfo in the URL becomes auth and never appears again: not in requests, not in spans, not in error messages
-  const u = new URL(url);
-  if ((u.username || u.password) && !auth) auth = { user: decodeURIComponent(u.username) || 'x-access-token', token: decodeURIComponent(u.password) };
+  // `new URL` puts what it was given on the TypeError (`input`): a credential in a malformed URL would ride out on it.
+  let u;
+  try { u = new URL(url); } catch { throw fail('bad_request', 'invalid url: not an absolute URL', { what: 'url' }); }
+  // userinfo in the URL becomes the Basic credential git sends for it, byte for byte: `user:password`; a user alone is
+  // `user:` (a token given as the user, which GitHub and GitLab accept; git sends it without asking for a password and
+  // asks only once it is refused), a password alone `:password`, an empty userinfo `:`. Explicit `auth` wins. It never
+  // appears again: not in requests, not in spans, not in error messages.
+  const fromUrl = auth == null && (u.username || u.password || emptyUserinfo(url)) ? { user: userinfo(u.username), pass: userinfo(u.password) } : null;
   u.username = ''; u.password = '';
   const base = u.toString().replace(/\/$/, '');
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
-  // auth: { token, user? } → Basic; { bearer } → Bearer; { header } → the Authorization value verbatim (a proxy forwarding
-  // its caller's credential). Whatever form, the value never reaches a span or an error message (`scrub`).
-  const authorization = auth?.header ? String(auth.header) : auth?.token ? `Basic ${btoa(`${auth.user ?? 'x-access-token'}:${auth.token}`)}` : auth?.bearer ? `Bearer ${auth.bearer}` : null;
-  const basicPass = () => { try { const d = atob(authorization.replace(/^Basic\s+/i, '')); return d.slice(d.indexOf(':') + 1); } catch { return null; } };
-  const secrets = [authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), /^Basic\s/i.test(authorization ?? '') ? basicPass() : null].filter(x => typeof x === 'string' && x.length >= 4);
-  const scrub = text => secrets.reduce((s, x) => s.split(x).join('[redacted]'), text);
+  // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
+  const [authorization, given] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth != null ? explicitAuth(auth) : [null, null];
+  // The Basic parts as a server would echo them (UTF-8 text). From a header they are decoded, as bytes and as UTF-8.
+  const decoded = (() => { if (!/^Basic\s/i.test(authorization ?? '')) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return c < 0 ? { user: d, pass: '' } : { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
+  const basic = given ?? (decoded && { user: utf8(decoded.user), pass: utf8(decoded.pass) });
+  const user = auth?.user ?? basic?.user;
+  const userSecret = basic ? secretUser(basic.user, basic.pass !== '') : secretShaped(user);
+  // Every string a server can send back (error bodies, ERR lines, band-2/3 text, ng reasons, hook output) passes through
+  // `scrub` before it reaches an error or a span: the transport carries it (`t.scrub`) and otel.js applies it.
+  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), basic?.pass, decoded?.pass, userSecret ? basic?.user ?? user : null, userSecret ? decoded?.user : null, secretShaped(user) ? user : null]);
   const headers = (service, extra = {}) => {
     const h = { 'Content-Type': `application/x-${service}-request`, Accept: `application/x-${service}-result`, 'User-Agent': userAgent, ...extra };
     if (authorization) h.Authorization = authorization;
@@ -84,14 +161,15 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
     const sig = requestSignal();
     let res;
     try {
-    try { res = await f(url, { method: 'POST', headers: headers(service, extra), body, signal: sig.signal }); }
+    try { res = await f(url, { method: 'POST', headers: headers(service, extra), body, signal: sig.signal, redirect: 'manual' }); }
     catch (e) { throw wrapNet(e, sig.signal); }
     const cache = res.headers.get('x-ply-pack-cache') ?? '';
     span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': res.headers.get('content-type') ?? '', 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
+    if (isRedirect(res)) throw redirectError(res, url, service, scrub);
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
       const preview = td.decode(await readCapped(res.body, ERROR_PREVIEW, { truncate: true }));
-      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${scrub(preview).slice(0, ERROR_QUOTE)}`, { status: res.status });
+      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${(scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE)}`, { status: res.status });
     }
     let bytes = 0, chunks = 0, maxChunk = 0, first = null;
     const ct = res.headers.get('content-type') ?? '';
@@ -108,7 +186,8 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
   return {
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
-    kind: 'http', url: base, tracer, parent, limits, signal, quirks, objects: new Map(),
+    // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
+    kind: 'http', url: base, tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     async *frames(service, body, span, hints = {}) {
       let st = pktInit();
       for await (const chunk of post(service, body, span, hints)) { const r = pktStep(st, chunk); st = r.state; yield* r.frames; }
@@ -123,8 +202,9 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
       try {
       const t0 = Date.now();
       let res;
-      try { res = await f(url, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal }); } catch (e) { throw wrapNet(e, sig.signal); }
+      try { res = await f(url, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
       span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
+      if (isRedirect(res)) throw redirectError(res, url, `${service} advertisement`, scrub);
       if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status });
       if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
       const maxPack = requireLimit(limits, 'maxPackBytes');
