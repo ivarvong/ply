@@ -33,7 +33,7 @@ import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Caught } from './boundary.js';
+import { thrownCode } from './boundary.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const BLOB_MODES: ReadonlySet<string> = new Set([MODE_BLOB, MODE_EXEC, MODE_LINK]);
@@ -78,10 +78,9 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Fi
       continue;
     }
     if (!BLOB_MODES.has(mode)) throw fail('bad_request', `${path}: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path });
-    // the caller's value: bytesOf passes anything but a string through, and the test below refuses it
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const data: unknown = bytesOf(spec.data as string | Uint8Array);
-    if (!(data instanceof Uint8Array)) throw fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
+    const raw = spec.data;
+    if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) throw fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
+    const data = bytesOf(raw);
     if (data.length > maxObject) throw limitError('object size', data.length, maxObject);
     // a symlink target is a path: git cannot check out an empty one, and a NUL ends it on every platform
     if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) throw fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
@@ -282,7 +281,7 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     hint = hintWas ?? decided.hint;
     const parent = decided.oldCommit;
     if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${parent ?? 'nothing'}, not the expected head ${head}`, { expected: head, actual: parent });
-    if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': (speculative as Caught)?.code ?? 'error' });
+    if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': thrownCode(speculative) ?? 'error' });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is commitOf's value (the rejection branch is the Error above)
     const oldTree: string | null = parent === null ? null : parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits).tree;
     root.set({ 'git.push_tree.commit.old': parent ?? '', 'git.push_tree.tree.old': oldTree ?? '' });

@@ -45,7 +45,8 @@ import type { Span, Tracer } from './otel.js';
 import type { FetchPackResult as FetchedPack } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Caught, CheckoutQuirks, TypeNames } from './boundary.js';
+import { thrownCode, thrownMessageMatches } from './boundary.js';
+import type { TypeNames } from './boundary.js';
 
 type PackObjects = NonNullable<FetchedPack['objects']>;
 
@@ -99,8 +100,7 @@ type Trees = { readonly root: string; readonly tree: (oid: string) => readonly T
 // parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Trees> {
   const r: FetchedPack = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }).catch((e: unknown) => {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    if ((e as Caught)?.code === 'remote_error' && /not our ref/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (thrownCode(e) === 'remote_error' && thrownMessageMatches(e, /not our ref/)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   const objects: PackObjects = r.objects ?? new Map();
@@ -142,8 +142,7 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<PackOb
 
 // A host that answers a many-wants fetch with an error status, ERR or broken framing is asked for one blob at a time
 // from then on (remembered on the transport's quirks). A lie (pack_corrupt) is never a reason to fall back.
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-const isWantsRefusal = (e: unknown): boolean => (['http', 'remote_error', 'protocol'] as readonly unknown[]).includes((e as Caught)?.code);
+const isWantsRefusal = (e: unknown): boolean => { const code = thrownCode(e); return code === 'http' || code === 'remote_error' || code === 'protocol'; };
 
 const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
@@ -158,30 +157,24 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
   for (const e of entries) if (e.mode !== MODE_COMMIT) { const l = byOid.get(e.oid); if (l) l.push(e); else byOid.set(e.oid, [e]); }
   const stat = { fetches: 0, buffered: 0, streamed: 0, splits: 0, bytes: 0 };
   span.set({ 'git.checkout.blobs.unique': byOid.size, 'git.checkout.blobs.paths': entries.length });
-  // checkout's quirk on the transport's quirks (boundary.ts CheckoutQuirks); tsc needs the assertion (TS2339), tsgolint reads it as a no-op
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/no-unnecessary-type-assertion -- see above
-  let single = (t.quirks as CheckoutQuirks | null | undefined)?.blobWants === 'single';
+  let single = t.quirks?.blobWants === 'single';
   // [oid, data | null] for each oid, in order; null means "stream it on its own"
   async function* group(oids: readonly string[]): AsyncGenerator<readonly [string, Uint8Array | null], void, undefined> {
     if (oids.length === 1 || single) { for (const oid of oids) yield [oid, null]; return; }
     let got: PackObjects;
     try { got = await fetchBlobs(t, oids); stat.fetches++; } catch (e) {
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-      if ((e as Caught)?.code === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
+      if (thrownCode(e) === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
       if (!isWantsRefusal(e)) throw e;
       single = true;
-      // transport.ts's Quirks does not name checkout's blobWants (boundary.ts CheckoutQuirks)
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-      if (t.quirks) (t.quirks as CheckoutQuirks).blobWants = 'single';
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-      span.set({ 'git.checkout.blobs.refused': (e as NonNullable<Caught>).code });
+      if (t.quirks) t.quirks.blobWants = 'single';
+      span.set({ 'git.checkout.blobs.refused': thrownCode(e) });
       yield* group(oids); return;
     }
     for (const oid of oids) yield [oid, got.get(oid)?.data ?? null];
   }
   let done = false;
   try {
-    for (const e of entries) if (e.mode === MODE_COMMIT) yield { ...e, size: 0, stream: null };
+    for (const e of entries) if (e.mode === MODE_COMMIT) yield { path: e.path, oid: e.oid, mode: e.mode, size: 0, stream: null };
     const oids = [...byOid.keys()];
     for (let i = 0; i < oids.length; i += batch) {
       for await (const [oid, data] of group(oids.slice(i, i + batch))) {
@@ -193,14 +186,18 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
           // oxlint-disable-next-line max-depth -- try, batch, group, paths of one blob: the iterator's shape, as before
           if (data) stat.buffered++; else stat.streamed++;
           stat.bytes += blob.size;
-          yield { ...e, size: blob.size, stream: blob.stream };
+          // gitlinks were yielded above and are not in byOid. The arm is what makes `mode` discriminate CheckoutFile
+          // (narrowing `e.mode` does not narrow the entry object, and a spread would not either).
+          yield e.mode === MODE_COMMIT
+            ? { path: e.path, oid: e.oid, mode: e.mode, size: 0, stream: null }
+            : { path: e.path, oid: e.oid, mode: e.mode, size: blob.size, stream: blob.stream };
         }
       }
     }
     done = true;
   } catch (e) {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    span.error(e, (e as Caught)?.code).set({ 'git.checkout.blobs.outcome': (e as Caught)?.code ?? 'error' });
+    const code = thrownCode(e);
+    span.error(e, code).set({ 'git.checkout.blobs.outcome': code ?? 'error' });
     throw e;
   } finally {
     span.set({ 'git.checkout.blobs.fetches': stat.fetches, 'git.checkout.blobs.buffered': stat.buffered, 'git.checkout.blobs.streamed': stat.streamed, 'git.checkout.blobs.splits': stat.splits, 'git.checkout.blobs.bytes': stat.bytes, 'git.checkout.blobs.single': single });
@@ -212,7 +209,11 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
 }
 
 // A file the iterator yields: its entry, size and content (null for a gitlink: its commit is not in this repository).
-export type CheckoutFile = CheckoutEntry & { readonly size: number; readonly stream: ReadableStream<Uint8Array> | null };
+// A gitlink has no blob, so no stream. Every other entry has one: the mode is the discriminant.
+export type CheckoutFile = Omit<CheckoutEntry, 'mode'> & (
+  | { readonly mode: typeof MODE_COMMIT; readonly size: number; readonly stream: null }
+  | { readonly mode: Exclude<Mode, typeof MODE_COMMIT>; readonly size: number; readonly stream: ReadableStream<Uint8Array> }
+);
 export type CheckoutResult = {
   readonly ref: string;
   readonly commit: string;

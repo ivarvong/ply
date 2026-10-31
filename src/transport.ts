@@ -33,7 +33,8 @@ export type Frame =
 export type Hints = { readonly bypassCache?: boolean };
 export type Scrub = (s: string) => string;
 // What a server was found to need, learned at run time and shared by every view of the transport (mutable on purpose).
-export type Quirks = { treeFilter?: 'blob:none' };
+// treeFilter: a host that refuses tree:0 (fetch). blobWants: a host that refuses a multi-blob want list (checkout).
+export type Quirks = { treeFilter?: 'blob:none'; blobWants?: 'single' };
 // Commits and trees harvested from over-wide packs (fetch.js), keyed by oid; `bytes` is their running total.
 export type HeldObject = { readonly type: number; readonly data: Uint8Array };
 export type Harvest = Map<string, HeldObject> & { bytes?: number };

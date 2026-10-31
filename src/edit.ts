@@ -26,7 +26,8 @@ import type { PackObject } from './push.js';
 import type { Signer } from './sign.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Caught, EntryOptions } from './boundary.js';
+import { thrownAttrs, thrownCode, thrownMessage } from './boundary.js';
+import type { EntryOptions } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -334,8 +335,7 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     } catch (e) {
       await pump.catch(() => { /* the read side's error is the one reported */ });
       partial();
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught), as the JS read it: the template coerces whatever the message (or the value) is
-      if (!isPlyCode((e as Caught)?.code)) throw fail('pack_corrupt', `blob stream: ${((e as Caught)?.message ?? e) as string}`, { cause: e });
+      if (!isPlyCode(thrownCode(e))) throw fail('pack_corrupt', `blob stream: ${String(thrownMessage(e) ?? e)}`, { cause: e });
       throw e;
     }
     if (sha === null) { try { sha = await begin(); } catch (e) { partial(); throw e; } } // empty blob
@@ -378,8 +378,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     hint = hintWas ?? decided.hint;
     const { oldCommit } = decided;
     if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${oldCommit}, not the expected head ${head}`, { expected: head, actual: oldCommit });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': (speculative as { readonly code?: unknown }).code ?? 'error' });
+    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': thrownCode(speculative) ?? 'error' });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is getObject's value (the rejection branch is the Error above)
     const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await getObject(oldCommit, TYPE.COMMIT, 1);
     const commit: { readonly tree: string; readonly parents: readonly string[] } = parseCommit(commitObj.data, limits);
@@ -398,8 +397,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
         if (data) cacheHits++; else { data = (await getObject(treeOid, TYPE.TREE)).data; cache.set(treeOid, data); }
         span.set({ 'git.edit.tree.cache_hit': hit });
         try { const { entry, attrs: found } = lookupEntry(data, name, last, limits); span.set(found); return { treeOid, data, entry }; }
-        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-        catch (e) { if ((e as { readonly attrs?: Attrs }).attrs) span.set((e as { readonly attrs: Attrs }).attrs); throw e; }
+        catch (e) { const found = thrownAttrs(e); if (found) span.set(found); throw e; }
       });
       levels.push(lvl);
       treeOid = lvl.entry.oid;

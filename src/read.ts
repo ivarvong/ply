@@ -29,7 +29,8 @@ import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Caught, EntryOptions, TypeNames } from './boundary.js';
+import { thrownCode, thrownMessage, thrownMessageMatches } from './boundary.js';
+import type { EntryOptions, TypeNames } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable require-await -- the entry points are async so that a throw while checking arguments is a rejection, as before */
@@ -63,25 +64,23 @@ export type Resolved = { readonly name: string; readonly commit: string };
 // Effect: ref → { name, commit } (annotated tags peeled; a bare oid is taken as given and checked by the commit fetch).
 export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolved> {
   const cands = refCandidates(ref);
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refCandidates answers [] only for a 40-hex oid string
-  if (!cands.length) return { name: ref as string, commit: ref as string };
+  // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it threw).
+  if (cands.length === 0 && typeof ref === 'string') return { name: ref, commit: ref };
   const { refs, head }: { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }>; readonly head: string | null } = await lsRefs(t, cands);
   for (const name of cands) {
     const r = refs.get(name);
     if (r) return { name: name === 'HEAD' ? (head ?? 'HEAD') : name, commit: r.peeled ?? r.oid };
   }
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refCandidates refused every non-string but null/undefined, which name HEAD
-  throw fail('not_found', cands[0] === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${ref as string} not found`);
+  const first = cands[0];
+  throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${typeof ref === 'string' ? ref : ''} not found`);
 }
 
 // Effect: the commit object alone (tree:0, deepen 1). A bare oid that is not a commit (or not on the server) is the
 // caller's not_found, not a corrupt pack.
 async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
   const c = await fetchObject(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    if ((e as Caught)?.code === 'pack_corrupt' && /expected commit/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `${commit} is not a commit`);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-    if ((e as Caught)?.code === 'remote_error' && /not our ref/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (thrownCode(e) === 'pack_corrupt' && thrownMessageMatches(e, /expected commit/)) throw fail('not_found', `${commit} is not a commit`);
+    if (thrownCode(e) === 'remote_error' && thrownMessageMatches(e, /not our ref/)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   return c.data;
@@ -223,8 +222,12 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   // the first of failure, cancellation and verified end records the outcome; whatever follows (a cancel aborting the
   // pump) leaves the ended spans alone
   const failHere = (e: unknown): unknown => {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const err = isPlyCode((e as Caught)?.code) ? (e as NonNullable<Caught>) : fail('pack_corrupt', `blob stream: ${((e as Caught)?.message ?? e) as string}`, { cause: e });
+    const code = thrownCode(e);
+    if (isPlyCode(code)) {
+      if (!span.ended) { fetchSpan.error(e).end(); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
+      return e;
+    }
+    const err = fail('pack_corrupt', `blob stream: ${String(thrownMessage(e) ?? e)}`, { cause: e });
     if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); }
     return err;
   };
@@ -284,8 +287,7 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   const stream = new ReadableStream<Uint8Array>({
     async pull(c) {
       let r: ReadableStreamReadResult<Uint8Array>;
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-      try { r = await inner.read(); } catch (e) { throw isPlyCode((e as Caught)?.code) ? e : failHere(e); }
+      try { r = await inner.read(); } catch (e) { throw isPlyCode(thrownCode(e)) ? e : failHere(e); }
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {

@@ -28,7 +28,7 @@ import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
 import { checkoutTree } from './checkout.js';
 import type { CheckoutFile, CheckoutResult } from './checkout.js';
 import type { ReadOptions, RefSpec } from './read.js';
-import type { Caught } from './boundary.js';
+import { thrownCode } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- files are written one at a time, in order, each stream drained before the next */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -42,8 +42,7 @@ const EXEC_MODE = 0o777;
 // those bytes through a Buffer path, as git writes it. A filesystem that refuses the bytes (APFS: EILSEQ) is a typed
 // refusal naming the path, never a file under a U+FFFD name.
 const fsPath = (dir: string, rel: string): string | Buffer => { const p = join(dir, rel); return p.isWellFormed() ? p : Buffer.from(encodeBytes(p, 'checkout path')); };
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-const refused = (path: string, e: unknown): unknown => ((e as Caught)?.code === 'EILSEQ' ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
+const refused = (path: string, e: unknown): unknown => (thrownCode(e) === 'EILSEQ' ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
 
 const collision = (path: string, why: string): Error => fail('bad_request', `checkout: ${path} ${why}`, { what: 'checkout path', path });
 
@@ -70,8 +69,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     if (made.has(rel)) return;
     const i = rel.lastIndexOf('/');
     await ensureDir(i < 0 ? '' : rel.slice(0, i));
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    await mkdir(fsPath(dir, rel)).catch((e: unknown) => { if ((e as Caught)?.code !== 'EEXIST') throw refused(rel, e); });
+    await mkdir(fsPath(dir, rel)).catch((e: unknown) => { if (thrownCode(e) !== 'EEXIST') throw refused(rel, e); });
     if (!(await lstat(fsPath(dir, rel))).isDirectory()) throw collision(rel, 'is already a file or symlink here; refusing to write through it');
     made.add(rel);
   };
@@ -83,17 +81,14 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     const full = fsPath(dir, f.path), slash = f.path.lastIndexOf('/');
     await ensureDir(slash < 0 ? '' : f.path.slice(0, slash));
     if (f.mode === MODE_COMMIT) { await ensureDir(f.path); out.gitlinks++; continue; }
-    // a regular file or a symlink: checkoutTree streams every entry that is not a gitlink
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const stream = f.stream as ReadableStream<Uint8Array>;
+    // a regular file or a symlink: checkoutTree streams every entry that is not a gitlink (CheckoutFile)
+    const stream = f.stream;
     if (f.mode === MODE_LINK) {
       const target = await slurp(stream, maxObject);
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-      await symlink(Buffer.from(target.buffer, target.byteOffset, target.length), full).catch((e: unknown) => { throw (e as Caught)?.code === 'EEXIST' ? collision(f.path, 'already exists') : refused(f.path, e); });
+      await symlink(Buffer.from(target.buffer, target.byteOffset, target.length), full).catch((e: unknown) => { throw thrownCode(e) === 'EEXIST' ? collision(f.path, 'already exists') : refused(f.path, e); });
       out.symlinks++; continue;
     }
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const fh = await open(full, 'wx', f.mode === MODE_EXEC ? EXEC_MODE : FILE_MODE).catch(async (e: unknown) => { await stream.cancel().catch(() => { /* failing: the stream is not read */ }); throw (e as Caught)?.code === 'EEXIST' ? collision(f.path, 'already exists') : refused(f.path, e); });
+    const fh = await open(full, 'wx', f.mode === MODE_EXEC ? EXEC_MODE : FILE_MODE).catch(async (e: unknown) => { await stream.cancel().catch(() => { /* failing: the stream is not read */ }); throw thrownCode(e) === 'EEXIST' ? collision(f.path, 'already exists') : refused(f.path, e); });
     try {
       for await (const c of stream) { let o = 0; while (o < c.length) o += (await fh.write(c, o, c.length - o)).bytesWritten; out.bytes += c.length; }
     } catch (e) {

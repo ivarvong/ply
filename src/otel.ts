@@ -4,6 +4,7 @@
 
 /* oxlint-disable max-classes-per-file -- Tracer and Span are one API: a Tracer starts Spans, a Span exports through its Tracer */
 import { scrubError } from './errors.js';
+import { thrownCode, thrownMessage, thrownName, thrownStack } from './boundary.js';
 
 // OTLP AnyValue: exactly one of these fields. `in` on the field name discriminates.
 export type AnyValue =
@@ -108,8 +109,8 @@ type SpanInit = {
   readonly follows?: Span | null;
   readonly scrub?: Scrub | null;
 };
-// An error read loosely, as a thrown value: any field may be missing, and a primitive has none.
-type Loose = { readonly message?: unknown; readonly code?: unknown; readonly name?: unknown; readonly stack?: unknown } | null | undefined;
+// A thrown field rendered the way String() renders it (a stack, a message). A string is itself.
+const asText = (v: unknown): string => (typeof v === 'string' ? v : String(v));
 
 // `declare` fields: assigned in the constructor, so they emit nothing (the JS is the constructor body as before).
 // A span under an authenticated transport carries the transport's `scrub` (http.js), and every child inherits it. At
@@ -165,13 +166,13 @@ export class Span {
   }
   public error(e: unknown, type?: unknown): this {
     scrubError(e, this.scrub);
-    // a thrown value of any type: the reads are optional-chained, so a primitive or null reads as nothing
-    /* oxlint-disable typescript/no-unsafe-type-assertion -- see above */
-    this.status = { code: 2, message: String((e as Loose)?.message ?? e) };
-    this.set({ 'error.type': type ?? (e as Loose)?.code ?? (e as Loose)?.name ?? 'Error' });
-    // oxlint-disable-next-line typescript/no-base-to-string -- a thrown value's stack renders as String() renders it, as before
-    this.event('exception', { 'exception.type': (e as Loose)?.name ?? 'Error', 'exception.message': String((e as Loose)?.message ?? e), 'exception.stacktrace': String((e as Loose)?.stack ?? '') });
-    /* oxlint-enable typescript/no-unsafe-type-assertion */
+    // a thrown value of any type: the readers are the optional-chained reads, so a primitive or null reads as nothing
+    const message = thrownMessage(e);
+    const code = thrownCode(e);
+    const name = thrownName(e);
+    this.status = { code: 2, message: asText(message ?? e) };
+    this.set({ 'error.type': type ?? code ?? name ?? 'Error' });
+    this.event('exception', { 'exception.type': name ?? 'Error', 'exception.message': asText(message ?? e), 'exception.stacktrace': asText(thrownStack(e) ?? '') });
     return this;
   }
   public ok(): this { if (this.status.code === 0) this.status = { code: 1 }; return this; }
