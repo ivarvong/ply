@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
+import { git, gitBuf, gitUserinfoCred, gitWithCred, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
 import { build } from './workerd/build.mjs';
 
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
@@ -183,7 +183,8 @@ test('workerd: a token given as the URL user authenticates the edit with the Aut
   const gate = await startAuthGate(srv.url);
   try {
     const url = `http://${TOKEN}@${new URL(gate.url).host}/ui.git`;
-    const ls = await gitAsync(work, ['ls-remote', url]);
+    const { cred, config } = await gitUserinfoCred(work, url); // git decodes it; no credential in the URL git dials
+    const ls = await gitWithCred(work, ['ls-remote', `${gate.url}/ui.git`], cred, config);
     assert.equal(ls.status, 0, ls.stderr);
     const gitAuth = [...new Set(gate.seen.map(x => x.authorization).filter(Boolean))];
     assert.deepEqual(gitAuth, [`Basic ${btoa(`${TOKEN}:`)}`]);

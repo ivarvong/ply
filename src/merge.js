@@ -19,7 +19,7 @@ import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validateIdent, validateMessage } from './validate.js';
+import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
@@ -295,7 +295,7 @@ export async function deleteBranch(t, { ref, oid }) {
 }
 
 export async function mergeBranch(url, { ref = 'refs/heads/main', from, author, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts } = {}) {
-  validateRef(ref); validateRef(from);
+  validatePushRef(ref, false); validateRef(from);
   const person = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message) validateMessage(message); validateAttributes(attributes);
   return operation('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }) => {
