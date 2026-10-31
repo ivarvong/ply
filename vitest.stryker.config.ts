@@ -21,6 +21,7 @@ export default mergeConfig(base, defineConfig({
       'test/props.test.js',
       'test/mutant-kill.test.js',
       'test/mutant-kill-tree.test.js',
+      'test/mutant-kill-packs.test.js',
       'test/space/push-outcome.test.js',
     ],
     env: { PROP_N: '4', PUSH_SPACE: 'quick', PUSH_SPACE_WORKERS: '0', MUTATION: '1' },

@@ -119,7 +119,20 @@ export function readOfsDelta(buf: Uint8Array, start: number): OfsDelta { return 
 
 // ---- parse ----
 // Caps are required. A missing field used to become Infinity (`??`), which disabled the check; checkLimit rejects that.
-const capOf = (value: unknown, limits: Limits, key: LimitKey): Result<number, ErrorOf<'bad_request'>> => (value === undefined ? readLimit(limits, key) : checkLimit(value, key));
+// Each key's cap is the caller's override at the same index when it gave one, else limits[key]; the first cap that
+// bounds nothing is the error. One cap per key, in order, so the result has keys.length entries.
+type Caps = readonly [number, number, number];
+function capsOf(limits: Limits, keys: readonly [LimitKey, LimitKey, LimitKey], given: readonly unknown[] = []): Result<Caps, ErrorOf<'bad_request'>> {
+  const out: number[] = [];
+  for (const [i, k] of keys.entries()) {
+    const r = given[i] === undefined ? readLimit(limits, k) : checkLimit(given[i], k);
+    if (!r.ok) return r;
+    out.push(r.value);
+  }
+  // three keys, three caps (the loop above)
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+  return ok(out as unknown as Caps);
+}
 export type PackParseOptions = {
   readonly verify?: boolean | undefined;
   readonly limits?: Limits | undefined;
@@ -160,15 +173,9 @@ export type ParsedPack = { readonly objects: PackObject[]; readonly stats: PackS
 export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): Result<ParsedPack, PackError> {
   const verify = opts.verify !== false;
   const limits = opts.limits ?? DEFAULT_LIMITS;
-  const maxObjectsR = capOf(opts.maxObjects, limits, 'maxPackObjects');
-  if (!maxObjectsR.ok) return maxObjectsR;
-  const maxInflatedR = capOf(opts.maxInflatedTotal, limits, 'maxInflatedTotal');
-  if (!maxInflatedR.ok) return maxInflatedR;
-  const maxObjectR = readLimit(limits, 'maxObjectSize');
-  if (!maxObjectR.ok) return maxObjectR;
-  const maxObjects = maxObjectsR.value;
-  const maxInflatedTotal = maxInflatedR.value;
-  const maxObjectSize = maxObjectR.value;
+  const caps = capsOf(limits, ['maxPackObjects', 'maxInflatedTotal', 'maxObjectSize'], [opts.maxObjects, opts.maxInflatedTotal]);
+  if (!caps.ok) return caps;
+  const [maxObjects, maxInflatedTotal, maxObjectSize] = caps.value;
   const minPack = PACK_HEADER_BYTES + PACK_TRAILER_BYTES;
   // Past the minPack check the header is a view, not a bounded read; the object loop's reads are bounded.
   if (buf.length < minPack || !buf.subarray(0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) return corrupt('pack: bad signature');
@@ -331,13 +338,6 @@ export type PackToResolve = { readonly objects: readonly PackObject[]; readonly 
 export type ResolvedPack = { readonly objects: Map<string, ResolvedObject>; readonly stats: { maxChain: number; externalBases: number; baseLookups: number } };
 type Base = { readonly type: number; readonly data: Uint8Array; readonly chain: number };
 
-// What an object's base is: none (a full object), another object at an offset (OFS_DELTA), or an object id (REF_DELTA).
-type BaseRef = { readonly tag: 'none' } | { readonly tag: 'ofs'; readonly offset: number } | { readonly tag: 'ref'; readonly oid: string };
-const NO_BASE: BaseRef = { tag: 'none' };
-const baseOf = (o: PackObject): BaseRef => {
-  if (o.baseOffset !== undefined) return { tag: 'ofs', offset: o.baseOffset };
-  return o.baseOid === undefined ? NO_BASE : { tag: 'ref', oid: o.baseOid };
-};
 // One object's resolution: done, waiting on a REF_DELTA base that has not been resolved yet (in this phase), or refused.
 // `waiting` is the typed form of what used to be a pack_corrupt "ref delta base … not found" caught back by a regex on
 // its message (#76).
@@ -356,15 +356,9 @@ export function resolvePackResult(
   external: (oid: string) => ExternalBase | null | undefined = () => null,
   limits: Limits = DEFAULT_LIMITS,
 ): Result<ResolvedPack, PackError> {
-  const maxChainR = readLimit(limits, 'maxDeltaChain');
-  if (!maxChainR.ok) return maxChainR;
-  const maxDeltaR = readLimit(limits, 'maxDeltaResult');
-  if (!maxDeltaR.ok) return maxDeltaR;
-  const inflatedR = readLimit(limits, 'maxInflatedTotal');
-  if (!inflatedR.ok) return inflatedR;
-  const maxChain = maxChainR.value;
-  const maxDelta = maxDeltaR.value;
-  const inflatedCap = inflatedR.value;
+  const caps = capsOf(limits, ['maxDeltaChain', 'maxDeltaResult', 'maxInflatedTotal']);
+  if (!caps.ok) return caps;
+  const [maxChain, maxDelta, inflatedCap] = caps.value;
   const byOffset = new Map(parsed.objects.map(o => [o.offset, o]));
   // REF_DELTA lookup is this map, not parsed.objects.find (that scan is O(n) per delta, O(passes·n²) on a pack of tiny
   // ref-deltas). Resolved deltas join the same map.
@@ -381,34 +375,27 @@ export function resolvePackResult(
     const hit = memo.get(obj.offset);
     if (hit) return { tag: 'resolved', r: hit };
     if (depth > maxChain) return failed(limitError('delta chain depth', depth, maxChain));
+    // the base: none (a full object), the object at baseOffset (OFS_DELTA), or the object named baseOid (REF_DELTA)
     let base: Base | undefined;
-    const ref = baseOf(obj);
-    switch (ref.tag) {
-      case 'none': break;
-      case 'ofs': {
-        const b = byOffset.get(ref.offset);
-        if (!b) return failed(plyError('pack_corrupt', `pack: ofs delta base not at object boundary ${ref.offset}`));
-        const s = resolveObj(b, depth + 1);
+    if (obj.baseOffset !== undefined) {
+      const b = byOffset.get(obj.baseOffset);
+      if (!b) return failed(plyError('pack_corrupt', `pack: ofs delta base not at object boundary ${obj.baseOffset}`));
+      const s = resolveObj(b, depth + 1);
+      if (s.tag !== 'resolved') return s;
+      base = s.r;
+    } else if (obj.baseOid !== undefined) {
+      stats.baseLookups++;
+      const inPack = byOid.get(obj.baseOid);
+      if (inPack) {
+        const s = resolveObj(inPack, depth + 1);
         if (s.tag !== 'resolved') return s;
         base = s.r;
-        break;
-      }
-      case 'ref': {
-        stats.baseLookups++;
-        const inPack = byOid.get(ref.oid);
-        if (inPack) {
-          const s = resolveObj(inPack, depth + 1);
-          if (s.tag !== 'resolved') return s;
-          base = s.r;
-          break;
-        }
-        const ext = phase === 'external' ? external(ref.oid) : undefined;
-        if (!ext) return { tag: 'waiting', oid: ref.oid };
+      } else {
+        const ext = phase === 'external' ? external(obj.baseOid) : undefined;
+        if (!ext) return { tag: 'waiting', oid: obj.baseOid };
         stats.externalBases++;
         base = { type: ext.type, data: ext.data, chain: 0 };
-        break;
       }
-      default: return assertNever(ref);
     }
     let core: Base & { deltaOps?: DeltaOps };
     let oid: string;
@@ -442,7 +429,7 @@ export function resolvePackResult(
   };
   // Full objects first: each is hashed here, once, and registered, so a REF_DELTA finds it by id.
   for (const o of parsed.objects) {
-    if (baseOf(o).tag !== 'none') continue;
+    if (o.baseOffset !== undefined || o.baseOid !== undefined) continue;
     o.oid = hashObject(String((TYPE_NAME as TypeNames)[o.type]), o.data);
     byOid.set(o.oid, o);
     const s = resolveObj(o);
@@ -451,7 +438,7 @@ export function resolvePackResult(
   // Until nothing is pending: a pass either resolves something, or moves to the external phase once, or ends in an
   // error. A REF chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check
   // above (≤ 2 · maxDeltaChain + 2), not by a pass ceiling that used to return the tail unresolved without an error (#14).
-  let pending = parsed.objects.filter(o => baseOf(o).tag !== 'none');
+  let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
   while (pending.length > 0) {
     const next: PackObject[] = [];
     let missing: string | undefined;

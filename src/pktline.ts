@@ -4,7 +4,7 @@
 import type { ErrorOf } from './errors.js';
 import { fail, orThrow } from './errors.js';
 import type { Err, Result } from './result.js';
-import { ok, assertNever } from './result.js';
+import { ok } from './result.js';
 import { te, concat, encodeBytesResult, HEXV } from './bytes.js';
 import {
   PKT_LEN_HEX, PKT_HEX_BASE, PKT_FLUSH, PKT_DELIM, PKT_RESPONSE_END, PKT_LEN_INVALID,
@@ -60,67 +60,48 @@ export const pktInit = (): PktState => Object.freeze({
   carry: null, frames: 0, data: 0, flush: 0, delim: 0, end: 0, bytes: 0, maxPayload: 0, carryMax: 0,
 });
 
-// What the four length bytes say: git's packet_read_with_status (pkt-line.c) as a closed set. A non-hex byte (either
-// case is hex) is "bad line length character"; 0000/0001/0002 are flush/delim/response-end; 0003 is "bad line length";
-// a payload of LARGE_PACKET_MAX bytes or more (the packet_buffer it reads into) is "bad line length" too, so the
-// longest frame git reads is 65523 bytes, three past the 65520 its writer emits. A length is classified, and so
-// bounded, before the payload is waited for or sliced.
-export type PktHeader =
-  | { readonly tag: 'flush' } | { readonly tag: 'delim' } | { readonly tag: 'end' }
-  | { readonly tag: 'data'; readonly len: number }
-  | { readonly tag: 'bad_hex' } | { readonly tag: 'invalid'; readonly len: number } | { readonly tag: 'too_long'; readonly payload: number };
-export function pktHeader(h: Uint8Array): PktHeader {
-  // h holds PKT_LEN_HEX bytes, HEXV covers every byte value and PKT_LEN_SHIFTS has four entries: every read here is in
-  // range, which noUncheckedIndexedAccess cannot see; `as number` (not the `!` src/ forbids) costs nothing at runtime
-  /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range reads, see above */
-  const a = HEXV[h[0] as number] as number;
-  const b = HEXV[h[1] as number] as number;
-  const c = HEXV[h[2] as number] as number;
-  const d = HEXV[h[3] as number] as number;
-  if ((a | b | c | d) < 0) return { tag: 'bad_hex' };
-  const len = (a << (PKT_LEN_SHIFTS[0] as number)) | (b << (PKT_LEN_SHIFTS[1] as number)) | (c << (PKT_LEN_SHIFTS[2] as number)) | d;
-  /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
-  switch (len) {
-    case PKT_FLUSH: return { tag: 'flush' };
-    case PKT_DELIM: return { tag: 'delim' };
-    case PKT_RESPONSE_END: return { tag: 'end' };
-    case PKT_LEN_INVALID: return { tag: 'invalid', len };
-    default: return len - PKT_LEN_HEX > PKT_READ_MAX_PAYLOAD ? { tag: 'too_long', payload: len - PKT_LEN_HEX } : { tag: 'data', len };
-  }
-}
-
 // (state, chunk) -> { state, frames: [{kind, payload?}] }. Carry is bounded by one max pkt: a length is checked
 // (pktHeader) before the loop waits for its payload. Every slice below is inside a length the loop has already
 // checked, so it is a view, not a bounded read: nothing here can be short.
 export type PktStepped = { frames: PktFrame[]; state: PktState };
 // @decoder pktStepResult prefix=pkt
-// oxlint-disable-next-line eslint/complexity -- one frame loop over an exhaustive switch
+// oxlint-disable-next-line eslint/complexity -- one frame loop, a switch on the length
 export function pktStepResult(st: PktState, chunk: Uint8Array): Result<PktStepped, Protocol> {
   const frames: PktFrame[] = [];
   const buf = st.carry ? concat([st.carry, chunk]) : chunk;
   let p = 0;
   let { data, flush, delim, end, maxPayload } = st;
   frame: while (buf.length - p >= PKT_LEN_HEX) {
-    const h = pktHeader(buf.subarray(p, p + PKT_LEN_HEX));
-    switch (h.tag) {
-      case 'bad_hex': return proto(`bad pkt-line length at byte ${st.bytes - (buf.length - chunk.length) + p}`);
-      case 'invalid': return proto(`invalid pkt-line length ${h.len}`);
-      case 'too_long': return proto(`bad pkt-line length ${h.payload}`);
-      case 'flush': flush++; frames.push({ kind: 'flush' }); p += PKT_LEN_HEX; break;
-      case 'delim': delim++; frames.push({ kind: 'delim' }); p += PKT_LEN_HEX; break;
-      case 'end': end++; frames.push({ kind: 'end' }); p += PKT_LEN_HEX; break;
-      case 'data': {
-        if (buf.length - p < h.len) break frame;
-        const payload = buf.subarray(p + PKT_LEN_HEX, p + h.len);
+    // the four length bytes are in buf (the loop), HEXV covers every byte value and PKT_LEN_SHIFTS has four entries:
+    // every read here is in range, which noUncheckedIndexedAccess cannot see (`as number`, not the `!` src/ forbids)
+    /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range reads, see above */
+    const a = HEXV[buf[p] as number] as number;
+    const b = HEXV[buf[p + 1] as number] as number;
+    const c = HEXV[buf[p + 2] as number] as number;
+    const d = HEXV[buf[p + 3] as number] as number;
+    if ((a | b | c | d) < 0) return proto(`bad pkt-line length at byte ${st.bytes - (buf.length - chunk.length) + p}`);
+    const len = (a << (PKT_LEN_SHIFTS[0] as number)) | (b << (PKT_LEN_SHIFTS[1] as number)) | (c << (PKT_LEN_SHIFTS[2] as number)) | d;
+    /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
+    // git's packet_read_with_status, by length: the three control packets, the invalid 0003, then data
+    switch (len) {
+      case PKT_FLUSH: flush++; frames.push({ kind: 'flush' }); break;
+      case PKT_DELIM: delim++; frames.push({ kind: 'delim' }); break;
+      case PKT_RESPONSE_END: end++; frames.push({ kind: 'end' }); break;
+      case PKT_LEN_INVALID: return proto(`invalid pkt-line length ${len}`);
+      default: {
+        // git's reader refuses a payload that does not fit its LARGE_PACKET_MAX buffer before reading it (pkt-line.c),
+        // so the bound is checked before the loop waits for (and carries) the payload
+        if (len - PKT_LEN_HEX > PKT_READ_MAX_PAYLOAD) return proto(`bad pkt-line length ${len - PKT_LEN_HEX}`);
+        if (buf.length - p < len) break frame;
+        const payload = buf.subarray(p + PKT_LEN_HEX, p + len);
         data++;
         // Stryker disable next-line EqualityOperator: a payload equal to the current maximum leaves the maximum unchanged
         if (payload.length > maxPayload) maxPayload = payload.length;
         frames.push({ kind: 'data', payload });
-        p += h.len;
-        break;
+        p += len - PKT_LEN_HEX;
       }
-      default: return assertNever(h);
     }
+    p += PKT_LEN_HEX;
   }
   const carry = p < buf.length ? buf.slice(p) : null;
   return ok({
