@@ -15,7 +15,8 @@ declare global {
 const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 export function toHex(bytes: Uint8Array): string {
   let s = '';
-  for (let i = 0; i < bytes.length; i++) s += HEX[bytes[i] ?? 0];
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- a byte indexes HEX (256 entries); `as`, not the `!` src/ forbids
+  for (let i = 0; i < bytes.length; i++) s += HEX[bytes[i] as number] as string;
   return s;
 }
 export function fromHex(hex: string): Uint8Array {
@@ -52,28 +53,24 @@ export class Sha1 {
     return this;
   }
 
-  // Every index below is in range: p holds 64 bytes at o, w is 80 words, h is 5. `?? 0` only satisfies the checker.
-  // oxlint-disable-next-line eslint/complexity -- one compression function; the `?? 0`s on in-range reads count as branches
+  // Every index below is in range (p holds 64 bytes at o, w is 80 words, h is 5), which noUncheckedIndexedAccess cannot
+  // see; `as number` says so at no runtime cost (a `?? 0` per read is bundle bytes and a branch in the hot loop).
+  /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above (`as number`, not the `!` src/ forbids) */
   private block(p: Uint8Array, o: number): void {
     const w = this.w;
     const h = this.h;
     for (let i = 0; i < 16; i++) {
-      w[i] = ((p[o + 4 * i] ?? 0) << 24) | ((p[o + 4 * i + 1] ?? 0) << 16) | ((p[o + 4 * i + 2] ?? 0) << 8) | (p[o + 4 * i + 3] ?? 0);
+      w[i] = ((p[o + 4 * i] as number) << 24) | ((p[o + 4 * i + 1] as number) << 16) | ((p[o + 4 * i + 2] as number) << 8) | (p[o + 4 * i + 3] as number);
     }
     for (let i = 16; i < 80; i++) {
-      const x = (w[i - 3] ?? 0) ^ (w[i - 8] ?? 0) ^ (w[i - 14] ?? 0) ^ (w[i - 16] ?? 0);
+      const x = (w[i - 3] as number) ^ (w[i - 8] as number) ^ (w[i - 14] as number) ^ (w[i - 16] as number);
       w[i] = (x << 1) | (x >>> 31);
     }
-    const a0 = h[0] ?? 0;
-    const b0 = h[1] ?? 0;
-    const c0 = h[2] ?? 0;
-    const d0 = h[3] ?? 0;
-    const e0 = h[4] ?? 0;
-    let a = a0;
-    let b = b0;
-    let c = c0;
-    let d = d0;
-    let e = e0;
+    let a = h[0] as number;
+    let b = h[1] as number;
+    let c = h[2] as number;
+    let d = h[3] as number;
+    let e = h[4] as number;
     for (let i = 0; i < 80; i++) {
       let f: number;
       let k: number;
@@ -83,11 +80,12 @@ export class Sha1 {
       else { f = b ^ c ^ d; k = 0xca_62_c1_d6; }
       // `| 0` is the 32-bit wrap SHA-1 adds modulo, not a truncation
       // oxlint-disable-next-line unicorn/prefer-math-trunc -- see above
-      const t = (((a << 5) | (a >>> 27)) + f + e + k + (w[i] ?? 0)) | 0;
+      const t = (((a << 5) | (a >>> 27)) + f + e + k + (w[i] as number)) | 0;
       e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
     }
-    h[0] = a0 + a; h[1] = b0 + b; h[2] = c0 + c; h[3] = d0 + d; h[4] = e0 + e;
+    (h[0] as number) += a; (h[1] as number) += b; (h[2] as number) += c; (h[3] as number) += d; (h[4] as number) += e;
   }
+  /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
 
   public digest(): Uint8Array {
     const bits = this.len * 8;
@@ -102,7 +100,7 @@ export class Sha1 {
     this.update(tail);
     const out = new Uint8Array(20);
     const odv = new DataView(out.buffer);
-    for (let i = 0; i < 5; i++) odv.setUint32(i * 4, this.h[i] ?? 0);
+    for (let i = 0; i < 5; i++) odv.setUint32(i * 4, this.h[i] as number); // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < 5, h is 5 words
     return out;
   }
 

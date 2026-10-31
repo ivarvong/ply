@@ -24,8 +24,10 @@ import {
 } from './format.js';
 
 const corrupt = (msg: string): Thrown => fail('pack_corrupt', msg);
-// TYPE_NAME's keys are the type numbers; read by a type number, a name may be absent.
-const TYPE_NAMES: Readonly<Record<number, string | undefined>> = TYPE_NAME;
+// TYPE_NAME's keys are the type numbers; read by a type number, a name may be absent (a widening, so no runtime alias).
+type TypeNames = Readonly<Record<number, string | undefined>>;
+// take(buf, p, n)[i] with i < n is in range, which noUncheckedIndexedAccess cannot see: such reads say `as number` (free
+// at runtime, unlike a `?? 0` per byte; not the `!` src/ forbids). Each carries the suppression below.
 
 // Past VARINT_MAX_SHIFT a group used to scale by Infinity, and 0 × Infinity is NaN: every `size > limit` check is false
 // on NaN, so the size reached callers (#13). Checked before the byte is read, so a hostile header costs ≤ 10 bytes.
@@ -40,7 +42,7 @@ function readVarint(buf: Uint8Array, start: number): [number, number] {
   let c: number;
   do {
     varintRoom(shift, 'delta');
-    c = take(buf, p, 1)[0] ?? 0;
+    c = take(buf, p, 1)[0] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range, see above
     p += 1;
     n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
     shift += VARINT_BITS;
@@ -48,25 +50,25 @@ function readVarint(buf: Uint8Array, start: number): [number, number] {
   return [n, p];
 }
 
-// BE32_SHIFTS has four entries (format.js); the defaults only satisfy the checker, as do the `?? 0`s on take()'s bytes
-const [SHIFT0 = 0, SHIFT1 = 0, SHIFT2 = 0] = BE32_SHIFTS;
 export function readUint32BE(buf: Uint8Array, off: number): number {
   const b = take(buf, off, BE32_SHIFTS.length);
-  return (((b[0] ?? 0) << SHIFT0) | ((b[1] ?? 0) << SHIFT1) | ((b[2] ?? 0) << SHIFT2) | (b[BE32_SHIFTS.length - 1] ?? 0)) >>> 0;
+  // b and BE32_SHIFTS (format.js) both have four entries: in range, see above
+  /* oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above */
+  return (((b[0] as number) << (BE32_SHIFTS[0] as number)) | ((b[1] as number) << (BE32_SHIFTS[1] as number)) | ((b[2] as number) << (BE32_SHIFTS[2] as number)) | (b[BE32_SHIFTS.length - 1] as number)) >>> 0;
 }
 
 export type ObjHeader = { readonly type: number; readonly size: number; readonly next: number };
 // @decoder readObjHeader prefix=obj-header
 export function readObjHeader(buf: Uint8Array, start: number): ObjHeader {
   let p = start;
-  let c = take(buf, p, 1)[0] ?? 0;
+  let c = take(buf, p, 1)[0] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range
   const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
   let size = c & OBJ_SIZE_FIRST_MASK;
   let shift = OBJ_TYPE_SHIFT;
   p += 1;
   while (c & OBJ_CONTINUE) {
     varintRoom(shift, 'pack');
-    c = take(buf, p, 1)[0] ?? 0;
+    c = take(buf, p, 1)[0] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range
     p += 1;
     size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
     shift += VARINT_BITS;
@@ -78,11 +80,11 @@ export type OfsDelta = { readonly off: number; readonly next: number };
 // @decoder readOfsDelta prefix=ofs-delta
 export function readOfsDelta(buf: Uint8Array, start: number): OfsDelta {
   let p = start;
-  let c = take(buf, p, 1)[0] ?? 0;
+  let c = take(buf, p, 1)[0] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range
   p += 1;
   let off = c & OBJ_SIZE_NEXT_MASK;
   while (c & OBJ_CONTINUE) {
-    c = take(buf, p, 1)[0] ?? 0;
+    c = take(buf, p, 1)[0] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range
     p += 1;
     off = ((off + 1) * OBJ_SIZE_NEXT_BASE) + (c & OBJ_SIZE_NEXT_MASK);
   }
@@ -174,7 +176,8 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): ParsedP
     const { out, consumed, stats: is } = inflate(buf, p, { expectedSize: size, maxOutput: maxObjectSize });
     stats.compressed += consumed; stats.inflated += size;
     stats.inflate.blocks += is.blocks; stats.inflate.stored += is.stored; stats.inflate.fixed += is.fixed; stats.inflate.dynamic += is.dynamic;
-    const name = String(TYPE_NAMES[type]); // the key the object literal made of it, as before
+    // type is one of the four object types or a delta (checked above), each of which TYPE_NAME names
+    const name = (TYPE_NAME as TypeNames)[type] as string; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above
     stats.byType[name] = (stats.byType[name] ?? 0) + 1;
     objects.push({ offset, headerBytes: p - offset, type, size, compressed: consumed, data: out, baseOffset, baseOid, inflate: is });
     p += consumed;
@@ -208,7 +211,7 @@ export function applyDelta(base: Uint8Array, delta: Uint8Array, opts: { readonly
   let o = 0;
   const ops: DeltaOps = { copy: 0, insert: 0, copyBytes: 0, insertBytes: 0 };
   // The byte at p, then past it: a bounded read, so a delta cut inside an opcode is a typed short read.
-  const deltaByte = (): number => take(delta, p++, 1)[0] ?? 0;
+  const deltaByte = (): number => take(delta, p++, 1)[0] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- one byte read, in range
   while (p < delta.length) {
     const c = deltaByte();
     if (c & DELTA_COPY) {
@@ -327,7 +330,7 @@ export function resolvePack(
       core = { type: base.type, data: out, chain, deltaOps: ops };
     }
     const r: ResolvedObject = Object.assign(core, {
-      oid: hashObject(TYPE_NAMES[core.type], core.data),
+      oid: hashObject((TYPE_NAME as TypeNames)[core.type], core.data),
       offset: obj.offset, size: obj.size, compressed: obj.compressed,
       baseOffset: obj.baseOffset, baseOid: obj.baseOid,
     });
@@ -337,7 +340,7 @@ export function resolvePack(
     byOid.set(r.oid, obj);
     return r;
   };
-  for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject(TYPE_NAMES[o.type], o.data);
+  for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject((TYPE_NAME as TypeNames)[o.type], o.data);
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) { byOid.set(o.oid, o); resolveObj(o); }
   // Until nothing is pending: a pass either resolves something, or switches to external bases once, or throws. A REF
   // chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check above
@@ -347,10 +350,12 @@ export function resolvePack(
     const next: PackObject[] = [];
     for (const o of pending) {
       try { resolveObj(o); }
-      catch (e) { if (e instanceof Error && 'code' in e && e.code === 'pack_corrupt' && /ref delta base .* not found/u.test(e.message)) next.push(o); else throw e; }
+      // the same two reads as ever (only a PlyError reaches here: resolveObj throws nothing else); TODO(A1): a Result, not a catch
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+      catch (e) { const f = e as { readonly code: unknown; readonly message: string }; if (f.code === 'pack_corrupt' && /ref delta base .* not found/u.test(f.message)) next.push(o); else throw e; }
     }
     if (next.length === pending.length) {
-      if (allowExternal && next[0]) resolveObj(next[0]); // no progress even with external bases: surface the real error
+      if (allowExternal) resolveObj(next[0] as PackObject); // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- next is pending, which is not empty // no progress even with external bases: surface the real error
       allowExternal = true;                   // every in-pack base is known now; the rest are thin bases
     }
     pending = next;

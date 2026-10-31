@@ -31,10 +31,7 @@ export const pkts = (lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -
   concat(lines.flatMap((l, i) => (i === delimAfter ? [pkt(l), DELIM] : [pkt(l)])).concat(flush ? [FLUSH] : []));
 
 // oxlint-disable-next-line no-magic-numbers -- sentinel: this byte is not a hex digit
-const NOT_HEX = -1;
-const HEXV = new Int8Array(BYTE_VALUES).fill(NOT_HEX);
-// PKT_LEN_SHIFTS has four entries (format.js); the defaults only satisfy the checker
-const [SHIFT0 = 0, SHIFT1 = 0, SHIFT2 = 0] = PKT_LEN_SHIFTS;
+const HEXV = new Int8Array(BYTE_VALUES).fill(-1);
 // ASCII digits: a code unit is the code point
 // oxlint-disable-next-line unicorn/prefer-code-point -- see above
 for (let i = 0; i < PKT_HEX_BASE; i++) { HEXV['0123456789abcdef'.charCodeAt(i)] = i; HEXV['0123456789ABCDEF'.charCodeAt(i)] = i; }
@@ -75,20 +72,21 @@ export function pktStep(st: PktState, chunk: Uint8Array): { frames: PktFrame[]; 
   let { data, flush, delim, end, maxPayload } = st;
   while (buf.length - p >= PKT_LEN_HEX) {
     const h = buf.subarray(p, p + PKT_LEN_HEX);
-    // h holds PKT_LEN_HEX bytes and HEXV covers every byte value: `?? -1` only satisfies the checker
-    const a = HEXV[h[0] ?? 0] ?? NOT_HEX;
-    const b = HEXV[h[1] ?? 0] ?? NOT_HEX;
-    const c = HEXV[h[2] ?? 0] ?? NOT_HEX;
-    const d = HEXV[h[3] ?? 0] ?? NOT_HEX;
+    // h holds PKT_LEN_HEX bytes, HEXV covers every byte value and PKT_LEN_SHIFTS has four entries: every read here is in
+    // range, which noUncheckedIndexedAccess cannot see; `as number` (not the `!` src/ forbids) costs nothing at runtime
+    /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range reads, see above */
+    const a = HEXV[h[0] as number] as number;
+    const b = HEXV[h[1] as number] as number;
+    const c = HEXV[h[2] as number] as number;
+    const d = HEXV[h[3] as number] as number;
     if ((a | b | c | d) < 0) throw proto(`bad pkt-line length at byte ${st.bytes - (buf.length - chunk.length) + p}`);
-    const len = (a << SHIFT0) | (b << SHIFT1) | (c << SHIFT2) | d;
+    const len = (a << (PKT_LEN_SHIFTS[0] as number)) | (b << (PKT_LEN_SHIFTS[1] as number)) | (c << (PKT_LEN_SHIFTS[2] as number)) | d;
+    /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
     if (len < PKT_DATA_MIN) {
       if (len === PKT_LEN_INVALID) throw proto('invalid pkt-line length 3');
       // 0, 1 and 2 are the only remaining lengths below PKT_DATA_MIN.
-      let kind: 'flush' | 'delim' | 'end' = 'end';
-      if (len === PKT_FLUSH) kind = 'flush';
-      else if (len === PKT_DELIM) kind = 'delim';
-      if (kind === 'flush') flush++; else if (kind === 'delim') delim++; else end++;
+      let kind: 'flush' | 'delim' | 'end';
+      if (len === PKT_FLUSH) { kind = 'flush'; flush++; } else if (len === PKT_DELIM) { kind = 'delim'; delim++; } else { kind = 'end'; end++; }
       frames.push({ kind });
       p += PKT_LEN_HEX;
       continue;

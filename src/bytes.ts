@@ -11,15 +11,6 @@ const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 // Well-formed UTF-8 or a throw; a leading BOM is kept (it is a byte of the text to git, #43).
 export const decodeStrict = (b: Uint8Array): string => strict.decode(b);
 
-export function concat(parts: readonly Uint8Array[]): Uint8Array {
-  let n = 0;
-  for (const p of parts) n += p.length;
-  const out = new Uint8Array(n);
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-}
-
 // ---- git bytes as strings, losslessly (#43) ----
 // Names, messages, idents and ref names are bytes to git; it never requires UTF-8 and never interprets a BOM. ply hands
 // them out as strings, so the mapping must be a bijection on bytes: well-formed UTF-8 decodes as UTF-8 (a BOM anywhere
@@ -44,7 +35,8 @@ const HIGH_END = 0xdb_ff;
 const inRange = (b: number | undefined, lo: number, hi: number): boolean => b !== undefined && b >= lo && b <= hi;
 // Length of the well-formed UTF-8 sequence at i (Unicode Table 3-7), or 0. `i` is always < b.length (both callers).
 function wellFormedAt(b: Uint8Array, i: number): number {
-  const c = b[i] ?? 0;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range, see above
+  const c = b[i] as number;
   if (c < ASCII_END) return 1;
   if (c < LEAD2) return 0;
   if (c < LEAD3) return inRange(b[i + 1], CONT, CONT_END) ? 2 : 0;
@@ -62,10 +54,19 @@ export function decodeBytes(b: Uint8Array): string {
   while (i < b.length) {
     const n = wellFormedAt(b, i);
     if (n) { i += n; continue; }
-    s += strict.decode(b.subarray(run, i)) + String.fromCodePoint(ESCAPE + (b[i] ?? 0));
+    s += strict.decode(b.subarray(run, i)) + String.fromCodePoint(ESCAPE + (b[i] as number)); // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < b.length (the loop)
     run = ++i;
   }
   return s + strict.decode(b.subarray(run));
+}
+
+export function concat(parts: readonly Uint8Array[]): Uint8Array {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
 }
 
 export function encodeBytes(s: unknown, what = 'string'): Uint8Array {
@@ -95,14 +96,11 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
   const buf = carry.length > 0 ? concat([carry, chunk]) : chunk;
   let cut = buf.length;
   for (let k = 1; k <= 3 && k <= buf.length; k++) {
-    const c = buf[buf.length - k] ?? 0;
+    const c = buf[buf.length - k] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- k <= buf.length (the loop)
     if (c < ASCII_END) break;
-    if (c >= LEAD2) {
-      let need = 2;
-      if (c >= LEAD3) need = c >= LEAD4 ? 4 : 3;
-      if (k < need) cut = buf.length - k;
-      break;
-    }
+    // the lead byte's sequence length (Table 3-7) in one expression, as git-facing hot paths keep it small
+    // oxlint-disable-next-line no-nested-ternary -- see above
+    if (c >= LEAD2) { if (k < (c >= LEAD4 ? 4 : c >= LEAD3 ? 3 : 2)) cut = buf.length - k; break; }
   }
   return { text: td.decode(buf.subarray(0, cut)), carry: buf.slice(cut) };
 }
@@ -115,11 +113,12 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
  */
 export function take(buf: Uint8Array | null | undefined, off: number, n: number, code: Code = 'pack_corrupt'): Uint8Array {
   const len = buf?.length ?? 0;
-  // `!buf` refuses take(absent, 0, 0), the one absent buffer the length check let through (no caller passes one)
-  if (!buf || !Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) {
+  if (!Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) {
     throw fail(code, `short read: need ${n} bytes at ${off}, have ${len}`);
   }
-  return buf.subarray(off, off + n);
+  // Only take(absent, 0, 0) gets here without a buffer, and it throws a TypeError as it always has (no caller passes one)
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above; TODO(A1): refuse it as a short read
+  return (buf as Uint8Array).subarray(off, off + n);
 }
 
 

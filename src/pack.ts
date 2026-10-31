@@ -10,8 +10,6 @@ import {
   DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3,
 } from './format.js';
-// TYPE_NAME's keys are the type numbers; read by a type number, a name may be absent.
-const TYPE_NAMES: Readonly<Record<number, string | undefined>> = TYPE_NAME;
 // ---- varints ----
 export function encodeObjHeader(type: number, size: number): Uint8Array {
   let rest = size;
@@ -98,15 +96,15 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
   const entries: BuiltEntry[] = [];
   for (const o of objects) {
     const baseOid = o.baseOid ?? ''; // truthiness, as before: an empty baseOid is no base
-    const type: number = baseOid === '' ? o.type : TYPE.REF_DELTA;
+    const type: number = baseOid ? TYPE.REF_DELTA : o.type;
     // one at a time, in pack order: the pack is a sequence (parallel deflate is a perf change, not this one)
     // oxlint-disable-next-line no-await-in-loop -- see above
     const z = await zlibDeflate(o.data);
     const h = encodeObjHeader(type, o.data.length);
     parts.push(h);
-    if (baseOid !== '') parts.push(fromHex(baseOid));
+    if (baseOid) parts.push(fromHex(baseOid));
     parts.push(z);
-    entries.push({ type, typeName: TYPE_NAMES[type], size: o.data.length, compressed: z.length, baseOid: o.baseOid ?? null, bytes: h.length + (baseOid === '' ? 0 : OID_BYTES) + z.length });
+    entries.push({ type, typeName: (TYPE_NAME as Readonly<Record<number, string | undefined>>)[type], size: o.data.length, compressed: z.length, baseOid: o.baseOid ?? null, bytes: h.length + (baseOid ? OID_BYTES : 0) + z.length });
   }
   const body = concat(parts);
   const pack = concat([body, new Sha1().update(body).digest()]);
