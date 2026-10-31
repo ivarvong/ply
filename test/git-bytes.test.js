@@ -40,11 +40,18 @@ export const FIELDS = ['treeName', 'commitMessage', 'authorName', 'refName', 'at
 export const OPS = ['readFile', 'listTree', 'readCommit', 'checkoutTree', 'editFile', 'merge'];
 
 // A ply refusal where git succeeds, with the reason it is right.
+// A commit with a NUL in its message or an ident is an error to `git fsck --strict` (nulInCommit, nulInHeader), and a
+// commit read accepts exactly what fsck --strict accepts (SAFETY.md I38, issue #59), so every read refuses it, typed,
+// with git's msgId, where git's porcelain still prints it.
+const fsckNul = e => e.code === 'pack_corrupt' && /^commit: nul(InCommit|InHeader): /.test(e.message);
 const ALLOWED_REFUSALS = {
   // APFS stores names as UTF-8 and answers EILSEQ to anything else; `git clone` fails on that file the same way.
   // `git merge <annotated tag>` writes a mergetag header, which ply does not; it says so instead of merging without it.
   merge: e => e.code === 'unsupported' && /is an annotated tag/.test(e.message),
-  checkoutTree: e => e.code === 'unsupported' && /filesystem refuses the name bytes/.test(e.message) && process.platform === 'darwin',
+  checkoutTree: e => fsckNul(e) || (e.code === 'unsupported' && /filesystem refuses the name bytes/.test(e.message) && process.platform === 'darwin'),
+  readFile: fsckNul,
+  listTree: fsckNul,
+  readCommit: fsckNul,
 };
 
 function B(...parts) { return Buffer.concat(parts.map(p => (typeof p === 'string' ? Buffer.from(p, 'utf8') : Buffer.from(p)))); }
