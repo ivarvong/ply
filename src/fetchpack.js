@@ -14,15 +14,16 @@ import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs } from 
 // so a malformed object fails the fetch (`pack_corrupt`) instead of reaching a caller or the harvest. On the tree:0
 // path all of it is what was asked for. On the blob:none path the trees are extras a tree:0 server would not have sent
 // (the walk reads commits only): checkWide drops one that is over a limit instead of failing the walk (#46; see there).
+// The result carries `filter`: the one the answered request used.
 const commitsAndTags = (_oid, o) => o.type !== TYPE.TREE;
 export async function fetchPackTree0(t, opts) {
   const wide = async learned => {
     const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check: objects => skippedAttrs(checkWide(objects, commitsAndTags, t.limits)), attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
     if (r.objects) harvest(t, r.objects);
-    return r;
+    return { ...r, filter: 'blob:none' };
   };
   if (t.quirks?.treeFilter === 'blob:none') return wide(false);
-  try { return await fetchPack(t, opts, { check: objects => { checkWide(objects, () => true, t.limits); return {}; } }); } catch (e) {
+  try { return { ...await fetchPack(t, opts, { check: objects => { checkWide(objects, () => true, t.limits); return {}; } }), filter: opts.filter }; } catch (e) {
     if (!isFilterRejection(e)) throw e;
     if (t.quirks) t.quirks.treeFilter = 'blob:none';
     return wide(true);

@@ -55,7 +55,7 @@ Layers, bottom up (each depends only on the ones below):
 | Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
 | Transport contract | `transport`, `http`, `sshgit` (+ `ssh`, `ssh-node`, `ssh-workers`) | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; two implementations, no dispatch |
 | Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |
-| Operations | `operation`, `edit`, `tree`, `checkout`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
+| Operations | `operation`, `edit`, `tree`, `checkout`, `log`, `merge`, `linemerge`, `attributes`, `rebase`, `sign` | `operation()` owns the root span, transport, outcome and the "after an acknowledged push, any read-back failure is `ambiguous`" rule |
 | Entry points | `edit.js` (edit-only bundle), `tree.js` (whole-tree push), `checkout.js` (whole-tree read), `index.js` (everything), `client.js` (`GitHttp` convenience wrapper); Node-only adapters outside every Workers bundle: `ssh-node.js` (`node:net`), `tree-node.js` and `checkout-node.js` (`node:fs`) | `sideEffects: false` |
 | Telemetry | `otel` | minimal OTLP/JSON tracer; exporters pluggable (`test/jsonl.mjs` for files) |
 
@@ -74,6 +74,10 @@ Key operation modules:
   `openBlob`; a host refusing many wants gets one per request (`quirks.blobWants`). Returns `entries` and a `files` async
   iterator. `checkout-node.js` (`writeFiles`, `checkoutDir`) writes a directory as `git clone` lays it out and never
   writes through a symlink. Issue #12.
+- `log.js` — `readLog(url, { ref, limit }, opts)`: first-parent history (`git rev-list --first-parent -n`) from one
+  `deepen <limit>` fetch through `fetchPackTree0` (`tree:0`, else `blob:none` with the trees harvested). `logWindow` (pure)
+  holds the window to the #37 deepen contract (the want present; every commit an ancestor; a missing parent only under a
+  `shallow` line, else `pack_corrupt`) and sets `truncated` from the last commit's parents. No `path` filter. Issue #56.
 - `merge.js` — `mergeBranch`, `fastForward`, `deleteBranch`, `mergeTrees` (trivial-merge rules per directory, only differing
   subtrees fetched), `bestBases` (git's `merge-base --all` with a completeness check), rename guards, `blobMerger`,
   `attributeDrivers`/`attributeTree`.
@@ -155,6 +159,8 @@ This session (2026-10-19 → 20):
 
 | Decision | Why (evidence) |
 |---|---|
+| readLog is first-parent, not git log's date order | the first `limit` first-parent commits are exactly inside a `deepen limit` window and `truncated` is the last commit's parent count, with no date heuristics; it is the history a branch view shows (one merge per landed branch). A date-ordered `git log -n` would need the whole window ranked by committer date (issue #56) |
+| readLog's window is held to the deepen contract like the merge-base walk's | a cut graph without `shallow` lines (or a foreign commit) is `pack_corrupt`, never a shorter or padded log: 90 cells in `test/log.test.js`, 50 of them predicted `pack_corrupt` from git's own graph |
 | Transport = plain record with two methods; HTTP and SSH implement it | operations never branch on transport; SSH added with zero changes above the contract |
 | Errors: one table, codes validated at throw | retry policy is data; tests check docs ↔ table ↔ literals in source stay aligned |
 | After an acknowledged push, any read-back failure → `ambiguous` | the push may have landed; a transport code would invite a wrong retry (I25) |
