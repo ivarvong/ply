@@ -39,7 +39,7 @@ jobs:
         run: node test/fuzz/git-semantic.mjs --n 20 --seed 1
 
   fuzz:
-    # Deterministic fuzz, fixed seeds and sizes, in parallel with `test` (~100 s on an M-series laptop). The deep,
+    # Deterministic fuzz, fixed seeds and sizes, in parallel with `test`, so it adds no PR wall time. The deep,
     # date-seeded runs are in nightly.yml. hostile --case 2366521731 is the pinned case npm test also runs.
     name: fuzz
     runs-on: ubuntu-latest
@@ -64,17 +64,17 @@ jobs:
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
       - name: hostile fuzzer
-        run: node test/fuzz/hostile.mjs --n 60 --seed 1 && node test/fuzz/hostile.mjs --case 2366521731
+        run: node test/fuzz/hostile.mjs --n 180 --seed 1 && node test/fuzz/hostile.mjs --case 2366521731
       - name: liar fuzzer
-        run: node test/fuzz/liar.mjs --n 40 --seed 1
+        run: node test/fuzz/liar.mjs --n 120 --seed 1
       - name: protocol fuzzer
-        run: node test/fuzz/protocol.mjs --n 100 --seed 1
+        run: node test/fuzz/protocol.mjs --n 300 --seed 1
       - name: packs fuzzer
-        run: node test/fuzz/packs.mjs --n 12 --seed 1
+        run: node test/fuzz/packs.mjs --n 36 --seed 1
       - name: codec fuzzer
-        run: node test/fuzz/codec.mjs --n 5000 --seed 1
+        run: node test/fuzz/codec.mjs --n 15000 --seed 1
       - name: attributes fuzzer
-        run: node test/fuzz/attributes.mjs --n 40 --seed 1
+        run: node test/fuzz/attributes.mjs --n 120 --seed 1
 
   mutate:
     name: mutate
