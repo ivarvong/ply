@@ -1031,6 +1031,77 @@ test('openBlob: every way a streamed blob can lie is pack_corrupt on the stream,
   await midway('untyped', cut(new Error('socket hang up')), 'pack_corrupt', 'blob stream: socket hang up');
 });
 
+// Pull until the stream ends or errors. The chunks are what the consumer was given; an error keeps the ones already released.
+async function pullChunks(stream) {
+  const chunks = [];
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const r = await reader.read();
+      if (r.done) return { chunks };
+      chunks.push(r.value);
+    }
+  } catch (error) {
+    return { chunks, error };
+  }
+}
+
+test('openBlob holds the last chunk until the hash and the trailer verify', async () => {
+  // 64 KiB of one byte inflates as several chunks when the pack is delivered in small frames (measured on this runtime).
+  const text = 'a'.repeat(65536);
+  const oid = hashObject('blob', te.encode(text));
+  const other = hashObject('blob', te.encode('b'));
+  const pack = await onePack(TYPE.BLOB, text.length, text);
+  const frames = packFrames(pack, 32);
+  const open = async (want, wire = frames) => {
+    const r = remote({ hook: async () => wire });
+    const ex = arrayExporter();
+    const tracer = new Tracer({ exporter: ex });
+    const opened = await openBlob(r.transport({ tracer }), tracer, tracer.start('p'), want);
+    return { size: opened.size, ...(await pullChunks(opened.stream)), spans: () => ex.lines.flatMap(flattenLine) };
+  };
+  const good = await open(oid);
+  assert.equal(good.error, undefined);
+  assert.ok(good.chunks.length >= 2, `a valid blob yielded ${good.chunks.length} chunk(s); the hold needs a real tail`);
+  const whole = concat(good.chunks);
+  assert.equal(whole.length, text.length);
+  assert.equal(td.decode(whole), text);
+  const prefix = concat(good.chunks.slice(0, -1));
+  const bad = await open(other);
+  assert.equal(bad.error?.code, 'pack_corrupt');
+  assert.equal(bad.error.message, `blob content hashes to ${oid}, not ${other}`);
+  assert.deepEqual(concat(bad.chunks), prefix, 'the last chunk of a blob that fails the hash is never yielded');
+  const badSpan = bad.spans().find(s => s.name === 'git.read.blob');
+  assert.equal(badSpan.attrs['git.read.blob.outcome'], 'pack_corrupt');
+  assert.equal(badSpan.attrs['git.read.blob.verified'], undefined);
+  // one inflate chunk (the pack arrives whole): holding it means the consumer receives nothing
+  const hello = packFrames(await onePack(TYPE.BLOB, 5, 'hello'));
+  const helloOid = hashObject('blob', te.encode('hello'));
+  const helloGood = await open(helloOid, hello);
+  assert.equal(helloGood.error, undefined);
+  assert.equal(helloGood.chunks.length, 1);
+  assert.equal(td.decode(concat(helloGood.chunks)), 'hello');
+  const helloBad = await open(other, hello);
+  assert.equal(helloBad.chunks.length, 0);
+  assert.equal(helloBad.error?.code, 'pack_corrupt');
+  assert.match(helloBad.error.message, /^blob content hashes to /);
+  // a one-byte chunk is a real chunk (an empty one is not)
+  const zee = packFrames(await onePack(TYPE.BLOB, 1, 'Z'), 8);
+  const zeeGood = await open(hashObject('blob', te.encode('Z')), zee);
+  assert.equal(td.decode(concat(zeeGood.chunks)), 'Z');
+  // the trailer fails after the bytes have inflated: the same tail stays held
+  const torn = new Uint8Array(pack);
+  torn[torn.length - 1] ^= 1;
+  const trailer = await open(oid, packFrames(torn, 32));
+  assert.equal(trailer.error?.code, 'pack_corrupt');
+  assert.match(trailer.error.message, /^pack: trailer [0-9a-f]{40} != [0-9a-f]{40}$/);
+  // aborting the inflate on a bad trailer delivers no further chunk, so the held tail is not among them
+  assert.ok(trailer.chunks.length < good.chunks.length);
+  const trailerBytes = trailer.chunks.length ? concat(trailer.chunks) : new Uint8Array();
+  assert.ok(trailerBytes.length < text.length);
+  assert.equal(td.decode(trailerBytes), text.slice(0, trailerBytes.length));
+});
+
 test('the details each operation stamps: prefixes, filters, nested paths, caller limits, error-code gates', async () => {
   // pushTree asks ls-refs for the base alone, honours the caller's limits, and reads nested trees by their full path
   const r = remote(); r.commit(FILES());
