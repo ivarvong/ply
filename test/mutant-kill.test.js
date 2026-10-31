@@ -909,6 +909,8 @@ test('boundaries between a thrown error and its neighbour', async () => {
   const opted = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'option alone']);
   assert.equal(opted.refs[0].options.alone, true);
   assert.equal(parseReportStatus(['option alone']).refs.length, 0);
+  // a line that is none of unpack/ok/ng/option is ignored, not read as an option of the last ref
+  assert.deepEqual(Object.keys(parseReportStatus(['unpack ok', 'ok refs/heads/main', 'unknown-line x y']).refs[0].options), []);
 
   let st = v2Init();
   const line = s => ({ kind: 'data', payload: te.encode(s) });

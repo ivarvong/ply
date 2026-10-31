@@ -65,7 +65,15 @@ export function parseReportStatus(lines: readonly string[], limits: Partial<Limi
     }
     else if (l.startsWith(OK_REF)) r.refs.push({ ref: l.slice(OK_REF.length), ok: true, options: Object.create(null) });
     else if (l.startsWith(NG_REF)) { const sp = l.indexOf(' ', NG_REF.length); r.refs.push({ ref: l.slice(NG_REF.length, sp), ok: false, reason: l.slice(sp + 1), options: Object.create(null) }); }
-    else if (l.startsWith(OPTION)) { const last = r.refs.at(LAST); if (last) { const [k = '', v] = l.slice(OPTION.length).split(' '); last.options[k] = v ?? true; } } // report-status-v2; option names are the server's, so options has no prototype
+    else if (l.startsWith(OPTION)) { // report-status-v2; option names are the server's, so options has no prototype
+      const last = r.refs.at(LAST);
+      if (last) {
+        const kv = l.slice(OPTION.length).split(' ');
+        // Stryker disable next-line StringLiteral: split always yields a first element, so the default is never read (it is for the type)
+        const [k = '', v] = kv;
+        last.options[k] = v ?? true;
+      }
+    }
   }
   r.ok = r.unpack === 'ok' && r.refs.length > 0 && r.refs.every(x => x.ok);
   return r;
