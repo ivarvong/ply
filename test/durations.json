@@ -7,6 +7,7 @@
   "test/concurrency.test.js": 4,
   "test/delta-bound.test.js": 16,
   "test/edges.test.js": 13,
+  "test/encode-tag.test.js": 4,
   "test/examples.test.js": 2,
   "test/format-facts.test.js": 0,
   "test/fsck-oracle.test.js": 1,
