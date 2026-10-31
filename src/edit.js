@@ -14,7 +14,7 @@ import { fromHex, streamingSha1 } from './sha1.js';
 import { te, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
-import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 
 export { spInit, spStep, spFinish }; // the single-object pack parser lives in fetch.js; re-exported for callers of old paths
@@ -65,7 +65,7 @@ const OID = /^[0-9a-f]{40}$/;
 // `base`: the ref whose head the commit is built on (default: `ref` itself). With base ≠ ref the push *creates* `ref`
 // (old oid = zeros), the way a pull-request branch is made; the CAS then means "the branch must not exist yet".
 export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find, replace, author, message, time = Math.floor(Date.now() / 1000) }, limits, head = null) {
-  validateRef(ref); validateRef(base);
+  validatePushRef(ref, false); validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
   const comps = validatePath(path, limits);

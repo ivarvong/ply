@@ -14,7 +14,7 @@ import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
-import { validateRef, validateIdent, validateMessage } from './validate.js';
+import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
@@ -58,7 +58,7 @@ async function transplant(t, cache, { base, ours, theirs }, { parent, author, co
 
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committer, author, time = Math.floor(Date.now() / 1000), squash = false, message = null }, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts } = {}) {
-  validateAttributes(attributes); validateRef(ref); validateRef(onto);
+  validateAttributes(attributes); validatePushRef(ref, false); validateRef(onto);
   const committerPerson = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
   const authorPerson = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== null) validateMessage(message);
@@ -108,7 +108,7 @@ export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committ
 
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
 export async function pickCommit(url, { ref = 'refs/heads/main', commit, committer, time = Math.floor(Date.now() / 1000), revert = false, message = null }, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts } = {}) {
-  validateAttributes(attributes); validateRef(ref);
+  validateAttributes(attributes); validatePushRef(ref, false);
   const committerPerson = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
   if (message !== null) validateMessage(message);
   if (!/^[0-9a-f]{40}$/.test(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');
