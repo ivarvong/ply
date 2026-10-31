@@ -1,6 +1,6 @@
 // Pack cache + head hint against real git through the counting proxy. The oracle for "fewer round trips" is the
 // proxy's per-stage request count (what the server actually saw); the oracle for correctness is git itself.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';

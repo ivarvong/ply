@@ -3,7 +3,7 @@
 // environment behind Basic auth. git is only the judge: push → checkout must give back the source directory byte for
 // byte with its modes and symlinks; `git clone` of the remote must equal the source; a repeat with nothing changed is a
 // noop and a one-file change sends one blob, the trees on its path and the commit.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { mkdirSync, symlinkSync, writeFileSync, chmodSync, readdirSync, lstatSync, readlinkSync, readFileSync } from 'node:fs';

@@ -1,6 +1,6 @@
 // The constants module is part of the mutation suite. These literals live in the test, not in src/, so a mutant
 // that changes a definition fails here even when no parser happens to branch on that name.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import * as fmt from '../src/format.js';
 

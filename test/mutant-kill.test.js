@@ -1,6 +1,6 @@
 // Branch and message assertions for the mutation gate. Prefix and round-trip tests kill the happy path;
 // these kill a mutant that deletes one check, flips one comparison, or empties one error string.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -25,8 +25,8 @@ import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.ts';
-import { validateIdent, isValidatedIdent } from '../src/validate.js';
+import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
+import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
 import { negotiate } from '../src/negotiate.js';
 import {
@@ -1769,4 +1769,14 @@ test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was onl
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['x'] }), 'a', 'b'), { best: ['c', 'z'], truncated: false }, 'a cut both bases reach');
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['w'] }), 'a', 'b'), { best: ['c', 'z'], truncated: true }, 'each base reaches a cut the other does not');
+});
+
+test('validatePushRef: receive-pack\'s funny refname (the cells test/space/refname.test.js observes from git)', () => {
+  const ok = (ref, del) => { try { return validatePushRef(ref, del) === ref; } catch (e) { assert.equal(e.code, 'bad_request'); assert.equal(e.what, 'ref'); return false; } };
+  // [ref, create accepted, delete accepted]: git v2.50.0 receive-pack's answers (the space's cells; a..b and a name outside refs/ by receive-pack.c:1477)
+  for (const [ref, create, del] of [['refs/a', false, true], ['refs/@', false, false], ['refs/@a', false, true], ['refs/-a', false, true],
+    ['refs/a/b', true, true], ['refs/@/a', true, true], ['refs/a/@', true, true], ['refs/heads/x', true, true], ['refs/a/b/c', true, true], ['refs/a..b/c', false, false], ['heads/a/b', false, false]]) {
+    assert.equal(ok(ref, false), create, `${ref} create`);
+    assert.equal(ok(ref, true), del, `${ref} delete`);
+  }
 });

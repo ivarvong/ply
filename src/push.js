@@ -19,7 +19,7 @@ const OPTION = 'option ';
 import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, UA } from './transport.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
-import { validateRef, validateWire } from './validate.js';
+import { validatePushRef, validateWire } from './validate.js';
 
 export const ZERO_OID = '0'.repeat(OID_HEX_CHARS);
 
@@ -204,7 +204,7 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
   const maxRefs = requireLimit(t.limits, 'maxRefs');
   if (commands.length > maxRefs) throw limitError('push commands', commands.length, maxRefs);
   for (const c of commands) {
-    validateRef(c.ref);
+    validatePushRef(c.ref, c.newOid === ZERO_OID);
     if (!new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`).test(c.oldOid) || !new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`).test(c.newOid)) throw fail('bad_request', 'push: oids must be 40-hex');
   }
   for (const o of pushOptions) validateWire(o, 'push option');
