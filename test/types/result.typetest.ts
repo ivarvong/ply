@@ -17,7 +17,7 @@ const describe = (e: PlyError): string => {
     case 'match_count': return String(e.matches);
     case 'merge_conflict': return e.conflicts.join(',');
     case 'bad_request': case 'unsupported': case 'network': case 'timeout': case 'aborted': case 'auth':
-    case 'not_found': case 'rate_limited': case 'upstream_5xx': case 'not_git': case 'ssh': case 'host_key_mismatch':
+    case 'not_found': case 'rate_limited': case 'upstream_5xx': case 'not_git':
     case 'protocol': case 'pack_corrupt': case 'remote_error': case 'lfs_pointer':
     case 'push_rejected': case 'push_partial': case 'not_fast_forward':
     case 'not_linear': case 'unrelated_histories': case 'internal':
