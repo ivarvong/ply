@@ -2,10 +2,11 @@
 import { fail } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
-import { isDotGit, isValidatedIdent } from './validate.js';
+import { isDotGitName, isDotFileName, isValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import {
-  OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
+  OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
+  MODE_S_IFREG, MODE_S_IFLNK, MODE_OWNER_EXEC, TREE_MAX_NAME_BYTES,
   MODE_S_IFMT, MODE_S_IFDIR, MODE_BITS, MODE_LOW_DIGITS, TREE_SORT_SLASH,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
@@ -31,7 +32,19 @@ const cmpBytes = (a, b) => {
 // ---- tree ----
 // fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for the low 16 bits of its mode: `40755` sorts
 // as a directory (fsck only warns about the mode), `160000` as a file.
-const isDirMode = mode => (parseInt(mode.slice(-MODE_LOW_DIGITS), 8) & MODE_BITS & MODE_S_IFMT) === MODE_S_IFDIR;
+const lowBits = mode => parseInt(mode.slice(-MODE_LOW_DIGITS), 8) & MODE_BITS;
+const isDirMode = mode => (lowBits(mode) & MODE_S_IFMT) === MODE_S_IFDIR;
+// object.h canon_mode on the low 16 bits (tree-walk keeps the mode in a uint16_t): every reader of a tree but fsck sees
+// this. A regular file is 100755 if the owner may execute it, else 100644 (100664 → 100644, 100700 → 100755); S_IFLNK is
+// a symlink, S_IFDIR a tree (40755 → 40000); every other type is a gitlink (1, 160644, 777777 → 160000). `7100644`
+// and `300644` are 100644 to git, without even a badFilemode warning.
+export function canonMode(mode) {
+  const m = lowBits(mode), type = m & MODE_S_IFMT;
+  if (type === MODE_S_IFREG) return m & MODE_OWNER_EXEC ? MODE_EXEC : MODE_BLOB;
+  if (type === MODE_S_IFLNK) return MODE_LINK;
+  if (type === MODE_S_IFDIR) return MODE_TREE;
+  return MODE_COMMIT;
+}
 const SLASH = Uint8Array.of(TREE_SORT_SLASH);
 
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
@@ -45,7 +58,7 @@ const SLASH = Uint8Array.of(TREE_SORT_SLASH);
 export function parseTree(data, limits = DEFAULT_LIMITS) {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
   const entries = [];
-  const raw = new Set();
+  const seen = new Set();
   let p = 0;
   let prevKey = null;
   while (p < data.length) {
@@ -55,23 +68,35 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
     if (sp < p) throw fail('pack_corrupt', 'tree: malformed entry');
     const nul = data.indexOf(TREE_NUL, sp + 1);
     if (nul < sp + 1) throw fail('pack_corrupt', 'tree: malformed entry');
-    const mode = td.decode(take(data, p, sp - p));
+    const raw = td.decode(take(data, p, sp - p));
     // The name is bytes to git: decodeBytes keeps a leading BOM and escapes ill-formed UTF-8, so the string maps back (#43)
     const nameBytes = take(data, sp + 1, nul - (sp + 1));
     const name = decodeBytes(nameBytes);
     // The id starts at nul+1. take() demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
     const oidBytes = take(data, nul + 1, OID_BYTES);
-    if (mode.length === 0) throw fail('pack_corrupt', 'tree: empty mode');
-    if (!/^[0-7]+$/.test(mode)) throw fail('pack_corrupt', 'tree: malformed mode');
-    if (mode[0] === '0') throw fail('pack_corrupt', 'tree: zero-padded mode');
+    if (raw.length === 0) throw fail('pack_corrupt', 'tree: empty mode');
+    if (!/^[0-7]+$/.test(raw)) throw fail('pack_corrupt', 'tree: malformed mode');
+    // decode_tree_entry refuses an empty name before fsck_tree looks at the mode's first byte
     if (name.length === 0) throw fail('pack_corrupt', 'tree: empty name');
+    if (raw[0] === '0') throw fail('pack_corrupt', 'tree: zero-padded mode');
+    const mode = canonMode(raw);
     if (name.indexOf('/') >= 0) throw fail('pack_corrupt', 'tree: full pathname');
-    if (name === '.' || name === '..' || isDotGit(name)) throw fail('pack_corrupt', 'tree: bad name');
+    if (name === '.' || name === '..' || isDotGitName(nameBytes)) throw fail('pack_corrupt', 'tree: bad name');
+    if (nameBytes.length > TREE_MAX_NAME_BYTES) throw fail('pack_corrupt', 'tree: large pathname');
+    if (oidBytes.every(b => b === 0)) throw fail('pack_corrupt', 'tree: null sha1');
+    // fsck_tree: a .gitmodules (any spelling) that is a symlink is gitmodulesSymlink; one that is not a blob (a tree, or a
+    // gitlink, whose commit is never in the repository) is gitmodulesBlob / gitmodulesMissing in fsck_finish. The same
+    // for .gitattributes, except that as a symlink it is only a warning (gitattributesSymlink, INFO)
+    if (isDotFileName(nameBytes, 'gitmodules')) {
+      if (mode === MODE_LINK) throw fail('pack_corrupt', 'tree: .gitmodules is a symbolic link');
+      if (mode === MODE_TREE || mode === MODE_COMMIT) throw fail('pack_corrupt', 'tree: .gitmodules is not a blob');
+    }
+    if ((mode === MODE_TREE || mode === MODE_COMMIT) && isDotFileName(nameBytes, 'gitattributes')) throw fail('pack_corrupt', 'tree: .gitattributes is not a blob');
     const rawName = toHex(nameBytes);
-    if (raw.has(rawName)) throw fail('pack_corrupt', `tree: duplicate entry ${JSON.stringify(name)}`);
-    raw.add(rawName);
-    const key = isDirMode(mode) ? concat([nameBytes, SLASH]) : nameBytes;
+    if (seen.has(rawName)) throw fail('pack_corrupt', `tree: duplicate entry ${JSON.stringify(name)}`);
+    seen.add(rawName);
+    const key = isDirMode(raw) ? concat([nameBytes, SLASH]) : nameBytes;
     // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw fail('pack_corrupt', 'tree: not strictly sorted');
     prevKey = key;

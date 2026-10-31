@@ -125,7 +125,7 @@ test('tree: fsck-hard malformations are rejected; a bad filemode warning still p
     ['duplicate', concat([raw('100644 a\0'), raw('100644 a\0', oidBytes(5))])],
   ];
   for (const [label, bytes] of bad) assert.throws(() => parseTree(bytes), e => e.code === 'pack_corrupt', label);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
+  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100644'); // canon_mode, as git ls-tree prints it
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
   assert.equal(id.length, OID_HEX_CHARS);
 });

@@ -8,17 +8,19 @@
 // symlink whose target is the blob, never followed; a 160000 gitlink is an empty directory (an uninitialised submodule).
 //
 // Path safety. `dir` must be absent or empty, so everything under it is ours. Every path goes through validatePath (no
-// `..`, `.`, empty or absolute component, no .git in any spelling git refuses). Each directory on the way is made one
-// level at a time and lstat'd: anything but a real directory there (a symlink this checkout made, or a file — the same
-// name on a case-insensitive filesystem counts) is `bad_request` (what: 'checkout path'), so nothing is ever written
-// through a link. Files are opened O_CREAT|O_EXCL ('wx'), which neither follows a symlink nor overwrites; symlink()
+// `..`, `.`, empty or absolute component, no .git in any spelling git refuses) and git's verify_path for this platform
+// (validate.js checkoutPathRefusal): on Windows a name with a backslash (`..\x` would leave `dir`), a colon (an NTFS
+// stream), a reserved device name or a trailing dot or space is `unsupported`, as git for Windows refuses it. Each
+// directory on the way is made one level at a time and lstat'd: anything but a real directory there (a symlink this
+// checkout made, or a file — the same name on a case-insensitive filesystem counts) is `bad_request` (what: 'checkout
+// path'), so nothing is ever written through a link. Files are opened O_CREAT|O_EXCL ('wx'), which neither follows a symlink nor overwrites; symlink()
 // never replaces. A stream that fails (a blob that does not hash to its oid) removes its file before the error is
 // rethrown; a checkout that throws leaves `dir` partial.
 import { mkdir, readdir, lstat, open, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fail } from './errors.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
-import { validatePath } from './validate.js';
+import { validatePath, checkoutPathRefusal } from './validate.js';
 import { concat, encodeBytes } from './bytes.js';
 import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
 import { checkoutTree } from './checkout.js';
@@ -49,7 +51,7 @@ async function slurp(stream, max) {
   return concat(parts);
 }
 
-export async function writeFiles(dir, files, { limits = DEFAULT_LIMITS } = {}) {
+export async function writeFiles(dir, files, { limits = DEFAULT_LIMITS, platform = process.platform } = {}) {
   const maxObject = requireLimit(limits, 'maxObjectSize');
   await emptyDir(dir);
   const made = new Set(['']);
@@ -64,6 +66,8 @@ export async function writeFiles(dir, files, { limits = DEFAULT_LIMITS } = {}) {
   const out = { files: 0, bytes: 0, symlinks: 0, gitlinks: 0 };
   for await (const f of files) {
     validatePath(f.path, limits);
+    const why = checkoutPathRefusal(f.path, f.mode, platform);
+    if (why) { await f.stream?.cancel().catch(() => {}); throw fail('unsupported', `checkout: git refuses to check out ${JSON.stringify(f.path)} on ${platform}: ${why}`, { what: 'checkout path', path: f.path }); }
     const full = fsPath(dir, f.path), slash = f.path.lastIndexOf('/');
     await ensureDir(slash < 0 ? '' : f.path.slice(0, slash));
     if (f.mode === MODE_COMMIT) { await ensureDir(f.path); out.gitlinks++; continue; }

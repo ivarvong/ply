@@ -538,7 +538,13 @@ test('canonMode is git\'s canon_mode', () => {
   for (const m of ['120000', '160000', '40000']) assert.equal(canonMode(m), m);
   const cases = { 100644: '100644', 100755: '100755', 100664: '100644', 100600: '100644', 100000: '100644', 100700: '100755', 100100: '100755', 100744: '100755', 100777: '100755', 100677: '100644' };
   for (const [m, want] of Object.entries(cases)) assert.equal(canonMode(m), want, m);
-  for (const m of ['100', '1006440', '0100644', '040000', '100648', '100x44', '', 'x100644', '100644x', '200644', '120001', '160001', '4000']) assert.equal(canonMode(m), null, m);
+  // the low 16 bits, as tree-walk keeps them (observed with git ls-tree 2.50): a type git does not know is a gitlink,
+  // and the digits above the sixth from the right are gone
+  const odd = { 100: '160000', 1006440: '160000', 200644: '160000', 120001: '120000', 160001: '160000', 4000: '160000', 140000: '160000', 40755: '40000', 7100644: '100644', 300644: '100644', 107777: '100755', 1: '160000', 777777: '160000' };
+  for (const [m, want] of Object.entries(odd)) assert.equal(canonMode(m), want, m);
+  // what parse_mode refuses (empty, a non-octal byte) or fsck --strict errors on (zero-padded), and non-strings
+  for (const m of ['0100644', '040000', '0', '100648', '100x44', '', 'x100644', '100644x', ' 100644', '8']) assert.equal(canonMode(m), null, m);
+  assert.equal(canonMode(100644), null);
 });
 
 test('treeFiles: depth-first in tree order, canonical modes, every refusal', () => {
@@ -566,7 +572,7 @@ test('treeFiles: depth-first in tree order, canonical modes, every refusal', () 
   // the same name in two different trees is not a duplicate
   const two = new Map([['r', [{ mode: '40000', name: 'a', oid: 'x' }, { mode: '40000', name: 'b', oid: 'x' }]], ['x', [{ mode: '100644', name: 'a', oid: '1' }]]]);
   assert.deepEqual(treeFiles(o => two.get(o), 'r').map(f => f.path), ['a/a', 'b/a']);
-  const bad = new Map([['r', [{ mode: '40000', name: 'd', oid: 'd' }]], ['d', [{ mode: '100648', name: 'x', oid: '1' }]]]);
+  const bad = new Map([['r', [{ mode: '40755', name: 'd', oid: 'd' }]], ['d', [{ mode: '100648', name: 'x', oid: '1' }]]]);
   throws(() => treeFiles(o => bad.get(o), 'r'), 'pack_corrupt', 'tree d: d/x has mode 100648, which git cannot check out');
   throws(() => treeFiles(tree, 'r', { limits: {} }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   throws(() => treeFiles(tree, 'r', { limits: { maxPackObjects: 9 } }), 'bad_request', 'limits.maxPathDepth must be a finite non-negative number');

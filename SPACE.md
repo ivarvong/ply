@@ -287,3 +287,217 @@ Raw product: 14 × 2 × 13 × 3 × 2 × 2 × 4 × 6 × 10 × 31 = **32,497,920**
 - `dropAfterPack/plain/complete/one/withPack/off/v1/ok/ok/uniform` — connection fails: dropAfterPack
 
 <!-- push-outcome: end generated -->
+
+## Fsck tree entries
+
+**Decision.** Given the bytes of a tree object (every read path parses one: readFile, listTree, editFile, pushTree,
+merge, rebase, checkoutTree; `src/objects.js` parseTree), does ply read it or refuse it (`pack_corrupt`), and what mode
+does it report for each entry? Then, given an accepted entry, may checkoutDir write it to disk?
+
+**Principle.** ply reads exactly the trees `git fsck --strict` reports no error for, and reports each entry's mode as
+git's tree readers see it (object.h canon_mode on the low 16 bits; `git ls-tree` prints the same). A warning git exits
+0 on (INFO under --strict) is decided per msgId below. checkoutDir writes exactly what git's checkout (read-cache.c
+verify_path) writes on that platform. The source is git v2.50.0: fsck.c fsck_tree, fsck_finish/fsck_blobs (the
+.gitmodules and .gitattributes it collects), verify_ordered; tree-walk.c decode_tree_entry; object.h parse_mode and
+canon_mode; utf8.c is_hfs_dot*; path.c is_ntfs_dot*; read-cache.c verify_path/verify_dotfile; compat/mingw.c
+is_valid_win32_path.
+
+**git's shape, from the source.**
+
+- *Modes.* parse_mode reads octal digits into an `unsigned int` and stores a `uint16_t`, so only the low 16 bits exist:
+  `7100644` and `300644` are 100644 to git, with not even a warning. fsck_tree's switch accepts 100755, 100644, 120000,
+  40000, 160000; 100664 only without --strict; anything else is badFilemode, which is INFO, so a warning even under
+  --strict. Every other reader canonicalises: a regular file is 100755 if the owner-execute bit is set, else 100644; a
+  type git does not know (1, 140000, 200644, 777777) is a gitlink. A leading `0` is zeroPaddedFilemode (WARN).
+- *Names.* An empty name never reaches fsck_tree's emptyName: decode_tree_entry refuses it ("empty filename in tree
+  entry") and fsck reports badTree. `.git` is refused in every spelling HFS+ or NTFS resolves to it, on every platform:
+  ASCII case, NTFS trailing dots and spaces, an NTFS stream (`.git:x`), the short name `git~1` (only ~1: git puts .git
+  first), the HFS+ ignorable code points anywhere, an invalid UTF-8 sequence after `.git` (next_hfs_char reads it as the
+  end), and the same NTFS spellings after any backslash. A name over 4096 bytes is largePathname.
+- *Dotfiles.* `.gitmodules` in any HFS/NTFS spelling (`gitmod~1`, the fallback `gi7eba~N`, even `~1234567`, and after a
+  backslash) as a symlink is gitmodulesSymlink (ERROR); as anything else its object is checked in fsck_finish, so a tree
+  there is gitmodulesBlob and a gitlink (whose commit is never in the repository) gitmodulesMissing. `.gitattributes`
+  likewise (gitattributesBlob, gitattributesMissing; but as a symlink only gitattributesSymlink, INFO). `.gitignore` and
+  `.mailmap` as symlinks are INFO.
+- *Checkout.* verify_path, with core.protectNTFS on by default everywhere and core.protectHFS on macOS, refuses a subset
+  of what fsck --strict refuses, on Linux and macOS: the enumerator checks every accepted (name, mode) with `git read-tree`
+  under both protections. On Windows a backslash is a separator and is refused outright, and is_valid_win32_path refuses
+  reserved device names, `: < > " | ? *`, controls and a trailing space or period: derived from the source (no git for
+  Windows runs here), held by checkoutPathRefusal.
+
+**Judgment calls.**
+
+1. *badFilemode is accepted* and reported canonically. Real repositories carry 100664 from git's first weeks, and git
+   checks them out (the enumerator's end-to-end test: `git clone` and checkoutDir of 100600, 100664, 100700, 7100644,
+   40755, 1 and 140000 are `diff -r` identical).
+2. *A symlinked .gitattributes, .gitignore or .mailmap is accepted* (INFO). merge reads a symlinked .gitattributes as its
+   blob, as attr.c read_attr_from_blob does (no mode check).
+3. *A .gitmodules or .gitattributes gitlink is refused*, although fsck_finish would accept one whose oid happened to name
+   a blob in the repository: ply cannot see the object's type when it parses the tree, and a gitlink's commit is not in
+   the repository it points from.
+4. *.gitattributes contents over git's caps* (a line of 2048 bytes or more, a blob over 100 MiB) are an fsck error in
+   the blob, not the tree; ply never parses blob contents as objects, and where it reads .gitattributes (merge) it
+   ignores such a line or blob exactly as attr.c does (`>=`, one byte stricter than fsck's `>` on the size). Checked
+   against `git check-attr --source` at 2047, 2048 and 2049 bytes, blob and symlink (FSCK_TREE_LARGE=1 adds 100 MiB - 1,
+   100 MiB and 100 MiB + 1; run 2026-10-31, all 9 cells agree).
+5. *On Windows checkoutDir refuses (`unsupported`)* a path git for Windows refuses; on Linux a backslash is a name byte
+   and is written as git writes it.
+
+**Where main (c2ccba2) and train/1 (77eb2c0) disagreed with the table** (`FSCK_TREE_SRC=<git archive REV src>`): main
+5,056 of 24,864 cells, train/1 4,094.
+
+| cells main / train/1 | table → ply | cause |
+|---:|---|---|
+| 2,922 / 2,874 | refuse → accept | no check for nullSha1, largePathname, gitmodulesSymlink, gitmodulesBlob/Missing, gitattributesBlob/Missing; hasDotgit missed for `.git:x`, `git~1:x`, `.git\xff`, `.git` + an encoded surrogate, `a\.git`, `a\git~1` |
+| 72 / 72 | accept → refuse | `git~2` refused as .git (only `git~1` is .git's short name) |
+| 836 / 836 | accept, wrong mode | the raw mode returned (100664, 40755, 7100644, 1, ...): readers comparing with `40000` or `100644` saw a different type than git |
+| 1,176 / 312 | refuse, under a msgId git did not report | both: `git~2` called a bad name where git refuses the tree for another reason (264), a zero-padded entry with an empty name called zero-padded where git says badTree (48); main also: duplicates called "not sorted" (#34, fixed on train/1) |
+| 50 / 0 | names | main: non-UTF-8 names decoded lossily (#43, fixed on train/1) |
+
+**Security.** On main and train/1, checkoutDir wrote a `.gitmodules` symlink (git refuses to check one out: CVE-2018-11235's
+class), and on Windows would have written `a\.git\hooks\…` into a nested `.git` and `..\x` outside the target
+directory (git for Windows refuses any backslash). Both are refused now: the first by parseTree, the others by validatePath
+and checkoutPathRefusal.
+
+**Enumeration.** `test/space/fsck-tree.test.js` builds every cell byte for byte, writes the space as packs (node:zlib,
+`git index-pack` without --strict, which judges nothing) and every 40th cell loose with `git hash-object --literally`,
+and runs `git fsck --strict` (both streams, exit code, every `error in`/`warning in` line, each pinned to the cell that
+owns an oid in it). It fails on any cell where the model's msgIds differ from git's, where ply's verdict differs from the
+table, where ply's refusal names no msgId git reported, or where an accepted entry's mode is not canon_mode. Measured
+2026-10-31 (laptop, git 2.50.0): 24,864 cells, 31,365 objects, 0 disagreements, about 4 s.
+
+<!-- fsck-tree: generated by scripts/space-md.mjs; do not edit by hand -->
+
+### Axes (tagged unions)
+
+**trigger** — the other entry in the tree, carrying one fsck_tree msgId's trigger (19 variants)
+
+- `alone` — a one-entry tree
+- `plain` `100644 m` — an ordinary sibling
+- `nullSha1` `100644 n` — is_null_oid
+- `fullPathname` `100644 m/n` — strchr(name, '/')
+- `emptyName` `100644 ` — an empty name: badTree (decode_tree_entry)
+- `malformedMode` `10x644 m` — parse_mode: a non-octal digit, "malformed mode in tree entry": badTree
+- `hasDot` `100644 .` — "."
+- `hasDotdot` `100644 ..` — ".."
+- `hasDotgit` `100644 .git` — is_hfs_dotgit || is_ntfs_dotgit
+- `zeroPaddedFilemode` `0100644 m` — the mode's first byte is '0'
+- `badFilemode` `100664 m` — S_IFREG|0664 under --strict
+- `gitmodulesSymlink` `120000 .gitmodules` — S_ISLNK on a .gitmodules
+- `gitmodulesBlob` `40000 .gitmodules` — a .gitmodules that is a tree: fsck_finish "non-blob found at .gitmodules"
+- `gitattributesSymlink` `120000 .gitattributes` — S_ISLNK on a .gitattributes (INFO)
+- `gitattributesMissing` `160000 .gitattributes` — a .gitattributes gitlink: fsck_finish cannot read the blob
+- `gitignoreSymlink` `120000 .gitignore` — S_ISLNK on a .gitignore (INFO)
+- `mailmapSymlink` `120000 .mailmap` — S_ISLNK on a .mailmap (INFO)
+- `largePathname` `100644 m×4097` — tree_entry_len > 4096
+- `duplicateEntries` — the cell's own name again, as 100644: verify_ordered TREE_HAS_DUPS
+
+**mode** — the cell entry's mode bytes: every class fsck_tree's switch and parse_mode tell apart (14 variants)
+
+- `blob` `100644` — S_IFREG|0644: standard
+- `exec` `100755` — S_IFREG|0755: standard
+- `symlink` `120000` — S_IFLNK: standard
+- `tree` `40000` — S_IFDIR: standard
+- `gitlink` `160000` — S_IFGITLINK: standard
+- `group` `100664` — S_IFREG|0664: "we had a few of these early on"; badFilemode only under --strict
+- `private` `100600` — S_IFREG|0600: badFilemode (INFO); canon_mode 100644
+- `dir755` `40755` — S_IFDIR|0755: badFilemode; S_ISDIR, so it sorts and reads as a tree
+- `gitlinkPerm` `160644` — S_IFGITLINK|0644: badFilemode; canon_mode 160000
+- `zeroPadded` `0100644` — a leading 0: zeroPaddedFilemode (WARN), and the value is still 100644
+- `zeroPaddedTree` `040000` — the zero-padded tree mode old tools wrote: zeroPaddedFilemode
+- `truncated` `7100644` — parse_mode keeps 16 bits: 07100644 & 0xffff is 0100644, a standard mode (no report at all)
+- `unknownType` `1` — type bits 0: badFilemode; canon_mode makes it a gitlink
+- `allBits` `777777` — 0177777: badFilemode; type 0170000 is no type git knows, so a gitlink
+
+**name** — the cell entry's name bytes: every spelling fsck_tree and verify_path tell apart (48 variants)
+
+- `plain` "a" — an ordinary name
+- `dot` "." — hasDot
+- `dotdot` ".." — hasDotdot
+- `empty` "" — decode_tree_entry: "empty filename in tree entry", so badTree (emptyName is unreachable)
+- `slash` "a/b" — fullPathname
+- `dotgit` ".git" — hasDotgit
+- `DOTGIT` ".GIT" — is_ntfs_dotgit and is_hfs_dotgit fold ASCII case
+- `DotGit` ".Git" — mixed case
+- `short1` "git~1" — is_ntfs_dotgit: the 8.3 short name of .git
+- `SHORT1` "GIT~1" — the short name, upper case
+- `short2` "git~2" — not .git: git guarantees .git takes ~1 (path.c), so ~2 is an ordinary name
+- `short10` "git~10" — git~1 followed by a digit: an ordinary name
+- `trailDot` ".git." — NTFS trims trailing dots
+- `trailSpace` ".git " — NTFS trims trailing spaces
+- `trailMixed` ".git. ." — dots and spaces, any mix
+- `stream` ".git:x" — an NTFS alternate data stream of .git
+- `shortStream` "git~1:x" — a stream of the short name
+- `dotgitx` ".gitx" — a longer name: ordinary
+- `hfsZwnj` ".g\xe2\x80\x8cit" — HFS+ ignores U+200C
+- `hfsBom` "\xef\xbb\xbf.git" — HFS+ ignores U+FEFF, also in front
+- `hfsLrm` ".git\xe2\x80\x8e" — HFS+ ignores U+200E, also at the end
+- `hfsBadTail` ".git\xff" — next_hfs_char reads an invalid sequence as the end of the name: .git
+- `hfsSurrogate` ".git\xed\xa0\x80" — a UTF-8-encoded surrogate is invalid to pick_one_utf8_char: the end, so .git
+- `badLead` "\xff.git" — invalid UTF-8 before the dot: not .git to HFS, not to NTFS
+- `overlongDot` "\xc0\xaegit" — an overlong "." is invalid, never a dot
+- `backslash` "a\.git" — fsck_tree reads a backslash as a separator (is_ntfs_dotgit after it) on every platform
+- `backslashShort` "a\git~1" — the short name after a backslash
+- `backslashDotdot` "..\x" — fsck checks only .git after a backslash: accepted, and `..` on Windows
+- `gitmodules` ".gitmodules" — gitmodulesSymlink as a symlink; collected for fsck_finish otherwise
+- `GITMODULES` ".GITMODULES" — case
+- `gitmodulesTrail` ".gitmodules ." — is_ntfs_dot_generic: trailing spaces and dots
+- `gitmodulesStream` ".gitmodules:x" — a stream
+- `gitmodulesShort` "gitmod~1" — the 6-character short name, ~1 to ~4
+- `gitmodulesShort5` "gitmod~5" — ~5 is past the regular short names, and gitmod is not the fallback prefix: ordinary
+- `gitmodulesFallback` "GI7EBA~1" — the fallback short name (hash prefix gi7eba)
+- `gitmodulesFallback9` "gi7eba~9" — the fallback allows ~1 to ~9
+- `tildeDigits` "~1234567" — is_ntfs_dot_generic's fallback loop takes a leading ~ and digits as every dotfile's short name
+- `gitmodulesHfs` ".gitmodu\xe2\x80\x8dles" — HFS+ ignorable inside
+- `gitmodulesBackslash` "a\.gitmodules" — is_ntfs_dotgitmodules after a backslash
+- `gitattributes` ".gitattributes" — gitattributesSymlink (INFO) as a symlink
+- `gitattributesShort` "gi7d29~1" — its fallback short name
+- `gitattributesBackslash` "a\.gitattributes" — fsck_tree checks only .gitmodules after a backslash
+- `gitignore` ".gitignore" — gitignoreSymlink (INFO)
+- `gitignoreShort` "gi250a~1" — its fallback short name
+- `mailmap` ".mailmap" — mailmapSymlink (INFO)
+- `mailmapShort` "maba30~1" — its fallback short name
+- `long4096` "l×4096" — max_tree_entry_len: 4096 bytes is allowed
+- `long4097` "l×4097" — largePathname
+
+**position** — the order of the two entries in the tree bytes (the tree is sorted or not as the names fall) (2 variants)
+
+- `cellFirst` — the cell entry, then the trigger entry
+- `triggerFirst` — the trigger entry, then the cell entry
+
+### Product
+
+Raw product: 19 × 14 × 48 × 2 = **25,536** (trigger × mode × name × position); a one-entry tree has no order: **24,864 cells**.
+
+Expected: ply accepts 1,350, refuses 23,514. Cells per msgId git reports (a cell can have several):
+
+| msgId | cells |
+|---|---:|
+| `badFilemode (warning)` | 10,058 |
+| `treeNotSorted` | 9,744 |
+| `hasDotgit` | 9,184 |
+| `zeroPaddedFilemode` | 4,432 |
+| `badTree` | 3,150 |
+| `gitmodulesBlob` | 2,320 |
+| `fullPathname` | 1,792 |
+| `hasDot` | 1,792 |
+| `hasDotdot` | 1,792 |
+| `largePathname` | 1,792 |
+| `gitattributesMissing` | 1,726 |
+| `gitmodulesSymlink` | 1,660 |
+| `duplicateEntries` | 1,568 |
+| `gitattributesSymlink (warning)` | 1,429 |
+| `gitignoreSymlink (warning)` | 1,429 |
+| `mailmapSymlink (warning)` | 1,429 |
+| `gitmodulesMissing` | 1,400 |
+| `nullSha1` | 1,330 |
+| `gitattributesBlob` | 315 |
+
+### Decisions for the warnings git exits 0 on
+
+- `badFilemode` → accept: git reads every such mode through canon_mode (100664 → 100644, 40755 → a tree, an unknown type → a gitlink) and checks it out; real repositories carry 100664 from git's first weeks. ply returns the canonical mode, as `git ls-tree` prints it
+- `gitattributesSymlink` → accept: git reads a symlinked .gitattributes from a tree as the blob it is (attr.c read_attr_from_blob has no mode check) and only declines to follow one in a worktree; ply has no worktree, and merge reads it as git merge-tree does
+- `gitignoreSymlink` → accept: ply never reads .gitignore
+- `mailmapSymlink` → accept: ply never reads .mailmap
+
+<!-- fsck-tree: end generated -->
