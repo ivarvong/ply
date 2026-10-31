@@ -65,8 +65,10 @@ export function parseReceiveAdvert(frames: readonly Frame[]): Result<Set<string>
     const line = td.decode(f.payload).replace(/\n$/u, '');
     const nul = line.indexOf('\0');
     const head = nul < 0 ? line : line.slice(0, nul);
+    // Stryker disable next-line EqualityOperator: a first line starting with NUL has no ref, so it is refused below with or without its caps read
     if (k === at && nul >= 0) {
       for (const c of line.slice(nul + 1).trim().split(' ')) caps.add(c);
+      // Stryker disable next-line StringLiteral,LogicalOperator: no object-format is a key OID_HEX lacks, which keeps sha1's width either way
       hex = OID_HEX.get(objectFormat(caps) ?? '') ?? hex;
     }
     if (!refLine(hex).test(head) && !shallowLine(hex).test(head)) return fail('protocol', `receive-pack advertisement: unexpected line ${JSON.stringify(head.slice(0, LINE_PREVIEW))}`);

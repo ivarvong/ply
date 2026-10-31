@@ -1740,6 +1740,31 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   await assert.rejects(pushWithOptions(advertised('report-status'), { ...del1, atomic: true }), e2 => e2.code === 'unsupported' && e2.caps.join() === 'report-status'); assert.equal(adverts, 1);
   assert.equal((await pushWithOptions(advertised('report-status atomic'), { ...del1, atomic: true })).report.tag, 'statuses'); assert.equal(adverts, 2);
   assert.deepEqual(parseReceiveAdvert([{ kind: 'flush' }]), { ok: true, value: new Set() });
+  // parseReceiveAdvert, line by line (connect.c get_remote_heads)
+  const dat = l => ({ kind: 'data', payload: typeof l === 'string' ? te.encode(l) : l });
+  const FL = { kind: 'flush' };
+  const advErr = (frames, message) => { const r = parseReceiveAdvert(frames); assert.equal(r.ok, false, message); assert.deepEqual([r.error.code, r.error.message], ['protocol', message]); };
+  const advOk = (frames, capsWant) => { const r = parseReceiveAdvert(frames); assert.equal(r.ok, true, JSON.stringify(r.error?.message)); assert.deepEqual([...r.value], capsWant); };
+  advErr([dat('# service=git-receive-pack\n'), dat(`${oid(1)} refs/heads/a\n`)], 'advertisement: no flush after the service header');
+  advOk([dat('# service=git-receive-pack\n'), FL, dat(`${oid(1)} refs/heads/a\0report-status atomic\n`), FL], ['report-status', 'atomic']);
+  // v2 answer (Artifacts): held to the v2 shape, no v0 caps; a v2 shape broken is parseCapabilitiesV2's typed error
+  advOk([dat('version 2\n'), dat('agent=x\n'), FL], []);
+  advOk([dat('version 2'), dat('agent=x\n'), FL], []);
+  assert.throws(() => parseReceiveAdvert([dat('version 2\n'), dat('agent=x\n')]), e => e.code === 'protocol');
+  advErr([dat('\nversion 2'), FL], 'receive-pack advertisement: unexpected line "\\nversion 2"');
+  advErr([dat(`${oid(1)} refs/heads/a\n`)], 'receive-pack advertisement: no flush after the refs');
+  advErr([dat(`${oid(1)} refs/heads/a\n`), { kind: 'delim' }, FL], 'receive-pack advertisement: invalid packet (delim)');
+  advErr([dat('bogus\n'), FL], 'receive-pack advertisement: unexpected line "bogus"');
+  advErr([dat(`${'x'.repeat(70)}\n`), FL], `receive-pack advertisement: unexpected line "${'x'.repeat(60)}"`);
+  // only the trailing LF is the line's; a caps value keeps an inner one
+  advOk([dat(`${oid(1)} refs/heads/a\0agent=a\nb`), FL], ['agent=a\nb']);
+  // the caps ride on the first line only, after its NUL; a shallow line may carry them
+  advOk([dat(`shallow ${oid(1)}\0report-status\n`), FL], ['report-status']);
+  advOk([dat(`${oid(1)} refs/heads/a\0report-status\n`), dat(`${oid(2)} refs/heads/b\0extra\n`), FL], ['report-status']);
+  advOk([dat(`${oid(1)} refs/heads/a\n`), dat(`${oid(2)} refs/heads/b\0extra\n`), FL], []);
+  // object-format=sha256 widens every oid to 64 hex
+  advOk([dat(`${'ab'.repeat(32)} refs/heads/a\0object-format=sha256\n`), dat(`${'cd'.repeat(32)} refs/heads/b\n`), FL], ['object-format=sha256']);
+  advErr([dat(`${'ab'.repeat(32)} refs/heads/a\0report-status\n`), FL], `receive-pack advertisement: unexpected line "${'ab'.repeat(30)}"`);
 
   // band 2 is kept as a 4096-character tail, counted per frame
   let st = streamInit(true);
