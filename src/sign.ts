@@ -4,7 +4,10 @@
 // The signed message is the commit object exactly as it would be stored *without* the gpgsig header; the gpgsig header
 // is then inserted after `committer` (where git puts it), its continuation lines prefixed by a space. Pure except
 // crypto.subtle.sign; verified by `git verify-commit` with an allowed-signers file in test/sign.test.js.
-import { thrown as fail } from './errors.js';
+import { fail, orThrow } from './errors.js';
+import type { ErrorOf } from './errors.js';
+import { ok } from './result.js';
+import type { Result } from './result.js';
 import { te, concat, decodeBytes, encodeBytes } from './bytes.js';
 import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
 
@@ -49,18 +52,20 @@ export function ed25519Signer({ privateKey, publicKeyRaw }: SignerKey): Signer {
 
 // Pure: splice a gpgsig header into an encoded commit. commit_tree_extended writes encoding, then gpgsig.
 // The signature goes after encoding when that header is present, otherwise immediately after committer.
-export function withGpgsig(commitBytes: Uint8Array, signatureText: string): Uint8Array<ArrayBuffer> {
+export function gpgsigSplice(commitBytes: Uint8Array, signatureText: string): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
   // decodeBytes/encodeBytes: a Latin-1 message or ident goes back out as its own bytes, and so is what was signed (#43)
   const text: string = decodeBytes(commitBytes);
   const nl = text.indexOf('\n\n');
   const headers = (nl < 0 ? text : text.slice(0, nl)).split('\n');
   let i = headers.findIndex(l => l.startsWith(`${COMMIT_HEADER_COMMITTER} `));
-  if (i < 0) throw fail('bad_request', 'commit has no committer line');
+  if (i < 0) return fail('bad_request', 'commit has no committer line');
   if ((headers[i + 1] ?? '').startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
   // the gpgsig header: the armored signature, its continuation lines prefixed by a space
   headers.splice(i + 1, 0, `gpgsig ${signatureText.replace(/\n$/u, '').split('\n').join('\n ')}`);
-  return encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit');
+  return ok(encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit'));
 }
+// The throwing form the public API and unconverted callers use until the Result cut-over (docs/STACK.md).
+export const withGpgsig = (commitBytes: Uint8Array, signatureText: string): Uint8Array<ArrayBuffer> => orThrow(gpgsigSplice(commitBytes, signatureText));
 
 // Sign an encoded (unsigned) commit: returns the signed commit bytes. The message signed is the unsigned commit.
 export async function signCommit(commitBytes: Uint8Array<ArrayBuffer>, signer: Signer, namespace = 'git'): Promise<Uint8Array<ArrayBuffer>> {

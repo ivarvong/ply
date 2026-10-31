@@ -21,10 +21,13 @@ enumerates it. Add a decision point as a new section (and a new `test/space/*.sp
 
 **Principle.** Once any request byte may have reached the server, a definite answer (`landed`, `rejected`, `partial`)
 needs positive evidence in exactly the shape git's receive-pack writes; every other post-send state is `ambiguous`.
-Before the request is sent, ply's own refusals are definite. The code is shaped the same way (src/push.js): the wire is
-read into a tagged union of stream shapes (`streamStep`: `report` | `broken`), the report into a tagged union of report
-shapes (`classifyReport`: `statuses` | `unpackFailed` | `malformed`), and `decideOutcome` is an exhaustive match over
-those tags whose only fallthrough is `ambiguous`. Every step is an allowlist.
+Before the request is sent, ply's own refusals are definite. The code is shaped the same way (src/push.ts): the wire is
+read into a tagged union of stream shapes (`streamStep`: `report` | `broken`), the report by a step machine
+(`reportStep`: `unpack` → `refs` | `malformed`, the one report parser) into a tagged union of report shapes
+(`classifyReport`: `statuses` | `unpackFailed` | `malformed`), `decideOutcome` is an exhaustive match over those tags
+whose only fallthrough is `ambiguous` (`landed` | `rejected` with a code and each refused ref's reason class |
+`partial` | `ambiguous`), and `outcomeResult` turns the outcome into the `Result` a caller matches on. Every step is an
+allowlist.
 
 **git's shape, from the source** (git v2.50.0):
 
@@ -60,7 +63,7 @@ differs from an update only in the reason text of an `ng`, which is the `ng` pay
 invalid option is a `refused` event. *The order of status lines* — receive-pack writes them in request order; ply
 matches each line to its ref and does not require the order (a reordering takes more than one byte to make, and every
 ref still needs exactly one exact line). *The text of an `ng` reason* — any printable ASCII is accepted (hooks, hosts and
-proc-receive choose it); it decides only `cas_conflict` versus `push_rejected` (`rejectionCode`), never landed versus not.
+proc-receive choose it); it decides only `cas_conflict` versus `push_rejected` (`rejectionCode`, over the refused refs' classes), never landed versus not.
 
 **Judgment calls** (where git's behaviour is clear but the outcome is a choice):
 

@@ -8,7 +8,8 @@ import { defineConfig, mergeConfig } from 'vitest/config';
 import base from './vitest.config.ts';
 
 // Every test process of the mutation run gets test/stryker-parent-guard.cjs: a mutant can grow a process past 23 GB
-// (src/pktline.js:22 without out.set) or orphan it; the guard SIGKILLs a test process past 3 GB resident or once its
+// (src/pktline.js:22 without out.set: the memory was node:assert's diff of two 65,516-element arrays in a test, now
+// test/bytes-assert.js, #85) or orphan it; the guard SIGKILLs a test process past 3 GB resident or once its
 // parent is gone, and Stryker counts the dead process as a detected mutant (scripts/mutate.mjs DETECTED).
 const guard = `--require=${fileURLToPath(new URL('./test/stryker-parent-guard.cjs', import.meta.url))}`;
 if (!(process.env['NODE_OPTIONS'] ?? '').includes(guard)) process.env['NODE_OPTIONS'] = [process.env['NODE_OPTIONS'], guard].filter(Boolean).join(' ');
@@ -20,6 +21,7 @@ const MUTATION_FILES = [
   'test/props.test.js',
   'test/mutant-kill.test.js',
   'test/mutant-kill-tree.test.js',
+  'test/mutant-kill-packs.test.js',
   'test/space/push-outcome.test.js',
   'test/result.test.js',
 ];
