@@ -15,54 +15,58 @@ The procedure is enforced, not remembered:
 
 | category | holes (ratchet) | mode |
 |---|---:|---|
-| decisions | 97 | REPORT |
-| git | 81 | REPORT |
-| failsites | 103 | REPORT |
+| decisions | 36 | REPORT |
+| git | 2 | REPORT |
+| failsites | 42 | REPORT |
 | claims | 0 | ENFORCE |
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **433** (375 fail sites, 16 produced codes, 6 untyped throws, 13 exported parse/decode/classify/decide functions). Covered by a merged space 297, by a pending PR 18, excluded 21, unregistered 97. Fail sites no cell reaches: 103 of 375. Of the registered points, 40 are claimed by an enumerated space, 24 only by a random one and 251 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **488** (411 fail sites, 22 produced codes, 6 untyped throws, 19 exported parse/decode/classify/decide functions). Covered by a merged space 415, by a pending PR 9, excluded 28, unregistered 36. Fail sites no cell reaches: 42 of 411. Of the registered points, 213 are claimed by an enumerated space, 12 only by a random one and 199 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
-git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 92, by a pending PR 64, excluded 140, uncovered 81. Claimed by an enumerated space 136, random 8, curated 12.
-
-Sampled fail sites (reached on some runs only; reported, never ratcheted):
-
-- `src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2` (test/sshgit.test.js): the encrypted-phase length check: reached in Linux CI run 41173588043, not in run 41172874060 nor in two macOS runs (timing-dependent: a connection torn down mid-packet). The ssh-faults space (proposed) should make it a cell
+git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 235, by a pending PR 0, excluded 140, uncovered 2. Claimed by an enumerated space 223, random 2, curated 10.
 
 ## Spaces
 
 | space | status | kind | axes | cells | observed / derived | oracle | decision points | git checks | run | OS |
 |---|---|---|---|---:|---|---|---:|---:|---|---|
-| `fetch-protocol` | main | enumerated | want(8) × have(11) × deepen(6) × filter(9) × server(3) × cycled | 14,256 | 14,256 / 0 | git pack-objects as upload-pack invokes it (exact object set) + the bound required ⊆ got ⊆ required ∪ had + invocation capture | 2 | 32 | ci (`test/protocol.test.js`) | — |
+| `fetch-protocol` | main | enumerated | want(8) × have(11) × deepen(6) × filter(9) × server(3) × cycled | 14,256 | 14,256 / 0 | git pack-objects as upload-pack invokes it (exact object set) + the bound required ⊆ got ⊆ required ∪ had + invocation capture | 1 | 32 | ci (`test/protocol.test.js`) | — |
 | `ident-alphabet` | main | enumerated | name × email | 4,767 | 4,767 / 0 | index-pack --strict (fsck_ident) on a commit carrying the ident | 1 | 2 | ci (`test/compliance.test.js`) | — |
 | `refname-alphabet` | main | enumerated | component × shape | 1,431 | 1,431 / 0 | git check-ref-format | 2 | 18 | ci (`test/compliance.test.js`) | — |
 | `tree-name-alphabet` | main | enumerated | name | 924 | 924 / 0 | index-pack --strict + fsck --strict on a tree with the name | 2 | 10 | ci (`test/compliance.test.js`) | dependent¹ |
 | `tree-encoding` | main | enumerated | pair(600) × modes(5) × order(2) | 6,000 | 6,000 / 0 | git mktree / write-tree | 0 | 5 | ci (`test/compliance.test.js`) | — |
-| `push-parity` | main | enumerated | config(6) × hook(4) × command(8) × caps(4) | 768 | 1 in 8 per day (seeded); 768 with PUSH_MATRIX=full / 0 | `git push` on a twin repo: same refs, same accept/reject | 6 | 5 | ci (`test/push.test.js`) | — |
+| `push-parity` | main | enumerated | config(6) × hook(4) × command(8) × caps(4) | 768 | 1 in 8 per day (seeded); 768 with PUSH_MATRIX=full / 0 | `git push` on a twin repo: same refs, same accept/reject | 1 | 5 | ci (`test/push.test.js`) | — |
 | `credential-cells` | main | enumerated | source(5) × user(6) × password(4) | 120 | 89 / 31 | git 2.50 behind a Basic-auth gate (what it sends), stated outcome elsewhere (#40, #48) | 4 | 0 | ci (`test/adversarial.test.js`) | — |
 | `wide-limits` | main | enumerated | server(2) × wanted(3) × sibling(4) × op(5) | 120 | 120 / 0 | git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47) | 5 | 0 | ci (`test/wide-limits.test.js`) | — |
-| `push-outcome` | pending #51 | enumerated | event(14) × framing(2) × delivery(13) × refs(3) × commands(2) × atomic(2) × format(4) × unpack(6) × status(10) × spread(31) | 4.3M (412,008 wrong on main) | scenarios from git 2.50 (push-outcome.observed.js) / the rest, from git source | expected() derived rule by rule from git v2.50.0 receive-pack/send-pack, checked against observed git | 4 | 33 | ci (`test/space/push-outcome.test.js`, `test/space/push-outcome-boundary.test.js`) | — |
-| `fsck-commit` | pending #62 | enumerated | ident(36) × role × body(9) × eol(2) × commitHeader(29) × tagHeader(18) | 51,338 objects (3,598 wrong verdicts on main) | 51,338 / 0 | git fsck --strict (both streams, exit code, msgId) on hash-object --literally objects (#59) | 1 | 27 | ci (`test/fsck-space.test.js`) | — |
-| `mergebase` | pending #52 | enumerated | position(4) × multiplicity(4) × settled(3) × server(7) × op(3) | ≤ 1,008 (product; rebase only where git has one base on the honest server) | — | git merge-base --all, merge-tree --write-tree, git rebase (#41, #42) | 1 | 0 | ci (`test/mergebase-space.test.js`) | — |
-| `git-bytes` | pending #55 | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 0 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
-| `streamed-body` | pending #49 | enumerated | path(6) × shape(7) × size(5) × rel(3) | 630 | 630 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36) | 12 | 0 | ci (`test/adversarial.test.js`) | — |
-| `tree-dups` | pending #50 | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) | — |
-| `fsck-oracle` | pending #53 | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) | — |
-| `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 68 | 8 | ci (`test/adversarial.test.js`) | — |
-| `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 5 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
+| `push-outcome` | main | enumerated | event(14) × framing(2) × delivery(13) × refs(3) × commands(2) × atomic(2) × format(4) × unpack(6) × status(10) × spread(31) | 4.3M (412,008 wrong on main) | scenarios from git 2.50 (push-outcome.observed.js) / the rest, from git source | expected() derived rule by rule from git v2.50.0 receive-pack/send-pack, checked against observed git | 6 | 33 | ci (`test/space/push-outcome.test.js`, `test/space/push-outcome-boundary.test.js`) | — |
+| `advertisement` | main | enumerated | protocol(8) × agent(3) × objectFormat(6) × fetch(33) × lsRefs(3) × serverOption(2) × sessionId(2) × malformed(9) × record(18) × eol(2) × framing(6) × request(4) × atomic(2) × options(2) × format(2) × flag(5) × server(2) | 64,417 | 317 / 64,100 | git ls-remote / git fetch / git push / git clone against a synthetic smart-HTTP server (advertisement and ls-refs rendered per cell, fetch forwarded to git http-backend) and receive-pack configured per cell; git's request lines and upload-pack's pack-objects invocation for the request cells; six real http-backend configurations render exactly | 19 | 15 | ci (`test/space/advertisement.test.js`) | — |
+| `push-ng` | main | enumerated | reason(42) × command(8) × atomic(2) × refs(3) × era(2) | 1,057 (32 wrong on train/1 77eb2c0) | 791 (776 on git 2.50, era v2.51+ on git >= 2.51) / 266 | real `git receive-pack --stateless-rpc` arranged per reason (config, hooks, hidden refs, symrefs, shallow lines, worktrees, proc-receive): its report byte for byte = the cell's derived report, ply's outcome = the class table, refs agree; git v2.50 locally, git >= 2.51 (batched texts) in CI | 5 | 28 | ci (`test/space/push-ng.test.js`) | — |
+| `fsck-commit` | main | enumerated | ident(36) × role × body(9) × eol(2) × commitHeader(29) × tagHeader(18) | 51,338 objects (3,598 wrong verdicts on main) | 51,338 / 0 | git fsck --strict (both streams, exit code, msgId) on hash-object --literally objects (#59) | 34 | 27 | ci (`test/fsck-space.test.js`) | — |
+| `mergebase` | main | enumerated | position(4) × multiplicity(4) × settled(3) × server(7) × op(3) | ≤ 1,008 (product; rebase only where git has one base on the honest server) | — | git merge-base --all, merge-tree --write-tree, git rebase (#41, #42) | 0 | 0 | ci (`test/mergebase-space.test.js`) | — |
+| `git-bytes` | main | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 11 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
+| `streamed-body` | main | enumerated | path(6) × shape(7) × size(5) × rel(3) | 630 | 630 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36) | 8 | 0 | ci (`test/adversarial.test.js`) | — |
+| `tree-dups` | main | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) | — |
+| `fsck-tree` | main | enumerated | trigger(19) × mode(14) × name(48) × position(2) × content | 24,864 (5,056 wrong on main, 4,094 on train/1) | 24,864 / 0 | git fsck --strict (both streams, exit code, msgId) on every cell (packed + a loose hash-object --literally sample); git ls-tree modes; git read-tree with protectHFS+protectNTFS; git check-attr --source | 11 | 27 | ci (`test/space/fsck-tree.test.js`) | — |
+| `pack-cut` | main | enumerated | pack(9) × cut × path(6) × corrupt(176) × cap | 29,293 ply cells (9,609 cuts × paths, 352 corruptions, caps) | 9,609 cuts by git index-pack --strict nightly (PACK_SPACE=full); 1,373 per PR / 0 | git index-pack --strict on the same bytes: every cut refused, a corruption refused exactly where git refuses it; ply typed pack_corrupt (limit_exceeded where a cap decides), never ok, never untyped (#5) | 43 | 0 | ci (`test/space/pack-cut.test.js`) | — |
+| `pkt-frame` | main | enumerated | length(64) × relation(7) × position(8) × writer(18) | 444 framing + 3,562 position + 18 writer | 444 / positions: from the reader model and the consumer rules of connect.c/sideband.c | git upload-pack --stateless-rpc with GIT_TRACE_PACKET (packet_read_with_status) on every framing cell, a port of it as the model for the rest; format_packet for the writer (#6, #14) | 17 | 15 | ci (`test/space/pkt-frame.test.js`) | — |
+| `ssh-faults` | main | enumerated | phase(9) × defect(24) × pin(5) | 107 (216 phase × defect pairs, 109 that do not exist on the wire) + 10 pin | 107 / 0 | `git ls-remote` through OpenSSH against the same scripted faulty server (test/sshfake.js, kex-strict-s): same ok/refused class, one named divergence (rekey); ply typed, never `internal` or `timeout`, within 2 s; ssh-keygen -l for the pin | 38 | 0 | ci (`test/space/ssh-faults.test.js`) | — |
+| `ssh-service` | main | enumerated | service(2) × outcome(10) | 20 | 20 / 0 | git ls-remote / git push over OpenSSH against a real sshd whose forced command produces each outcome: same class, the same server line in git's stderr and in ply's message; one named divergence (empty v0 advertisement) | 5 | 2 | ci (`test/space/ssh-service.test.js`) | — |
+| `fsck-oracle` | main | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) | — |
+| `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 47 | 6 | ci (`test/adversarial.test.js`) | — |
+| `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 2 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
 | `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 6 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) | — |
 | `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) | — |
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
-| `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
-| `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 5 | 0 | ci (`test/packcache.test.js`) | — |
-| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 34 | 0 | ci (`test/pure.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 68 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
+| `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 17 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
+| `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
+| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 11 | 0 | ci (`test/pure.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 54 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
-| `ssh` | main | curated | case | cases | — | OpenSSH sshd + git over ssh | 13 | 0 | ci (`test/sshgit.test.js`) | — |
-| `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 1 | 0 | ci (`test/sign.test.js`) | — |
-| `read` | main | curated | case | cases | — | git cat-file / ls-tree | 7 | 0 | ci (`test/read.test.js`, `test/artifacts-compat.test.js`) | — |
-| `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 21 | 6 | ci (`test/props.test.js`) | — |
+| `ssh` | main | curated | case | cases | — | OpenSSH sshd + git over ssh | 5 | 0 | ci (`test/sshgit.test.js`) | — |
+| `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
+| `claims-owed` | pending #81 | curated | site | none yet | — | owed: cells in the owning space that reach each site (issue #81); then the rule moves back and this entry is deleted | 9 | 0 | ci | — |
+| `read` | main | curated | case | cases | — | git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56) | 16 | 0 | ci (`test/read.test.js`, `test/log.test.js`, `test/artifacts-compat.test.js`) | — |
+| `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 9 | 0 | ci (`test/props.test.js`) | — |
 | `edit-fuzz` | main | random | repo × edit | seeded | — | git: ref, blob splice, diff --name-only, fsck --strict (I3) | 0 | 0 | local (`test/fuzz/run.mjs`) | dependent¹ |
 | `hostile-fuzz` | main | random | exchange × mutation | seeded | — | safety invariants against git (I1, I2) | 0 | 0 | local (`test/fuzz/hostile.mjs`) | — |
 | `below-hash` | main | random | object × mutation | seeded | — | git fsck --strict on the same bytes | 0 | 0 | ci-step (`test/fuzz/below-hash.mjs`) | — |
@@ -84,333 +88,139 @@ Sampled fail sites (reached on some runs only; reported, never ratcheted):
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (23: lossless 0, strict 1, replacement 22)
+## Decode sites (30: lossless 8, strict 4, replacement 18)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
 | where | mode | via | registry |
 |---|---|---|---|
-| `src/discover.js:14` discover() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
-| `src/fetch.js:78` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
-| `src/fetch.js:79` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
-| `src/fetch.js:83` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
+| `src/bytes.js:11` decodeStrict() | strict | strict | **HOLE (data path)** |
+| `src/bytes.js:37` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.js:42` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.js:45` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.js:64` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
+| `src/bytes.js:78` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress and ssh stderr, quoted into a span or an error; a character cut by a frame waits for its tail |
+| `src/discover.js:23` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
+| `src/fetch.js:95` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
+| `src/fetch.js:99` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
 | `src/http.js:34` utf8() | replacement | td | **HOLE (data path)** |
 | `src/http.js:171` post() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
-| `src/lsrefs.js:69` lsRefs() | replacement | td | **HOLE (data path)** |
-| `src/objects.js:48` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
-| `src/objects.js:49` parseTree() | replacement | td | **HOLE (data path)** |
-| `src/objects.js:96` splitHeaders() | replacement | td | **HOLE (data path)** |
-| `src/packcache.js:19` isCacheableFetch() | replacement | new TextDecoder | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
-| `src/push.js:118` pushLine() | replacement | td | **HOLE (data path)** |
-| `src/push.js:131` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
-| `src/push.js:132` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
-| `src/receivecaps.js:14` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
-| `src/sign.js:43` withGpgsig() | replacement | new TextDecoder | **HOLE (data path)** |
+| `src/lsrefs.js:80` lsRefs() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.js:71` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
+| `src/objects.js:74` parseTree() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.js:227` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.js:287` parseTag() | lossless | decodeBytes | `git-bytes` / field |
+| `src/packcache.js:19` isCacheableFetch() | replacement | td | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
+| `src/push.js:82` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
+| `src/push.js:125` classifyReport() | lossless | decodeBytes | `git-bytes` / field |
+| `src/push.js:245` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
+| `src/push.js:246` push() | lossless | decodeBytes | excluded: display-only: band 2 progress and the band 3 message |
+| `src/receivecaps.js:13` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
+| `src/receivecaps.js:39` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
+| `src/receivecaps.js:46` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
+| `src/sign.js:44` withGpgsig() | lossless | decodeBytes | `sign` / case |
 | `src/ssh.js:31` text() | replacement | td | excluded: protocol/display: ssh algorithm names (compared to ASCII constants) and disconnect descriptions |
-| `src/ssh.js:178` connect() | replacement | td | excluded: display/protocol: the ssh version line, checked for its ASCII "SSH-2.0-" prefix |
-| `src/ssh.js:300` dispatch() | replacement | td | excluded: display-only: the channel's stderr tail quoted in errors |
-| `src/sshgit.js:33` sshDecode() | strict | strict | **HOLE (data path)** |
-| `src/sshgit.js:132` openChannel() | replacement | td | **HOLE (data path)** |
-| `src/sshgit.js:135` openChannel() | replacement | td | **HOLE (data path)** |
-| `src/sshgit.js:138` openChannel() | replacement | td | excluded: protocol: the capability list after the NUL (ASCII keywords) |
+| `src/ssh.js:189` connect() | replacement | td | excluded: display/protocol: the ssh version line, checked for its ASCII "SSH-2.0-" prefix |
+| `src/sshgit.js:143` openChannel() | replacement | td | **HOLE (data path)** |
+| `src/sshgit.js:146` openChannel() | replacement | td | **HOLE (data path)** |
+| `src/sshgit.js:149` openChannel() | replacement | td | excluded: protocol: the capability list after the NUL (ASCII keywords) |
 
-## Holes (281)
+## Holes (80)
 
 Ranked by severity, then category (`git`: a git check with no space; `decisions`: a ply decision point with no registry entry; `failsites`: a fail site no cell reaches; `claims`: a registry claim its space does not back). Fail-site and claim holes are the ratchet's, from the last recorded run.
 
-### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (181)
+### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (22)
 
 | category | id | where | what |
 |---|---|---|---|
-| git | `capability:receive-pack v0:object-format` | git builtin/receive-pack.c:299 show_ref() | capability: object-format |
-| git | `capability:receive-pack v0:push-options` | git builtin/receive-pack.c:296 show_ref() | capability: push-options |
-| git | `capability:v2 serve:object-format` | git serve.c:160 capabilities[]() | capability: object-format |
-| git | `connect.c:die:check_stateless_delimiter:%s` | git connect.c:485 check_stateless_delimiter() | die: %s |
-| git | `connect.c:die:die_initial_contact:Could not read from remote repository. Please make sure you have the correct access rights and the reposit` | git connect.c:72 die_initial_contact() | die: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exis |
-| git | `connect.c:die:die_initial_contact:the remote end hung up upon initial contact` | git connect.c:70 die_initial_contact() | die: the remote end hung up upon initial contact |
-| git | `connect.c:die:ensure_server_supports_v2:server doesn't support '%s'` | git connect.c:94 ensure_server_supports_v2() | die: server doesn't support '%s' |
-| git | `connect.c:die:get_remote_heads:invalid packet` | git connect.c:361 get_remote_heads() | die: invalid packet |
-| git | `connect.c:die:get_remote_heads:protocol error: unexpected '%s'` | git connect.c:381 get_remote_heads() | die: protocol error: unexpected '%s' |
-| git | `connect.c:die:get_remote_refs:expected flush after ref listing` | git connect.c:603 get_remote_refs() | die: expected flush after ref listing |
-| git | `connect.c:die:get_remote_refs:invalid ls-refs response: %s` | git connect.c:599 get_remote_refs() | die: invalid ls-refs response: %s |
-| git | `connect.c:die:process_capabilities_v2:expected flush after capabilities` | git connect.c:140 process_capabilities_v2() | die: expected flush after capabilities |
-| git | `connect.c:die:process_ref:protocol error: unexpected capabilities^{}` | git connect.c:298 process_ref() | die: protocol error: unexpected capabilities^{} |
-| git | `connect.c:die:process_shallow:protocol error: expected shallow sha-1, got '%s'` | git connect.c:320 process_shallow() | die: protocol error: expected shallow sha-1, got '%s' |
-| git | `connect.c:die:process_shallow:repository on the other end cannot be shallow` | git connect.c:322 process_shallow() | die: repository on the other end cannot be shallow |
-| git | `connect.c:die:send_capabilities:unknown object format '%s' specified by server` | git connect.c:499 send_capabilities() | die: unknown object format '%s' specified by server |
-| git | `connect.c:die:server_supports_feature:server doesn't support feature '%s'` | git connect.c:129 server_supports_feature() | die: server doesn't support feature '%s' |
-| git | `fsck:badFilemode` | git fsck.h:86 FOREACH_FSCK_MSG_ID() | fsck-msg: BAD_FILEMODE INFO |
-| git | `fsck:badTree` | git fsck.h:41 FOREACH_FSCK_MSG_ID() | fsck-msg: BAD_TREE ERROR |
-| git | `fsck:gitattributesBlob` | git fsck.h:74 FOREACH_FSCK_MSG_ID() | fsck-msg: GITATTRIBUTES_BLOB ERROR |
-| git | `fsck:gitattributesLarge` | git fsck.h:72 FOREACH_FSCK_MSG_ID() | fsck-msg: GITATTRIBUTES_LARGE ERROR |
-| git | `fsck:gitattributesLineLength` | git fsck.h:73 FOREACH_FSCK_MSG_ID() | fsck-msg: GITATTRIBUTES_LINE_LENGTH ERROR |
-| git | `fsck:gitattributesMissing` | git fsck.h:71 FOREACH_FSCK_MSG_ID() | fsck-msg: GITATTRIBUTES_MISSING ERROR |
-| git | `fsck:gitattributesSymlink` | git fsck.h:90 FOREACH_FSCK_MSG_ID() | fsck-msg: GITATTRIBUTES_SYMLINK INFO |
-| git | `fsck:gitignoreSymlink` | git fsck.h:89 FOREACH_FSCK_MSG_ID() | fsck-msg: GITIGNORE_SYMLINK INFO |
-| git | `fsck:gitmodulesSymlink` | git fsck.h:67 FOREACH_FSCK_MSG_ID() | fsck-msg: GITMODULES_SYMLINK ERROR |
-| git | `fsck:largePathname` | git fsck.h:84 FOREACH_FSCK_MSG_ID() | fsck-msg: LARGE_PATHNAME WARN |
-| git | `fsck:mailmapSymlink` | git fsck.h:91 FOREACH_FSCK_MSG_ID() | fsck-msg: MAILMAP_SYMLINK INFO |
-| git | `fsck:nullSha1` | git fsck.h:81 FOREACH_FSCK_MSG_ID() | fsck-msg: NULL_SHA1 WARN |
 | git | `fsck:unknownType` | git fsck.h:61 FOREACH_FSCK_MSG_ID() | fsck-msg: UNKNOWN_TYPE ERROR |
-| git | `fsck:zeroPaddedFilemode` | git fsck.h:82 FOREACH_FSCK_MSG_ID() | fsck-msg: ZERO_PADDED_FILEMODE WARN |
-| git | `pkt-line.c:die:format_packet:protocol error: impossibly long line` | git pkt-line.c:158 format_packet() | die: protocol error: impossibly long line |
-| git | `pkt-line.c:die:packet_fwrite:packet write failed - data exceeds max packet size` | git pkt-line.c:257 packet_fwrite() | die: packet write failed - data exceeds max packet size |
-| git | `receive-pack.c:reject:atomic transaction failed` | git builtin/receive-pack.c:1909 execute_commands_atomic() | reject: atomic transaction failed |
-| git | `receive-pack.c:reject:bad pack` | git builtin/receive-pack.c:1515 update() | reject: bad pack |
-| git | `receive-pack.c:reject:bad ref` | git builtin/receive-pack.c:1562 update() | reject: bad ref |
-| git | `receive-pack.c:reject:branch is currently checked out` | git builtin/receive-pack.c:1501 update() | reject: branch is currently checked out |
-| git | `receive-pack.c:reject:broken symref` | git builtin/receive-pack.c:1684 check_aliased_update_internal() | reject: broken symref |
-| git | `receive-pack.c:reject:Could not update working tree to new HEAD` | git builtin/receive-pack.c:1414 push_to_deploy() | reject: Could not update working tree to new HEAD |
-| git | `receive-pack.c:reject:deletion of the current branch prohibited` | git builtin/receive-pack.c:1539 update() | reject: deletion of the current branch prohibited |
-| git | `receive-pack.c:reject:deny deleting a hidden ref` | git builtin/receive-pack.c:1823 reject_updates_to_hidden() | reject: deny deleting a hidden ref |
-| git | `receive-pack.c:reject:deny updating a hidden ref` | git builtin/receive-pack.c:1825 reject_updates_to_hidden() | reject: deny updating a hidden ref |
-| git | `receive-pack.c:reject:denyCurrentBranch = updateInstead needs a worktree` | git builtin/receive-pack.c:1449 update_worktree() | reject: denyCurrentBranch = updateInstead needs a worktree |
-| git | `receive-pack.c:reject:fail to run proc-receive hook` | git builtin/receive-pack.c:2027 execute_commands() | reject: fail to run proc-receive hook |
-| git | `receive-pack.c:reject:failed` | git builtin/receive-pack.c:1093 read_proc_receive_report() | reject: failed |
-| git | `receive-pack.c:reject:failed to delete` | git builtin/receive-pack.c:1606 update() | reject: failed to delete |
-| git | `receive-pack.c:reject:funny refname` | git builtin/receive-pack.c:1481 update() | reject: funny refname |
-| git | `receive-pack.c:reject:inconsistent aliased update` | git builtin/receive-pack.c:1711 check_aliased_update_internal() | reject: inconsistent aliased update |
-| git | `receive-pack.c:reject:inconsistent push options` | git builtin/receive-pack.c:2599 cmd_receive_pack() | reject: inconsistent push options |
-| git | `receive-pack.c:reject:Invalid denyDeleteCurrent setting` | git builtin/receive-pack.c:1542 update() | reject: Invalid denyDeleteCurrent setting |
-| git | `receive-pack.c:reject:missing necessary objects` | git builtin/receive-pack.c:1777 set_connectivity_errors() | reject: missing necessary objects |
-| git | `receive-pack.c:reject:proc-receive failed to report status` | git builtin/receive-pack.c:1103 read_proc_receive_report() | reject: proc-receive failed to report status |
-| git | `receive-pack.c:reject:push-to-checkout hook declined` | git builtin/receive-pack.c:1433 push_to_checkout() | reject: push-to-checkout hook declined |
-| git | `receive-pack.c:reject:shallow error` | git builtin/receive-pack.c:1616 update() | reject: shallow error |
-| git | `receive-pack.c:reject:shallow update not allowed` | git builtin/receive-pack.c:2425 update_shallow_info() | reject: shallow update not allowed |
-| git | `receive-pack.c:reject:transaction failed to start` | git builtin/receive-pack.c:1864 execute_commands_non_atomic() | reject: transaction failed to start |
-| git | `receive-pack.c:reject:transaction failed to start#2` | git builtin/receive-pack.c:1893 execute_commands_atomic() | reject: transaction failed to start |
-| git | `receive-pack.c:reject:unable to migrate objects to permanent storage` | git builtin/receive-pack.c:2008 execute_commands() | reject: unable to migrate objects to permanent storage |
-| git | `receive-pack.c:reject:Up-to-date check failed` | git builtin/receive-pack.c:1376 push_to_deploy() | reject: Up-to-date check failed |
-| git | `receive-pack.c:reject:Working directory has staged changes` | git builtin/receive-pack.c:1402 push_to_deploy() | reject: Working directory has staged changes |
-| git | `receive-pack.c:reject:Working directory has unstaged changes` | git builtin/receive-pack.c:1388 push_to_deploy() | reject: Working directory has unstaged changes |
-| git | `send-pack.c:die:send_pack:the receiving end does not support --atomic push` | git send-pack.c:577 send_pack() | die: the receiving end does not support --atomic push |
-| git | `send-pack.c:die:send_pack:the receiving end does not support push options` | git send-pack.c:582 send_pack() | die: the receiving end does not support push options |
-| git | `send-pack.c:die:send_pack:the receiving end does not support this repository's hash algorithm` | git send-pack.c:558 send_pack() | die: the receiving end does not support this repository's hash algorithm |
-| git | `send-pack.c:error:send_pack:atomic push failed for ref %s. status: %d` | git send-pack.c:630 send_pack() | error: atomic push failed for ref %s. status: %d |
-| git | `tree-mode:case S_IFREG\|0664` | git fsck.c:738 fsck_tree() | tree-mode: mode S_IFREG\|0664 |
-| git | `tree-mode:reports BAD_FILEMODE` | git fsck.c:796 fsck_tree() | tree-mode: reports BAD_FILEMODE |
-| git | `tree-mode:reports BAD_TREE` | git fsck.c:641 fsck_tree() | tree-mode: reports BAD_TREE |
-| git | `tree-mode:reports BAD_TREE#2` | git fsck.c:718 fsck_tree() | tree-mode: reports BAD_TREE |
-| git | `tree-mode:reports GITATTRIBUTES_SYMLINK` | git fsck.c:682 fsck_tree() | tree-mode: reports GITATTRIBUTES_SYMLINK |
-| git | `tree-mode:reports GITIGNORE_SYMLINK` | git fsck.c:690 fsck_tree() | tree-mode: reports GITIGNORE_SYMLINK |
-| git | `tree-mode:reports LARGE_PATHNAME` | git fsck.c:808 fsck_tree() | tree-mode: reports LARGE_PATHNAME |
-| git | `tree-mode:reports MAILMAP_SYMLINK` | git fsck.c:695 fsck_tree() | tree-mode: reports MAILMAP_SYMLINK |
-| git | `tree-mode:reports NULL_SHA1` | git fsck.c:768 fsck_tree() | tree-mode: reports NULL_SHA1 |
-| git | `tree-mode:reports ZERO_PADDED_FILEMODE` | git fsck.c:792 fsck_tree() | tree-mode: reports ZERO_PADDED_FILEMODE |
-| decisions | `src/discover.js#discover:coded=protocol:return coded('protocol', () => t.tracer.span('git.upload…` | src/discover.js:10 discover() | protocol: return coded('protocol', () => t.tracer.span('git.upload-pack discover', clientS |
-| decisions | `src/fetch.js#once:pack_corrupt:expected …, got …#2` | src/fetch.js:312 once() | pack_corrupt: expected …, got … |
-| decisions | `src/fetch.js#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.js:310 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
-| decisions | `src/fetch.js#parseSideband:protocol:&lt;payload>, &lt;SIDEBAND_CHANNEL_BYTES>, &lt;payload.length - S…` | src/fetch.js:141 parseSideband() | protocol: &lt;payload>, &lt;SIDEBAND_CHANNEL_BYTES>, &lt;payload.length - SIDEBAND_CHANNEL_BYTES> |
-| decisions | `src/fetch.js#spStep:pack_corrupt:&lt;all>, &lt;0>, &lt;emitLen>` | src/fetch.js:176 spStep() | pack_corrupt: &lt;all>, &lt;0>, &lt;emitLen> |
-| decisions | `src/fetch.js#spStep:pack_corrupt:&lt;all>, &lt;emitLen>, &lt;all.length - emitLen>` | src/fetch.js:177 spStep() | pack_corrupt: &lt;all>, &lt;emitLen>, &lt;all.length - emitLen> |
-| decisions | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;0>, &lt;p>` | src/fetch.js:170 spStep() | pack_corrupt: &lt;head>, &lt;0>, &lt;p> |
-| decisions | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;0>, &lt;PACK_SIGNATURE.length>` | src/fetch.js:159 spStep() | pack_corrupt: &lt;head>, &lt;0>, &lt;PACK_SIGNATURE.length> |
-| decisions | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;p>, &lt;head.length - p>` | src/fetch.js:171 spStep() | pack_corrupt: &lt;head>, &lt;p>, &lt;head.length - p> |
-| decisions | `src/http.js#advertise:not_git:unexpected content-type from … advertisement` | src/http.js:209 advertise() | not_git: unexpected content-type from … advertisement |
+| decisions | `src/bytes.js#decodeStrict:decode:strict:b` | src/bytes.js:11 decodeStrict() | &lt;decode:strict>: b |
+| decisions | `src/fetch.js#once:pack_corrupt:expected …, got …#2` | src/fetch.js:331 once() | pack_corrupt: expected …, got … |
+| decisions | `src/fetch.js#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.js:329 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
 | decisions | `src/http.js#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.js:34 utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
-| decisions | `src/inflate.js#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.js:115 codes() | pack_corrupt: inflate: bad distance symbol |
-| decisions | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;ADLER_BYTES>` | src/inflate.js:173 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;ADLER_BYTES> |
-| decisions | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;DEFLATE_STORED_HEADER_BYTES>` | src/inflate.js:138 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;DEFLATE_STORED_HEADER_BYTES> |
-| decisions | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;len>` | src/inflate.js:143 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;len> |
-| decisions | `src/lsrefs.js#lsRefs:decode:replacement:f.payload` | src/lsrefs.js:69 lsRefs() | &lt;decode:replacement>: f.payload |
-| decisions | `src/objects.js#parseTree:decode:replacement:take(data, sp + 1, nul - (sp + 1))` | src/objects.js:49 parseTree() | &lt;decode:replacement>: take(data, sp + 1, nul - (sp + 1)) |
-| decisions | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.js:48 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
-| decisions | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.js:49 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
-| decisions | `src/objects.js#splitHeaders:decode:replacement:data` | src/objects.js:96 splitHeaders() | &lt;decode:replacement>: data |
-| decisions | `src/packresolve.js#applyDelta:pack_corrupt:&lt;base>, &lt;off>, &lt;len>` | src/packresolve.js:165 applyDelta() | pack_corrupt: &lt;base>, &lt;off>, &lt;len> |
-| decisions | `src/packresolve.js#applyDelta:pack_corrupt:&lt;delta>, &lt;p>, &lt;c>` | src/packresolve.js:169 applyDelta() | pack_corrupt: &lt;delta>, &lt;p>, &lt;c> |
-| decisions | `src/packresolve.js#makeDelta:pack_corrupt:&lt;target>, &lt;p>, &lt;target.length - s - p>` | src/packresolve.js:185 makeDelta() | pack_corrupt: &lt;target>, &lt;p>, &lt;target.length - s - p> |
-| decisions | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;0>, &lt;p>` | src/packresolve.js:128 parsePack() | pack_corrupt: &lt;buf>, &lt;0>, &lt;p> |
-| decisions | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;0>, &lt;PACK_SIGNATURE.length>` | src/packresolve.js:89 parsePack() | pack_corrupt: &lt;buf>, &lt;0>, &lt;PACK_SIGNATURE.length> |
-| decisions | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;p>, &lt;OID_BYTES>` | src/packresolve.js:112 parsePack() | pack_corrupt: &lt;buf>, &lt;p>, &lt;OID_BYTES> |
-| decisions | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;p>, &lt;PACK_TRAILER_BYTES>` | src/packresolve.js:127 parsePack() | pack_corrupt: &lt;buf>, &lt;p>, &lt;PACK_TRAILER_BYTES> |
-| decisions | `src/packresolve.js#readObjHeader:pack_corrupt:&lt;buf>, &lt;p>, &lt;1>` | src/packresolve.js:48 readObjHeader() | pack_corrupt: &lt;buf>, &lt;p>, &lt;1> |
-| decisions | `src/packresolve.js#readOfsDelta:pack_corrupt:&lt;buf>, &lt;p>, &lt;1>` | src/packresolve.js:65 readOfsDelta() | pack_corrupt: &lt;buf>, &lt;p>, &lt;1> |
-| decisions | `src/packresolve.js#readUint32BE:pack_corrupt:&lt;buf>, &lt;off>, &lt;BE32_SHIFTS.length>` | src/packresolve.js:42 readUint32BE() | pack_corrupt: &lt;buf>, &lt;off>, &lt;BE32_SHIFTS.length> |
-| decisions | `src/packresolve.js#readVarint:pack_corrupt:&lt;buf>, &lt;p>, &lt;1>` | src/packresolve.js:33 readVarint() | pack_corrupt: &lt;buf>, &lt;p>, &lt;1> |
-| decisions | `src/packresolve.js#resolveObj:pack_corrupt:pack: ofs delta base not at object boundary …` | src/packresolve.js:215 resolveObj() | pack_corrupt: pack: ofs delta base not at object boundary … |
-| decisions | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>, &lt;buf.length - p>` | src/pktline.js:66 pktStep() | protocol: &lt;buf>, &lt;p>, &lt;buf.length - p> |
-| decisions | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>, &lt;PKT_LEN_HEX>` | src/pktline.js:43 pktStep() | protocol: &lt;buf>, &lt;p>, &lt;PKT_LEN_HEX> |
-| decisions | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>&lt;PKT_LEN_HEX>, &lt;len - PKT_LEN_HEX>` | src/pktline.js:58 pktStep() | protocol: &lt;buf>, &lt;p>&lt;PKT_LEN_HEX>, &lt;len - PKT_LEN_HEX> |
-| decisions | `src/push.js#pushLine:decode:replacement:payload` | src/push.js:118 pushLine() | &lt;decode:replacement>: payload |
-| decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:199 flush() | pack_corrupt: blob content hashes to …, not … |
-| decisions | `src/sign.js#withGpgsig:decode:replacement:commitBytes` | src/sign.js:43 withGpgsig() | &lt;decode:replacement>: commitBytes |
-| decisions | `src/ssh.js#authenticate:ssh:ssh: expected SERVICE_ACCEPT, got …` | src/ssh.js:230 authenticate() | ssh: ssh: expected SERVICE_ACCEPT, got … |
-| decisions | `src/ssh.js#connect:host_key_mismatch:ssh: host key signature over the exchange hash does not …` | src/ssh.js:214 connect() | host_key_mismatch: ssh: host key signature over the exchange hash does not verify |
-| decisions | `src/ssh.js#connect:ssh:ssh: all-zero shared secret` | src/ssh.js:210 connect() | ssh: ssh: all-zero shared secret |
-| decisions | `src/ssh.js#connect:ssh:ssh: bad host signature type` | src/ssh.js:212 connect() | ssh: ssh: bad host signature type |
-| decisions | `src/ssh.js#connect:ssh:ssh: bad server ephemeral key` | src/ssh.js:207 connect() | ssh: ssh: bad server ephemeral key |
-| decisions | `src/ssh.js#connect:ssh:ssh: expected KEX_ECDH_REPLY, got …` | src/ssh.js:199 connect() | ssh: ssh: expected KEX_ECDH_REPLY, got … |
-| decisions | `src/ssh.js#connect:ssh:ssh: expected KEXINIT, got …` | src/ssh.js:189 connect() | ssh: ssh: expected KEXINIT, got … |
-| decisions | `src/ssh.js#connect:ssh:ssh: expected NEWKEYS, got …` | src/ssh.js:220 connect() | ssh: ssh: expected NEWKEYS, got … |
-| decisions | `src/ssh.js#connect:ssh:ssh: no version line` | src/ssh.js:177 connect() | ssh: ssh: no version line |
-| decisions | `src/ssh.js#dispatch:ssh:ssh: unexpected message …` | src/ssh.js:296 dispatch() | ssh: ssh: unexpected message … |
-| decisions | `src/ssh.js#exec:remote_error:ssh: server refused to exec …` | src/ssh.js:258 exec() | remote_error: ssh: server refused to exec … |
-| decisions | `src/ssh.js#exec:ssh:ssh: channel open failed (…): …` | src/ssh.js:253 exec() | ssh: ssh: channel open failed (…): … |
-| decisions | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)` | src/ssh.js:138 openPacket() | ssh: ssh: packet too large (…) |
-| decisions | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2` | src/ssh.js:144 openPacket() | ssh: ssh: packet too large (…) |
-| decisions | `src/sshgit.js#openChannel:decode:replacement:f.payload` | src/sshgit.js:135 openChannel() | &lt;decode:replacement>: f.payload |
-| decisions | `src/sshgit.js#openChannel:decode:replacement:first.payload` | src/sshgit.js:132 openChannel() | &lt;decode:replacement>: first.payload |
-| decisions | `src/sshgit.js#sshDecode:decode:strict:Uint8Array.from(bytes)` | src/sshgit.js:33 sshDecode() | &lt;decode:strict>: Uint8Array.from(bytes) |
+| decisions | `src/inflate.js#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.js:122 codes() | pack_corrupt: inflate: bad distance symbol |
+| decisions | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.js:71 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
+| decisions | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.js:73 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
+| decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:203 flush() | pack_corrupt: blob content hashes to …, not … |
+| decisions | `src/sshgit.js#openChannel:decode:replacement:f.payload` | src/sshgit.js:146 openChannel() | &lt;decode:replacement>: f.payload |
+| decisions | `src/sshgit.js#openChannel:decode:replacement:first.payload` | src/sshgit.js:143 openChannel() | &lt;decode:replacement>: first.payload |
 | failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js:244 begin() | pack_corrupt: expected blob, got type … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:blob stream: …` | src/edit.js:269 streamBlobEdit() | pack_corrupt: blob stream: … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js:275 streamBlobEdit() | pack_corrupt: inflated … != header size … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js:253 streamBlobEdit() | pack_corrupt: inflated bytes before header |
-| failsites | `src/fetch.js#once:pack_corrupt:expected …, got …#2` | src/fetch.js:312 once() | pack_corrupt: expected …, got … |
-| failsites | `src/fetch.js#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.js:310 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
-| failsites | `src/fetch.js#once:pack_corrupt:pack: … trailing bytes after object` | src/fetch.js:280 once() | pack_corrupt: pack: … trailing bytes after object |
-| failsites | `src/fetch.js#parseSideband:protocol:&lt;payload>, &lt;SIDEBAND_CHANNEL_BYTES>, &lt;payload.length - S…` | src/fetch.js:141 parseSideband() | protocol: &lt;payload>, &lt;SIDEBAND_CHANNEL_BYTES>, &lt;payload.length - SIDEBAND_CHANNEL_BYTES> |
-| failsites | `src/fetch.js#spStep:pack_corrupt:&lt;all>, &lt;0>, &lt;emitLen>` | src/fetch.js:176 spStep() | pack_corrupt: &lt;all>, &lt;0>, &lt;emitLen> |
-| failsites | `src/fetch.js#spStep:pack_corrupt:&lt;all>, &lt;emitLen>, &lt;all.length - emitLen>` | src/fetch.js:177 spStep() | pack_corrupt: &lt;all>, &lt;emitLen>, &lt;all.length - emitLen> |
-| failsites | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;0>, &lt;p>` | src/fetch.js:170 spStep() | pack_corrupt: &lt;head>, &lt;0>, &lt;p> |
-| failsites | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;0>, &lt;PACK_SIGNATURE.length>` | src/fetch.js:159 spStep() | pack_corrupt: &lt;head>, &lt;0>, &lt;PACK_SIGNATURE.length> |
-| failsites | `src/fetch.js#spStep:pack_corrupt:&lt;head>, &lt;p>, &lt;head.length - p>` | src/fetch.js:171 spStep() | pack_corrupt: &lt;head>, &lt;p>, &lt;head.length - p> |
-| failsites | `src/http.js#advertise:not_git:unexpected content-type from … advertisement` | src/http.js:209 advertise() | not_git: unexpected content-type from … advertisement |
-| failsites | `src/inflate.js#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.js:115 codes() | pack_corrupt: inflate: bad distance symbol |
-| failsites | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;ADLER_BYTES>` | src/inflate.js:173 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;ADLER_BYTES> |
-| failsites | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;DEFLATE_STORED_HEADER_BYTES>` | src/inflate.js:138 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;DEFLATE_STORED_HEADER_BYTES> |
-| failsites | `src/inflate.js#inflate:pack_corrupt:&lt;buf>, &lt;p>, &lt;len>` | src/inflate.js:143 inflate() | pack_corrupt: &lt;buf>, &lt;p>, &lt;len> |
-| failsites | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.js:48 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
-| failsites | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.js:49 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
-| failsites | `src/packresolve.js#applyDelta:pack_corrupt:&lt;base>, &lt;off>, &lt;len>` | src/packresolve.js:165 applyDelta() | pack_corrupt: &lt;base>, &lt;off>, &lt;len> |
-| failsites | `src/packresolve.js#applyDelta:pack_corrupt:&lt;delta>, &lt;p>, &lt;c>` | src/packresolve.js:169 applyDelta() | pack_corrupt: &lt;delta>, &lt;p>, &lt;c> |
-| failsites | `src/packresolve.js#makeDelta:pack_corrupt:&lt;target>, &lt;p>, &lt;target.length - s - p>` | src/packresolve.js:185 makeDelta() | pack_corrupt: &lt;target>, &lt;p>, &lt;target.length - s - p> |
-| failsites | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;0>, &lt;p>` | src/packresolve.js:128 parsePack() | pack_corrupt: &lt;buf>, &lt;0>, &lt;p> |
-| failsites | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;0>, &lt;PACK_SIGNATURE.length>` | src/packresolve.js:89 parsePack() | pack_corrupt: &lt;buf>, &lt;0>, &lt;PACK_SIGNATURE.length> |
-| failsites | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;p>, &lt;OID_BYTES>` | src/packresolve.js:112 parsePack() | pack_corrupt: &lt;buf>, &lt;p>, &lt;OID_BYTES> |
-| failsites | `src/packresolve.js#parsePack:pack_corrupt:&lt;buf>, &lt;p>, &lt;PACK_TRAILER_BYTES>` | src/packresolve.js:127 parsePack() | pack_corrupt: &lt;buf>, &lt;p>, &lt;PACK_TRAILER_BYTES> |
-| failsites | `src/packresolve.js#readObjHeader:pack_corrupt:&lt;buf>, &lt;p>, &lt;1>` | src/packresolve.js:48 readObjHeader() | pack_corrupt: &lt;buf>, &lt;p>, &lt;1> |
-| failsites | `src/packresolve.js#readOfsDelta:pack_corrupt:&lt;buf>, &lt;p>, &lt;1>` | src/packresolve.js:65 readOfsDelta() | pack_corrupt: &lt;buf>, &lt;p>, &lt;1> |
-| failsites | `src/packresolve.js#readUint32BE:pack_corrupt:&lt;buf>, &lt;off>, &lt;BE32_SHIFTS.length>` | src/packresolve.js:42 readUint32BE() | pack_corrupt: &lt;buf>, &lt;off>, &lt;BE32_SHIFTS.length> |
-| failsites | `src/packresolve.js#readVarint:pack_corrupt:&lt;buf>, &lt;p>, &lt;1>` | src/packresolve.js:33 readVarint() | pack_corrupt: &lt;buf>, &lt;p>, &lt;1> |
-| failsites | `src/packresolve.js#resolveObj:pack_corrupt:pack: ofs delta base not at object boundary …` | src/packresolve.js:215 resolveObj() | pack_corrupt: pack: ofs delta base not at object boundary … |
-| failsites | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>, &lt;buf.length - p>` | src/pktline.js:66 pktStep() | protocol: &lt;buf>, &lt;p>, &lt;buf.length - p> |
-| failsites | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>, &lt;PKT_LEN_HEX>` | src/pktline.js:43 pktStep() | protocol: &lt;buf>, &lt;p>, &lt;PKT_LEN_HEX> |
-| failsites | `src/pktline.js#pktStep:protocol:&lt;buf>, &lt;p>&lt;PKT_LEN_HEX>, &lt;len - PKT_LEN_HEX>` | src/pktline.js:58 pktStep() | protocol: &lt;buf>, &lt;p>&lt;PKT_LEN_HEX>, &lt;len - PKT_LEN_HEX> |
-| failsites | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:199 flush() | pack_corrupt: blob content hashes to …, not … |
-| failsites | `src/read.js#flush:pack_corrupt:inflated … != declared …` | src/read.js:197 flush() | pack_corrupt: inflated … != declared … |
-| failsites | `src/read.js#transform:pack_corrupt:server streamed more than the … bytes it declared` | src/read.js:191 transform() | pack_corrupt: server streamed more than the … bytes it declared |
-| failsites | `src/ssh.js#authenticate:ssh:ssh: expected SERVICE_ACCEPT, got …` | src/ssh.js:230 authenticate() | ssh: ssh: expected SERVICE_ACCEPT, got … |
-| failsites | `src/ssh.js#connect:host_key_mismatch:ssh: host key signature over the exchange hash does not …` | src/ssh.js:214 connect() | host_key_mismatch: ssh: host key signature over the exchange hash does not verify |
-| failsites | `src/ssh.js#connect:ssh:ssh: all-zero shared secret` | src/ssh.js:210 connect() | ssh: ssh: all-zero shared secret |
-| failsites | `src/ssh.js#connect:ssh:ssh: bad host signature type` | src/ssh.js:212 connect() | ssh: ssh: bad host signature type |
-| failsites | `src/ssh.js#connect:ssh:ssh: bad server ephemeral key` | src/ssh.js:207 connect() | ssh: ssh: bad server ephemeral key |
-| failsites | `src/ssh.js#connect:ssh:ssh: expected KEX_ECDH_REPLY, got …` | src/ssh.js:199 connect() | ssh: ssh: expected KEX_ECDH_REPLY, got … |
-| failsites | `src/ssh.js#connect:ssh:ssh: expected KEXINIT, got …` | src/ssh.js:189 connect() | ssh: ssh: expected KEXINIT, got … |
-| failsites | `src/ssh.js#connect:ssh:ssh: expected NEWKEYS, got …` | src/ssh.js:220 connect() | ssh: ssh: expected NEWKEYS, got … |
-| failsites | `src/ssh.js#connect:ssh:ssh: no version line` | src/ssh.js:177 connect() | ssh: ssh: no version line |
-| failsites | `src/ssh.js#dispatch:ssh:ssh: unexpected message …` | src/ssh.js:296 dispatch() | ssh: ssh: unexpected message … |
-| failsites | `src/ssh.js#exec:remote_error:ssh: server refused to exec …` | src/ssh.js:258 exec() | remote_error: ssh: server refused to exec … |
-| failsites | `src/ssh.js#exec:ssh:ssh: channel open failed (…): …` | src/ssh.js:253 exec() | ssh: ssh: channel open failed (…): … |
-| failsites | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)` | src/ssh.js:138 openPacket() | ssh: ssh: packet too large (…) |
+| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js:277 streamBlobEdit() | pack_corrupt: inflated … != header size … |
+| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js:257 streamBlobEdit() | pack_corrupt: inflated bytes before header |
+| failsites | `src/fetch.js#once:pack_corrupt:expected …, got …#2` | src/fetch.js:331 once() | pack_corrupt: expected …, got … |
+| failsites | `src/fetch.js#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.js:329 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| failsites | `src/inflate.js#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.js:122 codes() | pack_corrupt: inflate: bad distance symbol |
+| failsites | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.js:71 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
+| failsites | `src/objects.js#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.js:73 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
+| failsites | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:203 flush() | pack_corrupt: blob content hashes to …, not … |
+| failsites | `src/read.js#flush:pack_corrupt:inflated … != declared …` | src/read.js:201 flush() | pack_corrupt: inflated … != declared … |
+| failsites | `src/read.js#transform:pack_corrupt:server streamed more than the … bytes it declared` | src/read.js:195 transform() | pack_corrupt: server streamed more than the … bytes it declared |
 
-### Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous) (6)
+### Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous) (5)
 
 | category | id | where | what |
 |---|---|---|---|
-| decisions | `src/rebase.js#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.js:89 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
+| decisions | `src/rebase.js#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.js:92 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
 | decisions | `src/rebase.js#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.js:71 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
-| failsites | `src/push.js#ambiguous:ambiguous:push outcome unknown: …` | src/push.js:124 ambiguous() | ambiguous: push outcome unknown: … |
-| failsites | `src/rebase.js#pickCommit:not_linear:… has … parents; only single-parent commits are picked` | src/rebase.js:118 pickCommit() | not_linear: … has … parents; only single-parent commits are picked |
-| failsites | `src/rebase.js#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.js:89 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
+| failsites | `src/rebase.js#pickCommit:not_linear:… has … parents; only single-parent commits are picked` | src/rebase.js:121 pickCommit() | not_linear: … has … parents; only single-parent commits are picked |
+| failsites | `src/rebase.js#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.js:92 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
 | failsites | `src/rebase.js#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.js:71 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
 
-### Severity 3: the rest (caller input, limits, local I/O) (94)
+### Severity 3: the rest (caller input, limits, local I/O) (53)
 
 | category | id | where | what |
 |---|---|---|---|
-| git | `receive-pack.c:die:cmd_receive_pack:'%s' does not appear to be a git repository` | git builtin/receive-pack.c:2547 cmd_receive_pack() | die: '%s' does not appear to be a git repository |
-| git | `receive-pack.c:die:read_head_info:error: unsupported object format '%s'` | git builtin/receive-pack.c:2143 read_head_info() | die: error: unsupported object format '%s' |
-| git | `request-arg:v2 fetch:deepen-relative` | git upload-pack.c:1665 process_args() | request-arg: deepen-relative |
-| git | `request-arg:v2 fetch:include-tag` | git upload-pack.c:1641 process_args() | request-arg: include-tag |
-| git | `request-arg:v2 fetch:no-progress` | git upload-pack.c:1637 process_args() | request-arg: no-progress |
 | git | `upload-pack.c:die:send_err_and_die:%s` | git upload-pack.c:1060 send_err_and_die() | die: %s |
-| decisions | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:83 checkoutDir() | bad_request: dir must be a non-empty string |
-| decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:42 slurp() | limit_exceeded: symlink target |
-| decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:66 writeFiles() | bad_request: already exists |
-| decisions | `src/discover.js#discover:unsupported:server did not answer protocol v2 (first line …)` | src/discover.js:15 discover() | unsupported: server did not answer protocol v2 (first line …) |
-| decisions | `src/discover.js#discover:unsupported:unsupported object-format …` | src/discover.js:25 discover() | unsupported: unsupported object-format … |
-| decisions | `src/fetch.js#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.js:249 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| decisions | `src/http.js#advertise:network:&lt;e>, &lt;sig.signal>` | src/http.js:205 advertise() | network: &lt;e>, &lt;sig.signal> |
-| decisions | `src/merge.js#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.js:268 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
-| decisions | `src/merge.js#attributeTree:not_found:attributes ref … not found` | src/merge.js:270 attributeTree() | not_found: attributes ref … not found |
-| decisions | `src/merge.js#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.js:226 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
-| decisions | `src/merge.js#mergeBranch:bad_request:author is required for a merge commit` | src/merge.js:315 mergeBranch() | bad_request: author is required for a merge commit |
-| decisions | `src/merge.js#mergeBranch:not_found:ref … not found` | src/merge.js:290 mergeBranch() | not_found: ref … not found |
-| decisions | `src/merge.js#mergeBranch:not_found:ref … not found#2` | src/merge.js:290 mergeBranch() | not_found: ref … not found |
+| decisions | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
+| decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
+| decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
+| decisions | `src/fetch.js#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.js:274 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
+| decisions | `src/merge.js#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.js:282 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
+| decisions | `src/merge.js#attributeTree:not_found:attributes ref … not found` | src/merge.js:284 attributeTree() | not_found: attributes ref … not found |
+| decisions | `src/merge.js#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.js:240 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
+| decisions | `src/merge.js#mergeBranch:bad_request:author is required for a merge commit` | src/merge.js:332 mergeBranch() | bad_request: author is required for a merge commit |
+| decisions | `src/merge.js#mergeBranch:not_found:ref … not found` | src/merge.js:304 mergeBranch() | not_found: ref … not found |
+| decisions | `src/merge.js#mergeBranch:not_found:ref … not found#2` | src/merge.js:304 mergeBranch() | not_found: ref … not found |
 | decisions | `src/negotiate.js#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.js:13 negotiate() | bad_request: negotiate rounds must be an integer |
-| decisions | `src/pktline.js#pkt:untyped:pkt-line payload too large: …` | src/pktline.js:15 pkt() | &lt;untyped>: pkt-line payload too large: … |
 | decisions | `src/rebase.js#linearChain:limit_exceeded:rebase chain` | src/rebase.js:38 linearChain() | limit_exceeded: rebase chain |
-| decisions | `src/rebase.js#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.js:111 pickCommit() | bad_request: commit must be a 40-hex oid |
-| decisions | `src/rebase.js#pickCommit:not_found:ref … not found` | src/rebase.js:115 pickCommit() | not_found: ref … not found |
+| decisions | `src/rebase.js#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.js:114 pickCommit() | bad_request: commit must be a 40-hex oid |
+| decisions | `src/rebase.js#pickCommit:not_found:ref … not found` | src/rebase.js:118 pickCommit() | not_found: ref … not found |
 | decisions | `src/rebase.js#rebaseBranch:not_found:ref … not found` | src/rebase.js:68 rebaseBranch() | not_found: ref … not found |
 | decisions | `src/rebase.js#rebaseBranch:not_found:ref … not found#2` | src/rebase.js:68 rebaseBranch() | not_found: ref … not found |
-| decisions | `src/ssh-node.js#nodeStream:timeout:socket timeout` | src/ssh-node.js:12 nodeStream() | timeout: socket timeout |
+| decisions | `src/ssh-node.js#nodeStream:timeout:socket timeout` | src/ssh-node.js:13 nodeStream() | timeout: socket timeout |
 | decisions | `src/ssh-workers.js#armed:timeout:socket timeout` | src/ssh-workers.js:9 armed() | timeout: socket timeout |
-| decisions | `src/ssh.js#connect:unsupported:ssh: host key type …` | src/ssh.js:204 connect() | unsupported: ssh: host key type … |
-| decisions | `src/ssh.js#constructor:bad_request:hostKey is required: an SSH client in a Worker cannot tr…` | src/ssh.js:90 constructor() | bad_request: hostKey is required: an SSH client in a Worker cannot trust-on-first-use |
-| decisions | `src/ssh.js#fill:network:ssh: connection closed by peer` | src/ssh.js:103 fill() | network: ssh: connection closed by peer |
-| decisions | `src/ssh.js#hostKeyFromLine:bad_request:hostKey blob is not ssh-ed25519` | src/ssh.js:84 hostKeyFromLine() | bad_request: hostKey blob is not ssh-ed25519 |
-| decisions | `src/ssh.js#hostKeyFromLine:bad_request:hostKey must be an "ssh-ed25519 AAAA…" line (optionally …` | src/ssh.js:82 hostKeyFromLine() | bad_request: hostKey must be an "ssh-ed25519 AAAA…" line (optionally prefixed by a host) |
-| decisions | `src/ssh.js#hostKeyFromLine:bad_request:hostKey: bad key length` | src/ssh.js:85 hostKeyFromLine() | bad_request: hostKey: bad key length |
-| decisions | `src/ssh.js#pick:unsupported:ssh: no common … algorithm (server offers …)` | src/ssh.js:49 pick() | unsupported: ssh: no common … algorithm (server offers …) |
-| decisions | `src/ssh.js#readMessage:&lt;code === 2 /* PROTOCOL_ERROR */ ? 'proto>:ssh: server disconnected (…): …` | src/ssh.js:161 readMessage() | &lt;code === 2 /* PROTOCOL_ERROR */ ? 'proto>: ssh: server disconnected (…): … |
-| decisions | `src/ssh.js#readMessage:unsupported:ssh: server requested rekeying; ply sessions are short e…` | src/ssh.js:163 readMessage() | unsupported: ssh: server requested rekeying; ply sessions are short enough not to |
-| decisions | `src/ssh.js#write:network:ssh: channel closed while writing` | src/ssh.js:266 write() | network: ssh: channel closed while writing |
-| decisions | `src/sshgit.js#openChannel:&lt;/denied\|not found\|does not appear\|no suc>:ssh: … sent no advertisement…` | src/sshgit.js:139 openChannel() | &lt;/denied\|not found\|does not appear\|no suc>: ssh: … sent no advertisement… |
-| decisions | `src/sshgit.js#readUntilFlush:limit_exceeded:advertisement bytes` | src/sshgit.js:162 readUntilFlush() | limit_exceeded: advertisement bytes |
 | decisions | `src/transport.js#coded:&lt;code>:&lt;String(e?.message ?? e)>` | src/transport.js:40 coded() | &lt;code>: &lt;String(e?.message ?? e)> |
 | decisions | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
 | decisions | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
-| decisions | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:78 validateMessage() | bad_request: message |
-| decisions | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:72 validatePath() | bad_request: path |
-| decisions | `src/validate.js#validateRef:bad_request:ref#3` | src/validate.js:48 validateRef() | bad_request: ref |
-| failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:83 checkoutDir() | bad_request: dir must be a non-empty string |
-| failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:42 slurp() | limit_exceeded: symlink target |
-| failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:66 writeFiles() | bad_request: already exists |
-| failsites | `src/discover.js#discover:unsupported:server did not answer protocol v2 (first line …)` | src/discover.js:15 discover() | unsupported: server did not answer protocol v2 (first line …) |
-| failsites | `src/discover.js#discover:unsupported:unsupported object-format …` | src/discover.js:25 discover() | unsupported: unsupported object-format … |
-| failsites | `src/fetch.js#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.js:249 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| failsites | `src/fetch.js#once:limit_exceeded:compressed object bytes` | src/fetch.js:275 once() | limit_exceeded: compressed object bytes |
-| failsites | `src/fetch.js#once:limit_exceeded:object size#2` | src/fetch.js:311 once() | limit_exceeded: object size |
-| failsites | `src/fetch.js#once:limit_exceeded:pack bytes#2` | src/fetch.js:303 once() | limit_exceeded: pack bytes |
-| failsites | `src/http.js#advertise:network:&lt;e>, &lt;sig.signal>` | src/http.js:205 advertise() | network: &lt;e>, &lt;sig.signal> |
-| failsites | `src/merge.js#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.js:268 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
-| failsites | `src/merge.js#attributeTree:not_found:attributes ref … not found` | src/merge.js:270 attributeTree() | not_found: attributes ref … not found |
-| failsites | `src/merge.js#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.js:226 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
-| failsites | `src/merge.js#mergeBranch:bad_request:author is required for a merge commit` | src/merge.js:315 mergeBranch() | bad_request: author is required for a merge commit |
-| failsites | `src/merge.js#mergeBranch:not_found:ref … not found` | src/merge.js:290 mergeBranch() | not_found: ref … not found |
-| failsites | `src/merge.js#mergeBranch:not_found:ref … not found#2` | src/merge.js:290 mergeBranch() | not_found: ref … not found |
+| decisions | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:191 validateMessage() | bad_request: message |
+| decisions | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:184 validatePath() | bad_request: path |
+| decisions | `src/validate.js#validateRef:bad_request:ref#3` | src/validate.js:49 validateRef() | bad_request: ref |
+| failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
+| failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
+| failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
+| failsites | `src/fetch.js#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.js:274 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
+| failsites | `src/fetch.js#once:limit_exceeded:object size#2` | src/fetch.js:330 once() | limit_exceeded: object size |
+| failsites | `src/merge.js#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.js:282 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
+| failsites | `src/merge.js#attributeTree:not_found:attributes ref … not found` | src/merge.js:284 attributeTree() | not_found: attributes ref … not found |
+| failsites | `src/merge.js#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.js:240 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
+| failsites | `src/merge.js#mergeBranch:bad_request:author is required for a merge commit` | src/merge.js:332 mergeBranch() | bad_request: author is required for a merge commit |
+| failsites | `src/merge.js#mergeBranch:not_found:ref … not found` | src/merge.js:304 mergeBranch() | not_found: ref … not found |
+| failsites | `src/merge.js#mergeBranch:not_found:ref … not found#2` | src/merge.js:304 mergeBranch() | not_found: ref … not found |
 | failsites | `src/negotiate.js#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.js:13 negotiate() | bad_request: negotiate rounds must be an integer |
-| failsites | `src/packresolve.js#resolveObj:limit_exceeded:pack inflated bytes` | src/packresolve.js:234 resolveObj() | limit_exceeded: pack inflated bytes |
-| failsites | `src/push.js#push:bad_request:push: oids must be 40-hex` | src/push.js:90 push() | bad_request: push: oids must be 40-hex |
-| failsites | `src/push.js#pushLine:limit_exceeded:report bytes` | src/push.js:116 pushLine() | limit_exceeded: report bytes |
-| failsites | `src/push.js#pushLine:limit_exceeded:report lines` | src/push.js:117 pushLine() | limit_exceeded: report lines |
-| failsites | `src/read.js#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:196 flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
-| failsites | `src/read.js#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:165 openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
+| failsites | `src/push.js#push:bad_request:push: oids must be 40-hex` | src/push.js:208 push() | bad_request: push: oids must be 40-hex |
+| failsites | `src/read.js#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:200 flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
+| failsites | `src/read.js#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:169 openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
 | failsites | `src/rebase.js#linearChain:limit_exceeded:rebase chain` | src/rebase.js:38 linearChain() | limit_exceeded: rebase chain |
-| failsites | `src/rebase.js#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.js:111 pickCommit() | bad_request: commit must be a 40-hex oid |
-| failsites | `src/rebase.js#pickCommit:not_found:ref … not found` | src/rebase.js:115 pickCommit() | not_found: ref … not found |
+| failsites | `src/rebase.js#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.js:114 pickCommit() | bad_request: commit must be a 40-hex oid |
+| failsites | `src/rebase.js#pickCommit:not_found:ref … not found` | src/rebase.js:118 pickCommit() | not_found: ref … not found |
 | failsites | `src/rebase.js#rebaseBranch:not_found:ref … not found` | src/rebase.js:68 rebaseBranch() | not_found: ref … not found |
 | failsites | `src/rebase.js#rebaseBranch:not_found:ref … not found#2` | src/rebase.js:68 rebaseBranch() | not_found: ref … not found |
-| failsites | `src/ssh-node.js#nodeStream:timeout:socket timeout` | src/ssh-node.js:12 nodeStream() | timeout: socket timeout |
+| failsites | `src/ssh-node.js#nodeStream:timeout:socket timeout` | src/ssh-node.js:13 nodeStream() | timeout: socket timeout |
 | failsites | `src/ssh-workers.js#armed:timeout:socket timeout` | src/ssh-workers.js:9 armed() | timeout: socket timeout |
-| failsites | `src/ssh.js#connect:unsupported:ssh: host key type …` | src/ssh.js:204 connect() | unsupported: ssh: host key type … |
-| failsites | `src/ssh.js#constructor:bad_request:hostKey is required: an SSH client in a Worker cannot tr…` | src/ssh.js:90 constructor() | bad_request: hostKey is required: an SSH client in a Worker cannot trust-on-first-use |
-| failsites | `src/ssh.js#fill:network:ssh: connection closed by peer` | src/ssh.js:103 fill() | network: ssh: connection closed by peer |
-| failsites | `src/ssh.js#hostKeyFromLine:bad_request:hostKey blob is not ssh-ed25519` | src/ssh.js:84 hostKeyFromLine() | bad_request: hostKey blob is not ssh-ed25519 |
-| failsites | `src/ssh.js#hostKeyFromLine:bad_request:hostKey must be an "ssh-ed25519 AAAA…" line (optionally …` | src/ssh.js:82 hostKeyFromLine() | bad_request: hostKey must be an "ssh-ed25519 AAAA…" line (optionally prefixed by a host) |
-| failsites | `src/ssh.js#hostKeyFromLine:bad_request:hostKey: bad key length` | src/ssh.js:85 hostKeyFromLine() | bad_request: hostKey: bad key length |
-| failsites | `src/ssh.js#pick:unsupported:ssh: no common … algorithm (server offers …)` | src/ssh.js:49 pick() | unsupported: ssh: no common … algorithm (server offers …) |
-| failsites | `src/ssh.js#readMessage:&lt;code === 2 /* PROTOCOL_ERROR */ ? 'proto>:ssh: server disconnected (…): …` | src/ssh.js:161 readMessage() | &lt;code === 2 /* PROTOCOL_ERROR */ ? 'proto>: ssh: server disconnected (…): … |
-| failsites | `src/ssh.js#readMessage:unsupported:ssh: server requested rekeying; ply sessions are short e…` | src/ssh.js:163 readMessage() | unsupported: ssh: server requested rekeying; ply sessions are short enough not to |
-| failsites | `src/ssh.js#write:network:ssh: channel closed while writing` | src/ssh.js:266 write() | network: ssh: channel closed while writing |
-| failsites | `src/sshgit.js#openChannel:&lt;/denied\|not found\|does not appear\|no suc>:ssh: … sent no advertisement…` | src/sshgit.js:139 openChannel() | &lt;/denied\|not found\|does not appear\|no suc>: ssh: … sent no advertisement… |
-| failsites | `src/sshgit.js#readUntilFlush:limit_exceeded:advertisement bytes` | src/sshgit.js:162 readUntilFlush() | limit_exceeded: advertisement bytes |
 | failsites | `src/transport.js#coded:&lt;code>:&lt;String(e?.message ?? e)>` | src/transport.js:40 coded() | &lt;code>: &lt;String(e?.message ?? e)> |
 | failsites | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
 | failsites | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
-| failsites | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:78 validateMessage() | bad_request: message |
-| failsites | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:72 validatePath() | bad_request: path |
-| failsites | `src/validate.js#validateRef:bad_request:ref#3` | src/validate.js:48 validateRef() | bad_request: ref |
+| failsites | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:191 validateMessage() | bad_request: message |
+| failsites | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:184 validatePath() | bad_request: path |
+| failsites | `src/validate.js#validateRef:bad_request:ref#3` | src/validate.js:49 validateRef() | bad_request: ref |
 
