@@ -22,6 +22,7 @@ import { signCommit } from './sign.js';
 import type { Caught, EncodeCommit, FetchObject, Fetched, Operation, OperationOptions, PackObject, Push, Signer, SpState, Transport, TreeEntry } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
+/* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 
 export { spInit, spStep, spFinish }; // the single-object pack parser lives in fetch.js; re-exported for callers of old paths
 
@@ -50,7 +51,7 @@ export type ScanState = {
 export type ScanOut = { readonly emit: Uint8Array[]; readonly state: ScanState };
 export const scanInit = ({ find, replace }: { readonly find: Uint8Array; readonly replace: Uint8Array }): ScanState => Object.freeze({ find, replace, carry: new Uint8Array(0), base: 0, matches: [], count: 0, emitted: 0, chunks: 0, maxChunk: 0 });
 export function scanStep(st: ScanState, chunk: Uint8Array): ScanOut {
-  const data = st.carry.length > 0 ? concat([st.carry, chunk]) : chunk;
+  const data = st.carry.length ? concat([st.carry, chunk]) : chunk;
   const emit: Uint8Array[] = [];
   const matches = [...st.matches];
   let count = st.count;
@@ -69,12 +70,12 @@ export function scanStep(st: ScanState, chunk: Uint8Array): ScanOut {
   const flushTo = data.length - keep;
   if (flushTo > p) { emit.push(data.subarray(p, flushTo)); emitted += flushTo - p; }
   return {
-    emit: emit.filter(e => e.length > 0),
+    emit: emit.filter(e => e.length),
     state: { ...st, carry: data.slice(flushTo), base: st.base + flushTo, matches, count, emitted, chunks: st.chunks + 1, maxChunk: Math.max(st.maxChunk, chunk.length) },
   };
 }
 export function scanFinish(st: ScanState): ScanOut {
-  const emit = st.carry.length > 0 ? [st.carry] : [];
+  const emit = st.carry.length ? [st.carry] : [];
   return { emit, state: { ...st, carry: new Uint8Array(0), emitted: st.emitted + st.carry.length } };
 }
 export const scanAttrs = (st: ScanState): Attrs => ({
@@ -84,7 +85,7 @@ export const scanAttrs = (st: ScanState): Attrs => ({
 
 // ---- the pipeline ----
 
-const OID = /^[0-9a-f]{40}$/u;
+const OID = /^[0-9a-f]{40}$/;
 
 export type EditSpec = {
   readonly ref?: string;
@@ -119,7 +120,7 @@ export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: 
   const comps = validatePath(path, limits);
   const find: unknown = bytesOf(findIn), replace: unknown = bytesOf(replaceIn);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
-  if (find.length === 0) throw fail('bad_request', 'find must be non-empty');
+  if (!find.length) throw fail('bad_request', 'find must be non-empty');
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
   return Object.freeze({ ref, base, create: base !== ref, path, comps, find, replace, author: person, message, time: person.time, head });
 }
@@ -137,7 +138,7 @@ export function decideHead<R extends string | null>({ hint, resolved }: { readon
 export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: Limits): { readonly entry: TreeEntry; readonly attrs: Attrs } {
   const entries: readonly TreeEntry[] = parseTree(data, limits);
   const entry = entries.find(e => e.name === name);
-  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': entry !== undefined, 'git.edit.tree.entry.mode': entry?.mode ?? '', 'git.edit.tree.entry.oid': entry?.oid ?? '', 'git.edit.tree.entry.oid_offset': entry?.oidOffset ?? -1 };
+  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': !!entry, 'git.edit.tree.entry.mode': entry?.mode ?? '', 'git.edit.tree.entry.oid': entry?.oid ?? '', 'git.edit.tree.entry.oid_offset': entry?.oidOffset ?? -1 };
   if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs });
   if (!last && entry.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { attrs });
   if (last && !(entry.mode === '100644' || entry.mode === '100755')) throw fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs });
@@ -325,9 +326,8 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     } catch (e) {
       await pump.catch(() => { /* the read side's error is the one reported */ });
       partial();
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-      const c = e as Caught;
-      if (!isPlyCode(c?.code)) throw fail('pack_corrupt', `blob stream: ${String(c?.message ?? e)}`, { cause: e });
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught), as the JS read it: the template coerces whatever the message (or the value) is
+      if (!isPlyCode((e as Caught)?.code)) throw fail('pack_corrupt', `blob stream: ${((e as Caught)?.message ?? e) as string}`, { cause: e });
       throw e;
     }
     if (sha === null) { try { sha = await begin(); } catch (e) { partial(); throw e; } } // empty blob
@@ -361,13 +361,16 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await (fetchObject as FetchObject)(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
-    const resolve = async (): Promise<string> => { const { refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> } = await lsRefs(t, [s.base]); const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`); return r.oid; };
-    const [resolved, speculative] = await Promise.all([resolve(), head === null ? null : getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e)]);
+    // oxlint-disable-next-line promise-function-async -- bundle budget: the JS's own .then chain, byte for byte
+    const resolve = (): Promise<string> => lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => { const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`); return r.oid; });
+    // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
+    const [resolved, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e) : null]);
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas ?? decided.hint;
     const { oldCommit } = decided;
     if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${oldCommit}, not the expected head ${head}`, { expected: head, actual: oldCommit });
-    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': (speculative as Caught)?.code ?? 'error' });
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
+    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': (speculative as { readonly code?: unknown }).code ?? 'error' });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is getObject's value (the rejection branch is the Error above)
     const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await getObject(oldCommit, TYPE.COMMIT, 1);
     const commit: { readonly tree: string; readonly parents: readonly string[] } = parseCommit(commitObj.data, limits);
@@ -387,7 +390,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
         span.set({ 'git.edit.tree.cache_hit': hit });
         try { const { entry, attrs: found } = lookupEntry(data, name, last, limits); span.set(found); return { treeOid, data, entry }; }
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-        catch (e) { const c = e as Caught; if (c?.attrs) span.set(c.attrs); throw e; }
+        catch (e) { const { attrs: failed } = e as { readonly attrs?: Attrs }; if (failed) span.set(failed); throw e; }
       });
       levels.push(lvl);
       treeOid = lvl.entry.oid;
@@ -414,7 +417,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     if (verify) await verifyRef(t, root, 'git.edit', s.ref, built.newCommit);
     return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt, newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: pushed.packBytes }), { 'git.edit.push.bytes': pushed.packBytes, 'git.edit.push.ratio': pushed.packBytes / Math.max(1, blob.newLen) });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown object gets the attempt's fields, as before
-    } catch (e) { if (typeof e === 'object' && e !== null) { const g = e as Tagged; g.attempt = attempt; g.hint = hint; } throw e; }
+    } catch (e) { if (typeof e === 'object' && e !== null) { (e as Tagged).attempt = attempt; (e as Tagged).hint = hint; } throw e; }
   });
 }
 
@@ -426,13 +429,11 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
 export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, ...opts }: EditOptions = {}): Promise<EditResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
-  const first = await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e);
-  // a value that is not an Error is editOnce's result (a thrown non-Error would land here too, as before)
+  // an Error from the first attempt: editOnce tagged it (attempt, hint) and operation() gave it its root span; a value
+  // that is not an Error is editOnce's result (a thrown non-Error would land there too, as before)
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  if (!(first instanceof Error)) return first as EditResult;
-  // an Error from the first attempt: editOnce tagged it (attempt, hint) and operation() gave it its root span
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  const f = first as Error & Tagged;
-  if (f.code !== 'cas_conflict' || f.attempt !== 0 || strictHead) throw first;
-  return editOnce(url, spec, opts, { head: null, attempt: 1, linkTo: f.span ?? null, hintWas: f.hint ?? null });
+  const first = await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e as Error & Tagged);
+  if (!(first instanceof Error)) return first;
+  if (first.code !== 'cas_conflict' || first.attempt !== 0 || strictHead) throw first;
+  return editOnce(url, spec, opts, { head: null, attempt: 1, linkTo: first.span ?? null, hintWas: first.hint ?? null });
 }

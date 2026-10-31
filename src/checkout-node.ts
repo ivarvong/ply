@@ -31,6 +31,7 @@ import type { ReadOptions, RefSpec } from './read.js';
 import type { Caught } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- files are written one at a time, in order, each stream drained before the next */
+/* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 
 /* oxlint-disable no-magic-numbers -- the permission bits git creates files with (entry.c), before the umask */
 const FILE_MODE = 0o666;
@@ -49,7 +50,7 @@ const collision = (path: string, why: string): Error => fail('bad_request', `che
 // Effect: `dir` exists and is empty afterwards, or bad_request.
 async function emptyDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true });
-  if ((await readdir(dir)).length > 0) throw fail('bad_request', `checkout: ${dir} is not empty`, { what: 'dir' });
+  if ((await readdir(dir)).length) throw fail('bad_request', `checkout: ${dir} is not empty`, { what: 'dir' });
 }
 
 // Effect: read a stream into one buffer, at most `max` bytes (a symlink target).

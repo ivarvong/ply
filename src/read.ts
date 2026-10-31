@@ -27,8 +27,9 @@ import type { Caught, FetchObject, Operation, OperationOptions, SpState, Transpo
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable require-await -- the entry points are async so that a throw while checking arguments is a rejection, as before */
+/* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
-const OID = /^[0-9a-f]{40}$/u;
+const OID = /^[0-9a-f]{40}$/;
 
 // Pure: what to ask ls-refs for, and which answer wins. git's ref_rev_parse_rules minus the remote-tracking forms.
 // `ref` is the caller's, checked here: anything but null, undefined or a string is bad_request.
@@ -57,13 +58,14 @@ export type Resolved = { readonly name: string; readonly commit: string };
 export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolved> {
   const cands = refCandidates(ref);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refCandidates answers [] only for a 40-hex oid string
-  if (cands.length === 0) return { name: ref as string, commit: ref as string };
+  if (!cands.length) return { name: ref as string, commit: ref as string };
   const { refs, head }: { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }>; readonly head: string | null } = await lsRefs(t, cands);
   for (const name of cands) {
     const r = refs.get(name);
     if (r) return { name: name === 'HEAD' ? (head ?? 'HEAD') : name, commit: r.peeled ?? r.oid };
   }
-  throw fail('not_found', cands[0] === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${String(ref)} not found`);
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refCandidates refused every non-string but null/undefined, which name HEAD
+  throw fail('not_found', cands[0] === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${ref as string} not found`);
 }
 
 // Effect: the commit object alone (tree:0, deepen 1). A bare oid that is not a commit (or not on the server) is the
@@ -73,8 +75,8 @@ async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
   const c = await (fetchObject as FetchObject)(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
     const x = e as Caught;
-    if (x?.code === 'pack_corrupt' && /expected commit/u.test(String(x.message))) throw fail('not_found', `${commit} is not a commit`);
-    if (x?.code === 'remote_error' && /not our ref/u.test(String(x.message))) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (x?.code === 'pack_corrupt' && /expected commit/.test(x.message)) throw fail('not_found', `${commit} is not a commit`);
+    if (x?.code === 'remote_error' && /not our ref/.test(x.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   return c.data;
@@ -104,7 +106,7 @@ export type CommitView = {
 // Pure: a commit object's view.
 export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): CommitView {
   const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = parseCommit(data, limits);
-  return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message ?? '', signed: c.extra.some(l => /^gpgsig(-sha256)? /u.test(l)) };
+  return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message ?? '', signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
 }
 
 // The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …).
@@ -150,7 +152,7 @@ async function walk(t: Transport, root: Span, tracer: Tracer, { commit, comps, c
 
 const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): string[] => {
   if (allowRoot && (path === undefined || path === null || path === '' || path === '/')) return [];
-  return validatePath(typeof path === 'string' ? path.replace(/\/$/u, '') : path, limits);
+  return validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
 };
 
 export type ListEntry = { readonly name: string; readonly mode: string; readonly oid: string; readonly type: EntryType };

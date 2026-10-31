@@ -13,7 +13,8 @@ export type Transport = Parameters<typeof lsRefs>[0];
 
 // A thrown value, read loosely as the JS did (`e?.code`): any field may be missing, and a primitive has none. Errors
 // become values in the A pass; until then a `catch` reads them through this.
-export type Caught = { readonly code?: unknown; readonly message?: unknown; readonly attrs?: Attrs } | null | undefined;
+// `message` reads as a string because the JS passed it straight to RegExp#test and templates (which coerce whatever it is).
+export type Caught = { readonly code?: unknown; readonly message: string; readonly attrs?: Attrs } | null | undefined;
 
 // A fetch implementation; packcache.js's adds `attrs()` (its hit/miss counters).
 export type FetchImpl = typeof fetch & { readonly attrs?: () => Attrs };

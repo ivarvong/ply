@@ -28,6 +28,7 @@
 //
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
+/* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 import { thrown as fail } from './errors.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
@@ -46,7 +47,7 @@ import type { Caught, FetchedPack, Operation, PackObjects, Quirks, Transport, Tr
 /* oxlint-disable no-magic-numbers -- a request-size default, not a wire-format fact */
 const BATCH = 1000;
 /* oxlint-enable no-magic-numbers */
-const TREE_MODE = /^[1-7][0-7]*$/u;
+const TREE_MODE = /^[1-7][0-7]*$/;
 
 /* oxlint-disable no-await-in-loop -- the files are yielded in order, one fetch or stream at a time (bounded memory) */
 
@@ -94,7 +95,7 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   const r: FetchedPack = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }).catch((e: unknown) => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
     const x = e as Caught;
-    if (x?.code === 'remote_error' && /not our ref/u.test(String(x.message))) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (x?.code === 'remote_error' && /not our ref/.test(x.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   const objects: PackObjects = r.objects ?? new Map();
@@ -138,7 +139,7 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<PackOb
 // from then on (remembered on the transport's quirks). A lie (pack_corrupt) is never a reason to fall back.
 const isWantsRefusal = (code: unknown): boolean => (['http', 'remote_error', 'protocol'] as readonly unknown[]).includes(code);
 
-const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new ReadableStream({ start(c) { if (data.length > 0) c.enqueue(data); c.close(); } });
+const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
 // The files iterator. Gitlinks first (nothing to fetch), then the unique blobs in `batch`-sized wants lists; every path
 // naming a blob is yielded with it. Its span, `git.checkout.blobs`, starts at the first next() and ends when the
@@ -215,7 +216,7 @@ export type CheckoutResult = {
 // oxlint-disable-next-line require-await -- async so that a throw while checking arguments is a rejection, as before
 export async function checkoutTree(url: string, { ref = null, path = '' }: { readonly ref?: RefSpec; readonly path?: string | null } = {}, { batch = BATCH, ...opts }: ReadOptions & { readonly batch?: number } = {}): Promise<CheckoutResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
-  const comps = path === undefined || path === null || path === '' || path === '/' ? [] : validatePath(typeof path === 'string' ? path.replace(/\/$/u, '') : path, limits);
+  const comps = path === undefined || path === null || path === '' || path === '/' ? [] : validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
   if (!Number.isSafeInteger(batch) || batch < 1 || batch > requireLimit(limits, 'maxPackObjects')) throw fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- operation.js is JS: its options read as their defaults' types (boundary.ts)
   return (operation as Operation)('checkout', url, { ...opts, attrs: { 'git.checkout.ref': ref ?? 'HEAD', 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } }, async ({ t, root, outcome }) => {

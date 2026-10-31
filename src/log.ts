@@ -30,6 +30,7 @@ import { parseCommit, TYPE, TYPE_NAME } from './objects.js';
 import { DEFAULT_LIMITS, requireLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { Caught, FetchedPack, Operation, PackObjects, Transport, TypeNames } from './boundary.js';
+/* oxlint-disable require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 export const DEFAULT_LOG_LIMIT = 20;
 const isObject = (v: unknown): v is object => v !== null && typeof v === 'object';
@@ -70,7 +71,7 @@ async function fetchWindow(t: Transport, commit: string, limit: number): Promise
   try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
     const x = e as Caught;
-    if (x?.code === 'remote_error' && /not our ref/u.test(String(x.message))) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if (x?.code === 'remote_error' && /not our ref/.test(x.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   }
   const want = r.objects?.get(commit);

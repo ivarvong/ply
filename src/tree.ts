@@ -11,6 +11,7 @@
 // Shape: pure decisions between thin effects, as edit.js. fileEntries, buildTree, selectObjects are functions of their
 // arguments; the effects (lsRefs, fetchObject, push, verifyRef) are free functions over a transport record.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
+/* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 import { thrown as fail } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
@@ -29,7 +30,7 @@ import { MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, DELTA_SIZE_MIN
 import type { Span } from './otel.js';
 import type { Caught, EncodeCommit, FetchObject, Fetched, Operation, PackObject, Push, Pushed, Transport, TreeEntry } from './boundary.js';
 
-const OID = /^[0-9a-f]{40}$/u;
+const OID = /^[0-9a-f]{40}$/;
 const BLOB_MODES: ReadonlySet<string> = new Set([MODE_BLOB, MODE_EXEC, MODE_LINK]);
 
 // The caller's files, in either shape (below): a record or Map of path → content, or an iterable of file specs.
@@ -53,9 +54,8 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Fi
   const maxObject = requireLimit(limits, 'maxObjectSize');
   // the caller's values: each is checked below (validatePath refuses a missing entry or path)
   /* oxlint-disable typescript/no-unsafe-type-assertion -- see above */
-  let pairs: Array<[unknown, unknown]> | null = null;
-  if (files instanceof Map) pairs = [...(files as Map<unknown, unknown>)];
-  else if (!(Symbol.iterator in files)) pairs = Object.entries(files);
+  // oxlint-disable-next-line no-nested-ternary -- bundle budget: the JS's expression, byte for byte
+  const pairs = files instanceof Map ? [...(files as Map<unknown, unknown>)] : Symbol.iterator in files ? null : Object.entries(files);
   // oxlint-disable-next-line oxc/no-map-spread -- a fresh object per value: a spread defines `path`, where Object.assign would run a `__proto__` setter
   const list = (pairs ? pairs.map(([path, v]) => (typeof v === 'string' || v instanceof Uint8Array ? { path, data: v } : { ...(v as object), path })) : files) as Iterable<FileSpec | null | undefined>;
   /* oxlint-enable typescript/no-unsafe-type-assertion */
@@ -77,7 +77,7 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Fi
     if (!(data instanceof Uint8Array)) throw fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
     if (data.length > maxObject) throw limitError('object size', data.length, maxObject);
     // a symlink target is a path: git cannot check out an empty one, and a NUL ends it on every platform
-    if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) throw fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
+    if (mode === MODE_LINK && (!data.length || data.includes(0))) throw fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
     out.push({ path, comps, mode, data, oid: hashObject('blob', data) });
   }
   return out;
@@ -154,7 +154,8 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
   };
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
   walk('');
-  return { trees, blobs, deltas: trees.filter(t => t.baseOid !== undefined).length };
+  // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (baseOid is undefined or an oid)
+  return { trees, blobs, deltas: trees.filter(t => t.baseOid).length };
 }
 
 export type TreeSpec = {
@@ -244,7 +245,7 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
     for (const e of (built.trees.get(dir) as BuiltDir).entries) {
       const was = before.get(e.name);
-      if (e.mode === MODE_TREE && was && was.mode === MODE_TREE && was.oid !== e.oid) next.push(visit(dir ? `${dir}/${e.name}` : e.name, was.oid));
+      if (e.mode === MODE_TREE && was?.mode === MODE_TREE && was.oid !== e.oid) next.push(visit(dir ? `${dir}/${e.name}` : e.name, was.oid));
     }
     await Promise.all(next);
   };
@@ -270,7 +271,8 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     const commitOf = (oid: string): Promise<Fetched> => (fetchObject as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     try {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
-    const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => refs.get(s.base)?.oid ?? null), head === null ? null : commitOf(head).then(o => o, (e: unknown) => e)]);
+    // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
+    const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => refs.get(s.base)?.oid ?? null), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
     if (resolved === null && s.create) throw fail('not_found', `ref ${s.base} not found`);
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas ?? decided.hint;
@@ -289,8 +291,9 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
 
     // 3. the commit, then one push whose old oid is the CAS
     const who = ident(s.author);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- objects.js is JS: `parents = []` reads as never[] (boundary.ts)
-    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: s.built.root, parents: parent === null ? [] : [parent], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : `${s.message}\n` });
+    // objects.js is JS: `parents = []` reads as never[] (boundary.ts); bundle budget: the JS's own truthy test and concatenation, byte for byte
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/strict-boolean-expressions, prefer-template -- see above
+    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: s.built.root, parents: parent ? [parent] : [], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
     if (signer) { commitData = await signCommit(commitData, signer); root.set({ 'git.push_tree.commit.signed': signer.kind, 'git.push_tree.commit.signer': signer.publicKeyLine ?? '' }); }
     const newCommit = hashObject('commit', commitData);
     const objects = [{ type: TYPE.COMMIT, data: commitData }, ...sel.trees, ...sel.blobs];
@@ -301,7 +304,7 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     if (verify) await verifyRef(t, root, 'git.push_tree', s.ref, newCommit);
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt, newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown object gets the attempt's fields, as before
-    } catch (e) { if (typeof e === 'object' && e !== null) { const g = e as Tagged; g.attempt = attempt; g.hint = hint; } throw e; }
+    } catch (e) { if (typeof e === 'object' && e !== null) { (e as Tagged).attempt = attempt; (e as Tagged).hint = hint; } throw e; }
   });
 }
 
@@ -314,13 +317,11 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
 export async function pushTree(url: string, spec: TreeSpec, { head = null, strictHead = false, ...opts }: PushTreeOptions = {}): Promise<PushTreeResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
   const s = validateTreeSpec(spec, opts.limits ?? DEFAULT_LIMITS, head);
-  const first = await pushTreeOnce(url, s, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e);
-  // a value that is not an Error is pushTreeOnce's result (a thrown non-Error would land here too, as before)
+  // an Error from the first attempt: pushTreeOnce tagged it (attempt, hint) and operation() gave it its root span; a
+  // value that is not an Error is pushTreeOnce's result (a thrown non-Error would land there too, as before)
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  if (!(first instanceof Error)) return first as PushTreeResult;
-  // an Error from the first attempt: pushTreeOnce tagged it (attempt, hint) and operation() gave it its root span
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  const f = first as Error & Tagged;
-  if (f.code !== 'cas_conflict' || f.attempt !== 0 || strictHead) throw first;
-  return pushTreeOnce(url, s, opts, { head: null, attempt: 1, linkTo: f.span ?? null, hintWas: f.hint ?? null });
+  const first = await pushTreeOnce(url, s, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e as Error & Tagged);
+  if (!(first instanceof Error)) return first;
+  if (first.code !== 'cas_conflict' || first.attempt !== 0 || strictHead) throw first;
+  return pushTreeOnce(url, s, opts, { head: null, attempt: 1, linkTo: first.span ?? null, hintWas: first.hint ?? null });
 }
