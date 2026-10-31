@@ -68,7 +68,7 @@
     "src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer",
     "src/objects.ts#parseTree:pack_corrupt:<data>, <p>, <sp - p>",
     "src/objects.ts#parseTree:pack_corrupt:<data>, <sp><1>, <nul - (sp + 1)>",
-    "src/push.ts#push:bad_request:push: oids must be 40-hex",
+    "src/push.ts#planPush:bad_request:push: oids must be 40-hex",
     "src/read.js#flush:<rethrown or pack_corrupt>:<e>",
     "src/read.js#flush:pack_corrupt:blob content hashes to …, not …",
     "src/read.js#flush:pack_corrupt:inflated … != declared …",
