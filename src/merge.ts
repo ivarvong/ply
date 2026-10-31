@@ -29,6 +29,7 @@ import { validateRef, validatePushRef, validateIdent, validateMessage } from './
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
+import { short, commitAt, commitBytesAt } from './mergeio.js';
 import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.js';
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons and bases are extras (errors.ts is shared; additive
@@ -374,7 +375,6 @@ export async function mergeTrees(t: Transport, cache: TreeCache, { base, ours, t
 // 'text' | 'union' | 'binary' as find_ll_merge_driver picks: merge set → text, -merge → binary, merge=binary|union|text
 // → that, any other name → text (a custom driver is server configuration we cannot see), unspecified → text.
 export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string): DriverFor {
-  const readTree = async (oid: string): Promise<TreeEntry[]> => cachedTree(t, cache, oid);
   // Each directory's tree and .gitattributes text is looked up once and shared, while it is pending or once it has
   // succeeded. A lookup that fails is forgotten as it fails, so the next path asks again (#79: one transient failure
   // poisoned every later lookup of that directory).
@@ -388,11 +388,11 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
   const treeOf = (dir: string): Promise<string | null> => once(`/${dir}`, async () => {
     const cut = dir.lastIndexOf('/');
     const p = await treeOf(cut < 0 ? '' : dir.slice(0, cut));
-    return p === null ? null : (await readTree(p)).find(e => e.name === dir.slice(cut + 1) && e.mode === '40000')?.oid ?? null;
+    return p === null ? null : (await cachedTree(t, cache, p)).find(e => e.name === dir.slice(cut + 1) && e.mode === '40000')?.oid ?? null;
   });
   const fileOf = (dir: string): Promise<string | null> => once(dir, async () => {
     const oid = await treeOf(dir);
-    const e = oid === null ? null : (await readTree(oid)).find(x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000');
+    const e = oid === null ? null : (await cachedTree(t, cache, oid)).find(x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000');
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     return e ? bytesToStr((await (fetchObject as unknown as FetchObject)(t, { oid: e.oid, expectType: TYPE.BLOB })).data) : null;
   });
@@ -463,12 +463,6 @@ export const uniqueObjects = <O extends { readonly oid: string }>(objects: reado
 // 2.43–2.45 in a bare repository whose HEAD is the target branch); a ref name or commit oid → its tree (attr.tree=<rev>).
 // 'ours' | 'theirs' | 'base', a ref name or a commit oid, or null
 export type AttributeSource = string | null;
-// a branch name as git's messages print it. Shared with rebase.ts.
-export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
-// Effect: one commit by oid (deepen 1: the commit alone), as bytes or parsed. Shared with rebase.ts.
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-export const commitBytesAt = (t: Transport, oid: string | null | undefined): Promise<Fetched> => (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
-export const commitAt = async (t: Transport, oid: string | null | undefined): Promise<Commit> => parseCommit((await commitBytesAt(t, oid)).data, t.limits);
 const isOid = (s: string): boolean => /^[0-9a-f]{40}$/u.test(s);
 export const validateAttributes = (a: unknown): void => {
   if (a === null || a === undefined) return;

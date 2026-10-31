@@ -111,5 +111,5 @@ test('git 2.54 changed compaction: the smallest input that separates the two mod
 test('a broken invariant of the port is a typed internal error, never a bare Error (#80)', () => {
   // compact's two sides must hold the same number of unchanged lines; feed it sides that do not
   const ids = Int32Array.of(1, 2); const ch = new Uint8Array(4); const chO = new Uint8Array(3);
-  assert.throws(() => compact(ids, ch, 2, Int32Array.of(1), chO, 1, 'myers'), e => e instanceof Error && isPlyCode(e.code) && e.code === 'internal' && retryPolicy(e) === 'no' && e.message === 'linemerge: change groups out of step');
+  assert.throws(() => compact(ids, ch, 2, Int32Array.of(1), chO, 1, 'myers'), e => e instanceof Error && isPlyCode(e.code) && e.code === 'internal' && retryPolicy(e) === 'no' && e.message === 'linemerge: groups out of step');
 });

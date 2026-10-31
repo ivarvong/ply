@@ -42,7 +42,7 @@ type Diffed<T> = Result<T, Undecided>;
 const DONE: Diffed<null> = ok(null);
 // compact's invariant: the two sides' change groups move in step (equal counts of unchanged lines). Broken, it is a
 // programmer bug, so thrown, and typed (#80); the stack names the site.
-const broken = (): Error => plyError('internal', 'linemerge: change groups out of step');
+const broken = (): Error => plyError('internal', 'linemerge: groups out of step');
 
 const BINARY_SNIFF = 8000; // git's FIRST_FEW_BYTES: a NUL in the first 8000 bytes makes the merge binary (= conflict)
 const MAX_CHAIN = 64;      // xhistogram.c max_chain_length
@@ -389,13 +389,11 @@ export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32A
       }
       // histogram: a moved group facing a non-empty group on the other side is re-diffed with classic Myers in git
       if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end)) {
-        switch (rediff) {
-          case 'undecided': return undecided('compaction needs the classic-diff fallback');
-          // newer git: re-diff the merged group against the facing one with Myers (xdl_fall_back_diff on the two ranges)
-          case 'myers': classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1)); break;
-          case 'skip': break; // older git: the shifted group stands
-          default: return assertNever(rediff);
-        }
+        if (rediff === 'undecided') return undecided('compaction needs the classic-diff fallback');
+        // newer git: re-diff the merged group against the facing one with Myers (xdl_fall_back_diff on the two ranges)
+        if (rediff === 'myers') classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1));
+        // 'skip' (older git): the shifted group stands. Not a switch with assertNever: a JS caller's unknown value reads
+        // as 'skip', as it always has (blobMerger refuses one).
       }
     }
     if (!nextG(g, C, n)) return DONE;

@@ -13,10 +13,11 @@ import { thrown as fail, type Extra } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
-import { mergeBase, mergeTrees, commitAt, commitBytesAt, short, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
+import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
+import { short, commitAt, commitBytesAt } from './mergeio.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 // The unconverted modules' functions as this module calls them (see merge.ts).
