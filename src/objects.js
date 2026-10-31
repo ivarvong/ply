@@ -6,6 +6,7 @@ import { isDotGit, isValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, IDENT_TZ_DIGITS,
+  MODE_S_IFMT, MODE_S_IFDIR, MODE_BITS, MODE_LOW_DIGITS, TREE_SORT_SLASH,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
   COMMIT_HEADER_ORDER, TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER, TAG_HEADER_ORDER,
@@ -31,11 +32,24 @@ const cmpBytes = (a, b) => {
 };
 
 // ---- tree ----
+// fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for the low 16 bits of its mode: `40755` sorts
+// as a directory (fsck only warns about the mode), `160000` as a file.
+const isDirMode = mode => (parseInt(mode.slice(-MODE_LOW_DIGITS), 8) & MODE_BITS & MODE_S_IFMT) === MODE_S_IFDIR;
+const SLASH = Uint8Array.of(TREE_SORT_SLASH);
+
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
+// Duplicates and order are git's rules (fsck duplicateEntries and treeNotSorted, both errors under --strict) on the
+// raw name bytes. A file `d` and a directory `d` need not be neighbours (`d` < `d.x` < `d/`), so the duplicate check is
+// over the whole tree, as fsck's verify_ordered does with its stack of file names a later directory could repeat. It
+// runs before the order check: by then every earlier pair was in order, and on a sorted prefix fsck's stack finds
+// exactly the duplicates this set finds, so the message is one fsck prints. One rule is ply's own: two names whose
+// bytes differ but decode to one string (two invalid UTF-8 sequences both become U+FFFD; TextDecoder drops a leading
+// BOM, #43) are refused, though git sees two names, because every caller looks an entry up by its decoded name.
 // @decoder parseTree prefix=tree
 export function parseTree(data, limits = DEFAULT_LIMITS) {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
   const entries = [];
+  const raw = new Set(), decoded = new Set();
   let p = 0;
   let prevKey = null;
   while (p < data.length) {
@@ -46,7 +60,8 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
     const nul = data.indexOf(TREE_NUL, sp + 1);
     if (nul < sp + 1) throw fail('pack_corrupt', 'tree: malformed entry');
     const mode = td.decode(take(data, p, sp - p));
-    const name = td.decode(take(data, sp + 1, nul - (sp + 1)));
+    const nameBytes = take(data, sp + 1, nul - (sp + 1));
+    const name = td.decode(nameBytes);
     // The id starts at nul+1. take() demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
     const oidBytes = take(data, nul + 1, OID_BYTES);
@@ -56,9 +71,15 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
     if (name.length === 0) throw fail('pack_corrupt', 'tree: empty name');
     if (name.indexOf('/') >= 0) throw fail('pack_corrupt', 'tree: full pathname');
     if (name === '.' || name === '..' || isDotGit(name)) throw fail('pack_corrupt', 'tree: bad name');
-    const key = te.encode(mode === MODE_TREE ? name + '/' : name);
+    const rawName = toHex(nameBytes);
+    if (raw.has(rawName)) throw fail('pack_corrupt', `tree: duplicate entry ${JSON.stringify(name)}`);
+    raw.add(rawName);
+    const key = isDirMode(mode) ? concat([nameBytes, SLASH]) : nameBytes;
+    // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw fail('pack_corrupt', 'tree: not strictly sorted');
     prevKey = key;
+    if (decoded.has(name)) throw fail('pack_corrupt', `tree: two entries decode to the name ${JSON.stringify(name)}`);
+    decoded.add(name);
     entries.push({ mode, name, oid: toHex(oidBytes), oidOffset: nul + 1, entryOffset: p });
     p = nul + 1 + OID_BYTES;
   }

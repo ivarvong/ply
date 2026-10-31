@@ -46,8 +46,9 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 63,197 B / 24,217 B gz. checkWide: the blob:none fallback drops an extra over a limit instead of failing (issue #46).
   // 2026-10-30: 64,070 B / 24,571 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
   // 2026-10-30: 64,399 B / 24,708 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
-  assert.ok(min < 64_400, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 24_709, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 63,148 B / 24,220 B gz. parseTree refuses one name twice anywhere in a tree, orders on raw bytes with fsck's S_ISDIR, and refuses decode-twins (issue #34).
+  assert.ok(min < 63_149, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 24_221, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -85,7 +86,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 81,669 B. The same checkWide, also on the merge-base walk's blob:none packs (issue #46).
   // 2026-10-30: 82,537 B. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
   // 2026-10-30: 82,807 B. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
-  assert.ok(min < 82_808, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 81,637 B. The same parseTree duplicate and order rules (issue #34).
+  assert.ok(min < 81_638, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -120,8 +122,9 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 48,192 B / 18,710 B gz. The same checkWide (issue #46).
   // 2026-10-30: 49,064 B / 19,053 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
   // 2026-10-30: 49,538 B / 19,272 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
-  assert.ok(min < 49_539, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_273, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 48,142 B / 18,699 B gz. The same parseTree duplicate and order rules (issue #34).
+  assert.ok(min < 48_143, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 18_700, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -143,8 +146,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 59,881 B / 23,141 B gz. The same checkWide (issue #46).
   // 2026-10-30: 60,752 B / 23,494 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
   // 2026-10-30: 61,079 B / 23,631 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
-  assert.ok(min < 61_080, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_632, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 59,847 B / 23,153 B gz. The same parseTree duplicate and order rules (issue #34).
+  assert.ok(min < 59_848, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 23_154, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -177,8 +181,9 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 44,697 B / 17,804 B gz. fetchPackOnce takes a `check` for fetchPackTree0 (issue #46); checkWide itself is shaken out.
   // 2026-10-30: 45,569 B / 18,149 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
   // 2026-10-30: 46,201 B / 18,389 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
-  assert.ok(min < 46_202, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_390, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 44,984 B / 17,893 B gz. The same parseTree duplicate and order rules (issue #34).
+  assert.ok(min < 44_985, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_894, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

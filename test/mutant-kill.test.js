@@ -87,13 +87,47 @@ test('parseTree error strings and the boundaries next to them', () => {
   for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
   throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
   throws(() => parseTree(data(raw('100644 b\0'), raw('100644 a\0'))), 'pack_corrupt', 'tree: not strictly sorted');
-  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
   assert.equal(parseTree(new Uint8Array(0)).length, 0);
   assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100664');
-  // a file and a directory of one name sort apart ('d' < 'd/'): the order check passes it. encodeTree refuses to write
-  // it (git fsck duplicateEntries), so the bytes are built by hand.
-  const tree = data(raw('100644 d\0', oidBytes(2)), raw('40000 d\0', oidBytes(1)));
-  assert.deepEqual(parseTree(tree).map(e => e.name), ['d', 'd']);
+  // issue #34: one name twice is git fsck duplicateEntries whatever the modes, next to each other or not. A file and a
+  // directory of one name sort apart ('d' < 'd.x' < 'd/'), so the old neighbour-only check passed them. encodeTree
+  // refuses to write such a tree, so the bytes are built by hand.
+  const e = (mode, name, n = 1) => raw(`${mode} ${name}\0`, oidBytes(n));
+  throws(() => parseTree(data(e('100644', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('100644', 'd', 2), e('100644', 'd.x'), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('120000', 'd', 2), e('100644', 'd-'), e('100644', 'd.x'), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('160000', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => parseTree(data(e('40000', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  // the same name in a later, unrelated position is still the duplicate, reported before the order it also breaks
+  throws(() => parseTree(data(e('100644', 'a'), e('100644', 'b'), e('100644', 'a'))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  // order: a directory sorts as name + '/'. S_ISDIR of the mode decides, as in fsck: `40755` is a directory, a gitlink
+  // is not. Either way round, one of the two lists is out of order.
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40000', 'd'))).map(x => x.name), ['d.x', 'd']);
+  throws(() => parseTree(data(e('40000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40755', 'd'))).map(x => x.mode), ['100644', '40755']);
+  throws(() => parseTree(data(e('40755', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  // fsck keeps the mode in an unsigned short: `1040000` is a directory there, `140000` (S_IFSOCK) is not
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('1040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'only the low 16 bits of a mode count');
+  throws(() => parseTree(data(e('1040000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(e('140000', 'd'), e('100644', 'd.x'))).map(x => x.name), ['d', 'd.x']);
+  // past 2^53 a whole-string parse loses the low bits; the last six digits keep them
+  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('777777777777777777777777040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'a long mode is read from its last six digits');
+  assert.deepEqual(parseTree(data(e('100644', 'd'), e('160000', 'd.x'))).map(x => x.mode), ['100644', '160000']);
+  throws(() => parseTree(data(e('100644', 'd.x'), e('160000', 'd'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(parseTree(data(e('40000', 'd'), e('100644', 'd0'))).map(x => x.name), ['d', 'd0'], "'/' sorts below '0'");
+  throws(() => parseTree(data(e('100644', 'd0'), e('40000', 'd'))), 'pack_corrupt', 'tree: not strictly sorted');
+  // case-only and NFC/NFD twins are two names to git and to ply
+  assert.deepEqual(parseTree(data(e('100644', 'D'), e('100644', 'd'))).map(x => x.name), ['D', 'd']);
+  assert.deepEqual(parseTree(data(e('100644', 'e\u0301'), e('100644', '\u00e9'))).map(x => x.name), ['e\u0301', '\u00e9']);
+  // order is on the raw bytes, and two names that decode to one string are refused (ply's own rule, see parseTree)
+  const rawE = (mode, bytes) => data(te.encode(`${mode} `), Uint8Array.from(bytes), Uint8Array.of(0), oidBytes(1));
+  throws(() => parseTree(data(rawE('100644', [0x64, 0xfe]), rawE('100644', [0x64, 0xff]))), 'pack_corrupt', 'tree: two entries decode to the name "d\ufffd"');
+  throws(() => parseTree(data(rawE('100644', [0x64, 0xff]), rawE('100644', [0x64, 0xfe]))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => parseTree(data(rawE('100644', [0x61]), rawE('100644', [0xef, 0xbb, 0xbf, 0x61]))), 'pack_corrupt', 'tree: two entries decode to the name "a"');
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xc3, 0xa9]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\u00e9', 'd\ufffd'], 'raw bytes: 0xc3 < 0xff although U+00E9 < U+FFFD holds too');
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xef, 0xbf, 0xbe]), rawE('100644', [0x64, 0xf0]))).map(x => x.name.length), [2, 2]);
+  throws(() => parseTree(data(rawE('100644', [0x64, 0xf0]), rawE('100644', [0x64, 0xef, 0xbf, 0xbe]))), 'pack_corrupt', 'tree: not strictly sorted');
 });
 
 test('commit and tag headers, idents, and assertFetched', () => {

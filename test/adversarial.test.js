@@ -19,7 +19,8 @@ import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
 import { editFile } from '../src/edit.js';
-import { readFile } from '../src/read.js';
+import { readFile, listTree } from '../src/read.js';
+import { pushTree } from '../src/tree.js';
 import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
@@ -28,7 +29,7 @@ import { createTransport } from '../src/http.js';
 import { createSshTransport, parseSshUrl } from '../src/sshgit.js';
 import { lsRefs } from '../src/lsrefs.js';
 import { fetchObject } from '../src/fetch.js';
-import { fetchPackTree0 } from '../src/fetchpack.js';
+import { fetchPack, fetchPackTree0 } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
@@ -838,6 +839,64 @@ test('#18 the blob:none walk harvests only checked objects: a malformed commit i
     assert.equal(err?.code, 'pack_corrupt', res ? `fetched; harvested ${t.objects.size}, malformed commit ${served?.harvested ? 'served by fetchObject from the harvest' : 'not kept'}` : String(err?.message));
     assert.equal(t.objects.has(badOid), false, 'nothing harvested from a refused pack');
   } finally { await proxy.close(); }
+});
+
+// #34: a server holding a tree that names `d` twice, a file and a directory, apart (`d` < `d.x` < `d/`). Before the fix
+// readFile d returned the blob, listTree listed both, editFile built a commit receive-pack's fsck rejected, and
+// mergeBranch pushed a merge re-encoded with one `d`. Every read path now refuses the tree as pack_corrupt and no ref moves.
+function dupTreeRepo() {
+  const name = `dup34-${n++}`;
+  const bare = makeBareRepo(root, name);
+  const hash = (type, bytes) => gitBuf(bare, ['hash-object', '--literally', '-w', '-t', type, '--stdin'], bytes).toString().trim();
+  const entry = (mode, nm, oid) => Buffer.concat([Buffer.from(`${mode} ${nm}\0`), Buffer.from(oid, 'hex')]);
+  const blob = text => hash('blob', Buffer.from(text));
+  const sub = hash('tree', entry('100644', 'f', blob('in dir\n')));
+  const top = (ok, extra = []) => hash('tree', Buffer.concat([entry('100644', 'd', blob('file d\n')), entry('100644', 'd.x', blob('dx\n')), entry('40000', 'd', sub), entry('100644', 'ok.txt', blob(ok)), ...extra]));
+  const commit = (tree, parents, msg) => git(bare, ['-c', 'user.name=x', '-c', 'user.email=x@x', 'commit-tree', tree, ...parents.flatMap(p => ['-p', p]), '-m', msg]).trim();
+  const c0 = commit(top('ok MARK 0\n'), [], 'base');
+  const c1 = commit(top('ok MARK 1\n'), [c0], 'main');
+  const c2 = commit(top('ok MARK 0\n', [entry('100644', 'z.txt', blob('z\n'))]), [c0], 'other');
+  git(bare, ['update-ref', 'refs/heads/main', c1]);
+  git(bare, ['update-ref', 'refs/heads/other', c2]);
+  return { name, bare, c0, c1, c2, tree: git(bare, ['rev-parse', `${c1}^{tree}`]).trim() };
+}
+
+test('#34 a tree naming `d` twice (file and directory, apart) is pack_corrupt on every read path; no ref moves', async () => {
+  const R = dupTreeRepo();
+  const url = `${srv.url}/${R.name}.git`;
+  const opts = () => ({ tracer: new Tracer() });
+  const who = { ...AUTHOR, time: 1700000000 };
+  const drain = async r => { if (r?.stream) for await (const _ of r.stream); if (r?.files) for await (const g of r.files) if (g.stream) for await (const _ of g.stream); return r; };
+  const ops = {
+    'readFile d': () => readFile(url, { path: 'd' }, opts()).then(drain),
+    'readFile d/f': () => readFile(url, { path: 'd/f' }, opts()).then(drain),
+    'readFile d.x': () => readFile(url, { path: 'd.x' }, opts()).then(drain),
+    'readFile ok.txt': () => readFile(url, { path: 'ok.txt' }, opts()).then(drain),
+    'listTree /': () => listTree(url, {}, opts()),
+    'listTree d': () => listTree(url, { path: 'd' }, opts()),
+    'checkoutTree': () => checkoutTree(url, {}, opts()).then(drain),
+    'checkoutTree d': () => checkoutTree(url, { path: 'd' }, opts()).then(drain),
+    ...Object.fromEntries(['d', 'd/f', 'd.x', 'ok.txt', 'nope'].map(path => [`editFile ${path}`, () => editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'e' }, opts())])),
+    'pushTree': () => pushTree(url, { files: { 'new.txt': 'n\n' }, author: AUTHOR, message: 'p' }, opts()),
+    'mergeBranch main<-other': () => mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/other', author: AUTHOR, message: 'm', time: 1 }, opts()),
+    'mergeBranch other<-main': () => mergeBranch(url, { ref: 'refs/heads/other', from: 'refs/heads/main', author: AUTHOR, message: 'm', time: 1 }, opts()),
+    'rebaseBranch other onto main': () => rebaseBranch(url, { ref: 'refs/heads/other', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts()),
+    'cherryPick other onto main': () => cherryPick(url, { ref: 'refs/heads/main', commit: R.c2, committer: who, time: 1 }, opts()),
+    'revertCommit main': () => revertCommit(url, { ref: 'refs/heads/main', commit: R.c1, committer: who, time: 1 }, opts()),
+    'fetchObject tree': () => fetchObject(createTransport(url, opts()), { oid: R.tree, expectType: TYPE.TREE }),
+    'fetchPackTree0 harvest': () => fetchPackTree0(createTransport(url, { ...opts(), quirks: { treeFilter: 'blob:none' } }), { wants: [R.c1], filter: 'tree:0', deepen: 1 }),
+  };
+  const got = {};
+  for (const [label, op] of Object.entries(ops)) {
+    try { await op(); got[label] = 'ok'; } catch (e) { got[label] = `${e?.code}: ${e?.message}`; }
+  }
+  const want = Object.fromEntries(Object.keys(ops).map(k => [k, 'pack_corrupt: tree: duplicate entry "d"']));
+  assert.deepEqual(got, want);
+  assert.equal(git(R.bare, ['rev-parse', 'main']).trim(), R.c1);
+  assert.equal(git(R.bare, ['rev-parse', 'other']).trim(), R.c2);
+  // the raw pack path holds the trees unparsed; the checked path is fetchPackTree0's assertFetched (above)
+  const raw = await fetchPack(createTransport(url, opts()), { wants: [R.c1], filter: 'blob:none', deepen: 1 });
+  assert.ok(raw.objects.has(R.tree), 'the server really serves the tree');
 });
 
 test('ambiguous push (response lost after server applied it): ref == our commit; a naive retry is match_count, content correct', async () => {
