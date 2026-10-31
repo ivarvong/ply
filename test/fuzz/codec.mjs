@@ -13,6 +13,7 @@ import { Sha1 } from '../../src/sha1.js';
 import { applyDelta, spliceDelta, makeDelta, buildPack, parsePack, resolvePack } from '../../src/pack.js';
 import { pktInit, pktStep, pkt } from '../../src/pktline.js';
 import { concat } from '../../src/bytes.js';
+import { zlibBound } from '../../src/format.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200000', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
@@ -52,6 +53,8 @@ for (let i = 0; i < N; i++) {
       tick(`inflate.level.${level}`); tick(`inflate.strategy.${strategy}`); tick(`inflate.wbits.${windowBits}`);
       const pre = rng.bytes(rng.int(0, 3)), post = rng.bytes(rng.int(0, 3));
       const buf = concat([pre, z, post]);
+      if (z.length > zlibBound(d.length)) throw new Error(`zlib emitted ${z.length} B for ${d.length} B, over zlibBound ${zlibBound(d.length)} (level ${level}, strategy ${strategy}, memLevel ${memLevel}, windowBits ${windowBits})`);
+      tick('inflate.under_zlib_bound');
       const r = inflate(buf, pre.length, rng.bool() ? { expectedSize: d.length } : {});
       if (r.consumed !== z.length) throw new Error(`consumed ${r.consumed} != ${z.length}`);
       if (r.out.length !== d.length || !Buffer.from(r.out).equals(Buffer.from(d))) throw new Error('content mismatch');

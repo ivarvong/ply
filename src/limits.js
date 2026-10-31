@@ -20,7 +20,11 @@ export const LIMIT_MERGE_BLOB = 8 * MIB;
 export const LIMIT_OBJECT = 64 * MIB;
 /** Commits and trees kept from an over-wide blob:none pack. Half an object, so a harvest cannot hide a second full one. */
 export const LIMIT_HARVEST = LIMIT_OBJECT / 2;
-/** Band-1 bytes one buffered fetch or advertisement may hold. Two objects, on the wire. */
+/**
+ * Band-1 (pack) bytes one fetch may deliver, buffered or streamed, and band-2 bytes beside them; also one advertisement,
+ * one receive-pack report. Two objects, on the wire. A streamed blob holds none of it, but its ingress has to end
+ * somewhere a caller controls: 128 MiB is above GitHub's 100 MiB file cap, so any blob GitHub stores streams under it.
+ */
 export const LIMIT_PACK_WIRE = LIMIT_OBJECT * 2;
 /** Result size a delta header may claim (gitformat-pack "Deltified representation"). Same ceiling as one object. */
 export const LIMIT_DELTA_RESULT = LIMIT_OBJECT;

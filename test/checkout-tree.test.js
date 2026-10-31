@@ -217,20 +217,36 @@ test('a tree naming one entry twice (a symlink `a` beside a directory `a`) is re
   assert.deepEqual(readdirSync(dir), []);
 });
 
-test('limits: entries walked, depth, the tree pack, and blob batches split down to streams under maxPackBytes', async () => {
+test('limits: entries walked, depth, the tree pack, blob batches split under maxPackBytes, a single blob over it refused', async () => {
   // the tree pack is 15 objects (commit + 14 trees); walking it visits 36 entries (22 files + 13 trees + 1 gitlink)
   await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), limits: withLimits({ maxPackObjects: 20 }), batch: 5 }), e => e.code === 'limit_exceeded' && e.what === 'checkout entries' && e.got === 21);
   await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), limits: withLimits({ maxPathDepth: 4 }) }), e => e.code === 'limit_exceeded' && e.what === 'path depth');
   await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), limits: withLimits({ maxPackBytes: 512 }) }), e => e.code === 'limit_exceeded' && e.what === 'pack bytes');
   for (const batch of [0, 1.5, 'x', 200_001]) await assert.rejects(checkoutTree(R.url, {}, { tracer: new Tracer(), batch }), e => e.code === 'bad_request' && e.what === 'batch');
-  // a cap the tree pack fits under but the blob batch (3 MiB big.bin, 58 KiB deflated) does not: split, the big blob streams alone
-  const max = 16 * 1024, t = traced(), dir = fresh();
+  // a cap the tree pack fits under but the whole blob batch does not, by one byte: split in half, both halves refetched
+  // under the cap and buffered (every fetch, streamed or buffered, stays under maxPackBytes)
+  const t0 = traced();
+  await checkoutDir(R.url, { dir: fresh() }, { tracer: t0.tracer });
+  const whole = t0.spans().find(s => s.name === 'git.upload-pack fetch' && s.attrs['git.fetch.filter'] === '').attrs['git.pack.bytes'];
+  const max = whole - 1, t = traced(), dir = fresh();
   await checkoutDir(R.url, { dir }, { tracer: t.tracer, limits: withLimits({ maxPackBytes: max }) });
   sameTree(clone(), dir);
   const blobs = t.spans().find(s => s.name === 'git.checkout.blobs').attrs;
-  assert.ok(blobs['git.checkout.blobs.splits'] >= 1, 'the batch was split'); assert.ok(blobs['git.checkout.blobs.streamed'] >= 1, 'big.bin streamed');
+  assert.equal(blobs['git.checkout.blobs.splits'], 1, 'the batch was split once'); assert.equal(blobs['git.checkout.blobs.fetches'], 2); assert.equal(blobs['git.checkout.blobs.streamed'], 0);
   for (const s of t.spans().filter(x => x.name === 'git.upload-pack fetch' && x.attrs['git.pack.bytes'] != null)) assert.ok(s.attrs['git.pack.bytes'] <= max, `a buffered pack of ${s.attrs['git.pack.bytes']} B`);
-  const read = t.spans().find(s => s.name === 'git.read.blob' && s.attrs['git.read.blob.size'] === 3 << 20);
+  // a cap under big.bin's own pack (3 MiB, 58 KiB deflated): the batch splits down to big.bin alone, whose stream is then
+  // over the cap too — limit_exceeded, never a stream read past maxPackBytes (before the endless-body fix it streamed)
+  const t2 = traced(), dir2 = fresh();
+  const err = await checkoutDir(R.url, { dir: dir2 }, { tracer: t2.tracer, limits: withLimits({ maxPackBytes: 16 * 1024 }) }).catch(e => e);
+  assert.equal(err.code, 'limit_exceeded', err.message); assert.equal(err.what, 'pack bytes'); assert.equal(err.max, 16 * 1024);
+  const b2 = t2.spans().find(s => s.name === 'git.checkout.blobs').attrs;
+  assert.ok(b2['git.checkout.blobs.splits'] >= 1, 'the batch was split'); assert.ok(b2['git.checkout.blobs.streamed'] >= 1, 'big.bin was fetched alone');
+  assert.ok(!existsSync(join(dir2, 'big.bin')), 'the refused blob left no file');
+  // a single blob under the cap still streams: batch 1 with the cap just above big.bin's pack
+  const t3 = traced(), dir3 = fresh();
+  await checkoutDir(R.url, { dir: dir3 }, { tracer: t3.tracer, limits: withLimits({ maxPackBytes: 64 * 1024 }), batch: 1 });
+  sameTree(clone(), dir3);
+  const read = t3.spans().find(s => s.name === 'git.read.blob' && s.attrs['git.read.blob.size'] === 3 << 20);
   assert.equal(read.attrs['git.read.blob.verified'], true);
 });
 

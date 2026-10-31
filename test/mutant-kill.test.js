@@ -29,7 +29,7 @@ import { negotiate } from '../src/negotiate.js';
 import {
   OID_BYTES, OID_HEX_CHARS, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
-  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS,
+  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
 
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
@@ -1322,4 +1322,122 @@ test('size varints stop at 64 bits: a header that never ends is pack_corrupt at 
   throws(() => spStep(sp, Uint8Array.of(0x80)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   assert.equal(spStep(sp, Uint8Array.of(0)).state.phase, 'body');
   throws(() => spStep(spInit(), concat([packHead, ones(1 << 20)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+});
+
+
+
+// The zlib stream of an object declared S bytes may not run past zlibBound(S) = S + ⌈S/8⌉ + ⌈S/64⌉ + 13 (format.js; the
+// inequalities against zlib's deflateBound forms are in format-facts.test.js). Before this bound, a stream of non-final
+// empty stored blocks (`00 00 00 ff ff`: 5 bytes in, 0 bytes out) was accepted by every path until the request timer:
+// readFile took 793.6 MiB and editFile 632.7 MiB in 8 s, both `timeout`. Now the buffered inflate refuses it at the first
+// block boundary past the bound (and a stream that ends past the bound, at its end), spStep refuses the streamed body on
+// the chunk that crosses it, and the same empty stored blocks exactly at the bound still inflate.
+test('zlib stream length is bounded by the declared size: inflate (both checks), spStep; exactly at the bound passes, one past fails', async () => {
+  const { Sha1 } = await import('../src/sha1.js');
+  const storedBlock = (data, final) => concat([Uint8Array.of(final ? 1 : 0, data.length & 0xff, data.length >> 8, ~data.length & 0xff, (~data.length >> 8) & 0xff), data]);
+  const adlerBytes = n => Uint8Array.of(n >>> 24, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+  const emptyBlocks = k => Array.from({ length: k }, () => storedBlock(new Uint8Array(0), false));
+  const streamOf = (data, k) => concat([Uint8Array.of(0x78, 0x01), ...emptyBlocks(k), storedBlock(data, true), adlerBytes(adler32(data))]);
+  const ten = te.encode('0123456789');
+  assert.equal(zlibBound(10), 26);
+  const exact = streamOf(ten, 1), over = streamOf(ten, 2);                          // 2 + 5·k + 15 + 4: 26 at k = 1, 31 at k = 2
+  assert.equal(exact.length, 26); assert.equal(over.length, 31);
+  assert.deepEqual([...zlib.inflateSync(exact)], [...ten]); assert.deepEqual([...zlib.inflateSync(over)], [...ten], 'zlib itself accepts both: the bound is ours');
+
+  // the empirical half of the bound: node's zlib (every level, strategy, memLevel 1/2/8/9 and windowBits 9/15 — the memLevel
+  // 1 and 2 cases are the storelen/fixedlen regimes) never emits more than zlibBound(S) for S bytes, incompressible or not
+  const rnd = n => { const b = new Uint8Array(n); let x = 0x9e3779b9 ^ n; for (let i = 0; i < n; i++) { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; b[i] = x & 0xff; } return b; };
+  const inputs = [...Array.from({ length: 70 }, (_, n) => n), 127, 128, 255, 256, 1000, 4096, 65535, 65536, 1 << 20].flatMap(n => [rnd(n), new Uint8Array(n).fill(0x61), te.encode('ab'.repeat(n >> 1))]);
+  let deflates = 0;
+  for (const d of inputs) for (const level of [-1, 0, 1, 6, 9]) for (const strategy of [0, 1, 2, 3, 4]) for (const memLevel of d.length > 5000 ? [8] : [1, 2, 8, 9]) for (const windowBits of [9, 15]) {
+    const z = zlib.deflateSync(d, { level, strategy, memLevel, windowBits }); deflates++;
+    assert.ok(z.length <= zlibBound(d.length), `zlib emitted ${z.length} B for ${d.length} B (bound ${zlibBound(d.length)}) at level ${level} strategy ${strategy} memLevel ${memLevel} windowBits ${windowBits}`);
+  }
+  assert.ok(deflates > 10_000, `${deflates} deflates`);
+
+  // inflate, end check: consumed > bound is pack_corrupt even though every block started inside the bound (at 2, 7, 12 ≤ 26).
+  // `pos` is non-zero so the consumed count is measured from the stream's start, not the buffer's.
+  const junk = new Uint8Array(7).fill(0xee);
+  const ok = inflate(concat([junk, exact]), junk.length, { expectedSize: 10 });
+  assert.equal(ok.consumed, 26); assert.deepEqual([...ok.out], [...ten]);
+  throws(() => inflate(concat([junk, over]), junk.length, { expectedSize: 10 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 26 for 10 bytes)');
+  // without an expected size the output cap stands in for the declared size: zlibBound(14) = 30 < 31 = zlibBound(15)
+  throws(() => inflate(over, 0, { maxOutput: 14 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 30 for 14 bytes)');
+  assert.equal(inflate(over, 0, { maxOutput: 15 }).consumed, 31);
+  // an expected size of 0 is a size, not an absent one: zlibBound(0) = 13 (zlib's own empty stream is 8 bytes; a stored one 11)
+  const empty = new Uint8Array(0);
+  assert.equal(inflate(streamOf(empty, 0), 0, { expectedSize: 0 }).consumed, 11);
+  throws(() => inflate(streamOf(empty, 1), 0, { expectedSize: 0 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (16 > 13 for 0 bytes)');
+
+  // inflate, block-start check (what ends an endless stream): zlibBound(2) = 17 and block boundaries fall at 2, 7, 12, 17, 22.
+  // A stream cut at 17 is still "unexpected end" (17 is not past the bound); one cut at 22 is refused as too long before the
+  // reader asks for more input; 1 MiB of empty stored blocks is refused by the same check at the same byte, in microseconds.
+  const two = te.encode('ab');
+  assert.equal(zlibBound(2), 17);
+  const blocks = k => concat([Uint8Array.of(0x78, 0x01), ...emptyBlocks(k)]);
+  throws(() => inflate(concat([junk, blocks(3)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(concat([junk, blocks(4)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  assert.equal(inflate(streamOf(two, 0), 0, { expectedSize: 2 }).consumed, 13);
+  throws(() => inflate(streamOf(two, 1), 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (18 > 17 for 2 bytes)');
+  const mib = new Uint8Array(1 << 20); mib.set([0x78, 0x01]); for (let i = 2; i + 5 <= mib.length; i += 5) mib.set([0, 0, 0, 0xff, 0xff], i);
+  const t0 = performance.now();
+  throws(() => inflate(mib, 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  assert.ok(performance.now() - t0 < 100, 'the endless stream was walked, not refused');
+  // parsePack (the buffered path) takes the same refusal through inflate for the first object
+  const hostile = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), encodeObjHeader(TYPE.BLOB, 2), blocks(20), new Uint8Array(20)]);
+  throws(() => parsePack(hostile), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+
+  // spStep: the streamed body is refused on the byte that takes the zlib bytes (the body minus the 20-byte trailer lag) past
+  // the bound. The message carries no byte count, so it is the same whatever the chunking (I10, props.test.js).
+  const packOf = z => { const body = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), encodeObjHeader(TYPE.BLOB, 10), z]); return concat([body, new Sha1().update(body).digest()]); };
+  const atBound = spFinish(spStep(spInit(), packOf(exact)).state);
+  assert.equal(atBound.zlibBytes, 26); assert.equal(atBound.size, 10);
+  const longer = 'pack: zlib stream longer than its declared size allows (10-byte object, 26-byte bound)';
+  throws(() => spStep(spInit(), packOf(over)), 'pack_corrupt', longer);
+  assert.throws(() => spStep(spInit(), packOf(over)), e => e.got === 31 && e.max === 26 && e.size === 10, 'the fields carry the count the message leaves out');
+  const hdrLen = PACK_HEADER_BYTES + encodeObjHeader(TYPE.BLOB, 10).length;
+  let sp = spInit(), at = -1;
+  const bytes = packOf(over);
+  for (let i = 0; i < bytes.length && at < 0; i++) {
+    try { sp = spStep(sp, bytes.subarray(i, i + 1)).state; } catch (e) { assert.equal(e.code, 'pack_corrupt'); assert.equal(e.message, longer); assert.deepEqual([e.got, e.max, e.size], [27, 26, 10]); at = i; }
+  }
+  assert.equal(sp.zlibBytes, 26, 'the state before the refusing byte is exactly at the bound');
+  assert.equal(at, hdrLen + 26 + 20, 'the 27th zlib byte is body byte 47 (20 of them are still the withheld trailer lag)');
+});
+
+// Every consumer of packStream (fetchSingle, fetchWide, fetchPackOnce, streamBlobEdit, openBlob, checkoutTree's streams)
+// gets limits.maxPackBytes from v2Step, before the frame is yielded: band 1 as 'pack bytes', band 2 as 'progress bytes'.
+// A consumer cannot forget the cap, and a missing limit is bad_request on the first frame.
+const sidebandFrame = (n, len) => ({ kind: 'data', payload: concat([Uint8Array.of(n), new Uint8Array(len).fill(0x78)]) });
+test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of packStream', () => {
+  const line = s => ({ kind: 'data', payload: te.encode(s) });
+  const band = sidebandFrame;
+  const limits = withLimits({ maxPackBytes: 10 });
+  let st = v2Step(v2Init(limits), line('packfile')).state;
+  const feed = f => { const r = v2Step(st, f); st = r.state; return r; };
+  assert.equal(feed(band(SIDEBAND_PACK, 6)).pack.length, 6);
+  assert.equal(feed(band(SIDEBAND_PACK, 4)).pack.length, 4);
+  assert.equal(st.band1, 10);
+  assert.equal(feed(band(SIDEBAND_PROGRESS, 10)).pack, null);
+  assert.equal(st.band2, 10);
+  assert.throws(() => feed(band(SIDEBAND_PACK, 1)), e => e.code === 'limit_exceeded' && e.message === 'pack bytes 11 exceeds limit 10' && e.what === 'pack bytes' && e.got === 11 && e.max === 10);
+  assert.throws(() => feed(band(SIDEBAND_PROGRESS, 1)), e => e.code === 'limit_exceeded' && e.message === 'progress bytes 11 exceeds limit 10' && e.what === 'progress bytes' && e.got === 11 && e.max === 10);
+  assert.equal(feed(band(SIDEBAND_PACK, 0)).pack.length, 0, 'an empty frame at the cap is not past it');
+  throws(() => v2Step({ ...v2Init(), limits: { maxSectionLines: 1 } }, line('packfile')), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
+});
+
+// receive-pack's band 2 (hook stderr, the host's explanation) is held to the cap its band-1 report already had: a flood of it
+// used to be read until the request timer, with the tail kept but the bytes unbounded.
+test('push holds band 2 to maxPackBytes, the same cap as its report', async () => {
+  const band = sidebandFrame;
+  const deletes = [{ ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID }];
+  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt('ok refs/heads/a\n')]) };
+  const pushT = frames => ({ limits: withLimits({ maxPackBytes: 50 }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
+  const fifty = await push(pushT([band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }]), { commands: deletes, sideband: true });
+  assert.equal(fifty.report.ok, true); assert.equal(fifty.hookOutput.length, 50);
+  await assert.rejects(push(pushT([band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), band(SIDEBAND_PROGRESS, 1), report, { kind: 'flush' }]), { commands: deletes, sideband: true }),
+    e => e.code === 'limit_exceeded' && e.what === 'progress bytes' && e.got === 51 && e.max === 50);
+  // the report's own cap (band 1), already there, with the same numbers
+  const wide = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt(`ok refs/heads/a${' '.repeat(60)}\n`)]) };
+  await assert.rejects(push(pushT([wide, { kind: 'flush' }]), { commands: deletes, sideband: true }), e => e.code === 'limit_exceeded' && e.what === 'report bytes' && e.max === 50);
 });

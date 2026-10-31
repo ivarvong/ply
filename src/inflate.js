@@ -14,7 +14,7 @@ import {
   DEFLATE_HLIT_MAX, DEFLATE_HDIST_MAX, DEFLATE_CODELEN_CODES, DEFLATE_CODELEN_BITS,
   DEFLATE_REPEAT_PREV, DEFLATE_REPEAT_ZERO3,
   DEFLATE_REPEAT16_BASE, DEFLATE_REPEAT16_BITS, DEFLATE_REPEAT17_BASE, DEFLATE_REPEAT17_BITS,
-  DEFLATE_REPEAT18_BASE, DEFLATE_REPEAT18_BITS, DEFLATE_BFINAL_BITS, BYTE_SHIFT, BE32_SHIFTS, ADLER_SHIFT,
+  DEFLATE_REPEAT18_BASE, DEFLATE_REPEAT18_BITS, DEFLATE_BFINAL_BITS, BYTE_SHIFT, BE32_SHIFTS, ADLER_SHIFT, zlibBound,
 } from './format.js';
 const bad = msg => fail('pack_corrupt', msg);
 /* oxlint-disable no-magic-numbers -- RFC 1951 §3.2.5 length/distance alphabets and the fixed Huffman assignment */
@@ -66,6 +66,13 @@ export function inflate(buf, pos = 0, opts = {}) {
   if (expectedSize !== undefined) {
     if (expectedSize > maxOutput) throw fail('limit_exceeded', `inflate: expected size ${expectedSize} exceeds limit ${maxOutput}`);
   }
+  // The stream may not run past zlibBound of the size it will produce (format.js): a run of non-final empty stored blocks
+  // (5 bytes in, 0 out) used to be consumed to the end of the buffer, so a pack's bytes bounded its CPU, not its objects.
+  // Without an expected size the output cap stands in. Checked where a block starts (so an endless stream is refused a
+  // few bytes past the bound, before any more of it is read) and when the stream ends (a last block may be long).
+  const declared = expectedSize ?? maxOutput;
+  const maxInput = zlibBound(declared);
+  const tooLong = n => bad(`inflate: zlib stream longer than its declared size allows (${n} > ${maxInput} for ${declared} bytes)`);
   // Stryker disable next-line ArithmeticOperator,MethodExpression: the buffer is grown until it holds the output, so a different positive initial guess yields the same bytes
   const guess = Math.max(256, (buf.length - pos) * 3); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
   let out = new Uint8Array(expectedSize ?? Math.min(maxOutput, guess));
@@ -128,6 +135,7 @@ export function inflate(buf, pos = 0, opts = {}) {
 
   let last;
   do {
+    if (p - start > maxInput) throw tooLong(p - start);
     last = bits(DEFLATE_BFINAL_BITS);
     const type = bits(DEFLATE_BTYPE_BITS);
     stats.blocks++;
@@ -176,5 +184,6 @@ export function inflate(buf, pos = 0, opts = {}) {
     p += ADLER_BYTES;
   }
   if (expectedSize !== undefined && o !== expectedSize) throw bad(`inflate: size ${o} != expected ${expectedSize}`);
+  if (p - start > maxInput) throw tooLong(p - start);
   return { out: result, consumed: p - start, stats };
 }
