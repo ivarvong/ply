@@ -93,31 +93,31 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 
 | where | mode | via | registry |
 |---|---|---|---|
-| `src/bytes.ts:12` decodeStrict() | strict | strict | **HOLE (data path)** |
-| `src/bytes.ts:50` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:57` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:60` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:89` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
-| `src/bytes.ts:105` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
-| `src/discover.ts:28` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
-| `src/fetch.ts:160` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
-| `src/fetch.ts:167` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
-| `src/http.ts:48` utf8() | replacement | td | **HOLE (data path)** |
-| `src/http.ts:212` post() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
-| `src/lsrefs.ts:90` lsRefs() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts:94` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
-| `src/objects.ts:97` parseTree() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts:258` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts:325` parseTag() | lossless | decodeBytes | `git-bytes` / field |
-| `src/packcache.ts:22` isCacheableFetch() | replacement | td | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
-| `src/push.ts:116` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
-| `src/push.ts:168` classifyReport() | lossless | decodeBytes | `git-bytes` / field |
-| `src/push.ts:334` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
-| `src/push.ts:335` push() | lossless | decodeBytes | excluded: display-only: band 2 progress and the band 3 message |
-| `src/receivecaps.ts:19` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
-| `src/receivecaps.ts:51` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
-| `src/receivecaps.ts:58` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
-| `src/sign.ts:54` withGpgsig() | lossless | decodeBytes | `sign` / case |
+| `src/bytes.ts` decodeStrict() | strict | strict | **HOLE (data path)** |
+| `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.ts` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
+| `src/bytes.ts` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
+| `src/discover.ts` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
+| `src/fetch.ts` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
+| `src/fetch.ts` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
+| `src/http.ts` utf8() | replacement | td | **HOLE (data path)** |
+| `src/http.ts` post() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
+| `src/lsrefs.ts` lsRefs() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
+| `src/objects.ts` parseTree() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts` parseTag() | lossless | decodeBytes | `git-bytes` / field |
+| `src/packcache.ts` isCacheableFetch() | replacement | td | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
+| `src/push.ts` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
+| `src/push.ts` classifyReport() | lossless | decodeBytes | `git-bytes` / field |
+| `src/push.ts` push() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
+| `src/push.ts` push() | lossless | decodeBytes | excluded: display-only: band 2 progress and the band 3 message |
+| `src/receivecaps.ts` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
+| `src/receivecaps.ts` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
+| `src/receivecaps.ts` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
+| `src/sign.ts` withGpgsig() | lossless | decodeBytes | `sign` / case |
 
 ## Holes (72)
 
@@ -128,85 +128,85 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | category | id | where | what |
 |---|---|---|---|
 | git | `fsck:unknownType` | git fsck.h:61 FOREACH_FSCK_MSG_ID() | fsck-msg: UNKNOWN_TYPE ERROR |
-| decisions | `src/bytes.ts#decodeStrict:decode:strict:b` | src/bytes.ts:12 decodeStrict() | &lt;decode:strict>: b |
-| decisions | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:405 once() | pack_corrupt: expected …, got … |
-| decisions | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:403 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
-| decisions | `src/http.ts#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.ts:48 utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
-| decisions | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts:150 codes() | pack_corrupt: inflate: bad distance symbol |
-| decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts:94 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
-| decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts:96 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
-| decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:203 flush() | pack_corrupt: blob content hashes to …, not … |
-| failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js:244 begin() | pack_corrupt: expected blob, got type … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js:277 streamBlobEdit() | pack_corrupt: inflated … != header size … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js:257 streamBlobEdit() | pack_corrupt: inflated bytes before header |
-| failsites | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:405 once() | pack_corrupt: expected …, got … |
-| failsites | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:403 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
-| failsites | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts:150 codes() | pack_corrupt: inflate: bad distance symbol |
-| failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts:94 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
-| failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts:96 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
-| failsites | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:203 flush() | pack_corrupt: blob content hashes to …, not … |
-| failsites | `src/read.js#flush:pack_corrupt:inflated … != declared …` | src/read.js:201 flush() | pack_corrupt: inflated … != declared … |
-| failsites | `src/read.js#transform:pack_corrupt:server streamed more than the … bytes it declared` | src/read.js:195 transform() | pack_corrupt: server streamed more than the … bytes it declared |
+| decisions | `src/bytes.ts#decodeStrict:decode:strict:b` | src/bytes.ts decodeStrict() | &lt;decode:strict>: b |
+| decisions | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts once() | pack_corrupt: expected …, got … |
+| decisions | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts once() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| decisions | `src/http.ts#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.ts utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
+| decisions | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts codes() | pack_corrupt: inflate: bad distance symbol |
+| decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
+| decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
+| decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js flush() | pack_corrupt: blob content hashes to …, not … |
+| failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js begin() | pack_corrupt: expected blob, got type … |
+| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js streamBlobEdit() | pack_corrupt: inflated … != header size … |
+| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js streamBlobEdit() | pack_corrupt: inflated bytes before header |
+| failsites | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts once() | pack_corrupt: expected …, got … |
+| failsites | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts once() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| failsites | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts codes() | pack_corrupt: inflate: bad distance symbol |
+| failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
+| failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
+| failsites | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js flush() | pack_corrupt: blob content hashes to …, not … |
+| failsites | `src/read.js#flush:pack_corrupt:inflated … != declared …` | src/read.js flush() | pack_corrupt: inflated … != declared … |
+| failsites | `src/read.js#transform:pack_corrupt:server streamed more than the … bytes it declared` | src/read.js transform() | pack_corrupt: server streamed more than the … bytes it declared |
 
 ### Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous) (5)
 
 | category | id | where | what |
 |---|---|---|---|
-| decisions | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts:165 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
-| decisions | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts:140 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
-| failsites | `src/rebase.ts#pickCommit:not_linear:… has … parents; only single-parent commits are picked` | src/rebase.ts:212 pickCommit() | not_linear: … has … parents; only single-parent commits are picked |
-| failsites | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts:165 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
-| failsites | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts:140 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
+| decisions | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
+| decisions | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
+| failsites | `src/rebase.ts#pickCommit:not_linear:… has … parents; only single-parent commits are picked` | src/rebase.ts pickCommit() | not_linear: … has … parents; only single-parent commits are picked |
+| failsites | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
+| failsites | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
 
 ### Severity 3: the rest (caller input, limits, local I/O) (47)
 
 | category | id | where | what |
 |---|---|---|---|
 | git | `upload-pack.c:die:send_err_and_die:%s` | git upload-pack.c:1060 send_err_and_die() | die: %s |
-| decisions | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
-| decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
-| decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
-| decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:423 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:483 attributeTree() | not_found: attributes ref … not found |
-| decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:419 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
-| decisions | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:565 mergeBranch() | bad_request: author is required for a merge commit |
-| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts:532 mergeBranch() | not_found: ref … not found |
-| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts:532 mergeBranch() | not_found: ref … not found |
-| decisions | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts:21 negotiate() | bad_request: negotiate rounds must be an integer |
-| decisions | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts:50 linearChain() | limit_exceeded: rebase chain |
-| decisions | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts:202 pickCommit() | bad_request: commit must be a 40-hex oid |
-| decisions | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts:208 pickCommit() | not_found: ref … not found |
-| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| decisions | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts:82 coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
-| decisions | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
-| decisions | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
-| decisions | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts:222 validateMessage() | bad_request: message |
-| decisions | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts:215 validatePath() | bad_request: path |
-| decisions | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts:59 validateRef() | bad_request: ref |
-| failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
-| failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
-| failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
-| failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:423 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| failsites | `src/fetch.ts#once:limit_exceeded:object size#2` | src/fetch.ts:404 once() | limit_exceeded: object size |
-| failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:483 attributeTree() | not_found: attributes ref … not found |
-| failsites | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:419 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
-| failsites | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:565 mergeBranch() | bad_request: author is required for a merge commit |
-| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts:532 mergeBranch() | not_found: ref … not found |
-| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts:532 mergeBranch() | not_found: ref … not found |
-| failsites | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts:21 negotiate() | bad_request: negotiate rounds must be an integer |
-| failsites | `src/push.ts#push:bad_request:push: oids must be 40-hex` | src/push.ts:294 push() | bad_request: push: oids must be 40-hex |
-| failsites | `src/read.js#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:200 flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
-| failsites | `src/read.js#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:169 openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
-| failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts:50 linearChain() | limit_exceeded: rebase chain |
-| failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts:202 pickCommit() | bad_request: commit must be a 40-hex oid |
-| failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts:208 pickCommit() | not_found: ref … not found |
-| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| failsites | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts:82 coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
-| failsites | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
-| failsites | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
-| failsites | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts:222 validateMessage() | bad_request: message |
-| failsites | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts:215 validatePath() | bad_request: path |
-| failsites | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts:59 validateRef() | bad_request: ref |
+| decisions | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js checkoutDir() | bad_request: dir must be a non-empty string |
+| decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js slurp() | limit_exceeded: symlink target |
+| decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js writeFiles() | bad_request: already exists |
+| decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
+| decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts attributeTree() | not_found: attributes ref … not found |
+| decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
+| decisions | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts mergeBranch() | bad_request: author is required for a merge commit |
+| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts mergeBranch() | not_found: ref … not found |
+| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts mergeBranch() | not_found: ref … not found |
+| decisions | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiate() | bad_request: negotiate rounds must be an integer |
+| decisions | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
+| decisions | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
+| decisions | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
+| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
+| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
+| decisions | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
+| decisions | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js keep() | limit_exceeded: directory bytes |
+| decisions | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js keep() | limit_exceeded: files |
+| decisions | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
+| decisions | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
+| decisions | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
+| failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js checkoutDir() | bad_request: dir must be a non-empty string |
+| failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js slurp() | limit_exceeded: symlink target |
+| failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js writeFiles() | bad_request: already exists |
+| failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
+| failsites | `src/fetch.ts#once:limit_exceeded:object size#2` | src/fetch.ts once() | limit_exceeded: object size |
+| failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts attributeTree() | not_found: attributes ref … not found |
+| failsites | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
+| failsites | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts mergeBranch() | bad_request: author is required for a merge commit |
+| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts mergeBranch() | not_found: ref … not found |
+| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts mergeBranch() | not_found: ref … not found |
+| failsites | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiate() | bad_request: negotiate rounds must be an integer |
+| failsites | `src/push.ts#push:bad_request:push: oids must be 40-hex` | src/push.ts push() | bad_request: push: oids must be 40-hex |
+| failsites | `src/read.js#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
+| failsites | `src/read.js#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
+| failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
+| failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
+| failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
+| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
+| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
+| failsites | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
+| failsites | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js keep() | limit_exceeded: directory bytes |
+| failsites | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js keep() | limit_exceeded: files |
+| failsites | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
+| failsites | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
+| failsites | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
 
