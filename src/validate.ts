@@ -70,10 +70,13 @@ export function validateRef(ref: unknown): string {
 // full name to check_refname_format, so every component passes; what is left is the part after refs/ as a refname of its
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
-export function validatePushRef(ref, deleting) {
-  const name = validateRef(ref).slice(5); // after "refs/"
+export function validatePushRef(ref: unknown, deleting: boolean): string {
+  // validateRef returns the ref it was given, now known to be a string
+  const checked = validateRef(ref);
+  // after "refs/"
+  const name = checked.slice(5);
   if (name === '@' || (!deleting && !name.includes('/'))) throw bad('ref', 'receive-pack refuses it (funny refname)');
-  return ref;
+  return checked;
 }
 
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
