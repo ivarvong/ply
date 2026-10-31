@@ -43,13 +43,12 @@ export function huffBuild(lengths: ArrayLike<number>): Huffman {
   const symbol = new Uint16Array(lengths.length);
   const offs = new Uint16Array(DEFLATE_BIT_TABLE);
   // Stryker disable next-line EqualityOperator: one past the end reads undefined, and count[0] is cleared on the next line
-  // not `(count[k] as number)++`: Stryker drops the parentheses when it mutates that form and the file no longer parses
-  for (let i = 0; i < lengths.length; i++) { const k = lengths[i] as number; count[k] = (count[k] as number) + 1; }
+  for (let i = 0; i < lengths.length; i++) { const l = lengths[i] as number; count[l] = (count[l] as number) + 1; }
   count[0] = 0;
   // Stryker disable next-line EqualityOperator: offs is DEFLATE_BIT_TABLE long, so the extra index is ignored
   for (let l = 1; l < DEFLATE_BIT_TABLE; l++) offs[l] = (offs[l - 1] as number) + (count[l - 1] as number);
   // Stryker disable next-line EqualityOperator: lengths[lengths.length] is undefined and the if skips it
-  for (let s = 0; s < lengths.length; s++) { const k = lengths[s] as number; if (k) { const at = offs[k] as number; offs[k] = at + 1; symbol[at] = s; } }
+  for (let s = 0; s < lengths.length; s++) { const l = lengths[s] as number; if (l) { const at = offs[l] as number; symbol[at] = s; offs[l] = at + 1; } }
   return { count, symbol };
 }
 
