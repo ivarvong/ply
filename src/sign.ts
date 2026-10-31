@@ -8,7 +8,7 @@ import { fail, orThrow } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { ok } from './result.js';
 import type { Result } from './result.js';
-import { te, concat, decodeBytes, encodeBytes } from './bytes.js';
+import { te, bufferSource, concat, decodeBytes, encodeBytes } from './bytes.js';
 import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
 
 const u32 = (n: number): Uint8Array => Uint8Array.from([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
@@ -31,7 +31,7 @@ export function armor(blob: Uint8Array): string {
 export type Signer = {
   readonly kind: 'ssh-ed25519';
   readonly publicKeyLine: string;
-  sign(message: Uint8Array<ArrayBuffer>, namespace?: string): Promise<string>;
+  sign(message: Uint8Array, namespace?: string): Promise<string>;
 };
 export type SignerKey = { readonly privateKey: CryptoKey; readonly publicKeyRaw: Uint8Array };
 
@@ -39,8 +39,8 @@ export function ed25519Signer({ privateKey, publicKeyRaw }: SignerKey): Signer {
   const pub = sshPublicKey(publicKeyRaw);
   return {
     kind: KEY_TYPE, publicKeyLine: pub.line,
-    async sign(message: Uint8Array<ArrayBuffer>, namespace = 'git'): Promise<string> {
-      const h = new Uint8Array(await crypto.subtle.digest('SHA-512', message));
+    async sign(message: Uint8Array, namespace = 'git'): Promise<string> {
+      const h = new Uint8Array(await crypto.subtle.digest('SHA-512', bufferSource(message)));
       const toSign: Uint8Array<ArrayBuffer> = concat([MAGIC, sshString(namespace), sshString(''), sshString('sha512'), sshString(h)]);
       const sig = new Uint8Array(await crypto.subtle.sign('Ed25519', privateKey, toSign));
       const blob: Uint8Array = concat([MAGIC, u32(1), sshString(pub.wire), sshString(namespace), sshString(''), sshString('sha512'), sshString(concat([sshString(KEY_TYPE), sshString(sig)]))]);
@@ -68,7 +68,7 @@ export function gpgsigSplice(commitBytes: Uint8Array, signatureText: string): Re
 export const withGpgsig = (commitBytes: Uint8Array, signatureText: string): Uint8Array<ArrayBuffer> => orThrow(gpgsigSplice(commitBytes, signatureText));
 
 // Sign an encoded (unsigned) commit: returns the signed commit bytes. The message signed is the unsigned commit.
-export async function signCommit(commitBytes: Uint8Array<ArrayBuffer>, signer: Signer, namespace = 'git'): Promise<Uint8Array<ArrayBuffer>> {
+export async function signCommit(commitBytes: Uint8Array, signer: Signer, namespace = 'git'): Promise<Uint8Array<ArrayBuffer>> {
   return withGpgsig(commitBytes, await signer.sign(commitBytes, namespace));
 }
 

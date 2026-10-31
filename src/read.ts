@@ -19,6 +19,7 @@ import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
+import { bufferSource } from './bytes.js';
 import { KIND } from './otel.js';
 import type { Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
@@ -28,7 +29,7 @@ import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Bytes, Caught, EntryOptions, TypeNames } from './boundary.js';
+import type { Caught, EntryOptions, TypeNames } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable require-await -- the entry points are async so that a throw while checking arguments is a rejection, as before */
@@ -218,7 +219,7 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   const it: AsyncIterator<Uint8Array> = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
   let sp: SpState = spInit();
-  const early: Array<Uint8Array<ArrayBuffer>> = [];
+  const early: Uint8Array[] = [];
   // the first of failure, cancellation and verified end records the outcome; whatever follows (a cancel aborting the
   // pump) leaves the ended spans alone
   const failHere = (e: unknown): unknown => {
@@ -233,8 +234,7 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) throw fail('pack_corrupt', 'pack ended before the object header');
       const r = spStep(sp, value); sp = r.state;
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
-      early.push(...(r.zlib as Bytes[]));
+      early.push(...r.zlib);
     }
     if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${(TYPE_NAME as TypeNames)[sp.type] ?? sp.type}`);
   } catch (e) { await it.return?.().catch(() => { /* the read already failed */ }); throw failHere(e); }
@@ -243,14 +243,13 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   const ds = new DecompressionStream('deflate');
   const writer = ds.writable.getWriter();
   const pump = (async () => {
-    for (const z of early) await writer.write(z);
+    for (const z of early) await writer.write(bufferSource(z));
     for (;;) {
       const { value, done } = await it.next();
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- see above
       if (done) break;
       const r = spStep(sp, value); sp = r.state;
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
-      for (const z of r.zlib) await writer.write(z as Bytes);
+      for (const z of r.zlib) await writer.write(bufferSource(z));
     }
     sp = spFinish(sp); // pack trailer checksum
     fetchSpan.end();

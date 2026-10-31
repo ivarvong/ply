@@ -33,7 +33,7 @@ import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Bytes, Caught } from './boundary.js';
+import type { Caught } from './boundary.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const BLOB_MODES: ReadonlySet<string> = new Set([MODE_BLOB, MODE_EXEC, MODE_LINK]);
@@ -153,11 +153,10 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
     const base = old.get(dir);
     const delta = base ? makeDelta(base.data, t.data).delta : null;
     // git's patch_delta rejects a delta under DELTA_SIZE_MIN; a delta no smaller than the tree is not worth the base lookup
-    // ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
-    trees.push(delta && delta.length >= DELTA_SIZE_MIN && delta.length < t.data.length ? { type: TYPE.TREE, data: delta as Bytes, baseOid: (base as { readonly oid: string }).oid } : { type: TYPE.TREE, data: t.data as Bytes });
+    trees.push(delta && delta.length >= DELTA_SIZE_MIN && delta.length < t.data.length ? { type: TYPE.TREE, data: delta, baseOid: (base as { readonly oid: string }).oid } : { type: TYPE.TREE, data: t.data });
     for (const e of t.entries) {
       if (e.mode === MODE_TREE) walk(dir ? `${dir}/${e.name}` : e.name);
-      else if (BLOB_MODES.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Bytes }); }
+      else if (BLOB_MODES.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Uint8Array }); }
     }
   };
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */

@@ -13,7 +13,7 @@ import { push, ZERO_OID } from './push.js';
 import { spliceDelta } from './pack.js';
 import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident, objectHeader, TYPE } from './objects.js';
 import { fromHex, streamingSha1 } from './sha1.js';
-import { te, concat, indexOfBytes, bytesOf } from './bytes.js';
+import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
@@ -26,7 +26,7 @@ import type { PackObject } from './push.js';
 import type { Signer } from './sign.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import type { Bytes, Caught, EntryOptions } from './boundary.js';
+import type { Caught, EntryOptions } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -157,18 +157,18 @@ export type Level = { readonly treeOid: string; readonly data: Uint8Array; reado
 export type BlobEdit = {
   readonly oldOid: string;
   readonly newOid: string;
-  readonly delta: Bytes;
+  readonly delta: Uint8Array;
   readonly baseLen: number;
   readonly newLen: number;
   readonly matchOffset: number | undefined;
   readonly scan: ScanState;
   readonly inflated: number;
 };
-export type NewTree = { readonly type: number; readonly data: Bytes; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
+export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
 export type Built = {
   readonly trees: readonly NewTree[];
   readonly newTree: string;
-  readonly commitData: Bytes;
+  readonly commitData: Uint8Array;
   readonly newCommit: string;
   readonly objects: readonly PackObject[];
 };
@@ -187,8 +187,7 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
   for (const { treeOid: oldOid, data, entry } of levels.toReversed()) {
     const newData: Uint8Array = treeReplaceOid(data, entry, child);
     const newOid = hashObject('tree', newData);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
-    const delta = spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) }).delta as Bytes;
+    const delta = spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) }).delta;
     trees.unshift({ type: TYPE.TREE, data: delta, baseOid: oldOid, newOid, newData });
     child = newOid;
   }
@@ -206,7 +205,7 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
 }
 
 // Pure: the same build with a different commit object (e.g. the signed one): identity and pack entry follow the bytes.
-export function withCommitData(built: Built, commitData: Bytes): Built {
+export function withCommitData(built: Built, commitData: Uint8Array): Built {
   const newCommit = hashObject('commit', commitData);
   return { ...built, commitData, newCommit, objects: [{ type: TYPE.COMMIT, data: commitData }, ...built.objects.slice(1)] };
 }
@@ -296,8 +295,7 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
       try {
         for await (const chunk of packStream(t, { wants: [blobOid] }, fetchSpan)) {
           const r = spStep(sp, chunk); sp = r.state;
-          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ArrayBuffer-backed, as every buffer ply makes (boundary.ts Bytes)
-          for (const z of r.zlib) await writer.write(z as Bytes);
+          for (const z of r.zlib) await writer.write(bufferSource(z));
         }
         sp = spFinish(sp);
         await writer.close();
@@ -347,9 +345,9 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     if (scan.count !== 1) throw fail('match_count', `expected exactly one match, found ${scan.count}`, { matches: scan.count });
     if (scan.emitted !== newLen) throw fail('internal', `emitted ${scan.emitted} != ${newLen}`);
     const newOid = await sha.hex();
-    // exactly one match (checked above), so matches[0] is its offset; the delta is ArrayBuffer-backed (boundary.ts Bytes)
+    // exactly one match (checked above), so matches[0] is its offset
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const { delta, ops } = spliceDelta({ baseLen: sp.size, off: scan.matches[0] as number, oldLen: find.length, insert: replace }) as { readonly delta: Bytes; readonly ops: { readonly copy: number; readonly insert: number } };
+    const { delta, ops } = spliceDelta({ baseLen: sp.size, off: scan.matches[0] as number, oldLen: find.length, insert: replace });
     span.set({ 'git.edit.blob.new': newOid, 'git.edit.blob.match_offset': scan.matches[0], 'git.edit.blob.delta.bytes': delta.length, 'git.edit.blob.delta.copy_ops': ops.copy, 'git.edit.blob.delta.insert_ops': ops.insert });
     return { oldOid: blobOid, newOid, delta, baseLen: sp.size, newLen, matchOffset: scan.matches[0], scan, inflated };
   });

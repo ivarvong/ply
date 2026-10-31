@@ -50,7 +50,7 @@ export type Transport = {
   readonly quirks?: Quirks | null;
   readonly objects?: Harvest | null;
   readonly scrub: Scrub | null;
-  frames: (service: string, body: Uint8Array<ArrayBuffer>, span: Span, hints?: Hints) => AsyncIterable<Frame>;
+  frames: (service: string, body: Uint8Array, span: Span, hints?: Hints) => AsyncIterable<Frame>;
   advertise: (service: string, span: Span) => Promise<Uint8Array>;
 };
 
@@ -61,7 +61,7 @@ export type Loose = { readonly code?: unknown; readonly message?: unknown; reado
 export const UA = 'ply/0.1.0';
 export const proto = (msg: string): ErrorOf<'protocol'> => fail('protocol', msg);
 
-export const frames = (t: Transport, service: string, body: Uint8Array<ArrayBuffer>, span: Span, hints: Hints = {}): AsyncIterable<Frame> => t.frames(service, body, span, hints);
+export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncIterable<Frame> => t.frames(service, body, span, hints);
 // oxlint-disable-next-line typescript/promise-function-async -- a pass-through: the transport's own promise, unwrapped (async adds a wrapper and bytes)
 export const advertise = (t: Transport, service: string, span: Span): Promise<Uint8Array> => t.advertise(service, span);
 

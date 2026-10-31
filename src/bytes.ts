@@ -63,6 +63,14 @@ export function decodeBytes(b: Uint8Array): string {
   return s + strict.decode(b.subarray(run));
 }
 
+// The byte-array rule: every input is a plain `Uint8Array` (any backing buffer); a function that allocates returns
+// `Uint8Array<ArrayBuffer>`. The one exception is a Web API typed `BufferSource` (Blob, fetch's body, a stream writer,
+// crypto.subtle), which takes only ArrayBuffer-backed views: this is the single cast, and it is sound because a view of
+// anything else (a SharedArrayBuffer) is copied into a fresh ArrayBuffer first. Every ply buffer takes the no-copy branch.
+export const bufferSource = (b: Uint8Array): Uint8Array<ArrayBuffer> =>
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- checked: the view's buffer is an ArrayBuffer
+  b.buffer instanceof ArrayBuffer ? b as Uint8Array<ArrayBuffer> : b.slice();
+
 export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   let n = 0;
   for (const p of parts) n += p.length;

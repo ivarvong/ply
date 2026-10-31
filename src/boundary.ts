@@ -23,9 +23,5 @@ export type EntryOptions = Omit<OperationOpts, 'tracer' | 'fetchImpl' | 'attrs' 
   readonly fetchImpl?: (FetchLike & { readonly attrs?: () => Attrs }) | undefined;
 };
 
-// Bytes handed to a platform stream or to buildPack, which take ArrayBuffer-backed views. Every buffer ply makes is
-// ArrayBuffer-backed; the converted modules still return plain Uint8Array (ArrayBufferLike). TODO(A1): bytes.ts types.
-export type Bytes = Uint8Array<ArrayBuffer>;
-
 // objects.ts TYPE_NAME, indexed by a type number read off the wire (any number: a lookup may miss).
 export type TypeNames = Readonly<Record<number, string | undefined>>;

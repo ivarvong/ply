@@ -355,7 +355,7 @@ const requestBody = (plan: PushPlan, pack: Uint8Array | null): Uint8Array<ArrayB
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the
 // response end the read as `lost`; the stream otherwise ends as a report or broken. `reading` is the last reading state.
 type Read = { readonly done: Broken | StreamReport; readonly reading: Reading } | { readonly cause: unknown };
-async function readResponse(t: PushTransport, plan: PushPlan, body: Uint8Array<ArrayBuffer>, span: Span, sideband: boolean): Promise<Read> {
+async function readResponse(t: PushTransport, plan: PushPlan, body: Uint8Array, span: Span, sideband: boolean): Promise<Read> {
   let reportBytes = 0;
   let reading = streamInit(sideband);
   let st: StreamState = reading;

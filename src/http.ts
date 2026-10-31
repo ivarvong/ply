@@ -7,7 +7,7 @@ import type { Span, Tracer } from './otel.js';
 import type { Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
 import { thrown as fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
-import { concat, td, te } from './bytes.js';
+import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
@@ -193,7 +193,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
   };
 
   // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk.
-  async function* post(service: string, body: Uint8Array<ArrayBuffer>, span: Span, hints: Hints): AsyncGenerator<Uint8Array, void, undefined> {
+  async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Uint8Array, void, undefined> {
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
     const extra = { 'Git-Protocol': 'version=2', ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
@@ -202,7 +202,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     const sig = requestSignal();
     let res: Response;
     try {
-    try { res = await f(target, { method: 'POST', headers: headers(service, extra), body, signal: sig.signal, redirect: 'manual' }); }
+    try { res = await f(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body), signal: sig.signal, redirect: 'manual' }); }
     catch (e) { throw wrapNet(e, sig.signal); }
     const cache = res.headers.get('x-ply-pack-cache') ?? '';
     span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': res.headers.get('content-type') ?? '', 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
@@ -232,7 +232,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     // A transport without a tracer fails on its first span, as it always has. A3: require it.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above
     kind: 'http', url: base, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
-    async *frames(service: string, body: Uint8Array<ArrayBuffer>, span: Span, hints: Hints = {}): AsyncGenerator<Frame, void, undefined> {
+    async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncGenerator<Frame, void, undefined> {
       let st: ReturnType<typeof pktStep>['state'] = pktInit();
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- pktline.js is untyped until its cluster converts; its frames are Frame
       for await (const chunk of post(service, body, span, hints)) { const r = pktStep(st, chunk); st = r.state; yield* r.frames as Frame[]; }

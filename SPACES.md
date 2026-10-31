@@ -134,18 +134,18 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts codes() | pack_corrupt: inflate: bad distance symbol |
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
-| decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js flush() | pack_corrupt: blob content hashes to …, not … |
-| failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js begin() | pack_corrupt: expected blob, got type … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js streamBlobEdit() | pack_corrupt: inflated … != header size … |
-| failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js streamBlobEdit() | pack_corrupt: inflated bytes before header |
+| decisions | `src/read.ts#flush:pack_corrupt:blob content hashes to …, not …` | src/read.ts flush() | pack_corrupt: blob content hashes to …, not … |
+| failsites | `src/edit.ts#begin:pack_corrupt:expected blob, got type …` | src/edit.ts begin() | pack_corrupt: expected blob, got type … |
+| failsites | `src/edit.ts#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.ts streamBlobEdit() | pack_corrupt: inflated … != header size … |
+| failsites | `src/edit.ts#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.ts streamBlobEdit() | pack_corrupt: inflated bytes before header |
 | failsites | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts once() | pack_corrupt: expected …, got … |
 | failsites | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts once() | pack_corrupt: object … not in the blob:none pack (… objects) |
 | failsites | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts codes() | pack_corrupt: inflate: bad distance symbol |
 | failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
 | failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
-| failsites | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js flush() | pack_corrupt: blob content hashes to …, not … |
-| failsites | `src/read.js#flush:pack_corrupt:inflated … != declared …` | src/read.js flush() | pack_corrupt: inflated … != declared … |
-| failsites | `src/read.js#transform:pack_corrupt:server streamed more than the … bytes it declared` | src/read.js transform() | pack_corrupt: server streamed more than the … bytes it declared |
+| failsites | `src/read.ts#flush:pack_corrupt:blob content hashes to …, not …` | src/read.ts flush() | pack_corrupt: blob content hashes to …, not … |
+| failsites | `src/read.ts#flush:pack_corrupt:inflated … != declared …` | src/read.ts flush() | pack_corrupt: inflated … != declared … |
+| failsites | `src/read.ts#transform:pack_corrupt:server streamed more than the … bytes it declared` | src/read.ts transform() | pack_corrupt: server streamed more than the … bytes it declared |
 
 ### Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous) (5)
 
@@ -162,9 +162,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | category | id | where | what |
 |---|---|---|---|
 | git | `upload-pack.c:die:send_err_and_die:%s` | git upload-pack.c:1060 send_err_and_die() | die: %s |
-| decisions | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js checkoutDir() | bad_request: dir must be a non-empty string |
-| decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js slurp() | limit_exceeded: symlink target |
-| decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js writeFiles() | bad_request: already exists |
+| decisions | `src/checkout-node.ts#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.ts checkoutDir() | bad_request: dir must be a non-empty string |
+| decisions | `src/checkout-node.ts#slurp:limit_exceeded:symlink target` | src/checkout-node.ts slurp() | limit_exceeded: symlink target |
+| decisions | `src/checkout-node.ts#writeFiles:bad_request:already exists` | src/checkout-node.ts writeFiles() | bad_request: already exists |
 | decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
 | decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts attributeTree() | not_found: attributes ref … not found |
 | decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
@@ -178,14 +178,14 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
 | decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
 | decisions | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
-| decisions | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js keep() | limit_exceeded: directory bytes |
-| decisions | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js keep() | limit_exceeded: files |
+| decisions | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
+| decisions | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
 | decisions | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
 | decisions | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
 | decisions | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
-| failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js checkoutDir() | bad_request: dir must be a non-empty string |
-| failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js slurp() | limit_exceeded: symlink target |
-| failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js writeFiles() | bad_request: already exists |
+| failsites | `src/checkout-node.ts#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.ts checkoutDir() | bad_request: dir must be a non-empty string |
+| failsites | `src/checkout-node.ts#slurp:limit_exceeded:symlink target` | src/checkout-node.ts slurp() | limit_exceeded: symlink target |
+| failsites | `src/checkout-node.ts#writeFiles:bad_request:already exists` | src/checkout-node.ts writeFiles() | bad_request: already exists |
 | failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
 | failsites | `src/fetch.ts#once:limit_exceeded:object size#2` | src/fetch.ts once() | limit_exceeded: object size |
 | failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts attributeTree() | not_found: attributes ref … not found |
@@ -195,16 +195,16 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts mergeBranch() | not_found: ref … not found |
 | failsites | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiate() | bad_request: negotiate rounds must be an integer |
 | failsites | `src/push.ts#planPush:bad_request:push: oids must be 40-hex` | src/push.ts planPush() | bad_request: push: oids must be 40-hex |
-| failsites | `src/read.js#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
-| failsites | `src/read.js#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
+| failsites | `src/read.ts#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.ts flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
+| failsites | `src/read.ts#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.ts openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
 | failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
 | failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
 | failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
 | failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
 | failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
 | failsites | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
-| failsites | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js keep() | limit_exceeded: directory bytes |
-| failsites | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js keep() | limit_exceeded: files |
+| failsites | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
+| failsites | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
 | failsites | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
 | failsites | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
 | failsites | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
