@@ -177,6 +177,37 @@ export async function listTree(url: string, { ref = null, path = '' }: { readonl
   });
 }
 
+export type FileResult = {
+  readonly ref: string;
+  readonly commit: string;
+  readonly blob: string;
+  readonly mode: string;
+  readonly size: number;
+  readonly stream: ReadableStream<Uint8Array>;
+};
+// The root span ends when the stream is open (size known); the content's own span, `git.read.blob`, ends when the
+// stream does, with the bytes delivered and whether the oid verified. It outlives the root, so it is not the root's child
+// but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
+export async function readFile(url: string, { ref = null, path }: { readonly ref?: RefSpec; readonly path?: string } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<FileResult> {
+  const limits = opts.limits ?? DEFAULT_LIMITS;
+  const comps = pathComps(path, limits, { allowRoot: false });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read', url, ({ ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+    // the tracer operation() started the root span on (opts.tracer)
+    const tracer = root.tracer;
+    const { name, commit } = await resolveCommit(t, ref);
+    // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const entry = (await walk(t, root, tracer, { commit, comps, cache, limits })).entry as TreeEntry;
+    // a symlink's blob is its target (what `git show <ref>:<path>` prints); a gitlink has no blob in this repository
+    if (entry.mode === '40000') throw fail('not_found', `${comps.join('/')} is a directory`);
+    if (entry.mode === '160000') throw fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`);
+    // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
+    const blob = await openBlob(t, tracer, root, entry.oid);
+    return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: blob.size, stream: blob.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': blob.size, 'git.read.blob.mode': entry.mode });
+  });
+}
+
 export type OpenedBlob = { readonly size: number; readonly stream: ReadableStream<Uint8Array> };
 // Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
 // through DecompressionStream and a verifying transform. Back-pressure: the pump awaits each write, so at most one
@@ -265,34 +296,4 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
     },
   }, { highWaterMark: 0 });
   return { size, stream };
-}
-
-export type FileResult = {
-  readonly ref: string;
-  readonly commit: string;
-  readonly blob: string;
-  readonly mode: string;
-  readonly size: number;
-  readonly stream: ReadableStream<Uint8Array>;
-};
-// The root span ends when the stream is open (size known); the content's own span, `git.read.blob`, ends when the
-// stream does, with the bytes delivered and whether the oid verified. It outlives the root, so it is not the root's child
-// but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
-export async function readFile(url: string, { ref = null, path }: { readonly ref?: RefSpec; readonly path?: string } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<FileResult> {
-  const limits = opts.limits ?? DEFAULT_LIMITS;
-  const comps = pathComps(path, limits, { allowRoot: false });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read', url, ({ ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
-    // the tracer operation() started the root span on (opts.tracer)
-    const tracer = root.tracer;
-    const { name, commit } = await resolveCommit(t, ref);
-    // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const entry = (await walk(t, root, tracer, { commit, comps, cache, limits })).entry as TreeEntry;
-    // a symlink's blob is its target (what `git show <ref>:<path>` prints); a gitlink has no blob in this repository
-    if (entry.mode === '40000') throw fail('not_found', `${comps.join('/')} is a directory`);
-    if (entry.mode === '160000') throw fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`);
-    const blob = await openBlob(t, tracer, root, entry.oid);
-    return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: blob.size, stream: blob.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': blob.size, 'git.read.blob.mode': entry.mode });
-  });
 }
