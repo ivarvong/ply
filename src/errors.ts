@@ -53,6 +53,9 @@ export type Extra = {
   readonly max?: number;
   readonly cause?: unknown;
   readonly original?: unknown;
+  // edit.ts: the span attributes of a failed tree lookup (lookupEntry), and an LFS pointer's size (lfs_pointer)
+  readonly attrs?: Readonly<Record<string, unknown>>;
+  readonly size?: number;
 };
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
