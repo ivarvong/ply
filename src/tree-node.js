@@ -1,5 +1,5 @@
 // Node only (node:fs, node:path): a directory as pushTree's `files`. Not part of any Workers bundle — the Workers-safe
-// core is tree.js, which takes the files as data. The SSH counterpart of this split is ssh-node.js / ssh-workers.js.
+// core is tree.js, which takes the files as data.
 //
 //   filesFromDir(dir, { limits, filter }) → [{ path, mode, data }]
 //   pushDir(url, { dir, filter, ...spec }, opts) = pushTree(url, { ...spec, files: await filesFromDir(dir, …) }, opts)

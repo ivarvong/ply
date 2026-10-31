@@ -70,18 +70,6 @@
       "types": "./dist/rebase.d.ts",
       "default": "./dist/rebase.js"
     },
-    "./ssh": {
-      "types": "./dist/sshgit.d.ts",
-      "default": "./dist/sshgit.js"
-    },
-    "./ssh-node": {
-      "types": "./dist/ssh-node.d.ts",
-      "default": "./dist/ssh-node.js"
-    },
-    "./ssh-workers": {
-      "types": "./dist/ssh-workers.d.ts",
-      "default": "./dist/ssh-workers.js"
-    },
     "./otel": {
       "types": "./dist/otel.d.ts",
       "default": "./dist/otel.js"
@@ -99,7 +87,7 @@
     "prepare": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.isolated.json && node scripts/ts-ratchet.mjs",
     "lint": "oxlint --type-aware --deny-warnings src && oxlint -c oxlint.loose.json src test scripts examples",
-    "test": "vitest run && vitest run -c vitest.workerd.config.ts && node --import ./test/ts-resolve.mjs test/fuzz/run.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --case 2366521731 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880 && node --import ./test/ts-resolve.mjs test/fuzz/git-semantic.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --op mergebase --n 40 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n 100 && node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n 40 && node --import ./test/ts-resolve.mjs test/fuzz/packgen.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs --n 20000 && node --import ./test/ts-resolve.mjs test/fuzz/usergiven.mjs && node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 40 && node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 300 && node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --runs && node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 150 --driver union && node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 4 --huge",
+    "test": "rm -rf .failsites && PLY_FAILSITES=.failsites NODE_OPTIONS=--import=$PWD/test/space/failsite-hook.mjs vitest run && PLY_FAILSITES=.failsites PLY_FAILSITES_GATE=1 vitest run test/space/failsites.test.js && node --import ./test/ts-resolve.mjs test/fuzz/run.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --case 2366521731 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880 && node --import ./test/ts-resolve.mjs test/fuzz/git-semantic.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --op mergebase --n 40 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n 100 && node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n 40 && node --import ./test/ts-resolve.mjs test/fuzz/packgen.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs --n 20000 && node --import ./test/ts-resolve.mjs test/fuzz/usergiven.mjs && node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 40 && node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 300 && node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --runs && node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 150 --driver union && node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 60 && node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 4 --huge",
     "test:props": "vitest run test/props.test.js",
     "test:oracle": "vitest run test/oracle.test.js test/concurrency.test.js test/edges.test.js",
     "test:adversarial": "vitest run test/adversarial.test.js",
@@ -111,16 +99,16 @@
     "fuzz:protocol": "node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs",
     "test:git": "vitest run test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js",
     "test:push-full": "PUSH_MATRIX=full vitest run test/push.test.js",
-    "test:space": "vitest run test/space/push-outcome.test.js test/space/push-outcome-boundary.test.js test/space/fsck-tree.test.js test/space/advertisement.test.js test/space/pack-cut.test.js test/space/pkt-frame.test.js test/space/push-ng.test.js test/space/refname.test.js test/space/ssh-faults.test.js test/space/ssh-service.test.js",
+    "test:space": "vitest run test/space/push-outcome.test.js test/space/push-outcome-boundary.test.js test/space/fsck-tree.test.js test/space/advertisement.test.js test/space/pack-cut.test.js test/space/pkt-frame.test.js test/space/push-ng.test.js test/space/refname.test.js",
     "test:pack-cut-full": "PACK_SPACE=full vitest run test/space/pack-cut.test.js",
     "space:md": "node scripts/space-md.mjs --write",
     "fuzz:packs": "node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs",
     "fuzz:linemerge": "node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs",
     "fuzz:diffscript": "node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs",
     "fuzz:attributes": "node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs",
-    "test:workerd": "vitest run -c vitest.workerd.config.ts",
+    "test:workerd": "vitest run test/workerd.test.js",
     "test:read": "vitest run test/read.test.js test/log.test.js test/artifacts-compat.test.js",
-    "coverage": "rm -rf /tmp/ply-cov && NODE_V8_COVERAGE=/tmp/ply-cov node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/packcache.test.js test/pure.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/run.mjs --n 60 --seed 11 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n 60 --seed 12 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n 80 --seed 32 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n 30 --seed 5; NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --runs && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --rediff undecided && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 40 --snake && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 3 --huge && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 40 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --driver union && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 50 --driver binary; node --import ./test/ts-resolve.mjs test/coverage.mjs /tmp/ply-cov --lines",
+    "coverage": "rm -rf /tmp/ply-cov && NODE_V8_COVERAGE=/tmp/ply-cov node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/packcache.test.js test/pure.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/run.mjs --n 60 --seed 11 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n 60 --seed 12 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n 80 --seed 32 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n 30 --seed 5; NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --runs && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --rediff undecided && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 40 --snake && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs --n 3 --huge && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 40 && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 200 --driver union && NODE_V8_COVERAGE=/tmp/ply-cov node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs --n 50 --driver binary; node --import ./test/ts-resolve.mjs test/coverage.mjs /tmp/ply-cov --lines",
     "live:prepare": "node --import ./test/ts-resolve.mjs test/live-prepare.mjs",
     "fuzz:liar": "node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs",
     "fuzz:packgen": "node --import ./test/ts-resolve.mjs test/fuzz/packgen.mjs",
@@ -132,13 +120,14 @@
     "test:bundle": "vitest run test/bundle.test.js",
     "test:sign": "vitest run test/sign.test.js",
     "test:merge": "vitest run test/merge.test.js test/rebase.test.js",
-    "test:ssh": "vitest run test/sshgit.test.js",
     "test:fsck-space": "vitest run test/fsck-space.test.js",
     "test:merge-long": "MERGE_CASES=200 vitest run test/merge.test.js",
     "fuzz:below-hash": "node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs",
     "fuzz:git-semantic": "node --import ./test/ts-resolve.mjs test/fuzz/git-semantic.mjs",
     "test:mutate": "node scripts/mutate.mjs",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "test:spaces": "vitest run test/space/registry.test.js",
+    "spaces": "node --import ./test/ts-resolve.mjs scripts/spaces.mjs"
   },
   "license": "MIT",
   "author": "Ivar Vong",
@@ -151,6 +140,7 @@
     "url": "https://github.com/ivarvong/ply/issues"
   },
   "devDependencies": {
+    "@babel/parser": "8.0.8",
     "@stryker-mutator/core": "10.1.1",
     "@stryker-mutator/vitest-runner": "10.1.1",
     "@types/node": "24.19.2",
