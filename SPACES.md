@@ -128,8 +128,8 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 |---|---|---|---|
 | git | `fsck:unknownType` | git fsck.h:61 FOREACH_FSCK_MSG_ID() | fsck-msg: UNKNOWN_TYPE ERROR |
 | decisions | `src/bytes.ts#decodeStrict:decode:strict:b` | src/bytes.ts:12 decodeStrict() | &lt;decode:strict>: b |
-| decisions | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:404 once() | pack_corrupt: expected …, got … |
-| decisions | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:402 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| decisions | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:405 once() | pack_corrupt: expected …, got … |
+| decisions | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:403 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
 | decisions | `src/http.ts#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.ts:48 utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
 | decisions | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts:150 codes() | pack_corrupt: inflate: bad distance symbol |
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts:94 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
@@ -138,8 +138,8 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js:244 begin() | pack_corrupt: expected blob, got type … |
 | failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js:277 streamBlobEdit() | pack_corrupt: inflated … != header size … |
 | failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js:257 streamBlobEdit() | pack_corrupt: inflated bytes before header |
-| failsites | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:404 once() | pack_corrupt: expected …, got … |
-| failsites | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:402 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| failsites | `src/fetch.ts#once:pack_corrupt:expected …, got …#2` | src/fetch.ts:405 once() | pack_corrupt: expected …, got … |
+| failsites | `src/fetch.ts#once:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts:403 once() | pack_corrupt: object … not in the blob:none pack (… objects) |
 | failsites | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts:150 codes() | pack_corrupt: inflate: bad distance symbol |
 | failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts:94 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
 | failsites | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts:96 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
@@ -165,7 +165,7 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
 | decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
 | decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
-| decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:422 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
+| decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:423 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
 | decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:483 attributeTree() | not_found: attributes ref … not found |
 | decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:419 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
 | decisions | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:565 mergeBranch() | bad_request: author is required for a merge commit |
@@ -186,8 +186,8 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
 | failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
 | failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
-| failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:422 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| failsites | `src/fetch.ts#once:limit_exceeded:object size#2` | src/fetch.ts:403 once() | limit_exceeded: object size |
+| failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:423 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
+| failsites | `src/fetch.ts#once:limit_exceeded:object size#2` | src/fetch.ts:404 once() | limit_exceeded: object size |
 | failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:483 attributeTree() | not_found: attributes ref … not found |
 | failsites | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:419 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
 | failsites | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:565 mergeBranch() | bad_request: author is required for a merge commit |
