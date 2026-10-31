@@ -41,7 +41,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
   // the platform stream does on close(). The next command opens a new connection. The timer is the strong owner of the
   // teardown (not AbortSignal.timeout, for the reason http.js gives).
   const fresh = () => { const conn = { reason: null, raw: null }; conn.dead = new Promise((_, rej) => { conn.kill = rej; }); conn.dead.catch(() => {}); return conn; };
-  const st = { client: null, channels: new Map(), connecting: null, conn: fresh() };
+  const st = { client: null, channels: new Map(), opening: new Map(), connecting: null, conn: fresh() };
   const teardown = (conn, e) => {
     if (conn.reason) return;
     conn.reason = e; conn.kill(e);
@@ -49,7 +49,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     if (st.conn !== conn) return;
     for (const entry of st.channels.values()) { entry.span.error(e); entry.span.end(); }
     if (st.client) st.lastStats = st.client.stats;
-    st.channels = new Map(); st.client = null; st.connecting = null; st.conn = fresh();
+    st.channels = new Map(); st.opening = new Map(); st.client = null; st.connecting = null; st.conn = fresh();
   };
   const bound = () => {
     if (signal?.aborted) throw wrapNet(signal.reason, signal);
@@ -65,7 +65,9 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     async connectOnce(span) {
       if (st.client) return st.client;
       const conn = st.conn;
-      if (!st.connecting) st.connecting = (async () => {
+      if (st.connecting) return st.connecting;
+      // A handshake that fails (refused, bad banner, host key, auth) is not kept: the next command dials again.
+      const p = st.connecting = (async () => {
         const opening = Promise.resolve(connect(u.host, u.port, { timeoutMs }));
         opening.then(raw => { if (conn.reason) try { raw.close(); } catch { /* closing */ } }, () => {});
         const raw = conn.raw = await Promise.race([opening, conn.dead]);
@@ -75,32 +77,45 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
         try { await c.connect(); await c.authenticate(); } catch (e) { try { raw.close(); } catch { /* closing */ } throw e; } // a failed handshake holds no socket
         st.client = c; return c;
       })();
-      return st.connecting;
+      p.catch(() => { if (st.connecting === p) st.connecting = null; });
+      return p;
     },
-    // One channel per service, opened on first use; the server's opening advertisement is read and kept.
-    async channelFor(service, span) {
-      if (st.channels.has(service)) return st.channels.get(service);
+    // One channel per service, opened on first use; the server's opening advertisement is read and kept. Concurrent first
+    // callers (editFile overlaps ls-refs with a speculative fetch) share one opening: a second channel would escape the
+    // first one's command lock.
+    channelFor(service, span) {
+      if (st.channels.has(service)) return Promise.resolve(st.channels.get(service));
+      if (!st.opening.has(service)) {
+        const p = t.openChannel(service, span).finally(() => { if (st.opening.get(service) === p) st.opening.delete(service); });
+        st.opening.set(service, p);
+      }
+      return st.opening.get(service);
+    },
+    // A channel that fails to open closes the transport, as a failed handshake does: a failed command holds no socket.
+    async openChannel(service, span) {
       const c = await t.connectOnce(span);
       const quoted = `'${u.path.replace(/'/g, `'\\''`)}'`;
       const chSpan = tracer.start('ssh.exec', { parent: span ?? t.parent, attrs: { 'ssh.command': `${service} ${quoted}`, 'git.service': service } });
-      const ch = await c.exec(`${service} ${quoted}`, { env: service === 'git-upload-pack' ? { GIT_PROTOCOL: 'version=2' } : {} });
-      const entry = { ch, pkt: pktInit(), carry: [], carryAt: 0, adv: null, caps: null, span: chSpan, bytesIn: 0, bytesOut: 0, lock: Promise.resolve() };
-      // read the advertisement: frames up to and including the first flush
-      const advFrames = []; const raw = [];
-      for await (const f of t.readUntilFlush(entry, raw)) advFrames.push(f);
-      entry.adv = concat(raw);
-      const first = advFrames.find(f => f.kind === 'data'); const firstLine = first ? td.decode(first.payload).replace(/\n$/, '') : '';
-      if (service === 'git-upload-pack') {
-        if (firstLine !== 'version 2') { await t.close(); throw fail('unsupported', `ssh: server did not speak protocol v2 (first line ${JSON.stringify(firstLine.slice(0, 60))}); it must accept the GIT_PROTOCOL environment variable (AcceptEnv GIT_PROTOCOL)${ch.stderr() ? `; stderr: ${ch.stderr().trim().slice(0, 200)}` : ''}`); }
-        entry.caps = advFrames.filter(f => f.kind === 'data').map(f => td.decode(f.payload).replace(/\n$/, '')).slice(1);
-      } else {
-        const nul = first ? first.payload.indexOf(0) : -1;
-        entry.caps = nul >= 0 ? td.decode(first.payload.subarray(nul + 1)).trim().split(' ') : [];
-        if (!first) { const err = ch.stderr().trim(); await t.close(); throw fail(/denied|not found|does not appear|no such|fatal/i.test(err) ? 'not_found' : 'remote_error', `ssh: ${service} sent no advertisement${err ? `: ${err.slice(0, 200)}` : ''}`); }
-      }
-      chSpan.set({ 'git.advertisement.bytes': entry.adv.length, 'git.advertisement.caps': entry.caps.slice(0, 32) });
-      st.channels.set(service, entry);
-      return entry;
+      try {
+        const ch = await c.exec(`${service} ${quoted}`, { env: service === 'git-upload-pack' ? { GIT_PROTOCOL: 'version=2' } : {} });
+        const entry = { ch, pkt: pktInit(), carry: [], carryAt: 0, adv: null, caps: null, span: chSpan, bytesIn: 0, bytesOut: 0, lock: Promise.resolve() };
+        // read the advertisement: frames up to and including the first flush
+        const advFrames = []; const raw = [];
+        for await (const f of t.readUntilFlush(entry, raw)) advFrames.push(f);
+        entry.adv = concat(raw);
+        const first = advFrames.find(f => f.kind === 'data'); const firstLine = first ? td.decode(first.payload).replace(/\n$/, '') : '';
+        if (service === 'git-upload-pack') {
+          if (firstLine !== 'version 2') throw fail('unsupported', `ssh: server did not speak protocol v2 (first line ${JSON.stringify(firstLine.slice(0, 60))}); it must accept the GIT_PROTOCOL environment variable (AcceptEnv GIT_PROTOCOL)${ch.stderr() ? `; stderr: ${ch.stderr().trim().slice(0, 200)}` : ''}`);
+          entry.caps = advFrames.filter(f => f.kind === 'data').map(f => td.decode(f.payload).replace(/\n$/, '')).slice(1);
+        } else {
+          const nul = first ? first.payload.indexOf(0) : -1;
+          entry.caps = nul >= 0 ? td.decode(first.payload.subarray(nul + 1)).trim().split(' ') : [];
+          if (!first) { const err = ch.stderr().trim(); throw fail(/denied|not found|does not appear|no such|fatal/i.test(err) ? 'not_found' : 'remote_error', `ssh: ${service} sent no advertisement${err ? `: ${err.slice(0, 200)}` : ''}`); }
+        }
+        chSpan.set({ 'git.advertisement.bytes': entry.adv.length, 'git.advertisement.caps': entry.caps.slice(0, 32) });
+        st.channels.set(service, entry);
+        return entry;
+      } catch (e) { chSpan.error(e); chSpan.end(); await t.close(); throw e; }
     },
     // Frames from the channel up to and including the next top-level flush (the decoder state carries across commands).
     async *readUntilFlush(entry, rawOut = null) {
