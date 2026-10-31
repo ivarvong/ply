@@ -42,19 +42,22 @@ export type PackKind = 'commit' | 'tree' | 'blob' | 'tag' | 'ofs_delta' | 'ref_d
 // on NaN, so the size reached callers (#13). Checked before the byte is read, so a hostile header costs ≤ 10 bytes.
 const varintLong = (what: string): Err<Corrupt> => corrupt(`${what}: size varint longer than ${VARINT_MAX_SHIFT + 1} bits`);
 
-function readVarint(buf: Uint8Array, start: number): Result<readonly [number, number], Corrupt> {
+// Little-endian 7-bit groups from start, each with a continue bit: the delta header's sizes (from n = 0, shift = 0), and
+// the rest of an object header's size after its first byte (from that byte's four bits, shift = 4).
+function readVarint(buf: Uint8Array, start: number, what: string, n0 = 0, shift0 = 0, more = true): Result<readonly [number, number], Corrupt> {
   let p = start;
-  let n = 0;
-  let shift = 0;
+  let n = n0;
+  let shift = shift0;
   let c: number | undefined;
-  do {
-    if (shift > VARINT_MAX_SHIFT) return varintLong('delta');
+  while (more) {
+    if (shift > VARINT_MAX_SHIFT) return varintLong(what);
     c = buf[p];
     if (c === undefined) return short(buf, p);
     p += 1;
     n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
     shift += VARINT_BITS;
-  } while (c & OBJ_CONTINUE);
+    more = (c & OBJ_CONTINUE) !== 0;
+  }
   return ok([n, p]);
 }
 
@@ -73,22 +76,11 @@ export type ObjHeader = { readonly type: number; readonly size: number; readonly
 // on that reason (fetch.ts spStep), and refuses anything else.
 // @decoder readObjHeaderResult prefix=obj-header
 export function readObjHeaderResult(buf: Uint8Array, start: number): Result<ObjHeader, Corrupt> {
-  let p = start;
-  let c = buf[p];
-  if (c === undefined) return short(buf, p);
-  const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
-  let size = c & OBJ_SIZE_FIRST_MASK;
-  let shift = OBJ_TYPE_SHIFT;
-  p += 1;
-  while (c & OBJ_CONTINUE) {
-    if (shift > VARINT_MAX_SHIFT) return varintLong('pack');
-    c = buf[p];
-    if (c === undefined) return short(buf, p);
-    p += 1;
-    size += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
-    shift += VARINT_BITS;
-  }
-  return ok({ type, size, next: p });
+  const c = buf[start];
+  if (c === undefined) return short(buf, start);
+  const rest = readVarint(buf, start + 1, 'pack', c & OBJ_SIZE_FIRST_MASK, OBJ_TYPE_SHIFT, (c & OBJ_CONTINUE) !== 0);
+  if (!rest.ok) return rest;
+  return ok({ type: (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK, size: rest.value[0], next: rest.value[1] });
 }
 // @decoder readObjHeader prefix=obj-header
 export function readObjHeader(buf: Uint8Array, start: number): ObjHeader { return orThrow(readObjHeaderResult(buf, start)); }
@@ -261,9 +253,9 @@ export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: { re
   }
   if (delta.length < DELTA_SIZE_MIN) return corrupt('delta: shorter than DELTA_SIZE_MIN');
   // readVarint's reads are bounded, so a header that runs past the buffer is a short read before p can pass the end.
-  const bs = readVarint(delta, 0);
+  const bs = readVarint(delta, 0, 'delta');
   if (!bs.ok) return bs;
-  const rs = readVarint(delta, bs.value[1]);
+  const rs = readVarint(delta, bs.value[1], 'delta');
   if (!rs.ok) return rs;
   const baseSize = bs.value[0];
   const resultSize = rs.value[0];
