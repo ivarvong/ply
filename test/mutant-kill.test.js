@@ -1539,8 +1539,12 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   const two = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
   const cls = (lines, commands = two) => classifyReport(lines.map(l => (typeof l === 'string' ? te.encode(l) : l)), commands);
   const why = (lines, commands) => cls(lines, commands).why;
-  assert.equal(why([Uint8Array.of(0xff)]), 'a line is not UTF-8');
-  assert.equal(why([data('ok refs/heads/', Uint8Array.of(0xff), '\n')], [{ ref: 'refs/heads/\ufffd' }]), 'a line is not UTF-8', 'a byte that is not UTF-8 never matches a ref named with U+FFFD');
+  assert.equal(why([Uint8Array.of(0xff)]), 'a line is not one LF-terminated line');
+  // a ref name's bytes >= 0x80 are legal to git and echoed as sent (#43): `\xff` is the ref the command spelled `\udcff`,
+  // never one spelled with U+FFFD
+  assert.equal(why([data('unpack ok\n'), data('ok refs/heads/', Uint8Array.of(0xff), '\n')], [{ ref: 'refs/heads/\ufffd' }]), 'status for a ref not commanded');
+  assert.deepEqual(cls([data('unpack ok\n'), data('ok refs/heads/', Uint8Array.of(0xe9, 0xe8), '\n')], [{ ref: 'refs/heads/\udce9\udce8' }]), { tag: 'statuses', refs: [{ ref: 'refs/heads/\udce9\udce8', ok: true, reason: '' }] });
+  assert.equal(why(['unpack ok\n', data('ng refs/heads/a caf', Uint8Array.of(0xe9), '\n'), 'ok refs/heads/b\n']), 'no readable reason for refs/heads/a');
   assert.equal(why(['unpack ok']), 'a line is not one LF-terminated line');
   assert.equal(why(['unpack ok\nx\n']), 'a line is not one LF-terminated line');
   for (const l of [[], ['unpack ok*\n'], ['ok refs/heads/a\n']]) assert.equal(why(l), 'no git unpack line first');

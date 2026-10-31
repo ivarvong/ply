@@ -2,7 +2,7 @@
 // is the one effect. Any failure after the body is on the wire is 'ambiguous' (the ref may have moved).
 import { fail, ambiguousAfterPush } from './errors.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
-import { td, concat, decodeBytes, decodeChunk, decodeStrict } from './bytes.js';
+import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { parseSideband } from './fetch.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS } from './format.js';
 
@@ -119,8 +119,10 @@ const splitOnce = (s, sep) => { const i = s.indexOf(sep); return i < 0 ? [s] : [
 export function classifyReport(payloads, commands) {
   const lines = [];
   for (const p of payloads) {
-    let l;
-    try { l = decodeStrict(p); } catch { return malformed('a line is not UTF-8'); }
+    // A ref name is bytes (check_refname_format refuses only control bytes, space, ~ ^ : ? * [ and backslash, `..`, `@{` and the
+    // dot/slash/.lock rules; any byte >= 0x80 is legal), and receive-pack echoes it as it got it. decodeBytes maps it to
+    // the string the command was built from (encodeBytes is its inverse), so `ok <ref>` matches its command (#43).
+    const l = decodeBytes(p);
     const body = l.slice(0, l.length - 1);
     if (!l.endsWith('\n') || body.includes('\n')) return malformed('a line is not one LF-terminated line');
     lines.push(body);
