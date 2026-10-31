@@ -1,6 +1,6 @@
 // K concurrent writers on one repo, each editing its own file, retrying on cas_conflict.
 // Property: every edit lands exactly once, history is linear, the ref is a CAS chain, nothing else changes.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';

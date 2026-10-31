@@ -20,7 +20,7 @@ import { listTree, readCommit } from '../../src/read.js';
 import { createTransport } from '../../src/http.js';
 import { fetchObject } from '../../src/fetch.js';
 import { Tracer, arrayExporter } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.ts';
+import { withLimits } from '../../src/limits.js';
 import { Rng } from './prng.js';
 import { OID_BYTES } from '../../src/format.js';
 

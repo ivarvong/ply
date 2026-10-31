@@ -10,7 +10,7 @@ import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, UA } from './transport.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateRef, validateWire } from './validate.js';
+import { validatePushRef, validateWire } from './validate.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -286,14 +286,14 @@ type PushErrorExtra = Extra & {
 //            have checked the advertisement for atomic and push-options (receivecaps.js pushWithOptions, which GitHttp.push
 //            uses): receive-pack ignores an unadvertised `atomic` (the refs land one by one) and reads unadvertised option
 //            lines as the pack.
-// oxlint-disable-next-line eslint/require-await -- async so a refusal before the request (validateRef, a limit) rejects instead of throwing, as before
+// oxlint-disable-next-line eslint/require-await -- async so a refusal before the request (validatePushRef, a limit) rejects instead of throwing, as before
 export async function push(t: PushTransport, { ref, oldOid, newOid, objects = [], commands: given, sideband = true, reportV2 = false, atomic = false, pushOptions = [] }: PushOptions): Promise<PushResult> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the single-ref fields are checked just below: validateRef and the oid pattern refuse a missing one
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the single-ref fields are checked just below: validatePushRef and the oid pattern refuse a missing one
   const commands: Commands = given ?? [{ ref, oldOid, newOid } as Command];
   const maxRefs = requireLimit(t.limits, 'maxRefs');
   if (commands.length > maxRefs) throw limitError('push commands', commands.length, maxRefs);
   for (const c of commands) {
-    validateRef(c.ref);
+    validatePushRef(c.ref, c.newOid === ZERO_OID);
     if (!OID.test(c.oldOid) || !OID.test(c.newOid)) throw fail('bad_request', 'push: oids must be 40-hex');
   }
   for (const o of pushOptions) validateWire(o, 'push option');

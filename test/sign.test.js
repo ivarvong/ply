@@ -1,6 +1,6 @@
 // Signed commits: our SSH/Ed25519 signature must verify with git (which shells out to ssh-keygen -Y verify) and with
 // ssh-keygen directly over the exact bytes git signs; a tampered commit must not verify; fsck must stay clean.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';

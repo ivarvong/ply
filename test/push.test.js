@@ -1,7 +1,7 @@
 // receive-pack parity: our push vs `git push` on identical repos, over the product of server configs × hooks ×
 // command kinds × capabilities. Oracle per cell: same accept/reject, same ref state, same stored objects,
 // same server message, hook stderr visible on band 2 when side-band is requested, fsck clean.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, cpSync } from 'node:fs';
