@@ -17,14 +17,18 @@ The procedure is enforced, not remembered:
 |---|---:|---|
 | decisions | 97 | REPORT |
 | git | 81 | REPORT |
-| failsites | 104 | REPORT |
+| failsites | 103 | REPORT |
 | claims | 0 | ENFORCE |
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **433** (375 fail sites, 16 produced codes, 6 untyped throws, 13 exported parse/decode/classify/decide functions). Covered by a merged space 297, by a pending PR 18, excluded 21, unregistered 97. Fail sites no cell reaches: 104 of 375. Of the registered points, 40 are claimed by an enumerated space, 24 only by a random one and 251 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **433** (375 fail sites, 16 produced codes, 6 untyped throws, 13 exported parse/decode/classify/decide functions). Covered by a merged space 297, by a pending PR 18, excluded 21, unregistered 97. Fail sites no cell reaches: 103 of 375. Of the registered points, 40 are claimed by an enumerated space, 24 only by a random one and 251 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 92, by a pending PR 64, excluded 140, uncovered 81. Claimed by an enumerated space 136, random 8, curated 12.
+
+Sampled fail sites (reached on some runs only; reported, never ratcheted):
+
+- `src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2` (test/sshgit.test.js): the encrypted-phase length check: reached in Linux CI run 41173588043, not in run 41172874060 nor in two macOS runs (timing-dependent: a connection torn down mid-packet). The ssh-faults space (proposed) should make it a cell
 
 ## Spaces
 
@@ -110,11 +114,11 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/sshgit.js:135` openChannel() | replacement | td | **HOLE (data path)** |
 | `src/sshgit.js:138` openChannel() | replacement | td | excluded: protocol: the capability list after the NUL (ASCII keywords) |
 
-## Holes (282)
+## Holes (281)
 
 Ranked by severity, then category (`git`: a git check with no space; `decisions`: a ply decision point with no registry entry; `failsites`: a fail site no cell reaches; `claims`: a registry claim its space does not back). Fail-site and claim holes are the ratchet's, from the last recorded run.
 
-### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (182)
+### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (181)
 
 | category | id | where | what |
 |---|---|---|---|
@@ -299,7 +303,6 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/ssh.js#exec:remote_error:ssh: server refused to exec …` | src/ssh.js:258 exec() | remote_error: ssh: server refused to exec … |
 | failsites | `src/ssh.js#exec:ssh:ssh: channel open failed (…): …` | src/ssh.js:253 exec() | ssh: ssh: channel open failed (…): … |
 | failsites | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)` | src/ssh.js:138 openPacket() | ssh: ssh: packet too large (…) |
-| failsites | `src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2` | src/ssh.js:144 openPacket() | ssh: ssh: packet too large (…) |
 
 ### Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous) (6)
 

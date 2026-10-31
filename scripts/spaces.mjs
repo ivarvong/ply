@@ -11,7 +11,7 @@ import { writeFileSync, existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compute, readRecords, ratchet, RATCHET, ROOT, CATEGORIES, severityOfPoint, severityOfGit, spaceByName, isSite } from '../test/space/holes.js';
-import { SPACES } from '../test/space/registry.js';
+import { SPACES, SAMPLED } from '../test/space/registry.js';
 
 const fmt = n => n.toLocaleString('en-US');
 const esc = s => String(s).replace(/\|/g, '\\|').replace(/\n/g, '\\n').replace(/</g, '&lt;');
@@ -64,6 +64,11 @@ export function renderMd(all) {
   const sites = all.points.filter(isSite).length;
   L.push(`Decision points: **${fmt(all.points.length)}** (${fmt(sites)} fail sites, ${fmt(all.inv.producers.length)} produced codes, ${fmt(all.inv.untyped.length)} untyped throws, ${fmt(all.inv.exports.length)} exported parse/decode/classify/decide functions). Covered by a merged space ${fmt(cov.decisions.main)}, by a pending PR ${fmt(cov.decisions.pending)}, excluded ${fmt(cov.decisions.excluded)}, unregistered ${fmt(cov.decisions.none)}. Fail sites no cell reaches: ${fmt(st.failsites.count)} of ${fmt(sites)}. Of the registered points, ${fmt(cov.decisionKinds.enumerated)} are claimed by an enumerated space, ${fmt(cov.decisionKinds.random)} only by a random one and ${fmt(cov.decisionKinds.curated)} only by a curated list: a curated or random claim says a case exists, not that the class is gone.`, '');
   L.push(`git ${all.man.git.tag} checks: **${fmt(all.man.entries.length)}** (${Object.entries(all.man.counts).map(([k, n]) => `${k} ${n}`).join(', ')}). Covered by a merged space ${fmt(cov.git.main)}, by a pending PR ${fmt(cov.git.pending)}, excluded ${fmt(cov.git.excluded)}, uncovered ${fmt(cov.git.none)}. Claimed by an enumerated space ${fmt(cov.gitKinds.enumerated)}, random ${fmt(cov.gitKinds.random)}, curated ${fmt(cov.gitKinds.curated)}.`, '');
+  if (SAMPLED.length) {
+    L.push('Sampled fail sites (reached on some runs only; reported, never ratcheted):', '');
+    for (const x of SAMPLED) L.push(`- \`${esc(x.id)}\` (${x.runner}): ${esc(x.why)}`);
+    L.push('');
+  }
   L.push('## Spaces', '');
   L.push('| space | status | kind | axes | cells | observed / derived | oracle | decision points | git checks | run | OS |', '|---|---|---|---|---:|---|---|---:|---:|---|---|');
   const countBy = by => { const m = new Map(); for (const r of by.values()) if (r.space) m.set(r.space, (m.get(r.space) ?? 0) + 1); return m; };

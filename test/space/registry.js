@@ -107,8 +107,11 @@ export const SPACES = [
 ];
 
 // Fail sites a seeded-per-day sample reaches on some days and not others; reported, never ratcheted (a ratchet on them
-// would flap). Each names the runner whose sample decides it. Empty until a measured flap puts one here.
-export const SAMPLED = [];
+// would flap). Each names the runner whose sample decides it and the runs that measured it.
+export const SAMPLED = [
+  { id: 'src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2', runner: 'test/sshgit.test.js',
+    why: 'the encrypted-phase length check: reached in Linux CI run 41173588043, not in run 41172874060 nor in two macOS runs (timing-dependent: a connection torn down mid-packet). The ssh-faults space (proposed) should make it a cell' },
+];
 
 // ---- ply's decision points (scripts/decision-points.mjs) ----
 // Function globs (`<file>#<fn>:*`) are used where every point of a function has the same space: a new fail() in that

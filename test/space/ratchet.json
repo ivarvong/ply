@@ -190,7 +190,7 @@
    ]
   },
   "failsites": {
-   "count": 104,
+   "count": 103,
    "ids": [
     "src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string",
     "src/checkout-node.js#slurp:limit_exceeded:symlink target",
@@ -283,7 +283,6 @@
     "src/ssh.js#hostKeyFromLine:bad_request:hostKey must be an \"ssh-ed25519 AAAA…\" line (optionally …",
     "src/ssh.js#hostKeyFromLine:bad_request:hostKey: bad key length",
     "src/ssh.js#openPacket:ssh:ssh: packet too large (…)",
-    "src/ssh.js#openPacket:ssh:ssh: packet too large (…)#2",
     "src/ssh.js#pick:unsupported:ssh: no common … algorithm (server offers …)",
     "src/ssh.js#readMessage:<code === 2 /* PROTOCOL_ERROR */ ? 'proto>:ssh: server disconnected (…): …",
     "src/ssh.js#readMessage:unsupported:ssh: server requested rekeying; ply sessions are short e…",
