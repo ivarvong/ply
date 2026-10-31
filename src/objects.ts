@@ -1,9 +1,12 @@
 // Git object encoding/decoding. All pure.
 import { thrown as fail } from './errors.js';
+import type { ErrorOf } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent } from './validate.js';
+import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
+import type { Limits } from './limits.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
   MODE_S_IFREG, MODE_S_IFLNK, MODE_OWNER_EXEC, TREE_MAX_NAME_BYTES,
@@ -13,32 +16,44 @@ import {
   TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER,
 } from './format.js';
 
-export const TYPE = Object.freeze({ COMMIT: OBJ_COMMIT, TREE: OBJ_TREE, BLOB: OBJ_BLOB, TAG: OBJ_TAG, OFS_DELTA: OBJ_OFS_DELTA, REF_DELTA: OBJ_REF_DELTA });
-export const TYPE_NAME = Object.freeze({ [OBJ_COMMIT]: 'commit', [OBJ_TREE]: 'tree', [OBJ_BLOB]: 'blob', [OBJ_TAG]: 'tag', [OBJ_OFS_DELTA]: 'ofs_delta', [OBJ_REF_DELTA]: 'ref_delta' });
-export const TYPE_ID = Object.freeze({ commit: OBJ_COMMIT, tree: OBJ_TREE, blob: OBJ_BLOB, tag: OBJ_TAG });
+export type ObjType = typeof OBJ_COMMIT | typeof OBJ_TREE | typeof OBJ_BLOB | typeof OBJ_TAG | typeof OBJ_OFS_DELTA | typeof OBJ_REF_DELTA;
+export const TYPE: {
+  readonly COMMIT: typeof OBJ_COMMIT; readonly TREE: typeof OBJ_TREE; readonly BLOB: typeof OBJ_BLOB; readonly TAG: typeof OBJ_TAG;
+  readonly OFS_DELTA: typeof OBJ_OFS_DELTA; readonly REF_DELTA: typeof OBJ_REF_DELTA;
+} = Object.freeze({ COMMIT: OBJ_COMMIT, TREE: OBJ_TREE, BLOB: OBJ_BLOB, TAG: OBJ_TAG, OFS_DELTA: OBJ_OFS_DELTA, REF_DELTA: OBJ_REF_DELTA });
+export const TYPE_NAME: {
+  readonly [OBJ_COMMIT]: 'commit'; readonly [OBJ_TREE]: 'tree'; readonly [OBJ_BLOB]: 'blob'; readonly [OBJ_TAG]: 'tag';
+  readonly [OBJ_OFS_DELTA]: 'ofs_delta'; readonly [OBJ_REF_DELTA]: 'ref_delta';
+} = Object.freeze({ [OBJ_COMMIT]: 'commit', [OBJ_TREE]: 'tree', [OBJ_BLOB]: 'blob', [OBJ_TAG]: 'tag', [OBJ_OFS_DELTA]: 'ofs_delta', [OBJ_REF_DELTA]: 'ref_delta' });
+export const TYPE_ID: {
+  readonly commit: typeof OBJ_COMMIT; readonly tree: typeof OBJ_TREE; readonly blob: typeof OBJ_BLOB; readonly tag: typeof OBJ_TAG;
+} = Object.freeze({ commit: OBJ_COMMIT, tree: OBJ_TREE, blob: OBJ_BLOB, tag: OBJ_TAG });
 
-export const objectHeader = (typeName, len) => te.encode(`${typeName} ${len}\0`);
+export const objectHeader = (typeName: string, len: number): Uint8Array => te.encode(`${typeName} ${len}\0`);
 
-export function hashObject(typeName, data) {
+export function hashObject(typeName: string, data: Uint8Array): string {
   return new Sha1().update(objectHeader(typeName, data.length)).update(data).hex();
 }
 
-const cmpBytes = (a, b) => {
+const cmpBytes = (a: Uint8Array, b: Uint8Array): number => {
   const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) return (a[i] ?? 0) - (b[i] ?? 0);
+  }
   return a.length - b.length;
 };
 
 // ---- tree ----
 // fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for the low 16 bits of its mode: `40755` sorts
 // as a directory (fsck only warns about the mode), `160000` as a file.
-const lowBits = mode => parseInt(mode.slice(-MODE_LOW_DIGITS), 8) & MODE_BITS;
-const isDirMode = mode => (lowBits(mode) & MODE_S_IFMT) === MODE_S_IFDIR;
+const lowBits = (mode: string): number => Number.parseInt(mode.slice(-MODE_LOW_DIGITS), 8) & MODE_BITS;
+const isDirMode = (mode: string): boolean => (lowBits(mode) & MODE_S_IFMT) === MODE_S_IFDIR;
 // object.h canon_mode on the low 16 bits (tree-walk keeps the mode in a uint16_t): every reader of a tree but fsck sees
 // this. A regular file is 100755 if the owner may execute it, else 100644 (100664 → 100644, 100700 → 100755); S_IFLNK is
 // a symlink, S_IFDIR a tree (40755 → 40000); every other type is a gitlink (1, 160644, 777777 → 160000). `7100644`
 // and `300644` are 100644 to git, without even a badFilemode warning.
-export function canonMode(mode) {
+export type Mode = typeof MODE_BLOB | typeof MODE_EXEC | typeof MODE_LINK | typeof MODE_TREE | typeof MODE_COMMIT;
+export function canonMode(mode: string): Mode {
   const m = lowBits(mode), type = m & MODE_S_IFMT;
   if (type === MODE_S_IFREG) return m & MODE_OWNER_EXEC ? MODE_EXEC : MODE_BLOB;
   if (type === MODE_S_IFLNK) return MODE_LINK;
@@ -46,6 +61,13 @@ export function canonMode(mode) {
   return MODE_COMMIT;
 }
 const SLASH = Uint8Array.of(TREE_SORT_SLASH);
+
+export type TreeEntry = { readonly mode: Mode; readonly name: string; readonly oid: string; readonly oidOffset: number; readonly entryOffset: number };
+// What encodeTree and treeSort take: a caller's entries, or parsed ones.
+export type TreeEntryInput = { readonly mode: string; readonly name: string; readonly oid: string };
+
+// Every tree refusal is pack_corrupt with this prefix (one constructor: the code and prefix ship once).
+const badTree = (why: string): ErrorOf<'pack_corrupt'> => fail('pack_corrupt', `tree: ${why}`);
 
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
 // Duplicates and order are git's rules (fsck duplicateEntries and treeNotSorted, both errors under --strict) on the
@@ -55,50 +77,51 @@ const SLASH = Uint8Array.of(TREE_SORT_SLASH);
 // exactly the duplicates this set finds, so the message is one fsck prints. Names decode losslessly (decodeBytes, #43):
 // distinct bytes are distinct names, so the raw-byte duplicate check is also the decoded-name one.
 // @decoder parseTree prefix=tree
-export function parseTree(data, limits = DEFAULT_LIMITS) {
+// oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, inline: a helper costs bytes on every entry
+export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): TreeEntry[] {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
-  const entries = [];
-  const seen = new Set();
+  const entries: TreeEntry[] = [];
+  const seen = new Set<string>();
   let p = 0;
-  let prevKey = null;
+  let prevKey: Uint8Array | null = null;
   while (p < data.length) {
     if (entries.length >= maxEntries) throw limitError('tree entries', entries.length + 1, maxEntries);
     const sp = data.indexOf(TREE_MODE_SEP, p);
     // A negative fromIndex would wrap; indexOf returns -1 when the separator is absent.
-    if (sp < p) throw fail('pack_corrupt', 'tree: malformed entry');
+    if (sp < p) throw badTree('malformed entry');
     const nul = data.indexOf(TREE_NUL, sp + 1);
-    if (nul < sp + 1) throw fail('pack_corrupt', 'tree: malformed entry');
-    const raw = td.decode(take(data, p, sp - p));
+    if (nul < sp + 1) throw badTree('malformed entry');
+    const raw: string = td.decode(take(data, p, sp - p));
     // The name is bytes to git: decodeBytes keeps a leading BOM and escapes ill-formed UTF-8, so the string maps back (#43)
-    const nameBytes = take(data, sp + 1, nul - (sp + 1));
-    const name = decodeBytes(nameBytes);
+    const nameBytes: Uint8Array = take(data, sp + 1, nul - (sp + 1));
+    const name: string = decodeBytes(nameBytes);
     // The id starts at nul+1. take() demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
-    const oidBytes = take(data, nul + 1, OID_BYTES);
-    if (raw.length === 0) throw fail('pack_corrupt', 'tree: empty mode');
-    if (!/^[0-7]+$/.test(raw)) throw fail('pack_corrupt', 'tree: malformed mode');
+    const oidBytes: Uint8Array = take(data, nul + 1, OID_BYTES);
+    if (raw.length === 0) throw badTree('empty mode');
+    if (!/^[0-7]+$/u.test(raw)) throw badTree('malformed mode');
     // decode_tree_entry refuses an empty name before fsck_tree looks at the mode's first byte
-    if (name.length === 0) throw fail('pack_corrupt', 'tree: empty name');
-    if (raw[0] === '0') throw fail('pack_corrupt', 'tree: zero-padded mode');
+    if (name.length === 0) throw badTree('empty name');
+    if (raw[0] === '0') throw badTree('zero-padded mode');
     const mode = canonMode(raw);
-    if (name.indexOf('/') >= 0) throw fail('pack_corrupt', 'tree: full pathname');
-    if (name === '.' || name === '..' || isDotGitName(nameBytes)) throw fail('pack_corrupt', 'tree: bad name');
-    if (nameBytes.length > TREE_MAX_NAME_BYTES) throw fail('pack_corrupt', 'tree: large pathname');
-    if (oidBytes.every(b => b === 0)) throw fail('pack_corrupt', 'tree: null sha1');
+    if (name.includes('/')) throw badTree('full pathname');
+    if (name === '.' || name === '..' || isDotGitName(nameBytes)) throw badTree('bad name');
+    if (nameBytes.length > TREE_MAX_NAME_BYTES) throw badTree('large pathname');
+    if (oidBytes.every(b => b === 0)) throw badTree('null sha1');
     // fsck_tree: a .gitmodules (any spelling) that is a symlink is gitmodulesSymlink; one that is not a blob (a tree, or a
     // gitlink, whose commit is never in the repository) is gitmodulesBlob / gitmodulesMissing in fsck_finish. The same
     // for .gitattributes, except that as a symlink it is only a warning (gitattributesSymlink, INFO)
     if (isDotFileName(nameBytes, 'gitmodules')) {
-      if (mode === MODE_LINK) throw fail('pack_corrupt', 'tree: .gitmodules is a symbolic link');
-      if (mode === MODE_TREE || mode === MODE_COMMIT) throw fail('pack_corrupt', 'tree: .gitmodules is not a blob');
+      if (mode === MODE_LINK) throw badTree('.gitmodules is a symbolic link');
+      if (mode === MODE_TREE || mode === MODE_COMMIT) throw badTree('.gitmodules is not a blob');
     }
-    if ((mode === MODE_TREE || mode === MODE_COMMIT) && isDotFileName(nameBytes, 'gitattributes')) throw fail('pack_corrupt', 'tree: .gitattributes is not a blob');
-    const rawName = toHex(nameBytes);
-    if (seen.has(rawName)) throw fail('pack_corrupt', `tree: duplicate entry ${JSON.stringify(name)}`);
+    if ((mode === MODE_TREE || mode === MODE_COMMIT) && isDotFileName(nameBytes, 'gitattributes')) throw badTree('.gitattributes is not a blob');
+    const rawName: string = toHex(nameBytes);
+    if (seen.has(rawName)) throw badTree(`duplicate entry ${JSON.stringify(name)}`);
     seen.add(rawName);
-    const key = isDirMode(raw) ? concat([nameBytes, SLASH]) : nameBytes;
+    const key: Uint8Array = isDirMode(raw) ? concat([nameBytes, SLASH]) : nameBytes;
     // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
-    if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw fail('pack_corrupt', 'tree: not strictly sorted');
+    if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw badTree('not strictly sorted');
     prevKey = key;
     entries.push({ mode, name, oid: toHex(oidBytes), oidOffset: nul + 1, entryOffset: p });
     p = nul + 1 + OID_BYTES;
@@ -106,16 +129,18 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
   return entries;
 }
 
-const sortKey = e => (e.mode === MODE_TREE ? e.name + '/' : e.name);
-export function treeSort(entries) {
+type Sortable = { readonly mode: string; readonly name: string };
+const sortKey = (e: Sortable): string => (e.mode === MODE_TREE ? `${e.name}/` : e.name);
+export function treeSort<T extends Sortable>(entries: Iterable<T>): T[] {
+  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own copy; the spread keeps any iterable a caller passes working
   return [...entries].sort((a, b) => cmpBytes(encodeBytes(sortKey(a), 'tree entry name'), encodeBytes(sortKey(b), 'tree entry name')));
 }
 
 // git fsck `duplicateEntries`: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort
 // next to each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and
 // `readme`) are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
-export function encodeTree(entries) {
-  const names = new Set();
+export function encodeTree(entries: readonly TreeEntryInput[]): Uint8Array {
+  const names = new Set<string>();
   for (const e of entries) {
     if (names.has(e.name)) throw fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
     names.add(e.name);
@@ -124,7 +149,7 @@ export function encodeTree(entries) {
 }
 
 // Replace the oid of one entry in place; returns new bytes + coordinates for a structural delta.
-export function treeReplaceOid(data, entry, newOidHex) {
+export function treeReplaceOid(data: Uint8Array, entry: { readonly oidOffset: number }, newOidHex: string): Uint8Array {
   const out = data.slice();
   out.set(fromHex(newOidHex), entry.oidOffset);
   return out;
@@ -144,40 +169,42 @@ export function treeReplaceOid(data, entry, newOidHex) {
 // so a BOM before `tree` is a missing tree, as in git, and an ill-formed UTF-8 byte becomes an escape (a lone surrogate)
 // that encodeBytes maps back to the same byte, so a Latin-1 message or ident re-encodes to its own bytes. No rule here
 // matches an escape, and an escape can never form a NUL, a newline or any other delimiter.
-const HEX = /^[0-9a-fA-F]$/;
-const DIGIT = /^[0-9]$/;
+const HEX = /^[0-9a-fA-F]$/u;
+const DIGIT = /^[0-9]$/u;
 
 const BLANK_LINE = '\n\n';
 const NO_BODY = -1;
-const corrupt = (kind, msgId, why) => fail('pack_corrupt', `${kind}: ${msgId}: ${why}`, { msgId });
+const corrupt = (kind: string, msgId: string, why: string): ErrorOf<'pack_corrupt'> => fail('pack_corrupt', `${kind}: ${msgId}: ${why}`, { msgId });
 
 // fsck.c verify_headers: no NUL before the first blank line, and a header without a blank line ends in a newline.
 // Returns the index of the blank line's first newline, or -1 when there is no body section.
-function verifyHeaders(s, kind) {
+function verifyHeaders(s: string, kind: string): number {
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (ch === '\0') throw corrupt(kind, 'nulInHeader', `unterminated header: NUL at offset ${i}`);
     if (ch === '\n' && s[i + 1] === '\n') return i;
   }
-  if (s.length && s.endsWith('\n')) return NO_BODY;
+  if (s.length > 0 && s.endsWith('\n')) return NO_BODY;
   throw corrupt(kind, 'unterminatedHeader', 'unterminated header');
 }
 
 // parse_oid_hex then '\n': 40 hex digits of either case (git stores the binary id, so it prints lowercase).
-function oidLine(s, p, kind, msgId, what) {
+function oidLine(s: string, p: number, kind: string, msgId: string, what: string): string {
   for (let i = 0; i < OID_HEX_CHARS; i++) if (!HEX.test(s[p + i] ?? '')) throw corrupt(kind, msgId, `invalid '${what}' line format - bad sha1`);
   if (s[p + OID_HEX_CHARS] !== '\n') throw corrupt(kind, msgId, `invalid '${what}' line format - bad sha1`);
   return s.slice(p, p + OID_HEX_CHARS).toLowerCase();
 }
 
+
 // fsck.c fsck_ident on the line that starts at p (after "author "); returns [the ident text, the index after its
 // newline]. The checks and their order are git's: a leading '<', a '>' before the '<', no '<', no space before '<',
 // no '>' after the email, no space after '>', then spaces or tabs, a digit, no leading zero unless the date is "0",
 // no overflow past git's timestamp range, one space, a sign, IDENT_TZ_DIGITS digits, and the newline.
-function fsckIdent(s, p, kind, role) {
+// oxlint-disable-next-line eslint/complexity -- fsck_ident line for line, inline: a helper costs bytes on every entry
+function fsckIdent(s: string, p: number, kind: string, role: string): readonly [ident: string, next: number] {
   const eol = s.indexOf('\n', p);
   const end = eol < 0 ? s.length : eol;
-  const bad = (msgId, why) => corrupt(kind, msgId, `invalid ${role} line - ${why}`);
+  const bad = (msgId: string, why: string): ErrorOf<'pack_corrupt'> => corrupt(kind, msgId, `invalid ${role} line - ${why}`);
   if (s[p] === '<') throw bad('missingNameBeforeEmail', 'missing space before email');
   let q = p;
   while (q < end && s[q] !== '<' && s[q] !== '>') q++;
@@ -205,46 +232,51 @@ function fsckIdent(s, p, kind, role) {
 }
 
 // The header lines after the last one fsck reads, up to the blank line (or the end), and the message after it.
-function rest(s, p, blank) {
+function rest(s: string, p: number, blank: number): { extra: string[]; message: string | null } {
   const headEnd = blank === NO_BODY ? s.length : blank + 1;
   const tail = s.slice(p, headEnd);
   // every header line ends in a newline (verify_headers), so the tail is whole lines; drop the last terminator
-  return { extra: tail.length ? tail.slice(0, tail.length - 1).split('\n') : [], message: blank === NO_BODY ? null : s.slice(blank + BLANK_LINE.length) };
+  return { extra: tail.length > 0 ? tail.slice(0, tail.length - 1).split('\n') : [], message: blank === NO_BODY ? null : s.slice(blank + BLANK_LINE.length) };
 }
 
 // The allowed typed refusal above: fsck accepts the object, git's views of it disagree, ply refuses. A line after the
 // committer that starts `parent ` is a parent cat-file shows and %P does not; PR #7 named it a bad header order.
 const COMMIT_SHADOWED = [COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER];
 const TAG_SHADOWED = [TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER];
-const duplicate = (kind, key) => fail('pack_corrupt', key === COMMIT_HEADER_PARENT && kind === 'commit' ? 'commit: bad header order' : `${kind}: duplicate ${key}`, { msgId: 'duplicateHeader' });
-function refuseShadowed(kind, extra, keys) {
+const duplicate = (kind: string, key: string): ErrorOf<'pack_corrupt'> => fail('pack_corrupt', key === COMMIT_HEADER_PARENT && kind === 'commit' ? 'commit: bad header order' : `${kind}: duplicate ${key}`, { msgId: 'duplicateHeader' });
+function refuseShadowed(kind: string, extra: readonly string[], keys: readonly string[]): void {
   for (const l of extra) for (const key of keys) if (l.startsWith(`${key} `)) throw duplicate(kind, key);
 }
 
 // @decoder parseCommit prefix=commit
-export function parseCommit(data, limits = DEFAULT_LIMITS) {
+export type Commit = {
+  readonly tree: string; readonly parents: string[]; readonly author: string; readonly committer: string;
+  readonly encoding: string | null; readonly extra: string[]; readonly message: string | null;
+};
+export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Commit {
   const maxParents = requireLimit(limits, 'maxCommitParents');
-  const s = decodeBytes(data);
+  const s: string = decodeBytes(data);
   const blank = verifyHeaders(s, 'commit');
-  const has = (p, key) => s.startsWith(`${key} `, p);
+  const has = (p: number, key: string): boolean => s.startsWith(`${key} `, p);
   if (!has(0, COMMIT_HEADER_TREE)) throw corrupt('commit', 'missingTree', "invalid format - expected 'tree' line");
   let p = COMMIT_HEADER_TREE.length + 1;
   const tree = oidLine(s, p, 'commit', 'badTreeSha1', COMMIT_HEADER_TREE);
   p += OID_HEX_CHARS + 1;
-  const parents = [];
+  const parents: string[] = [];
   while (has(p, COMMIT_HEADER_PARENT)) {
     p += COMMIT_HEADER_PARENT.length + 1;
     parents.push(oidLine(s, p, 'commit', 'badParentSha1', COMMIT_HEADER_PARENT));
     if (parents.length > maxParents) throw limitError('commit parents', parents.length, maxParents);
     p += OID_HEX_CHARS + 1;
   }
-  const authors = [];
+  const authors: string[] = [];
   while (has(p, COMMIT_HEADER_AUTHOR)) {
     const [who, next] = fsckIdent(s, p + COMMIT_HEADER_AUTHOR.length + 1, 'commit', COMMIT_HEADER_AUTHOR);
     authors.push(who);
     p = next;
   }
-  if (authors.length < 1) throw corrupt('commit', 'missingAuthor', "invalid format - expected 'author' line");
+  const [author] = authors;
+  if (author === undefined) throw corrupt('commit', 'missingAuthor', "invalid format - expected 'author' line");
   if (authors.length > 1) throw corrupt('commit', 'multipleAuthors', "invalid format - multiple 'author' lines");
   if (!has(p, COMMIT_HEADER_COMMITTER)) throw corrupt('commit', 'missingCommitter', "invalid format - expected 'committer' line");
   const [committer, next] = fsckIdent(s, p + COMMIT_HEADER_COMMITTER.length + 1, 'commit', COMMIT_HEADER_COMMITTER);
@@ -253,13 +285,15 @@ export function parseCommit(data, limits = DEFAULT_LIMITS) {
   const { extra, message } = rest(s, next, blank);
   refuseShadowed('commit', extra, COMMIT_SHADOWED);
   const at = extra.findIndex(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `));
-  const encoding = at < 0 ? null : extra.splice(at, 1)[0].slice(COMMIT_HEADER_ENCODING.length + 1);
+  // extra[-1] is undefined: no encoding line
+  // splice returns the one line it removed; join('') is that line
+  const encoding = at < 0 ? null : extra.splice(at, 1).join('').slice(COMMIT_HEADER_ENCODING.length + 1);
   // a second encoding is a second copy of a single-valued header
   if (extra.some(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `))) throw duplicate('commit', COMMIT_HEADER_ENCODING);
-  return { tree, parents, author: authors[0], committer, encoding, extra, message };
+  return { tree, parents, author, committer, encoding, extra, message };
 }
 
-export function ident(person) {
+export function ident(person: ValidatedIdent): string {
   if (!isValidatedIdent(person)) throw fail('bad_request', 'ident: unvalidated identity', { what: 'ident' });
   return `${person.name} <${person.email}> ${person.time} ${person.tz}`;
 }
@@ -267,26 +301,31 @@ export function ident(person) {
 // The inverse, as git's split_ident_line reads it: name up to the first '<' (trailing spaces trimmed), email up to the
 // next '>', then "<epoch> <tz>" after the last '>'. Fields git would print as empty are '' (time null when the date is missing).
 // @decoder parseIdent prefix=ident
-export function parseIdent(line) {
+export type ParsedIdent = { readonly name: string; readonly email: string; readonly time: string | null; readonly tz: string };
+export function parseIdent(line: unknown): ParsedIdent | null {
   if (typeof line !== 'string') return null;
   const lt = line.indexOf('<');
   if (lt < 0) return { name: line.trim(), email: '', time: null, tz: '' };
   const gt = line.indexOf('>', lt + 1);
   // Stryker disable next-line EqualityOperator: indexOf from lt + 1 cannot return 0, so <= and < reject the same missing '>'
   if (gt < 0) return { name: line.trim(), email: '', time: null, tz: '' };
-  const parts = line.slice(line.lastIndexOf('>') + 1).trim().split(/\s+/);
+  const parts = line.slice(line.lastIndexOf('>') + 1).trim().split(/\s+/u);
   // Stryker disable next-line StringLiteral: a missing time fails the digit test the same way any non-numeric default does
   const time = parts[0] ?? '';
   const tz = parts[1] ?? '';
-  return { name: line.slice(0, lt).trimEnd(), email: line.slice(lt + 1, gt), time: /^\d+$/.test(time) ? time : null, tz };
+  return { name: line.slice(0, lt).trimEnd(), email: line.slice(lt + 1, gt), time: /^\d+$/u.test(time) ? time : null, tz };
 }
 
 // ---- tag (annotated): fsck.c fsck_tag_standalone ----
 // @decoder parseTag prefix=tag
-export function parseTag(data) {
-  const s = decodeBytes(data);
+export type Tag = {
+  readonly object: string; readonly type: string; readonly tag: string; readonly tagger: string | null;
+  readonly extra: string[]; readonly message: string | null;
+};
+export function parseTag(data: Uint8Array): Tag {
+  const s: string = decodeBytes(data);
   const blank = verifyHeaders(s, 'tag');
-  const has = (p, key) => s.startsWith(`${key} `, p);
+  const has = (p: number, key: string): boolean => s.startsWith(`${key} `, p);
   if (!has(0, TAG_HEADER_OBJECT)) throw corrupt('tag', 'missingObject', "invalid format - expected 'object' line");
   let p = TAG_HEADER_OBJECT.length + 1;
   const object = oidLine(s, p, 'tag', 'badObjectSha1', TAG_HEADER_OBJECT);
@@ -305,7 +344,7 @@ export function parseTag(data) {
   const tag = s.slice(p, eol);
   p = eol + 1;
   // missingTaggerEntry is INFO: tags before git 0.99.1 have none
-  let tagger = null;
+  let tagger: string | null = null;
   if (has(p, TAG_HEADER_TAGGER)) [tagger, p] = fsckIdent(s, p + TAG_HEADER_TAGGER.length + 1, 'tag', TAG_HEADER_TAGGER);
   // extraHeaderEntry is IGNORE, and fsck never reads a tag's body: a NUL there is accepted, unlike in a commit
   const { extra, message } = rest(s, p, blank);
@@ -316,7 +355,7 @@ export function parseTag(data) {
 // Every object fetch passes through here once it hashes to the oid the server advertised (fetchObject, checkWide on a
 // pack before any of it is returned or harvested). It is the same parser every reader calls, so a commit or tag no
 // reader would accept never reaches one.
-export function assertFetched(typeName, data, limits = DEFAULT_LIMITS) {
+export function assertFetched(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): void {
   if (typeName === 'blob' || typeName === 'ofs_delta' || typeName === 'ref_delta') return;
   if (typeName === 'tree') { parseTree(data, limits); return; }
   if (typeName === 'commit') { parseCommit(data, limits); return; }
@@ -327,16 +366,20 @@ export function assertFetched(typeName, data, limits = DEFAULT_LIMITS) {
 // A header value is one line. LF or NUL, from any caller, would open a new header. The message is the body: LF is
 // legal there, NUL is not. withGpgsig splices signature continuation lines after this returns, so those bytes are
 // not re-checked here.
-const headerValue = (value, what) => {
-  if (typeof value !== 'string' || /[\0\n]/.test(value)) throw fail('bad_request', `${what} must not contain NUL or newline`, { what });
+const headerValue = (value: unknown, what: string): void => {
+  if (typeof value !== 'string' || /[\0\n]/u.test(value)) throw fail('bad_request', `${what} must not contain NUL or newline`, { what });
 };
-const messageBody = message => {
+const messageBody = (message: unknown): void => {
   if (message !== null && (typeof message !== 'string' || message.includes('\0'))) throw fail('bad_request', 'message must not contain NUL', { what: 'message' });
 };
 
 // Faithful: the message is written verbatim after the blank line; null means no body section. Callers that want
 // git's conventional trailing newline add it themselves (editFile does).
-export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }) {
+export type CommitInput = {
+  readonly tree: string; readonly parents?: readonly string[]; readonly author: string; readonly committer?: string;
+  readonly encoding?: string | null; readonly message?: string | null; readonly extra?: readonly string[];
+};
+export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitInput): Uint8Array {
   headerValue(tree, 'tree');
   for (const p of parents) headerValue(p, 'parent');
   headerValue(author, 'author');
@@ -352,10 +395,14 @@ export function encodeCommit({ tree, parents = [], author, committer = author, e
   ];
   if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
   lines.push(...extra);
-  return encodeBytes(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message), 'commit');
+  return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
 }
 
-export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }) {
+export type TagInput = {
+  readonly object: string; readonly type: string; readonly tag: string; readonly tagger: string;
+  readonly message?: string | null; readonly extra?: readonly string[];
+};
+export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }: TagInput): Uint8Array {
   headerValue(object, 'object');
   headerValue(type, 'type');
   headerValue(tag, 'tag');
@@ -366,5 +413,5 @@ export function encodeTag({ object, type, tag, tagger, message = null, extra = [
     `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
     ...extra,
   ];
-  return encodeBytes(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message), 'tag');
+  return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'tag');
 }

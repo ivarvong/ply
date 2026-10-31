@@ -330,7 +330,7 @@ export function resolvePack(
       core = { type: base.type, data: out, chain, deltaOps: ops };
     }
     const r: ResolvedObject = Object.assign(core, {
-      oid: hashObject((TYPE_NAME as TypeNames)[core.type], core.data),
+      oid: hashObject(String((TYPE_NAME as TypeNames)[core.type]), core.data),
       offset: obj.offset, size: obj.size, compressed: obj.compressed,
       baseOffset: obj.baseOffset, baseOid: obj.baseOid,
     });
@@ -340,7 +340,7 @@ export function resolvePack(
     byOid.set(r.oid, obj);
     return r;
   };
-  for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject((TYPE_NAME as TypeNames)[o.type], o.data);
+  for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) o.oid = hashObject(String((TYPE_NAME as TypeNames)[o.type]), o.data);
   for (const o of parsed.objects) if (o.baseOffset === undefined && o.baseOid === undefined) { byOid.set(o.oid, o); resolveObj(o); }
   // Until nothing is pending: a pass either resolves something, or switches to external bases once, or throws. A REF
   // chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check above

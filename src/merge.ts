@@ -14,6 +14,7 @@
 // The pure parts: threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits), uniqueObjects; linemerge.js. The effects: lsRefs, fetchObject, push.
 /* oxlint-disable import/max-dependencies -- a merge drives ls-refs, fetch, push, the object codecs and the line merge */
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
+import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import { thrown as fail } from './errors.js';
@@ -469,7 +470,7 @@ export type MergeOutcome =
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
 export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
   validatePushRef(ref, false); validateRef(from);
-  const person: object | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+  const person: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== undefined && message !== null) validateMessage(message); validateAttributes(attributes);
   return runOp('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref, from]);
@@ -497,7 +498,7 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     if (fastForwardOnly) throw fail('not_fast_forward', `${ref} has moved past the merge base; a merge commit would be needed`);
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     const [cB, cO, cT]: Array<{ readonly data: Uint8Array }> = await Promise.all([base, ours, theirs].map(oid => fetchObj(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })));
-    const tree = (c: { readonly data: Uint8Array } | undefined): string => parseCommit(c?.data, t.limits).tree;
+    const tree = (c: { readonly data: Uint8Array } | undefined): string => parseCommit(c?.data ?? new Uint8Array(0), t.limits).tree;
     const trees = { base: tree(cB), ours: tree(cO), theirs: tree(cT) };
     const mergeBlob = blobMerger(t, { maxMergeBlobBytes: requireLimit(t.limits, 'maxMergeBlobBytes'), rediff });
     const attrTree = await attributeTree(t, attributes, trees);

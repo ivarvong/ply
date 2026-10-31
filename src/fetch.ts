@@ -317,7 +317,7 @@ export function checkWide(objects: Map<string, PackObject>, wanted: (oid: string
   const skipped: Skipped[] = [];
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE && o.type !== TYPE.TAG) continue;
-    try { assertFetched((TYPE_NAME as Names)[o.type], o.data, limits); } catch (e) {
+    try { assertFetched(String((TYPE_NAME as Names)[o.type]), o.data, limits); } catch (e) {
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
       if ((e as Loose)?.code !== 'limit_exceeded' || wanted(oid, o)) throw e;
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a limit_exceeded error carries `what` (limits.ts)
@@ -370,11 +370,11 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
       const zlib = concat(zlibParts);
       const { out, consumed, stats } = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });
       if (consumed !== zlib.length) throw fail('pack_corrupt', `pack: ${zlib.length - consumed} trailing bytes after object`);
-      const got = hashObject((TYPE_NAME as Names)[sp.type], out);
-      span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': (TYPE_NAME as Names)[sp.type] });
+      const got = hashObject(String((TYPE_NAME as Names)[sp.type]), out);
+      span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': String((TYPE_NAME as Names)[sp.type]) });
       if (got !== oid) throw fail('pack_corrupt', `object ${got} served for want ${oid}`);
-      assertFetched((TYPE_NAME as Names)[sp.type], out, t.limits);
-      if (expectType !== null && sp.type !== expectType) throw fail('pack_corrupt', `expected ${(TYPE_NAME as Names)[expectType]}, got ${(TYPE_NAME as Names)[sp.type]}`);
+      assertFetched(String((TYPE_NAME as Names)[sp.type]), out, t.limits);
+      if (expectType !== null && sp.type !== expectType) throw fail('pack_corrupt', `expected ${(TYPE_NAME as Names)[expectType]}, got ${String((TYPE_NAME as Names)[sp.type])}`);
       return { type: sp.type, data: out, oid, size: out.length, bust };
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- any thrown object carries the cache status (fetchPack reads it back)
     } catch (e) { if (Boolean(e) && typeof e === 'object') (e as { cacheStatus?: unknown }).cacheStatus = span.attrs['git.response.cache'] ?? ''; throw e; }
