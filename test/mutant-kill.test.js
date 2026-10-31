@@ -16,6 +16,9 @@ import {
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
+import { bestBases, mergeBase } from '../src/merge.js';
+import { rebaseBranch } from '../src/rebase.js';
+import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
 import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
@@ -1543,4 +1546,75 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes
   const ok = await push(fits, del);
   assert.equal(ok.report.ok, true); assert.equal(ok.hookOutput, '');
+});
+
+// A commit-only v2 server over a hand graph ({ name: [parent names] }), answering `want` + `deepen N` + `filter tree:0`
+// as upload-pack does: the commits within N of the want (the want is depth 1), those at depth N as `shallow` lines; a
+// want of the empty tree answers it; ls-refs from `t.refs`; receive-pack answers every command `ok` and moves the ref
+// (the pack is not inspected) — enough for mergeBase and rebaseBranch. Ported from research/18 (7b21380).
+function graphServer(edges) {
+  const author = ident(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }));
+  const tree = hashObject('tree', new Uint8Array(0));
+  const oids = new Map(), datas = new Map();
+  const build = name => { if (oids.has(name)) return oids.get(name); const d = encodeCommit({ tree, parents: edges[name].map(build), author, committer: author, message: `${name}\n` }); const o = hashObject('commit', d); oids.set(name, o); datas.set(o, d); return o; };
+  for (const name of Object.keys(edges)) build(name);
+  const parentsOf = new Map([...oids].map(([name, o]) => [o, edges[name].map(n => oids.get(n))]));
+  const requests = [];
+  const line = str => ({ kind: 'data', payload: te.encode(str) });
+  const sideband = b => ({ kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), b]) });
+  const t = { limits: DEFAULT_LIMITS, tracer: new Tracer(), parent: null, objects: new Map(), quirks: {}, requests, refs: new Map(), url: 'stub://graph',
+    async *frames(service, body) {
+      // the pkt-lines up to the first flush (a receive-pack body carries the raw pack after it)
+      const lines = []; for (let p = 0; p + 4 <= body.length;) { const n = parseInt(td.decode(body.subarray(p, p + 4)), 16); if (n === 0) break; if (n > 1) lines.push(td.decode(body.subarray(p + 4, p + n)).replace(/\n$/, '')); p += Math.max(n, 4); }
+      if (service === 'git-receive-pack') { yield sideband(pkt('unpack ok\n')); for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield sideband(pkt(`ok ${m[2]}\n`)); } } yield { kind: 'flush' }; return; }
+      if (lines[0] === 'command=ls-refs') { const prefixes = lines.filter(l => l.startsWith('ref-prefix ')).map(l => l.slice(11)); for (const [ref, o] of t.refs) if (prefixes.some(p => ref.startsWith(p))) yield line(`${o} ${ref}\n`); yield { kind: 'flush' }; return; }
+      const want = lines.find(l => l.startsWith('want '))?.slice(5), deepen = +(lines.find(l => l.startsWith('deepen '))?.slice(7) ?? 0);
+      const filter = lines.find(l => l.startsWith('filter '))?.slice(7) ?? null;
+      requests.push({ want, deepen, filter });
+      if (want === tree) { const { pack } = await buildPack([{ type: TYPE.TREE, data: new Uint8Array(0) }]); yield line('packfile\n'); yield sideband(pack); yield { kind: 'flush' }; return; }
+      const depth = new Map([[want, 1]]); const q = [want];
+      for (let i = 0; i < q.length; i++) { const c = q[i]; if (depth.get(c) >= deepen) continue; for (const p of parentsOf.get(c) ?? []) if (!depth.has(p)) { depth.set(p, depth.get(c) + 1); q.push(p); } }
+      const window = [...depth.keys()], shallow = window.filter(c => depth.get(c) === deepen && parentsOf.get(c).length);
+      const { pack } = await buildPack(window.map(c => ({ type: TYPE.COMMIT, data: datas.get(c) })));
+      if (shallow.length) { yield line('shallow-info\n'); for (const c of shallow) yield line(`shallow ${c}\n`); yield { kind: 'delim' }; }
+      yield line('packfile\n');
+      for (let i = 0; i < pack.length; i += 65000) yield sideband(pack.subarray(i, Math.min(i + 65000, pack.length)));
+      yield { kind: 'flush' };
+    } };
+  return { t, oid: name => oids.get(name) };
+}
+const chain = (name, n, below) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${name}${i + 1}`, [i + 1 < n ? `${name}${i + 2}` : below]]));
+
+test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was only named, and a cut below two candidates deepens', async () => {
+  // #41: the base exactly at the window's cut (8 a side) is named by both sides' children, never fetched by mergeBase; it
+  // is fetched once (deepen 1) before the first replay. With the base inside the window (7) it is not fetched again.
+  for (const n of [8, 7]) {
+    const s = graphServer({ root: [], ...chain('f', n, 'root'), ...chain('m', n, 'root') });
+    s.t.refs.set('refs/heads/feat', s.oid('f1')); s.t.refs.set('refs/heads/main', s.oid('m1'));
+    const res = await rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+    assert.deepEqual([res.outcome, res.commits, res.base, res.onto], ['rebase', n, s.oid('root'), s.oid('m1')]);
+    assert.equal(s.t.refs.get('refs/heads/feat'), res.oid, 'the branch was force-updated to the new tip');
+    assert.equal(s.t.requests.filter(q => q.want === s.oid('root') && q.deepen === 1).length, n === 8 ? 1 : 0, 'base fetched once at the cut (n=8), not when the window held it (n=7)');
+  }
+  // #42: a,b → [c, z]; c → p1..p6 → x → z. Depth 8 cuts x: {c, z} looks criss-cross; one more window shows z below c.
+  { const s = graphServer({ a: ['c', 'z'], b: ['c', 'z'], ...chain('p', 6, 'x'), c: ['p1'], x: ['z'], z: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.base, res.bases, res.depth], [s.oid('c'), [s.oid('c')], 16]); }
+  // a true criss-cross with nothing cut below it is final at the first window (two bases, not a deeper search)
+  { const s = graphServer({ a: ['x', 'y'], b: ['y', 'x'], x: ['r'], y: ['r'], r: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.base, res.bases, res.depth], [null, [s.oid('x'), s.oid('y')].sort(), 8]); }
+  // ...nor over deep shared history: a cut both bases reach cannot join them (the research rule deepened to the cap here:
+  // limit_exceeded where git answers two bases)
+  { const s = graphServer({ a: ['x', 'y'], b: ['y', 'x'], x: ['h1'], y: ['h1'], ...chain('h', 40, 'r'), r: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'), { maxDepth: 16 });
+    assert.deepEqual([res.base, res.bases, res.depth], [null, [s.oid('x'), s.oid('y')].sort(), 8]); }
+  // a single base over a settled cut stays final at the first window
+  { const s = graphServer({ a: ['c'], b: ['c'], ...chain('p', 9, 'r'), c: ['p1'], r: [] });
+    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    assert.deepEqual([res.base, res.depth], [s.oid('c'), 8]); }
+  const G = o => new Map(Object.entries(o).map(([k, parents]) => [k, { parents }]));
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['x'] }), 'a', 'b'), { best: ['c', 'z'], truncated: false }, 'a cut both bases reach');
+  assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: ['w'] }), 'a', 'b'), { best: ['c', 'z'], truncated: true }, 'each base reaches a cut the other does not');
 });

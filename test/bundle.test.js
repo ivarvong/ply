@@ -89,7 +89,9 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 82,807 B. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
   // 2026-10-30: 81,637 B. The same parseTree duplicate and order rules (issue #34).
   // 2026-10-30: 83,907 B. The same push outcome allowlist (SAFETY.md I36).
-  assert.ok(min < 83_908, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 81,773 B. A settled cut one best base reaches and another does not keeps the merge-base walk going (#42);
+  // rebase fetches a base named only at the window's cut (#41).
+  assert.ok(min < 81_774, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
