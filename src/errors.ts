@@ -53,6 +53,14 @@ export type Extra = {
   readonly max?: number;
   readonly cause?: unknown;
   readonly original?: unknown;
+  // ssh: the DISCONNECT reason code, the host key a server presented, the auth methods it offered, a channel's
+  // window and queued bytes when it overran, a remote command's exit status (null: none received).
+  readonly disconnect?: number;
+  readonly presented?: string;
+  readonly methods?: readonly string[];
+  readonly window?: number;
+  readonly queued?: number;
+  readonly exit?: number | null;
 };
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
