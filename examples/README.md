@@ -1,17 +1,28 @@
 # examples
 
-Scripts that use ply as the git client from a machine with Node but no `git` binary. Both were checked against real
-`git http-backend` (`test/server.js`) and behind the Artifacts-behaviour proxy (`test/proxy.js`, `blob:none` only):
-`git fsck --strict` clean, `git clone` of the result identical to the source directory.
+Two CLI scripts that use ply as the git client from a machine with Node and no `git` binary. Each is a thin wrapper over
+a first-class API; `test/examples.test.js` runs both, as a user would, against `git http-backend` with the client's
+`PATH` holding only `node`.
 
-- `push-tree.mjs <dir> <remote.git> [refs/heads/main] [token]` — the directory as one commit. Creates the ref with the
-  zero old-oid or updates it with the current head as the CAS; honours `.gitignore` (root and nested); leaves out every
-  blob and tree the previous commit already has, so a one-file change ships that blob, the trees on its path and the
-  commit; an unchanged tree is a `noop`. Symlinks and submodules are skipped on purpose.
-- `checkout-tree.mjs <remote.git> <out-dir> [ref] [token]` — a ref into a directory via `readCommit`/`listTree`/`readFile`:
-  every blob hash-checked as it streams, modes kept (`100755` → executable, `120000` → symlink).
+```sh
+export PLY_TOKEN=…            # Basic auth (user PLY_USER, default x-access-token); or PLY_BEARER for Bearer
+node examples/push-tree.mjs ./site https://host/repo.git --ref main --message "deploy"
+node examples/checkout-tree.mjs https://host/repo.git ./out --ref main
+```
 
-Token: Artifacts and GitHub both take `auth: { user: 'x', token }` (Basic) or `{ bearer }`; the scripts use the former.
+Credentials come from the environment only, never argv (argv shows up in `ps` and shell history). Author is
+`GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`.
 
-Round trips today: push ≈ 2 for a create, ≈ 7 for an update (the server-has walk is one `listTree` per directory);
-checkout ≈ 3 + 2 per file. A library-level `pushTree` / `checkoutTree` would do the same in a fixed handful — see #11.
+- `push-tree.mjs <dir> <remote> [--ref main] [--message …]` — `pushDir` (`ply/tree-node`): the directory as one commit.
+  Creates the ref with the zero old-oid, or updates it with its current head as the CAS. Prints the old → new commit,
+  the objects sent and the pack bytes. The push is thin: whatever the previous commit already has is left out, so a
+  repeat with one file changed sends that blob, the trees on its path and the commit; a repeat with nothing changed is
+  a `noop` and sends nothing. `.git` is skipped; `.gitignore` is not read (give `pushDir` a `filter` for that).
+- `checkout-tree.mjs <remote> <dir> [--ref main]` — `checkoutDir` (`ply/checkout-node`): a ref (default `HEAD`) into an
+  absent or empty directory, laid out as `git clone` lays it out (`100755` executable, `120000` a symlink, a submodule
+  an empty directory), every blob hash-checked as it streams. Prints the commit and the files, bytes and symlinks
+  written. Three requests whatever the file count: ls-refs, a `blob:none` tree fetch, one fetch for the blobs.
+
+Measured by `test/examples.test.js` (9 files, 6 trees, two symlinks, an exec bit): create sends 16 objects / 4683 pack
+bytes; a one-file change four directories deep sends 6 objects (1 blob, 4 trees, the commit) / 488 bytes; an unchanged
+tree is a `noop`. The checkout is byte-identical to the source with modes, and so is `git clone` of the remote.
