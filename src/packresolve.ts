@@ -43,21 +43,20 @@ export type PackKind = 'commit' | 'tree' | 'blob' | 'tag' | 'ofs_delta' | 'ref_d
 const varintLong = (what: string): Err<Corrupt> => corrupt(`${what}: size varint longer than ${VARINT_MAX_SHIFT + 1} bits`);
 
 // Little-endian 7-bit groups from start, each with a continue bit: the delta header's sizes (from n = 0, shift = 0), and
-// the rest of an object header's size after its first byte (from that byte's four bits, shift = 4).
-function readVarint(buf: Uint8Array, start: number, what: string, n0 = 0, shift0 = 0, more = true): Result<readonly [number, number], Corrupt> {
+// the rest of an object header's size after a first byte that continues (from that byte's four bits, shift = 4).
+function readVarint(buf: Uint8Array, start: number, what: string, n0 = 0, shift0 = 0): Result<readonly [number, number], Corrupt> {
   let p = start;
   let n = n0;
   let shift = shift0;
   let c: number | undefined;
-  while (more) {
+  do {
     if (shift > VARINT_MAX_SHIFT) return varintLong(what);
     c = buf[p];
     if (c === undefined) return short(buf, p);
     p += 1;
     n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
     shift += VARINT_BITS;
-    more = (c & OBJ_CONTINUE) !== 0;
-  }
+  } while (c & OBJ_CONTINUE);
   return ok([n, p]);
 }
 
@@ -78,9 +77,11 @@ export type ObjHeader = { readonly type: number; readonly size: number; readonly
 export function readObjHeaderResult(buf: Uint8Array, start: number): Result<ObjHeader, Corrupt> {
   const c = buf[start];
   if (c === undefined) return short(buf, start);
-  const rest = readVarint(buf, start + 1, 'pack', c & OBJ_SIZE_FIRST_MASK, OBJ_TYPE_SHIFT, (c & OBJ_CONTINUE) !== 0);
+  const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
+  if (!(c & OBJ_CONTINUE)) return ok({ type, size: c & OBJ_SIZE_FIRST_MASK, next: start + 1 });
+  const rest = readVarint(buf, start + 1, 'pack', c & OBJ_SIZE_FIRST_MASK, OBJ_TYPE_SHIFT);
   if (!rest.ok) return rest;
-  return ok({ type: (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK, size: rest.value[0], next: rest.value[1] });
+  return ok({ type, size: rest.value[0], next: rest.value[1] });
 }
 // @decoder readObjHeader prefix=obj-header
 export function readObjHeader(buf: Uint8Array, start: number): ObjHeader { return orThrow(readObjHeaderResult(buf, start)); }
