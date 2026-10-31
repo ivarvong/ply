@@ -77,7 +77,9 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 80,904 B. The walk's packs held to the deepen contract and checked with assertFetched before harvest (issue #18).
   // 2026-10-30: 81,313 B. The same URL userinfo handling (issue #32).
   // 2026-10-30: 81,669 B. The same checkWide, also on the merge-base walk's blob:none packs (issue #46).
-  assert.ok(min < 81_670, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 81,773 B. A settled cut one best base reaches and another does not keeps the merge-base walk going (#42);
+  // rebase fetches a base named only at the window's cut (#41).
+  assert.ok(min < 81_774, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {

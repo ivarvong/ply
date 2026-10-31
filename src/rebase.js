@@ -80,6 +80,9 @@ export async function rebaseBranch(url, { ref, onto = 'refs/heads/main', committ
     }
     const chain = linearChain(commits, tip, base, requireLimit(limits, 'maxRebaseCommits'));
     root.set({ 'git.rebase.commits': chain.length });
+    // The base may sit exactly at the window's cut: named by its children on both sides, never fetched (mergeBase needs
+    // no more than that; #41). Its tree is the first replay's base, so fetch it; every chain commit is above it and in hand.
+    if (!commits.has(base)) commits.set(base, parseCommit((await fetchObject(t, { oid: base, expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits));
     const targetTree = parseCommit((await fetchObject(t, { oid: target, expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits).tree;
     const who = ident(committerPerson);
     const out = { fetched: 0, rediff, attributes }; const objects = []; let cur = target, curTree = targetTree; const replayed = [], dropped = [];

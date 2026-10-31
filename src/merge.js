@@ -62,10 +62,19 @@ export function threeWay(base, ours, theirs) {
 export const mergeMode = (b, o, t) => (o === t ? o : b === o ? t : b === t ? o : null);
 
 // Pure: git's merge bases — the best common ancestors of `a` and `b` (common ancestors that are not ancestors of another
-// common ancestor; git merge-base --all), over the commits known so far (oid → { parents }). `truncated` says the answer
-// may be incomplete: some commit that could lead to another best base has parents we have not fetched yet. Sound
-// because any best base outside what we know is an ancestor of a or b that is not an ancestor of a known common
-// ancestor — so it lies beyond a frontier commit of exactly that region.
+// common ancestor; git merge-base --all), over the commits known so far (oid → { parents }). A commit named as a parent
+// but not in the map is a cut: its ancestry is unknown. `truncated` says the answer may change once the cuts are fetched:
+//   - a cut reachable from a or b outside the settled region (common ancestors and everything below them) may hide a
+//     best base — any best base outside what we know is an ancestor of a or b that is not an ancestor of a known common
+//     ancestor, so it lies beyond exactly such a cut;
+//   - with more than one best base, a cut inside the settled region may hide that one of them is an ancestor of
+//     another (through the cut), so the set would shrink: {c, z} where z is below c through a cut x is not criss-cross,
+//     it is {c} (#42). Only a cut that some best base reaches and another does not can do that: z below c through a
+//     cut k means k is an ancestor of c and z an ancestor of k, so k cannot also be an ancestor of z (a cycle). A cut
+//     every best base reaches (deep shared history under a true criss-cross) changes nothing, and deepening for it
+//     would walk to the root or the cap (limit_exceeded where git answers two bases).
+// A single best base over a graph whose only cuts are settled is final, and the rule says so without a special case:
+// every settled commit is the base or below it, so the one base reaches every settled cut.
 export function bestBases(commits, a, b) {
   const closure = starts => { const seen = new Set(); const st = [...starts]; while (st.length) { const c = st.pop(); if (seen.has(c)) continue; seen.add(c); for (const p of commits.get(c)?.parents ?? []) st.push(p); } return seen; };
   const A = closure([a]), B = closure([b]);
@@ -74,7 +83,12 @@ export function bestBases(commits, a, b) {
   const best = common.filter(c => !below.has(c)).sort();
   const settled = new Set([...common, ...below]);
   const frontier = start => { const seen = new Set(); const st = [start]; while (st.length) { const c = st.pop(); if (seen.has(c) || settled.has(c)) continue; seen.add(c); const k = commits.get(c); if (!k) return true; for (const p of k.parents) st.push(p); } return false; };
-  return { best, truncated: frontier(a) || frontier(b) };
+  const cutBetween = () => {
+    const reach = best.map(c => closure([c]));
+    for (const k of settled) if (!commits.has(k) && reach.some(r => !r.has(k))) return true;
+    return false;
+  };
+  return { best, truncated: frontier(a) || frontier(b) || cutBetween() };
 }
 
 // Effect: ancestors of `head` as oid → distance, via commit-only packs (tree:0 keeps trees and blobs out) of doubling depth.

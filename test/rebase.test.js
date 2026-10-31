@@ -94,6 +94,25 @@ test('rebase: conflict where git conflicts; branch untouched; squash produces on
   assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
 });
 
+test('rebase and squash when the merge base sits exactly at the first window\'s cut (8 commits above both tips): equal to git, not a TypeError', async () => {
+  // mergeBase names the root through its children on both sides without ever fetching it (depth 8 holds the 8 commits
+  // above it); rebase read commits.get(base).tree → "Cannot read properties of undefined" on an honest server (#41).
+  // 7 a side: the base is inside the window (the control); 8: it is exactly at the cut.
+  for (const n of [7, 8]) for (const squash of [false, true]) {
+    const r = repo();
+    const base = commitFiles(r.work, r.bare, { 'f.txt': 'root\n' }, 'root');
+    let tip = base, main = base;
+    for (let i = 1; i <= n; i++) { tip = commitOn(r, 'feat', tip, { [`t${i}.txt`]: `${i}\n` }, `feat ${i}`); main = commitOn(r, 'main', main, { [`m${i}.txt`]: `${i}\n` }, `main ${i}`); }
+    const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); const gitLog = log(d, 'origin/main..HEAD'); rmSync(d, { recursive: true, force: true });
+    const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash }, T());
+    assert.equal(res.outcome, squash ? 'squash' : 'rebase', `n=${n}`); assert.equal(res.base, base); assert.equal(res.commits, n);
+    assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), res.oid);
+    assert.equal(treeOf(r.bare, 'feat'), gitTree, `${squash ? 'squash' : 'rebase'}: tip tree == git rebase`);
+    if (!squash) assert.deepEqual(log(r.bare, 'main..feat').map(l => l.split('|')[0]), gitLog.map(l => l.split('|')[0]), 'every replayed tree == git');
+    assert.equal(ok(sh(r.bare, ['fsck', '--strict', '--no-dangling'])), '');
+  }
+});
+
 test('cherry-pick and revert: trees equal git; signature not carried; signed result verifies', async () => {
   const r = repo();
   commitFiles(r.work, r.bare, { 'a.txt': 'a\n', 'b.txt': 'b\n' }, 'base');
