@@ -1,27 +1,114 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "eslint",
+    "typescript",
+    "unicorn",
+    "oxc",
+    "import",
+    "promise",
+    "node"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "pedantic": "error",
+    "perf": "error",
+    "restriction": "error",
+    "style": "off",
+    "nursery": "off"
+  },
+  "ignorePatterns": [
+    "src/**/*.js",
+    "dist/**"
+  ],
   "rules": {
-    "no-magic-numbers": "off"
+    "oxc/no-optional-chaining": "off",
+    "oxc/no-rest-spread-properties": "off",
+    "oxc/no-async-await": "off",
+    "eslint/no-magic-numbers": "off",
+    "eslint/no-undefined": "off",
+    "eslint/no-plusplus": "off",
+    "eslint/no-bitwise": "off",
+    "eslint/no-continue": "off",
+    "eslint/max-lines-per-function": "off",
+    "eslint/max-lines": "off",
+    "eslint/max-statements": "off",
+    "eslint/max-depth": [
+      "error",
+      4
+    ],
+    "eslint/max-params": [
+      "error",
+      5
+    ],
+    "unicorn/no-null": "off",
+    "unicorn/prefer-top-level-await": "off",
+    "import/no-default-export": "error",
+    "import/extensions": [
+      "error",
+      "always",
+      {
+        "ignorePackages": true
+      }
+    ],
+    "typescript/explicit-function-return-type": "off",
+    "typescript/explicit-module-boundary-types": "off",
+    "typescript/prefer-readonly-parameter-types": "off",
+    "eslint/no-inline-comments": "off",
+    "typescript/consistent-type-definitions": [
+      "error",
+      "type"
+    ],
+    "typescript/consistent-type-imports": "error",
+    "typescript/consistent-indexed-object-style": "error",
+    "typescript/array-type": [
+      "error",
+      {
+        "default": "array-simple"
+      }
+    ],
+    "typescript/no-inferrable-types": "error",
+    "typescript/prefer-function-type": "error",
+    "eslint/no-var": "error",
+    "eslint/prefer-const": "error",
+    "eslint/prefer-template": "error",
+    "eslint/no-nested-ternary": "error",
+    "eslint/no-duplicate-imports": "off",
+    "import/no-duplicates": "error",
+    "eslint/no-else-return": "error",
+    "eslint/no-useless-computed-key": "error",
+    "eslint/object-shorthand": "error",
+    "eslint/yoda": "error",
+    "unicorn/numeric-separators-style": "error",
+    "unicorn/prefer-node-protocol": "error",
+    "unicorn/throw-new-error": "error",
+    "unicorn/prefer-string-slice": "error",
+    "unicorn/no-array-for-each": "error",
+    "unicorn/prefer-at": "error"
   },
   "overrides": [
     {
       "files": [
-        "src/objects.js",
-        "src/bytes.js",
-        "src/pktline.js",
-        "src/pack.js",
-        "src/packresolve.js",
-        "src/inflate.js",
-        "src/fetch.js",
-        "src/push.js",
-        "src/lsrefs.js",
-        "src/limits.js"
+        "src/objects.ts",
+        "src/bytes.ts",
+        "src/pktline.ts",
+        "src/pack.ts",
+        "src/packresolve.ts",
+        "src/inflate.ts",
+        "src/fetch.ts",
+        "src/push.ts",
+        "src/lsrefs.ts",
+        "src/limits.ts"
       ],
       "rules": {
-        "no-magic-numbers": [
+        "eslint/no-magic-numbers": [
           "error",
           {
-            "ignore": [0, 1],
+            "ignore": [
+              0,
+              1
+            ],
             "ignoreArrayIndexes": true,
             "ignoreDefaultValues": true,
             "enforceConst": false,

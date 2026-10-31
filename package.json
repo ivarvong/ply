@@ -3,37 +3,102 @@
   "version": "0.1.0",
   "description": "Zero-dependency git smart-HTTP client: blobless partial fetch, streamed single-file edit, thin delta push. OTLP spans built in.",
   "type": "module",
-  "main": "src/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/index.js",
-    "./edit": "./src/edit.js",
-    "./read": "./src/read.js",
-    "./log": "./src/log.js",
-    "./tree": "./src/tree.js",
-    "./tree-node": "./src/tree-node.js",
-    "./checkout": "./src/checkout.js",
-    "./checkout-node": "./src/checkout-node.js",
-    "./client": "./src/client.js",
-    "./transport": "./src/transport.js",
-    "./fetch": "./src/fetch.js",
-    "./push": "./src/push.js",
-    "./packcache": "./src/packcache.js",
-    "./sign": "./src/sign.js",
-    "./merge": "./src/merge.js",
-    "./rebase": "./src/rebase.js",
-    "./ssh": "./src/sshgit.js",
-    "./ssh-node": "./src/ssh-node.js",
-    "./ssh-workers": "./src/ssh-workers.js",
-    "./otel": "./src/otel.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./edit": {
+      "types": "./dist/edit.d.ts",
+      "default": "./dist/edit.js"
+    },
+    "./read": {
+      "types": "./dist/read.d.ts",
+      "default": "./dist/read.js"
+    },
+    "./log": {
+      "types": "./dist/log.d.ts",
+      "default": "./dist/log.js"
+    },
+    "./tree": {
+      "types": "./dist/tree.d.ts",
+      "default": "./dist/tree.js"
+    },
+    "./tree-node": {
+      "types": "./dist/tree-node.d.ts",
+      "default": "./dist/tree-node.js"
+    },
+    "./checkout": {
+      "types": "./dist/checkout.d.ts",
+      "default": "./dist/checkout.js"
+    },
+    "./checkout-node": {
+      "types": "./dist/checkout-node.d.ts",
+      "default": "./dist/checkout-node.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./transport": {
+      "types": "./dist/transport.d.ts",
+      "default": "./dist/transport.js"
+    },
+    "./fetch": {
+      "types": "./dist/fetch.d.ts",
+      "default": "./dist/fetch.js"
+    },
+    "./push": {
+      "types": "./dist/push.d.ts",
+      "default": "./dist/push.js"
+    },
+    "./packcache": {
+      "types": "./dist/packcache.d.ts",
+      "default": "./dist/packcache.js"
+    },
+    "./sign": {
+      "types": "./dist/sign.d.ts",
+      "default": "./dist/sign.js"
+    },
+    "./merge": {
+      "types": "./dist/merge.d.ts",
+      "default": "./dist/merge.js"
+    },
+    "./rebase": {
+      "types": "./dist/rebase.d.ts",
+      "default": "./dist/rebase.js"
+    },
+    "./ssh": {
+      "types": "./dist/sshgit.d.ts",
+      "default": "./dist/sshgit.js"
+    },
+    "./ssh-node": {
+      "types": "./dist/ssh-node.d.ts",
+      "default": "./dist/ssh-node.js"
+    },
+    "./ssh-workers": {
+      "types": "./dist/ssh-workers.d.ts",
+      "default": "./dist/ssh-workers.js"
+    },
+    "./otel": {
+      "types": "./dist/otel.d.ts",
+      "default": "./dist/otel.js"
+    }
   },
   "sideEffects": false,
   "files": [
-    "src"
+    "dist"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.isolated.json && node scripts/ts-ratchet.mjs",
+    "lint": "oxlint --type-aware --deny-warnings src && oxlint -c oxlint.loose.json src test scripts examples",
     "test": "node --test test/props.test.js test/oracle.test.js test/concurrency.test.js test/edges.test.js test/adversarial.test.js test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js test/pure.test.js test/bundle.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js test/delta-bound.test.js test/git-differential.test.js test/fsck-space.test.js test/fsck-oracle.test.js test/sign.test.js test/merge.test.js test/linemerge.test.js test/rebase.test.js test/sshgit.test.js test/protocol.test.js test/workerd.test.js test/read.test.js test/log.test.js test/artifacts-compat.test.js test/space/push-outcome.test.js test/space/push-outcome-boundary.test.js test/space/fsck-tree.test.js test/space/advertisement.test.js test/wide-limits.test.js test/examples.test.js test/mergebase-space.test.js test/git-bytes.test.js test/span-contract.test.js test/space/pack-cut.test.js test/space/pkt-frame.test.js test/space/push-ng.test.js test/space/ssh-faults.test.js test/space/ssh-service.test.js && node test/fuzz/run.mjs --n 60 && node test/fuzz/hostile.mjs --n 60 && node test/fuzz/hostile.mjs --case 2366521731 && node test/fuzz/below-hash.mjs --n 20 --seed 1 && node test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880 && node test/fuzz/git-semantic.mjs --n 20 --seed 1 && node test/fuzz/liar.mjs --n 60 && node test/fuzz/liar.mjs --op mergebase --n 40 --seed 1 && node test/fuzz/protocol.mjs --n 100 && node test/fuzz/packs.mjs --n 40 && node test/fuzz/packgen.mjs --n 60 && node test/fuzz/codec.mjs --n 20000 && node test/fuzz/usergiven.mjs && node test/fuzz/attributes.mjs --n 40 && node test/fuzz/linemerge.mjs --n 300 && node test/fuzz/linemerge.mjs --n 200 --runs && node test/fuzz/linemerge.mjs --n 150 --driver union && node test/fuzz/diffscript.mjs --n 60 && node test/fuzz/diffscript.mjs --n 4 --huge",
     "test:props": "node --test test/props.test.js",
     "test:oracle": "node --test test/oracle.test.js test/concurrency.test.js test/edges.test.js",
@@ -72,7 +137,6 @@
     "test:merge-long": "MERGE_CASES=200 node --test test/merge.test.js",
     "fuzz:below-hash": "node test/fuzz/below-hash.mjs",
     "fuzz:git-semantic": "node test/fuzz/git-semantic.mjs",
-    "lint": "oxlint",
     "test:mutate": "node scripts/mutate.mjs"
   },
   "license": "MIT",

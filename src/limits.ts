@@ -36,38 +36,38 @@ export const LIMIT_DELTA_RESULT: number = LIMIT_OBJECT;
  * resolvePack counts deltas from the full (or external) base, so no resolved object is more than 64 deltas deep in
  * either pack order (test/delta-bound.test.js).
  */
-export const LIMIT_DELTA_CHAIN: number = 64;
+export const LIMIT_DELTA_CHAIN = 64;
 /**
  * How many maximum-sized objects a buffered pack may inflate at once, including delta results resolvePack
  * allocates on top of the inflated instructions. Four covers a merge-base triple (base, ours, theirs) plus
  * the commit that names them. Issue #9's 6 × 64 MiB pack is 384 MiB and must fail before that resident set exists.
  */
-export const LIMIT_INFLATED_OBJECTS: number = 4;
+export const LIMIT_INFLATED_OBJECTS = 4;
 export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECTS;
 /**
  * Objects in one buffered pack. gitformat-pack stores the count as a uint32, which is not a memory or CPU bound.
  * 100_000 is above a blob:none listing of a large repository's trees (the kernel is on the order of 10^4 trees)
  * and is the ceiling for a REF_DELTA fixpoint: one Map lookup per object per pass, not a scan of the pack.
  */
-export const LIMIT_PACK_OBJECTS: number = 100_000;
+export const LIMIT_PACK_OBJECTS = 100_000;
 /** ls-refs lines, and the rebase chain walked from them. */
-export const LIMIT_REFS: number = 10_000;
+export const LIMIT_REFS = 10_000;
 export const LIMIT_REBASE_COMMITS: number = LIMIT_REFS;
 /** shallow, ack, and any other v2 section lines per fetch. */
-export const LIMIT_SECTION_LINES: number = 1_000;
+export const LIMIT_SECTION_LINES = 1000;
 /**
  * Entries parsed from one tree. A max-sized tree of minimum entries (git's "too-short tree object" floor)
  * is millions of names; this stops before that array exists.
  */
-export const LIMIT_TREE_ENTRIES: number = 200_000;
+export const LIMIT_TREE_ENTRIES = 200_000;
 /** PATH_MAX for one component, and a depth no real worktree uses. */
-export const LIMIT_PATH_DEPTH: number = 128;
-export const LIMIT_PATH_COMPONENT: number = 4096;
+export const LIMIT_PATH_DEPTH = 128;
+export const LIMIT_PATH_COMPONENT = 4096;
 /**
  * Merge-base doubling search. The walk starts at 8 and doubles; 1024 is eight steps, and the pack byte cap
  * fires on a wide blob:none window before a deeper search would.
  */
-export const LIMIT_MERGE_DEPTH: number = 1024;
+export const LIMIT_MERGE_DEPTH = 1024;
 /**
  * report-status pkt-lines buffered from receive-pack: one unpack line, one status per ref, plus
  * report-status-v2 option lines. The ref cap is the same order.
@@ -84,7 +84,7 @@ export const LIMIT_COMMIT_PARENTS: number = LIMIT_REFS;
  */
 export const LIMIT_LS_REFS_BYTES: number = LIMIT_PACK_WIRE;
 /** Per HTTP exchange, including a stalled body. The timer that enforces this owns the AbortSignal. */
-export const LIMIT_REQUEST_TIMEOUT_MS: number = 60_000;
+export const LIMIT_REQUEST_TIMEOUT_MS = 60_000;
 
 /* oxlint-enable no-magic-numbers */
 

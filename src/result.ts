@@ -22,4 +22,5 @@ export const andThen = <T, U, E, F>(r: Result<T, E>, f: (t: T) => Result<U, F>):
 // does not type-check), each handler receiving the narrowed member.
 export type Handlers<U extends { readonly code: string }, R> = { readonly [K in U['code']]: (u: Extract<U, { readonly code: K }>) => R };
 export const match = <U extends { readonly code: string }, R>(u: U, h: Handlers<U, R>): R =>
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- h[u.code] is the handler for u's own member (Handlers)
   (h[u.code as U['code']] as (u: U) => R)(u);
