@@ -58,6 +58,8 @@ export type Extra = {
   // objects.ts: git fsck's message id on a refused commit, tag or duplicate header; the name a tree carries twice
   readonly msgId?: string;
   readonly entry?: string;
+  // edit.ts: the span attributes of a failed tree lookup (lookupEntry)
+  readonly attrs?: Readonly<Record<string, unknown>>;
   // push.ts: the receive-pack report as classified (null when it was not git's) and band 2 (hook stderr) as received
   readonly report?: { readonly tag: string; readonly refs: ReadonlyArray<{ readonly ref: string; readonly ok: boolean; readonly reason: string }> } | null;
   readonly hookOutput?: string;

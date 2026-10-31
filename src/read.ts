@@ -12,20 +12,35 @@
 // Annotated tags are peeled. `size` is known before the first content byte (the pack object header carries it), so a
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
 // or the server sends a different number of bytes than it declared: a consumer that saw `done` saw the right bytes.
+/* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
 import { operation } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
+import { bufferSource } from './bytes.js';
 import { KIND } from './otel.js';
+import type { Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
+import type { Limits } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
+import type { OperationOpts } from './operation.js';
+import type { SpState } from './fetch.js';
+import type { Transport } from './transport.js';
+import type { TreeEntry } from './objects.js';
+import { thrownCode, thrownMessage, thrownMessageMatches } from './boundary.js';
+import type { EntryOptions, TypeNames } from './boundary.js';
+
+/* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
+/* oxlint-disable require-await -- the entry points are async so that a throw while checking arguments is a rejection, as before */
+/* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 const OID = /^[0-9a-f]{40}$/;
 
 // Pure: what to ask ls-refs for, and which answer wins. git's ref_rev_parse_rules minus the remote-tracking forms.
-export function refCandidates(ref) {
+// `ref` is the caller's, checked here: anything but null, undefined or a string is bad_request.
+export function refCandidates(ref: unknown): string[] {
   if (ref === null || ref === undefined || ref === '' || ref === 'HEAD') return ['HEAD'];
   if (typeof ref !== 'string') throw fail('bad_request', 'ref must be a string');
   if (OID.test(ref)) return [];
@@ -33,36 +48,48 @@ export function refCandidates(ref) {
   return [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`].map(r => validateRef(r));
 }
 
+// git ls-tree's object types.
+export type EntryType = 'tree' | 'commit' | 'blob';
 // Pure: git ls-tree's type for a tree entry mode.
-export const entryType = mode => (mode === '40000' ? 'tree' : mode === '160000' ? 'commit' : 'blob');
+export const entryType = (mode: string): EntryType => {
+  if (mode === '40000') return 'tree';
+  return mode === '160000' ? 'commit' : 'blob';
+};
 // Pure: git ls-tree prints modes as %06o (trees as 040000); the tree object stores them without the leading zero.
-export const lsMode = mode => mode.padStart(6, '0');
+export const lsMode = (mode: string): string => mode.padStart(6, '0');
 
+// A ref as the caller names it: null/undefined/'' or 'HEAD' for the remote's HEAD, a name, or a 40-hex oid.
+export type RefSpec = string | null | undefined;
+export type Resolved = { readonly name: string; readonly commit: string };
 // Effect: ref → { name, commit } (annotated tags peeled; a bare oid is taken as given and checked by the commit fetch).
-export async function resolveCommit(t, ref) {
+export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolved> {
   const cands = refCandidates(ref);
-  if (!cands.length) return { name: ref, commit: ref };
-  const { refs, head } = await lsRefs(t, cands);
+  // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it threw).
+  if (cands.length === 0 && typeof ref === 'string') return { name: ref, commit: ref };
+  const { refs, head }: { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }>; readonly head: string | null } = await lsRefs(t, cands);
   for (const name of cands) {
     const r = refs.get(name);
     if (r) return { name: name === 'HEAD' ? (head ?? 'HEAD') : name, commit: r.peeled ?? r.oid };
   }
-  throw fail('not_found', cands[0] === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${ref} not found`);
+  const first = cands[0];
+  throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${typeof ref === 'string' ? ref : ''} not found`);
 }
 
 // Effect: the commit object alone (tree:0, deepen 1). A bare oid that is not a commit (or not on the server) is the
 // caller's not_found, not a corrupt pack.
-async function fetchCommit(t, commit) {
-  const c = await fetchObject(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch(e => {
-    if (e?.code === 'pack_corrupt' && /expected commit/.test(e.message)) throw fail('not_found', `${commit} is not a commit`);
-    if (e?.code === 'remote_error' && /not our ref/.test(e.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
+  const c = await fetchObject(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
+    if (thrownCode(e) === 'pack_corrupt' && thrownMessageMatches(e, /expected commit/)) throw fail('not_found', `${commit} is not a commit`);
+    if (thrownCode(e) === 'remote_error' && thrownMessageMatches(e, /not our ref/)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   return c.data;
 }
 
-// Pure: an ident for JSON. `time` is ISO-8601 UTC, `epoch` the raw seconds, `tz` the offset as written (+0530).
-const identView = line => {
+// An ident for JSON. `time` is ISO-8601 UTC, `epoch` the raw seconds, `tz` the offset as written (+0530).
+export type IdentView = { readonly name: string; readonly email: string; readonly time: string | null; readonly epoch: number | null; readonly tz: string };
+// Pure: an ident line's view (null for a line parseIdent cannot read).
+const identView = (line: unknown): IdentView | null => {
   const p = parseIdent(line);
   if (!p) return null;
   const epoch = p.time === null ? null : Number(p.time);
@@ -70,34 +97,51 @@ const identView = line => {
   return { name: p.name, email: p.email, time: d && !Number.isNaN(d.getTime()) ? d.toISOString().replace('.000Z', 'Z') : null, epoch, tz: p.tz };
 };
 
-// Pure: the JSON view of a commit object. `signed` is whether it carries a gpgsig/gpgsig-sha256 header (any format:
+// The JSON view of a commit object. `signed` is whether it carries a gpgsig/gpgsig-sha256 header (any format:
 // OpenPGP, SSH, X.509); it says nothing about whether the signature verifies. The message is the raw body, UTF-8.
-export function commitView(data, limits = DEFAULT_LIMITS) {
-  const c = parseCommit(data, limits);
+export type CommitView = {
+  readonly tree: string;
+  readonly parents: readonly string[];
+  readonly author: IdentView | null;
+  readonly committer: IdentView | null;
+  readonly message: string;
+  readonly signed: boolean;
+};
+// Pure: a commit object's view.
+export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): CommitView {
+  const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = parseCommit(data, limits);
   return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message ?? '', signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
 }
 
-export async function readCommit(url, { ref = null } = {}, opts = {}) {
-  return operation('read_commit', url, { ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } }, async ({ t, outcome }) => {
+// The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …).
+export type ReadOptions = EntryOptions;
+// Trees by oid, kept by the caller across reads (immutable: an oid names its bytes).
+export type TreeCache = Map<string, Uint8Array>;
+export type CommitResult = CommitView & { readonly ref: string; readonly oid: string };
+
+export async function readCommit(url: string, { ref = null }: { readonly ref?: RefSpec } = {}, opts: ReadOptions = {}): Promise<CommitResult> {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const view = commitView(await fetchCommit(t, commit), t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
   });
 }
 
-// Effect: walk `comps` from the commit's root tree. Returns { commit, levels, entry } where entry is the last
+// Effect: walk `comps` from the commit's root tree. Returns { tree, entry } where entry is the last
 // component's tree entry (null for the root: comps = []).
-async function walk(t, root, tracer, { commit, comps, cache, limits }) {
-  const info = parseCommit(await fetchCommit(t, commit), limits);
+async function walk(t: Transport, root: Span, tracer: Tracer, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<{ readonly tree: string; readonly entry: TreeEntry | null }> {
+  const info: { readonly tree: string } = parseCommit(await fetchCommit(t, commit), limits);
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.tree });
-  let treeOid = info.tree, entry = null;
-  for (let depth = 0; depth < comps.length; depth++) {
-    const name = comps[depth];
+  let treeOid = info.tree;
+  let entry: TreeEntry | null = null;
+  for (const [depth, name] of comps.entries()) {
+    // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
     entry = await tracer.span('git.read.tree', { parent: root, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': treeOid, 'git.read.tree.lookup': name } }, async span => {
       let data = cache.get(treeOid);
       span.set({ 'git.read.tree.cache_hit': !!data });
       if (!data) { data = (await fetchObject(t, { oid: treeOid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(treeOid, data); }
-      const entries = parseTree(data, limits);
+      const entries: readonly TreeEntry[] = parseTree(data, limits);
       const e = entries.find(x => x.name === name);
       span.set({ 'git.read.tree.entries': entries.length, 'git.read.tree.entry.found': !!e, 'git.read.tree.entry.mode': e?.mode ?? '' });
       if (!e) throw fail('not_found', `path component ${name} not found`);
@@ -109,75 +153,106 @@ async function walk(t, root, tracer, { commit, comps, cache, limits }) {
   return { tree: info.tree, entry };
 }
 
-const pathComps = (path, limits, { allowRoot }) => {
+const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): string[] => {
   if (allowRoot && (path === undefined || path === null || path === '' || path === '/')) return [];
   return validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
 };
 
-export async function listTree(url, { ref = null, path = '' } = {}, { cache = new Map(), ...opts } = {}) {
+export type ListEntry = { readonly name: string; readonly mode: string; readonly oid: string; readonly type: EntryType };
+export type ListResult = { readonly ref: string; readonly commit: string; readonly tree: string; readonly entries: readonly ListEntry[] };
+export async function listTree(url: string, { ref = null, path = '' }: { readonly ref?: RefSpec; readonly path?: string | null } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<ListResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: true });
-  return operation('ls_tree', url, { ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } }, async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('ls_tree', url, ({ ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
-    const { tree, entry } = await walk(t, root, opts.tracer, { commit, comps, cache, limits });
+    // the tracer operation() started the root span on (opts.tracer)
+    const { tree, entry } = await walk(t, root, root.tracer, { commit, comps, cache, limits });
     if (entry && entry.mode !== '40000') throw fail('not_found', `${comps.join('/')} is not a directory (mode ${entry.mode})`);
     const oid = entry ? entry.oid : tree;
     let data = cache.get(oid);
     if (!data) { data = (await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(oid, data); }
-    const entries = parseTree(data, limits);
+    const entries: readonly TreeEntry[] = parseTree(data, limits);
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
   });
 }
 
+export type FileResult = {
+  readonly ref: string;
+  readonly commit: string;
+  readonly blob: string;
+  readonly mode: string;
+  readonly size: number;
+  readonly stream: ReadableStream<Uint8Array>;
+};
 // The root span ends when the stream is open (size known); the content's own span, `git.read.blob`, ends when the
 // stream does, with the bytes delivered and whether the oid verified. It outlives the root, so it is not the root's child
 // but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
-export async function readFile(url, { ref = null, path } = {}, { cache = new Map(), ...opts } = {}) {
+export async function readFile(url: string, { ref = null, path }: { readonly ref?: RefSpec; readonly path?: string } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<FileResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: false });
-  return operation('read', url, { ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } }, async ({ t, root, outcome }) => {
-    const tracer = opts.tracer;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read', url, ({ ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+    // the tracer operation() started the root span on (opts.tracer)
+    const tracer = root.tracer;
     const { name, commit } = await resolveCommit(t, ref);
-    const { entry } = await walk(t, root, tracer, { commit, comps, cache, limits });
+    // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const entry = (await walk(t, root, tracer, { commit, comps, cache, limits })).entry as TreeEntry;
     // a symlink's blob is its target (what `git show <ref>:<path>` prints); a gitlink has no blob in this repository
     if (entry.mode === '40000') throw fail('not_found', `${comps.join('/')} is a directory`);
     if (entry.mode === '160000') throw fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`);
+    // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
     const blob = await openBlob(t, tracer, root, entry.oid);
     return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: blob.size, stream: blob.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': blob.size, 'git.read.blob.mode': entry.mode });
   });
 }
 
+export type OpenedBlob = { readonly size: number; readonly stream: ReadableStream<Uint8Array> };
 // Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
 // through DecompressionStream and a verifying transform. Back-pressure: the pump awaits each write, so at most one
 // network chunk and one inflate chunk are in flight beyond what the consumer has taken.
 // `opener` is the span the stream follows (the read root, or git.checkout.blobs): the consumer reads after it returns.
-export async function openBlob(t, tracer, opener, oid) {
+export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: string): Promise<OpenedBlob> {
   const span = tracer.start('git.read.blob', { follows: opener, attrs: { 'git.read.blob.oid': oid } });
   const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
-  const it = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
-  let sp = spInit(); const early = [];
+  const it: AsyncIterator<Uint8Array> = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
+  let sp: SpState = spInit();
+  const early: Uint8Array[] = [];
   // the first of failure, cancellation and verified end records the outcome; whatever follows (a cancel aborting the
   // pump) leaves the ended spans alone
-  const failHere = e => { const err = isPlyCode(e?.code) ? e : fail('pack_corrupt', `blob stream: ${e?.message ?? e}`, { cause: e }); if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); } return err; };
+  const failHere = (e: unknown): unknown => {
+    const code = thrownCode(e);
+    if (isPlyCode(code)) {
+      if (!span.ended) { fetchSpan.error(e).end(); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
+      return e;
+    }
+    const err = fail('pack_corrupt', `blob stream: ${String(thrownMessage(e) ?? e)}`, { cause: e });
+    if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); }
+    return err;
+  };
   try {
     while (sp.phase !== 'body') {
       const { value, done } = await it.next();
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) throw fail('pack_corrupt', 'pack ended before the object header');
-      const r = spStep(sp, value); sp = r.state; early.push(...r.zlib);
+      const r = spStep(sp, value); sp = r.state;
+      early.push(...r.zlib);
     }
-    if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${TYPE_NAME[sp.type] ?? sp.type}`);
-  } catch (e) { await it.return?.().catch(() => {}); throw failHere(e); }
+    if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${(TYPE_NAME as TypeNames)[sp.type] ?? sp.type}`);
+  } catch (e) { await it.return?.().catch(() => { /* the read already failed */ }); throw failHere(e); }
   const size = sp.size;
   span.set({ 'git.read.blob.size': size });
   const ds = new DecompressionStream('deflate');
   const writer = ds.writable.getWriter();
   const pump = (async () => {
-    for (const z of early) await writer.write(z);
+    for (const z of early) await writer.write(bufferSource(z));
     for (;;) {
       const { value, done } = await it.next();
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- see above
       if (done) break;
       const r = spStep(sp, value); sp = r.state;
-      for (const z of r.zlib) await writer.write(z);
+      for (const z of r.zlib) await writer.write(bufferSource(z));
     }
     sp = spFinish(sp); // pack trailer checksum
     fetchSpan.end();
@@ -185,11 +260,11 @@ export async function openBlob(t, tracer, opener, oid) {
   })();
   // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
   // verify transform's flush never runs then, so the failure is recorded (and both spans ended) here.
-  pump.catch(async e => { const err = failHere(e); await writer.abort(err).catch(() => {}); await it.return?.().catch(() => {}); });
+  pump.catch(async (e: unknown) => { const err = failHere(e); await writer.abort(err).catch(() => { /* already failing */ }); await it.return?.().catch(() => { /* already failing */ }); });
   const sha = streamingSha1();
   await sha.update(objectHeader('blob', size));
   let seen = 0;
-  const verify = new TransformStream({
+  const verify = new TransformStream<Uint8Array, Uint8Array>({
     async transform(chunk, ctl) {
       seen += chunk.length;
       if (seen > size) throw failHere(fail('pack_corrupt', `server streamed more than the ${size} bytes it declared`));
@@ -209,16 +284,16 @@ export async function openBlob(t, tracer, opener, oid) {
   // The consumer's cancel() is an outcome of its own ('cancelled', not an error): without the cancel hook a cancel after the
   // pump has written its last chunk would leave both spans open forever, and one before it would read as pack_corrupt.
   const inner = ds.readable.pipeThrough(verify).getReader();
-  const stream = new ReadableStream({
+  const stream = new ReadableStream<Uint8Array>({
     async pull(c) {
-      let r;
-      try { r = await inner.read(); } catch (e) { throw isPlyCode(e?.code) ? e : failHere(e); }
+      let r: ReadableStreamReadResult<Uint8Array>;
+      try { r = await inner.read(); } catch (e) { throw isPlyCode(thrownCode(e)) ? e : failHere(e); }
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {
       if (!span.ended) { fetchSpan.end(); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.outcome': 'cancelled' }).end(); }
-      await inner.cancel(reason).catch(() => {});
-      await it.return?.().catch(() => {});
+      await inner.cancel(reason).catch(() => { /* cancelling: the outcome is recorded */ });
+      await it.return?.().catch(() => { /* cancelling: the outcome is recorded */ });
     },
   }, { highWaterMark: 0 });
   return { size, stream };

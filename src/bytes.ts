@@ -63,6 +63,13 @@ export function decodeBytes(b: Uint8Array): string {
   return s + strict.decode(b.subarray(run));
 }
 
+// The byte-array rule: every input is a plain `Uint8Array` (any backing buffer); a function that allocates returns
+// `Uint8Array<ArrayBuffer>`. A Web API typed `BufferSource` (Blob, fetch's body, a stream writer, crypto.subtle) takes
+// only ArrayBuffer-backed views. A view of anything else (a SharedArrayBuffer) is copied into a fresh ArrayBuffer;
+// every ply buffer takes the no-copy branch. The predicate is the narrowing: there is no cast.
+const arrayBufferBacked = (b: Uint8Array): b is Uint8Array<ArrayBuffer> => b.buffer instanceof ArrayBuffer;
+export const bufferSource = (b: Uint8Array): Uint8Array<ArrayBuffer> => (arrayBufferBacked(b) ? b : b.slice());
+
 export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   let n = 0;
   for (const p of parts) n += p.length;

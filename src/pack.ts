@@ -1,7 +1,7 @@
 // Packfile v2: parse, delta resolve/apply/generate, build. Pure except buildPack (async zlib).
 import { Sha1, fromHex } from './sha1.js';
 import { TYPE, TYPE_NAME } from './objects.js';
-import { concat } from './bytes.js';
+import { bufferSource, concat } from './bytes.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, OID_BYTES, BYTE_MASK,
   OBJ_TYPE_SHIFT, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
@@ -59,7 +59,7 @@ export const insertOps = (bytes: Uint8Array): Uint8Array[] => {
 
 // Structural delta: base with [off, off+oldLen) replaced by `insert`. Pure; needs no base bytes.
 export type Splice = { readonly baseLen: number; readonly off: number; readonly oldLen: number; readonly insert: Uint8Array };
-export type SplicedDelta = { readonly delta: Uint8Array; readonly resultLen: number; readonly ops: { readonly copy: number; readonly insert: number } };
+export type SplicedDelta = { readonly delta: Uint8Array<ArrayBuffer>; readonly resultLen: number; readonly ops: { readonly copy: number; readonly insert: number } };
 export function spliceDelta({ baseLen, off, oldLen, insert }: Splice): SplicedDelta {
   const resultLen = baseLen - oldLen + insert.length;
   const tail = baseLen - off - oldLen;
@@ -71,14 +71,14 @@ export function spliceDelta({ baseLen, off, oldLen, insert }: Splice): SplicedDe
 }
 
 // ---- build ----
-// ArrayBuffer-backed: a Blob refuses a view of a SharedArrayBuffer.
-export async function zlibDeflate(bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array> {
-  const ab = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
+// Any Uint8Array in; a Blob takes only an ArrayBuffer-backed view, which bufferSource guarantees (bytes.ts).
+export async function zlibDeflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+  const ab = await new Response(new Blob([bufferSource(bytes)]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
   return new Uint8Array(ab);
 }
 
 // objects: [{ type (1-4), data, baseOid? }] — baseOid makes it a REF_DELTA whose `data` is the delta.
-export type PackInput = { readonly type: number; readonly data: Uint8Array<ArrayBuffer>; readonly baseOid?: string | null | undefined };
+export type PackInput = { readonly type: number; readonly data: Uint8Array; readonly baseOid?: string | null | undefined };
 export type BuiltEntry = {
   readonly type: number; readonly typeName: string | undefined; readonly size: number; readonly compressed: number;
   readonly baseOid: string | null; readonly bytes: number;

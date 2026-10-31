@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { take, indexOfBytes, bytesOf, te, td, concat, decodeBytes, encodeBytes, decodeChunk } from '../src/bytes.js';
+import { take, indexOfBytes, bytesOf, te, td, concat, decodeBytes, encodeBytes, decodeChunk, bufferSource } from '../src/bytes.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, assertFetched, encodeTree, encodeCommit, encodeTag, TYPE, hashObject, ident,
 } from '../src/objects.js';
@@ -183,6 +183,34 @@ test('decodeBytes / encodeBytes: a bijection on bytes; decodeChunk holds a cut s
   assert.deepEqual([...decodeChunk(new Uint8Array(0), Uint8Array.from([0xc3, 0xa9])).carry], []);
   assert.equal(decodeChunk(new Uint8Array(0), Uint8Array.from([0x80])).text, '\ufffd');
   assert.deepEqual([...decodeChunk(new Uint8Array(0), Uint8Array.from([0xe2, 0x82, 0x80, 0x80])).carry], []);
+});
+
+// bufferSource is the BufferSource boundary (bytes.ts): an ArrayBuffer view is returned as itself, and a
+// SharedArrayBuffer view is copied into a fresh ArrayBuffer. Both arms have to be observed or the copy is uncovered.
+test('bufferSource keeps an ArrayBuffer view and copies a SharedArrayBuffer view', () => {
+  const own = Uint8Array.of(1, 2, 3, 4);
+  assert.equal(bufferSource(own), own);
+  assert.ok(bufferSource(own).buffer instanceof ArrayBuffer);
+  const wide = new Uint8Array([9, 8, 7, 6, 5]);
+  const view = wide.subarray(1, 4);
+  assert.equal(bufferSource(view), view);
+  assert.deepEqual([...bufferSource(view)], [8, 7, 6]);
+  const empty = new Uint8Array(0);
+  assert.equal(bufferSource(empty), empty);
+  const shared = new Uint8Array(new SharedArrayBuffer(4));
+  shared.set([9, 8, 7, 6]);
+  const copy = bufferSource(shared);
+  assert.notEqual(copy, shared);
+  assert.ok(copy.buffer instanceof ArrayBuffer);
+  assert.ok(!(copy.buffer instanceof SharedArrayBuffer));
+  assert.deepEqual([...copy], [9, 8, 7, 6]);
+  copy[0] = 1;
+  assert.equal(shared[0], 9);
+  const sharedEmpty = new Uint8Array(new SharedArrayBuffer(0));
+  const emptyCopy = bufferSource(sharedEmpty);
+  assert.notEqual(emptyCopy, sharedEmpty);
+  assert.equal(emptyCopy.byteLength, 0);
+  assert.ok(emptyCopy.buffer instanceof ArrayBuffer);
 });
 
 test('commit and tag headers, idents, and assertFetched', () => {

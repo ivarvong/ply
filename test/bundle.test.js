@@ -14,7 +14,7 @@ const size = (entry, kind, got, budget) => console.log(`bundle ${entry.padEnd(8)
 const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, '').replace(/\.ts$/, '.js'), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
 
 test('edit entry carries only what the edit path uses', async () => {
-  const out = await bundle('src/edit.js');
+  const out = await bundle('src/edit.ts');
   const js = out.outputFiles[0].text;
   const ABSENT = {
     // the delta resolver (parsePack/resolvePack/applyDelta) rides along since 2026-10-23: the blob:none fallback for servers
@@ -101,7 +101,7 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
 });
 
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
-  const out = await bundle('src/log.js');
+  const out = await bundle('src/log.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
   for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js', 'tree.js', 'checkout.js']) assert.ok(!files.includes(f), `${f} is in the log bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
@@ -124,7 +124,7 @@ test('full entry is the superset and still carries no node builtins', async () =
 });
 
 test('read entry: readFile/listTree carry no push, merge, pack building or rebase code', async () => {
-  const out = await bundle('src/read.js');
+  const out = await bundle('src/read.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
   for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the read bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'line merge': /histogram|xdl_/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
@@ -161,7 +161,7 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
-  const out = await bundle('src/tree.js');
+  const out = await bundle('src/tree.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
   for (const f of ['tree-node.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'read.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the tree bundle`);
   assert.ok(!/node:|\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/.test(js), 'no node builtins or classes');
@@ -191,16 +191,16 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   size('tree', 'gz', gz, 27_135);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
-  const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  const node = await build({ entryPoints: ['src/tree-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the two Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
   const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
-  assert.deepEqual(withNode, ['checkout-node.js', 'tree-node.js']);
+  assert.deepEqual(withNode, ['checkout-node.ts', 'tree-node.ts']);
 });
 
 test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {
-  const out = await bundle('src/checkout.js');
+  const out = await bundle('src/checkout.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
   for (const f of ['checkout-node.js', 'tree-node.js', 'tree.js', 'push.js', 'pack.js', 'edit.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the checkout bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
@@ -233,6 +233,6 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   size('checkout', 'gz', gz, 20_929);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
-  const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  const node = await build({ entryPoints: ['src/checkout-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
 });
