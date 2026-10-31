@@ -52,6 +52,19 @@ export function validateRef(ref) {
   return ref;
 }
 
+// A ref a push may name: git v2.50.0 receive-pack.c update() refuses anything else as "funny refname", checking the name
+// after "refs/" with check_refname_format(name + 5, deleting ? REFNAME_ALLOW_ONELEVEL : 0). validateRef already holds the
+// full name to check_refname_format, so every component passes; what is left is the part after refs/ as a refname of its
+// own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
+// never written). Proved cell by cell against git in test/space/refname.test.js.
+export function validatePushRef(ref, deleting) {
+  validateRef(ref);
+  const name = ref.slice('refs/'.length);
+  if (name === '@') throw bad('ref', 'refs/@ is a funny refname to receive-pack');
+  if (!deleting && !name.includes('/')) throw bad('ref', 'a push may only write refs/<dir>/<name> (receive-pack: funny refname)');
+  return ref;
+}
+
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
 // Ported line by line, because the edges are where a name gets through: `git~1` but not `git~2`; `.git:x` (an NTFS
 // stream) and `.git . .` (NTFS trims trailing dots and spaces); `.g\u200cit` and `.git\xff` (HFS+ skips ignorable code
