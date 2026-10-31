@@ -18,7 +18,7 @@ import { encodeObjHeader, buildPack, spliceDelta } from '../src/pack.js';
 import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packresolve.js';
 import { inflate } from '../src/inflate.js';
 import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
-import { parseLsRefLine } from '../src/lsrefs.js';
+import { parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
 import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
@@ -365,6 +365,15 @@ property('ls-ref', 'an ls-refs line prefix is a typed error or a field prefix', 
     catch (e) { assert.ok(CODES.has(e.code), e.message); continue; }
     assert.equal(got.oid, full.oid);
     assert.ok(full.name.startsWith(got.name));
+  }
+});
+
+property('ls-unborn', 'an unborn line prefix records nothing or a prefix of the target', () => {
+  const line = 'unborn HEAD peeled:x symref-target:refs/heads/main symref-target:refs/heads/other';
+  assert.deepEqual(parseUnbornLine(line), { name: 'HEAD', target: 'refs/heads/main' });
+  for (let i = 1; i < line.length; i++) {
+    const got = parseUnbornLine(line.slice(0, i));
+    if (got !== null) assert.ok('refs/heads/main'.startsWith(got.target), got.target);
   }
 });
 
