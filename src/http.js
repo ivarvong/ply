@@ -2,7 +2,8 @@
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
 import { fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
-import { concat, td } from './bytes.js';
+import { concat, td, te } from './bytes.js';
+import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
 import { UA, wrapNet } from './transport.js';
@@ -16,14 +17,6 @@ const ERROR_QUOTE = 200;
 
 const headerField = (value, what) => { if (value != null) validateWire(value, what); };
 
-// The Basic user is a name on most hosts (`x-access-token`, `oauth2`, `git`, a login) and a secret on some (a deploy
-// token, a PAT given as the user). Scrubbing a name would mangle legitimate server text ("denied to ivar"), so the user
-// is scrubbed only when it is secret-shaped: at least 16 characters with a digit. Every token format seen (ghp_…, glpat-…,
-// hex, base64) is; every conventional user name is not. Below 4 characters nothing is scrubbed (it would eat text).
-const MIN_SECRET = 4;
-const SECRET_USER_CHARS = 16;
-const secretShaped = s => typeof s === 'string' && s.length >= SECRET_USER_CHARS && /[0-9]/.test(s);
-
 // URL userinfo → the bytes git sends for it (git 2.50, measured against http-backend behind Basic auth), as a byte
 // string `btoa` takes as is: `%XX` is that byte (`%FF` → 0xFF, UTF-8 as its bytes), anything else as written (`%ZZ`
 // stays `%ZZ`; WHATWG URL has already percent-encoded every non-ASCII character). A NUL, CR or LF is refused: git
@@ -34,29 +27,44 @@ const userinfo = s => {
   if (/[\0\r\n]/.test(b)) throw fail('bad_request', 'invalid url userinfo: must not contain NUL, CR, or LF', { what: 'url userinfo' });
   return b;
 };
+// WHATWG URL drops an empty userinfo (`http://@h`, `http://:@h` → `http://h/`); git sends Basic `:` for both (measured).
+// A `\` ends the authority of a special URL, as `/` does.
+const emptyUserinfo = url => /^[a-z][a-z0-9+.-]*:\/\/[^/?#\\]*@/i.test(String(url));
+const latin1 = bytes => { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return s; };
+const utf8 = b => td.decode(Uint8Array.from(b, c => c.charCodeAt(0)));
+// An Authorization value or a Bearer token goes on the wire as written: printable ASCII (and tab) only. A raw
+// non-ASCII or control character is refused before any request: fetch throws an untyped TypeError on a character past
+// U+00FF, git sends UTF-8 as raw bytes (measured, `http.extraHeader`) that no grammar for either scheme admits, and a
+// control character is a 400 from a strict server (measured: git's `Bearer t\x01k` → HTTP 400). Basic credentials are
+// any text (below).
+const ASCII_VALUE = /^[\t\x20-\x7e]+$/;
+const noCredential = why => fail('bad_request', `invalid auth: ${why}`, { what: 'auth' });
 
-// text → text with every secret replaced by '[redacted]'; null when there is nothing to hide. Server text is kept as a
-// tail or a prefix in places (progress, hook output, a quoted line), so a secret can arrive cut: any run of FRAGMENT or
-// more characters of a secret is redacted, not only whole ones. 12 characters of a random token cannot occur by chance
-// (a 12-hex window of a commit oid matches a hex token's with p ≈ 1e-13); shorter secrets are matched whole.
-const FRAGMENT = 12;
-const REDACTED = '[redacted]';
-function scrubber(values) {
-  const secrets = values.filter(x => typeof x === 'string' && x.length >= MIN_SECRET);
-  if (!secrets.length) return null;
-  const whole = secrets.filter(x => x.length < FRAGMENT);
-  const grams = new Set();
-  for (const x of secrets) for (let i = 0; i + FRAGMENT <= x.length; i++) grams.add(x.slice(i, i + FRAGMENT));
-  const cut = s => {
-    let out = '', from = 0, start = -1, end = -1;
-    for (let i = 0; i + FRAGMENT <= s.length; i++) {
-      if (!grams.has(s.slice(i, i + FRAGMENT))) continue;
-      if (i > end) { if (start >= 0) { out += s.slice(from, start) + REDACTED; from = end; } start = i; }
-      end = i + FRAGMENT;
-    }
-    return start < 0 ? s : out + s.slice(from, start) + REDACTED + s.slice(end);
-  };
-  return text => whole.reduce((acc, x) => acc.split(x).join(REDACTED), cut(String(text)));
+// The explicit `auth` → [Authorization value, its Basic parts or null]. Every form yields a credential or is refused:
+// an `auth` that sends nothing is the silent trap #32 was (every request anonymous, a 401 saying nothing about why).
+//   { header }        the value verbatim (a proxy forwarding its caller's credential)
+//   { token, user? }  Basic `user:token`, user defaulting to `x-access-token`; the text is sent as its UTF-8 bytes, as git
+//                     sends a credential helper's (measured: `username=tëst password=päss` → those bytes)
+//   { bearer }        Bearer
+//   { user }          refused. git's own credential API asks for the password when a helper gives a user alone (measured:
+//                     "could not read Password", nothing sent) and a library cannot ask; `token: ''` is the explicit
+//                     empty password and sends `user:` (git, helper `password=` empty: `ivar:`), the URL `user@` form.
+function explicitAuth({ header, token, user, bearer }) {
+  if (header != null) {
+    if (!ASCII_VALUE.test(header)) throw noCredential('the authorization header must be non-empty printable ASCII');
+    return [header, null];
+  }
+  if (token != null) {
+    if (token === '' && user == null) throw noCredential('an empty token with no user carries no credential');
+    const name = user ?? 'x-access-token';
+    return [`Basic ${btoa(latin1(te.encode(`${name}:${token}`)))}`, { user: name, pass: token }];
+  }
+  if (bearer != null) {
+    if (!ASCII_VALUE.test(bearer)) throw noCredential('the bearer token must be non-empty printable ASCII');
+    return [`Bearer ${bearer}`, null];
+  }
+  if (user != null) throw noCredential('a user with no token; pass the token, or token: \'\' to send the user alone (Basic `user:`)');
+  throw noCredential('no token, bearer or header; omit auth to send none');
 }
 
 // A 3xx is never followed (fetch `redirect: 'manual'`), same-origin or not. Following hands the Authorization header to
@@ -108,25 +116,23 @@ export function createTransport(url, { auth, tracer, parent = null, fetchImpl = 
   try { u = new URL(url); } catch { throw fail('bad_request', 'invalid url: not an absolute URL', { what: 'url' }); }
   // userinfo in the URL becomes the Basic credential git sends for it, byte for byte: `user:password`; a user alone is
   // `user:` (a token given as the user, which GitHub and GitLab accept; git sends it without asking for a password and
-  // asks only once it is refused), a password alone `:password`. Explicit `auth` wins. It never appears again: not in
-  // requests, not in spans, not in error messages.
-  const fromUrl = (u.username || u.password) && !auth ? { user: userinfo(u.username), pass: userinfo(u.password) } : null;
+  // asks only once it is refused), a password alone `:password`, an empty userinfo `:`. Explicit `auth` wins. It never
+  // appears again: not in requests, not in spans, not in error messages.
+  const fromUrl = auth == null && (u.username || u.password || emptyUserinfo(url)) ? { user: userinfo(u.username), pass: userinfo(u.password) } : null;
   u.username = ''; u.password = '';
   const base = u.toString().replace(/\/$/, '');
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
-  // auth: { token, user? } → Basic; { bearer } → Bearer; { header } → the Authorization value verbatim (a proxy forwarding
-  // its caller's credential). Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
-  const authorization = fromUrl ? `Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}` : auth?.header ? String(auth.header) : auth?.token ? `Basic ${btoa(`${auth.user ?? 'x-access-token'}:${auth.token}`)}` : auth?.bearer ? `Bearer ${auth.bearer}` : null;
-  const utf8 = b => td.decode(Uint8Array.from(b, c => c.charCodeAt(0)));
-  const basic = fromUrl ? { user: utf8(fromUrl.user), pass: utf8(fromUrl.pass) } : (() => { if (!/^Basic\s/i.test(authorization ?? '')) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
+  // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
+  const [authorization, given] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth != null ? explicitAuth(auth) : [null, null];
+  // The Basic parts as a server would echo them (UTF-8 text). From a header they are decoded, as bytes and as UTF-8.
+  const decoded = (() => { if (!/^Basic\s/i.test(authorization ?? '')) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return c < 0 ? { user: d, pass: '' } : { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
+  const basic = given ?? (decoded && { user: utf8(decoded.user), pass: utf8(decoded.pass) });
   const user = auth?.user ?? basic?.user;
-  // A Basic user with an empty password is the whole credential (the token-as-user form): secret at 16 characters,
-  // digit or not (a GitLab or GitHub token without one would otherwise stay readable).
-  const userSecret = secretShaped(user) || (basic !== null && basic.pass === '' && user.length >= SECRET_USER_CHARS);
+  const userSecret = basic ? secretUser(basic.user, basic.pass !== '') : secretShaped(user);
   // Every string a server can send back (error bodies, ERR lines, band-2/3 text, ng reasons, hook output) passes through
   // `scrub` before it reaches an error or a span: the transport carries it (`t.scrub`) and otel.js applies it.
-  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), basic?.pass, userSecret ? user : null]);
+  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), basic?.pass, decoded?.pass, userSecret ? basic?.user ?? user : null, userSecret ? decoded?.user : null, secretShaped(user) ? user : null]);
   const headers = (service, extra = {}) => {
     const h = { 'Content-Type': `application/x-${service}-request`, Accept: `application/x-${service}-result`, 'User-Agent': userAgent, ...extra };
     if (authorization) h.Authorization = authorization;

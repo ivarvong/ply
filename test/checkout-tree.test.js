@@ -240,7 +240,11 @@ test('limits: entries walked, depth, the tree pack, blob batches split under max
   const err = await checkoutDir(R.url, { dir: dir2 }, { tracer: t2.tracer, limits: withLimits({ maxPackBytes: 16 * 1024 }) }).catch(e => e);
   assert.equal(err.code, 'limit_exceeded', err.message); assert.equal(err.what, 'pack bytes'); assert.equal(err.max, 16 * 1024);
   const b2 = t2.spans().find(s => s.name === 'git.checkout.blobs').attrs;
-  assert.ok(b2['git.checkout.blobs.splits'] >= 1, 'the batch was split'); assert.ok(b2['git.checkout.blobs.streamed'] >= 1, 'big.bin was fetched alone');
+  // "fetched alone" is read from openBlob's own span, not `streamed`: that counter moves only once openBlob returns, and
+  // whether the cap trips while it reads the object header (one network chunk past 16 KiB) or later in the pump depends
+  // on chunk sizes (CI: the former). Either way failHere ends a git.read.blob span as limit_exceeded.
+  assert.ok(b2['git.checkout.blobs.splits'] >= 1, 'the batch was split');
+  assert.ok(t2.spans().some(s => s.name === 'git.read.blob' && s.attrs['git.read.blob.outcome'] === 'limit_exceeded'), 'big.bin was fetched alone');
   assert.ok(!existsSync(join(dir2, 'big.bin')), 'the refused blob left no file');
   // a single blob under the cap still streams: batch 1 with the cap just above big.bin's pack
   const t3 = traced(), dir3 = fresh();
