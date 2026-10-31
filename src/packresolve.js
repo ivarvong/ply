@@ -266,4 +266,3 @@ export function resolvePack(parsed, external = () => undefined, limits = DEFAULT
   return { objects: resolved, stats };
 }
 
-// mutate-shard CI timing probe; reverted before merge.

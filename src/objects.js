@@ -280,4 +280,3 @@ export function encodeTag({ object, type, tag, tagger, message = null, extra = [
   ];
   return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
 }
-// mutate-shard CI timing probe; reverted before merge.
