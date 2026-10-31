@@ -59,7 +59,7 @@ test('edit entry carries only what the edit path uses', async () => {
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
   const edit = await bundle('src/edit.js');
   assert.ok(!/SSH-2\.0|curve25519|KEXINIT/.test(edit.outputFiles[0].text), 'no SSH in the edit bundle');
-  const ssh = await build({ entryPoints: ['src/sshgit.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets', 'node:net'] });
+  const ssh = await build({ entryPoints: ['src/sshgit.ts'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets', 'node:net'] });
   const js = ssh.outputFiles[0].text;
   assert.ok(/curve25519-sha256/.test(js) && /aes128-gcm@openssh\.com/.test(js));
   assert.ok(!/node:net/.test(js), 'the ssh transport does not pick a socket implementation');
@@ -193,8 +193,9 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
-  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
-  assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
+  // (by module name: a module is .js until its cluster converts it to .ts)
+  const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && !f.endsWith('.d.ts') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).map(f => f.replace(/\.[jt]s$/, '')).sort();
+  assert.deepEqual(withNode, ['checkout-node', 'ssh-node', 'tree-node']);
 });
 
 test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {

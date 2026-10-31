@@ -95,6 +95,14 @@
   "overrides": [
     {
       "files": [
+        "src/**/*.d.ts"
+      ],
+      "rules": {
+        "import/unambiguous": "off"
+      }
+    },
+    {
+      "files": [
         "src/objects.ts",
         "src/bytes.ts",
         "src/pktline.ts",
