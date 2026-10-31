@@ -26,7 +26,7 @@ import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 const fetchObj = fetchObject as unknown as (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<{ readonly data: Uint8Array }>;
 const pushRef = push as unknown as (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 const runOp = operation as unknown as <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-const commitBytes = encodeCommit as unknown as (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array;
+const commitBytes = encodeCommit as unknown as (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array<ArrayBuffer>;
 /* oxlint-enable typescript/no-unsafe-type-assertion */
 
 type Rediff = NonNullable<MergeOptions['rediff']>;

@@ -54,7 +54,9 @@ export type OpContext = { readonly t: Transport; readonly root: Span; readonly o
 export type PushResult = { readonly packBytes: number };
 export type Refs = { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }> };
 export type Author = { readonly name: string; readonly email: string; readonly tz?: string };
-export type Signer = { readonly sign: (message: Uint8Array, namespace?: string) => Promise<string> };
+// a commit signer (src/sign.ts); re-exported for rebase.ts
+export type { Signer } from './sign.js';
+import type { Signer } from './sign.js';
 export type TreeCache = Map<string, Uint8Array>;
 type Fetched = { readonly data: Uint8Array };
 export type PushObject = { readonly type: number; readonly data: Uint8Array };
@@ -65,7 +67,7 @@ export type PushObject = { readonly type: number; readonly data: Uint8Array };
 const fetchObj = fetchObject as unknown as (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<Fetched>;
 const pushRef = push as unknown as (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 const runOp = operation as unknown as <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-const commitBytes = encodeCommit as unknown as (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array;
+const commitBytes = encodeCommit as unknown as (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array<ArrayBuffer>;
 /* oxlint-enable typescript/no-unsafe-type-assertion */
 
 const EMPTY: readonly TreeEntry[] = [];

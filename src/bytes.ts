@@ -69,7 +69,7 @@ export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-export function encodeBytes(s: unknown, what = 'string'): Uint8Array {
+export function encodeBytes(s: unknown, what = 'string'): Uint8Array<ArrayBuffer> {
   if (typeof s !== 'string') throw fail('bad_request', `${what} must be a string`, { what });
   if (s.isWellFormed()) return te.encode(s);
   const parts: Uint8Array[] = [];

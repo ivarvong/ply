@@ -18,6 +18,7 @@ import { negotiate } from './negotiate.js';
 import { push } from './push.js';
 // oxlint-disable-next-line import/max-dependencies -- the one module that gathers every wire operation
 import { receiveCaps, pushWithOptions } from './receivecaps.js';
+import type { PushOptions } from './push.js';
 import { discover } from './discover.js';
 
 // A3: the audit deletes the unused re-exports below; they are public API until then.
@@ -32,11 +33,7 @@ export { receiveCaps, pushCapsProblem, pushWithOptions } from './receivecaps.js'
 export { discover, parseCapabilitiesV2, capLookup } from './discover.js';
 
 // push.js and receivecaps.js are not converted yet: the options as push.js documents them, its results as it declares them.
-export type PushOpts = {
-  readonly ref?: string; readonly oldOid?: string; readonly newOid?: string; readonly objects?: readonly unknown[];
-  readonly commands?: ReadonlyArray<{ readonly ref: string; readonly oldOid: string; readonly newOid: string }>;
-  readonly sideband?: boolean; readonly reportV2?: boolean; readonly atomic?: boolean; readonly pushOptions?: readonly string[];
-};
+export type PushOpts = PushOptions;
 type PushResult = ReturnType<typeof push>;
 type ReceiveCaps = ReturnType<typeof receiveCaps>;
 
@@ -55,7 +52,7 @@ export class GitHttp {
   public negotiate(opts: NegotiateOpts, extra?: Pick<FetchPackExtra, 'external' | 'resolve'>): Promise<NegotiateResult> { return negotiate(this.t, opts, extra); }
   // A4: the audit's CheckedCaps; this duplicates pushWithOptions' routing (receivecaps.js).
   // oxlint-disable-next-line typescript/strict-boolean-expressions, typescript/no-unsafe-type-assertion -- an empty option list is no options, as before; push.js infers its options from their defaults until its cluster converts
-  public push(opts: PushOpts): PushResult { return opts.atomic || opts.pushOptions?.length ? pushWithOptions(this.t, opts) : push(this.t, opts as never); }
+  public push(opts: PushOpts): PushResult { return opts.atomic || opts.pushOptions?.length ? pushWithOptions(this.t, opts) : push(this.t, opts); }
   public receiveCaps(): ReceiveCaps { return receiveCaps(this.t); }
   public discover(): Promise<DiscoverInfo> { return discover(this.t); }
 }
