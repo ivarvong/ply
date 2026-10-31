@@ -3,7 +3,7 @@
 // resort, makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
 // pack.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
 import type { ErrorOf } from './errors.js';
-import { plyError, orThrow } from './errors.js';
+import { fail, plyError, orThrow } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever } from './result.js';
 import type { InflateStats } from './inflate.js';
@@ -28,7 +28,7 @@ import {
 type Corrupt = ErrorOf<'pack_corrupt'>;
 // Everything a buffered pack can be refused for: corrupt bytes, a limit, or a caller's limit that bounds nothing.
 export type PackError = Corrupt | ErrorOf<'limit_exceeded'> | ErrorOf<'bad_request'>;
-const corrupt = (msg: string): Err<Corrupt> => err(plyError('pack_corrupt', msg));
+const corrupt = (msg: string): Err<Corrupt> => fail('pack_corrupt', msg);
 const short = (buf: Uint8Array, p: number): Err<Corrupt> => err(shortRead('pack_corrupt', p, 1, buf.length));
 // TYPE_NAME's keys are the type numbers; read by a type number, a name may be absent (a widening, so no runtime alias).
 type TypeNames = Readonly<Record<number, PackKind | undefined>>;

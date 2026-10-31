@@ -4,7 +4,7 @@
 // is what positions the pack parser at the next object header.
 
 import type { ErrorOf } from './errors.js';
-import { plyError, orThrow } from './errors.js';
+import { fail, plyError, orThrow, isPlyCode } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever } from './result.js';
 import { DEFAULT_LIMITS, checkLimit } from './limits.js';
@@ -80,10 +80,13 @@ export type InflateError = ErrorOf<'pack_corrupt'> | ErrorOf<'limit_exceeded'> |
 export type BlockType = 'stored' | 'fixed' | 'dynamic';
 // DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC (format.ts) are these indices
 const BLOCK_TYPE: ReadonlyArray<BlockType | undefined> = ['stored', 'fixed', 'dynamic'];
-// Thrown only inside inflateResult, by the step that put its error in the slot, and caught there (below). One Error made
-// once (lint: only errors are thrown); it carries nothing, the slot does.
-const STOP: Error = new Error('inflate: stop');
-const corrupt = (msg: string): Err<ErrorOf<'pack_corrupt'>> => err(plyError('pack_corrupt', msg));
+const corrupt = (msg: string): Err<ErrorOf<'pack_corrupt'>> => fail('pack_corrupt', msg);
+// the same refusal, thrown inside the block loop (below)
+const bad = (msg: string): ErrorOf<'pack_corrupt'> => plyError('pack_corrupt', msg);
+// A PlyError thrown inside inflateResult's block loop is one of its own refusals (the loop calls only its own closures,
+// huffBuild and adler32, and only the closures throw one); anything else thrown there is a bug.
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value read loosely: a missing code is undefined
+const isRefusal = (e: unknown): e is InflateError => isPlyCode((e as { readonly code?: unknown } | null)?.code);
 
 // @decoder inflateResult prefix=inflate
 // oxlint-disable-next-line eslint/complexity -- one decoder (header, blocks by exhaustive block type, trailer)
@@ -96,12 +99,9 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
     if (!m.ok) return m;
     maxOutput = m.value;
   }
-  // The error slot. The bit reader, the Huffman decoder and the block loop are a hot loop of small closures: a Result
-  // per bit would allocate per bit, so a failing step puts its error here and throws STOP, the one value the try
-  // around the loop turns back into an Err. Anything else thrown is a bug and propagates.
-  let failure: InflateError | undefined;
-  const bad = (msg: string): Error => { failure = plyError('pack_corrupt', msg); return STOP; };
-  const over = (msg: string, what: string, got: number): Error => { failure = plyError('limit_exceeded', msg, { what, got, max: maxOutput }); return STOP; };
+  // The block loop is a hot loop of small closures (the bit reader, the Huffman decoder): a Result per bit would allocate
+  // per bit, so a failing step throws its PlyError and the one try around the loop returns it as an Err (isRefusal).
+  const over = (msg: string, what: string, got: number): ErrorOf<'limit_exceeded'> => plyError('limit_exceeded', msg, { what, got, max: maxOutput });
   const start = pos;
   const stats: InflateStats = { blocks: 0, stored: 0, fixed: 0, dynamic: 0, literals: 0, matches: 0, matchBytes: 0, maxDist: 0, maxLen: 0 };
   // bit reader (LSB-first); p is also the zlib header's cursor
@@ -126,7 +126,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
   // few bytes past the bound, before any more of it is read) and when the stream ends (a last block may be long).
   const declared = expectedSize ?? maxOutput;
   const maxInput = zlibBound(declared);
-  const tooLongMsg = (n: number): string => `inflate: zlib stream longer than its declared size allows (${n} > ${maxInput} for ${declared} bytes)`;
+  const tooLong = (n: number): ErrorOf<'pack_corrupt'> => plyError('pack_corrupt', `inflate: zlib stream longer than its declared size allows (${n} > ${maxInput} for ${declared} bytes)`);
   // Stryker disable next-line ArithmeticOperator,MethodExpression: the buffer is grown until it holds the output, so a different positive initial guess yields the same bytes
   const guess = Math.max(256, (buf.length - p) * 3); // oxlint-disable-line no-magic-numbers -- output-buffer growth, not a wire-format fact
   let out = new Uint8Array(expectedSize ?? Math.min(maxOutput, guess));
@@ -249,17 +249,16 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
   try {
     let last: number;
     do {
-      if (p - start > maxInput) throw bad(tooLongMsg(p - start));
+      if (p - start > maxInput) throw tooLong(p - start);
       last = bits(DEFLATE_BFINAL_BITS);
       const type = BLOCK_TYPE[bits(DEFLATE_BTYPE_BITS)];
       stats.blocks++;
       block(type);
     } while (!last);
   } catch (e) {
-    if (e !== STOP) throw e;
+    if (isRefusal(e)) return err(e);
+    throw e;
   }
-  // set exactly when STOP was thrown
-  if (failure) return err(failure);
 
   const result = out.subarray(0, o);
   if (!raw) {
@@ -270,7 +269,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
     p += ADLER_BYTES;
   }
   if (expectedSize !== undefined && o !== expectedSize) return corrupt(`inflate: size ${o} != expected ${expectedSize}`);
-  if (p - start > maxInput) return corrupt(tooLongMsg(p - start));
+  if (p - start > maxInput) return err(tooLong(p - start));
   return ok({ out: result, consumed: p - start, stats });
 }
 // @decoder inflate prefix=inflate

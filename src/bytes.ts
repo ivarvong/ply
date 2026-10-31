@@ -124,19 +124,26 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
  * bytes switches on that, never on the message (#76). An absent buffer is a short read of an empty one.
  */
 export type ShortReadCode = 'pack_corrupt' | 'protocol';
+const shortReadMessage = (off: number, n: number, have: number): string => `short read: need ${n} bytes at ${off}, have ${have}`;
 // The short-read error itself, for a parser that reads byte by byte without a take() per byte.
 export const shortRead = <C extends ShortReadCode>(code: C, off: number, n: number, have: number): ErrorOf<C> =>
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- plyError's member for C; the compiler cannot resolve Payload<C> for a type parameter
-  plyError<ShortReadCode>(code, `short read: need ${n} bytes at ${off}, have ${have}`, { reason: 'short_read' }) as ErrorOf<C>;
+  plyError<ShortReadCode>(code, shortReadMessage(off, n, have), { reason: 'short_read' }) as ErrorOf<C>;
+const inBounds = (buf: Uint8Array | null | undefined, off: number, n: number): buf is Uint8Array =>
+  Boolean(buf) && Number.isInteger(off) && Number.isInteger(n) && off >= 0 && n >= 0 && off + n <= (buf?.length ?? 0);
 export function takeResult<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null | undefined, off: number, n: number, code?: C): Result<Uint8Array, ErrorOf<C>> {
-  const len = buf?.length ?? 0;
+  const have = buf?.length ?? 0;
   // an omitted code is C's default, 'pack_corrupt'; the compiler cannot tie a default value to a type parameter
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  if (!buf || !Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) return err(shortRead(code ?? 'pack_corrupt' as C, off, n, len));
-  return ok(buf.subarray(off, off + n));
+  return inBounds(buf, off, n) ? ok(buf.subarray(off, off + n)) : err(shortRead(code ?? 'pack_corrupt' as C, off, n, have));
 }
-// The throwing form (docs/STACK.md, migration path step 2).
-export const take = (buf: Uint8Array | null | undefined, off: number, n: number, code?: ShortReadCode): Uint8Array => orThrow(takeResult(buf, off, n, code));
+// The throwing form (docs/STACK.md, migration path step 2). Its own plyError, with the code its caller picks, so the
+// decision-point inventory (scripts/decision-points.mjs) sees every take() call as a site, as before.
+export function take(buf: Uint8Array | null | undefined, off: number, n: number, code: ShortReadCode = 'pack_corrupt'): Uint8Array {
+  const have = buf?.length ?? 0;
+  if (!inBounds(buf, off, n)) throw plyError(code, shortReadMessage(off, n, have), { reason: 'short_read' });
+  return buf.subarray(off, off + n);
+}
 
 // Hex digit value of each byte value, either case; -1 for a byte that is not a hex digit. The one hex table: the
 // pkt-line length reader and fromHex (sha1.ts) read it.
