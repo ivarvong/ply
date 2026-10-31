@@ -21,7 +21,7 @@ import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TY
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
@@ -179,7 +179,7 @@ export type TreePlan = {
 // parent (default `ref`); base ≠ ref creates `ref` (zero old oid). base = ref and the ref absent: the first commit of a
 // new ref, no parent, zero old oid — a deploy's first push.
 export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, author, message, time = Math.floor(Date.now() / 1000) }: TreeSpec, limits: Limits, head: string | null = null): TreePlan {
-  validateRef(ref); validateRef(base);
+  validatePushRef(ref, false); validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');

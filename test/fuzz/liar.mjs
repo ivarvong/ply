@@ -20,7 +20,7 @@ import { editFile } from '../../src/edit.js';
 import { mergeBase, mergeBranch } from '../../src/merge.js';
 import { createTransport } from '../../src/http.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.ts';
+import { withLimits } from '../../src/limits.js';
 import { TYPE } from '../../src/objects.js';
 import { concat, te } from '../../src/bytes.js';
 

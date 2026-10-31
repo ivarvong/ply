@@ -17,7 +17,7 @@ import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import type { Caught, EncodeCommit, FetchObject, Fetched, Operation, OperationOptions, PackObject, Push, Signer, SpState, Transport, TreeEntry } from './boundary.js';
 
@@ -113,7 +113,7 @@ export type EditPlan = {
 // `base`: the ref whose head the commit is built on (default: `ref` itself). With base ≠ ref the push *creates* `ref`
 // (old oid = zeros), the way a pull-request branch is made; the CAS then means "the branch must not exist yet".
 export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
-  validateRef(ref); validateRef(base);
+  validatePushRef(ref, false); validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
   const comps = validatePath(path, limits);
