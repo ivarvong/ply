@@ -14,7 +14,7 @@
 // (test/space/failsite-setup.js) names it and exports it as PLY_FAILSITE_RUNNER to the workers and children it starts;
 // a plain node process is its own script. test/space/holes.js maps frames to inventory sites.
 import { registerHooks } from 'node:module';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainThread, threadId } from 'node:worker_threads';
@@ -30,8 +30,13 @@ if (DIR && !globalThis[KEY]) {
   let named = null;
   const runner = () => named ?? process.env.PLY_FAILSITE_RUNNER ?? (process.argv[1] ? relative(ROOT, process.argv[1]) : '(eval)');
   const thread = isMainThread ? 'm' : `w${threadId}`;
-  const save = r => writeFileSync(join(out, `${process.pid}-${thread}-${r.replace(/[^\w.-]+/g, '_')}.json`),
-    JSON.stringify({ runner: r, platform: process.platform, frames: Object.fromEntries(byRunner.get(r) ?? []) }));
+  // written to a temporary name and renamed (atomic on one filesystem): a process killed mid-write (a test's timeout,
+  // a worker terminated) leaves its previous record or none, never a truncated one the gate cannot parse
+  const save = r => {
+    const file = join(out, `${process.pid}-${thread}-${r.replace(/[^\w.-]+/g, '_')}.json`);
+    writeFileSync(`${file}.tmp`, JSON.stringify({ runner: r, platform: process.platform, frames: Object.fromEntries(byRunner.get(r) ?? []) }));
+    renameSync(`${file}.tmp`, file);
+  };
   const recorder = holder => {
     const limit = Error.stackTraceLimit;
     Error.stackTraceLimit = 40;
