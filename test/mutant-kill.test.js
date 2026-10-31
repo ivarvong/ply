@@ -1570,6 +1570,22 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   for (const r of ['xfailed to update ref', 'failed to update refs', 'a bad ref', 'bad refs']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
   assert.equal(rejectionCode({ unpack: 'unpack-objects abnormal exit', refs: [{ ok: false, reason: 'failed to update ref' }] }), 'push_rejected');
   assert.equal(rejectionCode({ unpack: 'ok', refs: [{ ok: true }, { ok: false, reason: 'stale ref' }] }), 'cas_conflict');
+  // the class table (test/space/push-ng.space.js): an atomic CAS loss, git >= 2.51's batched texts, denyNonFastForwards,
+  // a proc-receive hook that did not answer, and the precedence refusal > non-fast-forward > cas
+  for (const r of ['atomic transaction failed', 'bad ref', 'incorrect old value provided', 'reference already exists', 'reference does not exist']) assert.equal(rejectionCode(ngs(r)), 'cas_conflict', r);
+  for (const r of ['refname conflict', 'hook declined', 'funny refname', 'atomic push failure']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
+  assert.equal(rejectionCode(ngs('non-fast-forward')), 'not_fast_forward');
+  assert.equal(rejectionCode(ngs('non-fast-forward', 'atomic push failure')), 'not_fast_forward');
+  assert.equal(rejectionCode(ngs('non-fast-forward', 'failed to update ref')), 'not_fast_forward');
+  assert.equal(rejectionCode(ngs('non-fast-forward', 'hook declined')), 'push_rejected');
+  assert.equal(rejectionCode(ngs('failed to update ref', 'atomic push failure')), 'cas_conflict');
+  assert.equal(rejectionCode(ngs('proc-receive failed to report status')), 'ambiguous');
+  assert.equal(rejectionCode(ngs('fail to run proc-receive hook', 'hook declined')), 'push_rejected');
+  assert.equal(rejectionCode(ngs('rejected: non-fast-forward')), 'cas_conflict', 'a host\'s wording keeps its heuristic');
+  const sts = (...rs) => ({ tag: 'statuses', refs: rs.map(([ref, ok, reason]) => ({ ref, ok, reason })) });
+  assert.deepEqual(decideOutcome(sts(['a', true, ''], ['b', false, 'fail to run proc-receive hook'])), { tag: 'ambiguous', why: 'proc-receive: fail to run proc-receive hook' });
+  assert.deepEqual(decideOutcome(sts(['a', false, 'proc-receive failed to report status'])), { tag: 'ambiguous', why: 'proc-receive: proc-receive failed to report status' });
+  assert.deepEqual(decideOutcome(sts(['a', false, 'non-fast-forward'])), { tag: 'rejected', code: 'not_fast_forward' });
 
   // band 2 is kept as a 4096-character tail, counted per frame
   let st = streamInit(true);

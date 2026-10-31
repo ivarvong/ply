@@ -1,0 +1,3366 @@
+{
+ "git": {
+  "tag": "v2.50.0",
+  "commit": "16bd9f20a403117f2e0d9bcda6c6e621d3763e77",
+  "source": "https://github.com/git/git"
+ },
+ "generator": "scripts/git-manifest.mjs",
+ "counts": {
+  "fsck-msg": 71,
+  "error": 38,
+  "die": 111,
+  "reject": 44,
+  "ng": 2,
+  "err-pkt": 2,
+  "capability": 46,
+  "request-arg": 21,
+  "refname-rule": 18,
+  "tree-mode": 24
+ },
+ "entries": [
+  {
+   "id": "fsck:nulInHeader",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 25,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "NUL_IN_HEADER FATAL",
+   "severity": "FATAL",
+   "reportedIn": [
+    "verify_headers"
+   ]
+  },
+  {
+   "id": "fsck:unterminatedHeader",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 26,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "UNTERMINATED_HEADER FATAL",
+   "severity": "FATAL",
+   "reportedIn": [
+    "verify_headers"
+   ]
+  },
+  {
+   "id": "fsck:badDate",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 28,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_DATE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:badDateOverflow",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 29,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_DATE_OVERFLOW ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:badEmail",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 30,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_EMAIL ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:badName",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 31,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_NAME ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:badObjectSha1",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 32,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_OBJECT_SHA1 ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone",
+    "fsck_object"
+   ]
+  },
+  {
+   "id": "fsck:badPackedRefEntry",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 33,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_PACKED_REF_ENTRY ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:badPackedRefHeader",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 34,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_PACKED_REF_HEADER ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:badParentSha1",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 35,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_PARENT_SHA1 ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:badRefContent",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 36,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_REF_CONTENT ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:badRefFiletype",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 37,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_REF_FILETYPE ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:badRefName",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 38,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_REF_NAME ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:badReferentName",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 39,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_REFERENT_NAME ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:badTimezone",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 40,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_TIMEZONE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:badTree",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 41,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_TREE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:badTreeSha1",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 42,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_TREE_SHA1 ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:badType",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 43,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_TYPE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:duplicateEntries",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 44,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "DUPLICATE_ENTRIES ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:missingAuthor",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 45,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_AUTHOR ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:missingCommitter",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 46,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_COMMITTER ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:missingEmail",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 47,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_EMAIL ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:missingNameBeforeEmail",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 48,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_NAME_BEFORE_EMAIL ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:missingObject",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 49,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_OBJECT ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:missingSpaceBeforeDate",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 50,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_SPACE_BEFORE_DATE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:missingSpaceBeforeEmail",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 51,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_SPACE_BEFORE_EMAIL ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:missingTag",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 52,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_TAG ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:missingTagEntry",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 53,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_TAG_ENTRY ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:missingTree",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 54,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_TREE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:missingType",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 55,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_TYPE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:missingTypeEntry",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 56,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_TYPE_ENTRY ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:multipleAuthors",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 57,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MULTIPLE_AUTHORS ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:packedRefEntryNotTerminated",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 58,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "PACKED_REF_ENTRY_NOT_TERMINATED ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:packedRefUnsorted",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 59,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "PACKED_REF_UNSORTED ERROR",
+   "severity": "ERROR",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:treeNotSorted",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 60,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "TREE_NOT_SORTED ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:unknownType",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 61,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "UNKNOWN_TYPE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_buffer"
+   ]
+  },
+  {
+   "id": "fsck:zeroPaddedDate",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 62,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "ZERO_PADDED_DATE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_ident"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesMissing",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 63,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_MISSING ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_finish",
+    "fsck_objects_error_cb_print_missing_gitmodules"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesBlob",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 64,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_BLOB ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_finish"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesLarge",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 65,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_LARGE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_blob"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesName",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 66,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_NAME ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_gitmodules_fn"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesSymlink",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 67,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_SYMLINK ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesUrl",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 68,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_URL ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_gitmodules_fn"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesPath",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 69,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_PATH ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_gitmodules_fn"
+   ]
+  },
+  {
+   "id": "fsck:gitmodulesUpdate",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 70,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_UPDATE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_gitmodules_fn"
+   ]
+  },
+  {
+   "id": "fsck:gitattributesMissing",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 71,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITATTRIBUTES_MISSING ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_finish"
+   ]
+  },
+  {
+   "id": "fsck:gitattributesLarge",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 72,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITATTRIBUTES_LARGE ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_blob"
+   ]
+  },
+  {
+   "id": "fsck:gitattributesLineLength",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 73,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITATTRIBUTES_LINE_LENGTH ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_blob"
+   ]
+  },
+  {
+   "id": "fsck:gitattributesBlob",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 74,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITATTRIBUTES_BLOB ERROR",
+   "severity": "ERROR",
+   "reportedIn": [
+    "fsck_finish"
+   ]
+  },
+  {
+   "id": "fsck:emptyName",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 76,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "EMPTY_NAME WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:fullPathname",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 77,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "FULL_PATHNAME WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:hasDot",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 78,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "HAS_DOT WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:hasDotdot",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 79,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "HAS_DOTDOT WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:hasDotgit",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 80,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "HAS_DOTGIT WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:nullSha1",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 81,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "NULL_SHA1 WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:zeroPaddedFilemode",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 82,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "ZERO_PADDED_FILEMODE WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:nulInCommit",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 83,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "NUL_IN_COMMIT WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_commit"
+   ]
+  },
+  {
+   "id": "fsck:largePathname",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 84,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "LARGE_PATHNAME WARN",
+   "severity": "WARN",
+   "reportedIn": [
+    "fsck_set_msg_type",
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:badFilemode",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 86,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_FILEMODE INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:emptyPackedRefsFile",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 87,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "EMPTY_PACKED_REFS_FILE INFO",
+   "severity": "INFO",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:gitmodulesParse",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 88,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITMODULES_PARSE INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_blob"
+   ]
+  },
+  {
+   "id": "fsck:gitignoreSymlink",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 89,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITIGNORE_SYMLINK INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:gitattributesSymlink",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 90,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "GITATTRIBUTES_SYMLINK INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:mailmapSymlink",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 91,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MAILMAP_SYMLINK INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_tree"
+   ]
+  },
+  {
+   "id": "fsck:badTagName",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 92,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "BAD_TAG_NAME INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:missingTaggerEntry",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 93,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "MISSING_TAGGER_ENTRY INFO",
+   "severity": "INFO",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "id": "fsck:symlinkRef",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 94,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "SYMLINK_REF INFO",
+   "severity": "INFO",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:refMissingNewline",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 95,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "REF_MISSING_NEWLINE INFO",
+   "severity": "INFO",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:symrefTargetIsNotARef",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 96,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "SYMREF_TARGET_IS_NOT_A_REF INFO",
+   "severity": "INFO",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:trailingRefContent",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 97,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "TRAILING_REF_CONTENT INFO",
+   "severity": "INFO",
+   "reportedIn": []
+  },
+  {
+   "id": "fsck:extraHeaderEntry",
+   "kind": "fsck-msg",
+   "file": "fsck.h",
+   "line": 99,
+   "fn": "FOREACH_FSCK_MSG_ID",
+   "text": "EXTRA_HEADER_ENTRY IGNORE",
+   "severity": "IGNORE",
+   "reportedIn": [
+    "fsck_tag_standalone"
+   ]
+  },
+  {
+   "kind": "error",
+   "file": "builtin/receive-pack.c",
+   "line": 1513,
+   "fn": "update",
+   "text": "unpack should have generated %s, but I can't find it!",
+   "id": "receive-pack.c:error:update:unpack should have generated %s, but I can't find it!"
+  },
+  {
+   "kind": "error",
+   "file": "builtin/receive-pack.c",
+   "line": 1561,
+   "fn": "update",
+   "text": "bad sha1 objects for %s",
+   "id": "receive-pack.c:error:update:bad sha1 objects for %s"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2052,
+   "fn": "queue_command",
+   "text": "protocol error: expected old/new/ref, got '%s'",
+   "id": "receive-pack.c:die:queue_command:protocol error: expected old/new/ref, got '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2081,
+   "fn": "queue_commands_from_cert",
+   "text": "protocol error: got both push certificate and unsigned commands",
+   "id": "receive-pack.c:die:queue_commands_from_cert:protocol error: got both push certificate and unsigned commands"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2085,
+   "fn": "queue_commands_from_cert",
+   "text": "malformed push certificate %.*s",
+   "id": "receive-pack.c:die:queue_commands_from_cert:malformed push certificate %.*s"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2111,
+   "fn": "read_head_info",
+   "text": "protocol error: expected shallow sha, got '%s'",
+   "id": "receive-pack.c:die:read_head_info:protocol error: expected shallow sha, got '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2143,
+   "fn": "read_head_info",
+   "text": "error: unsupported object format '%s'",
+   "id": "receive-pack.c:die:read_head_info:error: unsupported object format '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2164,
+   "fn": "read_head_info",
+   "text": "protocol error: got an unexpected packet",
+   "id": "receive-pack.c:die:read_head_info:protocol error: got an unexpected packet"
+  },
+  {
+   "kind": "error",
+   "file": "builtin/receive-pack.c",
+   "line": 2204,
+   "fn": "parse_pack_header",
+   "text": "<expr>",
+   "id": "receive-pack.c:error:parse_pack_header:<expr>"
+  },
+  {
+   "kind": "error",
+   "file": "builtin/receive-pack.c",
+   "line": 2207,
+   "fn": "parse_pack_header",
+   "text": "<expr>",
+   "id": "receive-pack.c:error:parse_pack_header:<expr>#2"
+  },
+  {
+   "kind": "die",
+   "file": "builtin/receive-pack.c",
+   "line": 2547,
+   "fn": "cmd_receive_pack",
+   "text": "'%s' does not appear to be a git repository",
+   "id": "receive-pack.c:die:cmd_receive_pack:'%s' does not appear to be a git repository"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1093,
+   "fn": "read_proc_receive_report",
+   "text": "failed",
+   "id": "receive-pack.c:reject:failed"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1103,
+   "fn": "read_proc_receive_report",
+   "text": "proc-receive failed to report status",
+   "id": "receive-pack.c:reject:proc-receive failed to report status"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1481,
+   "fn": "update",
+   "text": "funny refname",
+   "id": "receive-pack.c:reject:funny refname"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1501,
+   "fn": "update",
+   "text": "branch is currently checked out",
+   "id": "receive-pack.c:reject:branch is currently checked out"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1515,
+   "fn": "update",
+   "text": "bad pack",
+   "id": "receive-pack.c:reject:bad pack"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1522,
+   "fn": "update",
+   "text": "deletion prohibited",
+   "id": "receive-pack.c:reject:deletion prohibited"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1539,
+   "fn": "update",
+   "text": "deletion of the current branch prohibited",
+   "id": "receive-pack.c:reject:deletion of the current branch prohibited"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1542,
+   "fn": "update",
+   "text": "Invalid denyDeleteCurrent setting",
+   "id": "receive-pack.c:reject:Invalid denyDeleteCurrent setting"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1562,
+   "fn": "update",
+   "text": "bad ref",
+   "id": "receive-pack.c:reject:bad ref"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1573,
+   "fn": "update",
+   "text": "non-fast-forward",
+   "id": "receive-pack.c:reject:non-fast-forward"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1579,
+   "fn": "update",
+   "text": "hook declined",
+   "id": "receive-pack.c:reject:hook declined"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1606,
+   "fn": "update",
+   "text": "failed to delete",
+   "id": "receive-pack.c:reject:failed to delete"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1616,
+   "fn": "update",
+   "text": "shallow error",
+   "id": "receive-pack.c:reject:shallow error"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1627,
+   "fn": "update",
+   "text": "failed to update ref",
+   "id": "receive-pack.c:reject:failed to update ref"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1684,
+   "fn": "check_aliased_update_internal",
+   "text": "broken symref",
+   "id": "receive-pack.c:reject:broken symref"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1711,
+   "fn": "check_aliased_update_internal",
+   "text": "inconsistent aliased update",
+   "id": "receive-pack.c:reject:inconsistent aliased update"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1777,
+   "fn": "set_connectivity_errors",
+   "text": "missing necessary objects",
+   "id": "receive-pack.c:reject:missing necessary objects"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1823,
+   "fn": "reject_updates_to_hidden",
+   "text": "deny deleting a hidden ref",
+   "id": "receive-pack.c:reject:deny deleting a hidden ref"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1825,
+   "fn": "reject_updates_to_hidden",
+   "text": "deny updating a hidden ref",
+   "id": "receive-pack.c:reject:deny updating a hidden ref"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1864,
+   "fn": "execute_commands_non_atomic",
+   "text": "transaction failed to start",
+   "id": "receive-pack.c:reject:transaction failed to start"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1874,
+   "fn": "execute_commands_non_atomic",
+   "text": "failed to update ref",
+   "id": "receive-pack.c:reject:failed to update ref#2"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1886,
+   "fn": "execute_commands_atomic",
+   "text": "atomic push failure",
+   "id": "receive-pack.c:reject:atomic push failure"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1893,
+   "fn": "execute_commands_atomic",
+   "text": "transaction failed to start",
+   "id": "receive-pack.c:reject:transaction failed to start#2"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1909,
+   "fn": "execute_commands_atomic",
+   "text": "atomic transaction failed",
+   "id": "receive-pack.c:reject:atomic transaction failed"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1938,
+   "fn": "execute_commands",
+   "text": "unpacker error",
+   "id": "receive-pack.c:reject:unpacker error"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1987,
+   "fn": "execute_commands",
+   "text": "pre-receive hook declined",
+   "id": "receive-pack.c:reject:pre-receive hook declined"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2008,
+   "fn": "execute_commands",
+   "text": "unable to migrate objects to permanent storage",
+   "id": "receive-pack.c:reject:unable to migrate objects to permanent storage"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2027,
+   "fn": "execute_commands",
+   "text": "fail to run proc-receive hook",
+   "id": "receive-pack.c:reject:fail to run proc-receive hook"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2425,
+   "fn": "update_shallow_info",
+   "text": "shallow update not allowed",
+   "id": "receive-pack.c:reject:shallow update not allowed"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2599,
+   "fn": "cmd_receive_pack",
+   "text": "inconsistent push options",
+   "id": "receive-pack.c:reject:inconsistent push options"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1376,
+   "fn": "push_to_deploy",
+   "text": "Up-to-date check failed",
+   "id": "receive-pack.c:reject:Up-to-date check failed"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1388,
+   "fn": "push_to_deploy",
+   "text": "Working directory has unstaged changes",
+   "id": "receive-pack.c:reject:Working directory has unstaged changes"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1402,
+   "fn": "push_to_deploy",
+   "text": "Working directory has staged changes",
+   "id": "receive-pack.c:reject:Working directory has staged changes"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1414,
+   "fn": "push_to_deploy",
+   "text": "Could not update working tree to new HEAD",
+   "id": "receive-pack.c:reject:Could not update working tree to new HEAD"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1433,
+   "fn": "push_to_checkout",
+   "text": "push-to-checkout hook declined",
+   "id": "receive-pack.c:reject:push-to-checkout hook declined"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 1449,
+   "fn": "update_worktree",
+   "text": "denyCurrentBranch = updateInstead needs a worktree",
+   "id": "receive-pack.c:reject:denyCurrentBranch = updateInstead needs a worktree"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2201,
+   "fn": "parse_pack_header",
+   "text": "eof before pack header was fully read",
+   "id": "receive-pack.c:reject:eof before pack header was fully read"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2204,
+   "fn": "parse_pack_header",
+   "text": "protocol error (pack signature mismatch detected)",
+   "id": "receive-pack.c:reject:protocol error (pack signature mismatch detected)"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2207,
+   "fn": "parse_pack_header",
+   "text": "protocol error (pack version unsupported)",
+   "id": "receive-pack.c:reject:protocol error (pack version unsupported)"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2210,
+   "fn": "parse_pack_header",
+   "text": "unknown error in parse_pack_header",
+   "id": "receive-pack.c:reject:unknown error in parse_pack_header"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2254,
+   "fn": "unpack",
+   "text": "unable to create temporary object directory",
+   "id": "receive-pack.c:reject:unable to create temporary object directory"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2281,
+   "fn": "unpack",
+   "text": "unpack-objects abnormal exit",
+   "id": "receive-pack.c:reject:unpack-objects abnormal exit"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2313,
+   "fn": "unpack",
+   "text": "index-pack fork failed",
+   "id": "receive-pack.c:reject:index-pack fork failed"
+  },
+  {
+   "kind": "reject",
+   "file": "builtin/receive-pack.c",
+   "line": 2324,
+   "fn": "unpack",
+   "text": "index-pack abnormal exit",
+   "id": "receive-pack.c:reject:index-pack abnormal exit"
+  },
+  {
+   "kind": "ng",
+   "file": "builtin/receive-pack.c",
+   "line": 2444,
+   "fn": "report",
+   "text": "ng %s %s\n",
+   "id": "receive-pack.c:ng:report:ng %s %s "
+  },
+  {
+   "kind": "ng",
+   "file": "builtin/receive-pack.c",
+   "line": 2468,
+   "fn": "report_v2",
+   "text": "ng %s %s\n",
+   "id": "receive-pack.c:ng:report_v2:ng %s %s "
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 342,
+   "fn": "create_pack_file",
+   "text": "git upload-pack: unable to fork git-pack-objects",
+   "id": "upload-pack.c:die:create_pack_file:git upload-pack: unable to fork git-pack-objects"
+  },
+  {
+   "kind": "error",
+   "file": "upload-pack.c",
+   "line": 401,
+   "fn": "create_pack_file",
+   "text": "poll failed, resuming",
+   "id": "upload-pack.c:error:create_pack_file:poll failed, resuming"
+  },
+  {
+   "kind": "error",
+   "file": "upload-pack.c",
+   "line": 455,
+   "fn": "create_pack_file",
+   "text": "git upload-pack: git-pack-objects died with error.",
+   "id": "upload-pack.c:error:create_pack_file:git upload-pack: git-pack-objects died with error."
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 474,
+   "fn": "create_pack_file",
+   "text": "git upload-pack: %s",
+   "id": "upload-pack.c:die:create_pack_file:git upload-pack: %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 485,
+   "fn": "do_got_oid",
+   "text": "oops (%s)",
+   "id": "upload-pack.c:die:do_got_oid:oops (%s)"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 511,
+   "fn": "got_oid",
+   "text": "git upload-pack: expected SHA1 object, got '%s'",
+   "id": "upload-pack.c:die:got_oid:git upload-pack: expected SHA1 object, got '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 600,
+   "fn": "get_common_commits",
+   "text": "git upload-pack: expected SHA1 list, got '%s'",
+   "id": "upload-pack.c:die:get_common_commits:git upload-pack: expected SHA1 list, got '%s'"
+  },
+  {
+   "kind": "error",
+   "file": "upload-pack.c",
+   "line": 815,
+   "fn": "check_non_tip",
+   "text": "git upload-pack: not our ref %s",
+   "id": "upload-pack.c:error:check_non_tip:git upload-pack: not our ref %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 935,
+   "fn": "send_shallow_list",
+   "text": "git upload-pack: deepen and deepen-since (or deepen-not) cannot be used together",
+   "id": "upload-pack.c:die:send_shallow_list:git upload-pack: deepen and deepen-since (or deepen-not) cannot be used together"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 982,
+   "fn": "process_shallow",
+   "text": "invalid shallow line: %s",
+   "id": "upload-pack.c:die:process_shallow:invalid shallow line: %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 987,
+   "fn": "process_shallow",
+   "text": "invalid shallow object %s",
+   "id": "upload-pack.c:die:process_shallow:invalid shallow object %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1005,
+   "fn": "process_deepen",
+   "text": "Invalid deepen: %s",
+   "id": "upload-pack.c:die:process_deepen:Invalid deepen: %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1021,
+   "fn": "process_deepen_since",
+   "text": "Invalid deepen-since: %s",
+   "id": "upload-pack.c:die:process_deepen_since:Invalid deepen-since: %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1037,
+   "fn": "process_deepen_not",
+   "text": "git upload-pack: ambiguous deepen-not: %s",
+   "id": "upload-pack.c:die:process_deepen_not:git upload-pack: ambiguous deepen-not: %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1039,
+   "fn": "process_deepen_not",
+   "text": "git upload-pack: deepen-not is not a ref: %s",
+   "id": "upload-pack.c:die:process_deepen_not:git upload-pack: deepen-not is not a ref: %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1060,
+   "fn": "send_err_and_die",
+   "text": "%s",
+   "id": "upload-pack.c:die:send_err_and_die:%s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1133,
+   "fn": "receive_needs",
+   "text": "git upload-pack: filtering capability not negotiated",
+   "id": "upload-pack.c:die:receive_needs:git upload-pack: filtering capability not negotiated"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1142,
+   "fn": "receive_needs",
+   "text": "git upload-pack: protocol error, expected to get object ID, not '%s'",
+   "id": "upload-pack.c:die:receive_needs:git upload-pack: protocol error, expected to get object ID, not '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1183,
+   "fn": "receive_needs",
+   "text": "git upload-pack: not our ref %s",
+   "id": "upload-pack.c:die:receive_needs:git upload-pack: not our ref %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1316,
+   "fn": "find_symref",
+   "text": "'%s' is a symref but it is not?",
+   "id": "upload-pack.c:die:find_symref:'%s' is a symref but it is not?"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1501,
+   "fn": "parse_want",
+   "text": "git upload-pack: protocol error, expected to get oid, not '%s'",
+   "id": "upload-pack.c:die:parse_want:git upload-pack: protocol error, expected to get oid, not '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1512,
+   "fn": "parse_want",
+   "text": "git upload-pack: not our ref %s",
+   "id": "upload-pack.c:die:parse_want:git upload-pack: not our ref %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1542,
+   "fn": "parse_want_ref",
+   "text": "unknown ref %s",
+   "id": "upload-pack.c:die:parse_want_ref:unknown ref %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1549,
+   "fn": "parse_want_ref",
+   "text": "duplicate want-ref %s",
+   "id": "upload-pack.c:die:parse_want_ref:duplicate want-ref %s"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1693,
+   "fn": "process_args",
+   "text": "unexpected line: '%s'",
+   "id": "upload-pack.c:die:process_args:unexpected line: '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "upload-pack.c",
+   "line": 1700,
+   "fn": "process_args",
+   "text": "expected flush after fetch arguments",
+   "id": "upload-pack.c:die:process_args:expected flush after fetch arguments"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 70,
+   "fn": "die_initial_contact",
+   "text": "the remote end hung up upon initial contact",
+   "id": "connect.c:die:die_initial_contact:the remote end hung up upon initial contact"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 72,
+   "fn": "die_initial_contact",
+   "text": "Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.",
+   "id": "connect.c:die:die_initial_contact:Could not read from remote repository. Please make sure you have the correct access rights and the reposit"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 94,
+   "fn": "ensure_server_supports_v2",
+   "text": "server doesn't support '%s'",
+   "id": "connect.c:die:ensure_server_supports_v2:server doesn't support '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 129,
+   "fn": "server_supports_feature",
+   "text": "server doesn't support feature '%s'",
+   "id": "connect.c:die:server_supports_feature:server doesn't support feature '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 140,
+   "fn": "process_capabilities_v2",
+   "text": "expected flush after capabilities",
+   "id": "connect.c:die:process_capabilities_v2:expected flush after capabilities"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 298,
+   "fn": "process_ref",
+   "text": "protocol error: unexpected capabilities^{}",
+   "id": "connect.c:die:process_ref:protocol error: unexpected capabilities^{}"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 320,
+   "fn": "process_shallow",
+   "text": "protocol error: expected shallow sha-1, got '%s'",
+   "id": "connect.c:die:process_shallow:protocol error: expected shallow sha-1, got '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 322,
+   "fn": "process_shallow",
+   "text": "repository on the other end cannot be shallow",
+   "id": "connect.c:die:process_shallow:repository on the other end cannot be shallow"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 361,
+   "fn": "get_remote_heads",
+   "text": "invalid packet",
+   "id": "connect.c:die:get_remote_heads:invalid packet"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 381,
+   "fn": "get_remote_heads",
+   "text": "protocol error: unexpected '%s'",
+   "id": "connect.c:die:get_remote_heads:protocol error: unexpected '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 485,
+   "fn": "check_stateless_delimiter",
+   "text": "%s",
+   "id": "connect.c:die:check_stateless_delimiter:%s"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 499,
+   "fn": "send_capabilities",
+   "text": "unknown object format '%s' specified by server",
+   "id": "connect.c:die:send_capabilities:unknown object format '%s' specified by server"
+  },
+  {
+   "kind": "error",
+   "file": "connect.c",
+   "line": 539,
+   "fn": "get_remote_bundle_uri",
+   "text": "error on bundle-uri response line %d: %s",
+   "id": "connect.c:error:get_remote_bundle_uri:error on bundle-uri response line %d: %s"
+  },
+  {
+   "kind": "error",
+   "file": "connect.c",
+   "line": 544,
+   "fn": "get_remote_bundle_uri",
+   "text": "expected flush after bundle-uri listing",
+   "id": "connect.c:error:get_remote_bundle_uri:expected flush after bundle-uri listing"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 599,
+   "fn": "get_remote_refs",
+   "text": "invalid ls-refs response: %s",
+   "id": "connect.c:die:get_remote_refs:invalid ls-refs response: %s"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 603,
+   "fn": "get_remote_refs",
+   "text": "expected flush after ref listing",
+   "id": "connect.c:die:get_remote_refs:expected flush after ref listing"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 742,
+   "fn": "get_protocol",
+   "text": "protocol '%s' is not supported",
+   "id": "connect.c:die:get_protocol:protocol '%s' is not supported"
+  },
+  {
+   "kind": "error",
+   "file": "connect.c",
+   "line": 793,
+   "fn": "enable_keepalive",
+   "text": "unable to set SO_KEEPALIVE on socket",
+   "id": "connect.c:error:enable_keepalive:unable to set SO_KEEPALIVE on socket"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 837,
+   "fn": "git_tcp_connect_sock",
+   "text": "unable to look up %s (port %s) (%s)",
+   "id": "connect.c:die:git_tcp_connect_sock:unable to look up %s (port %s) (%s)"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 863,
+   "fn": "git_tcp_connect_sock",
+   "text": "unable to connect to %s:\n%s",
+   "id": "connect.c:die:git_tcp_connect_sock:unable to connect to %s: %s"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 900,
+   "fn": "git_tcp_connect_sock",
+   "text": "unable to look up %s (%s)",
+   "id": "connect.c:die:git_tcp_connect_sock:unable to look up %s (%s)"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 906,
+   "fn": "git_tcp_connect_sock",
+   "text": "unknown port %s",
+   "id": "connect.c:die:git_tcp_connect_sock:unknown port %s"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 940,
+   "fn": "git_tcp_connect_sock",
+   "text": "unable to connect to %s:\n%s",
+   "id": "connect.c:die:git_tcp_connect_sock:unable to connect to %s: %s#2"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1043,
+   "fn": "git_proxy_connect",
+   "text": "strange hostname '%s' blocked",
+   "id": "connect.c:die:git_proxy_connect:strange hostname '%s' blocked"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1045,
+   "fn": "git_proxy_connect",
+   "text": "strange port '%s' blocked",
+   "id": "connect.c:die:git_proxy_connect:strange port '%s' blocked"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1055,
+   "fn": "git_proxy_connect",
+   "text": "cannot start proxy %s",
+   "id": "connect.c:die:git_proxy_connect:cannot start proxy %s"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1126,
+   "fn": "parse_connect_url",
+   "text": "no path specified; see 'git help pull' for valid url syntax",
+   "id": "connect.c:die:parse_connect_url:no path specified; see 'git help pull' for valid url syntax"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1266,
+   "fn": "git_connect_git",
+   "text": "newline is forbidden in git:// hosts and repo paths",
+   "id": "connect.c:die:git_connect_git:newline is forbidden in git:// hosts and repo paths"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1323,
+   "fn": "push_ssh_options",
+   "text": "ssh variant 'simple' does not support -4",
+   "id": "connect.c:die:push_ssh_options:ssh variant 'simple' does not support -4"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1335,
+   "fn": "push_ssh_options",
+   "text": "ssh variant 'simple' does not support -6",
+   "id": "connect.c:die:push_ssh_options:ssh variant 'simple' does not support -6"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1352,
+   "fn": "push_ssh_options",
+   "text": "ssh variant 'simple' does not support setting port",
+   "id": "connect.c:die:push_ssh_options:ssh variant 'simple' does not support setting port"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1375,
+   "fn": "fill_ssh_args",
+   "text": "strange hostname '%s' blocked",
+   "id": "connect.c:die:fill_ssh_args:strange hostname '%s' blocked"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1467,
+   "fn": "git_connect",
+   "text": "strange pathname '%s' blocked",
+   "id": "connect.c:die:git_connect:strange pathname '%s' blocked"
+  },
+  {
+   "kind": "die",
+   "file": "connect.c",
+   "line": 1516,
+   "fn": "git_connect",
+   "text": "unable to fork",
+   "id": "connect.c:die:git_connect:unable to fork"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 97,
+   "fn": "packet_flush",
+   "text": "unable to write flush packet",
+   "id": "pkt-line.c:die:packet_flush:unable to write flush packet"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 104,
+   "fn": "packet_delim",
+   "text": "unable to write delim packet",
+   "id": "pkt-line.c:die:packet_delim:unable to write delim packet"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 111,
+   "fn": "packet_response_end",
+   "text": "unable to write response end packet",
+   "id": "pkt-line.c:die:packet_response_end:unable to write response end packet"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 118,
+   "fn": "packet_flush_gently",
+   "text": "flush packet write failed",
+   "id": "pkt-line.c:error:packet_flush_gently:flush packet write failed"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 158,
+   "fn": "format_packet",
+   "text": "protocol error: impossibly long line",
+   "id": "pkt-line.c:die:format_packet:protocol error: impossibly long line"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 174,
+   "fn": "packet_write_fmt_1",
+   "text": "packet write with format failed",
+   "id": "pkt-line.c:die:packet_write_fmt_1:packet write with format failed"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 176,
+   "fn": "packet_write_fmt_1",
+   "text": "packet write with format failed",
+   "id": "pkt-line.c:error:packet_write_fmt_1:packet write with format failed"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 237,
+   "fn": "packet_write_gently",
+   "text": "%s",
+   "id": "pkt-line.c:error:packet_write_gently:%s"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 248,
+   "fn": "packet_write",
+   "text": "%s",
+   "id": "pkt-line.c:die:packet_write:%s"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 257,
+   "fn": "packet_fwrite",
+   "text": "packet write failed - data exceeds max packet size",
+   "id": "pkt-line.c:die:packet_fwrite:packet write failed - data exceeds max packet size"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 357,
+   "fn": "get_packet_data",
+   "text": "read error",
+   "id": "pkt-line.c:error:get_packet_data:read error"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 358,
+   "fn": "get_packet_data",
+   "text": "read error",
+   "id": "pkt-line.c:die:get_packet_data:read error"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 370,
+   "fn": "get_packet_data",
+   "text": "the remote end hung up unexpectedly",
+   "id": "pkt-line.c:error:get_packet_data:the remote end hung up unexpectedly"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 371,
+   "fn": "get_packet_data",
+   "text": "the remote end hung up unexpectedly",
+   "id": "pkt-line.c:die:get_packet_data:the remote end hung up unexpectedly"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 431,
+   "fn": "packet_read_with_status",
+   "text": "protocol error: bad line length character: %.4s",
+   "id": "pkt-line.c:error:packet_read_with_status:protocol error: bad line length character: %.4s"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 433,
+   "fn": "packet_read_with_status",
+   "text": "protocol error: bad line length character: %.4s",
+   "id": "pkt-line.c:die:packet_read_with_status:protocol error: bad line length character: %.4s"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 448,
+   "fn": "packet_read_with_status",
+   "text": "protocol error: bad line length %d",
+   "id": "pkt-line.c:error:packet_read_with_status:protocol error: bad line length %d"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 450,
+   "fn": "packet_read_with_status",
+   "text": "protocol error: bad line length %d",
+   "id": "pkt-line.c:die:packet_read_with_status:protocol error: bad line length %d"
+  },
+  {
+   "kind": "error",
+   "file": "pkt-line.c",
+   "line": 456,
+   "fn": "packet_read_with_status",
+   "text": "protocol error: bad line length %d",
+   "id": "pkt-line.c:error:packet_read_with_status:protocol error: bad line length %d#2"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 458,
+   "fn": "packet_read_with_status",
+   "text": "protocol error: bad line length %d",
+   "id": "pkt-line.c:die:packet_read_with_status:protocol error: bad line length %d#2"
+  },
+  {
+   "kind": "die",
+   "file": "pkt-line.c",
+   "line": 510,
+   "fn": "packet_read_with_status",
+   "text": "remote error: %s",
+   "id": "pkt-line.c:die:packet_read_with_status:remote error: %s"
+  },
+  {
+   "kind": "err-pkt",
+   "file": "pkt-line.c",
+   "line": 509,
+   "fn": "packet_read_with_status",
+   "text": "ERR ",
+   "id": "pkt-line.c:err-pkt:packet_read_with_status:ERR "
+  },
+  {
+   "kind": "err-pkt",
+   "file": "pkt-line.c",
+   "line": 699,
+   "fn": "packet_writer_error",
+   "text": "ERR ",
+   "id": "pkt-line.c:err-pkt:packet_writer_error:ERR "
+  },
+  {
+   "kind": "die",
+   "file": "sideband.c",
+   "line": 173,
+   "fn": "demultiplex_sideband",
+   "text": "remote error: %s",
+   "id": "sideband.c:die:demultiplex_sideband:remote error: %s"
+  },
+  {
+   "kind": "die",
+   "file": "sideband.c",
+   "line": 249,
+   "fn": "demultiplex_sideband",
+   "text": "%s",
+   "id": "sideband.c:die:demultiplex_sideband:%s"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 42,
+   "fn": "option_parse_push_signed",
+   "text": "bad %s argument: %s",
+   "id": "send-pack.c:die:option_parse_push_signed:bad %s argument: %s"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 96,
+   "fn": "pack_objects",
+   "text": "git pack-objects failed",
+   "id": "send-pack.c:die:pack_objects:git pack-objects failed"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 118,
+   "fn": "pack_objects",
+   "text": "error writing to pack-objects",
+   "id": "send-pack.c:die:pack_objects:error writing to pack-objects"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 145,
+   "fn": "pack_objects",
+   "text": "pack-objects died of signal %d",
+   "id": "send-pack.c:error:pack_objects:pack-objects died of signal %d"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 156,
+   "fn": "receive_unpack_status",
+   "text": "unexpected flush packet while reading remote unpack status",
+   "id": "send-pack.c:error:receive_unpack_status:unexpected flush packet while reading remote unpack status"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 158,
+   "fn": "receive_unpack_status",
+   "text": "unable to parse remote unpack status: %s",
+   "id": "send-pack.c:error:receive_unpack_status:unable to parse remote unpack status: %s"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 160,
+   "fn": "receive_unpack_status",
+   "text": "remote unpack failed: %s",
+   "id": "send-pack.c:error:receive_unpack_status:remote unpack failed: %s"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 186,
+   "fn": "receive_status",
+   "text": "invalid status line from remote: %s",
+   "id": "send-pack.c:error:receive_status:invalid status line from remote: %s"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 197,
+   "fn": "receive_status",
+   "text": "'option' without a matching 'ok/ng' directive",
+   "id": "send-pack.c:error:receive_status:'option' without a matching 'ok/ng' directive"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 235,
+   "fn": "receive_status",
+   "text": "invalid ref status from remote: %s",
+   "id": "send-pack.c:error:receive_status:invalid ref status from remote: %s"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 388,
+   "fn": "generate_push_cert",
+   "text": "failed to sign the push certificate",
+   "id": "send-pack.c:die:generate_push_cert:failed to sign the push certificate"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 412,
+   "fn": "reject_invalid_nonce",
+   "text": "the receiving end asked to sign an invalid nonce <%.*s>",
+   "id": "send-pack.c:die:reject_invalid_nonce:the receiving end asked to sign an invalid nonce <%.*s>"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 422,
+   "fn": "reject_invalid_nonce",
+   "text": "the receiving end asked to sign an invalid nonce <%.*s>",
+   "id": "send-pack.c:die:reject_invalid_nonce:the receiving end asked to sign an invalid nonce <%.*s>#2"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 456,
+   "fn": "get_commons_through_negotiation",
+   "text": "send-pack: unable to fork off fetch subprocess",
+   "id": "send-pack.c:die:get_commons_through_negotiation:send-pack: unable to fork off fetch subprocess"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 467,
+   "fn": "get_commons_through_negotiation",
+   "text": "invalid length read %d",
+   "id": "send-pack.c:die:get_commons_through_negotiation:invalid length read %d"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 469,
+   "fn": "get_commons_through_negotiation",
+   "text": "invalid hash",
+   "id": "send-pack.c:die:get_commons_through_negotiation:invalid hash"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 558,
+   "fn": "send_pack",
+   "text": "the receiving end does not support this repository's hash algorithm",
+   "id": "send-pack.c:die:send_pack:the receiving end does not support this repository's hash algorithm"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 568,
+   "fn": "send_pack",
+   "text": "the receiving end does not support --signed push",
+   "id": "send-pack.c:die:send_pack:the receiving end does not support --signed push"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 577,
+   "fn": "send_pack",
+   "text": "the receiving end does not support --atomic push",
+   "id": "send-pack.c:die:send_pack:the receiving end does not support --atomic push"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 582,
+   "fn": "send_pack",
+   "text": "the receiving end does not support push options",
+   "id": "send-pack.c:die:send_pack:the receiving end does not support push options"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 630,
+   "fn": "send_pack",
+   "text": "atomic push failed for ref %s. status: %d",
+   "id": "send-pack.c:error:send_pack:atomic push failed for ref %s. status: %d"
+  },
+  {
+   "kind": "die",
+   "file": "send-pack.c",
+   "line": 706,
+   "fn": "send_pack",
+   "text": "send-pack: unable to fork off sideband demultiplexer",
+   "id": "send-pack.c:die:send_pack:send-pack: unable to fork off sideband demultiplexer"
+  },
+  {
+   "kind": "error",
+   "file": "send-pack.c",
+   "line": 756,
+   "fn": "send_pack",
+   "text": "error in sideband demultiplexer",
+   "id": "send-pack.c:error:send_pack:error in sideband demultiplexer"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 145,
+   "fn": "get_refs_from_bundle_inner",
+   "text": "could not read bundle '%s'",
+   "id": "transport.c:die:get_refs_from_bundle_inner:could not read bundle '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 266,
+   "fn": "set_git_option",
+   "text": "transport: invalid depth option '%s'",
+   "id": "transport.c:die:set_git_option:transport: invalid depth option '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 326,
+   "fn": "die_if_server_options",
+   "text": "server options require protocol version 2 or later",
+   "id": "transport.c:die:die_if_server_options:server options require protocol version 2 or later"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 932,
+   "fn": "git_transport_push",
+   "text": "support for protocol v2 not implemented yet",
+   "id": "transport.c:die:git_transport_push:support for protocol v2 not implemented yet"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 1072,
+   "fn": "parse_protocol_config",
+   "text": "unknown value for config '%s': %s",
+   "id": "transport.c:die:parse_protocol_config:unknown value for config '%s': %s"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 1149,
+   "fn": "transport_check_allowed",
+   "text": "transport '%s' not allowed",
+   "id": "transport.c:die:transport_check_allowed:transport '%s' not allowed"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 1201,
+   "fn": "transport_get",
+   "text": "git-over-rsync is no longer supported",
+   "id": "transport.c:die:transport_get:git-over-rsync is no longer supported"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 1316,
+   "fn": "die_with_unpushed_submodules",
+   "text": "Aborting.",
+   "id": "transport.c:die:die_with_unpushed_submodules:Aborting."
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 1467,
+   "fn": "transport_push",
+   "text": "failed to push all needed submodules",
+   "id": "transport.c:die:transport_push:failed to push all needed submodules"
+  },
+  {
+   "kind": "error",
+   "file": "transport.c",
+   "line": 1612,
+   "fn": "transport_get_remote_bundle_uri",
+   "text": "bundle-uri operation not supported by protocol",
+   "id": "transport.c:error:transport_get_remote_bundle_uri:bundle-uri operation not supported by protocol"
+  },
+  {
+   "kind": "error",
+   "file": "transport.c",
+   "line": 1615,
+   "fn": "transport_get_remote_bundle_uri",
+   "text": "could not retrieve server-advertised bundle-uri list",
+   "id": "transport.c:error:transport_get_remote_bundle_uri:could not retrieve server-advertised bundle-uri list"
+  },
+  {
+   "kind": "die",
+   "file": "transport.c",
+   "line": 1638,
+   "fn": "transport_connect",
+   "text": "operation not supported by protocol",
+   "id": "transport.c:die:transport_connect:operation not supported by protocol"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 184,
+   "fn": "seek_buffer",
+   "text": "curl seek would be outside of buffer",
+   "id": "http.c:error:seek_buffer:curl seek would be outside of buffer"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1019,
+   "fn": "get_curl_handle",
+   "text": "curl_easy_init failed",
+   "id": "http.c:die:get_curl_handle:curl_easy_init failed"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1228,
+   "fn": "get_curl_handle",
+   "text": "Invalid proxy URL '%s'",
+   "id": "http.c:die:get_curl_handle:Invalid proxy URL '%s'"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1235,
+   "fn": "get_curl_handle",
+   "text": "libcurl 7.84 or later is required to support paths in proxy URLs",
+   "id": "http.c:die:get_curl_handle:libcurl 7.84 or later is required to support paths in proxy URLs"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1238,
+   "fn": "get_curl_handle",
+   "text": "Invalid proxy URL '%s': only SOCKS proxies support paths",
+   "id": "http.c:die:get_curl_handle:Invalid proxy URL '%s': only SOCKS proxies support paths"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1242,
+   "fn": "get_curl_handle",
+   "text": "Invalid proxy URL '%s': host must be localhost if a path is present",
+   "id": "http.c:die:get_curl_handle:Invalid proxy URL '%s': host must be localhost if a path is present"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1334,
+   "fn": "http_init",
+   "text": "%s",
+   "id": "http.c:die:http_init:%s"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1336,
+   "fn": "http_init",
+   "text": "Could not set SSL backend to '%s': cURL was built without SSL backends",
+   "id": "http.c:die:http_init:Could not set SSL backend to '%s': cURL was built without SSL backends"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1340,
+   "fn": "http_init",
+   "text": "Could not set SSL backend to '%s': already set",
+   "id": "http.c:die:http_init:Could not set SSL backend to '%s': already set"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1348,
+   "fn": "http_init",
+   "text": "curl_global_init failed",
+   "id": "http.c:die:http_init:curl_global_init failed"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 1370,
+   "fn": "http_init",
+   "text": "curl_multi_init failed",
+   "id": "http.c:die:http_init:curl_multi_init failed"
+  },
+  {
+   "kind": "die",
+   "file": "http.c",
+   "line": 2236,
+   "fn": "update_url_from_redirect",
+   "text": "unable to update url base from redirection:\n  asked for: %s\n   redirect: %s",
+   "id": "http.c:die:update_url_from_redirect:unable to update url base from redirection: asked for: %s redirect: %s"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2282,
+   "fn": "http_request_reauth",
+   "text": "unable to flush a file",
+   "id": "http.c:error:http_request_reauth:unable to flush a file"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2287,
+   "fn": "http_request_reauth",
+   "text": "unable to truncate a file",
+   "id": "http.c:error:http_request_reauth:unable to truncate a file"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2326,
+   "fn": "http_get_file",
+   "text": "Unable to open local file %s",
+   "id": "http.c:error:http_get_file:Unable to open local file %s"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2399,
+   "fn": "fetch_pack_index",
+   "text": "Unable to get pack index %s",
+   "id": "http.c:error:fetch_pack_index:Unable to get pack index %s"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2573,
+   "fn": "new_direct_http_pack_request",
+   "text": "Unable to open local file %s for pack",
+   "id": "http.c:error:new_direct_http_pack_request:Unable to open local file %s for pack"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2675,
+   "fn": "new_http_object_request",
+   "text": "fd leakage in start: %d",
+   "id": "http.c:error:new_http_object_request:fd leakage in start: %d"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2694,
+   "fn": "new_http_object_request",
+   "text": "Couldn't create temporary file %s",
+   "id": "http.c:error:new_http_object_request:Couldn't create temporary file %s"
+  },
+  {
+   "kind": "error",
+   "file": "http.c",
+   "line": 2742,
+   "fn": "new_http_object_request",
+   "text": "Couldn't truncate temporary file %s",
+   "id": "http.c:error:new_http_object_request:Couldn't truncate temporary file %s"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 288,
+   "fn": "show_ref",
+   "text": "report-status",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:report-status"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 288,
+   "fn": "show_ref",
+   "text": "report-status-v2",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:report-status-v2"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 288,
+   "fn": "show_ref",
+   "text": "delete-refs",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:delete-refs"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 288,
+   "fn": "show_ref",
+   "text": "side-band-64k",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:side-band-64k"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 288,
+   "fn": "show_ref",
+   "text": "quiet",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:quiet"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 290,
+   "fn": "show_ref",
+   "text": "atomic",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:atomic"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 292,
+   "fn": "show_ref",
+   "text": "ofs-delta",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:ofs-delta"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 294,
+   "fn": "show_ref",
+   "text": "push-cert",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:push-cert"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 296,
+   "fn": "show_ref",
+   "text": "push-options",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:push-options"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 298,
+   "fn": "show_ref",
+   "text": "session-id",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:session-id"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 299,
+   "fn": "show_ref",
+   "text": "object-format",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:object-format"
+  },
+  {
+   "kind": "capability",
+   "file": "builtin/receive-pack.c",
+   "line": 300,
+   "fn": "show_ref",
+   "text": "agent",
+   "where": "receive-pack v0",
+   "id": "capability:receive-pack v0:agent"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1258,
+   "fn": "write_v0_ref",
+   "text": "multi_ack",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:multi_ack"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1258,
+   "fn": "write_v0_ref",
+   "text": "thin-pack",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:thin-pack"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1258,
+   "fn": "write_v0_ref",
+   "text": "side-band",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:side-band"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1259,
+   "fn": "write_v0_ref",
+   "text": "side-band-64k",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:side-band-64k"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1259,
+   "fn": "write_v0_ref",
+   "text": "ofs-delta",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:ofs-delta"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1259,
+   "fn": "write_v0_ref",
+   "text": "shallow",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:shallow"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1259,
+   "fn": "write_v0_ref",
+   "text": "deepen-since",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:deepen-since"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1259,
+   "fn": "write_v0_ref",
+   "text": "deepen-not",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:deepen-not"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1260,
+   "fn": "write_v0_ref",
+   "text": "deepen-relative",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:deepen-relative"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1260,
+   "fn": "write_v0_ref",
+   "text": "no-progress",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:no-progress"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1260,
+   "fn": "write_v0_ref",
+   "text": "include-tag",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:include-tag"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1260,
+   "fn": "write_v0_ref",
+   "text": "multi_ack_detailed",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:multi_ack_detailed"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1272,
+   "fn": "write_v0_ref",
+   "text": "object-format",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:object-format"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1272,
+   "fn": "write_v0_ref",
+   "text": "agent",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:agent"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1276,
+   "fn": "write_v0_ref",
+   "text": "allow-tip-sha1-in-want",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:allow-tip-sha1-in-want"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1278,
+   "fn": "write_v0_ref",
+   "text": "allow-reachable-sha1-in-want",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:allow-reachable-sha1-in-want"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1279,
+   "fn": "write_v0_ref",
+   "text": "no-done",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:no-done"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1281,
+   "fn": "write_v0_ref",
+   "text": "filter",
+   "where": "upload-pack v0",
+   "id": "capability:upload-pack v0:filter"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1864,
+   "fn": "upload_pack_advertise",
+   "text": "shallow",
+   "where": "v2 fetch",
+   "id": "capability:v2 fetch:shallow"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1864,
+   "fn": "upload_pack_advertise",
+   "text": "wait-for-done",
+   "where": "v2 fetch",
+   "id": "capability:v2 fetch:wait-for-done"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1867,
+   "fn": "upload_pack_advertise",
+   "text": "filter",
+   "where": "v2 fetch",
+   "id": "capability:v2 fetch:filter"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1870,
+   "fn": "upload_pack_advertise",
+   "text": "ref-in-want",
+   "where": "v2 fetch",
+   "id": "capability:v2 fetch:ref-in-want"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1873,
+   "fn": "upload_pack_advertise",
+   "text": "sideband-all",
+   "where": "v2 fetch",
+   "id": "capability:v2 fetch:sideband-all"
+  },
+  {
+   "kind": "capability",
+   "file": "upload-pack.c",
+   "line": 1876,
+   "fn": "upload_pack_advertise",
+   "text": "packfile-uris",
+   "where": "v2 fetch",
+   "id": "capability:v2 fetch:packfile-uris"
+  },
+  {
+   "kind": "capability",
+   "file": "ls-refs.c",
+   "line": 210,
+   "fn": "ls_refs_advertise",
+   "text": "unborn",
+   "where": "v2 ls-refs",
+   "id": "capability:v2 ls-refs:unborn"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 142,
+   "fn": "capabilities[]",
+   "text": "agent",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:agent"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 146,
+   "fn": "capabilities[]",
+   "text": "ls-refs",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:ls-refs"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 151,
+   "fn": "capabilities[]",
+   "text": "fetch",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:fetch"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 156,
+   "fn": "capabilities[]",
+   "text": "server-option",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:server-option"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 160,
+   "fn": "capabilities[]",
+   "text": "object-format",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:object-format"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 165,
+   "fn": "capabilities[]",
+   "text": "session-id",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:session-id"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 170,
+   "fn": "capabilities[]",
+   "text": "object-info",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:object-info"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 175,
+   "fn": "capabilities[]",
+   "text": "bundle-uri",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:bundle-uri"
+  },
+  {
+   "kind": "capability",
+   "file": "serve.c",
+   "line": 180,
+   "fn": "capabilities[]",
+   "text": "promisor-remote",
+   "where": "v2 serve",
+   "id": "capability:v2 serve:promisor-remote"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1629,
+   "fn": "process_args",
+   "text": "thin-pack",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:thin-pack"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1633,
+   "fn": "process_args",
+   "text": "ofs-delta",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:ofs-delta"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1637,
+   "fn": "process_args",
+   "text": "no-progress",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:no-progress"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1641,
+   "fn": "process_args",
+   "text": "include-tag",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:include-tag"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1645,
+   "fn": "process_args",
+   "text": "done",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:done"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1649,
+   "fn": "process_args",
+   "text": "wait-for-done",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:wait-for-done"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1665,
+   "fn": "process_args",
+   "text": "deepen-relative",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:deepen-relative"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1670,
+   "fn": "process_args",
+   "text": "filter",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:filter"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1678,
+   "fn": "process_args",
+   "text": "sideband-all",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:sideband-all"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1684,
+   "fn": "process_args",
+   "text": "packfile-uris",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:packfile-uris"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1496,
+   "fn": "parse_want",
+   "text": "want",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:want"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1533,
+   "fn": "parse_want_ref",
+   "text": "want-ref",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:want-ref"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1575,
+   "fn": "parse_have",
+   "text": "have",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:have"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 978,
+   "fn": "process_shallow",
+   "text": "shallow",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:shallow"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1001,
+   "fn": "process_deepen",
+   "text": "deepen",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:deepen"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1015,
+   "fn": "process_deepen_since",
+   "text": "deepen-since",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:deepen-since"
+  },
+  {
+   "kind": "request-arg",
+   "file": "upload-pack.c",
+   "line": 1031,
+   "fn": "process_deepen_not",
+   "text": "deepen-not",
+   "where": "v2 fetch",
+   "id": "request-arg:v2 fetch:deepen-not"
+  },
+  {
+   "kind": "request-arg",
+   "file": "ls-refs.c",
+   "line": 168,
+   "fn": "ls_refs",
+   "text": "peel",
+   "where": "v2 ls-refs",
+   "id": "request-arg:v2 ls-refs:peel"
+  },
+  {
+   "kind": "request-arg",
+   "file": "ls-refs.c",
+   "line": 170,
+   "fn": "ls_refs",
+   "text": "symrefs",
+   "where": "v2 ls-refs",
+   "id": "request-arg:v2 ls-refs:symrefs"
+  },
+  {
+   "kind": "request-arg",
+   "file": "ls-refs.c",
+   "line": 172,
+   "fn": "ls_refs",
+   "text": "ref-prefix",
+   "where": "v2 ls-refs",
+   "id": "request-arg:v2 ls-refs:ref-prefix"
+  },
+  {
+   "kind": "request-arg",
+   "file": "ls-refs.c",
+   "line": 176,
+   "fn": "ls_refs",
+   "text": "unborn",
+   "where": "v2 ls-refs",
+   "id": "request-arg:v2 ls-refs:unborn"
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 177,
+   "fn": "check_refname_component",
+   "text": "it begins with \".\"",
+   "id": "refname:it begins with \".\""
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 178,
+   "fn": "check_refname_component",
+   "text": "it has double dots \"..\"",
+   "id": "refname:it has double dots \"..\""
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 179,
+   "fn": "check_refname_component",
+   "text": "it has ASCII control characters",
+   "id": "refname:it has ASCII control characters"
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 180,
+   "fn": "check_refname_component",
+   "text": "it has \":\", \"?\", \"[\", \"\\\", \"^\", \"~\", SP, or TAB anywhere",
+   "id": "refname:it has \":\", \"?\", \"[\", \"\\\", \"^\", \"~\", SP, or TAB anywhere"
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 181,
+   "fn": "check_refname_component",
+   "text": "it has \"*\" anywhere unless REFNAME_REFSPEC_PATTERN is set",
+   "id": "refname:it has \"*\" anywhere unless REFNAME_REFSPEC_PATTERN is set"
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 182,
+   "fn": "check_refname_component",
+   "text": "it ends with a \"/\"",
+   "id": "refname:it ends with a \"/\""
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 183,
+   "fn": "check_refname_component",
+   "text": "it ends with \".lock\"",
+   "id": "refname:it ends with \".lock\""
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 184,
+   "fn": "check_refname_component",
+   "text": "it contains a \"@{\" portion",
+   "id": "refname:it contains a \"@{\" portion"
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 211,
+   "fn": "check_refname_component",
+   "text": "Refname contains \"..\".",
+   "id": "refname:Refname contains \"..\"."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 220,
+   "fn": "check_refname_component",
+   "text": "Refname contains \"@{\".",
+   "id": "refname:Refname contains \"@{\"."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 254,
+   "fn": "check_refname_component",
+   "text": "Component has zero length.",
+   "id": "refname:Component has zero length."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 256,
+   "fn": "check_refname_component",
+   "text": "Component starts with '.'.",
+   "id": "refname:Component starts with '.'."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 266,
+   "fn": "check_refname_component",
+   "text": "Refname ends with \".lock\".",
+   "id": "refname:Refname ends with \".lock\"."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 235,
+   "fn": "check_refname_component",
+   "text": "unless REFNAME_REFSPEC_PATTERN: if (!(*flags & REFNAME_REFSPEC_PATTERN)) {",
+   "id": "refname:unless REFNAME_REFSPEC_PATTERN"
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 280,
+   "fn": "check_or_sanitize_refname",
+   "text": "Refname is a single character '@'.",
+   "id": "refname:Refname is a single character '@'."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 307,
+   "fn": "check_or_sanitize_refname",
+   "text": "Refname ends with '.'.",
+   "id": "refname:Refname ends with '.'."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 314,
+   "fn": "check_or_sanitize_refname",
+   "text": "Refname has only one component.",
+   "id": "refname:Refname has only one component."
+  },
+  {
+   "kind": "refname-rule",
+   "file": "refs.c",
+   "line": 313,
+   "fn": "check_or_sanitize_refname",
+   "text": "unless REFNAME_ALLOW_ONELEVEL: if (!(flags & REFNAME_ALLOW_ONELEVEL) && component_count < 2)",
+   "id": "refname:unless REFNAME_ALLOW_ONELEVEL"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 727,
+   "fn": "fsck_tree",
+   "text": "mode S_IFREG|0755",
+   "id": "tree-mode:case S_IFREG|0755"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 728,
+   "fn": "fsck_tree",
+   "text": "mode S_IFREG|0644",
+   "id": "tree-mode:case S_IFREG|0644"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 729,
+   "fn": "fsck_tree",
+   "text": "mode S_IFLNK",
+   "id": "tree-mode:case S_IFLNK"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 730,
+   "fn": "fsck_tree",
+   "text": "mode S_IFDIR",
+   "id": "tree-mode:case S_IFDIR"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 731,
+   "fn": "fsck_tree",
+   "text": "mode S_IFGITLINK",
+   "id": "tree-mode:case S_IFGITLINK"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 738,
+   "fn": "fsck_tree",
+   "text": "mode S_IFREG|0664",
+   "id": "tree-mode:case S_IFREG|0664"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 641,
+   "fn": "fsck_tree",
+   "text": "reports BAD_TREE",
+   "id": "tree-mode:reports BAD_TREE"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 672,
+   "fn": "fsck_tree",
+   "text": "reports GITMODULES_SYMLINK",
+   "id": "tree-mode:reports GITMODULES_SYMLINK"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 682,
+   "fn": "fsck_tree",
+   "text": "reports GITATTRIBUTES_SYMLINK",
+   "id": "tree-mode:reports GITATTRIBUTES_SYMLINK"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 690,
+   "fn": "fsck_tree",
+   "text": "reports GITIGNORE_SYMLINK",
+   "id": "tree-mode:reports GITIGNORE_SYMLINK"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 695,
+   "fn": "fsck_tree",
+   "text": "reports MAILMAP_SYMLINK",
+   "id": "tree-mode:reports MAILMAP_SYMLINK"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 709,
+   "fn": "fsck_tree",
+   "text": "reports GITMODULES_SYMLINK",
+   "id": "tree-mode:reports GITMODULES_SYMLINK#2"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 718,
+   "fn": "fsck_tree",
+   "text": "reports BAD_TREE",
+   "id": "tree-mode:reports BAD_TREE#2"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 768,
+   "fn": "fsck_tree",
+   "text": "reports NULL_SHA1",
+   "id": "tree-mode:reports NULL_SHA1"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 772,
+   "fn": "fsck_tree",
+   "text": "reports FULL_PATHNAME",
+   "id": "tree-mode:reports FULL_PATHNAME"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 776,
+   "fn": "fsck_tree",
+   "text": "reports EMPTY_NAME",
+   "id": "tree-mode:reports EMPTY_NAME"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 780,
+   "fn": "fsck_tree",
+   "text": "reports HAS_DOT",
+   "id": "tree-mode:reports HAS_DOT"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 784,
+   "fn": "fsck_tree",
+   "text": "reports HAS_DOTDOT",
+   "id": "tree-mode:reports HAS_DOTDOT"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 788,
+   "fn": "fsck_tree",
+   "text": "reports HAS_DOTGIT",
+   "id": "tree-mode:reports HAS_DOTGIT"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 792,
+   "fn": "fsck_tree",
+   "text": "reports ZERO_PADDED_FILEMODE",
+   "id": "tree-mode:reports ZERO_PADDED_FILEMODE"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 796,
+   "fn": "fsck_tree",
+   "text": "reports BAD_FILEMODE",
+   "id": "tree-mode:reports BAD_FILEMODE"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 800,
+   "fn": "fsck_tree",
+   "text": "reports DUPLICATE_ENTRIES",
+   "id": "tree-mode:reports DUPLICATE_ENTRIES"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 804,
+   "fn": "fsck_tree",
+   "text": "reports TREE_NOT_SORTED",
+   "id": "tree-mode:reports TREE_NOT_SORTED"
+  },
+  {
+   "kind": "tree-mode",
+   "file": "fsck.c",
+   "line": 808,
+   "fn": "fsck_tree",
+   "text": "reports LARGE_PATHNAME",
+   "id": "tree-mode:reports LARGE_PATHNAME"
+  }
+ ]
+}

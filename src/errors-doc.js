@@ -24,7 +24,7 @@ export const CODE_DOCS = Object.freeze({
   push_rejected: { where: 'remote', what: 'a hook or policy refused the push; see hookOutput / remote messages' },
   push_partial: { where: 'remote', what: 'a non-atomic multi-ref push was partly applied: `landed` lists the refs updated, `rejected` the refs refused with their reasons' },
   merge_conflict: { where: 'content', what: 'both sides changed a path; `conflicts` lists them' },
-  not_fast_forward: { where: 'content', what: 'fastForwardOnly was requested and a merge commit would be needed' },
+  not_fast_forward: { where: 'content', what: 'fastForwardOnly was requested and a merge commit would be needed, or the server refuses non-fast-forward updates (receive.denyNonFastForwards) and the pushed commit does not descend from the old oid' },
   unrelated_histories: { where: 'content', what: 'no common ancestor within the search depth' },
   not_linear: { where: 'content', what: 'a merge commit in a chain that must be linear (rebase, pick)' },
   ambiguous: { where: 'remote', what: 'the push was sent and may have been applied, but no trustworthy confirmation was obtained' },

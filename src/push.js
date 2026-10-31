@@ -158,6 +158,8 @@ export function decideOutcome(shape, { atomic = false, pack = true } = {}) {
     case 'statuses': {
       const ok = shape.refs.filter(r => r.ok), ng = shape.refs.filter(r => !r.ok);
       if (!ng.length) return { tag: 'landed' };
+      // a proc-receive hook took the command and did not answer for it: it may have acted (test/space/push-ng.space.js)
+      if (ng.some(r => ngClass(r.reason) === 'ambiguous')) return { tag: 'ambiguous', why: `proc-receive: ${ng.find(r => ngClass(r.reason) === 'ambiguous').reason}` };
       if (!ok.length) return { tag: 'rejected', code: rejectionCode({ unpack: 'ok', refs: ng }) };
       // atomic: all or none. A split is git-shaped only for refs refused before the transaction (hidden refs, observed);
       // ply does not claim a partial outcome for a push the caller made atomic (SPACE.md).
@@ -167,16 +169,26 @@ export function decideOutcome(shape, { atomic = false, pack = true } = {}) {
     default: return { tag: 'ambiguous', why: shape.why ?? `report shape ${shape.tag}` };
   }
 }
-// retryable iff every failed ref failed on receive-pack's own ref update (stale old value, lock) or was an innocent
-// member of an atomic push; a hook rejection anywhere makes the push non-retryable
-// 'stale ref': Cloudflare Artifacts' only ref-update rejection (stale old oid, create over an existing ref, stale delete, and
-// the innocent members of a multi-ref push, which it always treats as atomic) — observed 2026-10-23, see SAFETY.md
-// 'incorrect old value provided': git ≥ 2.50 receive-pack (batched ref updates) reports a stale old oid
-// under that name. 'bad ref': denyNonFastForwards could not parse a stale, unknown old oid.
-const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref|stale ref|incorrect old value provided)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r);
+// The class of one ng reason. git v2.50.0 receive-pack's own reasons are a table, each justified by what a caller can
+// safely do next and judged by real git: test/space/push-ng.space.js (every reason × command × atomic × refs; SPACE.md).
+//   cas        the ref is not where the command said (stale old oid, create over an existing ref, a held lock): fresh retry
+//   nff        receive.denyNonFastForwards, and the new commit does not descend from the command's own old oid
+//   ambiguous  a proc-receive hook was handed the command and did not answer for it: it may have acted
+//   innocent   'atomic push failure', an atomic push's other members: the culprit's class decides
+// git >= 2.51 reports a non-atomic ref's failed update by cause (refs.c ref_transaction_error_msg): a stale old oid, a
+// create over an existing ref and a ref deleted since the read are cas; 'refname conflict' (D/F) and the rest refuse.
+// Every other git reason is a refusal (push_rejected). A reason git does not write is another host's: 'stale ref' is
+// Cloudflare Artifacts' only ref-update rejection (stale old oid, create over an existing ref, stale delete, and the
+// innocent members of a multi-ref push, which it always treats as atomic; observed 2026-10-23, SAFETY.md I31).
+const NG_CLASS = new Map([['failed to update ref', 'cas'], ['atomic transaction failed', 'cas'], ['bad ref', 'cas'], ['incorrect old value provided', 'cas'], ['reference already exists', 'cas'], ['reference does not exist', 'cas'], ['non-fast-forward', 'nff'], ['atomic push failure', 'innocent'], ['proc-receive failed to report status', 'ambiguous'], ['fail to run proc-receive hook', 'ambiguous']]);
+const HOST_CAS = /^(failed to lock|stale ref)$|fetch first|non-fast-forward|already exists/;
+const ngClass = r => NG_CLASS.get(r) ?? (HOST_CAS.test(r) ? 'cas' : 'rejected');
+// all refs refused: a refusal anywhere wins, then a non-fast-forward, then a lost compare-and-swap
 export const rejectionCode = report => {
-  const reasons = report.refs.filter(r => !r.ok).map(r => r.reason);
-  return report.unpack !== 'ok' ? 'push_rejected' : reasons.length && reasons.every(isCas) && reasons.some(r => r !== 'atomic push failure') ? 'cas_conflict' : 'push_rejected';
+  const cls = report.refs.filter(r => !r.ok).map(r => ngClass(r.reason));
+  if (report.unpack !== 'ok' || cls.includes('rejected')) return 'push_rejected';
+  if (cls.includes('ambiguous')) return 'ambiguous';
+  return cls.includes('nff') ? 'not_fast_forward' : cls.includes('cas') ? 'cas_conflict' : 'push_rejected';
 };
 const bandLines = text => text.split(/\r?\n|\r/).map(l => l.trim()).filter(Boolean).slice(-REPORT_KEEP);
 
