@@ -99,51 +99,88 @@ test('parseTree error strings and the boundaries next to them', () => {
 test('commit and tag headers, idents, and assertFetched', () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => parseCommit(te.encode('tree')), 'pack_corrupt', 'commit: truncated header line');
-  throws(() => parseCommit(te.encode('nospace\n')), 'pack_corrupt', 'commit: truncated header line');
-  throws(() => parseCommit(te.encode(`tree ${tree}\n parent-sig\n\n`)), 'pack_corrupt', 'commit: bad header order');
+  const C = 'commit: ', T = 'tag: ';
+  // verify_headers: a NUL before the blank line, and a header that does not end in a newline
+  throws(() => parseCommit(te.encode('tree')), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
+  throws(() => parseCommit(new Uint8Array(0)), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\0\n\n`)), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 45`);
+  throws(() => parseCommit(te.encode('\0')), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 0`);
+  throws(() => parseCommit(te.encode('nospace\n')), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => parseCommit(te.encode('\n\nbody')), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => parseCommit(te.encode(`tree\n${tree}\n`)), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\n`)), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\n parent-sig\n\n`)), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\n`)), 'pack_corrupt', `${C}missingCommitter: invalid format - expected 'committer' line`);
+  // the tree and parent ids: 40 hex digits of either case, then the newline; git prints the id lowercase
+  throws(() => parseCommit(te.encode(`tree zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree.slice(1)}g\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree} \nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree.slice(1)}\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nparent zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nparent ${oid(2)}x\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
+  const upper = parseCommit(te.encode(`tree ${'AB'.repeat(20)}\nparent ${'Cd'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n\n`));
+  assert.equal(upper.tree, 'ab'.repeat(20));
+  assert.deepEqual(upper.parents, ['cd'.repeat(20)]);
+  assert.equal(parseCommit(te.encode(`tree ${'9f'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n`)).tree, '9f'.repeat(20));
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}multipleAuthors: invalid format - multiple 'author' lines`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor Ada\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingEmail: invalid author line - missing email`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', `${C}missingEmail: invalid committer line - missing email`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor Ada <ada@ex>\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingSpaceBeforeDate: invalid author line - missing space before date`);
+  // the body: no NUL anywhere in a commit (nulInCommit is WARN, an error under --strict)
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\nsub\0ject\n`)), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
+  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\0`)), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
   const cont = parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n parent-sig\n\n`));
   assert.deepEqual(cont.extra, [' parent-sig']);
   assert.equal(cont.encoding, null);
   assert.equal(cont.message, '');
-  const blankFirst = parseCommit(te.encode('\n\nbody'));
-  assert.deepEqual(blankFirst.head ?? blankFirst.extra, []);
-  assert.equal(blankFirst.message, 'body');
-  assert.equal(parseCommit(te.encode(`tree ${tree}\n`)).message, null);
+  const noBody = parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\nsubject\n`));
+  assert.deepEqual(noBody.extra, ['subject']);
+  assert.equal(noBody.message, null);
+  assert.deepEqual(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n`)).extra, []);
+  assert.equal(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\nm`)).message, '\nm');
+  // a leading BOM is a byte before `tree`, as git reads it
+  throws(() => parseCommit(concat([Uint8Array.of(0xef, 0xbb, 0xbf), te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n`)])), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
 
   const commit = encodeCommit({ tree, parents: [oid(2)], author, message: 'hi\n' });
   assert.equal(parseCommit(commit).tree, tree);
   assert.deepEqual(parseCommit(commit).parents, [oid(2)]);
-  throws(() => assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: bad header order');
-  throws(() => assertFetched('commit', te.encode('\n\n')), 'pack_corrupt', 'commit: missing or bad tree');
-  throws(() => assertFetched('commit', te.encode(`tree zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: missing or bad tree');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nparent zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: bad parent');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: bad header order');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\n\n`)), 'pack_corrupt', 'commit: missing author');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\n\n`)), 'pack_corrupt', 'commit: missing committer');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex>\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad date');
   assertFetched('commit', commit);
+  throws(() => assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
   assert.equal(assertFetched('blob', te.encode('x')), undefined);
   assert.equal(assertFetched('ofs_delta', te.encode('x')), undefined);
   assert.equal(assertFetched('ref_delta', te.encode('x')), undefined);
   throws(() => assertFetched('submodule', te.encode('x')), 'pack_corrupt', 'object: bad type submodule');
   throws(() => assertFetched('tree', data(' a\0', oidBytes(1))), 'pack_corrupt', 'tree: empty mode');
+  throws(() => assertFetched('tag', te.encode('x')), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
 
   const tagger = author;
   const tag = encodeTag({ object: oid(3), type: 'commit', tag: 'v1', tagger, message: 'rel\n' });
   assert.equal(parseTag(tag).tag, 'v1');
-  throws(() => parseTag(te.encode(`object ${oid(3)}\nobject ${oid(4)}\ntype commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: duplicate object');
-  throws(() => assertFetched('tag', te.encode(`type commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => assertFetched('tag', te.encode('\n\n')), 'pack_corrupt', 'tag: missing or bad object');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\n\n`)), 'pack_corrupt', 'tag: missing type');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\n\n`)), 'pack_corrupt', 'tag: missing name');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\ntag v1\n\n`)), 'pack_corrupt', 'tag: missing tagger');
-  throws(() => assertFetched('tag', te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger Ada\n\n`)), 'pack_corrupt', 'tagger: missing email');
   assertFetched('tag', tag);
+  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\0\n`)), 'pack_corrupt', `${T}nulInHeader: unterminated header: NUL at offset 47`);
+  throws(() => parseTag(te.encode('\n\n')), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
+  throws(() => parseTag(te.encode(`type commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3).slice(2)}\ntype commit\n\n`)), 'pack_corrupt', `${T}badObjectSha1: invalid 'object' line format - bad sha1`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\n\n`)), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
+  for (const bad of ['commi', '', 'commit ', 'Commit', 'ofs_delta', 'constructor', 'toString'])
+    throws(() => parseTag(te.encode(`object ${oid(3)}\ntype ${bad}\ntag v1\n\n`)), 'pack_corrupt', `${T}badType: invalid 'type' value`);
+  for (const type of ['commit', 'tree', 'blob', 'tag']) assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype ${type}\ntag v1\n`)).type, type);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\n\n`)), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
+  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger Ada\n\n`)), 'pack_corrupt', `${T}missingEmail: invalid tagger line - missing email`);
+  // INFO under --strict, so accepted: no tagger (missingTaggerEntry) and a name that is not a refname (badTagName)
+  const old = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v0.99\n\nold\n`));
+  assert.equal(old.tagger, null);
+  assert.equal(old.message, 'old\n');
+  assert.deepEqual(old.extra, []);
+  assert.deepEqual(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\nfoo bar\n\n`)).extra, ['foo bar']);
   assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag \ntagger ${tagger}\n\n`)).tag, '');
+  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1..2\ntagger ${tagger}\n\n`)).tag, 'v1..2');
+  // fsck never reads a tag's body: a NUL there is accepted, unlike in a commit
+  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${tagger}\n\nr\0l\n`)).message, 'r\0l\n');
+  assert.equal(parseTag(te.encode(`object ${'AB'.repeat(20)}\ntype commit\ntag v1\n`)).object, 'ab'.repeat(20));
 
   assert.equal(parseIdent(1), null);
   assert.deepEqual(parseIdent('  bare name  '), { name: 'bare name', email: '', time: null, tz: '' });
@@ -153,7 +190,7 @@ test('commit and tag headers, idents, and assertFetched', () => {
   assert.deepEqual(parseIdent('Ada  <ada@ex> nope +0100'), { name: 'Ada', email: 'ada@ex', time: null, tz: '+0100' });
 });
 
-test('duplicate and out-of-order commit and tag headers are rejected', () => {
+test('headers after the committer and the tagger are kept, not judged; first-wins like git', () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const other = 'Bea <bea@ex> 1700000001 +0000';
   const tree = oid(1);
@@ -167,6 +204,7 @@ test('duplicate and out-of-order commit and tag headers are rejected', () => {
   assert.equal(ok.committer, committer);
   assert.equal(ok.encoding, 'UTF-8');
   assert.deepEqual(ok.extra, ['gpgsig -----BEGIN', ' signature', 'mergetag object x']);
+  assert.equal(ok.message, 'msg\n');
   const again = parseCommit(encodeCommit(ok));
   assert.equal(again.encoding, 'UTF-8');
   assert.deepEqual(again.extra, ok.extra);
@@ -188,103 +226,128 @@ test('duplicate and out-of-order commit and tag headers are rejected', () => {
   assert.equal(plainHeaders[ci + 1].startsWith('gpgsig '), true);
   assert.equal(plainHeaders[ci + 2], 'x-custom v');
   assert.equal(parseCommit(withGpgsig(bare, 'SIG\n')).extra[0].startsWith('gpgsig '), true);
-  const dup = (label, lines) => throws(() => parseCommit(body(lines)), 'pack_corrupt', label);
-  const bad = (lines) => throws(() => parseCommit(body(lines)), 'pack_corrupt', 'commit: bad header order');
-  dup('commit: duplicate tree', [`tree ${tree}`, `tree ${tree2}`, `author ${author}`, `committer ${committer}`]);
-  dup('commit: duplicate tree', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, `tree ${tree2}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `author ${other}`, `committer ${committer}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, `author ${other}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', `author ${other}`]);
-  dup('commit: duplicate author', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x', `author ${other}`]);
-  dup('commit: duplicate committer', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, `committer ${other}`]);
-  dup('commit: duplicate committer', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', `committer ${other}`]);
-  dup('commit: duplicate committer', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x', `committer ${other}`]);
-  dup('commit: duplicate encoding', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', 'encoding ISO-8859-1']);
-  dup('commit: duplicate encoding', [`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', 'gpgsig x', 'encoding ISO-8859-1']);
-  bad([`parent ${oid(3)}`, `tree ${tree}`, `author ${author}`, `committer ${committer}`]);
-  bad([`author ${author}`, `tree ${tree}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, `author ${author}`, 'encoding UTF-8', `committer ${committer}`]);
-  bad([`tree ${tree}`, 'encoding UTF-8', `author ${author}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, `author ${author}`, `committer ${committer}`, `parent ${oid(3)}`]);
-  bad([`tree ${tree}`, `author ${author}`, `parent ${oid(3)}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, ' parent-sig', `author ${author}`, `committer ${committer}`]);
-  bad([`tree ${tree}`, 'x-custom v', `author ${author}`, `committer ${committer}`]);
+  // after the committer fsck reads nothing: a second tree, parent, author, committer or encoding is an extra line,
+  // and the value is the first (git's %T, %P, %e and commit date read the first; only pretty's %an/%cn read the last)
+  const after = (...lines) => parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, ...lines]));
+  assert.equal(after(`tree ${tree2}`).tree, tree);
+  assert.deepEqual(after(`tree ${tree2}`).extra, [`tree ${tree2}`]);
+  assert.deepEqual(after(`parent ${oid(3)}`).parents, []);
+  assert.equal(after(`author ${other}`).author, author);
+  assert.equal(after(`committer ${other}`).committer, committer);
+  assert.equal(after('committer garbage').committer, committer);
+  assert.deepEqual(after('foo').extra, ['foo']);
+  const twoEnc = after('encoding ISO-8859-1', 'gpgsig x', 'encoding UTF-8');
+  assert.equal(twoEnc.encoding, 'ISO-8859-1');
+  assert.deepEqual(twoEnc.extra, ['gpgsig x', 'encoding UTF-8']);
+  assert.equal(after('gpgsig x', ' y', 'encoding ISO-8859-1').encoding, 'ISO-8859-1');
+  assert.equal(after(' encoding ISO-8859-1').encoding, null);
+  assert.equal(after('encodingISO').encoding, null);
+  // before the committer, the order is fsck's: tree, parents, one author, committer
+  const bad = (lines, msgId, why) => throws(() => parseCommit(body(lines)), 'pack_corrupt', `commit: ${msgId}: ${why}`);
+  const noAuthor = ['missingAuthor', "invalid format - expected 'author' line"];
+  const noCommitter = ['missingCommitter', "invalid format - expected 'committer' line"];
+  bad([`parent ${oid(3)}`, `tree ${tree}`, `author ${author}`, `committer ${committer}`], 'missingTree', "invalid format - expected 'tree' line");
+  bad([`author ${author}`, `tree ${tree}`, `committer ${committer}`], 'missingTree', "invalid format - expected 'tree' line");
+  bad([`tree ${tree}`, `tree ${tree2}`, `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, 'encoding UTF-8', `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, ' parent-sig', `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, 'x-custom v', `author ${author}`, `committer ${committer}`], ...noAuthor);
+  bad([`tree ${tree}`, `committer ${committer}`, `author ${author}`], ...noAuthor);
+  bad([`tree ${tree}`, `author ${author}`, 'encoding UTF-8', `committer ${committer}`], ...noCommitter);
+  bad([`tree ${tree}`, `author ${author}`, `parent ${oid(3)}`, `committer ${committer}`], ...noCommitter);
   const twoParents = parseCommit(body([`tree ${tree}`, `parent ${oid(3)}`, `parent ${oid(3)}`, `author ${author}`, `committer ${committer}`]));
   assert.deepEqual(twoParents.parents, [oid(3), oid(3)]);
+
   const tags = parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc']));
   assert.equal(tags.object, oid(5));
   assert.equal(tags.type, 'commit');
   assert.equal(tags.tag, 'v1');
   assert.equal(tags.tagger, author);
   assert.deepEqual(tags.extra, ['gpgsig abc']);
+  assert.equal(tags.message, 'msg\n');
   assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc', ' more'])).extra, ['gpgsig abc', ' more']);
-  const tagDup = (label, lines) => throws(() => parseTag(body(lines)), 'pack_corrupt', label);
-  const tagBad = (lines) => throws(() => parseTag(body(lines)), 'pack_corrupt', 'tag: bad header order');
-  tagDup('tag: duplicate object', [`object ${oid(5)}`, `object ${oid(6)}`, 'type commit', 'tag v1', `tagger ${author}`]);
-  tagDup('tag: duplicate object', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, `object ${oid(6)}`]);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'type blob', 'tag v1', `tagger ${author}`]);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'tag v1', 'type blob']);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'type blob']);
-  tagDup('tag: duplicate type', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig x', 'type blob']);
-  tagDup('tag: duplicate tag', [`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`]);
-  tagDup('tag: duplicate tag', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'tag v2']);
-  tagDup('tag: duplicate tag', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig x', 'tag v2']);
-  tagDup('tag: duplicate tagger', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, `tagger ${other}`]);
-  tagDup('tag: duplicate tagger', [`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig x', `tagger ${other}`]);
-  tagBad(['type commit', `object ${oid(5)}`, 'tag v1', `tagger ${author}`]);
-  tagBad(['tag v1', `object ${oid(5)}`, 'type commit', `tagger ${author}`]);
-  tagBad([`object ${oid(5)}`, 'type commit', `tagger ${author}`]);
-  tagBad([`object ${oid(5)}`, 'type commit', 'tag v1', 'foo bar', `tagger ${author}`]);
-  tagBad(['gpgsig x', `object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`]);
-  assert.equal(parseCommit(te.encode(`tree ${tree}\nparent ${oid(3)}\n`)).message, null);
-  assert.equal(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\n`)).author, author);
+  // after the tagger fsck reads nothing (extraHeaderEntry is IGNORE): a second object, type, tag or tagger is kept
+  const tagAfter = (...lines) => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, ...lines]));
+  assert.equal(tagAfter(`tagger ${other}`).tagger, author);
+  assert.deepEqual(tagAfter(`object ${oid(6)}`, 'type blob', 'tag v2').extra, [`object ${oid(6)}`, 'type blob', 'tag v2']);
+  assert.equal(tagAfter('type blob').type, 'commit');
+  const tagBad = (lines, msgId, why) => throws(() => parseTag(body(lines)), 'pack_corrupt', `tag: ${msgId}: ${why}`);
+  tagBad([`object ${oid(5)}`, `object ${oid(6)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingTypeEntry', "invalid format - expected 'type' line");
+  tagBad([`object ${oid(5)}`, 'type commit', 'type blob', 'tag v1', `tagger ${author}`], 'missingTagEntry', "invalid format - expected 'tag' line");
+  tagBad(['type commit', `object ${oid(5)}`, 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
+  tagBad(['gpgsig x', `object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
+  // a tag line followed by anything but a tagger: missingTaggerEntry (INFO), so the rest is extra
+  assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])).extra, ['tag v2', `tagger ${author}`]);
+  assert.equal(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])).tagger, null);
   assert.equal(parseTag(te.encode(`object ${oid(5)}\ntype commit\ntag \n`)).tag, '');
 });
 
-test('fsck badTimezone: a sign, four digits, then the end of the ident line', () => {
+test('fsck_ident: every rule, in git\'s order, on every role', () => {
   const tree = oid(1);
   const who = tz => `A <a@b.c> 1700000000 ${tz}`;
   const commit = (author, committer = who('+0000')) => te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${committer}\n\nm\n`);
   const tag = tagger => te.encode(`object ${tree}\ntype commit\ntag v1\ntagger ${tagger}\n\n`);
-  for (const tz of ['+0000', '-0000', '+0530', '-1200', '+1400', '+9999', '+1560', '+2400', '+0059']) {
-    assertFetched('commit', commit(who(tz)));
-    assertFetched('tag', tag(who(tz)));
-  }
-  // fsck skips spaces and tabs before the timestamp, and a timestamp of 0 must not be confused with a zero in the zone
-  assertFetched('commit', commit('A <a@b.c>  1700000000 +0000'));
-  assertFetched('commit', commit('A <a@b.c> \t1700000000 +0530'));
-  assertFetched('commit', commit('A <a@b.c> 0 -1200'));
-  assertFetched('commit', commit('A <a@b.c> 1700000009 +0000'));
-  const bad = ['+000', '+00000', '+00', '+', '0000', '+0a00', '+00:00', 'Z', '+0000x', '+0000 ', '+0000\t', ' +0000', '+00 00', '++000', '+-000', '+0000 extra'];
-  for (const tz of bad) {
-    throws(() => assertFetched('commit', commit(who(tz))), 'pack_corrupt', 'author: bad time zone');
-    throws(() => assertFetched('commit', commit(who('+0000'), who(tz))), 'pack_corrupt', 'committer: bad time zone');
-    throws(() => assertFetched('tag', tag(who(tz))), 'pack_corrupt', 'tagger: bad time zone');
-  }
-  throws(() => assertFetched('commit', commit('A <a@b.c> 1700000000')), 'pack_corrupt', 'author: bad date');
-  throws(() => assertFetched('commit', commit('A <a@b.c>1700000000 +0000')), 'pack_corrupt', 'author: bad date');
-  throws(() => assertFetched('commit', commit('A <a@b.c> 12:34 +0000')), 'pack_corrupt', 'author: bad date');
-  throws(() => assertFetched('commit', commit('Ada <ada@ex> soon +0000')), 'pack_corrupt', 'author: bad date');
+  const all = (ident, msgId, why) => {
+    throws(() => assertFetched('commit', commit(ident)), 'pack_corrupt', `commit: ${msgId}: invalid author line - ${why}`);
+    throws(() => assertFetched('commit', commit(who('+0000'), ident)), 'pack_corrupt', `commit: ${msgId}: invalid committer line - ${why}`);
+    throws(() => assertFetched('tag', tag(ident)), 'pack_corrupt', `tag: ${msgId}: invalid tagger line - ${why}`);
+  };
+  const fine = ident => { assertFetched('commit', commit(ident)); assertFetched('commit', commit(who('+0000'), ident)); assertFetched('tag', tag(ident)); };
+  for (const tz of ['+0000', '-0000', '+0530', '-1200', '+1400', '+9999', '+1560', '+2400', '+0059']) fine(who(tz));
+  // fsck skips spaces and tabs before the timestamp; a timestamp of 0 is not zero-padded; any name and email bytes
+  fine('A <a@b.c>  1700000000 +0000');
+  fine('A <a@b.c> \t1700000000 +0530');
+  fine('A <a@b.c> 0 -1200');
+  fine('A <a@b.c> 1700000009 +0000');
+  fine('A <a@b.c> 9223372036854775807 +0000');
+  fine(' <a@b.c> 1700000000 +0000');
+  fine('A <> 1700000000 +0000');
+  fine('A <a b> 1700000000 +0000');
+  fine('A\t <a@b.c> 1700000000 +0000');
+  const badTz = ['+000', '+00000', '+00', '+', '0000', '+0a00', '+00:00', 'Z', '+0000x', '+0000 ', '+0000\t', ' +0000', '+00 00', '++000', '+-000', '+0000 extra', '+000a', 'a0000'];
+  for (const tz of badTz) all(who(tz), 'badTimezone', 'bad time zone');
+  all('A <a@b.c> 1700000000', 'badDate', 'bad date');
+  all('A <a@b.c> 12:34 +0000', 'badDate', 'bad date');
+  all('Ada <ada@ex> soon +0000', 'badDate', 'bad date');
+  all('A <a@b.c> +0000', 'badDate', 'bad date');
+  all('A <a@b.c> 1700000000\t+0000', 'badDate', 'bad date');
+  all('A <a@b.c> \t', 'badDate', 'bad date');
+  all('A <a@b.c> 01700000000 +0000', 'zeroPaddedDate', 'zero-padded date');
+  all('A <a@b.c> 00 +0000', 'zeroPaddedDate', 'zero-padded date');
+  all('A <a@b.c> 0x +0000', 'zeroPaddedDate', 'zero-padded date');
+  all('A <a@b.c> 9223372036854775808 +0000', 'badDateOverflow', 'date causes integer overflow');
+  all('A <a@b.c> 99999999999999999999999 +0000', 'badDateOverflow', 'date causes integer overflow');
+  all('A <a@b.c> 99999999999999999999999x +0000', 'badDateOverflow', 'date causes integer overflow');
+  all('A <a@b.c>1700000000 +0000', 'missingSpaceBeforeDate', 'missing space before date');
+  all('A <a@b.c>', 'missingSpaceBeforeDate', 'missing space before date');
+  all('A <a@b.c 1700000000 +0000', 'badEmail', 'bad email');
+  all('A <a<b@c> 1700000000 +0000', 'badEmail', 'bad email');
+  all('A <a@b.c', 'badEmail', 'bad email');
   // a space is required immediately before '<'. commit#23000087 replaced it with '!'; commit#19000059 with 0x9E.
-  throws(() => assertFetched('commit', commit('A<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  throws(() => assertFetched('commit', commit('A!<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  throws(() => assertFetched('commit', commit('<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  throws(() => assertFetched('commit', commit('A\t<a@b.c> 1700000000 +0000')), 'pack_corrupt', 'author: missing space before email');
-  assertFetched('commit', commit(' <a@b.c> 1700000000 +0000'));
+  all('A<a@b.c> 1700000000 +0000', 'missingSpaceBeforeEmail', 'missing space before email');
+  all('A!<a@b.c> 1700000000 +0000', 'missingSpaceBeforeEmail', 'missing space before email');
+  all('A\t<a@b.c> 1700000000 +0000', 'missingSpaceBeforeEmail', 'missing space before email');
+  all('<a@b.c> 1700000000 +0000', 'missingNameBeforeEmail', 'missing space before email');
+  all('A > <a@b.c> 1700000000 +0000', 'badName', 'bad name');
+  all('A a@b.c> 1700000000 +0000', 'badName', 'bad name');
+  all('A U Thor 1700000000 +0000', 'missingEmail', 'missing email');
+  all('', 'missingEmail', 'missing email');
   const glued = concat([
     te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +0000\ncommitter A `),
     Uint8Array.of(0x9e),
     te.encode('<a@b.c> 1700000000 +0000\n\nm\n'),
   ]);
-  throws(() => assertFetched('commit', glued), 'pack_corrupt', 'committer: missing space before email');
+  throws(() => assertFetched('commit', glued), 'pack_corrupt', 'commit: missingSpaceBeforeEmail: invalid committer line - missing space before email');
   // commit#1000022: 0xC1 inserted into the author zone, Latin-1 "+00Á00"
   const poison = concat([
     te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +00`),
     Uint8Array.of(0xc1),
     te.encode('00\ncommitter A <a@b.c> 1700000000 +0000\n\nm\n'),
   ]);
-  throws(() => assertFetched('commit', poison), 'pack_corrupt', 'author: bad time zone');
+  throws(() => assertFetched('commit', poison), 'pack_corrupt', 'commit: badTimezone: invalid author line - bad time zone');
+  // a non-UTF-8 name is bytes git accepts
+  assertFetched('commit', concat([te.encode(`tree ${tree}\nauthor J`), Uint8Array.of(0xf6), te.encode(`rg <j@b.c> 1 +0000\ncommitter ${who('+0000')}\n\n`)]));
 });
 
 test('pkt-line kinds, counters, and length errors', () => {
@@ -652,19 +715,17 @@ test('ssh url, kex, and gitattributes lines', () => {
 test('boundaries between a thrown error and its neighbour', async () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: missing space before email');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badEmail: invalid author line - bad email');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: missingNameBeforeEmail: invalid author line - missing space before email');
   assertFetched('commit', te.encode(`tree ${tree}\nauthor  <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
-  assert.equal(parseCommit(new Uint8Array(0)).message, null);
   throws(() => parseTree(data('100644 a', oidBytes(4))), 'pack_corrupt', 'tree: malformed entry');
   throws(() => parseTree(data('g7 a\0', oidBytes(4))), 'pack_corrupt', 'tree: malformed mode');
-  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', 'tag: truncated header line');
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\nfoo bar\n\n`)), 'pack_corrupt', 'tag: bad header order');
+  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', 'tag: unterminatedHeader: unterminated header');
   const extra = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\nfoo bar\n\n`));
   assert.equal(extra.tagger, author);
   assert.deepEqual(extra.extra, ['foo bar']);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\ntagger second <s@ex> 1 +0000\n\n`)), 'pack_corrupt', 'tag: duplicate tagger');
+  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\ntagger second <s@ex> 1 +0000\n\n`)).tagger, author);
   assert.deepEqual(parseIdent('>a <b@c> 1 +0000'), { name: '>a', email: 'b@c', time: '1', tz: '+0000' });
   assert.deepEqual(parseIdent('Ada <a@b>'), { name: 'Ada', email: 'a@b', time: null, tz: '' });
   assert.deepEqual(parseIdent('Ada <a@b> 1  +0100'), { name: 'Ada', email: 'a@b', time: '1', tz: '+0100' });
@@ -777,13 +838,13 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(parseIdent('a><b@c> 1 +0000'), { name: 'a>', email: 'b@c', time: '1', tz: '+0000' });
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'author: bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'committer: missing email');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'commit: missingEmail: invalid committer line - missing email');
   const id = oid(3);
   const tagger = author;
-  throws(() => parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => parseTag(te.encode(`tag v1\nobject ${id}\ntype blob\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
+  throws(() => parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingObject: invalid format - expected 'object' line");
+  throws(() => parseTag(te.encode(`object ${id}\ntag v1\ntype blob\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingTypeEntry: invalid format - expected 'type' line");
 
   const onlyDelim = pktStep(pktInit(), DELIM);
   assert.equal(onlyDelim.state.delim, 1);
@@ -888,9 +949,7 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.equal(parseLine('a text', no).pat.endsWith, false);
   assert.deepEqual(parseLine('*.c text=', no).states, [['text', '']]);
   assert.deepEqual(parseIdent('  Ada <ada@ex'), { name: 'Ada <ada@ex', email: '', time: null, tz: '' });
-  throws(() => parseTag(te.encode(`type commit\ntype blob\nobject ${id}\ntag v1\ntag v2\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: bad header order');
-  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntype blob\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: duplicate type');
-  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntag v1\ntag v2\ntagger ${tagger}\n\n`)), 'pack_corrupt', 'tag: duplicate tag');
+  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntype blob\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingTagEntry: invalid format - expected 'tag' line");
 
   throws(() => pktStep(pktInit(), te.encode('0000zzzz')), 'protocol', 'bad pkt-line length at byte 4');
   const line = s => ({ kind: 'data', payload: te.encode(s) });

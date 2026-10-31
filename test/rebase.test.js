@@ -42,7 +42,9 @@ test('pure: linearChain and carriedExtra', () => {
   assert.deepEqual(linearChain(c, '3', '0').map(x => x.oid), ['1', '2', '3']);
   assert.deepEqual(linearChain(c, '3', '3'), []);
   assert.throws(() => linearChain(c, 'm', '0'), e => e.code === 'not_linear');
-  assert.deepEqual(carriedExtra(['encoding utf8', 'gpgsig -----BEGIN', ' abc', ' def', 'x y']), ['encoding utf8', 'x y']);
+  assert.deepEqual(carriedExtra(['encoding utf8', 'gpgsig -----BEGIN', ' abc', ' def', 'x y']), ['x y']);
+  // a second structural header after the committer (parseCommit kept the first) is never carried into a new commit
+  assert.deepEqual(carriedExtra([`tree ${'a'.repeat(40)}`, `parent ${'b'.repeat(40)}`, 'author X <x> 1 +0000', 'committer Y <y> 2 +0000', 'encoding ISO-8859-1', 'mergetag object x', ' type commit', 'foo']), ['mergetag object x', ' type commit', 'foo']);
 });
 
 test('rebase: three commits onto a moved main — trees, authors, messages equal git rebase; committer is ours; CAS on the old tip', async () => {

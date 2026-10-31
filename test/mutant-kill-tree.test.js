@@ -834,11 +834,13 @@ test('commitView: idents for JSON, signed, parents and message', () => {
   assert.equal(commitView(raw('mergetag object x')).signed, false);
   assert.equal(commitView(raw('xgpgsig y')).signed, false);
   assert.equal(commitView(raw('gpgsigx y')).signed, false);
-  // a date git could not read: epoch and time null, the rest kept
-  const odd = commitView(te.encode(`tree ${tree}\nauthor A <a@x>\ncommitter A <a@x> 100000000000000000 +0000\n\nm\n`), withLimits({}));
-  assert.deepEqual(odd.author, { name: 'A', email: 'a@x', time: null, epoch: null, tz: '' });
+  // a date fsck accepts but a JS Date cannot hold: time null, the epoch and the rest kept
+  const odd = commitView(te.encode(`tree ${tree}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 100000000000000000 +0000\n\nm\n`), withLimits({}));
   assert.deepEqual(odd.committer, { name: 'A', email: 'a@x', time: null, epoch: 1e17, tz: '+0000' });
   assert.equal(odd.message, 'm\n');
+  // a commit fsck refuses is refused here too (#59): commitView reads through parseCommit
+  assert.throws(() => commitView(te.encode(`tree ${tree}\nauthor A <a@x>\ncommitter A <a@x> 1 +0000\n\nm\n`)), e => e.code === 'pack_corrupt' && e.msgId === 'missingSpaceBeforeDate');
+  assert.throws(() => commitView(te.encode(`tree ${tree}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n\nm\0\n`)), e => e.code === 'pack_corrupt' && e.msgId === 'nulInCommit');
 });
 
 test('readCommit: the commit alone (tree:0, deepen 1), its view and span; a non-commit oid is not_found', async () => {
