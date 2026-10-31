@@ -7,6 +7,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
 import { te, td, concat, take } from '../src/bytes.js';
+import { assertBytes } from './bytes-assert.js';
 import { fromHex } from '../src/sha1.js';
 import { thrown as fail } from '../src/errors.js';
 import { validateIdent } from '../src/validate.js';
@@ -259,7 +260,7 @@ property('pkt', 'pkt-line prefix-closure, finished so a partial frame cannot hid
     assert.equal(got.length, k);
     got.forEach((g, j) => {
       assert.equal(g.kind, full[j].kind);
-      if (g.kind === 'data') assert.deepEqual([...g.payload], [...full[j].payload]);
+      if (g.kind === 'data') assertBytes(g.payload, full[j].payload);
     });
   }
 });
@@ -303,7 +304,7 @@ property('sideband', 'a sideband frame is a channel byte plus an opaque body pre
   for (let i = 1; i < payload.length; i++) {
     const got = parseSideband(payload.subarray(0, i));
     assert.equal(got.band, 1);
-    assert.deepEqual([...got.body], [...body.subarray(0, i - 1)]);
+    assertBytes(got.body, body.subarray(0, i - 1));
   }
 });
 
@@ -351,7 +352,7 @@ property('v2', 'a prefix of a v2 fetch response is a prefix of its sections and 
     const got = run(frames.slice(0, i));
     assert.deepEqual(got.sections, full.sections.slice(0, got.sections.length));
     assert.ok(full.pack.length >= got.pack.length);
-    assert.deepEqual([...got.pack], [...full.pack.subarray(0, got.pack.length)]);
+    assertBytes(got.pack, full.pack.subarray(0, got.pack.length));
   }
 });
 
@@ -461,7 +462,7 @@ test('take() throws a typed short read and does not clamp', () => {
   assert.equal(take(buf, 4, 0).length, 0);
 });
 
-const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)$/;
+const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)(Result)?$/;
 
 test('every exported decoder has a prefix-closure property', () => {
   const missing = [];

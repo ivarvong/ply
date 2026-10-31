@@ -20,7 +20,8 @@ import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, statSy
 import { join } from 'node:path';
 
 const REPORT = 'reports/mutation/mutation.json';
-const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate|huffBuild|adler32|pktStep|pktFinish|spStep|spFinish|v2Step|parseSideband|take|assertFetched|splitHeaders|checkIdent)$/;
+// A converted decoder keeps its gate: `xResult` is the Result core of the throwing wrapper `x` (docs/STACK.md).
+const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate|huffBuild|adler32|pktStep|pktFinish|pktHeader|spStep|spFinish|v2Step|parseSideband|take|assertFetched|splitHeaders|checkIdent)(Result)?$/;
 // Either extension: a file keeps its gate when it converts to TypeScript.
 const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts']);
 const SRC = /\.(?:js|ts)$/;
