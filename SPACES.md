@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **430** (361 fail sites, 19 produced codes, 7 untyped throws, 18 exported parse/decode/classify/decide functions). Covered by a merged space 365, by a pending PR 9, excluded 26, unregistered 30. Fail sites no cell reaches: 40 of 361. Of the registered points, 163 are claimed by an enumerated space, 14 only by a random one and 197 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **428** (361 fail sites, 19 produced codes, 7 untyped throws, 17 exported parse/decode/classify/decide functions). Covered by a merged space 363, by a pending PR 9, excluded 26, unregistered 30. Fail sites no cell reaches: 40 of 361. Of the registered points, 162 are claimed by an enumerated space, 14 only by a random one and 196 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -43,7 +43,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `push-ng` | main | enumerated | reason(42) × command(8) × atomic(2) × refs(3) × era(2) | 1,057 (32 wrong on train/1 77eb2c0) | 791 (776 on git 2.50, era v2.51+ on git >= 2.51) / 266 | real `git receive-pack --stateless-rpc` arranged per reason (config, hooks, hidden refs, symrefs, shallow lines, worktrees, proc-receive): its report byte for byte = the cell's derived report, ply's outcome = the class table, refs agree; git v2.50 locally, git >= 2.51 (batched texts) in CI | 5 | 28 | ci (`test/space/push-ng.test.js`) | — |
 | `fsck-commit` | main | enumerated | ident(36) × role × body(9) × eol(2) × commitHeader(29) × tagHeader(18) | 51,338 objects (3,598 wrong verdicts on main) | 51,338 / 0 | git fsck --strict (both streams, exit code, msgId) on hash-object --literally objects (#59) | 34 | 27 | ci (`test/fsck-space.test.js`) | — |
 | `mergebase` | main | enumerated | position(4) × multiplicity(4) × settled(3) × server(7) × op(3) | ≤ 1,008 (product; rebase only where git has one base on the honest server) | — | git merge-base --all, merge-tree --write-tree, git rebase (#41, #42) | 0 | 0 | ci (`test/mergebase-space.test.js`) | — |
-| `git-bytes` | main | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 11 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
+| `git-bytes` | main | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 10 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
 | `streamed-body` | main | enumerated | path(6) × shape(7) × size(5) × rel(3) | 630 | 630 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36) | 8 | 0 | ci (`test/adversarial.test.js`) | — |
 | `tree-dups` | main | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) | — |
 | `fsck-tree` | main | enumerated | trigger(19) × mode(14) × name(48) × position(2) × content | 24,864 (5,056 wrong on main, 4,094 on train/1) | 24,864 / 0 | git fsck --strict (both streams, exit code, msgId) on every cell (packed + a loose hash-object --literally sample); git ls-tree modes; git read-tree with protectHFS+protectNTFS; git check-attr --source | 12 | 27 | ci (`test/space/fsck-tree.test.js`) | — |
@@ -57,7 +57,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 17 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
-| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 14 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
+| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 13 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 54 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
@@ -86,18 +86,17 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (25: lossless 8, strict 4, replacement 13)
+## Decode sites (24: lossless 8, strict 3, replacement 13)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
 | where | mode | via | registry |
 |---|---|---|---|
-| `src/bytes.ts:15` decodeStrict() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:55` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:62` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:65` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts:96` encodeBytesResult() | lossless | decodeBytes | `git-bytes` / content |
-| `src/bytes.ts:116` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
+| `src/bytes.ts:53` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.ts:60` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.ts:63` decodeBytes() | strict | strict | `git-bytes` / content |
+| `src/bytes.ts:94` encodeBytesResult() | lossless | decodeBytes | `git-bytes` / content |
+| `src/bytes.ts:114` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
 | `src/discover.ts:28` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
 | `src/fetch.ts:160` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
 | `src/fetch.ts:167` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
