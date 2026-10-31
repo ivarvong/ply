@@ -1,0 +1,12 @@
+{
+  "test/protocol.test.js": 230,
+  "test/adversarial.test.js": 130,
+  "test/compliance.test.js": 40,
+  "test/push.test.js": 45,
+  "test/sshgit.test.js": 25,
+  "test/merge.test.js": 20,
+  "test/rebase.test.js": 15,
+  "test/read.test.js": 15,
+  "test/checkout-tree.test.js": 10,
+  "test/parity.test.js": 10
+}

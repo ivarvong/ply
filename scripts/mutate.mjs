@@ -21,6 +21,10 @@ import { join } from 'node:path';
 const REPORT = 'reports/mutation/mutation.json';
 const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate|huffBuild|adler32|pktStep|pktFinish|spStep|spFinish|v2Step|parseSideband|take|assertFetched|splitHeaders|checkIdent)$/;
 const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js']);
+// A test file that exits non-zero without reporting a failed test (a mutant that throws while its module loads, or one
+// that trips Stryker's hit limit, an infinite loop, there) is a RuntimeError to the tap runner. The test failed: the
+// mutant is detected, as it was under the command runner, where any non-zero exit was Killed.
+const DETECTED = new Set(['Killed', 'Timeout', 'RuntimeError']);
 
 function commentProblems() {
   const bad = [];
@@ -91,8 +95,9 @@ function runStryker(files) {
 }
 
 // Mutants per file, from Stryker's own instrumenter with the config's mutator options: the same mutants a run would
-// test, counted without running a test (about half a second for all of src/). With coverageAnalysis "off" every mutant
-// runs the whole command, so the count is the cost.
+// test, counted without running a test (about half a second for all of src/). The count is an upper bound on the cost:
+// with coverageAnalysis "perTest" a mutant no quick test reaches costs nothing (NoCoverage), and a covered one runs only
+// the test files that reach it.
 async function mutantCounts(files) {
   const { Instrumenter } = await import('@stryker-mutator/instrumenter');
   const quiet = () => false;
@@ -241,7 +246,7 @@ function summarize(report) {
     for (const m of mutants) {
       const status = m.status;
       counts[status] = (counts[status] ?? 0) + 1;
-      if (status === 'Killed' || status === 'Timeout') detected++;
+      if (DETECTED.has(status)) detected++;
       else if (status === 'Ignored') ignored++;
       else survived++;
       const line = m.location?.start?.line ?? 0;
@@ -251,7 +256,7 @@ function summarize(report) {
         violations.push(`${file}:${line} ${fn} ${m.mutatorName} ${status}${m.replacement ? ` → ${String(m.replacement).slice(0, 60)}` : ''}`);
       }
     }
-    const det = (counts.Killed ?? 0) + (counts.Timeout ?? 0);
+    const det = (counts.Killed ?? 0) + (counts.Timeout ?? 0) + (counts.RuntimeError ?? 0);
     const sur = (counts.Survived ?? 0) + (counts.NoCoverage ?? 0);
     const score = det + sur === 0 ? 100 : (100 * det) / (det + sur);
     rows.push({ file, score, killed: counts.Killed ?? 0, timeout: counts.Timeout ?? 0, survived: counts.Survived ?? 0, noCoverage: counts.NoCoverage ?? 0, ignored: counts.Ignored ?? 0, total: mutants.length });

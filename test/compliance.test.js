@@ -18,31 +18,51 @@ let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });
 after(() => cleanup());
 
-// fsck verdict for one object: filter fsck's output to this oid (fsck scans the whole store)
-function fsckOf(oid) {
+// fsck verdicts for every object written so far: one `git fsck --strict` over the whole store, its output split by oid.
+// fsck reports each object it finds wanting on its own line naming that object, and an object's verdict depends only on
+// its own bytes, so one scan answers every case. (One fsck per case re-scanned a store that grew with every case:
+// quadratic, 259 s of CI for the ident test alone.) The verdict text is the line's, as one fsck per case read it.
+function fsckAll() {
   let out = '';
   try { git(repo, ['fsck', '--strict', '--no-dangling']); } catch (e) { out = (e.stderr || '').toString() + (e.stdout || '').toString(); }
-  const line = out.split('\n').find(l => l.includes(oid) && /^(error|warning)/.test(l));
-  return line ? line.replace(/^(error|warning) in \w+ [0-9a-f]+: /, '').split(':')[0] : 'ok';
+  const verdicts = new Map();
+  for (const line of out.split('\n')) {
+    if (!/^(error|warning)/.test(line)) continue;
+    for (const oid of line.match(/[0-9a-f]{40}/g) ?? []) if (!verdicts.has(oid)) verdicts.set(oid, line.replace(/^(error|warning) in \w+ [0-9a-f]+: /, '').split(':')[0]);
+  }
+  return oid => verdicts.get(oid) ?? 'ok';
 }
 const writeLiterally = (type, data) => { try { return gitBuf(repo, ['hash-object', '-t', type, '-w', '--stdin', '--literally'], data).toString().trim(); } catch { return null; } };
+// The same, for many objects in one hash-object (--stdin-paths) instead of a process each. If git refuses the batch,
+// every object is written alone, so an object git will not write is null exactly as writeLiterally has it.
+let batches = 0;
+function writeAllLiterally(type, datas) {
+  const dir = join(root, `batch-${batches++}`); mkdirSync(dir);
+  const paths = datas.map((d, i) => { const p = join(dir, String(i)); writeFileSync(p, d); return p; });
+  let oids;
+  try { oids = gitBuf(repo, ['hash-object', '-t', type, '-w', '--literally', '--stdin-paths'], paths.join('\n') + '\n').toString().trim().split('\n'); } catch { oids = []; }
+  return oids.length === datas.length ? oids : datas.map(d => writeLiterally(type, d));
+}
 
 const strings = (alphabet, maxLen) => { const out = ['']; let layer = ['']; for (let n = 1; n <= maxLen; n++) { layer = layer.flatMap(s => alphabet.map(c => s + c)); out.push(...layer); } return out; };
 
 test('ident validation == git fsck --strict (exhaustive over an alphabet, name and email independently)', () => {
   const alpha = ['a', ' ', '<', '>', '\n', '\0', '.', '\t', '\r', '"', "'", '@', ','];
-  let n = 0, disagree = [];
+  const cases = [];
   const check = (name, email) => {
-    n++;
     let ours; try { validateIdent({ name, email, time: 1700000000, tz: '+0000' }); ours = 'ok'; } catch { ours = 'reject'; }
     const data = Buffer.from(`tree ${emptyTree}\nauthor ${name} <${email}> 1700000000 +0000\ncommitter ${name} <${email}> 1700000000 +0000\n\nm\n`, 'utf8');
-    const oid = writeLiterally('commit', data);
-    const theirs = oid ? fsckOf(oid) : 'unwritable';
-    // a NUL splits the header for git ("unterminated header"); for us it is a plain reject. Both reject.
-    if ((ours === 'ok') !== (theirs === 'ok')) disagree.push({ name, email, ours, theirs });
+    cases.push({ name, email, ours, data });
   };
   for (const s of strings(alpha, 3)) { check(s, 'a@x'); check('A', s); }
   for (const [name, email] of [["O'Brien", 'o@x'], ['Dr. Who, Jr.', 'w@x'], [' lead', 'l@x'], ['trail ', 't@x'], ['日本語 名', 'n@x'], ['', ''], ['x', 'a b @ c']]) check(name, email);
+  writeAllLiterally('commit', cases.map(k => k.data)).forEach((oid, i) => { cases[i].oid = oid; });
+  const fsck = fsckAll(), n = cases.length, disagree = [];
+  for (const { name, email, ours, oid } of cases) {
+    const theirs = oid ? fsck(oid) : 'unwritable';
+    // a NUL splits the header for git ("unterminated header"); for us it is a plain reject. Both reject.
+    if ((ours === 'ok') !== (theirs === 'ok')) disagree.push({ name, email, ours, theirs });
+  }
   assert.deepEqual(disagree, [], `${disagree.length}/${n} disagreements`);
   console.log(`  idents: ${n} cases, 0 disagreements`);
 });
@@ -67,15 +87,19 @@ test('ref validation == git check-ref-format (exhaustive over an alphabet)', () 
 test('path validation == git tree acceptance + fsck --strict (components over an alphabet, .git variants, NTFS/HFS)', () => {
   const alpha = ['a', '.', 'g', 'i', 't', '~', '1', ' ', 'G', 'I', 'T', '\\'];
   const comps = [...new Set([...strings(alpha, 2).filter(s => s.length), ...strings(['.', 'g', 'i', 't', 'G'], 4).filter(s => s.length), '.git', '.GIT', '.Git', 'git~1', 'GIT~1', '.gi\u200ct', '.g\u200ci\u200dt', '.git ', '.git.', '.git..', '.git . ', 'gi7eba~1', '.GIT~1', 'x', '..', '.', 'nul\0x', 'a\nb', '.gitmodules', '.git\u200e', '\ufeff.git', '.giT'])]; // 'a/b' is two components for us, one (invalid) name for a tree
-  let n = 0; const disagree = [];
+  const cases = [];
   for (const c of comps) {
-    n++;
     const path = `d/${c}`;
     let ours; try { validatePath(path, DEFAULT_LIMITS); ours = 'ok'; } catch { ours = 'reject'; }
     // git side: build the tree object directly (bypassing index normalization) and fsck it
     const data = Buffer.concat([Buffer.from(`100644 ${c}\0`, 'utf8'), Buffer.from(blob, 'hex')]);
-    const oid = c.includes('\0') || c.includes('/') ? null : writeLiterally('tree', data);
-    const theirs = oid ? fsckOf(oid) : 'reject';
+    cases.push({ c, ours, data, writable: !c.includes('\0') && !c.includes('/') });
+  }
+  const writable = cases.filter(k => k.writable);
+  writeAllLiterally('tree', writable.map(k => k.data)).forEach((oid, i) => { writable[i].oid = oid; });
+  const fsck = fsckAll(), n = cases.length, disagree = [];
+  for (const { c, ours, oid } of cases) {
+    const theirs = oid ? fsck(oid) : 'reject';
     if ((ours === 'ok') !== (theirs === 'ok')) disagree.push({ c: JSON.stringify(c), ours, theirs });
   }
   assert.deepEqual(disagree, [], `${disagree.length}/${n} disagreements`);
