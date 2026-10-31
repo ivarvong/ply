@@ -95,7 +95,7 @@ export function renderMd(all) {
   }
   L.push('');
   const holes = rankedHoles(all, st);
-  const SEV = { 1: 'Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh)', 2: 'Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous)', 3: 'Severity 3: the rest (caller input, limits, local I/O)' };
+  const SEV = { 1: 'Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements)', 2: 'Severity 2: decisions that claim an outcome (landed, rejected, conflict, ambiguous)', 3: 'Severity 3: the rest (caller input, limits, local I/O)' };
   L.push(`## Holes (${fmt(holes.length)})`, '');
   L.push('Ranked by severity, then category (`git`: a git check with no space; `decisions`: a ply decision point with no registry entry; `failsites`: a fail site no cell reaches; `claims`: a registry claim its space does not back). Fail-site and claim holes are the ratchet\'s, from the last recorded run.', '');
   for (const sev of [1, 2, 3]) {

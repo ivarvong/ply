@@ -242,7 +242,7 @@ export function inventory() {
     if (!SKIP_PRODUCERS.has(f.file)) walk(f.ast, (n, anc) => {
       if (n.type !== 'StringLiteral' || !CODE_SET.has(n.value)) return;
       const parent = anc[anc.length - 1];
-      // a code inside a site's code argument (`fail(c ? 'protocol' : 'ssh', ...)`) is that site's, not a producer
+      // a code inside a site's code argument (`fail(c ? 'protocol' : 'pack_corrupt', ...)`) is that site's, not a producer
       if (anc.some(a => siteCalls.has(a) && a.arguments[0] && a.arguments[0].start <= n.start && n.end <= a.arguments[0].end)) return;
       let ctx = null;
       if (parent?.type === 'ReturnStatement' || (parent?.type === 'ArrowFunctionExpression' && parent.body === n)) ctx = 'return';

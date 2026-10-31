@@ -136,10 +136,10 @@ export function judge(category, ids, stored = ratchet().categories[category]) {
 // ---- severity: what a hole costs if git and ply disagree there ----
 // 1: a strict or replacement decode of bytes git passes through raw (unless the registry says display-only);
 //    a check on untrusted input (anything a server, a repository or the wire decides: objects, packs, pkt-lines,
-//    reports, advertisements, ssh packets), on either side (a git check with no space, or a ply parser site no cell reached)
+//    reports, advertisements), on either side (a git check with no space, or a ply parser site no cell reached)
 // 2: a decision that claims an outcome: landed, rejected, conflict, ambiguous, not fast-forward
 // 3: the rest (caller input validation, limits, local I/O)
-const UNTRUSTED_CODES = new Set(['pack_corrupt', 'protocol', 'not_git', 'remote_error', 'ssh', 'host_key_mismatch']);
+const UNTRUSTED_CODES = new Set(['pack_corrupt', 'protocol', 'not_git', 'remote_error']);
 const OUTCOME_CODES = new Set(['cas_conflict', 'push_rejected', 'ambiguous', 'merge_conflict', 'not_fast_forward', 'not_linear', 'unrelated_histories', 'match_count']);
 const UNTRUSTED_GIT_KINDS = new Set(['fsck-msg', 'tree-mode', 'reject', 'ng', 'err-pkt', 'capability', 'refname-rule']);
 const CLIENT_SIDE_PARSERS = new Set(['pkt-line.c', 'sideband.c', 'connect.c', 'send-pack.c']);

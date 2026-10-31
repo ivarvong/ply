@@ -15,16 +15,16 @@ The procedure is enforced, not remembered:
 
 | category | holes (ratchet) | mode |
 |---|---:|---|
-| decisions | 36 | REPORT |
+| decisions | 32 | REPORT |
 | git | 2 | REPORT |
-| failsites | 42 | REPORT |
+| failsites | 40 | REPORT |
 | claims | 0 | ENFORCE |
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **492** (414 fail sites, 22 produced codes, 7 untyped throws, 19 exported parse/decode/classify/decide functions). Covered by a merged space 418, by a pending PR 9, excluded 29, unregistered 36. Fail sites no cell reaches: 42 of 414. Of the registered points, 215 are claimed by an enumerated space, 12 only by a random one and 200 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **431** (363 fail sites, 19 produced codes, 7 untyped throws, 17 exported parse/decode/classify/decide functions). Covered by a merged space 364, by a pending PR 9, excluded 26, unregistered 32. Fail sites no cell reaches: 40 of 363. Of the registered points, 169 are claimed by an enumerated space, 12 only by a random one and 192 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
-git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 235, by a pending PR 0, excluded 140, uncovered 2. Claimed by an enumerated space 223, random 2, curated 10.
+git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
 ## Spaces
 
@@ -36,7 +36,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `tree-name-alphabet` | main | enumerated | name | 924 | 924 / 0 | index-pack --strict + fsck --strict on a tree with the name | 2 | 10 | ci (`test/compliance.test.js`) | dependent¹ |
 | `tree-encoding` | main | enumerated | pair(600) × modes(5) × order(2) | 6,000 | 6,000 / 0 | git mktree / write-tree | 0 | 5 | ci (`test/compliance.test.js`) | — |
 | `push-parity` | main | enumerated | config(6) × hook(4) × command(8) × caps(4) | 768 | 1 in 8 per day (seeded); 768 with PUSH_MATRIX=full / 0 | `git push` on a twin repo: same refs, same accept/reject | 1 | 5 | ci (`test/push.test.js`) | — |
-| `credential-cells` | main | enumerated | source(5) × user(6) × password(4) | 120 | 89 / 31 | git 2.50 behind a Basic-auth gate (what it sends), stated outcome elsewhere (#40, #48) | 4 | 0 | ci (`test/adversarial.test.js`) | — |
+| `credential-cells` | main | enumerated | source(3) × user(6) × password(4) | 72 | 67 / 5 | git 2.50 behind a Basic-auth gate (what it sends), stated outcome elsewhere (#40, #48) | 1 | 0 | ci (`test/adversarial.test.js`) | — |
 | `wide-limits` | main | enumerated | server(2) × wanted(3) × sibling(4) × op(5) | 120 | 120 / 0 | git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47) | 5 | 0 | ci (`test/wide-limits.test.js`) | — |
 | `push-outcome` | main | enumerated | event(14) × framing(2) × delivery(13) × refs(3) × commands(2) × atomic(2) × format(4) × unpack(6) × status(10) × spread(31) | 4.3M (412,008 wrong on main) | scenarios from git 2.50 (push-outcome.observed.js) / the rest, from git source | expected() derived rule by rule from git v2.50.0 receive-pack/send-pack, checked against observed git | 6 | 33 | ci (`test/space/push-outcome.test.js`, `test/space/push-outcome-boundary.test.js`) | — |
 | `advertisement` | main | enumerated | protocol(8) × agent(3) × objectFormat(6) × fetch(33) × lsRefs(3) × serverOption(2) × sessionId(2) × malformed(9) × record(18) × eol(2) × framing(6) × request(4) × atomic(2) × options(2) × format(2) × flag(5) × server(2) | 64,417 | 317 / 64,100 | git ls-remote / git fetch / git push / git clone against a synthetic smart-HTTP server (advertisement and ls-refs rendered per cell, fetch forwarded to git http-backend) and receive-pack configured per cell; git's request lines and upload-pack's pack-objects invocation for the request cells; six real http-backend configurations render exactly | 19 | 15 | ci (`test/space/advertisement.test.js`) | — |
@@ -49,8 +49,6 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `fsck-tree` | main | enumerated | trigger(19) × mode(14) × name(48) × position(2) × content | 24,864 (5,056 wrong on main, 4,094 on train/1) | 24,864 / 0 | git fsck --strict (both streams, exit code, msgId) on every cell (packed + a loose hash-object --literally sample); git ls-tree modes; git read-tree with protectHFS+protectNTFS; git check-attr --source | 12 | 27 | ci (`test/space/fsck-tree.test.js`) | — |
 | `pack-cut` | main | enumerated | pack(9) × cut × path(6) × corrupt(176) × cap | 29,293 ply cells (9,609 cuts × paths, 352 corruptions, caps) | 9,609 cuts by git index-pack --strict nightly (PACK_SPACE=full); 1,373 per PR / 0 | git index-pack --strict on the same bytes: every cut refused, a corruption refused exactly where git refuses it; ply typed pack_corrupt (limit_exceeded where a cap decides), never ok, never untyped (#5) | 43 | 0 | ci (`test/space/pack-cut.test.js`) | — |
 | `pkt-frame` | main | enumerated | length(64) × relation(7) × position(8) × writer(18) | 444 framing + 3,562 position + 18 writer | 444 / positions: from the reader model and the consumer rules of connect.c/sideband.c | git upload-pack --stateless-rpc with GIT_TRACE_PACKET (packet_read_with_status) on every framing cell, a port of it as the model for the rest; format_packet for the writer (#6, #14) | 17 | 15 | ci (`test/space/pkt-frame.test.js`) | — |
-| `ssh-faults` | main | enumerated | phase(9) × defect(24) × pin(5) | 107 (216 phase × defect pairs, 109 that do not exist on the wire) + 10 pin | 107 / 0 | `git ls-remote` through OpenSSH against the same scripted faulty server (test/sshfake.js, kex-strict-s): same ok/refused class, one named divergence (rekey); ply typed, never `internal` or `timeout`, within 2 s; ssh-keygen -l for the pin | 38 | 0 | ci (`test/space/ssh-faults.test.js`) | — |
-| `ssh-service` | main | enumerated | service(2) × outcome(10) | 20 | 20 / 0 | git ls-remote / git push over OpenSSH against a real sshd whose forced command produces each outcome: same class, the same server line in git's stderr and in ply's message; one named divergence (empty v0 advertisement) | 5 | 2 | ci (`test/space/ssh-service.test.js`) | — |
 | `fsck-oracle` | main | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) | — |
 | `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 47 | 6 | ci (`test/adversarial.test.js`) | — |
 | `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 2 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
@@ -60,9 +58,8 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 17 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 12 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 54 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 51 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
-| `ssh` | main | curated | case | cases | — | OpenSSH sshd + git over ssh | 5 | 0 | ci (`test/sshgit.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
 | `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
 | `claims-owed` | pending #81 | curated | site | none yet | — | owed: cells in the owning space that reach each site (issue #81); then the rule moves back and this entry is deleted | 9 | 0 | ci | — |
@@ -89,7 +86,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (30: lossless 8, strict 4, replacement 18)
+## Decode sites (25: lossless 8, strict 4, replacement 13)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
@@ -100,7 +97,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/bytes.ts:57` decodeBytes() | strict | strict | `git-bytes` / content |
 | `src/bytes.ts:60` decodeBytes() | strict | strict | `git-bytes` / content |
 | `src/bytes.ts:89` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
-| `src/bytes.ts:105` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress and ssh stderr, quoted into a span or an error; a character cut by a frame waits for its tail |
+| `src/bytes.ts:105` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
 | `src/discover.ts:28` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
 | `src/fetch.ts:160` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
 | `src/fetch.ts:167` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
@@ -120,17 +117,12 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/receivecaps.ts:51` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/receivecaps.ts:58` receiveCaps() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/sign.ts:54` withGpgsig() | lossless | decodeBytes | `sign` / case |
-| `src/ssh.js:31` text() | replacement | td | excluded: protocol/display: ssh algorithm names (compared to ASCII constants) and disconnect descriptions |
-| `src/ssh.js:189` connect() | replacement | td | excluded: display/protocol: the ssh version line, checked for its ASCII "SSH-2.0-" prefix |
-| `src/sshgit.js:143` openChannel() | replacement | td | **HOLE (data path)** |
-| `src/sshgit.js:146` openChannel() | replacement | td | **HOLE (data path)** |
-| `src/sshgit.js:149` openChannel() | replacement | td | excluded: protocol: the capability list after the NUL (ASCII keywords) |
 
-## Holes (80)
+## Holes (74)
 
 Ranked by severity, then category (`git`: a git check with no space; `decisions`: a ply decision point with no registry entry; `failsites`: a fail site no cell reaches; `claims`: a registry claim its space does not back). Fail-site and claim holes are the ratchet's, from the last recorded run.
 
-### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements, ssh) (22)
+### Severity 1: checks on untrusted input (objects, packs, pkt-lines, reports, advertisements) (20)
 
 | category | id | where | what |
 |---|---|---|---|
@@ -143,8 +135,6 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;p>, &lt;sp - p>` | src/objects.ts:94 parseTree() | pack_corrupt: &lt;data>, &lt;p>, &lt;sp - p> |
 | decisions | `src/objects.ts#parseTree:pack_corrupt:&lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)>` | src/objects.ts:96 parseTree() | pack_corrupt: &lt;data>, &lt;sp>&lt;1>, &lt;nul - (sp + 1)> |
 | decisions | `src/read.js#flush:pack_corrupt:blob content hashes to …, not …` | src/read.js:203 flush() | pack_corrupt: blob content hashes to …, not … |
-| decisions | `src/sshgit.js#openChannel:decode:replacement:f.payload` | src/sshgit.js:146 openChannel() | &lt;decode:replacement>: f.payload |
-| decisions | `src/sshgit.js#openChannel:decode:replacement:first.payload` | src/sshgit.js:143 openChannel() | &lt;decode:replacement>: first.payload |
 | failsites | `src/edit.js#begin:pack_corrupt:expected blob, got type …` | src/edit.js:244 begin() | pack_corrupt: expected blob, got type … |
 | failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated … != header size …` | src/edit.js:277 streamBlobEdit() | pack_corrupt: inflated … != header size … |
 | failsites | `src/edit.js#streamBlobEdit:pack_corrupt:inflated bytes before header` | src/edit.js:257 streamBlobEdit() | pack_corrupt: inflated bytes before header |
@@ -161,13 +151,13 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 
 | category | id | where | what |
 |---|---|---|---|
-| decisions | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts:164 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
-| decisions | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts:142 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
-| failsites | `src/rebase.ts#pickCommit:not_linear:… has … parents; only single-parent commits are picked` | src/rebase.ts:212 pickCommit() | not_linear: … has … parents; only single-parent commits are picked |
-| failsites | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts:164 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
-| failsites | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts:142 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
+| decisions | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts:169 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
+| decisions | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts:144 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
+| failsites | `src/rebase.ts#pickCommit:not_linear:… has … parents; only single-parent commits are picked` | src/rebase.ts:217 pickCommit() | not_linear: … has … parents; only single-parent commits are picked |
+| failsites | `src/rebase.ts#rebaseBranch:merge_conflict:squash of … onto … conflicts: …` | src/rebase.ts:169 rebaseBranch() | merge_conflict: squash of … onto … conflicts: … |
+| failsites | `src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth` | src/rebase.ts:144 rebaseBranch() | unrelated_histories: … and … share no common ancestor within the search depth |
 
-### Severity 3: the rest (caller input, limits, local I/O) (53)
+### Severity 3: the rest (caller input, limits, local I/O) (49)
 
 | category | id | where | what |
 |---|---|---|---|
@@ -176,20 +166,18 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
 | decisions | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
 | decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:422 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| decisions | `src/merge.ts#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.ts:429 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
-| decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:435 attributeTree() | not_found: attributes ref … not found |
-| decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:373 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
-| decisions | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:513 mergeBranch() | bad_request: author is required for a merge commit |
-| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts:481 mergeBranch() | not_found: ref … not found |
-| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts:481 mergeBranch() | not_found: ref … not found |
+| decisions | `src/merge.ts#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.ts:436 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
+| decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:442 attributeTree() | not_found: attributes ref … not found |
+| decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:379 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
+| decisions | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:523 mergeBranch() | bad_request: author is required for a merge commit |
+| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts:492 mergeBranch() | not_found: ref … not found |
+| decisions | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts:492 mergeBranch() | not_found: ref … not found |
 | decisions | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts:21 negotiate() | bad_request: negotiate rounds must be an integer |
-| decisions | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts:52 linearChain() | limit_exceeded: rebase chain |
-| decisions | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts:203 pickCommit() | bad_request: commit must be a 40-hex oid |
-| decisions | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts:208 pickCommit() | not_found: ref … not found |
-| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| decisions | `src/ssh-node.js#nodeStream:timeout:socket timeout` | src/ssh-node.js:13 nodeStream() | timeout: socket timeout |
-| decisions | `src/ssh-workers.js#armed:timeout:socket timeout` | src/ssh-workers.js:9 armed() | timeout: socket timeout |
+| decisions | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts:53 linearChain() | limit_exceeded: rebase chain |
+| decisions | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts:206 pickCommit() | bad_request: commit must be a 40-hex oid |
+| decisions | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts:212 pickCommit() | not_found: ref … not found |
+| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts:137 rebaseBranch() | not_found: ref … not found |
+| decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts:137 rebaseBranch() | not_found: ref … not found |
 | decisions | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts:82 coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
 | decisions | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
 | decisions | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
@@ -201,23 +189,21 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/checkout-node.js#writeFiles:bad_request:already exists` | src/checkout-node.js:76 writeFiles() | bad_request: already exists |
 | failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts:422 fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
 | failsites | `src/fetch.ts#once:limit_exceeded:object size#2` | src/fetch.ts:403 once() | limit_exceeded: object size |
-| failsites | `src/merge.ts#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.ts:429 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
-| failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:435 attributeTree() | not_found: attributes ref … not found |
-| failsites | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:373 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
-| failsites | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:513 mergeBranch() | bad_request: author is required for a merge commit |
-| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts:481 mergeBranch() | not_found: ref … not found |
-| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts:481 mergeBranch() | not_found: ref … not found |
+| failsites | `src/merge.ts#attributeTree:bad_request:attributes must be null, ours, theirs, base, a ref or a …` | src/merge.ts:436 attributeTree() | bad_request: attributes must be null, ours, theirs, base, a ref or a commit oid |
+| failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts:442 attributeTree() | not_found: attributes ref … not found |
+| failsites | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts:379 blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
+| failsites | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts:523 mergeBranch() | bad_request: author is required for a merge commit |
+| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts:492 mergeBranch() | not_found: ref … not found |
+| failsites | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts:492 mergeBranch() | not_found: ref … not found |
 | failsites | `src/negotiate.ts#negotiate:bad_request:negotiate rounds must be an integer` | src/negotiate.ts:21 negotiate() | bad_request: negotiate rounds must be an integer |
 | failsites | `src/push.ts#push:bad_request:push: oids must be 40-hex` | src/push.ts:294 push() | bad_request: push: oids must be 40-hex |
 | failsites | `src/read.js#flush:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:200 flush() | &lt;rethrown or pack_corrupt>: &lt;e> |
 | failsites | `src/read.js#openBlob:&lt;rethrown or pack_corrupt>:&lt;e>` | src/read.js:169 openBlob() | &lt;rethrown or pack_corrupt>: &lt;e> |
-| failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts:52 linearChain() | limit_exceeded: rebase chain |
-| failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts:203 pickCommit() | bad_request: commit must be a 40-hex oid |
-| failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts:208 pickCommit() | not_found: ref … not found |
-| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts:134 rebaseBranch() | not_found: ref … not found |
-| failsites | `src/ssh-node.js#nodeStream:timeout:socket timeout` | src/ssh-node.js:13 nodeStream() | timeout: socket timeout |
-| failsites | `src/ssh-workers.js#armed:timeout:socket timeout` | src/ssh-workers.js:9 armed() | timeout: socket timeout |
+| failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts:53 linearChain() | limit_exceeded: rebase chain |
+| failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts:206 pickCommit() | bad_request: commit must be a 40-hex oid |
+| failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts:212 pickCommit() | not_found: ref … not found |
+| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts:137 rebaseBranch() | not_found: ref … not found |
+| failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts:137 rebaseBranch() | not_found: ref … not found |
 | failsites | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts:82 coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
 | failsites | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
 | failsites | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |

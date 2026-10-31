@@ -2,7 +2,7 @@
  "note": "Holes per category (test/space/holes.js). Only ever lowered: npm run spaces -- --ratchet. A category at 0 is enforced.",
  "categories": {
   "decisions": {
-   "count": 36,
+   "count": 32,
    "ids": [
     "src/bytes.ts#decodeStrict:decode:strict:b",
     "src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string",
@@ -30,10 +30,6 @@
     "src/rebase.ts#rebaseBranch:not_found:ref … not found",
     "src/rebase.ts#rebaseBranch:not_found:ref … not found#2",
     "src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth",
-    "src/ssh-node.js#nodeStream:timeout:socket timeout",
-    "src/ssh-workers.js#armed:timeout:socket timeout",
-    "src/sshgit.js#openChannel:decode:replacement:f.payload",
-    "src/sshgit.js#openChannel:decode:replacement:first.payload",
     "src/transport.ts#coded:<code>:<String((e as Loose)?.message ?? e)>",
     "src/tree-node.js#keep:limit_exceeded:directory bytes",
     "src/tree-node.js#keep:limit_exceeded:files",
@@ -50,7 +46,7 @@
    ]
   },
   "failsites": {
-   "count": 42,
+   "count": 40,
    "ids": [
     "src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string",
     "src/checkout-node.js#slurp:limit_exceeded:symlink target",
@@ -86,8 +82,6 @@
     "src/rebase.ts#rebaseBranch:not_found:ref … not found",
     "src/rebase.ts#rebaseBranch:not_found:ref … not found#2",
     "src/rebase.ts#rebaseBranch:unrelated_histories:… and … share no common ancestor within the search depth",
-    "src/ssh-node.js#nodeStream:timeout:socket timeout",
-    "src/ssh-workers.js#armed:timeout:socket timeout",
     "src/transport.ts#coded:<code>:<String((e as Loose)?.message ?? e)>",
     "src/tree-node.js#keep:limit_exceeded:directory bytes",
     "src/tree-node.js#keep:limit_exceeded:files",
