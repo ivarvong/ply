@@ -20,7 +20,9 @@ import { bestBases, mergeBase } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, lsRefs } from '../src/lsrefs.js';
-import { parseReportStatus, classifyReport, decideOutcome, rejectionCode, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
+import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions } from '../src/receivecaps.js';
+import { orThrow } from '../src/errors.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
@@ -745,27 +747,18 @@ test('ls-refs lines and report-status', () => {
   const long = 'not a ref line '.repeat(8);
   throws(() => parseLsRefLine(long), 'protocol', `ls-refs: malformed line ${JSON.stringify(long.slice(0, 60))}`);
 
-  const ok = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'ok refs/heads/other']);
-  assert.equal(ok.ok, true);
-  assert.equal(ok.unpack, 'ok');
-  assert.equal(ok.refs.length, 2);
-  const ng = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'ng refs/heads/other failed to lock', 'option old-oid abc', 'option quiet']);
-  assert.equal(ng.ok, false);
-  assert.equal(ng.refs[1].ref, 'refs/heads/other');
-  assert.equal(ng.refs[1].reason, 'failed to lock');
-  assert.equal(ng.refs[1].options['old-oid'], 'abc');
-  // #16: option names are the server's; a `__proto__` or `constructor` option is recorded, and an absent one reads as absent
-  const named = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'option __proto__ x', 'option constructor']);
-  assert.deepEqual(Object.entries(named.refs[0].options), [['__proto__', 'x'], ['constructor', true]]);
-  assert.equal(ok.refs[0].options.constructor, undefined);
-  assert.equal('toString' in ok.refs[0].options, false);
-  assert.equal(ng.refs[1].options.quiet, true);
-  assert.equal(parseReportStatus(['unpack error']).ok, false);
-  assert.equal(parseReportStatus(['unpack ok']).unpack, 'ok');
-  assert.equal(parseReportStatus(['ok refs/heads/main']).ok, false);
-  assert.equal(parseReportStatus(['unpackok', 'ok refs/heads/main']).unpack, null);
-  throws(() => parseReportStatus(['unpack failed', 'unpack ok', 'ok refs/heads/main']), 'protocol', 'report: duplicate unpack');
-  throws(() => parseReportStatus(['unpack ok', 'ok refs/heads/main', 'unpack ok']), 'protocol', 'report: duplicate unpack');
+  // one report parser (classifyReport): the lines parseReportStatus read, judged by git's grammar
+  const rs = (lines, refs = ['refs/heads/main', 'refs/heads/other']) => classifyReport(lines.map(l => te.encode(`${l}\n`)), refs.map(ref => ({ ref })));
+  assert.deepEqual(rs(['unpack ok', 'ok refs/heads/main', 'ok refs/heads/other']), { tag: 'statuses', refs: [{ ref: 'refs/heads/main', ok: true, reason: '' }, { ref: 'refs/heads/other', ok: true, reason: '' }] });
+  assert.deepEqual(rs(['unpack ok', 'ok refs/heads/main', 'ng refs/heads/other failed to lock']).refs[1], { ref: 'refs/heads/other', ok: false, reason: 'failed to lock' });
+  // report-status-v2 option lines come only from a proc-receive hook (not modelled): the report is not git's plain one
+  assert.deepEqual(rs(['unpack ok', 'ok refs/heads/main', 'ng refs/heads/other failed to lock', 'option old-oid abc']), { tag: 'malformed', why: 'a line is not a ref status' });
+  assert.deepEqual(rs(['unpack error', 'ok refs/heads/main', 'ok refs/heads/other']), { tag: 'malformed', why: 'no git unpack line first' });
+  assert.deepEqual(rs(['ok refs/heads/main']), { tag: 'malformed', why: 'no git unpack line first' });
+  assert.deepEqual(rs(['unpackok', 'ok refs/heads/main']), { tag: 'malformed', why: 'no git unpack line first' });
+  // send-pack.c receive_unpack_status reads one unpack line; a second is an invalid ref status
+  assert.deepEqual(rs(['unpack index-pack abnormal exit', 'unpack ok', 'ok refs/heads/main'], ['refs/heads/main']), { tag: 'malformed', why: 'a line is not a ref status' });
+  assert.deepEqual(rs(['unpack ok', 'ok refs/heads/main', 'unpack ok'], ['refs/heads/main']), { tag: 'malformed', why: 'a line is not a ref status' });
 });
 
 test('ssh url, kex, and gitattributes lines', () => {
@@ -903,12 +896,10 @@ test('boundaries between a thrown error and its neighbour', async () => {
   assert.equal(parseLsRefLine(`${id} refs/heads/a`).name, 'refs/heads/a');
   assert.equal(parseLsRefLine(`${id} refs/heads/a symref-target:val`)['symref-target'], 'val');
   assert.equal(parseLsRefLine(`${id} refs/heads/a sym:val`).sym, undefined);
-  const report = parseReportStatus(['unpack ok', 'ok refs/heads/main']);
-  assert.equal(report.ok, true);
-  assert.equal(report.refs[0].ref, 'refs/heads/main');
-  const opted = parseReportStatus(['unpack ok', 'ok refs/heads/main', 'option alone']);
-  assert.equal(opted.refs[0].options.alone, true);
-  assert.equal(parseReportStatus(['option alone']).refs.length, 0);
+  const main = [{ ref: 'refs/heads/main' }];
+  assert.deepEqual(classifyReport(['unpack ok\n', 'ok refs/heads/main\n'].map(l => te.encode(l)), main), { tag: 'statuses', refs: [{ ref: 'refs/heads/main', ok: true, reason: '' }] });
+  assert.equal(classifyReport(['unpack ok\n', 'ok refs/heads/main\n', 'option alone\n'].map(l => te.encode(l)), main).tag, 'malformed');
+  assert.equal(classifyReport([te.encode('option alone\n')], main).tag, 'malformed');
 
   let st = v2Init();
   const line = s => ({ kind: 'data', payload: te.encode(s) });
@@ -998,9 +989,10 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(2), Uint8Array.of(DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 2, 2)])), 'pack_corrupt', 'delta: copy out of range');
   throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(2, 9, 9)])), 'pack_corrupt', 'delta: insert out of range');
 
-  assert.equal(parseReportStatus([]).ok, false);
-  assert.equal(parseReportStatus(['unpack ok']).ok, false);
-  assert.equal(parseReportStatus(['unpack ok', 'ng refs/heads/a no']).ok, false);
+  const one = [{ ref: 'refs/heads/a' }];
+  assert.deepEqual(classifyReport([], one), { tag: 'malformed', why: 'no git unpack line first' });
+  assert.deepEqual(classifyReport([te.encode('unpack ok\n')], one), { tag: 'malformed', why: 'no status for refs/heads/a' });
+  assert.deepEqual(decideOutcome(classifyReport(['unpack ok\n', 'ng refs/heads/a no\n'].map(l => te.encode(l)), one)), { tag: 'rejected', code: 'push_rejected', refs: [{ ref: 'refs/heads/a', reason: 'no', cls: 'rejected' }] });
 
   const ref = `${oid(4)} refs/heads/a :val`;
   assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a' });
@@ -1326,9 +1318,14 @@ test('aggregate caps fail closed before allocation', async () => {
   st = v2Step(v2Init(withLimits({ maxSectionLines: 2 })), line('wanted-refs')).state;
   assert.equal(v2Step(st, line('abc')).state.section, 'wanted-refs');
 
-  throws(() => parseReportStatus(['unpack ok', 'ok refs/heads/a'], { maxReportLines: 1 }), 'limit_exceeded', 'report lines 2 exceeds limit 1');
-  assert.equal(parseReportStatus(['unpack ok'], { maxReportLines: 1 }).unpack, 'ok');
-  throws(() => parseReportStatus(['unpack ok'], {}), 'bad_request', 'limits.maxReportLines must be a finite non-negative number');
+  // the report's line bound is the read's (push: maxReportLines), and every limit push reads is checked before anything is sent
+  const delA = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }] };
+  for (const key of ['maxRefs', 'maxReportLines', 'maxPackBytes']) {
+    const r = planPush(delA, withLimits({ [key]: undefined }));
+    assert.equal(r.ok, false); assert.equal(r.error.code, 'bad_request'); assert.equal(r.error.message, `limits.${key} must be a finite non-negative number`);
+  }
+  const planned = orThrow(planPush(delA, withLimits({ maxReportLines: 1, maxPackBytes: 2 })));
+  assert.deepEqual([planned.maxReportLines, planned.maxPack, planned.needPack, planned.checked], [1, 2, false, undefined]);
 
   const base = te.encode('abcd');
   const delta = makeDelta(base, te.encode('abXY')).delta;
@@ -1378,7 +1375,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const commands = [{ ref: 'refs/heads/a' }, { ref: 'refs/heads/b' }];
   const mixed = classifyReport(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'].map(l => te.encode(l)), commands);
   assert.deepEqual(decideOutcome(mixed, { atomic: true }), { tag: 'ambiguous', why: 'atomic push split: some refs ok, some ng' });
-  assert.deepEqual(decideOutcome(mixed), { tag: 'partial', landed: ['refs/heads/a'], rejected: [{ ref: 'refs/heads/b', reason: 'failed to lock' }] });
+  assert.deepEqual(decideOutcome(mixed), { tag: 'partial', landed: ['refs/heads/a'], rejected: [{ ref: 'refs/heads/b', reason: 'failed to lock', cls: 'cas' }] });
 
   const refLine = `${oid(4)} refs/heads/main\n`;
   const framesOf = list => ({
@@ -1408,10 +1405,14 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID },
     { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
   ];
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: true }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false }), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
+  const all = new Set(['atomic', 'push-options']);
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: true })) }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
+  // atomic and push options only as checked capabilities: an untyped caller's raw fields are refused before anything is sent
+  for (const raw of [{ atomic: true }, { pushOptions: ['x'] }]) await assert.rejects(push(receipt(), { commands: deletes, sideband: false, ...raw }), e => e.code === 'bad_request' && e.message === 'push: unchecked atomic or push options');
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false, pushOptions: [] }), e => e.code === 'push_partial');
+  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: false })) }), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
   await assert.rejects(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false }), e => e.code === 'bad_request' && e.what === 'ref');
-  await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, pushOptions: ['a\nb'] }), e => e.code === 'bad_request' && e.what === 'push option');
+  await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, checked: orThrow(checkPushCaps(all, { pushOptions: ['a\nb'] })) }), e => e.code === 'bad_request' && e.what === 'push option');
   await assert.rejects(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push commands');
 
   const fetchImpl = (_url, init) => new Promise((_resolve, reject) => {
@@ -1614,7 +1615,7 @@ test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const total = fl.reduce((n, f) => n + (f.payload?.length ?? 0), 0);
   const pushT = (frames, max) => ({ limits: withLimits({ maxPackBytes: max }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
   const fits = await push(pushT(fl, total), { commands: del, sideband: true });
-  assert.equal(fits.report.ok, true); assert.equal(fits.hookOutput.length, 50);
+  assert.equal(fits.report.tag, "statuses"); assert.equal(fits.hookOutput.length, 50);
   await assert.rejects(push(pushT(fl, total - 1), { commands: del, sideband: true }),
     e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.got === total && e.cause.max === total - 1);
   // an endless band 2 is cut at the cap, not read until the timer: reading stops on the frame that crosses it
@@ -1645,36 +1646,100 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n']), 'no status for refs/heads/b');
   assert.equal(why(['unpack index-pack abnormal exit\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), 'unpack failed, a ref is not "unpacker error"');
   assert.equal(why(['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b unpacker error\n']), '"unpacker error" beside "unpack ok"');
-  for (const status of GIT_UNPACK_ERRORS) assert.deepEqual(cls([`unpack ${status}\n`, 'ng refs/heads/a unpacker error\n', 'ng refs/heads/b unpacker error\n']), { tag: 'unpackFailed', status });
+  const unpackerRefs = [{ ref: 'refs/heads/a', ok: false, reason: 'unpacker error' }, { ref: 'refs/heads/b', ok: false, reason: 'unpacker error' }];
+  for (const status of GIT_UNPACK_ERRORS) assert.deepEqual(cls([`unpack ${status}\n`, 'ng refs/heads/a unpacker error\n', 'ng refs/heads/b unpacker error\n']), { tag: 'unpackFailed', status, refs: unpackerRefs });
   assert.equal(GIT_UNPACK_ERRORS.length, 8);
   assert.deepEqual(cls(['unpack ok\n', 'ng refs/heads/b hook declined\n', 'ok refs/heads/a\n']), { tag: 'statuses', refs: [{ ref: 'refs/heads/b', ok: false, reason: 'hook declined' }, { ref: 'refs/heads/a', ok: true, reason: '' }] });
 
-  const failed = { tag: 'unpackFailed', status: 'index-pack abnormal exit' };
-  assert.deepEqual(decideOutcome(failed), { tag: 'rejected', code: 'push_rejected' });
+  const failed = { tag: 'unpackFailed', status: 'index-pack abnormal exit', refs: unpackerRefs };
+  assert.deepEqual(decideOutcome(failed), { tag: 'rejected', code: 'push_rejected', refs: unpackerRefs.map(r => ({ ref: r.ref, reason: r.reason, cls: 'rejected' })) });
   assert.deepEqual(decideOutcome(failed, { pack: false }), { tag: 'ambiguous', why: 'unpack failed but no pack was sent' });
   assert.deepEqual(decideOutcome({ tag: 'malformed', why: 'w' }), { tag: 'ambiguous', why: 'w' });
-  assert.deepEqual(decideOutcome({ tag: 'weird' }), { tag: 'ambiguous', why: 'report shape weird' });
-  const ngs = (...reasons) => ({ unpack: 'ok', refs: reasons.map(reason => ({ ok: false, reason })) });
-  assert.equal(rejectionCode(ngs('failed to update ref')), 'cas_conflict');
-  for (const r of ['xfailed to update ref', 'failed to update refs', 'a bad ref', 'bad refs']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
-  assert.equal(rejectionCode({ unpack: 'unpack-objects abnormal exit', refs: [{ ok: false, reason: 'failed to update ref' }] }), 'push_rejected');
-  assert.equal(rejectionCode({ unpack: 'ok', refs: [{ ok: true }, { ok: false, reason: 'stale ref' }] }), 'cas_conflict');
+  assert.deepEqual(decideOutcome({ tag: 'broken', why: 'b', remote: 'r' }), { tag: 'ambiguous', why: 'b' });
+  // a shape outside the union is a programmer bug, not an outcome
+  assert.throws(() => decideOutcome({ tag: 'weird' }), /unreachable/);
+  // the refusal of an all-ng report, by the classes present (the old rejectionCode, now part of the outcome)
+  const sts = (...rs) => ({ tag: 'statuses', refs: rs.map(([ref, ok, reason]) => ({ ref, ok, reason })) });
+  const ngs = (...reasons) => sts(...reasons.map((r, i) => [`r${i}`, false, r]));
+  const tagOf = shape => { const o = decideOutcome(shape); return o.tag === 'rejected' ? o.code : o.tag; };
+  assert.equal(tagOf(ngs('failed to update ref')), 'cas_conflict');
+  for (const r of ['xfailed to update ref', 'failed to update refs', 'a bad ref', 'bad refs']) assert.equal(tagOf(ngs(r)), 'push_rejected', r);
+  assert.equal(tagOf({ tag: 'unpackFailed', status: 'unpack-objects abnormal exit', refs: [{ ref: 'r0', ok: false, reason: 'failed to update ref' }] }), 'push_rejected');
+  assert.deepEqual(decideOutcome(ngs('stale ref')), { tag: 'rejected', code: 'cas_conflict', refs: [{ ref: 'r0', reason: 'stale ref', cls: 'cas' }] });
   // the class table (test/space/push-ng.space.js): an atomic CAS loss, git >= 2.51's batched texts, denyNonFastForwards,
   // a proc-receive hook that did not answer, and the precedence refusal > non-fast-forward > cas
-  for (const r of ['atomic transaction failed', 'bad ref', 'incorrect old value provided', 'reference already exists', 'reference does not exist']) assert.equal(rejectionCode(ngs(r)), 'cas_conflict', r);
-  for (const r of ['refname conflict', 'hook declined', 'funny refname', 'atomic push failure']) assert.equal(rejectionCode(ngs(r)), 'push_rejected', r);
-  assert.equal(rejectionCode(ngs('non-fast-forward')), 'not_fast_forward');
-  assert.equal(rejectionCode(ngs('non-fast-forward', 'atomic push failure')), 'not_fast_forward');
-  assert.equal(rejectionCode(ngs('non-fast-forward', 'failed to update ref')), 'not_fast_forward');
-  assert.equal(rejectionCode(ngs('non-fast-forward', 'hook declined')), 'push_rejected');
-  assert.equal(rejectionCode(ngs('failed to update ref', 'atomic push failure')), 'cas_conflict');
-  assert.equal(rejectionCode(ngs('proc-receive failed to report status')), 'ambiguous');
-  assert.equal(rejectionCode(ngs('fail to run proc-receive hook', 'hook declined')), 'push_rejected');
-  assert.equal(rejectionCode(ngs('rejected: non-fast-forward')), 'cas_conflict', 'a host\'s wording keeps its heuristic');
-  const sts = (...rs) => ({ tag: 'statuses', refs: rs.map(([ref, ok, reason]) => ({ ref, ok, reason })) });
+  for (const r of ['atomic transaction failed', 'bad ref', 'incorrect old value provided', 'reference already exists', 'reference does not exist']) assert.equal(tagOf(ngs(r)), 'cas_conflict', r);
+  for (const r of ['refname conflict', 'hook declined', 'funny refname', 'atomic push failure']) assert.equal(tagOf(ngs(r)), 'push_rejected', r);
+  assert.equal(tagOf(ngs('non-fast-forward')), 'not_fast_forward');
+  assert.equal(tagOf(ngs('non-fast-forward', 'atomic push failure')), 'not_fast_forward');
+  assert.equal(tagOf(ngs('non-fast-forward', 'failed to update ref')), 'not_fast_forward');
+  assert.equal(tagOf(ngs('non-fast-forward', 'hook declined')), 'push_rejected');
+  assert.equal(tagOf(ngs('failed to update ref', 'atomic push failure')), 'cas_conflict');
+  assert.equal(tagOf(ngs('fail to run proc-receive hook', 'hook declined')), 'ambiguous', 'a hook that may have acted outranks a refusal');
+  assert.equal(tagOf(ngs('rejected: non-fast-forward')), 'cas_conflict', 'a host\'s wording keeps its heuristic');
+  for (const [r, c] of [['proc-receive failed to report status', 'ambiguous'], ['fail to run proc-receive hook', 'ambiguous'], ['atomic push failure', 'innocent'], ['non-fast-forward', 'nff'], ['failed to lock', 'cas'], ['fetch first', 'cas'], ['x already exists', 'cas'], ['failed to lock x', 'rejected']]) assert.equal(ngClass(r), c, r);
   assert.deepEqual(decideOutcome(sts(['a', true, ''], ['b', false, 'fail to run proc-receive hook'])), { tag: 'ambiguous', why: 'proc-receive: fail to run proc-receive hook' });
   assert.deepEqual(decideOutcome(sts(['a', false, 'proc-receive failed to report status'])), { tag: 'ambiguous', why: 'proc-receive: proc-receive failed to report status' });
-  assert.deepEqual(decideOutcome(sts(['a', false, 'non-fast-forward'])), { tag: 'rejected', code: 'not_fast_forward' });
+  assert.deepEqual(decideOutcome(sts(['a', false, 'non-fast-forward'])), { tag: 'rejected', code: 'not_fast_forward', refs: [{ ref: 'a', reason: 'non-fast-forward', cls: 'nff' }] });
+
+  // the outcome as a Result: the error a caller matches on, per tag
+  const ctx = { report: null, hookOutput: 'h', remote: undefined, commands: [{ ref: 'a', oldOid: oid(1), newOid: oid(2) }, { ref: 'b', oldOid: ZERO_OID, newOid: oid(2) }] };
+  assert.deepEqual(outcomeResult({ tag: 'landed' }, ctx), { ok: true, value: null });
+  const errOf = (o, c = ctx) => { const r = outcomeResult(o, c); assert.equal(r.ok, false); return r.error; };
+  const ref = (name, reason, c) => ({ ref: name, reason, cls: c });
+  let e = errOf({ tag: 'rejected', code: 'push_rejected', refs: [ref('a', 'hook declined', 'rejected')] });
+  assert.deepEqual([e.code, e.message, e.hookOutput, e.report], ['push_rejected', 'push rejected: hook declined', 'h', null]);
+  e = errOf({ tag: 'rejected', code: 'not_fast_forward', refs: [ref('a', 'non-fast-forward', 'nff')] });
+  assert.deepEqual([e.code, e.message], ['not_fast_forward', 'push rejected: non-fast-forward']);
+  // cas_conflict: expected is the culprit's own old oid (null for a create), actual unknown (receive-pack does not say)
+  e = errOf({ tag: 'rejected', code: 'cas_conflict', refs: [ref('a', 'atomic push failure', 'innocent'), ref('b', 'reference already exists', 'cas')] });
+  assert.deepEqual([e.code, e.message, e.expected, e.actual], ['cas_conflict', 'push rejected: atomic push failure', null, null]);
+  e = errOf({ tag: 'rejected', code: 'cas_conflict', refs: [ref('a', 'stale ref', 'cas')] });
+  assert.deepEqual([e.expected, e.actual], [oid(1), null]);
+  e = errOf({ tag: 'partial', landed: ['a'], rejected: [ref('b', 'hook declined', 'rejected')] });
+  assert.deepEqual([e.code, e.message, e.landed, e.rejected[0].ref], ['push_partial', 'push partially applied: a updated; b (hook declined) refused', ['a'], 'b']);
+  e = errOf({ tag: 'ambiguous', why: 'w' });
+  assert.deepEqual([e.code, e.message, e.original], ['ambiguous', 'push outcome unknown: w', undefined]);
+  e = errOf({ tag: 'ambiguous', why: 'band 3' }, { ...ctx, remote: 'boom' });
+  assert.deepEqual([e.code, e.message, e.original], ['ambiguous', 'push outcome unknown: remote: boom: band 3', 'remote_error']);
+  assert.throws(() => outcomeResult({ tag: 'weird' }, ctx), /unreachable/);
+
+  // the report state machine: absorbing malformed, one status per ref, the finish checks
+  let rst = reportInit([{ ref: 'a' }]);
+  assert.deepEqual(reportFinish(rst), { tag: 'malformed', why: 'no git unpack line first' });
+  rst = reportStep(rst, te.encode('unpack ok\n'));
+  assert.equal(rst.tag, 'refs');
+  assert.deepEqual(reportFinish(rst), { tag: 'malformed', why: 'no status for a' });
+  const bad = reportStep(rst, te.encode('xx\n'));
+  assert.equal(reportStep(bad, te.encode('ok a\n')), bad);
+  assert.throws(() => reportStep({ tag: 'weird' }, te.encode('x\n')), /unreachable/);
+  assert.throws(() => reportFinish({ tag: 'weird' }), /unreachable/);
+
+  // the checked capabilities: the request asks for atomic / push-options only from them
+  const caps = (...c) => new Set(c);
+  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: ZERO_OID }], {}), ['report-status', 'side-band-64k', 'delete-refs', 'agent=ply/0.1.0']);
+  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], { sideband: false, reportV2: true }, orThrow(checkPushCaps(caps('atomic', 'push-options'), { atomic: true, pushOptions: ['o'] }))), ['report-status-v2', 'atomic', 'push-options', 'agent=ply/0.1.0']);
+  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], {}, orThrow(checkPushCaps(caps(), {}))), ['report-status', 'side-band-64k', 'agent=ply/0.1.0']);
+  assert.equal(capsProblem(caps('atomic')), null);
+  assert.deepEqual(capsProblem(caps('object-format=sha256', 'atomic'), { atomic: true }), { tag: 'objectFormat', format: 'sha256' });
+  assert.deepEqual(capsProblem(caps('object-format=sha1'), { atomic: true }), { tag: 'noAtomic' });
+  assert.deepEqual(capsProblem(caps('atomic'), { atomic: true, pushOptions: ['x'] }), { tag: 'noPushOptions' });
+  assert.equal(capsProblem(caps(), { pushOptions: [] }), null);
+  const unsup = checkPushCaps(caps('agent=x'), { pushOptions: ['x'] });
+  assert.deepEqual([unsup.ok, unsup.error.code, unsup.error.message, unsup.error.caps], [false, 'unsupported', 'server does not advertise push-options', ['agent=x']]);
+  assert.equal(checkPushCaps(caps('object-format=sha256')).error.message, 'server repository is object-format sha256');
+  assert.equal(checkPushCaps(caps(), { atomic: true }).error.message, 'server does not advertise atomic');
+  assert.deepEqual(orThrow(checkPushCaps(caps('push-options'), { pushOptions: ['p'] })), { atomic: false, pushOptions: ['p'] });
+  // pushWithOptions reads the advertisement only when the push asks for atomic or push options
+  let adverts = 0;
+  const advertised = advertCaps => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
+    async advertise() { adverts++; return concat([pkt(`${oid(1)} refs/heads/a\0${advertCaps}\n`), FLUSH]); },
+    async *frames() { yield { kind: 'data', payload: te.encode('unpack ok\n') }; yield { kind: 'data', payload: te.encode('ok refs/heads/a\n') }; yield { kind: 'flush' }; } });
+  const del1 = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: false };
+  assert.equal((await pushWithOptions(advertised('report-status'), del1)).report.tag, 'statuses'); assert.equal(adverts, 0);
+  await assert.rejects(pushWithOptions(advertised('report-status'), { ...del1, atomic: true }), e2 => e2.code === 'unsupported' && e2.caps.join() === 'report-status'); assert.equal(adverts, 1);
+  assert.equal((await pushWithOptions(advertised('report-status atomic'), { ...del1, atomic: true })).report.tag, 'statuses'); assert.equal(adverts, 2);
+  assert.deepEqual(parseReceiveAdvert([{ kind: 'flush' }]), { ok: true, value: new Set() });
 
   // band 2 is kept as a 4096-character tail, counted per frame
   let st = streamInit(true);
@@ -1688,7 +1753,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   const report = (...lines) => band(1, ...lines.map(l => pkt(l)), FLUSH);
   const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
   await assert.rejects(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
-  await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report.unpack === 'ok*');
+  await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
   await assert.rejects(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
   await assert.rejects(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
   const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
@@ -1697,7 +1762,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   await assert.rejects(push(big, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
   const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes
   const ok = await push(fits, del);
-  assert.equal(ok.report.ok, true); assert.equal(ok.hookOutput, '');
+  assert.deepEqual(ok.report, { tag: 'statuses', refs: [{ ref: 'refs/heads/a', ok: true, reason: '' }] }); assert.equal(ok.hookOutput, '');
 });
 
 // A commit-only v2 server over a hand graph ({ name: [parent names] }), answering `want` + `deepen N` + `filter tree:0`

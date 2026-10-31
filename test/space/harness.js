@@ -1,7 +1,12 @@
 // Runs one rendered cell through the real push path: `push()` over a fake transport that frames the response bytes
 // exactly as http.js does (pktStep over the body, pktFinish at the end), no network. Returns the outcome as a tagged union.
 // PUSH_SPACE_SRC=<dir>: run the space against another copy of src/ (e.g. `git archive main src`) to see where it disagrees
-const { push } = await import(process.env.PUSH_SPACE_SRC ? `${process.env.PUSH_SPACE_SRC}/push.js` : '../../src/push.js');
+const SRC = process.env.PUSH_SPACE_SRC ?? '../../src';
+const { push } = await import(`${SRC}/push.js`);
+// atomic and push options reach push() only as capabilities checked against an advertisement that has them (the cells
+// are about the response, not the advertisement: test/space/advertisement.test.js is). An older src/ without
+// checkPushCaps took them raw.
+const { checkPushCaps } = await import(`${SRC}/receivecaps.js`);
 import { pktInit, pktStep, pktFinish } from '../../src/pktline.js';
 import { withLimits } from '../../src/limits.js';
 import { thrown as fail } from '../../src/errors.js';
@@ -30,7 +35,9 @@ export function fakeTransport(response, limits) {
 export async function runPush(rendered, response = rendered.response) {
   const t = fakeTransport(response ?? { drop: 'never' }, rendered.limits);
   try {
-    await push(t, { commands: rendered.commands, objects: [], ...rendered.opts });
+    const { atomic = false, pushOptions = [], ...opts } = rendered.opts ?? {};
+    const checked = checkPushCaps && (atomic || pushOptions.length > 0) ? checkPushCaps(new Set(['atomic', 'push-options']), { atomic, pushOptions }).value : undefined;
+    await push(t, { commands: rendered.commands, objects: [], ...(checkPushCaps ? { ...opts, ...(checked ? { checked } : {}) } : rendered.opts) });
     return { tag: 'landed', refs: rendered.commands.map(c => c.ref) };
   } catch (e) {
     if (t.sent === 0 && (e.code === 'bad_request' || e.code === 'limit_exceeded')) return { tag: 'preSend', code: e.code, what: e.what };

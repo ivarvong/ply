@@ -147,7 +147,7 @@ operations   edit · push tree · merge · rebase · cherry-pick · revert      
 commands     lsRefs · packStream/fetchObject · fetchPack/negotiate · push · discover · receiveCaps   free functions over a transport
 transport    the contract (transport.js): t.frames(service, body, span, hints) · t.advertise(service, span)
              implementations: http.js (one POST per command) · sshgit.js (one channel per service, over ssh.js)
-protocol     pure step functions: pktStep · v2Step · spStep · scanStep · parseReportStatus · threeWay · decideHead
+protocol     pure step functions: pktStep · v2Step · spStep · scanStep · streamStep · reportStep · threeWay · decideHead
 codecs       pktline · inflate · sha1 · objects · pack (delta/build) · validate
 errors       errors.js: every code, its retry policy; errors-doc.js: what each means
 ```
