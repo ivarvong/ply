@@ -179,7 +179,8 @@ add('valid-commit', { objects: [{ type: 'blob', data: blob }, { type: 'tree', da
 {
   const tag = encodeTag({ object: commitOid, type: 'commit', tag: 'v1', tagger: AUTHOR, message: 'rel\n' });
   add('valid-tag', { objects: [{ type: 'blob', data: blob }, { type: 'tree', data: treeOk }, { type: 'commit', data: commitOk }, { type: 'tag', data: tag }], focus: 'tag', normal: true });
-  const emptyName = encodeTag({ object: commitOid, type: 'commit', tag: '', tagger: AUTHOR, message: 'rel\n' });
+  // encodeTag refuses an empty tag name (git hash-object's badTagName), so the malformed object is spelled out
+  const emptyName = te.encode(`object ${commitOid}\ntype commit\ntag \ntagger ${AUTHOR}\n\nrel\n`);
   add('empty-tag-name', { objects: [{ type: 'blob', data: blob }, { type: 'tree', data: treeOk }, { type: 'commit', data: commitOk }, { type: 'tag', data: emptyName }], focus: 'tag', normal: false });
 }
 
