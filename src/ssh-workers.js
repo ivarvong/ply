@@ -13,3 +13,4 @@ export async function workersStream(host, port, { timeoutMs = 30000 } = {}) {
     close() { try { writer.close().catch(() => {}); } catch { /* ignore */ } try { sock.close(); } catch { /* ignore */ } },
   };
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

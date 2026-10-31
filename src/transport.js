@@ -44,3 +44,4 @@ export function wrapNet(e, signal) {
   if (signal?.aborted || e?.name === 'AbortError' || e?.name === 'TimeoutError') return fail(e?.name === 'TimeoutError' || signal?.reason?.name === 'TimeoutError' ? 'timeout' : 'aborted', `request aborted: ${e?.message ?? e}`, { cause: e });
   return fail('network', `network: ${e?.message ?? e}`, { cause: e });
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

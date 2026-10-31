@@ -77,3 +77,4 @@ export async function lsRefs(t, prefixes = []) {
     return { refs, head };
   }));
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

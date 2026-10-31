@@ -178,3 +178,4 @@ export function inflate(buf, pos = 0, opts = {}) {
   if (expectedSize !== undefined && o !== expectedSize) throw bad(`inflate: size ${o} != expected ${expectedSize}`);
   return { out: result, consumed: p - start, stats };
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

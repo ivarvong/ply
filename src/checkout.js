@@ -187,3 +187,4 @@ async function* blobFiles(transport, tracer, parent, entries, batch) {
     span.end();
   }
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

@@ -67,3 +67,4 @@ export function scrubError(e, scrub) {
   };
   return walk(e);
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

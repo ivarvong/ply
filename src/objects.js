@@ -280,3 +280,4 @@ export function encodeTag({ object, type, tag, tagger, message = null, extra = [
   ];
   return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

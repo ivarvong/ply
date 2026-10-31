@@ -35,3 +35,4 @@ export function scrubber(values) {
   };
   return text => whole.reduce((acc, x) => acc.split(x).join(REDACTED), cut(String(text)));
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

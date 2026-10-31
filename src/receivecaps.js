@@ -23,3 +23,4 @@ export async function pushWithOptions(t, opts) {
   if (opts.pushOptions?.length) { const caps = await receiveCaps(t); if (!caps.has('push-options')) throw fail('unsupported', 'server does not advertise push-options', { caps: [...caps] }); }
   return push(t, opts);
 }
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

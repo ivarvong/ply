@@ -25,3 +25,4 @@ export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcac
 export { isFilterRejection } from './fetch.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';
 export { concat } from './bytes.js';
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)

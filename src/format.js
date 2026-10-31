@@ -225,3 +225,4 @@ export const DEFLATE_REPEAT18_BITS = 7;
 
 /** `2 ** shift` for a size-varint group. Defined once so the base is not recopied at each call site. */
 export const varintScale = shift => 2 ** shift;
+// ci/fast probe: whole-file mutation of every src file (reverted in the next commit)
