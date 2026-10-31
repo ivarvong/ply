@@ -184,7 +184,9 @@ const bandLines = text => text.split(/\r?\n|\r/).map(l => l.trim()).filter(Boole
 //   sideband (default on): side-band-64k — the server's human-readable explanation of a rejection (hook stderr, GitHub's
 //            GH006 text) arrives on band 2 and is recorded as git.push.remote.messages. Every receive-pack since 1.7 has it.
 //   reportV2: report-status-v2 (per-ref option lines), atomic: all-or-nothing, pushOptions: strings — the caller must
-//            have checked the advertisement for push-options (receivecaps.js); an unadvertised option is read as the pack.
+//            have checked the advertisement for atomic and push-options (receivecaps.js pushWithOptions, which GitHttp.push
+//            uses): receive-pack ignores an unadvertised `atomic` (the refs land one by one) and reads unadvertised option
+//            lines as the pack.
 export async function push(t, { ref, oldOid, newOid, objects = [], commands, sideband = true, reportV2 = false, atomic = false, pushOptions = [] }) {
   commands = commands ?? [{ ref, oldOid, newOid }];
   const maxRefs = requireLimit(t.limits, 'maxRefs');

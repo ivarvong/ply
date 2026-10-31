@@ -501,3 +501,136 @@ Expected: ply accepts 1,350, refuses 23,514. Cells per msgId git reports (a cell
 - `mailmapSymlink` → accept: ply never reads .mailmap
 
 <!-- fsck-tree: end generated -->
+
+## Advertisement
+
+**Decision.** What does ply do with what a server says about itself (the v2 capability advertisement, the ls-refs
+listing, the receive-pack capability list), and with what ply asks of it (atomic, push options, fetch arguments)? Four
+decisions, one space (`test/space/advertisement.space.js`):
+
+| decision | ply entry point | outcome |
+|---|---|---|
+| `caps` | `discover()` | `ok` with the parsed capabilities, or `unsupported` / `protocol` / `remote_error` / `not_git` / `network` |
+| `refs` | `lsRefs()` | `ok` with the refs and HEAD's target, or `protocol` / `unsupported` / `remote_error` |
+| `push` | `GitHttp.push` (`pushWithOptions`) | `landed`, or `unsupported` before a byte of the push is sent, or `ambiguous` (push-outcome's rule) |
+| `request` | `fetchPack()` | `ok` with the request lines and pack-objects invocation git's own request gets, or `protocol` |
+
+**Principle.** ply proceeds when git proceeds, and gives a typed refusal when git refuses or when a feature ply needs
+is absent. Every cell's expected value carries both sides (`git`: ok or refuse; `ply`: the outcome), and
+`consistent()` checks the rule on every cell: ply never proceeds where git refuses, and refuses where git proceeds only
+for a need it names (`PLY_NEEDS`: v2, the fetch command, sha1).
+
+**git's reading, from the source** (git v2.50.0):
+
+- `connect.c` `process_capabilities_v2` reads capability lines up to a flush and dies "expected flush after
+  capabilities" on anything else; over HTTP a pkt after that flush is handed on as the ls-refs response ("invalid
+  ls-refs response"). `server_supports_v2` (presence: `key` or `key=…`), `server_feature_v2` (value: the first `key=…`;
+  a bare `object-format` is no value, so sha1) and `server_supports_feature` (the first `key`/`key=…` line, its value
+  split on whitespace by `parse_feature_value`) all take the **first** matching line. `send_capabilities` dies "unknown
+  object format" on a name `hash_algo_by_name` does not know; `get_remote_refs` dies "server doesn't support 'ls-refs'".
+- `process_ref_v2` splits a record on every space (a doubled space is an empty field, an empty second field a ref
+  named ""), skips an `unborn <name> …` record (it records HEAD's unborn target only for a clone that asked), reads the
+  oid with `parse_oid_hex_algop` (either case), keeps `symref-target:` and `peeled:` and skips every other attribute; a
+  bad peeled oid or a record of fewer than two fields is "invalid ls-refs response". A name listed twice stays twice in
+  the list and `find_ref_by_name` takes the first (observed: `git fetch` of it fetches the first oid).
+- `pkt-line.c` `packet_read_with_status` dies "protocol error: bad line length" once a payload is ≥ its buffer,
+  `packet_buffer[LARGE_PACKET_MAX]`: it reads payloads up to 65519 bytes.
+- `send-pack.c` `send_pack` checks, before sending anything, the repository hash against `object-format` (absent is
+  sha1), then `--atomic` against `atomic`, then push options against `push-options`. `builtin/receive-pack.c` honours a
+  client's `atomic` / `push-options` only when it advertised them, and dies on commands in another hash.
+- `upload-pack.c` `process_args` accepts `no-progress`, `include-tag` and `deepen-relative` unconditionally and `filter`
+  only with `uploadpack.allowFilter`; `fetch-pack.c` warns "filtering not recognized by server, ignoring" and fetches
+  everything.
+
+**Judgment calls.**
+
+1. *A plain push to a sha256 repository is `ambiguous`.* ply reads the receive-pack advertisement only when the push
+   needs a capability (atomic, push options); a plain push saves that round trip, receive-pack dies reading the sha1
+   commands and writes no report. Every ply flow reads ls-refs first, which refuses a sha256 listing as `unsupported`.
+2. *A filter the server cannot honour is refused* (`protocol`: upload-pack dies on the unexpected `filter` line and the
+   stream ends without its flush), where git warns and fetches everything: `fetchObject`'s bounded memory rests on the
+   filter it asked for.
+3. *v0 / v1 servers, a server without `fetch`, and sha256* are `unsupported` though `git ls-remote` proceeds: ply is
+   v2-only, every ply read is ls-refs then fetch, and ply is sha1-only.
+4. *Precedence among refusals* in `discover()`: the pkt framing, the protocol, the advertisement's framing, ls-refs and
+   fetch present, the object format. git reads the object format only when it sends ls-refs, but every cell where the
+   orders differ is a refusal on both sides.
+
+**Found** (each a cell class that disagreed with git on train/1, 77eb2c0; all fixed here):
+
+| # | where | train/1 | git | now |
+|---|---|---|---|---|
+| 1 | discover: a capability listed twice | the last line wins (sha1 after sha256 proceeds; sha256 after sha1 refuses) | the first wins | the first wins |
+| 2 | discover: `object-format` with no `=` | `unsupported` | sha1, proceeds | sha1 |
+| 3 | discover: no flush, or a delim, after the capabilities | proceeds | "expected flush after capabilities" | `protocol` |
+| 4 | discover: a pkt after the capabilities' flush | read as a capability, proceeds | refuses | `protocol` |
+| 5 | discover: no `ls-refs` (or no `fetch`) | proceeds | "server doesn't support 'ls-refs'" | `unsupported` |
+| 6 | discover: `ERR` as the first line | `unsupported` | "remote error" | `remote_error` |
+| 7 | every pkt-line reader: a payload of 65520–65531 bytes | accepted | "bad line length" | `protocol` |
+| 8 | ls-refs: an `unborn …` record | `protocol` | skipped | skipped |
+| 9 | ls-refs: an upper-case oid or peeled oid | `protocol` | accepted | accepted, kept lower-case |
+| 10 | ls-refs: an empty name (`<oid> `, `<oid>  <name>`) | `protocol` | a ref named "" | a ref named "" |
+| 11 | ls-refs: a name listed twice | the last listing | the first | the first |
+| 12 | push: `atomic` to a server that does not advertise it | sent; receive-pack ignored it and the refs landed one by one; `landed` | refuses before sending | `unsupported` before sending |
+| 13 | push: atomic or push options to a sha256 repository | advertisement read, hash ignored, pushed: `ambiguous` | refuses before sending | `unsupported` before sending |
+
+The request decision found nothing: for each of `no-progress`, its absence, `include-tag`, `deepen-relative` and
+`filter`, ply's request lines equal git's own request for the same fetch and upload-pack invokes pack-objects with the
+same argv and stdin.
+
+**Enumeration.** `test/space/advertisement.test.js` runs every caps and refs cell through ply's real path
+(`createTransport` with an in-process fetch serving the rendered bytes) and compares the table. Observed: a synthetic
+smart-HTTP server serves each observed cell's advertisement and ls-refs response and forwards fetch requests to `git
+http-backend`; `git ls-remote` judges every caps cell within one deviation of git's default advertisement and every refs
+cell, `git fetch` the fetch-feature cells (which features git uses, read from its own requests), `git push` every push
+cell against receive-pack configured per cell, and `git fetch` / `git clone` each request cell (its request lines and
+upload-pack's pack-objects invocation, captured by `uploadpack.packObjectsHook`). ply runs over real HTTP against the
+same server. Six real http-backend configurations (default, `uploadpack.allowFilter=false`, `allowRefInWant` +
+`allowSidebandAll`, `lsrefs.unborn=ignore`, `transfer.advertiseSID`, a sha256 repository) advertise exactly what the
+renderer writes for their cell. `ADV_SPACE_SRC=<dir>` runs the space against another copy of `src/`.
+
+<!-- advertisement: generated by scripts/space-md.mjs; do not edit by hand -->
+
+### Axes (tagged unions)
+
+**caps protocol** (8) — `v2`, `v0`, `v1`, `err`, `v2service`, `serviceNoFlush`, `html`, `reset`; only `v2` carries the capability axes
+
+**caps (v2)**
+
+- `agent` (3) — the agent capability: `present`, `absent`, `empty`
+- `objectFormat` (6) — object-format, read by send_capabilities with server_feature_v2 (needs `=`): `sha1`, `absent`, `sha256`, `unknown`, `bare`, `empty`
+- `fetch` (33) — the fetch command and its features: `absent`, `features[]`, `features[shallow wait-for-done filter ref-in-want sideband-all]` (… every subset of the five features: 32 + absent)
+- `lsRefs` (3) — the ls-refs command: `unborn`, `plain`, `absent`
+- `serverOption` (2) — server-option: `present`, `absent`
+- `sessionId` (2) — session-id: `absent`, `present`
+- `malformed` (9) — one malformation of the advertisement: `none`, `noLF`, `unknownCap`, `duplicate`, `longMax`, `longOver`, `noFlush`, `delim`, `trailing`
+
+**refs**
+
+- `record` (18) — one record of the listing, added to or changed in HEAD (symref), main, a tag (peeled): `plain`, `unknownAttr`, `unbornHead`, `unbornOther`, `unbornOnly`, `emptySymref`, `emptyPeeled`, `badPeeled`, `upperOid`, `upperPeeled`, `emptyName`, `doubleSpace`, `oidOnly`, `badOid`, `sha256`, `duplicate`, `capsName`, `err`
+- `eol` (2) — line ends: `lf`, `none`
+- `framing` (6) — the end of the listing: `flush`, `noFlush`, `delim`, `trailing`, `longMax`, `longOver`
+
+**push**
+
+- `request` (4) — what the push asks for: `none`, `atomic`, `options`, `both`
+- `atomic` (2) — receive.advertiseAtomic: `on`, `off`
+- `options` (2) — receive.advertisePushOptions: `off`, `on`
+- `format` (2) — the server repository's hash: `sha1`, `sha256`
+
+**request**
+
+- `flag` (5) — one fetch argument ply can send (fetch.js fetchBody): `noProgress`, `progress`, `includeTag`, `deepenRelative`, `filter`
+- `server` (2) — uploadpack.allowFilter: `filterOn`, `filterOff`
+
+### Cells
+
+| decision | cells | observed from git | derived |
+|---|---:|---:|---:|
+| caps | 64,159 | 59 | 64,100 |
+| refs | 216 | 216 | 0 |
+| push | 32 | 32 | 0 |
+| request | 10 | 10 | 0 |
+| **all** | **64,417** | **317** | **64,100** |
+
+<!-- advertisement: end generated -->

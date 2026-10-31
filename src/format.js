@@ -69,6 +69,9 @@ export const PKT_DATA_MIN = PKT_LEN_HEX;
 /** gitprotocol-common(5): pkt-line length must be ≤ 65520. Payload budget is that minus the length prefix. */
 export const PKT_MAX_SIZE = 65520;
 export const PKT_MAX_PAYLOAD = PKT_MAX_SIZE - PKT_LEN_HEX;
+/** What git's reader accepts: pkt-line.c packet_read_with_status dies "protocol error: bad line length" once the payload
+ * (length minus the prefix) is ≥ its buffer, packet_buffer[LARGE_PACKET_MAX]. So it reads payloads up to 65519 bytes. */
+export const PKT_READ_MAX_PAYLOAD = PKT_MAX_SIZE - 1;
 /** Nibble width when decoding the hex length. Shifts of the four hex digits, high digit first. */
 export const NIBBLE_BITS = 4;
 export const PKT_LEN_SHIFTS = Object.freeze([NIBBLE_BITS * 3, NIBBLE_BITS * 2, NIBBLE_BITS, 0]);
