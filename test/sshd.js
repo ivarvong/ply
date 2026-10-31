@@ -29,11 +29,13 @@ export async function startSshd(root, { publicKeyRaw, acceptEnv = true, user = p
 }
 
 // A TCP proxy in front of a port. `mode.trickle` (ms, 0 = off) holds server→client bytes back and releases one per tick:
-// a server that is never idle for long, the shape an idle timer cannot catch. `connections` counts accepted clients.
-export async function trickleProxy(target, mode = { trickle: 0 }) {
+// a server that is never idle for long, the shape an idle timer cannot catch. `mode.banner` (a string) answers a client
+// with that line and hangs up instead of forwarding: a handshake that fails fast. `connections` counts accepted clients.
+export async function trickleProxy(target, mode = { trickle: 0, banner: null }) {
   const socks = new Set(); let connections = 0;
   const server = net.createServer(c => {
     connections++;
+    if (mode.banner) { socks.add(c); c.on('error', () => {}); c.end(mode.banner); return; }
     const up = net.connect(target, '127.0.0.1'); socks.add(c); socks.add(up);
     const held = []; let timer = null;
     const drip = () => { timer = null; if (!held.length || c.destroyed) return; c.write(held[0].subarray(0, 1)); held[0] = held[0].subarray(1); if (!held[0].length) held.shift(); if (held.length) timer = setTimeout(drip, mode.trickle); };
