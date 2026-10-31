@@ -4,6 +4,7 @@ export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, loo
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
 export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode } from './read.js';
+export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { SshClient, hostKeyLine, hostKeyFromLine, fingerprint } from './ssh.js';

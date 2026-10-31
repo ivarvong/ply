@@ -81,7 +81,22 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 82,181 B. The same credential handling (issue #40).
   // 2026-10-30: 81,669 B. The same checkWide, also on the merge-base walk's blob:none packs (issue #46).
   // 2026-10-30: 82,537 B. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 82_538, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 82,581 B. fetchPackTree0 says which filter answered (readLog, issue #56).
+  assert.ok(min < 82_582, `merge bundle ${min} B exceeds budget`);
+});
+
+test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
+  const out = await bundle('src/log.js');
+  const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
+  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js', 'tree.js', 'checkout.js']) assert.ok(!files.includes(f), `${f} is in the log bundle`);
+  const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
+  for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the log bundle (${re})`);
+  const min = js.length, gz = gzipSync(js, { level: 9 }).length;
+  console.log(`  log bundle: ${min} B min, ${gz} B gz; modules: ${retained(out).map(([k, b]) => `${k}=${b}`).join(' ')}`);
+  // 2026-10-30: 43,164 B / 17,227 B gz, first measured (issue #56): ls-refs, the commit-only window (fetchPackTree0
+  // with the blob:none fallback, so the delta resolver), the deepen-contract check and readCommit's commit view.
+  assert.ok(min < 43_165, `log bundle ${min} B exceeds budget`);
+  assert.ok(gz < 17_228, `log bundle ${gz} B gz exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
