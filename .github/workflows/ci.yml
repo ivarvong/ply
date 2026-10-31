@@ -69,8 +69,8 @@ jobs:
   fuzz:
     # Deterministic fuzz, fixed seeds and sizes, in parallel with `test`, so it adds no PR wall time. The deep,
     # date-seeded runs are in nightly.yml. hostile --case 2366521731 is the pinned case npm test also runs.
-    # The fuzzers run src/*.ts under node's type stripping; NODE_OPTIONS (set after npm ci, absolute) adds the
-    # .js -> .ts resolve hook to every later node process.
+    # The fuzzers run src/*.ts under node's type stripping; --import ./test/ts-resolve.mjs maps the .js specifiers to
+    # .ts (GitHub refuses NODE_OPTIONS through $GITHUB_ENV, so each command names the hook).
     name: fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -93,26 +93,24 @@ jobs:
       - name: git identity
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
-      - name: resolve hook for later steps
-        run: echo "NODE_OPTIONS=--import=${GITHUB_WORKSPACE}/test/ts-resolve.mjs" >> "$GITHUB_ENV"
       - name: hostile fuzzer
-        run: node test/fuzz/hostile.mjs --n 180 --seed 1 && node test/fuzz/hostile.mjs --case 2366521731
+        run: node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --n 180 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/hostile.mjs --case 2366521731
       - name: below-hash fuzzer
-        run: node test/fuzz/below-hash.mjs --n 20 --seed 1 && node test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
+        run: node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
       - name: git-semantic fuzzer
-        run: node test/fuzz/git-semantic.mjs --n 20 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/git-semantic.mjs --n 20 --seed 1
       - name: liar merge-base fuzzer
-        run: node test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --op mergebase --n 40 --seed 1
       - name: liar fuzzer
-        run: node test/fuzz/liar.mjs --n 120 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/liar.mjs --n 120 --seed 1
       - name: protocol fuzzer
-        run: node test/fuzz/protocol.mjs --n 300 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs --n 300 --seed 1
       - name: packs fuzzer
-        run: node test/fuzz/packs.mjs --n 36 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs --n 36 --seed 1
       - name: codec fuzzer
-        run: node test/fuzz/codec.mjs --n 15000 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs --n 15000 --seed 1
       - name: attributes fuzzer
-        run: node test/fuzz/attributes.mjs --n 120 --seed 1
+        run: node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 120 --seed 1
 
   # Stryker over the src files a PR changed (all of src/ on main), split into 8 shards balanced by mutant count
   # (scripts/mutate.mjs --plan 8). A file is the unit, and linemerge.js alone is 13% of src/, so 8 is where more

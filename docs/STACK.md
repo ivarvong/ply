@@ -139,7 +139,10 @@ Evidence and the alternative we rejected are in the PR description.
 vitest runs every `test/**/*.test.js` file that `node --test` ran before (`vitest.config.ts`); the fuzzers in
 `test/fuzz/` stay node scripts. `npm test` = vitest + the fuzzer chain. CI shards vitest (`--shard i/N`).
 Mutation testing: `@stryker-mutator/vitest-runner`, `mutate: src/**/*.{js,ts}`; the gate (`scripts/mutate.mjs`) is
-unchanged: parser and bounds survivors fail a PR, 8 shards balanced by mutant count.
+unchanged: parser and bounds survivors fail a PR, 8 shards balanced by mutant count. `tsconfigFile` points at a file
+that does not exist on purpose: Stryker's tsconfig preprocessor calls the TypeScript JS API
+(`ts.parseConfigFileTextToJson`), which TypeScript 7 does not ship (`TypeError: ts.parseConfigFileTextToJson is not a
+function`); the rewrite only matters for `extends`/references outside the sandbox, which ply has none of.
 
 ## Converting a module (the brief for cluster agents)
 
