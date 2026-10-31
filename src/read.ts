@@ -74,9 +74,9 @@ async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fetch.js is JS: `expectType = null` reads as the type null (boundary.ts)
   const c = await (fetchObject as FetchObject)(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const x = e as Caught;
-    if (x?.code === 'pack_corrupt' && /expected commit/.test(x.message)) throw fail('not_found', `${commit} is not a commit`);
-    if (x?.code === 'remote_error' && /not our ref/.test(x.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if ((e as Caught)?.code === 'pack_corrupt' && /expected commit/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `${commit} is not a commit`);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+    if ((e as Caught)?.code === 'remote_error' && /not our ref/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   return c.data;
@@ -190,15 +190,15 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   // pump) leaves the ended spans alone
   const failHere = (e: unknown): unknown => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const x = e as Caught;
-    const err = isPlyCode(x?.code) ? x : fail('pack_corrupt', `blob stream: ${String(x?.message ?? e)}`, { cause: e });
-    if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err?.code }).end(); }
+    const err = isPlyCode((e as Caught)?.code) ? (e as NonNullable<Caught>) : fail('pack_corrupt', `blob stream: ${((e as Caught)?.message ?? e) as string}`, { cause: e });
+    if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); }
     return err;
   };
   try {
     while (sp.phase !== 'body') {
       const { value, done } = await it.next();
-      if (done === true) throw fail('pack_corrupt', 'pack ended before the object header');
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
+      if (done) throw fail('pack_corrupt', 'pack ended before the object header');
       const r = spStep(sp, value); sp = r.state; early.push(...r.zlib);
     }
     if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${(TYPE_NAME as TypeNames)[sp.type] ?? sp.type}`);
@@ -211,7 +211,8 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
     for (const z of early) await writer.write(z);
     for (;;) {
       const { value, done } = await it.next();
-      if (done === true) break;
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- see above
+      if (done) break;
       const r = spStep(sp, value); sp = r.state;
       for (const z of r.zlib) await writer.write(z);
     }

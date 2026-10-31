@@ -94,8 +94,7 @@ type Trees = { readonly root: string; readonly tree: (oid: string) => readonly T
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Trees> {
   const r: FetchedPack = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }).catch((e: unknown) => {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const x = e as Caught;
-    if (x?.code === 'remote_error' && /not our ref/.test(x.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if ((e as Caught)?.code === 'remote_error' && /not our ref/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   });
   const objects: PackObjects = r.objects ?? new Map();
@@ -104,7 +103,7 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   if (c.type !== TYPE.COMMIT) throw fail('not_found', `${commit} is not a commit`);
   const tree = (oid: string): readonly TreeEntry[] => {
     const o = objects.get(oid);
-    if (!o || o.type !== TYPE.TREE) throw fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
+    if (o?.type !== TYPE.TREE) throw fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
     return parseTree(o.data, limits);
   };
   let trees = 0; for (const o of objects.values()) if (o.type === TYPE.TREE) trees++;
@@ -112,16 +111,13 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
 }
 
 // Effect: walk `comps` from `root` to the subtree's oid (not_found for a missing component or a non-directory).
-const subtree = (tree: (oid: string) => readonly TreeEntry[], root: string, comps: readonly string[]): string => {
-  let oid = root;
-  for (const [i, name] of comps.entries()) {
-    const e = tree(oid).find(x => x.name === name);
-    if (!e) throw fail('not_found', `path component ${name} not found`);
-    if (e.mode !== MODE_TREE) throw fail('not_found', `${comps.slice(0, i + 1).join('/')} is not a directory (mode ${e.mode})`);
-    oid = e.oid;
-  }
-  return oid;
-};
+// oxlint-disable-next-line unicorn/no-array-reduce -- bundle budget: the JS's fold, byte for byte
+const subtree = (tree: (oid: string) => readonly TreeEntry[], root: string, comps: readonly string[]): string => comps.reduce((oid, name, i) => {
+  const e = tree(oid).find(x => x.name === name);
+  if (!e) throw fail('not_found', `path component ${name} not found`);
+  if (e.mode !== MODE_TREE) throw fail('not_found', `${comps.slice(0, i + 1).join('/')} is not a directory (mode ${e.mode})`);
+  return e.oid;
+}, root);
 
 // Effect: one wants-list fetch of blobs, buffered and delta-resolved. Every object is keyed by its computed hash; one
 // that was not asked for, or is not a blob, is pack_corrupt. A wanted blob the pack leaves out is simply absent.
@@ -137,7 +133,8 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<PackOb
 
 // A host that answers a many-wants fetch with an error status, ERR or broken framing is asked for one blob at a time
 // from then on (remembered on the transport's quirks). A lie (pack_corrupt) is never a reason to fall back.
-const isWantsRefusal = (code: unknown): boolean => (['http', 'remote_error', 'protocol'] as readonly unknown[]).includes(code);
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
+const isWantsRefusal = (e: unknown): boolean => (['http', 'remote_error', 'protocol'] as readonly unknown[]).includes((e as Caught)?.code);
 
 const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
@@ -159,13 +156,13 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
     let got: PackObjects;
     try { got = await fetchBlobs(t, oids); stat.fetches++; } catch (e) {
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-      const code = (e as Caught)?.code;
-      if (code === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
-      if (!isWantsRefusal(code)) throw e;
+      if ((e as Caught)?.code === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
+      if (!isWantsRefusal(e)) throw e;
       single = true;
-      const quirks: Quirks | null | undefined = t.quirks;
-      if (quirks) quirks.blobWants = 'single';
-      span.set({ 'git.checkout.blobs.refused': code });
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/strict-boolean-expressions -- transport.js is JS: its quirks read as any (boundary.ts)
+      if (t.quirks) (t.quirks as Quirks).blobWants = 'single';
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
+      span.set({ 'git.checkout.blobs.refused': (e as NonNullable<Caught>).code });
       yield* group(oids); return;
     }
     for (const oid of oids) yield [oid, got.get(oid)?.data ?? null];
@@ -191,8 +188,7 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
     done = true;
   } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const code = (e as Caught)?.code;
-    span.error(e, code).set({ 'git.checkout.blobs.outcome': code ?? 'error' });
+    span.error(e, (e as Caught)?.code).set({ 'git.checkout.blobs.outcome': (e as Caught)?.code ?? 'error' });
     throw e;
   } finally {
     span.set({ 'git.checkout.blobs.fetches': stat.fetches, 'git.checkout.blobs.buffered': stat.buffered, 'git.checkout.blobs.streamed': stat.streamed, 'git.checkout.blobs.splits': stat.splits, 'git.checkout.blobs.bytes': stat.bytes, 'git.checkout.blobs.single': single });

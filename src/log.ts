@@ -70,8 +70,7 @@ async function fetchWindow(t: Transport, commit: string, limit: number): Promise
   let r: FetchedPack;
   try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
-    const x = e as Caught;
-    if (x?.code === 'remote_error' && /not our ref/.test(x.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    if ((e as Caught)?.code === 'remote_error' && /not our ref/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   }
   const want = r.objects?.get(commit);

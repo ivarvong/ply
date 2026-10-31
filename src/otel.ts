@@ -52,8 +52,9 @@ const now = probe((): (() => string) => { const base = BigInt(Date.now()) * 1_00
 // CPU clock: real on node (process.cpuUsage), null on Workers where no clock advances during synchronous work. Spans
 // record cpu_ms only where it is measured; the edge carries calibrated estimates instead (see edit.js CPU_RATE).
 export const cpuNow: () => number | null = probe((): (() => number | null) => () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; }, () => null);
-// t0 is non-null only where the clock is real, so cpuNow() is a number there (`?? 0` is JS's own reading of null).
-export const cpuSince = (t0: number | null): number | null => (t0 === null ? null : (cpuNow() ?? 0) - t0);
+// t0 is non-null only where the clock is real, so cpuNow() is a number there.
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+export const cpuSince = (t0: number | null): number | null => (t0 === null ? null : (cpuNow() as number) - t0);
 
 // Isolate-lifetime invocation counter: module scope survives across requests inside one isolate (workerd, node), so the
 // first root span of an isolate is the one that paid connection setup, JIT warmup and cache misses.
@@ -71,7 +72,8 @@ export function anyValue(v: unknown): AnyValue {
   // bytes are code units 0-255, where fromCharCode and fromCodePoint agree
   // oxlint-disable-next-line unicorn/prefer-code-point -- see above
   if (v instanceof Uint8Array) return { bytesValue: btoa(String.fromCharCode(...v.subarray(0, 4096))) };
-  if (Array.isArray(v)) return { arrayValue: { values: v.map(x => anyValue(x)) } };
+  // oxlint-disable-next-line unicorn/no-array-callback-reference -- bundle budget: anyValue takes one argument, so map's index and array are ignored
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(anyValue) } };
   // objects are stringified: attribute values are scalars or arrays of scalars
   // oxlint-disable-next-line typescript/no-base-to-string -- a caller's object renders as String() renders it, as before
   return { stringValue: String(v) };
@@ -164,12 +166,12 @@ export class Span {
   public error(e: unknown, type?: unknown): this {
     scrubError(e, this.scrub);
     // a thrown value of any type: the reads are optional-chained, so a primitive or null reads as nothing
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-    const l = e as Loose;
-    this.status = { code: 2, message: String(l?.message ?? e) };
-    this.set({ 'error.type': type ?? l?.code ?? l?.name ?? 'Error' });
+    /* oxlint-disable typescript/no-unsafe-type-assertion -- see above */
+    this.status = { code: 2, message: String((e as Loose)?.message ?? e) };
+    this.set({ 'error.type': type ?? (e as Loose)?.code ?? (e as Loose)?.name ?? 'Error' });
     // oxlint-disable-next-line typescript/no-base-to-string -- a thrown value's stack renders as String() renders it, as before
-    this.event('exception', { 'exception.type': l?.name ?? 'Error', 'exception.message': String(l?.message ?? e), 'exception.stacktrace': String(l?.stack ?? '') });
+    this.event('exception', { 'exception.type': (e as Loose)?.name ?? 'Error', 'exception.message': String((e as Loose)?.message ?? e), 'exception.stacktrace': String((e as Loose)?.stack ?? '') });
+    /* oxlint-enable typescript/no-unsafe-type-assertion */
     return this;
   }
   public ok(): this { if (this.status.code === 0) this.status = { code: 1 }; return this; }
@@ -183,7 +185,8 @@ export class Span {
       startTimeUnixNano: this.start, endTimeUnixNano: now(),
       attributes: s ? scrubKvs(kvs(this.attrs), s) : kvs(this.attrs),
       events: s ? this.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : this.events,
-      links: this.links, status: s && this.status.message !== undefined ? { ...this.status, message: s(this.status.message) } : this.status,
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- as before: an empty status message is left unscrubbed
+      links: this.links, status: s && this.status.message ? { ...this.status, message: s(this.status.message) } : this.status,
       droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: this.droppedLinks,
     });
     return this;
@@ -224,8 +227,9 @@ export class Tracer {
 // ---- exporters ----
 export type ArrayExporter = Exporter & { readonly lines: ExportLine[] };
 export const arrayExporter = (arr: ExportLine[] = []): ArrayExporter => Object.assign((line: ExportLine) => { arr.push(line); }, { lines: arr });
-// oxlint-disable-next-line no-console -- the console exporter's default sink is the console
-export const consoleExporter = (log: (s: string) => void = console.log): Exporter => line => { log(JSON.stringify(line)); };
+// the console exporter's default sink is the console; bundle budget: the JS's arrow, byte for byte
+// oxlint-disable-next-line no-console, typescript/no-confusing-void-expression -- see above
+export const consoleExporter = (log: (s: string) => void = console.log): Exporter => line => log(JSON.stringify(line));
 // ---- reading side (pure): flatten a JSONL line back to {name, attrs, events, ...} ----
 export type FlatValue = string | number | boolean | readonly FlatValue[];
 export type FlatAttrs = Record<string, FlatValue>;
