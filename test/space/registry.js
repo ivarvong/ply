@@ -149,7 +149,7 @@ export const DECISIONS = [
   { match: 'src/edit.js#streamBlobEdit:internal:*', excluded: INTERNAL },
   { match: 'src/rebase.ts#linearChain:internal:*', excluded: INTERNAL },
   { match: 'src/result.ts#assertNever:untyped:unreachable: *', excluded: 'exhaustiveness: the type checker proves the call unreachable (a value of type never); reaching it is a bug, never an outcome' },
-  { match: 'src/linemerge.ts#compact:untyped:internal: *', excluded: 'an internal invariant of the diff compaction (an untyped Error by design: a bug, not an outcome); the linemerge and diffscript fuzzers against git hold it' },
+  { match: 'src/linemerge.ts#broken:internal:*', excluded: 'an internal invariant of the diff compaction (code internal since #96: a bug, not an outcome); the linemerge and diffscript fuzzers against git hold it' },
   { match: 'src/http.ts#httpCode:*', space: 'hostile-server', axisTag: 'case' },
   { match: 'src/push.ts#rejectionCode:*', space: 'push-ng', axisTag: 'reason' },
   { match: 'src/receivecaps.ts#receiveCaps:protocol:*', space: 'pkt-frame', axisTag: 'position' },
