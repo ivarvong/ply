@@ -8,7 +8,7 @@ export function build({ port, outDir }) {
   mkdirSync(outDir, { recursive: true });
   const mods = [];
   for (const f of readdirSync(join(root, 'src'))) {
-    if (!f.endsWith('.js') || f === 'ssh-node.js') continue; // node:net has no place in the Workers bundle
+    if (!f.endsWith('.js')) continue;
     writeFileSync(join(outDir, f), readFileSync(join(root, 'src', f), 'utf8').replace(/from '\.\/([\w.-]+)'/g, "from '$1'"));
     mods.push(f);
   }

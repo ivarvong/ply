@@ -1,5 +1,4 @@
-// Credential redaction, shared by both transports (http.js builds one from its Authorization; sshgit.js from a
-// secret-shaped login name). Its own module so the SSH entry does not carry the HTTP transport.
+// Credential redaction (http.js builds one from its Authorization). Its own module: pure, and testable without a transport.
 
 // The Basic user is a name on most hosts (`x-access-token`, `oauth2`, `git`, a login) and a secret on some (a deploy
 // token, a PAT given as the user). Scrubbing a name would mangle legitimate server text ("denied to ivar"), so the user
@@ -17,7 +16,7 @@ export const secretUser = (user, hasPassword) => secretShaped(user) || (!hasPass
 // more characters of a secret is redacted, not only whole ones. 12 characters of a random token cannot occur by chance
 // (a 12-hex window of a commit oid matches a hex token's with p ≈ 1e-13); shorter secrets are matched whole.
 export const FRAGMENT = 12;
-export const REDACTED = '[redacted]';
+const REDACTED = '[redacted]';
 export function scrubber(values) {
   const secrets = values.filter(x => typeof x === 'string' && x.length >= MIN_SECRET);
   if (!secrets.length) return null;

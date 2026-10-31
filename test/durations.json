@@ -39,9 +39,6 @@
   "test/space/push-outcome-boundary.test.js": 169,
   "test/space/push-outcome.test.js": 98,
   "test/space/refname.test.js": 10,
-  "test/space/ssh-faults.test.js": 4,
-  "test/space/ssh-service.test.js": 6,
   "test/span-contract.test.js": 4,
-  "test/sshgit.test.js": 24,
   "test/wide-limits.test.js": 12
 }

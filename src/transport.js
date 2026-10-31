@@ -4,20 +4,20 @@
 //   t.frames(service, body, span, hints)  → AsyncIterable of pkt-line frames of one command's response
 //   t.advertise(service, span)            → Uint8Array: the service's capability advertisement (pkt-lines)
 //
-// plus the data every caller may read: t.kind ('http' | 'ssh'), t.url (credential-free, for spans and messages),
+// plus the data every caller may read: t.kind ('http'), t.url (credential-free, for spans and messages),
 // t.tracer, t.parent (the span wire spans hang under), t.limits, t.signal, and t.scrub: null, or a function that
-// redacts the transport's credential from any text (server echoes), applied by every span under it (otel.js). SSH has
-// none: publickey auth never sends the server a secret it could echo.
+// redacts the transport's credential from any text (server echoes), applied by every span under it (otel.js).
 //
 // `hints` are transport-neutral requests a transport may honor or ignore: { bypassCache: true } asks an HTTP transport
 // with a pack cache in front of it (packcache.js) to go to the origin. Transports record, on the span they are given:
-//   git.transport            'http' | 'ssh'
+//   git.transport            'http'
 //   git.request.bytes        body bytes sent
 //   git.response.bytes       bytes received for this command
 //   git.response.first_byte_ms, git.response.duration_ms
 //   git.response.cache       'HIT' | 'MISS' | 'BUST' | ''   (HTTP with packcache; '' otherwise)
 //   server.address, url.full
-// and may add transport-specific detail under http.* / ssh.*. Implementations: http.js, sshgit.js.
+// and may add transport-specific detail under http.*. Implementation: http.js (an SSH one was removed 2026-10-31;
+// history on branch archive/ssh).
 import { thrown as fail, isPlyCode } from './errors.js';
 import { KIND } from './otel.js';
 

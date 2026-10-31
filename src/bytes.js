@@ -4,11 +4,8 @@ import { thrown as fail } from './errors.js';
 export const te = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
 // does not find `\ufeffREADME`), so no decoder here swallows it the way the default one does (#43). `td` is for text
-// git itself only prints (sideband progress, remote errors, ssh banners): an invalid sequence there becomes U+FFFD.
+// git itself only prints (sideband progress, remote errors): an invalid sequence there becomes U+FFFD.
 export const td = new TextDecoder('utf-8', { ignoreBOM: true });
-const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-// Well-formed UTF-8 or a throw; a leading BOM is kept (it is a byte of the text to git, #43).
-export const decodeStrict = b => strict.decode(b);
 
 // ---- git bytes as strings, losslessly (#43) ----
 // Names, messages, idents and ref names are bytes to git; it never requires UTF-8 and never interprets a BOM. ply hands
@@ -65,7 +62,7 @@ export function encodeBytes(s, what = 'string') {
   return bytes;
 }
 
-// Text that arrives in pieces (sideband band 2, ssh stderr): a sequence cut by a frame boundary waits in `carry` for its
+// Text that arrives in pieces (sideband band 2): a sequence cut by a frame boundary waits in `carry` for its
 // tail instead of decoding as two U+FFFD. Pure: returns { text, carry }.
 export function decodeChunk(carry, chunk) {
   const buf = carry.length ? concat([carry, chunk]) : chunk;

@@ -57,17 +57,6 @@ test('edit entry carries only what the edit path uses', async () => {
   assert.ok(gz < 28_213, `edit bundle ${gz} B gz exceeds budget`);
 });
 
-test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
-  const edit = await bundle('src/edit.js');
-  assert.ok(!/SSH-2\.0|curve25519|KEXINIT/.test(edit.outputFiles[0].text), 'no SSH in the edit bundle');
-  const ssh = await build({ entryPoints: ['src/sshgit.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets', 'node:net'] });
-  const js = ssh.outputFiles[0].text;
-  assert.ok(/curve25519-sha256/.test(js) && /aes128-gcm@openssh\.com/.test(js));
-  assert.ok(!/node:net/.test(js), 'the ssh transport does not pick a socket implementation');
-  console.log(`  ssh transport bundle: ${js.length} B min, ${gzipSync(js, { level: 9 }).length} B gz; modules: ${retained(ssh).map(([k, b]) => `${k}=${b}`).join(' ')}`);
-  assert.ok(js.length < 30_000, `ssh bundle ${js.length} B exceeds budget`);
-});
-
 test('merge entry: the line merge rides with merge/rebase only, under its own budget', async () => {
   const out = await bundle('src/merge.js');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
@@ -120,7 +109,7 @@ test('log entry: readLog carries no push, merge, pack building or rebase code', 
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
-  const out = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  const out = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true });
   const js = out.outputFiles[0].text;
   assert.ok(!/node:/.test(js));
   for (const f of ['packresolve.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'discover.js', 'client.js', 'packcache.js', 'edit.js']) assert.ok(retained(out).map(([k]) => k).includes(f), `${f} missing from full bundle`);
@@ -190,14 +179,14 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-31: 70,045 B / 27,104 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
   assert.ok(min < 70_046, `tree bundle ${min} B exceeds budget`);
   assert.ok(gz < 27_105, `tree bundle ${gz} B gz exceeds budget`);
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
-  // src/ imports node: builtins in exactly the three Node adapters
+  // src/ imports node: builtins in exactly the two Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
   const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
-  assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
+  assert.deepEqual(withNode, ['checkout-node.js', 'tree-node.js']);
 });
 
 test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {
@@ -231,7 +220,7 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 52_918, `checkout bundle ${min} B exceeds budget`);
   assert.ok(gz < 20_912, `checkout bundle ${gz} B gz exceeds budget`);
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
+  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
