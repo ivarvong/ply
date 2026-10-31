@@ -108,7 +108,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/objects.ts:94` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
 | `src/objects.ts:97` parseTree() | lossless | decodeBytes | `git-bytes` / field |
 | `src/objects.ts:258` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts:326` parseTag() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts:325` parseTag() | lossless | decodeBytes | `git-bytes` / field |
 | `src/packcache.ts:22` isCacheableFetch() | replacement | td | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
 | `src/push.ts:116` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
 | `src/push.ts:168` classifyReport() | lossless | decodeBytes | `git-bytes` / field |

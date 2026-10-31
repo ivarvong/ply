@@ -90,7 +90,9 @@ test('parseTree error strings and the boundaries next to them', () => {
     [`100644 ${'l'.repeat(4097)}\0`, 'tree: large pathname'],
     ['120000 .gitmodules\0', 'tree: .gitmodules is a symbolic link'],
     ['40000 GITMOD~1\0', 'tree: .gitmodules is not a blob'],
+    ['160000 .gitmodules\0', 'tree: .gitmodules is not a blob'],
     ['160000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
+    ['40000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
   ];
   for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
   throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
