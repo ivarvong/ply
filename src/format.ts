@@ -6,7 +6,7 @@
 /** SHA-1 object id width. gitformat-pack(5): object names in packs are 20 bytes. */
 export const OID_BYTES = 20;
 /** Hex digits in a SHA-1 object name. Two hex chars per byte. */
-export const OID_HEX_CHARS = OID_BYTES * 2;
+export const OID_HEX_CHARS: number = OID_BYTES * 2;
 /** SHA-256 object names, rejected: gitprotocol-v2 object-format. */
 export const SHA256_HEX_CHARS = 64;
 
@@ -15,7 +15,7 @@ export const BYTE_VALUES = 256;
 export const BYTE_MASK = 255;
 
 /** Big-endian uint32 shifts. gitformat-pack(5) network order for version and object count. */
-export const BE32_SHIFTS = Object.freeze([24, 16, 8, 0]);
+export const BE32_SHIFTS: readonly number[] = Object.freeze([24, 16, 8, 0]);
 export const UINT32_BYTES = 4;
 
 // ---- tree (gitobject layout; fsck.c fsck_tree) ----
@@ -34,15 +34,15 @@ export const MODE_COMMIT = '160000';
  * the low 16 bits (fsck keeps the mode in an `unsigned short`) are S_IFDIR. `40755` sorts as a directory; `160000`
  * (gitlink) as a file. A tree sorts a directory by its name followed by `/`.
  */
-export const MODE_S_IFMT = 0o170000;
-export const MODE_S_IFDIR = 0o040000;
-export const MODE_S_IFREG = 0o100000;
-export const MODE_S_IFLNK = 0o120000;
+export const MODE_S_IFMT = 0o17_0000;
+export const MODE_S_IFDIR = 0o04_0000;
+export const MODE_S_IFREG = 0o10_0000;
+export const MODE_S_IFLNK = 0o12_0000;
 /** ce_permissions: a regular file is executable (100755) when the owner-execute bit is set. */
 export const MODE_OWNER_EXEC = 0o100;
 /** fsck.c max_tree_entry_len (fsck.largePathname): a longer name is largePathname (WARN, an error under --strict). */
 export const TREE_MAX_NAME_BYTES = 4096;
-export const MODE_BITS = 0xffff;
+export const MODE_BITS = 0xff_ff;
 /** Octal digits that cover MODE_BITS: the low 18 bits are exact from the last six digits, however long the mode. */
 export const MODE_LOW_DIGITS = 6;
 export const TREE_SORT_SLASH = 0x2f;
@@ -52,8 +52,8 @@ export const TREE_SORT_SLASH = 0x2f;
  */
 export const TREE_MODE_MIN_DIGITS = 1;
 export const TREE_NAME_MIN_BYTES = 1;
-export const TREE_ENTRY_OVERHEAD = TREE_MODE_MIN_DIGITS + 1 + TREE_NAME_MIN_BYTES + 1;
-export const TREE_ENTRY_MIN = TREE_ENTRY_OVERHEAD + OID_BYTES;
+export const TREE_ENTRY_OVERHEAD: number = TREE_MODE_MIN_DIGITS + 1 + TREE_NAME_MIN_BYTES + 1;
+export const TREE_ENTRY_MIN: number = TREE_ENTRY_OVERHEAD + OID_BYTES;
 
 // ---- pkt-line (gitprotocol-common(5)) ----
 /** Hex digits of the length prefix. The length counts those digits. */
@@ -65,25 +65,25 @@ export const PKT_DELIM = 1;
 export const PKT_RESPONSE_END = 2;
 export const PKT_LEN_INVALID = 3;
 /** Smallest data pkt-line: the 4 hex digits and an empty payload. */
-export const PKT_DATA_MIN = PKT_LEN_HEX;
+export const PKT_DATA_MIN: number = PKT_LEN_HEX;
 /** gitprotocol-common(5): pkt-line length must be ≤ 65520. Payload budget is that minus the length prefix. */
-export const PKT_MAX_SIZE = 65520;
-export const PKT_MAX_PAYLOAD = PKT_MAX_SIZE - PKT_LEN_HEX;
+export const PKT_MAX_SIZE = 65_520;
+export const PKT_MAX_PAYLOAD: number = PKT_MAX_SIZE - PKT_LEN_HEX;
 /** What git's reader accepts: pkt-line.c packet_read_with_status dies "protocol error: bad line length" once the payload
  * (length minus the prefix) is ≥ its buffer, packet_buffer[LARGE_PACKET_MAX]. So it reads payloads up to 65519 bytes. */
-export const PKT_READ_MAX_PAYLOAD = PKT_MAX_SIZE - 1;
+export const PKT_READ_MAX_PAYLOAD: number = PKT_MAX_SIZE - 1;
 /** Nibble width when decoding the hex length. Shifts of the four hex digits, high digit first. */
 export const NIBBLE_BITS = 4;
-export const PKT_LEN_SHIFTS = Object.freeze([NIBBLE_BITS * 3, NIBBLE_BITS * 2, NIBBLE_BITS, 0]);
+export const PKT_LEN_SHIFTS: readonly number[] = Object.freeze([NIBBLE_BITS * 3, NIBBLE_BITS * 2, NIBBLE_BITS, 0]);
 
 // ---- pack (gitformat-pack(5)) ----
 /** ASCII `PACK`. */
-export const PACK_SIGNATURE = Object.freeze([0x50, 0x41, 0x43, 0x4b]);
+export const PACK_SIGNATURE: readonly number[] = Object.freeze([0x50, 0x41, 0x43, 0x4b]);
 export const PACK_VERSION = 2;
 /** 4 signature + 4 version + 4 object count. */
 export const PACK_HEADER_BYTES = 12;
 /** Trailer is the SHA-1 of every preceding byte. */
-export const PACK_TRAILER_BYTES = OID_BYTES;
+export const PACK_TRAILER_BYTES: number = OID_BYTES;
 /** Object type codes. 0 and 5 are reserved. */
 export const OBJ_COMMIT = 1;
 export const OBJ_TREE = 2;
@@ -112,7 +112,7 @@ export const DELTA_SIZE_MIN = 4;
 export const DELTA_COPY = 0x80;
 export const DELTA_INSERT_MAX = 127;
 /** Copy size of 0 means 0x10000. */
-export const DELTA_COPY_MAX = 0x10000;
+export const DELTA_COPY_MAX = 0x1_00_00;
 export const DELTA_COPY_OFF1 = 0x01;
 export const DELTA_COPY_OFF2 = 0x02;
 export const DELTA_COPY_OFF3 = 0x04;
@@ -122,10 +122,10 @@ export const DELTA_COPY_LEN2 = 0x20;
 export const DELTA_COPY_LEN3 = 0x40;
 /** Width of one byte. The next little-endian or offset byte sits this many bits higher. */
 export const BYTE_SHIFT = 8;
-export const DELTA_OFF_SHIFT = BYTE_SHIFT;
+export const DELTA_OFF_SHIFT: number = BYTE_SHIFT;
 /** Second and third offset/length bytes sit 16 bits up (two groups of DELTA_OFF_SHIFT). */
-export const DELTA_BYTE2_SHIFT = DELTA_OFF_SHIFT * 2;
-export const DELTA_OFF4_FACTOR = 0x1000000;
+export const DELTA_BYTE2_SHIFT: number = DELTA_OFF_SHIFT * 2;
+export const DELTA_OFF4_FACTOR = 0x1_00_00_00;
 
 // ---- sideband (gitprotocol-pack(5) side-band-64k; gitprotocol-v2(5) packfile section) ----
 export const SIDEBAND_PACK = 1;
@@ -159,7 +159,7 @@ export const IDENT_TZ_MINUTE_MAX = 59;
  * 9223372036854775807 is a date and 9223372036854775808 is "date causes integer overflow". Measured on git 2.50
  * (test/fsck-space.test.js `ok-max-date`, `date-overflow`).
  */
-export const IDENT_TIMESTAMP_MAX = 0x7fffffffffffffffn;
+export const IDENT_TIMESTAMP_MAX = 0x7f_ff_ff_ff_ff_ff_ff_ffn;
 
 // ---- commit headers (Documentation/gitformat-commit; fsck.c fsck_commit) ----
 // fsck_commit reads exactly one tree, then any parent lines, then author lines (exactly one allowed), then one
@@ -188,7 +188,7 @@ export const ZLIB_CM_MASK = 0x0f;
 export const ZLIB_FDICT = 0x20;
 export const ZLIB_HEADER_MOD = 31;
 export const ADLER_BYTES = 4;
-export const ADLER_MOD = 65521;
+export const ADLER_MOD = 65_521;
 /** Adler-32 stores the sum `b` in the high 16 bits. RFC 1950 §2.2. */
 export const ADLER_SHIFT = 16;
 export const DEFLATE_BFINAL_BITS = 1;
@@ -198,7 +198,7 @@ export const DEFLATE_FIXED = 1;
 export const DEFLATE_DYNAMIC = 2;
 export const DEFLATE_STORED_HEADER_BYTES = 4;
 /** One's complement of the stored-block length is 16 bits. RFC 1951 §3.2.4. */
-export const DEFLATE_STORED_LEN_MASK = 0xffff;
+export const DEFLATE_STORED_LEN_MASK = 0xff_ff;
 export const DEFLATE_MAX_BITS = 15;
 export const DEFLATE_BIT_TABLE = 16;
 export const DEFLATE_LITERALS = 256;
@@ -241,7 +241,7 @@ export const ZLIB_BOUND_LITERAL_DIV = 8;
 export const ZLIB_BOUND_BLOCK_DIV = 64;
 export const ZLIB_BOUND_SLACK = 13;
 /** The longest zlib stream accepted for an object whose inflated size is `size`. Finite for every finite size. */
-export const zlibBound = size => size + Math.ceil(size / ZLIB_BOUND_LITERAL_DIV) + Math.ceil(size / ZLIB_BOUND_BLOCK_DIV) + ZLIB_BOUND_SLACK;
+export const zlibBound = (size: number): number => size + Math.ceil(size / ZLIB_BOUND_LITERAL_DIV) + Math.ceil(size / ZLIB_BOUND_BLOCK_DIV) + ZLIB_BOUND_SLACK;
 
 /** `2 ** shift` for a size-varint group. Defined once so the base is not recopied at each call site. */
-export const varintScale = shift => 2 ** shift;
+export const varintScale = (shift: number): number => 2 ** shift;

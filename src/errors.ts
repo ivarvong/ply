@@ -53,7 +53,10 @@ export type Extra = {
   readonly max?: number;
   readonly cause?: unknown;
   readonly original?: unknown;
-  // edit.ts: the span attributes of a failed tree lookup (lookupEntry), and an LFS pointer's size (lfs_pointer)
+  // objects.ts: git fsck's message id on a refused commit, tag or duplicate header; the name a tree carries twice
+  readonly msgId?: string;
+  readonly entry?: string;
+  // edit.ts: the span attributes of a failed tree lookup (lookupEntry); an LFS pointer's size (lfs_pointer)
   readonly attrs?: Readonly<Record<string, unknown>>;
   readonly size?: number;
 };
