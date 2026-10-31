@@ -2,7 +2,7 @@
 // fixture lives in a bare repo behind `git http-backend`; the clone and ply's checkout must be `diff -r` identical, and
 // a walk of both compares every entry's type, permission bits, bytes and symlink target. Round trips are counted at
 // the fetch boundary and compared with the per-file baseline (readCommit → listTree per directory → readFile per blob,
-// examples/checkout-tree.mjs). Also: a blob:none-only host (Artifacts), a host that refuses many wants, lying servers
+// the first examples/checkout-tree.mjs, before checkoutDir). Also: a blob:none-only host (Artifacts), a host that refuses many wants, lying servers
 // (wrong blob, unwanted object, wrong commit, duplicate tree entry), `path`, the limits, and the writer's path rules.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -102,7 +102,7 @@ test('checkoutDir == git clone: diff -r and modes; 3 round trips against the per
   const trips = t.spans().filter(s => s.attrs['git.request.bytes'] != null).length;
   assert.equal(trips, 3);
 
-  // the baseline (examples/checkout-tree.mjs): readCommit once, listTree per directory, readFile per blob, by commit oid
+  // the baseline (what the first examples/checkout-tree.mjs did): readCommit once, listTree per directory, readFile per blob, by commit oid
   const base = counting(), opts = { tracer: new Tracer(), fetchImpl: base.f, cache: new Map(), quirks: {} };
   const { oid } = await readCommit(R.url, { ref: 'main' }, opts);
   let read = 0;
