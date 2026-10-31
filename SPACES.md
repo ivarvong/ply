@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **488** (411 fail sites, 22 produced codes, 6 untyped throws, 19 exported parse/decode/classify/decide functions). Covered by a merged space 415, by a pending PR 9, excluded 28, unregistered 36. Fail sites no cell reaches: 42 of 411. Of the registered points, 213 are claimed by an enumerated space, 12 only by a random one and 199 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **489** (412 fail sites, 22 produced codes, 6 untyped throws, 19 exported parse/decode/classify/decide functions). Covered by a merged space 416, by a pending PR 9, excluded 28, unregistered 36. Fail sites no cell reaches: 42 of 412. Of the registered points, 214 are claimed by an enumerated space, 12 only by a random one and 199 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 235, by a pending PR 0, excluded 140, uncovered 2. Claimed by an enumerated space 223, random 2, curated 10.
 
@@ -64,6 +64,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
 | `ssh` | main | curated | case | cases | — | OpenSSH sshd + git over ssh | 5 | 0 | ci (`test/sshgit.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
+| `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
 | `claims-owed` | pending #81 | curated | site | none yet | — | owed: cells in the owning space that reach each site (issue #81); then the rule moves back and this entry is deleted | 9 | 0 | ci | — |
 | `read` | main | curated | case | cases | — | git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56) | 16 | 0 | ci (`test/read.test.js`, `test/log.test.js`, `test/artifacts-compat.test.js`) | — |
 | `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 9 | 0 | ci (`test/props.test.js`) | — |
@@ -192,8 +193,8 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/transport.js#coded:&lt;code>:&lt;String(e?.message ?? e)>` | src/transport.js:40 coded() | &lt;code>: &lt;String(e?.message ?? e)> |
 | decisions | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
 | decisions | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
-| decisions | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:191 validateMessage() | bad_request: message |
-| decisions | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:184 validatePath() | bad_request: path |
+| decisions | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:202 validateMessage() | bad_request: message |
+| decisions | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:195 validatePath() | bad_request: path |
 | decisions | `src/validate.js#validateRef:bad_request:ref#3` | src/validate.js:49 validateRef() | bad_request: ref |
 | failsites | `src/checkout-node.js#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.js:93 checkoutDir() | bad_request: dir must be a non-empty string |
 | failsites | `src/checkout-node.js#slurp:limit_exceeded:symlink target` | src/checkout-node.js:50 slurp() | limit_exceeded: symlink target |
@@ -220,7 +221,7 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/transport.js#coded:&lt;code>:&lt;String(e?.message ?? e)>` | src/transport.js:40 coded() | &lt;code>: &lt;String(e?.message ?? e)> |
 | failsites | `src/tree-node.js#keep:limit_exceeded:directory bytes` | src/tree-node.js:31 keep() | limit_exceeded: directory bytes |
 | failsites | `src/tree-node.js#keep:limit_exceeded:files` | src/tree-node.js:29 keep() | limit_exceeded: files |
-| failsites | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:191 validateMessage() | bad_request: message |
-| failsites | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:184 validatePath() | bad_request: path |
+| failsites | `src/validate.js#validateMessage:bad_request:message` | src/validate.js:202 validateMessage() | bad_request: message |
+| failsites | `src/validate.js#validatePath:bad_request:path#6` | src/validate.js:195 validatePath() | bad_request: path |
 | failsites | `src/validate.js#validateRef:bad_request:ref#3` | src/validate.js:49 validateRef() | bad_request: ref |
 
