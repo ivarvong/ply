@@ -22,8 +22,6 @@ import { parseLsRefLine } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
 import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
-import { kexInit, parseKexInit } from '../src/ssh.js';
-import { parseSshUrl } from '../src/sshgit.js';
 import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 
@@ -31,7 +29,7 @@ const covered = new Set();
 const property = (id, name, fn) => { covered.add(id); test(name, fn); };
 const oid = n => n.toString(16).padStart(OID_HEX_CHARS, '0');
 const oidBytes = n => fromHex(oid(n));
-const CODES = new Set(['pack_corrupt', 'protocol', 'ssh', 'bad_request', 'remote_error', 'unsupported']);
+const CODES = new Set(['pack_corrupt', 'protocol', 'bad_request', 'remote_error', 'unsupported']);
 
 function sampleTree() {
   const entries = [
@@ -417,48 +415,6 @@ property('stream', 'a proper prefix of a git response stream is never a report',
     assert.equal(run(frames).lines.length, 2, name);
     for (let i = 0; i < frames.length; i++) assert.equal(run(frames.slice(0, i)).tag, 'broken', `${name}: ${i} frames`);
     if (sideband) for (let j = 1; j < inner.length; j++) assert.equal(run([frames[0], { kind: 'data', payload: concat([Uint8Array.of(1), inner.subarray(0, j)]) }, { kind: 'flush' }]).tag, 'broken', `band 1 cut at ${j}`);
-  }
-});
-
-property('kex', 'a KEXINIT prefix throws ssh until the reserved tail', () => {
-  const cookie = new Uint8Array(16);
-  for (let i = 0; i < cookie.length; i++) cookie[i] = i + 1;
-  const msg = kexInit(cookie);
-  const full = parseKexInit(msg);
-  // parseKexInit stops at first_kex_packet_follows and does not read the reserved u32, so the last four bytes are
-  // not required. Every shorter cut throws; every cut that reaches that boolean parses to the same message.
-  let opened = null;
-  for (let i = 1; i < msg.length; i++) {
-    let got;
-    try { got = parseKexInit(msg.subarray(0, i)); }
-    catch (e) {
-      assert.equal(e.code, 'ssh');
-      assert.equal(opened, null, `threw again after succeeding at ${opened}`);
-      continue;
-    }
-    if (opened === null) opened = i;
-    assert.deepEqual(got, full);
-  }
-  assert.ok(opened !== null && opened < msg.length);
-});
-
-property('ssh-url', 'an ssh url prefix throws or returns a prefix of the host and path', () => {
-  for (const url of ['ssh://git@github.com:22/owner/repo.git', 'git@github.com:owner/repo.git']) {
-    const full = parseSshUrl(url);
-    for (let i = 1; i < url.length; i++) {
-      const pre = url.slice(0, i);
-      let got;
-      try { got = parseSshUrl(pre); }
-      catch (e) { assert.equal(e.code, 'bad_request'); continue; }
-      // `ssh:/...` (the second slash not yet present) matches the scp grammar instead. That alias is url syntax,
-      // not a git object; once `://` is in hand the host and path stay prefixes.
-      if (url.startsWith('ssh://') && !pre.includes('://')) continue;
-      assert.ok(full.host.startsWith(got.host), `${pre} host ${got.host}`);
-      assert.ok(full.user.startsWith(got.user));
-      const gotPath = got.path.replace(/^\//, '');
-      const fullPath = full.path.replace(/^\//, '');
-      assert.ok(fullPath.startsWith(gotPath), `${pre} → ${got.path}`);
-    }
   }
 });
 

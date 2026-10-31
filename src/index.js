@@ -7,8 +7,6 @@ export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidate
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
-export { SshClient, hostKeyLine, hostKeyFromLine, fingerprint } from './ssh.js';
-export { createSshTransport, parseSshUrl } from './sshgit.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
 export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, ZERO_OID, pushBody } from './client.js';
 export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, applyDelta, makeDelta, packParseOpts } from './pack.js';

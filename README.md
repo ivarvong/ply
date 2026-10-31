@@ -120,19 +120,9 @@ Artifacts advertises `fetch=filter` but answers anything other than `blob:none` 
 
 - A pull request is a GitHub API object around such a branch; that call is outside this library.
 
-## SSH hosts
+## SSH
 
-`ply/ssh` is a zero-dependency SSH-2 client (`src/ssh.js`, 14 KB min) and a git transport on it (`src/sshgit.js`): curve25519-sha256, pinned `ssh-ed25519` host key (no trust-on-first-use — pass the `ssh-keyscan -t ed25519` line), `aes128/256-gcm@openssh.com`, publickey auth with an Ed25519 WebCrypto key, one connection for every command of an edit (`env GIT_PROTOCOL=version=2` + `exec git-upload-pack`, a second channel for `git-receive-pack`). TCP comes from the platform: `ply/ssh-workers` (`cloudflare:sockets`) or `ply/ssh-node` (`node:net`).
-
-```js
-import { createSshTransport } from 'ply/ssh';
-import { workersStream } from 'ply/ssh-workers';
-const t = createSshTransport('git@github.com:owner/repo.git', { privateKey, publicKeyRaw, hostKey: 'github.com ssh-ed25519 AAAA…', connect: workersStream, tracer });
-await editFile(url, spec, { tracer, transport: t });   // editFile / mergeBranch / rebaseBranch all take `transport`
-await t.close();
-```
-
-Proven against a real `sshd` (OpenSSH 9.6) in `test/sshgit.test.js`: edits, merge, rebase, signing and verify on one connection; parity both ways with git's own ssh client (clone sees our push, we see git's); host key mismatch refused before any credential is presented; unauthorized key → `auth`; a server without `AcceptEnv GIT_PROTOCOL` → `unsupported`; 25 random byte flips on the encrypted stream → bad tag, never a wrong answer (git is the judge). Two things learned the hard way: git caches loose refs for the life of a process, so a long-lived `upload-pack` channel must be dropped after a push; and a channel is one git process reading commands in order, so concurrent commands (the head hint's overlapped fetch) are serialized per channel. GitHub's SSH endpoint could not be reached from the build sandbox (HTTPS-only egress); it advertises the same kex/cipher/host-key set.
+SSH transport removed 2026-10-31; history on branch archive/ssh.
 
 ## Guards and policy
 
@@ -146,31 +136,31 @@ Proven against a real `sshd` (OpenSSH 9.6) in `test/sshgit.test.js`: edits, merg
 operations   edit · push tree · merge · rebase · cherry-pick · revert        operation.js: root span, transport, outcome, verify rule
 commands     lsRefs · packStream/fetchObject · fetchPack/negotiate · push · discover · receiveCaps   free functions over a transport
 transport    the contract (transport.js): t.frames(service, body, span, hints) · t.advertise(service, span)
-             implementations: http.js (one POST per command) · sshgit.js (one channel per service, over ssh.js)
+             implementation: http.js (one POST per command)
 protocol     pure step functions: pktStep · v2Step · spStep · scanStep · streamStep · reportStep · threeWay · decideHead
 codecs       pktline · inflate · sha1 · objects · pack (delta/build) · validate
 errors       errors.js: every code, its retry policy; errors-doc.js: what each means
 ```
 
-Each layer is testable without the one below it, and `test/bundle.test.js` asserts the dependency direction. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*` / `ssh.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
+Each layer is testable without the one below it, and `test/bundle.test.js` asserts the dependency direction. Transport hints are neutral (`{ bypassCache }`), not headers; transport-specific detail goes under `http.*`, the neutral facts under `git.transport`, `git.request.bytes`, `git.response.bytes`, `git.response.cache`.
 
 ## Telemetry conventions (enforced by `test/pure.test.js` and `test/span-contract.test.js`)
 
-- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children; `ssh.<phase>` for transport phases.
-- Attribute keys: dotted lowercase under `git.` `http.` `ssh.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
+- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children.
+- Attribute keys: dotted lowercase under `git.` `http.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
 - Every trace root (operation roots and the spans that follow them, below) carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, `cancelled`, …, or the error code).
 - Every wire span carries `git.transport`, `git.request.bytes`, `git.response.bytes`, `server.address`.
 
 ### Telemetry contract
 
-Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit), the wire spans and the SSH phases against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
+Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit), and the wire spans against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
 
 - **Removing or renaming** a span or key, changing a value's type, or moving a span is a **breaking change** for consumers' dashboards and alerts, and is called out as one in the PR and the release notes.
 - **Adding** one also fails the test until the snapshot is regenerated (`npm run test:spans:update`), so every addition is visible in review as a diff of `test/span-contract.json`.
 
 ### Span lifetimes
 
-Some work is driven by the caller after the call returns: `readFile`'s `stream`, `checkoutTree`'s `files` iterator (and each streamed blob in it), and an SSH channel (`ssh.exec`, one git process reused across commands until it is closed). Their spans — `git.read.blob`, `git.checkout.blobs`, `ssh.exec` — **follow** the span that started them instead of being its children:
+Some work is driven by the caller after the call returns: `readFile`'s `stream`, `checkoutTree`'s `files` iterator (and each streamed blob in it). Their spans — `git.read.blob`, `git.checkout.blobs` — **follow** the span that started them instead of being its children:
 
 - Each is the root of a trace of its own, with an OTLP link `ply.link=follows_from` to the span it follows, and that span carries `ply.link=followed_by` back if it was still open when the follower started (`git.read` → `git.read.blob`; `git.checkout.blobs` → each streamed `git.read.blob`). Links per span are capped at `maxEvents`, the rest counted in `droppedLinksCount`.
 - A follower is not an invocation (no `ply.isolate.*`), inherits its leader's credential scrubbing, and carries its own `<name>.outcome`. It ends when the work does: the stream read to the end (`ok`), failing (the error code), or cancelled by the consumer (`cancelled`). A stream neither read to the end nor cancelled never ends its span, and holds its connection, like an unread `fetch` body.

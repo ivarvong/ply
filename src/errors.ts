@@ -15,14 +15,14 @@ export type Retry = 'yes' | 'fresh' | 'no' | 'read';
 // makes the table exhaustive both ways: a code without a policy, or a policy for an unknown code, does not compile.
 export type Code =
   | 'bad_request' | 'unsupported' | 'network' | 'timeout' | 'aborted' | 'http' | 'auth' | 'not_found' | 'rate_limited'
-  | 'upstream_5xx' | 'not_git' | 'ssh' | 'host_key_mismatch' | 'protocol' | 'pack_corrupt' | 'remote_error'
+  | 'upstream_5xx' | 'not_git' | 'protocol' | 'pack_corrupt' | 'remote_error'
   | 'limit_exceeded' | 'match_count' | 'lfs_pointer' | 'cas_conflict' | 'push_rejected' | 'push_partial'
   | 'merge_conflict' | 'not_fast_forward' | 'not_linear' | 'unrelated_histories' | 'ambiguous' | 'internal';
 
 export const RETRY: Readonly<Record<Code, Retry>> = Object.freeze({
   bad_request: 'no', unsupported: 'no', network: 'yes', timeout: 'yes', aborted: 'no', http: 'no', auth: 'no',
-  not_found: 'no', rate_limited: 'yes', upstream_5xx: 'yes', not_git: 'no', ssh: 'yes', host_key_mismatch: 'no',
-  protocol: 'yes', pack_corrupt: 'yes', remote_error: 'no', limit_exceeded: 'no', match_count: 'no',
+  not_found: 'no', rate_limited: 'yes', upstream_5xx: 'yes', not_git: 'no', protocol: 'yes',
+  pack_corrupt: 'yes', remote_error: 'no', limit_exceeded: 'no', match_count: 'no',
   lfs_pointer: 'no', cas_conflict: 'fresh', push_rejected: 'no', push_partial: 'no', merge_conflict: 'no',
   not_fast_forward: 'no', not_linear: 'no', unrelated_histories: 'no', ambiguous: 'read', internal: 'no',
 });
