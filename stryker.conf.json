@@ -1,10 +1,12 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "testRunner": "command",
-  "commandRunner": {
-    "command": "PROP_N=4 node --test --test-concurrency=1 test/props.test.js test/prefix-closure.test.js test/format-facts.test.js test/mutant-kill.test.js test/mutant-kill-tree.test.js && PUSH_SPACE=quick PUSH_SPACE_WORKERS=1 node --test --test-name-pattern='every cell|unpack failure strings' test/space/push-outcome.test.js"
+  "testRunner": "tap",
+  "tap": {
+    "testFiles": ["test/format-facts.test.js", "test/prefix-closure.test.js", "test/props.test.js", "test/mutant-kill.test.js", "test/mutant-kill-tree.test.js", "test/space/push-outcome.test.js"],
+    "nodeArgs": ["--env-file=test/stryker.env", "-r", "./test/stryker-parent-guard.cjs", "--test-reporter=tap", "--test-skip-pattern=cells observed from git|every tag of every axis", "-r", "{{hookFile}}", "{{testFile}}"],
+    "forceBail": true
   },
-  "coverageAnalysis": "off",
+  "coverageAnalysis": "perTest",
   "mutate": ["src/**/*.js"],
   "ignorePatterns": ["reports", ".stryker-tmp", "fuzz-out", "coverage"],
   "tempDirName": ".stryker-tmp",

@@ -84,9 +84,11 @@ if (!isMainThread) {
   });
 
   test('push outcome: every cell of the space through push(), against the table', { timeout: 600_000 }, async () => {
+    // PUSH_SPACE_WORKERS=0: every cell on this thread (the mutation run: Stryker's per-test coverage is recorded by the
+    // test process's main thread, so code reached only in a worker would count as uncovered).
     const w = +(process.env.PUSH_SPACE_WORKERS ?? Math.min(4, availableParallelism()));
     const t0 = performance.now();
-    const shards = await Promise.all(Array.from({ length: w }, (_, k) => new Promise((resolve, reject) => {
+    const shards = w === 0 ? [await runShard(0, 1)] : await Promise.all(Array.from({ length: w }, (_, k) => new Promise((resolve, reject) => {
       const wk = new Worker(new URL(import.meta.url), { workerData: { k, w } });
       wk.once('message', resolve); wk.once('error', reject);
     })));

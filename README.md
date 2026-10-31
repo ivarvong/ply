@@ -208,7 +208,7 @@ Peak per invocation is one pkt-line (≤ 64 KB) + one inflate chunk (16 KB) + `|
 ```
 npm run lint            # oxlint; no-magic-numbers on the wire decoders (0 and 1 are the only allowed literals)
 npm run test:props      # ~5 s: pure step functions — chunking invariance, codec roundtrips, node:zlib/crypto oracles
-npm run test:mutate     # Stryker across src/. Full run locally and on main; a PR mutates only the src files it changes
+npm run test:mutate     # Stryker across src/. Full run locally and on main; a PR mutates only the src lines it changes
 npm run fuzz:below-hash -- --n 20 --seed 1   # mutate decompressed objects, re-hash, fetch, compare with git fsck --strict
 npm run test:oracle     # ~5 s: real git — tree oids vs write-tree, git pack-objects (ofs-delta, 5 window/depth/compression combos) parsed to cat-file truth, verify-pack chain depths, index-pack --fix-thin accepts our thin packs, filter semantics, 6-writer CAS convergence
 npm run fuzz -- --n 200 # ~30 s: steered generative cases against git http-backend
