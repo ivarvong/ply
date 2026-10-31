@@ -130,14 +130,14 @@ jobs:
             exit 1
           fi
 
-  # Stryker over the src files a PR changed (all of src/ on main), split into 8 shards balanced by measured cost
-  # (scripts/mutate.mjs --plan 8, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
+  # Stryker over the src files a PR changed (all of src/ on main), split into 16 shards balanced by measured cost
+  # (scripts/mutate.mjs --plan 16, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
   # costing more than a shard's share. Shards only run Stryker; the job named `mutate` merges their reports, checks
   # every mutant of every planned file is there exactly once, and judges them with the same rules as an unsharded run.
-  # The 8 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
+  # The 16 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
   # fails the gate.
   mutate-shard:
-    name: mutate-shard (${{ matrix.shard }}/8)
+    name: mutate-shard (${{ matrix.shard }}/16)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -145,7 +145,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -161,7 +161,7 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
           SHARD: ${{ matrix.shard }}
-        run: node scripts/mutate.mjs --shard "${SHARD}/8"
+        run: node scripts/mutate.mjs --shard "${SHARD}/16"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mutation-shard-${{ matrix.shard }}
@@ -205,7 +205,7 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
-        run: node scripts/mutate.mjs --merge shard-reports --shards 8
+        run: node scripts/mutate.mjs --merge shard-reports --shards 16
       # The merged report, for per-file history (weights for a future partition, or a look at what survived).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: success() || failure()
