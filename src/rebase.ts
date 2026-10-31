@@ -6,7 +6,9 @@
 //   rebase      commit's parent tree new tip     commit tree          parent [new tip], author+message kept, committer now
 //   squash      merge-base tree      target      branch tip tree      parent [target]
 //   cherry-pick commit's parent tree target      commit tree          parent [target], author+message kept
+//               (a root's parent is the empty tree)
 //   revert      commit tree          target      commit's parent tree parent [target]
+//               (a root's parent is the empty tree)
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
 import { thrown as fail, type Extra } from './errors.js';
@@ -183,6 +185,12 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
 }
 /* oxlint-enable eslint/complexity */
 
+// What to do when the transplanted tree is the target's tree. 'stop' is git's default (report empty, write nothing).
+// 'keep' is `git cherry-pick --keep-redundant-commits` (implies `--allow-empty`): write the commit on that tree.
+// One policy covers both kinds git distinguishes — a commit that was empty, and one that became empty because the
+// change is already applied — because both are the same tree here. git 2.43's `revert` has no `--allow-empty`; the
+// commit it would write is what `git commit --allow-empty --no-edit` writes from the message revert prepared.
+export type EmptyPolicy = 'stop' | 'keep';
 export type PickSpec = {
   readonly ref?: string;
   readonly commit: string;
@@ -192,14 +200,54 @@ export type PickSpec = {
   readonly time?: number;
   readonly revert?: boolean;
   readonly message?: string | null;
+  readonly empty?: EmptyPolicy;
 };
-export type PickOutcome =
-  | { readonly outcome: 'empty'; readonly ref: string; readonly oid: string }
-  | { readonly outcome: 'ok'; readonly ref: string; readonly oid: string; readonly tree: string; readonly onto: string; readonly pushBytes: number };
+type PickWritten = {
+  readonly ref: string;
+  readonly oid: string;
+  readonly tree: string;
+  readonly onto: string;
+  readonly pushBytes: number;
+};
+export type PickEmpty = { readonly outcome: 'empty'; readonly ref: string; readonly oid: string };
+export type PickKept = { readonly outcome: 'kept_empty' } & PickWritten;
+export type PickOk = { readonly outcome: 'ok' } & PickWritten;
+// 'stop' cannot keep, and 'keep' cannot stop: the policy is part of the result.
+export type PickOutcome<E extends EmptyPolicy = EmptyPolicy> =
+  [E] extends ['keep'] ? PickKept | PickOk : [E] extends ['stop'] ? PickEmpty | PickOk : PickEmpty | PickKept | PickOk;
+
+function emptyPolicy(value: unknown): EmptyPolicy {
+  if (value === undefined || value === 'stop') return 'stop';
+  if (value === 'keep') return 'keep';
+  // Own decision point: a three-statement function whose thrown fail() uses its parameter is recorded as a wrapper,
+  // and the call site would be the decision instead of this check.
+  const got = value;
+  throw fail('bad_request', "empty must be 'stop' or 'keep'", { what: 'empty', got });
+}
+
+// A root's missing parent is the empty tree (mergeTrees' null). git's first parent of a parentless commit.
+async function parentTreeAt(t: Transport, parents: readonly string[]): Promise<string | null> {
+  const parentOid = parents[0];
+  if (parentOid === undefined) return null;
+  return (await commitAt(t, parentOid)).tree;
+}
+
+// 'stop' reports empty and writes nothing. 'keep' writes that same tree (`kept_empty`). A different tree is `ok`.
+function writtenKind(sameTree: boolean, empty: EmptyPolicy): 'empty' | 'kept_empty' | 'ok' {
+  if (!sameTree) return 'ok';
+  if (empty === 'stop') return 'empty';
+  return 'kept_empty';
+}
 
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
-export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time = Math.floor(Date.now() / 1000), revert = false, message = null }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
+// A root commit has no parent: git diffs it against the empty tree (mergeTrees' null), and revert does the same in
+// reverse. A merge commit is refused; git cherry-picks one only with `-m` (a mainline ply does not take).
+export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
+export function pickCommit(url: string, spec: PickSpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
+export function pickCommit(url: string, spec: PickSpec, opts?: RebaseOptions): Promise<PickOutcome>;
+export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time = Math.floor(Date.now() / 1000), revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
   validateAttributes(attributes); validatePushRef(ref, false);
+  const empty = emptyPolicy(emptyGiven);
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const revertAuthor: ValidatedIdent = author ? stamp(author, time) : committerPerson;
   if (message !== null) validateMessage(message);
@@ -207,26 +255,38 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit } }, async ({ t, outcome }): Promise<PickOutcome> => {
+  return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty } }, async ({ t, outcome }): Promise<PickOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref]);
     const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`);
     const [cT, cC] = await Promise.all([target, commit].map(oid => commitBytesAt(t, oid)));
     const tInfo: Commit = parseCommit(cT?.data ?? new Uint8Array(0), t.limits);
     const c: Commit = parseCommit(cC?.data ?? new Uint8Array(0), t.limits);
-    if (c.parents.length !== 1) throw fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
-    const p: Commit = await commitAt(t, c.parents[0]);
+    if (c.parents.length > 1) throw fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
+    const parentTree = await parentTreeAt(t, c.parents);
     const who: string = ident(committerPerson);
     const out: Replay = { fetched: 0, rediff, attributes };
     const subject = (c.message ?? '').split('\n')[0] ?? '';
     const r = await transplant(t, cache,
-      revert ? { base: c.tree, ours: tInfo.tree, theirs: p.tree } : { base: p.tree, ours: tInfo.tree, theirs: c.tree },
+      revert ? { base: c.tree, ours: tInfo.tree, theirs: parentTree } : { base: parentTree, ours: tInfo.tree, theirs: c.tree },
       { parent: target, author: revert ? ident(revertAuthor) : c.author, committer: who, message: message ?? (revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message), encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
     if (r.conflicts) throw fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${r.conflicts.slice(0, 8).join(', ')}`, { conflicts: r.conflicts, reasons: r.reasons } as ConflictDetail);
-    if (r.treeOid === tInfo.tree) return outcome('empty', { outcome: 'empty', ref, oid: target });
+    const kind = writtenKind(r.treeOid === tInfo.tree, empty);
+    if (kind === 'empty') return outcome('empty', { outcome: 'empty', ref, oid: target });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: r.oid, objects: uniqueObjects(r.objects) });
-    return outcome('ok', { outcome: 'ok', ref, oid: r.oid, tree: r.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: r.oid, [`${name}.tree`]: r.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
+    return outcome(kind, { outcome: kind, ref, oid: r.oid, tree: r.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: r.oid, [`${name}.tree`]: r.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
   });
 }
-export const cherryPick = (url: string, spec: Omit<PickSpec, 'revert'>, opts?: RebaseOptions): Promise<PickOutcome> => pickCommit(url, { ...spec, revert: false }, opts);
-export const revertCommit = (url: string, spec: Omit<PickSpec, 'revert'>, opts?: RebaseOptions): Promise<PickOutcome> => pickCommit(url, { ...spec, revert: true }, opts);
+type CherrySpec = Omit<PickSpec, 'revert'>;
+export function cherryPick(url: string, spec: CherrySpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
+export function cherryPick(url: string, spec: CherrySpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
+export function cherryPick(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome>;
+export function cherryPick(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome> {
+  return pickCommit(url, { ...spec, revert: false }, opts);
+}
+export function revertCommit(url: string, spec: CherrySpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
+export function revertCommit(url: string, spec: CherrySpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
+export function revertCommit(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome>;
+export function revertCommit(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome> {
+  return pickCommit(url, { ...spec, revert: true }, opts);
+}
