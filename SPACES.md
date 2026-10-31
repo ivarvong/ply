@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **431** (363 fail sites, 19 produced codes, 7 untyped throws, 17 exported parse/decode/classify/decide functions). Covered by a merged space 364, by a pending PR 9, excluded 26, unregistered 32. Fail sites no cell reaches: 40 of 363. Of the registered points, 169 are claimed by an enumerated space, 12 only by a random one and 192 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **432** (363 fail sites, 19 produced codes, 7 untyped throws, 18 exported parse/decode/classify/decide functions). Covered by a merged space 365, by a pending PR 9, excluded 26, unregistered 32. Fail sites no cell reaches: 40 of 363. Of the registered points, 169 are claimed by an enumerated space, 12 only by a random one and 193 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -58,6 +58,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 17 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 12 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
+| `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
 | `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 51 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git merge-file | 10 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
@@ -103,7 +104,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/fetch.ts:167` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
 | `src/http.ts:48` utf8() | replacement | td | **HOLE (data path)** |
 | `src/http.ts:212` post() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
-| `src/lsrefs.ts:90` lsRefs() | lossless | decodeBytes | `git-bytes` / field |
+| `src/lsrefs.ts:114` lsRefs() | lossless | decodeBytes | `git-bytes` / field |
 | `src/objects.ts:94` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
 | `src/objects.ts:97` parseTree() | lossless | decodeBytes | `git-bytes` / field |
 | `src/objects.ts:258` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
