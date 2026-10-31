@@ -1,6 +1,6 @@
 // Compile-time checks: `tsc --noEmit` must pass; every @ts-expect-error must still be an error.
-import { assertNever, match, ok, andThen, type Result } from '../../src/result.ts';
-import { fail, type PlyError, type Code } from '../../src/errors.ts';
+import { assertNever, match, ok, andThen, type Result } from '../../src/result.js';
+import { fail, type PlyError, type Code } from '../../src/errors.js';
 
 const r: Result<number, PlyError> = Math.random() > 0.5 ? ok(1) : fail('timeout', 't');
 if (r.ok) { const n: number = r.value; void n; } else { const c: Code = r.error.code; void c; }

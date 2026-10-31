@@ -1,6 +1,6 @@
 // What each error code means and where it comes from. Documentation for humans and tooling; the runtime table is
 // errors.ts (RETRY); `satisfies` makes the table exhaustive over Code at compile time, test/pure.test.js at run time.
-import type { Code } from './errors.ts';
+import type { Code } from './errors.js';
 
 export type CodeDoc = { readonly where: 'local' | 'remote' | 'net' | 'content'; readonly what: string };
 export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({

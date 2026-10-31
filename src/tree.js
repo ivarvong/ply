@@ -10,7 +10,7 @@
 //
 // Shape: pure decisions between thin effects, as edit.js. fileEntries, buildTree, selectObjects are functions of their
 // arguments; the effects (lsRefs, fetchObject, push, verifyRef) are free functions over a transport record.
-import { thrown as fail } from './errors.ts';
+import { thrown as fail } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -18,7 +18,7 @@ import { push, ZERO_OID } from './push.js';
 import { makeDelta } from './packresolve.js';
 import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
-import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.ts';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
 import { decideHead } from './edit.js';
 import { signCommit } from './sign.js';

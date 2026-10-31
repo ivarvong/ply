@@ -3,7 +3,7 @@
 // (shallow, filter, wait-for-done, ref-in-want...). Run it as a canary so a server-side change shows up as an attr diff.
 // The advertisement is read as git's client reads it (connect.c); the space of advertisements and ply's answer to each
 // is test/space/advertisement.space.js.
-import { thrown as fail } from './errors.ts';
+import { thrown as fail } from './errors.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { coded, clientSpan, advertise, proto } from './transport.js';

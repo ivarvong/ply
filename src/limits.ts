@@ -1,10 +1,10 @@
 // Bounds on everything an untrusted server (or a careless caller) can size. Every allocation driven by
 // wire data checks one of these before the buffer exists. A missing or non-finite field is a hard error:
 // `undefined > n` is false in JS, so a forgotten default must not silently disable the check.
-import type { ErrorOf } from './errors.ts';
-import { orThrow, plyError } from './errors.ts';
-import type { Result } from './result.ts';
-import { err, ok } from './result.ts';
+import type { ErrorOf } from './errors.js';
+import { orThrow, plyError } from './errors.js';
+import type { Result } from './result.js';
+import { err, ok } from './result.js';
 
 /* oxlint-disable no-magic-numbers -- these are the cap definitions; parsers import the names */
 

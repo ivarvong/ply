@@ -1,8 +1,8 @@
 // v2 ls-refs: the ref namespace, filtered by prefix. The one request that cannot be cached (it is the freshness source).
-import { thrown as fail } from './errors.ts';
+import { thrown as fail } from './errors.js';
 import { pkts } from './pktline.js';
 import { decodeBytes } from './bytes.js';
-import { limitError, requireLimit } from './limits.ts';
+import { limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
 import { OID_HEX_CHARS, SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';

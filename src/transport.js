@@ -18,7 +18,7 @@
 //   git.response.cache       'HIT' | 'MISS' | 'BUST' | ''   (HTTP with packcache; '' otherwise)
 //   server.address, url.full
 // and may add transport-specific detail under http.* / ssh.*. Implementations: http.js, sshgit.js.
-import { thrown as fail, isPlyCode } from './errors.ts';
+import { thrown as fail, isPlyCode } from './errors.js';
 import { KIND } from './otel.js';
 
 // We are not git and do not claim to be: servers that branch on the agent string get the truth.

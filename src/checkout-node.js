@@ -18,8 +18,8 @@
 // rethrown; a checkout that throws leaves `dir` partial.
 import { mkdir, readdir, lstat, open, symlink, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { thrown as fail } from './errors.ts';
-import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.ts';
+import { thrown as fail } from './errors.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validatePath, checkoutPathRefusal } from './validate.js';
 import { concat, encodeBytes } from './bytes.js';
 import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';

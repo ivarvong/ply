@@ -1,7 +1,7 @@
 // v2 fetch: request body (pure), response state machine (pure step), the streamed band-1 pack, and fetchObject — one
 // object by oid through the single-object pack parser, hash-verified. The buffered multi-object fetch with delta
 // resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
-import { thrown as fail, scrubError } from './errors.ts';
+import { thrown as fail, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -9,7 +9,7 @@ import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
-import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.ts';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
 

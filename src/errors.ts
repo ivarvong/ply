@@ -6,8 +6,8 @@
 //        'fresh' — retry from a fresh read (a compare-and-swap lost; the parent must be re-resolved)
 //        'no'    — retrying the same request cannot succeed
 //        'read'  — do not retry blindly: the server MAY have applied the change; read the ref back first
-import type { Err, Result } from './result.ts';
-import { err } from './result.ts';
+import type { Err, Result } from './result.js';
+import { err } from './result.js';
 
 export type Retry = 'yes' | 'fresh' | 'no' | 'read';
 
@@ -92,7 +92,7 @@ export const fail = <C extends Code>(code: C, message: string, ...detail: Payloa
   err(plyError(code, message, ...detail));
 
 // ---- Migration boundary -------------------------------------------------------------------------------------
-// Unconverted modules (scripts/ts-ratchet.json) throw. A PlyError is already the Error they throw, so crossing the
+// Unconverted modules (the .js files under src/, scripts/ts-ratchet.mjs) throw. A PlyError is already the Error they throw, so crossing the
 // boundary is `throw r.error`. Delete this section with the last .js file in src/.
 
 export type Thrown = Error & { readonly code: Code };

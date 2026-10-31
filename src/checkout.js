@@ -27,12 +27,12 @@
 // 100 MiB file cap). The iterator holds at most the batch it is yielding (and the previous one while its streams are unread).
 //
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
-import { thrown as fail } from './errors.ts';
+import { thrown as fail } from './errors.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { resolveCommit, openBlob } from './read.js';
 import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME } from './objects.js';
-import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.ts';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validatePath } from './validate.js';
 import { withParent } from './transport.js';
 import { MODE_TREE, MODE_COMMIT } from './format.js';

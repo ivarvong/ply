@@ -5,7 +5,7 @@
 // Every primitive is WebCrypto (X25519, Ed25519, AES-GCM, SHA-256), so this runs on Workers and node ≥ 20 unchanged.
 // Pure parts: the wire codec (ssh strings/mpints/name-lists), KEXINIT, the exchange hash, key derivation layout, packet
 // padding. Effects: the stream and crypto.subtle. Spans: one per phase, attributes carry the negotiated algorithms.
-import { thrown as fail } from './errors.ts';
+import { thrown as fail } from './errors.js';
 import { te, td, concat, decodeChunk } from './bytes.js';
 import { KIND } from './otel.js';
 

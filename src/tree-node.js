@@ -12,8 +12,8 @@
 // by maxInflatedTotal — the resident set ply already accepts for one buffered pack.
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { thrown as fail } from './errors.ts';
-import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.ts';
+import { thrown as fail } from './errors.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
 import { pushTree } from './tree.js';
 

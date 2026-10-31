@@ -1,5 +1,5 @@
 // Byte helpers.
-import { thrown as fail } from './errors.ts';
+import { thrown as fail } from './errors.js';
 
 export const te = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
