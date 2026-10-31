@@ -56,6 +56,14 @@ export function padded(payload, block, lengthCounts) {
   return concat([u32(1 + payload.length + padLen), Uint8Array.from([padLen]), payload, pad]);
 }
 
+// A packet's payload (pure): `body` is [padding_length][payload][padding], `len` bytes. RFC 4253 §6: at least 4 bytes of
+// padding, a payload of at least the message type; OpenSSH refuses anything else ("incomplete message").
+export const unpad = (body, len) => {
+  const padLen = body[0];
+  if (!(padLen >= 4 && padLen <= len - 2)) throw sshErr(`ssh: bad padding (${padLen} in a ${len}-byte packet)`);
+  return body.subarray(1, len - padLen);
+};
+
 // Exchange hash H (pure)
 export const exchangeHashInput = ({ vC, vS, iC, iS, kS, qC, qS, K }) => concat([str(vC), str(vS), str(iC), str(iS), str(kS), str(qC), str(qS), mpint(K)]);
 
@@ -137,8 +145,8 @@ export class SshClient {
       await this.fill(4); const len = new Reader(this.rbuf).u32();
       if (len > 256 * 1024 + 64) throw sshErr(`ssh: packet too large (${len})`);
       await this.fill(4 + len); const raw = this.take(4 + len);
-      const padLen = raw[4]; this.seqIn++; this.stats.packetsIn++;
-      return raw.subarray(5, 4 + len - padLen);
+      this.seqLast = this.seqIn++; this.stats.packetsIn++;
+      return unpad(raw.subarray(4), len);
     }
     await this.fill(4); const lengthField = this.take(4).slice(); const len = new Reader(lengthField).u32();
     if (len > 256 * 1024 + 64) throw sshErr(`ssh: packet too large (${len})`);
@@ -147,9 +155,8 @@ export class SshClient {
     let plain;
     try { plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: lengthField, tagLength: 128 }, this.dec.key, sealed)); }
     catch { throw sshErr('ssh: packet authentication failed (bad tag)'); }
-    this.seqIn++; this.stats.packetsIn++;
-    const padLen = plain[0];
-    return plain.subarray(1, plain.length - padLen);
+    this.seqLast = this.seqIn++; this.stats.packetsIn++;
+    return unpad(plain, len);
   }
   // Transport-level messages that may arrive at any time are handled here; anything else is returned.
   async readMessage() {
@@ -170,12 +177,16 @@ export class SshClient {
     return this.tracer.span('ssh.connect', { parent: this.parent, kind: KIND.CLIENT, attrs: { 'ssh.user': this.user, 'ssh.client.version': this.vC } }, async span => {
       // version exchange: the server may send banner lines before its version line
       await this.send(te.encode(this.vC + '\r\n'));
-      let vS = null;
+      // Lines before it are text (§4.2), bounded as OpenSSH bounds them: 1024 lines, 64 KiB, no NUL (a server that sends
+      // packets first, or junk forever, is refused at once rather than read until the request times out).
+      let vS = null, seen = 0, lines = 0;
       while (vS === null) {
-        await this.fill(1);
         let nl = this.rbuf.indexOf(0x0a);
-        while (nl < 0) { await this.fill(this.rbuf.length + 1); nl = this.rbuf.indexOf(0x0a); if (this.rbuf.length > 65536) throw sshErr('ssh: no version line'); }
-        const line = td.decode(this.take(nl + 1)).replace(/\r?\n$/, '');
+        while (nl < 0 && seen + this.rbuf.length <= 65536) { await this.fill(this.rbuf.length + 1); nl = this.rbuf.indexOf(0x0a); }
+        const raw = nl < 0 ? null : this.take(nl + 1);
+        seen += raw?.length ?? 0; lines++;
+        if (!raw || raw.includes(0) || lines > 1024 || seen > 65536) throw sshErr('ssh: no version line');
+        const line = td.decode(raw).replace(/\r?\n$/, '');
         if (line.startsWith('SSH-')) vS = line;
       }
       if (!vS.startsWith('SSH-2.0-') && !vS.startsWith('SSH-1.99-')) throw fail('unsupported', `ssh: server version ${vS}`);
@@ -205,9 +216,11 @@ export class SshClient {
       if (kRaw.length !== 32 || !equal(kRaw, this.hostKeyPinned)) throw fail('host_key_mismatch', `ssh: host key ${hostKeyLine(kRaw)} does not match the pinned ${hostKeyLine(this.hostKeyPinned)}`, { presented: hostKeyLine(kRaw) });
       span.set({ 'ssh.hostkey.fingerprint': await fingerprint(kRaw) });
       if (qS.length !== 32) throw sshErr('ssh: bad server ephemeral key');
+      // A low-order server key makes the shared secret zero (RFC 8731 §3: abort). WebCrypto on node and workerd refuses to
+      // derive it (an untyped OperationError); a runtime that derives it returns zeros. Both are this one refusal.
       const serverPub = await crypto.subtle.importKey('raw', qS, { name: 'X25519' }, false, []);
-      const K = new Uint8Array(await crypto.subtle.deriveBits({ name: 'X25519', public: serverPub }, eph.privateKey, 256));
-      if (K.every(b => b === 0)) throw sshErr('ssh: all-zero shared secret');
+      const K = await crypto.subtle.deriveBits({ name: 'X25519', public: serverPub }, eph.privateKey, 256).then(b => new Uint8Array(b), () => null);
+      if (!K || K.every(b => b === 0)) throw sshErr('ssh: all-zero shared secret');
       const H = new Uint8Array(await crypto.subtle.digest('SHA-256', exchangeHashInput({ vC: this.vC, vS, iC, iS, kS, qC, qS, K })));
       const sr = new Reader(sigBlob); if (sr.text() !== 'ssh-ed25519') throw sshErr('ssh: bad host signature type'); const sig = sr.string();
       const hostPub = await crypto.subtle.importKey('raw', kRaw, { name: 'Ed25519' }, false, ['verify']);
@@ -228,6 +241,7 @@ export class SshClient {
     return this.tracer.span('ssh.userauth', { parent: this.parent, kind: KIND.CLIENT, attrs: { 'ssh.auth.method': 'publickey', 'ssh.auth.key': 'ssh-ed25519' } }, async span => {
       await this.writePacket(concat([Uint8Array.from([MSG.SERVICE_REQUEST]), str('ssh-userauth')]));
       const acc = await this.readMessage(); if (acc[0] !== MSG.SERVICE_ACCEPT) throw sshErr(`ssh: expected SERVICE_ACCEPT, got ${acc[0]}`);
+      { const r = new Reader(acc); r.byte(); r.text(); } // the service name: read, as OpenSSH reads it (a message cut short is refused), not compared
       const pubBlob = encodePub(this.publicKeyRaw);
       const head = concat([str(this.user), str('ssh-connection'), str('publickey'), bool(true), str('ssh-ed25519'), str(pubBlob)]);
       const toSign = concat([str(this.sessionId), Uint8Array.from([MSG.USERAUTH_REQUEST]), head]);
@@ -246,13 +260,14 @@ export class SshClient {
   // Run a command on a session channel. Returns { stdout: AsyncIterable<Uint8Array>, write(bytes), eof(), stderr(): string, exit(): Promise<number|null> }.
   async exec(command, { env = {} } = {}) {
     const id = this.nextChannel++;
-    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], queued: 0, replies: [], waiters: [], eof: false, closed: false, stderr: '', stderrCarry: new Uint8Array(0), exit: null, exitWaiters: [], winWaiters: [] };
+    const ch = { id, remote: null, opening: true, pendingReplies: 0, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], queued: 0, replies: [], waiters: [], eof: false, closed: false, stderr: '', stderrCarry: new Uint8Array(0), exit: null, exitWaiters: [], winWaiters: [] };
     this.channels.set(id, ch);
     await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_OPEN]), str('session'), u32(id), u32(this.windowSize), u32(this.maxPacket)]));
     const conf = await this.readChannelMsg(ch, [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE]);
     if (conf[0] === MSG.CHANNEL_OPEN_FAILURE) { const r = new Reader(conf); r.byte(); r.u32(); const code = r.u32(); throw sshErr(`ssh: channel open failed (${code}): ${r.text()}`); }
     { const r = new Reader(conf); r.byte(); r.u32(); ch.remote = r.u32(); ch.winRemote = r.u32(); ch.maxRemote = r.u32(); }
     for (const [k, v] of Object.entries(env)) await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_REQUEST]), u32(ch.remote), str('env'), bool(false), str(k), str(v)]));
+    ch.pendingReplies++; // counted before the request is queued: its reply cannot arrive before it
     await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_REQUEST]), u32(ch.remote), str('exec'), bool(true), str(command)]));
     const res = await this.readChannelMsg(ch, [MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE]);
     if (res[0] === MSG.CHANNEL_FAILURE) throw fail('remote_error', `ssh: server refused to exec ${JSON.stringify(command)}`);
@@ -286,16 +301,23 @@ export class SshClient {
   // arrived went to its channel, whichever waiter read it (a second reader would block on a message nobody sends).
   pumpOnce(ch) {
     if (ch?.closed) return Promise.resolve();
-    this.pumping ??= this.readMessage().then(m => this.dispatch(m)).finally(() => { this.pumping = null; });
+    this.pumping ??= this.readMessage().then(m => this.dispatch(m, this.seqLast)).finally(() => { this.pumping = null; });
     return this.pumping;
   }
-  async dispatch(m) {
+  // The connection phase, as OpenSSH runs it (channels.c, dispatch.c). A message that is not for a channel (an unknown
+  // type, a stray USERAUTH_SUCCESS) is answered UNIMPLEMENTED and otherwise ignored (RFC 4253 §11.4). A request reply
+  // with no request pending is dropped (a reply that precedes its request answers nothing); an open confirmation or
+  // failure for a channel that is not opening is fatal ("open confirmation for non-opening channel").
+  async dispatch(m, seq) {
     const type = m[0];
     const r = new Reader(m); r.byte();
-    const chanMsgs = [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE, MSG.CHANNEL_WINDOW_ADJUST, MSG.CHANNEL_DATA, MSG.CHANNEL_EXTENDED_DATA, MSG.CHANNEL_EOF, MSG.CHANNEL_CLOSE, MSG.CHANNEL_REQUEST, MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE];
-    if (!chanMsgs.includes(type)) throw sshErr(`ssh: unexpected message ${type}`);
+    if (!CHANNEL_MSGS.includes(type)) { await this.writePacket(concat([Uint8Array.from([MSG.UNIMPLEMENTED]), u32(seq)])); return; }
     const ch = this.channels.get(r.u32()); if (!ch) return;
-    if (type === MSG.CHANNEL_OPEN_CONFIRMATION || type === MSG.CHANNEL_OPEN_FAILURE || type === MSG.CHANNEL_SUCCESS || type === MSG.CHANNEL_FAILURE) ch.replies.push(m);
+    if (type === MSG.CHANNEL_OPEN_CONFIRMATION || type === MSG.CHANNEL_OPEN_FAILURE) {
+      if (!ch.opening) throw sshErr(`ssh: unexpected message ${type} for channel ${ch.id}, which is not opening`);
+      ch.opening = false; ch.replies.push(m);
+    }
+    else if (type === MSG.CHANNEL_SUCCESS || type === MSG.CHANNEL_FAILURE) { if (ch.pendingReplies > 0) { ch.pendingReplies--; ch.replies.push(m); } }
     else if (type === MSG.CHANNEL_DATA) { const d = r.string(); this.arrived(ch, d.length); ch.queue.push(d.slice()); ch.queued += d.length; }
     else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); this.arrived(ch, d.length); const t = decodeChunk(ch.stderrCarry, d); ch.stderrCarry = t.carry; ch.stderr = (ch.stderr + t.text).slice(-8192); await this.consumed(ch); }
     else if (type === MSG.CHANNEL_WINDOW_ADJUST) ch.winRemote += r.u32();
@@ -316,5 +338,6 @@ export class SshClient {
   }
 }
 
+const CHANNEL_MSGS = [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE, MSG.CHANNEL_WINDOW_ADJUST, MSG.CHANNEL_DATA, MSG.CHANNEL_EXTENDED_DATA, MSG.CHANNEL_EOF, MSG.CHANNEL_CLOSE, MSG.CHANNEL_REQUEST, MSG.CHANNEL_SUCCESS, MSG.CHANNEL_FAILURE];
 const equal = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 export async function fingerprint(raw) { const d = new Uint8Array(await crypto.subtle.digest('SHA-256', encodePub(raw))); return 'SHA256:' + btoa(String.fromCharCode(...d)).replace(/=+$/, ''); }

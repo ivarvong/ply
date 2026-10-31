@@ -287,3 +287,60 @@ Raw product: 14 × 2 × 13 × 3 × 2 × 2 × 4 × 6 × 10 × 31 = **32,497,920**
 - `dropAfterPack/plain/complete/one/withPack/off/v1/ok/ok/uniform` — connection fails: dropAfterPack
 
 <!-- push-outcome: end generated -->
+
+## SSH handshake faults and SSH service outcomes
+
+**Decisions.** What ply's SSH client tells the caller when the server breaks the protocol at one handshake phase
+(`ssh-faults`), and when the session is fine but the git service behind the channel refuses (`ssh-service`). Both are
+enumerated with OpenSSH as the oracle: every cell runs against the same server through `git ls-remote` / `git push`
+over OpenSSH, and ply must land in git's class (ok / refused) unless the cell names a divergence with its reason.
+
+**ssh-faults** (`test/space/ssh-faults.space.js`, enumerator `test/space/ssh-faults.test.js`, server `test/sshfake.js`).
+Axes: phase {banner, kexinit, ecdh, newkeys, service, userauth, channelOpen, exec, data} × defect {truncated (tcp,
+reset, channel, eof), malformed, oversize (packet, stream), badPad, badMac, unknown, wrongAlg (kex, hostKey, cipher,
+phase), badKey (unpinned, sigType, sigBytes, ephLength, ephLowOrder), duplicate (immediate, afterSession), outOfOrder,
+disconnect (2, 11)}: 216 pairs, 109 that do not exist on the wire (each rule says why: no MAC before NEWKEYS, algorithm
+lists only in KEXINIT, …), **107 cells**. The scripted server is written from the RFCs and imports nothing from
+`src/ssh.js`; it advertises `kex-strict-s-v00@openssh.com` as OpenSSH ≥ 9.6 servers do, so OpenSSH's own strict-KEX
+rules apply. A fault-free run is `git ls-remote` succeeding through OpenSSH. Every cell asserts ply's code and message,
+an outcome within 2 s (requestTimeoutMs 4 s, so a hang shows as `timeout`), and git's class. Plus 10 pin cells
+(hostKey valid / absent / not a line / ssh-rsa blob / short key, through `SshClient` and `createSshTransport`): `bad_request`
+before any I/O, as `ssh-keygen -l` refuses the same lines.
+
+Outcomes (2026-10-31, OpenSSH 10.2p1, git 2.50.0): ssh 57, network 19, protocol 10, ok 8, unsupported 7,
+host_key_mismatch 2, remote_error 2, auth 1, limit_exceeded 1; 1.3 s on 4 servers. What OpenSSH does, and ply now
+does too: refuses any unexpected message during the initial key exchange (strict KEX) and userauth; in the connection
+phase answers an unknown or stray message with UNIMPLEMENTED (RFC 4253 §11.4) and drops a request reply that has no
+request pending; disconnects on an open confirmation for a channel that is not opening; does not compare the service
+name in SERVICE_ACCEPT. One divergence: `kexinit/duplicate(afterSession)`, a server-initiated rekey, which OpenSSH
+honours and ply refuses (`unsupported`): ply sessions are one operation, under OpenSSH servers' rekey limits.
+
+**ssh-service** (`test/space/ssh-service.space.js`, enumerator `test/space/ssh-service.test.js`). Axes: service
+{upload-pack, receive-pack} × outcome {exists, missing, notRepo, unreadable, absent (no git on PATH), hostNotFound
+("ERROR: Repository not found."), hostDenied ("ERROR: Permission to o/r.git denied to u."), silent (exit 1), warning,
+emptyAdvertisement}: **20 cells**, a real sshd whose forced command produces each outcome. git types none of them
+(it prints the server's line and "fatal: Could not read from remote repository."); ply types them from the line as
+HTTP types a status (`refusalCode`): missing → `not_found`, denied → `auth`, anything else → `remote_error`, with the
+exit status and the server's line in the message, and the test checks git's stderr and ply's message carry the same
+line. One divergence: `uploadPack/emptyAdvertisement`, git's v0 empty-repository advertisement, which git lists as
+nothing and ply refuses (`unsupported`: ply speaks only v2 over ssh).
+
+**Where train/1 (77eb2c0) disagreed with the tables**: 29 of 107 fault cells and 15 of 20 service cells.
+
+| cells | table → train/1 | cause |
+|---:|---|---|
+| 9 | `network` → `protocol` "read ECONNRESET" | a reset socket's raw error reached `coded()` and took the operation's default code |
+| 3 | `network` / `protocol` "server disconnected (2): …" → `protocol` "This socket has been ended by the other party" | the node stream refused to write once the peer half-closed, before the DISCONNECT already received was read |
+| 1 | `ssh` "all-zero shared secret" → `protocol` "The operation failed for an operation-specific reason" | WebCrypto refuses to derive X25519 with a low-order key (an untyped OperationError); the zero check after it never ran |
+| 8 | `ssh` "bad padding" → `timeout` (4 s) | padding_length 3 accepted (RFC 4253 §6: ≥ 4; OpenSSH "Corrupted padlen"); the exchange went on until the bound |
+| 1 | `ssh` "no version line" → `timeout` | a packet before the version line was read as a pre-version text line, then more lines were awaited forever (OpenSSH: "invalid format"; now: no NUL, ≤ 1024 lines, ≤ 64 KiB) |
+| 1 | `ssh` "short message" → `timeout` | SERVICE_ACCEPT's name was never read, so a cut message was accepted |
+| 4 | ok → `ssh` "unexpected message 200 / 52" | an unknown or stray message in the connection phase was fatal (RFC 4253 §11.4, OpenSSH: UNIMPLEMENTED) |
+| 1 | `ssh` → ok | a second open confirmation for an open channel was accepted (OpenSSH: disconnect) |
+| 1 | `remote_error` "ended before its advertisement (exit 0)" → `protocol` | a service that ended before its first byte was "ended before the response was complete" |
+| 6 | `not_found` → `remote_error` | a missing repository (git's "does not appear to be a git repository", a host's "Repository not found"): the not_found classifier ran only for an advertisement that was a bare flush, so a missing repository never reached it (its regex also took "command not found" for a missing repository) |
+| 2 | `auth` → `remote_error` | a host denying the repository ("Permission to … denied"), HTTP's 403 |
+| 2 | `remote_error` → `protocol` (retry: yes) | a service that exits 1 and says nothing was retried as a framing fault |
+| 2 | message only | git absent on the host: still `remote_error`, now with the exit status (127) and never `not_found` |
+| 2 | `not_found` → `remote_error` (unreadable) | as missing: git prints the same line |
+| 1 | `protocol` "empty advertisement" → `remote_error` "sent no advertisement" | a bare-flush receive-pack advertisement |

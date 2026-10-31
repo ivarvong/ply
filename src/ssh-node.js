@@ -3,7 +3,8 @@ import { fail } from './errors.js';
 import net from 'node:net';
 export function nodeStream(host, port, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
-    const sock = net.connect({ host, port });
+    // half-open: a peer that sends DISCONNECT and closes its side must not fail our next write before we read its reason
+    const sock = net.connect({ host, port, allowHalfOpen: true });
     const chunks = []; let waiters = []; let ended = false, err = null;
     const wake = () => { const w = waiters; waiters = []; for (const f of w) f(); };
     sock.on('data', d => { chunks.push(new Uint8Array(d.buffer, d.byteOffset, d.length)); wake(); });
