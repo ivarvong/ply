@@ -1,5 +1,5 @@
 // Git object encoding/decoding. All pure.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent } from './validate.js';

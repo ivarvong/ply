@@ -12,7 +12,7 @@
 //                         classic Myers, which we do not port (test/fuzz/linemerge.mjs measures it). Where we succeed, the
 //                         tree is what `git merge-tree --write-tree` produces (test/merge.test.js).
 // The pure parts: threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits), uniqueObjects; linemerge.js. The effects: lsRefs, fetchObject, push.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';

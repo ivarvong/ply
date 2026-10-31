@@ -1,6 +1,6 @@
 // Branch and message assertions for the mutation gate. Prefix and round-trip tests kill the happy path;
 // these kill a mutant that deletes one check, flips one comparison, or empties one error string.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';

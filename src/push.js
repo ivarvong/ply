@@ -1,6 +1,6 @@
 // v0 receive-pack: commands + thin pack in, report-status out. The request body and report parsing are pure; `push`
 // is the one effect. Any failure after the body is on the wire is 'ambiguous' (the ref may have moved).
-import { fail, ambiguousAfterPush } from './errors.js';
+import { thrown as fail, ambiguousAfterPush } from './errors.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { parseSideband } from './fetch.js';

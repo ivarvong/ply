@@ -165,7 +165,7 @@ jobs:
         env:
           PACK_SPACE: full
         run: |
-          node --test test/space/pack-cut.test.js || { echo "NIGHTLY-FAIL pack-cut reproduce: PACK_SPACE=full node --test test/space/pack-cut.test.js"; exit 1; }
+          npx vitest run test/space/pack-cut.test.js || { echo "NIGHTLY-FAIL pack-cut reproduce: PACK_SPACE=full npx vitest run test/space/pack-cut.test.js"; exit 1; }
 
   report:
     name: report failure

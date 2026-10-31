@@ -21,7 +21,9 @@ import { join } from 'node:path';
 
 const REPORT = 'reports/mutation/mutation.json';
 const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate|huffBuild|adler32|pktStep|pktFinish|spStep|spFinish|v2Step|parseSideband|take|assertFetched|splitHeaders|checkIdent)$/;
-const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js']);
+// Either extension: a file keeps its gate when it converts to TypeScript.
+const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts']);
+const SRC = /\.(?:js|ts)$/;
 // A test file that exits non-zero without reporting a failed test (a mutant that throws while its module loads, or one
 // that trips Stryker's hit limit, an infinite loop, there) is a RuntimeError to the tap runner. The test failed: the
 // mutant is detected, as it was under the command runner, where any non-zero exit was Killed.
@@ -29,7 +31,7 @@ const DETECTED = new Set(['Killed', 'Timeout', 'RuntimeError']);
 
 function commentProblems() {
   const bad = [];
-  for (const file of readdirSync('src').filter(f => f.endsWith('.js'))) {
+  for (const file of readdirSync('src').filter(f => SRC.test(f))) {
     readFileSync(join('src', file), 'utf8').split('\n').forEach((line, i) => {
       if (/Stryker disable all\b/.test(line)) bad.push(`${file}:${i + 1} uses a blanket Stryker disable`);
       if (/Stryker disable next-line/.test(line)) {
@@ -40,7 +42,7 @@ function commentProblems() {
     });
   }
   const cfg = readFileSync('stryker.conf.json', 'utf8');
-  if (/!\s*src\/(objects|bytes|format|pack|packresolve|pktline|inflate|fetch|lsrefs)\.js/.test(cfg)) {
+  if (/!\s*src\/(objects|bytes|format|pack|packresolve|pktline|inflate|fetch|lsrefs)\.(?:js|ts)/.test(cfg)) {
     bad.push('stryker.conf.json excludes a parser or bounds file');
   }
   return bad;
@@ -53,7 +55,7 @@ function functions(file) {
     // A top-level const starts a new owner. Otherwise pktAttrs, sitting under pktFinish, would be
     // scored as a parser survivor.
     const m = lines[i].match(/^(?:export )?(?:async )?function (\w+)/)
-      || lines[i].match(/^(?:export )?const (\w+)\s*=/);
+      || lines[i].match(/^(?:export )?const (\w+)\s*[:=]/);
     if (m) fns.push({ name: m[1], line: i + 1 });
   }
   return fns;
@@ -79,7 +81,7 @@ function changedRanges() {
   const ranges = new Map();
   let file = null;
   for (const line of diff.stdout.split('\n')) {
-    if (line.startsWith('+++ ')) { const f = line.slice(4).replace(/^b\//, ''); file = f.startsWith('src/') && f.endsWith('.js') ? f : null; continue; }
+    if (line.startsWith('+++ ')) { const f = line.slice(4).replace(/^b\//, ''); file = f.startsWith('src/') && SRC.test(f) ? f : null; continue; }
     const h = file && /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (!h) continue;
     const from = Number(h[1]), len = h[2] === undefined ? 1 : Number(h[2]);
@@ -136,12 +138,12 @@ async function mutantCounts(files) {
 }
 
 function allSrc() {
-  // The config's mutate glob is src/**/*.js; src/ has no subdirectories today. Refuse to guess if that changes.
+  // The config's mutate globs are src/**/*.{js,ts}; src/ has no subdirectories today. Refuse to guess if that changes.
   const cfg = JSON.parse(readFileSync('stryker.conf.json', 'utf8'));
-  if (JSON.stringify(cfg.mutate) !== JSON.stringify(['src/**/*.js'])) throw new Error('mutate: sharding assumes stryker.conf.json mutate is ["src/**/*.js"]');
+  if (JSON.stringify(cfg.mutate) !== JSON.stringify(['src/**/*.js', 'src/**/*.ts'])) throw new Error('mutate: sharding assumes stryker.conf.json mutate is ["src/**/*.js", "src/**/*.ts"]');
   const entries = readdirSync('src');
   if (entries.some(e => statSync(join('src', e)).isDirectory())) throw new Error('mutate: sharding assumes src/ has no subdirectories');
-  return entries.filter(f => f.endsWith('.js')).map(f => `src/${f}`).sort();
+  return entries.filter(f => SRC.test(f)).map(f => `src/${f}`).sort();
 }
 
 // Longest-processing-time first: heaviest unit to the lightest shard. Deterministic (ties by name, then by shard index),

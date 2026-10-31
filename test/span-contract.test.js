@@ -5,7 +5,7 @@
 //
 //   a span or key removed or renamed → this test fails, naming it: a breaking change (README "Telemetry contract")
 //   a span or key added             → this test fails too, until the snapshot is regenerated and reviewed:
-//                                      UPDATE_SPAN_CONTRACT=1 node --test test/span-contract.test.js
+//                                      UPDATE_SPAN_CONTRACT=1 npx vitest run test/span-contract.test.js
 //
 // Shape rules. Siblings with the same name merge into one node (a fetch made three times is one `git.upload-pack fetch`
 // node with the union of their keys), so a round-trip count is not part of the contract; their order in the file is by
@@ -15,7 +15,7 @@
 // Also here: the lifetime rule. In every trace above, no span starts before or ends after its parent; a span with no
 // parent is either an operation root (it carries ply.isolate.invocation) or follows an exported span via a
 // follows_from link.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
@@ -227,12 +227,12 @@ const recordAll = async () => (recorded ??= (async () => {
 test('span contract: every operation\'s span tree (names, kinds, structure, links, attribute keys and types) equals test/span-contract.json', async () => {
   const { shapes } = await recordAll();
   if (UPDATE) { writeFileSync(SNAPSHOT, `${JSON.stringify(shapes, null, 2)}\n`); return; }
-  assert.ok(existsSync(SNAPSHOT), 'no snapshot: run UPDATE_SPAN_CONTRACT=1 node --test test/span-contract.test.js');
+  assert.ok(existsSync(SNAPSHOT), 'no snapshot: run UPDATE_SPAN_CONTRACT=1 npx vitest run test/span-contract.test.js');
   const want = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
   if (!sshAvailable) for (const k of Object.keys(SSH_SCENARIOS)) delete want[k];
   const diff = contractDiff(want, shapes);
   assert.deepEqual(diff, [], [
-    'the span contract changed (- is in test/span-contract.json but no longer emitted: removing or renaming it is a breaking change; + is new: review it, then regenerate with UPDATE_SPAN_CONTRACT=1 node --test test/span-contract.test.js):',
+    'the span contract changed (- is in test/span-contract.json but no longer emitted: removing or renaming it is a breaking change; + is new: review it, then regenerate with UPDATE_SPAN_CONTRACT=1 npx vitest run test/span-contract.test.js):',
     ...diff,
   ].join('\n'));
   // the diff is set-based; the file must also be exactly what the generator writes (no hand edits, nothing reordered)

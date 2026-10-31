@@ -2,7 +2,7 @@
 // after each one: `git fsck --strict` on the server, the tree oid against git's own index (update-index --cacheinfo +
 // write-tree over the same files), `git ls-tree -r` modes and oids, and a `git clone` whose checkout is compared byte
 // for byte and mode for mode. A repeat push must carry exactly the objects `git rev-list --objects new ^old` names.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync, chmodSync, readFileSync, lstatSync, readlinkSync, readdirSync } from 'node:fs';

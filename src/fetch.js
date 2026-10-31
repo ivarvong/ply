@@ -1,7 +1,7 @@
 // v2 fetch: request body (pure), response state machine (pure step), the streamed band-1 pack, and fetchObject — one
 // object by oid through the single-object pack parser, hash-verified. The buffered multi-object fetch with delta
 // resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
-import { fail, scrubError } from './errors.js';
+import { thrown as fail, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';

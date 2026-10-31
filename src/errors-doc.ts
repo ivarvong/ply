@@ -1,6 +1,9 @@
 // What each error code means and where it comes from. Documentation for humans and tooling; the runtime table is
-// errors.js (RETRY), and test/pure.test.js checks the two stay in step.
-export const CODE_DOCS = Object.freeze({
+// errors.ts (RETRY); `satisfies` makes the table exhaustive over Code at compile time, test/pure.test.js at run time.
+import type { Code } from './errors.js';
+
+export type CodeDoc = { readonly where: 'local' | 'remote' | 'net' | 'content'; readonly what: string };
+export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path; checkout: a non-empty dir, or a path that collides or would pass through a symlink)' },
   unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, no v2 over ssh, push-options not advertised)' },
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
@@ -29,4 +32,4 @@ export const CODE_DOCS = Object.freeze({
   not_linear: { where: 'content', what: 'a merge commit in a chain that must be linear (rebase, pick)' },
   ambiguous: { where: 'remote', what: 'the push was sent and may have been applied, but no trustworthy confirmation was obtained' },
   internal: { where: 'local', what: 'an invariant of this library failed; please report' },
-});
+} satisfies Record<Code, CodeDoc>);

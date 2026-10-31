@@ -4,7 +4,7 @@
 // the fetch boundary and compared with the per-file baseline (readCommit → listTree per directory → readFile per blob,
 // the first examples/checkout-tree.mjs, before checkoutDir). Also: a blob:none-only host (Artifacts), a host that refuses many wants, lying servers
 // (wrong blob, unwanted object, wrong commit, duplicate tree entry), `path`, the limits, and the writer's path rules.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, symlinkSync, readdirSync, lstatSync, readlinkSync, readFileSync, existsSync, writeFileSync } from 'node:fs';

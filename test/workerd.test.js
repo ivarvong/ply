@@ -1,6 +1,6 @@
 // The pipeline under workerd (the Workers runtime), against the local git server. Skipped if workerd is not installed.
-//   WORKERD=/path/to/workerd node --test test/workerd.test.js      (default: looks in ./node_modules/.bin and ../wd/node_modules/.bin)
-import { test, before, after } from 'node:test';
+//   WORKERD=/path/to/workerd npx vitest run test/workerd.test.js      (default: looks in ./node_modules/.bin and ../wd/node_modules/.bin)
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -28,13 +28,13 @@ after(async () => { if (!WORKERD) return; proc.kill(); await srv.close(); cleanu
 
 const post = async (path, body, q = '') => (await fetch(`http://127.0.0.1:${PORT}${path}${q}`, { method: 'POST', body: JSON.stringify(body) })).json();
 
-test('workerd: platform features the pipeline relies on', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: platform features the pipeline relies on', { skip: !WORKERD }, async () => {
   const f = await (await fetch(`http://127.0.0.1:${PORT}/features`)).json();
   for (const k of ['DecompressionStream', 'CompressionStream', 'AbortSignalAny', 'AbortSignalTimeout', 'getRandomValues']) assert.equal(f[k], 'function', k);
   assert.equal(f.deflateOk, true);
 });
 
-test('workerd: edit small file, 24 MB file, cache hit on second edit; git-verified', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: edit small file, 24 MB file, cache hit on second edit; git-verified', { skip: !WORKERD }, async () => {
   const bare = makeBareRepo(root, 'e'); const work = join(root, 'we'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
   const big = Buffer.alloc(24 << 20); for (let i = 0; i < big.length; i += 4096) big.write(`line ${i}\n`, i); big.write('MARK', 12 << 20);
   commitFiles(work, bare, { 'a/b/c.txt': 'hello MARK world\n', 'big.bin': big }, 'seed');
@@ -57,7 +57,7 @@ test('workerd: edit small file, 24 MB file, cache hit on second edit; git-verifi
   console.log(`  small ${r.results[0].ms}ms; 24MB edit git-verified, max alloc ${r.roots[0]['mem.alloc.max_single']}`);
 });
 
-test('workerd: pack cache on caches.default + head hint (ls-refs skipped, CAS catches a stale hint)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: pack cache on caches.default + head hint (ls-refs skipped, CAS catches a stale hint)', { skip: !WORKERD }, async () => {
   const bare = makeBareRepo(root, 'pc'); const work = join(root, 'wpc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
   commitFiles(work, bare, { 'a/b/c.txt': 'hello MARK world\n' }, 'seed');
   const url = `${srv.url}/pc.git`;
@@ -83,7 +83,7 @@ test('workerd: pack cache on caches.default + head hint (ls-refs skipped, CAS ca
   assert.deepEqual(fsckProblems(bare), []);
 });
 
-test('workerd: Ed25519 signing through the platform WebCrypto; git verifies', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: Ed25519 signing through the platform WebCrypto; git verifies', { skip: !WORKERD }, async () => {
   const bare = makeBareRepo(root, 'sg'); const work = join(root, 'wsg'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
   commitFiles(work, bare, { 'f.txt': 'MARK\n' }, 'seed');
   const r = await post('/edit', { url: `${srv.url}/sg.git`, path: 'f.txt', find: 'MARK', replace: 'SIGNED', sign: true });
@@ -94,7 +94,7 @@ test('workerd: Ed25519 signing through the platform WebCrypto; git verifies', { 
   assert.equal(v.status, 0, v.stderr); assert.match(v.stderr + v.stdout, /Good "git" signature/);
 });
 
-test('workerd: 10 concurrent writers in one isolate converge via cas_conflict retries', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: 10 concurrent writers in one isolate converge via cas_conflict retries', { skip: !WORKERD }, async () => {
   const bare = makeBareRepo(root, 'c'); const work = join(root, 'wc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
   const files = {}; for (let i = 0; i < 10; i++) files[`f${i}.txt`] = `v0 MARK${i}\n`;
   commitFiles(work, bare, files, 'seed');
@@ -114,7 +114,7 @@ test('workerd: 10 concurrent writers in one isolate converge via cas_conflict re
   console.log(`  retries: ${rs.map(r => r.tries).join(',')}`);
 });
 
-test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd; git verifies', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd; git verifies', { skip: !WORKERD }, async () => {
   const { startSshd } = await import('./sshd.js');
   const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
@@ -134,7 +134,7 @@ test('workerd: the pipeline over SSH via cloudflare:sockets against a real sshd;
   } finally { await sshd.close(); }
 });
 
-test('workerd: I1 over SSH — a trickling server is cut at requestTimeoutMs and an aborted signal stops the exchange, typed as over HTTP', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: I1 over SSH — a trickling server is cut at requestTimeoutMs and an aborted signal stops the exchange, typed as over HTTP', { skip: !WORKERD }, async () => {
   const { startSshd, trickleProxy } = await import('./sshd.js');
   const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
@@ -158,7 +158,7 @@ test('workerd: I1 over SSH — a trickling server is cut at requestTimeoutMs and
   } finally { await px.close(); await sshd.close(); }
 });
 
-test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST; nothing reaches the other origin', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST; nothing reaches the other origin', { skip: !WORKERD }, async () => {
   const listen = h => new Promise(ok => { const s = http.createServer(h); s.listen(0, '127.0.0.1', () => ok(s)); });
   const seen = [];
   const other = await listen((req, res) => { seen.push({ url: req.url, authorization: req.headers.authorization ?? null }); res.writeHead(200, { 'content-type': 'text/plain' }); res.end('x'); });
@@ -176,7 +176,7 @@ test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST
   } finally { other.close(); red.close(); }
 });
 
-test('workerd: a token given as the URL user authenticates the edit with the Authorization git sends; it reaches no span (#32)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: a token given as the URL user authenticates the edit with the Authorization git sends; it reaches no span (#32)', { skip: !WORKERD }, async () => {
   const bare = makeBareRepo(root, 'ui'); const work = join(root, 'wui'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
   commitFiles(work, bare, { 'a.txt': 'hello MARK\n' }, 'seed');
   const TOKEN = 'glpat-WorkerdUserOnlyToken';
@@ -197,7 +197,7 @@ test('workerd: a token given as the URL user authenticates the edit with the Aut
   } finally { await gate.close(); }
 });
 
-test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob follows the root in a trace of its own (#35)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob follows the root in a trace of its own (#35)', { skip: !WORKERD }, async () => {
   const bare = makeBareRepo(root, 'rd'); const work = join(root, 'wrd'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
   const big = Buffer.alloc(1 << 20); for (let i = 0; i < big.length; i += 4096) big.write(`line ${i}\n`, i);
   commitFiles(work, bare, { 'big.bin': big }, 'seed');

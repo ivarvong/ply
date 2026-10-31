@@ -2,7 +2,7 @@
 // applyDelta is git's patch_delta, resolvePack resolves OFS/REF chains to a fixpoint with external bases as a last
 // resort, makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
 // pack.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { inflate } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';

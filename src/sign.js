@@ -4,7 +4,7 @@
 // The signed message is the commit object exactly as it would be stored *without* the gpgsig header; the gpgsig header
 // is then inserted after `committer` (where git puts it), its continuation lines prefixed by a space. Pure except
 // crypto.subtle.sign; verified by `git verify-commit` with an allowed-signers file in test/sign.test.js.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { te, concat, decodeBytes, encodeBytes } from './bytes.js';
 import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
 

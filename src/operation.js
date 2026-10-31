@@ -10,7 +10,7 @@
 import { createTransport, redactUrl } from './http.js';
 import { withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 
 export async function operation(op, url, { auth, tracer, parent = null, fetchImpl, limits = DEFAULT_LIMITS, signal = null, quirks, transport = null, attrs = {}, link = null, onFinish = null }, body) {

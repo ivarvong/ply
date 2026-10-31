@@ -59,7 +59,7 @@ async function shard(k, w) {
 if (!isMainThread) {
   shard(workerData.k, workerData.w).then(r => parentPort.postMessage(r));
 } else {
-  const { test } = await import('node:test');
+  const { test } = await import('vitest');
   const assert = (await import('node:assert/strict')).default;
   test('push outcome boundaries: every single-byte mutant of every definite cell is its own outcome or ambiguous', { timeout: 1_800_000 }, async () => {
     const w = +(process.env.PUSH_SPACE_WORKERS ?? Math.min(4, availableParallelism()));

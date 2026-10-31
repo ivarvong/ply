@@ -17,7 +17,7 @@
 //
 // PACK_SPACE=full runs the git oracle on every cut (nightly); the default runs it on a deterministic subset: every
 // field boundary of every pack plus every 8th offset (CI). ply's own paths run every offset in both modes.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
@@ -310,7 +310,7 @@ test('the exported readers: every offset of every short buffer is a typed short 
 });
 
 test('census', t => {
-  t.diagnostic(`git ${F.version}; packs ${ALL.map(p => `${p.name}=${p.bytes.length}B`).join(' ')}`);
-  t.diagnostic(`${census.cells} ply cells, ${census.oracle} cut cells judged by git index-pack (${FULL ? 'full' : 'CI subset'}), ${CORRUPT.length} corruption cells`);
-  for (const [k, v] of Object.entries(census.codes).sort()) t.diagnostic(`  ${k}: ${v}`);
+  console.log(`git ${F.version}; packs ${ALL.map(p => `${p.name}=${p.bytes.length}B`).join(' ')}`);
+  console.log(`${census.cells} ply cells, ${census.oracle} cut cells judged by git index-pack (${FULL ? 'full' : 'CI subset'}), ${CORRUPT.length} corruption cells`);
+  for (const [k, v] of Object.entries(census.codes).sort()) console.log(`  ${k}: ${v}`);
 });

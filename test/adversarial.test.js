@@ -10,7 +10,7 @@
 //   I6c A 3xx is never followed: no request (and no Authorization) reaches another origin.
 //   I6d URL userinfo is the Basic credential git sends for that URL, byte for byte, and reaches no error, span or URL.
 //   I6e Every credential cell (source × user × password × transport) has one stated outcome, git's where git has the input.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -805,7 +805,7 @@ test('#18 merge base over a cut graph: a server that withholds ancestors without
   for (const [name, lie] of Object.entries(lies)) {
     const R = cutHistoryRepo();
     const r = await mergeVia(R, walkLie(lie(R)));
-    t.diagnostic(`${name}: ${r.error ? r.error.code : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
+    console.log(`${name}: ${r.error ? r.error.code : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
     const ok = r.error?.code === 'pack_corrupt' && /withheld and [0-9a-f]{40} not reported shallow/.test(r.error.message) && r.main === R.M && !r.counts['receive-pack'];
     if (!ok) wrong.push(`${name}: ${r.result ? `${r.result.outcome} with base ${r.result.base} (git: X ${R.X}; P ${R.P}), main:g=${JSON.stringify(gitBuf(R.bare, ['cat-file', 'blob', 'main:g']).toString())}` : `${r.error.code}: ${r.error.message}`}; requests ${JSON.stringify(r.counts)}`);
     // rebase walks the same way: a linear branch y10 ← … ← X onto main fails closed the same, the branch untouched
@@ -828,7 +828,7 @@ test('#18 the walk\'s pack holds only what was asked for, well-formed: an extra 
   for (const [name, lie] of Object.entries(cases)) {
     const R = cutHistoryRepo();
     const r = await mergeVia(R, walkLie(lie(R)));
-    t.diagnostic(`${name}: ${r.error ? `${r.error.code} (${r.error.message})` : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
+    console.log(`${name}: ${r.error ? `${r.error.code} (${r.error.message})` : r.result.outcome}, requests ${JSON.stringify(r.counts)}`);
     if (r.error?.code !== 'pack_corrupt' || r.main !== R.M || r.counts['receive-pack']) wrong.push(`${name}: ${r.result ? `${r.result.outcome} (base ${r.result.base})` : `${r.error.code}: ${r.error.message}`}; requests ${JSON.stringify(r.counts)}`);
   }
   assert.deepEqual(wrong, []);

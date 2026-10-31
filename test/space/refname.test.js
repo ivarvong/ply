@@ -2,7 +2,7 @@
 // real receive-pack's answer to a create and to a delete of it — and ply must agree on every cell: validateRef with
 // check-ref-format, validatePushRef with receive-pack ("funny refname" or not), and push() refuses before sending
 // exactly the names receive-pack calls funny.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';

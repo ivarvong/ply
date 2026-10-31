@@ -4,7 +4,7 @@
 //   paths   → tree built from the path, then `git fsck --strict` (protectNTFS/HFS defaults)
 //   trees   → our encodeTree hash == `git write-tree` over all name pairs × modes
 //   commits → parseCommit on every commit shape git can write (merges, gpgsig, mergetag, encoding, extra headers)
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';

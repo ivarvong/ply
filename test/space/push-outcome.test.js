@@ -45,10 +45,11 @@ async function runShard(k, w) {
 if (!isMainThread) {
   runShard(workerData.k, workerData.w).then(r => parentPort.postMessage(r));
 } else {
-  const { test } = await import('node:test');
+  const { test } = await import('vitest');
   const assert = (await import('node:assert/strict')).default;
 
-  test('every tag of every axis has a meaning and a renderer (the match is exhaustive)', () => {
+  // MUTATION=1 (vitest.stryker.config.ts): the two tests that are not about src/ are left out of the mutation run.
+  test('every tag of every axis has a meaning and a renderer (the match is exhaustive)', { skip: !!process.env.MUTATION }, () => {
     for (const a of space.AXES) {
       const tags = space.TAGS[a.name];
       assert.deepEqual(Object.keys(space.MEANING[a.name]).sort(), [...tags].sort(), `MEANING.${a.name} covers exactly its tags`);
@@ -65,7 +66,7 @@ if (!isMainThread) {
     assert.deepEqual([...GIT_UNPACK_ERRORS], space.GIT_UNPACK_ERRORS);
   });
 
-  test('cells observed from git: git\'s bytes are the cell\'s rendering, ply\'s outcome is the table\'s, the server agrees', { timeout: 300_000 }, async () => {
+  test('cells observed from git: git\'s bytes are the cell\'s rendering, ply\'s outcome is the table\'s, the server agrees', { timeout: 300_000, skip: !!process.env.MUTATION }, async () => {
     const { observeAll } = await import('./push-outcome.observed.js');
     const obs = await observeAll();
     const ids = new Set();

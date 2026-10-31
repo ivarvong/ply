@@ -1,6 +1,6 @@
 // Smart-HTTP transport: one POST per git command, body chunks yielded as they arrive, every request a CLIENT span.
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';

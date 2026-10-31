@@ -3,7 +3,7 @@
 // Pack objects are concatenated zlib streams with no length prefix; `consumed`
 // is what positions the pack parser at the next object header.
 
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { take } from './bytes.js';
 import { DEFAULT_LIMITS, requireLimit, finiteLimit } from './limits.js';
 import {

@@ -1,7 +1,7 @@
 // Parity with git's own client. For each clone/fetch shape, git's CLI and our client issue the equivalent request;
 // we compare (1) the pack-objects invocation upload-pack made for each, (2) the shallow set git recorded vs our
 // shallow/unshallow lines, (3) the objects git stored vs the objects we received.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';

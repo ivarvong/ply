@@ -206,8 +206,8 @@ Individual oracles (each prints a repro on failure):
 | Diff hunks vs `git diff --histogram` | `node test/fuzz/diffscript.mjs --n 200 [--snake\|--huge]` |
 | `.gitattributes` vs `git check-attr` | `node test/fuzz/attributes.mjs --n 200 --seed 1` |
 | Wanted-tree filter model vs `rev-list` | `node test/fuzz/usergiven.mjs --n 60 --seed 500` |
-| Merge property (histories, renames, attributes) | `MERGE_SEED=11 MERGE_CASES=120 node --test --test-name-pattern=property test/merge.test.js` |
-| Rebase/cherry-pick property | `REBASE_SEED=1 REBASE_CASES=60 node --test --test-name-pattern=property test/rebase.test.js` |
+| Merge property (histories, renames, attributes) | `MERGE_SEED=11 MERGE_CASES=120 npx vitest run -t property test/merge.test.js` |
+| Rebase/cherry-pick property | `REBASE_SEED=1 REBASE_CASES=60 npx vitest run -t property test/rebase.test.js` |
 | Protocol product space | `node test/fuzz/protocol.mjs --n 200 --seed 32` |
 
 The oracle's version picks the matching mode automatically (`test/gitversion.js`). To judge against another git:

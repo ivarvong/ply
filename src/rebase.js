@@ -7,7 +7,7 @@
 //   squash      merge-base tree      target      branch tip tree      parent [target]
 //   cherry-pick commit's parent tree target      commit tree          parent [target], author+message kept
 //   revert      commit tree          target      commit's parent tree parent [target]
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { push } from './push.js';

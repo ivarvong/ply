@@ -1,6 +1,6 @@
 // Caller-supplied strings that reach a git object header or a protocol command line are validated here.
 // Anything that could terminate a header line or a pkt-line field is rejected rather than escaped: git has no escaping.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { requireLimit } from './limits.js';
 import { encodeBytes } from './bytes.js';
 import { MODE_LINK, IDENT_TZ_DIGITS, IDENT_TZ_HOUR_MIN, IDENT_TZ_HOUR_MAX, IDENT_TZ_MINUTE_MAX } from './format.js';
