@@ -27,17 +27,14 @@ export const givenOid = (name: string, what: string): string | null => {
   if (/^0+$/u.test(name)) throw fail('bad_request', `${what} must not be the zero oid`, { what });
   return name;
 };
-// Effect: a given commit id is a commit on the server. Fetched alone (deepen 1); an oid the server does not have, or one
-// that is not a commit, is the caller's not_found (as read.js's fetchCommit maps it), not a corrupt pack mid-merge.
-type Loose = { readonly code?: unknown; readonly message?: unknown } | null | undefined;
-export const assertCommit = async (t: Transport, oid: string, what: string): Promise<void> => {
-  try { await commitBytesAt(t, oid); } catch (error) {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (as errors.ts reads one)
-    const e = error as Loose; const said = String(e?.message);
-    if ((e?.code === 'pack_corrupt' && said.includes('expected commit')) || (e?.code === 'remote_error' && said.includes('not our ref'))) throw fail('not_found', `${what} ${oid} is not a commit on the remote`, { what });
-    throw error;
-  }
-};
+// Effect: a given commit id is a commit on the server, fetched alone (deepen 1). One the server does not have ('not our
+// ref') or that is not a commit ('expected commit') is the caller's not_found, as read.js's fetchCommit maps them — not
+// a corrupt pack mid-merge (pack_corrupt reads as retryable).
+type Loose = { readonly message?: unknown } | null | undefined;
+export const assertCommit = async (t: Transport, oid: string, what: string): Promise<unknown> => commitBytesAt(t, oid).catch((e: unknown) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (as errors.ts reads one)
+  throw /expected commit|not our ref/u.test(String((e as Loose)?.message)) ? fail('not_found', `${what} ${oid} is not a commit on the remote`, { what }) : e;
+});
 // A commit stamp: who and when, each stamp with its own time and zone (#103 item 4). `time` is the operation's, for a
 // stamp that gives none; an omitted zone is +0000.
 export const stamp = (p: Partial<Author> | null | undefined, time: number): ValidatedIdent => validateIdent({ name: p?.name, email: p?.email, time: p?.time ?? time, tz: p?.tz });
