@@ -1,7 +1,7 @@
 // v2 ls-refs: the ref namespace, filtered by prefix. The one request that cannot be cached (it is the freshness source).
 import { fail } from './errors.js';
 import { pkts } from './pktline.js';
-import { td } from './bytes.js';
+import { decodeBytes } from './bytes.js';
 import { limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
 import { frames, coded, clientSpan, proto } from './transport.js';
@@ -66,7 +66,9 @@ export async function lsRefs(t, prefixes = []) {
       if (f.kind !== 'data') throw proto(`ls-refs: unexpected ${f.kind} in ref listing`);
       bytes += f.payload.length;
       if (bytes > maxBytes) throw limitError('ls-refs bytes', bytes, maxBytes);
-      const line = td.decode(f.payload).trim();
+      // A ref name is bytes (check-ref-format allows any byte >= 0x80): decodeBytes keeps them distinct and writable back,
+      // and only the LF comes off, as connect.c's packet reader chomps it. trim() also ate a trailing U+FEFF or U+00A0 (#43).
+      const line = decodeBytes(f.payload).replace(/\n$/, '');
       const rec = parseLsRefLine(line);
       if (refs.size >= maxRefs) throw limitError('ls-refs lines', refs.size + 1, maxRefs);
       refs.set(rec.name, rec);

@@ -302,6 +302,9 @@ export async function mergeBranch(url, { ref = 'refs/heads/main', from, author, 
     const { refs } = await lsRefs(t, [ref, from]);
     const ours = refs.get(ref)?.oid, theirs = refs.get(from)?.oid;
     if (!ours) throw fail('not_found', `ref ${ref} not found`); if (!theirs) throw fail('not_found', `ref ${from} not found`);
+    // ls-refs names an annotated tag's object, not a commit; `git merge <tag>` records the tag in a mergetag header, which
+    // ply does not write. Refused by name (it read as a missing commit, pack_corrupt, before #43's matrix ran it).
+    for (const r of [ref, from]) if (refs.get(r).peeled) throw fail('unsupported', `${r} is an annotated tag (git merge writes a mergetag header ply does not); merge its commit ${refs.get(r).peeled}`, { what: r === ref ? 'ref' : 'from' });
     root.set({ 'git.merge.ours': ours, 'git.merge.theirs': theirs });
     if (ours === theirs) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base: ours });
     const { base, bases, depth } = await mergeBase(t, ours, theirs);

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { take, indexOfBytes, bytesOf, te, td, concat } from '../src/bytes.js';
+import { take, indexOfBytes, bytesOf, te, td, concat, decodeBytes, encodeBytes, decodeChunk } from '../src/bytes.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, assertFetched, encodeTree, encodeCommit, encodeTag, TYPE, hashObject, ident,
 } from '../src/objects.js';
@@ -123,14 +123,52 @@ test('parseTree error strings and the boundaries next to them', () => {
   // case-only and NFC/NFD twins are two names to git and to ply
   assert.deepEqual(parseTree(data(e('100644', 'D'), e('100644', 'd'))).map(x => x.name), ['D', 'd']);
   assert.deepEqual(parseTree(data(e('100644', 'e\u0301'), e('100644', '\u00e9'))).map(x => x.name), ['e\u0301', '\u00e9']);
-  // order is on the raw bytes, and two names that decode to one string are refused (ply's own rule, see parseTree)
+  // order is on the raw bytes; byte-distinct names stay distinct (decodeBytes is lossless, #43), so the decode-twin refusal
+  // #34 had (U+FFFD twins, a dropped leading BOM) cannot arise and is gone: these parse as two names, as in git
   const rawE = (mode, bytes) => data(te.encode(`${mode} `), Uint8Array.from(bytes), Uint8Array.of(0), oidBytes(1));
-  throws(() => parseTree(data(rawE('100644', [0x64, 0xfe]), rawE('100644', [0x64, 0xff]))), 'pack_corrupt', 'tree: two entries decode to the name "d\ufffd"');
   throws(() => parseTree(data(rawE('100644', [0x64, 0xff]), rawE('100644', [0x64, 0xfe]))), 'pack_corrupt', 'tree: not strictly sorted');
-  throws(() => parseTree(data(rawE('100644', [0x61]), rawE('100644', [0xef, 0xbb, 0xbf, 0x61]))), 'pack_corrupt', 'tree: two entries decode to the name "a"');
-  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xc3, 0xa9]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\u00e9', 'd\ufffd'], 'raw bytes: 0xc3 < 0xff although U+00E9 < U+FFFD holds too');
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xfe]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\udcfe', 'd\udcff']);
+  assert.deepEqual(parseTree(data(rawE('100644', [0x61]), rawE('100644', [0xef, 0xbb, 0xbf, 0x61]))).map(x => x.name), ['a', '\ufeffa']);
+  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xc3, 0xa9]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\u00e9', 'd\udcff'], 'raw bytes: 0xc3 < 0xff (0xff decodes to its escape U+DCFF, #43)');
   assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xef, 0xbf, 0xbe]), rawE('100644', [0x64, 0xf0]))).map(x => x.name.length), [2, 2]);
   throws(() => parseTree(data(rawE('100644', [0x64, 0xf0]), rawE('100644', [0x64, 0xef, 0xbf, 0xbe]))), 'pack_corrupt', 'tree: not strictly sorted');
+  // a leading U+FEFF is a byte of the name to git; the default TextDecoder would drop it and `README` would be found (#43)
+  assert.equal(parseTree(raw('100644 \ufeffREADME\0'))[0].name, '\ufeffREADME');
+  assert.equal(td.decode(te.encode('\ufeffX')), '\ufeffX');
+  // and a mode is not a name: `\ufeff100644` is malformed, as git's ls-tree says
+  throws(() => parseTree(raw('\ufeff100644 a\0')), 'pack_corrupt', 'tree: malformed mode');
+  // ill-formed UTF-8 names are escaped byte by byte, sort and re-encode as their bytes
+  const latin = data(Uint8Array.from([...te.encode('100644 caf'), 0xe9, 0]), oidBytes(1), Uint8Array.from([...te.encode('100644 caf'), 0xe9, 0x41, 0]), oidBytes(2));
+  assert.deepEqual(parseTree(latin).map(e => e.name), ['caf\udce9', 'caf\udce9A']);
+  assert.deepEqual(encodeTree(parseTree(latin)), latin);
+  // a directory sorts as name + '/' on the raw bytes: `a\xff` (file) after `a/`-keyed dir `a`
+  assert.deepEqual(parseTree(data(raw('40000 a\0', oidBytes(1)), Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2))).map(e => e.name), ['a', 'a\udcff']);
+  throws(() => parseTree(data(Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2), raw('40000 a\0', oidBytes(1)))), 'pack_corrupt', 'tree: not strictly sorted');
+});
+
+test('decodeBytes / encodeBytes: a bijection on bytes; decodeChunk holds a cut sequence (#43)', () => {
+  const cases = [[0xef, 0xbb, 0xbf, 0x52], [0x63, 0xe9], [0xc0, 0xae], [0xe0, 0x80, 0xae], [0xed, 0xa0, 0x80], [0xed, 0x9f, 0xbf], [0xf0, 0x8f, 0xbf, 0xbf], [0xf0, 0x90, 0x80, 0x80], [0xf4, 0x8f, 0xbf, 0xbf], [0xf4, 0x90, 0x80, 0x80], [0xf5, 0x80], [0xc1, 0xbf], [0xc2, 0x80], [0xdf, 0xbf], [0xe2, 0x82], [0x80], [0xff], [0x41, 0, 0x0d], [0xc3, 0xa9, 0xff]];
+  const want = ['\ufeffR', 'c\udce9', '\udcc0\udcae', '\udce0\udc80\udcae', '\udced\udca0\udc80', '\ud7ff', '\udcf0\udc8f\udcbf\udcbf', '\u{10000}', '\u{10ffff}', '\udcf4\udc90\udc80\udc80', '\udcf5\udc80', '\udcc1\udcbf', '\u0080', '\u07ff', '\udce2\udc82', '\udc80', '\udcff', 'A\0\r', '\u00e9\udcff'];
+  cases.forEach((c, i) => {
+    const b = Uint8Array.from(c);
+    assert.equal(decodeBytes(b), want[i], c.join(' '));
+    assert.deepEqual(encodeBytes(want[i]), b, c.join(' '));
+  });
+  for (const [s, msg] of [['\ud800', 'x: lone surrogate U+D800 is no byte sequence'], ['a\udfff', 'x: lone surrogate U+DFFF is no byte sequence'], ['\udc7f', 'x: lone surrogate U+DC7F is no byte sequence'], ['\udcc3\udca9', 'x: escaped bytes spell well-formed UTF-8; pass the characters']]) throws(() => encodeBytes(s, 'x'), 'bad_request', msg);
+  throws(() => encodeBytes(1, 'x'), 'bad_request', 'x must be a string');
+  assert.deepEqual(encodeBytes('\u{1f680}\udcff'), Uint8Array.from([0xf0, 0x9f, 0x9a, 0x80, 0xff]));
+  // a well-formed string takes the TextEncoder path; a lone escape at either end is still found
+  assert.deepEqual(encodeBytes('\udcffa'), Uint8Array.from([0xff, 0x61]));
+  let d = decodeChunk(new Uint8Array(0), Uint8Array.from([0x61, 0xf0, 0x9f]));
+  assert.deepEqual([d.text, [...d.carry]], ['a', [0xf0, 0x9f]]);
+  d = decodeChunk(d.carry, Uint8Array.from([0x9a, 0x80, 0xe2]));
+  assert.deepEqual([d.text, [...d.carry]], ['\u{1f680}', [0xe2]]);
+  d = decodeChunk(d.carry, Uint8Array.from([0x82, 0xac]));
+  assert.deepEqual([d.text, [...d.carry]], ['\u20ac', []]);
+  // a complete sequence at the end is not held; nor a stray continuation byte
+  assert.deepEqual([...decodeChunk(new Uint8Array(0), Uint8Array.from([0xc3, 0xa9])).carry], []);
+  assert.equal(decodeChunk(new Uint8Array(0), Uint8Array.from([0x80])).text, '\ufffd');
+  assert.deepEqual([...decodeChunk(new Uint8Array(0), Uint8Array.from([0xe2, 0x82, 0x80, 0x80])).carry], []);
 });
 
 test('commit and tag headers, idents, and assertFetched', () => {
@@ -1263,6 +1301,11 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   await assert.rejects(lsRefs(framesOf([{ kind: 'delim' }])), e => e.code === 'protocol' && e.message === 'ls-refs: unexpected delim in ref listing');
   const listed = await lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }]));
   assert.equal(listed.refs.get('refs/heads/main').oid, oid(4));
+  // ref names are bytes (#43): a trailing U+FEFF or U+00A0 stays (trim() ate both), two Latin-1 names stay two refs
+  const odd = [te.encode(`${oid(1)} refs/heads/x\ufeff\n`), te.encode(`${oid(2)} refs/heads/y\u00a0\n`), Uint8Array.from([...te.encode(`${oid(3)} refs/heads/`), 0xe9, 0x0a]), Uint8Array.from([...te.encode(`${oid(5)} refs/heads/`), 0xe8, 0x0a]), te.encode(`${oid(6)} refs/heads/cr\r\n`)];
+  const oddRefs = (await lsRefs(framesOf([...odd.map(payload => ({ kind: 'data', payload })), { kind: 'flush' }]))).refs;
+  assert.deepEqual([...oddRefs.keys()], ['refs/heads/x\ufeff', 'refs/heads/y\u00a0', 'refs/heads/\udce9', 'refs/heads/\udce8', 'refs/heads/cr\r']);
+  assert.deepEqual(pkt('refs/heads/\udce9'), Uint8Array.from([...te.encode('0010refs/heads/'), 0xe9]));
   await assert.rejects(lsRefs(framesOf([]), ['refs/heads/a\nb']), e => e.code === 'bad_request' && e.what === 'ref prefix');
   const payload = te.encode(refLine);
   await assert.rejects(lsRefs({ ...framesOf([{ kind: 'data', payload }, { kind: 'flush' }]), limits: withLimits({ maxLsRefsBytes: payload.length - 1 }) }), e => e.code === 'limit_exceeded' && e.what === 'ls-refs bytes');

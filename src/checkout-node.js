@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { fail } from './errors.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validatePath } from './validate.js';
-import { concat } from './bytes.js';
+import { concat, encodeBytes } from './bytes.js';
 import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
 import { checkoutTree } from './checkout.js';
 
@@ -27,6 +27,12 @@ import { checkoutTree } from './checkout.js';
 const FILE_MODE = 0o666;
 const EXEC_MODE = 0o777;
 /* oxlint-enable no-magic-numbers */
+
+// A tree name is bytes (#43): one that is not UTF-8 arrives with escaped bytes (bytes.js decodeBytes) and is written as
+// those bytes through a Buffer path, as git writes it. A filesystem that refuses the bytes (APFS: EILSEQ) is a typed
+// refusal naming the path, never a file under a U+FFFD name.
+const fsPath = (dir, rel) => { const p = join(dir, rel); return p.isWellFormed() ? p : Buffer.from(encodeBytes(p, 'checkout path')); };
+const refused = (path, e) => (e?.code === 'EILSEQ' ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
 
 const collision = (path, why) => fail('bad_request', `checkout: ${path} ${why}`, { what: 'checkout path', path });
 
@@ -51,22 +57,22 @@ export async function writeFiles(dir, files, { limits = DEFAULT_LIMITS } = {}) {
     if (made.has(rel)) return;
     const i = rel.lastIndexOf('/');
     await ensureDir(i < 0 ? '' : rel.slice(0, i));
-    await mkdir(join(dir, rel)).catch(e => { if (e?.code !== 'EEXIST') throw e; });
-    if (!(await lstat(join(dir, rel))).isDirectory()) throw collision(rel, 'is already a file or symlink here; refusing to write through it');
+    await mkdir(fsPath(dir, rel)).catch(e => { if (e?.code !== 'EEXIST') throw refused(rel, e); });
+    if (!(await lstat(fsPath(dir, rel))).isDirectory()) throw collision(rel, 'is already a file or symlink here; refusing to write through it');
     made.add(rel);
   };
   const out = { files: 0, bytes: 0, symlinks: 0, gitlinks: 0 };
   for await (const f of files) {
     validatePath(f.path, limits);
-    const full = join(dir, f.path), slash = f.path.lastIndexOf('/');
+    const full = fsPath(dir, f.path), slash = f.path.lastIndexOf('/');
     await ensureDir(slash < 0 ? '' : f.path.slice(0, slash));
     if (f.mode === MODE_COMMIT) { await ensureDir(f.path); out.gitlinks++; continue; }
     if (f.mode === MODE_LINK) {
       const target = await slurp(f.stream, maxObject);
-      await symlink(Buffer.from(target.buffer, target.byteOffset, target.length), full).catch(e => { throw e?.code === 'EEXIST' ? collision(f.path, 'already exists') : e; });
+      await symlink(Buffer.from(target.buffer, target.byteOffset, target.length), full).catch(e => { throw e?.code === 'EEXIST' ? collision(f.path, 'already exists') : refused(f.path, e); });
       out.symlinks++; continue;
     }
-    const fh = await open(full, 'wx', f.mode === MODE_EXEC ? EXEC_MODE : FILE_MODE).catch(async e => { await f.stream.cancel().catch(() => {}); throw e?.code === 'EEXIST' ? collision(f.path, 'already exists') : e; });
+    const fh = await open(full, 'wx', f.mode === MODE_EXEC ? EXEC_MODE : FILE_MODE).catch(async e => { await f.stream.cancel().catch(() => {}); throw e?.code === 'EEXIST' ? collision(f.path, 'already exists') : refused(f.path, e); });
     try {
       for await (const c of f.stream) { let o = 0; while (o < c.length) o += (await fh.write(c, o, c.length - o)).bytesWritten; out.bytes += c.length; }
     } catch (e) {

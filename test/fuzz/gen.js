@@ -18,7 +18,7 @@ export const KNOBS = {
 };
 
 const VOCAB = 'the quick brown fox jumps over lazy dog lorem ipsum dolor sit amet git pack delta inflate huffman'.split(' ');
-const SORT_EDGE_NAMES = ['a', 'a-b', 'a.b', 'a0', 'a_b', 'ab', 'A', 'a~', 'z', 'é', 'a b', 'a--', 'a.', '-a', '.hidden', 'ä', '한글', '🚀'];
+const SORT_EDGE_NAMES = ['a', 'a-b', 'a.b', 'a0', 'a_b', 'ab', 'A', 'a~', 'z', 'é', 'a b', 'a--', 'a.', '-a', '.hidden', 'ä', '한글', '🚀', '\ufeffREADME'];
 const BOUNDARY_SIZES = [127, 128, 255, 256, 4095, 4096, 16383, 16384, 16385, 32767, 32768, 32769, 65535, 65536, 65537, 131072];
 
 export function genBlob(rng, cls) {

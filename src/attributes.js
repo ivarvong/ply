@@ -13,6 +13,8 @@
 //
 // Verified against `git check-attr --source` (test/fuzz/attributes.mjs).
 
+import { encodeBytes } from './bytes.js';
+
 export const UNSET = null;          // '!attr'  — explicitly unspecified
 const UNKNOWN = undefined;          // never mentioned
 const BLANK = ' \t\r\n';
@@ -20,7 +22,8 @@ const MAX_LINE = 2048, MAX_FILE = 100 * 1024 * 1024;
 const BUILTIN = '[attr]binary -diff -merge -text';
 
 export const bytesToStr = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)); return s; };
-export const utf8ToStr = s => bytesToStr(new TextEncoder().encode(s));
+// encodeBytes: a path whose tree name held escaped bytes (#43) is matched on those bytes, as check-attr matches them
+export const utf8ToStr = s => bytesToStr(encodeBytes(s, 'path'));
 
 // ---- git's sane_ctype (ASCII only) ----
 const isAlpha = c => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);

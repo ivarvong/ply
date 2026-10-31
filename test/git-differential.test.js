@@ -116,14 +116,14 @@ test('a commit git writes round-trips, and a duplicate tagger is fsck-clean firs
 // Axes (tagged unions; the test takes their product and runs every cell):
 //   relation  equal (`d`,`d`) | slash-prefix (`d`,`d.x`: which sorts first depends on whether `d` is a directory) |
 //             case-only (`d`,`D`) | nfc-nfd (`é` as U+00E9 and as e + U+0301) | decode-twin (`d\xff`,`d\xfe`: distinct
-//             bytes, one decoded string)
+//             bytes that a lossy decoder made one string; with decodeBytes, #43, they are two names)
 //   modes     blob | exec | symlink | tree | gitlink, for each of the two entries (25)
 //   position  adjacent | separated (a blob whose key sorts strictly between the two keys, when one exists)
 //   order     sorted (git's order, ties keep the first) | unsorted (that list reversed)
 // Expected (git's rules, fsck.c verify_ordered; checked against fsck below, cell by cell): fsck errors iff the two names
 // are the same bytes (duplicateEntries) or the list is out of order (treeNotSorted). ply accepts iff fsck is silent,
-// with one documented exception: a sorted decode-twin, which git accepts and ply refuses because its callers look
-// entries up by decoded name. When ply refuses, its message is one fsck printed for that tree.
+// with no exception (#34's decode-twin refusal is gone since names decode losslessly, #43). When ply refuses, its
+// message is one fsck printed for that tree.
 const MODES = [['blob', '100644'], ['exec', '100755'], ['symlink', '120000'], ['tree', '40000'], ['gitlink', '160000']];
 const RELATIONS = [
   ['equal', Buffer.from('d'), Buffer.from('d')],
@@ -179,7 +179,6 @@ export function plyVerdict34(bytes) {
     assert.equal(e.code, 'pack_corrupt', e.message);
     if (e.message.startsWith('tree: duplicate entry ')) return 'duplicateEntries';
     if (e.message === 'tree: not strictly sorted') return 'treeNotSorted';
-    if (e.message.startsWith('tree: two entries decode to the name ')) return 'ply:decodeTwin';
     return `other:${e.message}`;
   }
 }
@@ -211,8 +210,7 @@ test('#34 parseTree on every cell of relation × mode × mode × position × ord
       const gitRejects = ids.size > 0;
       if (gitRejects !== c.expectGitRejects) bad.push(`${c.id}: model says git ${c.expectGitRejects ? 'rejects' : 'accepts'}, fsck: [${[...ids]}]`);
       for (const id of ids) if (id !== 'duplicateEntries' && id !== 'treeNotSorted') bad.push(`${c.id}: unexpected fsck ${id}`);
-      const exception = c.relation === 'decode-twin' && !gitRejects;
-      if (exception ? ply !== 'ply:decodeTwin' : gitRejects ? !ids.has(ply) : ply !== 'accept') bad.push(`${c.id}: fsck [${[...ids]}], ply ${ply}`);
+      if (gitRejects ? !ids.has(ply) : ply !== 'accept') bad.push(`${c.id}: fsck [${[...ids]}], ply ${ply}`);
       const k = `${c.relation} ${gitRejects ? [...ids].sort().join('+') : 'clean'} -> ${ply}`;
       tally.set(k, (tally.get(k) ?? 0) + 1);
     }

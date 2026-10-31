@@ -2,7 +2,7 @@
 // is the one effect. Any failure after the body is on the wire is 'ambiguous' (the ref may have moved).
 import { fail, ambiguousAfterPush } from './errors.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
-import { td, concat } from './bytes.js';
+import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { parseSideband } from './fetch.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS } from './format.js';
 
@@ -63,7 +63,7 @@ export function parseReportStatus(lines, limits = DEFAULT_LIMITS) {
 // outer flush (cmd_receive_pack: packet_flush(1) when use_sideband), end.
 const broken = (why, remote) => ({ tag: 'broken', why, remote });
 // `lines` grows in place (a report can hold limits.maxReportLines lines): a state is not reused once stepped.
-export const streamInit = sideband => ({ tag: 'reading', sideband, phase: 'report', inner: pktInit(), lines: [], band2: '', band2Frames: 0 });
+export const streamInit = sideband => ({ tag: 'reading', sideband, phase: 'report', inner: pktInit(), lines: [], band2: '', band2Carry: new Uint8Array(0), band2Frames: 0 });
 // @decoder streamStep prefix=stream
 export function streamStep(st, f) {
   // Stryker disable next-line ConditionalExpression: push stops stepping at the first non-reading state
@@ -77,7 +77,8 @@ export function streamStep(st, f) {
   if (f.kind !== 'data') return broken(`${f.kind} packet`);
   if (!st.sideband) { st.lines.push(f.payload); return st; }
   const { band, body } = parseSideband(f.payload);
-  if (band === SIDEBAND_PROGRESS) return { ...st, band2: (st.band2 + td.decode(body)).slice(-BAND_TAIL), band2Frames: st.band2Frames + 1 };
+  // decodeChunk: a character cut by a frame boundary is held for the next frame instead of decoding as two U+FFFD (#43)
+  if (band === SIDEBAND_PROGRESS) { const d = decodeChunk(st.band2Carry, body); return { ...st, band2: (st.band2 + d.text).slice(-BAND_TAIL), band2Carry: d.carry, band2Frames: st.band2Frames + 1 }; }
   if (band === SIDEBAND_ERROR) return broken('band 3', td.decode(body).trim());
   if (band !== SIDEBAND_PACK) return broken(`bad sideband ${band}`);
   // an empty band-1 packet is copy_to_sideband's keepalive: sent while hooks run, before the report and after it (post-receive)
@@ -226,8 +227,8 @@ export async function push(t, { ref, oldOid, newOid, objects = [], commands, sid
       }
       st = streamFinish(st);
     } catch (e) { throw ambiguousAfterPush(e); }
-    const band2 = reading.band2;
-    const lines = st.tag === 'report' ? st.lines.map(p => td.decode(p).replace(/\n$/, '')) : [];
+    const band2 = reading.band2Carry.length ? (reading.band2 + td.decode(reading.band2Carry)).slice(-BAND_TAIL) : reading.band2;
+    const lines = st.tag === 'report' ? st.lines.map(p => decodeBytes(p).replace(/\n$/, '')) : [];
     let report = null;
     try { report = parseReportStatus(lines, t.limits); } catch { /* a malformed report: the outcome below is ambiguous */ }
     const shape = st.tag === 'report' ? classifyReport(st.lines, commands) : st;

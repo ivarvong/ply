@@ -3,7 +3,7 @@
 // resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
 import { fail, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
-import { td, concat, take } from './bytes.js';
+import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched } from './objects.js';
 import { inflate } from './inflate.js';
@@ -60,7 +60,7 @@ export function fetchBody({ wants, haves = [], filter, deepen, deepenSince, deep
 // ---- v2 fetch response state machine (pure step over frames) ----
 export const v2Init = (limits = DEFAULT_LIMITS) => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
-  band1: 0, band2: 0, band3: 0, band2Frames: 0, progress: '', error: null, done: false, packFrames: 0,
+  band1: 0, band2: 0, band3: 0, band2Frames: 0, progress: '', progressCarry: new Uint8Array(0), error: null, done: false, packFrames: 0,
 });
 // @decoder v2Step prefix=v2
 export function v2Step(st, frame) {
@@ -86,7 +86,9 @@ export function v2Step(st, frame) {
     if (band.band === SIDEBAND_PROGRESS) {
       const band2 = st.band2 + band.body.length;
       if (band2 > maxPack) throw limitError('progress bytes', band2, maxPack);
-      return { state: { ...st, band2, band2Frames: st.band2Frames + 1, progress: (st.progress + td.decode(band.body)).slice(-PROGRESS_KEEP) }, pack: null };
+      // decodeChunk: a character cut by a frame boundary is held for the next frame instead of decoding as two U+FFFD
+      const d = decodeChunk(st.progressCarry, band.body);
+      return { state: { ...st, band2, band2Frames: st.band2Frames + 1, progress: (st.progress + d.text).slice(-PROGRESS_KEEP), progressCarry: d.carry }, pack: null };
     }
     if (band.band === SIDEBAND_ERROR) throw fail('remote_error', `remote: ${td.decode(band.body).trim()}`);
     throw proto(`v2: bad sideband ${band.band}`);

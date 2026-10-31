@@ -1,7 +1,7 @@
 // Git object encoding/decoding. All pure.
 import { fail } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
-import { te, td, concat, take } from './bytes.js';
+import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGit, isValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import {
@@ -42,14 +42,13 @@ const SLASH = Uint8Array.of(TREE_SORT_SLASH);
 // raw name bytes. A file `d` and a directory `d` need not be neighbours (`d` < `d.x` < `d/`), so the duplicate check is
 // over the whole tree, as fsck's verify_ordered does with its stack of file names a later directory could repeat. It
 // runs before the order check: by then every earlier pair was in order, and on a sorted prefix fsck's stack finds
-// exactly the duplicates this set finds, so the message is one fsck prints. One rule is ply's own: two names whose
-// bytes differ but decode to one string (two invalid UTF-8 sequences both become U+FFFD; TextDecoder drops a leading
-// BOM, #43) are refused, though git sees two names, because every caller looks an entry up by its decoded name.
+// exactly the duplicates this set finds, so the message is one fsck prints. Names decode losslessly (decodeBytes, #43):
+// distinct bytes are distinct names, so the raw-byte duplicate check is also the decoded-name one.
 // @decoder parseTree prefix=tree
 export function parseTree(data, limits = DEFAULT_LIMITS) {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
   const entries = [];
-  const raw = new Set(), decoded = new Set();
+  const raw = new Set();
   let p = 0;
   let prevKey = null;
   while (p < data.length) {
@@ -60,8 +59,9 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
     const nul = data.indexOf(TREE_NUL, sp + 1);
     if (nul < sp + 1) throw fail('pack_corrupt', 'tree: malformed entry');
     const mode = td.decode(take(data, p, sp - p));
+    // The name is bytes to git: decodeBytes keeps a leading BOM and escapes ill-formed UTF-8, so the string maps back (#43)
     const nameBytes = take(data, sp + 1, nul - (sp + 1));
-    const name = td.decode(nameBytes);
+    const name = decodeBytes(nameBytes);
     // The id starts at nul+1. take() demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
     const oidBytes = take(data, nul + 1, OID_BYTES);
@@ -78,8 +78,6 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
     // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw fail('pack_corrupt', 'tree: not strictly sorted');
     prevKey = key;
-    if (decoded.has(name)) throw fail('pack_corrupt', `tree: two entries decode to the name ${JSON.stringify(name)}`);
-    decoded.add(name);
     entries.push({ mode, name, oid: toHex(oidBytes), oidOffset: nul + 1, entryOffset: p });
     p = nul + 1 + OID_BYTES;
   }
@@ -88,7 +86,7 @@ export function parseTree(data, limits = DEFAULT_LIMITS) {
 
 const sortKey = e => (e.mode === MODE_TREE ? e.name + '/' : e.name);
 export function treeSort(entries) {
-  return [...entries].sort((a, b) => cmpBytes(te.encode(sortKey(a)), te.encode(sortKey(b))));
+  return [...entries].sort((a, b) => cmpBytes(encodeBytes(sortKey(a), 'tree entry name'), encodeBytes(sortKey(b), 'tree entry name')));
 }
 
 // git fsck `duplicateEntries`: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort
@@ -100,7 +98,7 @@ export function encodeTree(entries) {
     if (names.has(e.name)) throw fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
     names.add(e.name);
   }
-  return concat(treeSort(entries).flatMap(e => [te.encode(`${e.mode} ${e.name}\0`), fromHex(e.oid)]));
+  return concat(treeSort(entries).flatMap(e => [encodeBytes(`${e.mode} ${e.name}\0`, 'tree entry name'), fromHex(e.oid)]));
 }
 
 // Replace the oid of one entry in place; returns new bytes + coordinates for a structural delta.
@@ -114,7 +112,8 @@ export function treeReplaceOid(data, entry, newOidHex) {
 // newline) is a truncated header and throws. A cut that lands on a newline is a whole number of header lines.
 // Bytes after the blank line are the message; git does not frame the message, so a message prefix is a prefix.
 function splitHeaders(data, what) {
-  const text = td.decode(data);
+  // decodeBytes, not td: a Latin-1 message or ident (an `encoding ISO-8859-1` commit) must re-encode to its own bytes (#43)
+  const text = decodeBytes(data);
   const blank = '\n\n';
   const nl = text.indexOf(blank);
   if (nl < 0 && text.length > 0 && !text.endsWith('\n')) throw fail('pack_corrupt', `${what}: truncated header line`);
@@ -285,7 +284,7 @@ export function encodeCommit({ tree, parents = [], author, committer = author, e
   ];
   if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
   lines.push(...extra);
-  return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
+  return encodeBytes(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message), 'commit');
 }
 
 export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }) {
@@ -299,5 +298,5 @@ export function encodeTag({ object, type, tag, tagger, message = null, extra = [
     `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
     ...extra,
   ];
-  return te.encode(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message));
+  return encodeBytes(lines.join('\n') + '\n' + (message === null ? '' : '\n' + message), 'tag');
 }
