@@ -173,6 +173,7 @@ This session (2026-10-19 → 20):
 | Blob batches are buffered and split on a cap, not streamed | a multi-object pack cannot be cut into objects without inflating each one (zlib end is found only by inflating); a batch is bounded by the same caps as any buffered pack, and a blob alone streams in O(1) memory. A split re-downloads up to `maxPackBytes` — the cost of not knowing blob sizes in advance (trees do not carry them) |
 | Every push refuses a pack over `maxPackBytes` before sending | a capped host (Artifacts 62–93 MiB) would otherwise take the upload and answer 4xx; `limit_exceeded` carries the measured size |
 | Redirects never followed (`redirect: 'manual'`, 3xx → `http`); the credential scrub rides on the transport into every span and error | workerd 2026-10-23 forwards Authorization on a cross-origin redirect (measured); a server can echo the token in ERR/band 2/band 3/`ng` text. SAFETY I6b, I6c (issue #15) |
+| URL userinfo is sent as git sends it (`<token>@` → Basic `<token>:`, `:pass` → `:pass`, percent-decoded to bytes), not refused | measured on git 2.50 behind a Basic-auth gate: no prompt before the first credentialed request, the header byte-equal in every form; a library cannot prompt, so a refused one is `auth`. SAFETY I6d (issue #32) |
 
 ## 6. Verification — how to rerun everything
 

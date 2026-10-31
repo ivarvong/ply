@@ -93,7 +93,7 @@ export default {
       if (!concurrent) for (let i = 0; i < n; i++) results.push(await one(i));
       const spans = exporter.lines.flatMap(flattenLine);
       const root = spans.filter(s => s.name === 'git.edit');
-      return Response.json({ signer: signing?.signer.publicKeyLine ?? null, results, roots: root.map(s => pick(s.attrs)), blob: spans.filter(s => s.name === 'git.edit.blob').map(s => pick(s.attrs)), spanCount: spans.length });
+      return Response.json({ signer: signing?.signer.publicKeyLine ?? null, results, roots: root.map(s => pick(s.attrs)), blob: spans.filter(s => s.name === 'git.edit.blob').map(s => pick(s.attrs)), spanCount: spans.length, ...(body.dump ? { dump: JSON.stringify(exporter.lines) } : {}) });
     }
     return new Response('not found', { status: 404 });
   },

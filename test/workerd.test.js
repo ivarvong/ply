@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles } from './server.js';
 import { build } from './workerd/build.mjs';
 
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
@@ -174,4 +174,24 @@ test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST
     const probe = seen.find(h => h.authorization === 'Bearer workerd-follow-probe') ?? seen.find(h => h.url.includes('info/refs'));
     console.log(`  workerd default follow, cross-origin: ${probe ? `target reached, Authorization ${probe.authorization ? 'FORWARDED' : 'stripped'}` : 'target not reached'} (${JSON.stringify(r.follow)})`);
   } finally { other.close(); red.close(); }
+});
+
+test('workerd: a token given as the URL user authenticates the edit with the Authorization git sends; it reaches no span (#32)', { skip: !WORKERD && 'workerd not installed' }, async () => {
+  const bare = makeBareRepo(root, 'ui'); const work = join(root, 'wui'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  commitFiles(work, bare, { 'a.txt': 'hello MARK\n' }, 'seed');
+  const TOKEN = 'glpat-WorkerdUserOnlyToken';
+  const gate = await startAuthGate(srv.url);
+  try {
+    const url = `http://${TOKEN}@${new URL(gate.url).host}/ui.git`;
+    const ls = await gitAsync(work, ['ls-remote', url]);
+    assert.equal(ls.status, 0, ls.stderr);
+    const gitAuth = [...new Set(gate.seen.map(x => x.authorization).filter(Boolean))];
+    assert.deepEqual(gitAuth, [`Basic ${btoa(`${TOKEN}:`)}`]);
+    gate.seen.length = 0;
+    const r = await post('/edit', { url, path: 'a.txt', find: 'MARK', replace: 'WORKERD', dump: true });
+    assert.ok(r.results[0].ok, JSON.stringify(r.results[0]));
+    assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.results[0].newCommit);
+    assert.deepEqual([...new Set(gate.seen.map(x => x.authorization))], gitAuth);
+    for (const s of [TOKEN, gitAuth[0].slice(6), `${TOKEN}@`]) assert.ok(!r.dump.includes(s), `${s} in a span`);
+  } finally { await gate.close(); }
 });

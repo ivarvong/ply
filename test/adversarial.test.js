@@ -8,11 +8,12 @@
 //   I6  Secrets never appear in telemetry.
 //   I6b A credential a server echoes back reaches no error and no span.
 //   I6c A 3xx is never followed: no request (and no Authorization) reaches another origin.
+//   I6d URL userinfo is the Basic credential git sends for that URL, byte for byte, and reaches no error, span or URL.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles } from './server.js';
 import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
@@ -412,6 +413,108 @@ const appendLsRefAttrs = (bytes, extra) => {
   }
   return concat(out);
 };
+
+// ---- I6d (#32): URL userinfo is git's credential, byte for byte; it is scrubbed like any other ----
+
+// Tokens of the shapes hosts issue (random parts are fixed here): a classic GitHub PAT, a fine-grained one, a GitLab PAT
+// with no digit (the ≥16-with-a-digit user rule alone would leave it readable when it is the user).
+const GHP = 'ghp_R4nd0mClassicTokenAbcdefGhijklmnop12';
+const GHFG = 'github_pat_11ABCDEFG0abcdefghijkl_MNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ';
+const GLPAT = 'glpat-AbcdEfghIjklMnopQrst';
+const USERINFO = [ // [name, userinfo as written in the URL, the secrets in it]
+  ['user only (ghp_)', `${GHP}@`, [GHP]],
+  ['user only (fine-grained)', `${GHFG}@`, [GHFG]],
+  ['user only (glpat, no digit)', `${GLPAT}@`, [GLPAT]],
+  ['user: (empty password)', `${GHP}:@`, [GHP]],
+  ['user:password', `alice:${encodeURIComponent('s3cret/Pass:word@0123456789')}@`, ['s3cret/Pass:word@0123456789']],
+  [':password', `:${GHP}@`, [GHP]],
+  ['percent-encoded user only', 'to%40ken%3Aabcdefghij0123456789@', ['to@ken:abcdefghij0123456789']],
+  ['UTF-8 user only', 't%C3%A9k%E2%82%ACabcdefghij0123456789@', ['ték€abcdefghij0123456789']],
+  ['invalid escape kept (%ZZ)', 'to%ZZkenabcdefghij0123456789@', ['to%ZZkenabcdefghij0123456789']],
+  ['raw byte (%FF)', 'tok%FFabcdefghij0123456789@', ['tok\uFFFDabcdefghij0123456789']],
+];
+
+test('I6d URL userinfo authenticates fetch and push with the Authorization git sends for the same URL, byte for byte', async () => {
+  const gate = await startAuthGate(srv.url);
+  try {
+    for (const [name, ui, secrets] of USERINFO) {
+      const repo = freshRepo();
+      const url = `http://${ui}${new URL(gate.url).host}/${repo.name}.git`;
+      // git: ls-remote and push through the gate; its credentialed requests carry one Authorization value
+      gate.seen.length = 0;
+      const ls = await gitAsync(repo.work, ['ls-remote', url]);
+      assert.equal(ls.status, 0, `${name}: git ls-remote: ${ls.stderr}`);
+      const push = await gitAsync(repo.work, ['push', '-q', url, 'HEAD:refs/heads/by-git']);
+      assert.equal(push.status, 0, `${name}: git push: ${push.stderr}`);
+      const gitAuth = [...new Set(gate.seen.map(r => r.authorization).filter(Boolean))];
+      assert.equal(gitAuth.length, 1, `${name}: git sent ${JSON.stringify(gitAuth)}`);
+      // ply: a read (fetch) and an edit (fetch + push) through the same gate; every request carries git's value
+      gate.seen.length = 0;
+      const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
+      const read = await readFile(url, { path: FILE }, { tracer });
+      const parts = []; for await (const c of read.stream) parts.push(c);
+      assert.equal(new TextDecoder().decode(concat(parts)), ORIG, `${name}: read`);
+      const r = await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer });
+      assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), r.newCommit, `${name}: push landed`);
+      assert.ok(gate.seen.some(x => x.path.endsWith('/git-receive-pack')), `${name}: ply pushed through the gate`);
+      assert.deepEqual([...new Set(gate.seen.map(x => x.authorization))], gitAuth, `${name}: ply's Authorization`);
+      // the userinfo is nowhere in the export, and every URL attribute is the credential-free URL
+      const dump = JSON.stringify(exporter.lines);
+      for (const s of [...secrets, ui, gitAuth[0], gitAuth[0].slice(6)]) assert.ok(!dump.includes(s), `${name}: ${JSON.stringify(s)} in a span`);
+      const urls = exporter.lines.flatMap(flattenLine).flatMap(sp => Object.entries(sp.attrs).filter(([k]) => /url/.test(k)).map(([, v]) => v));
+      assert.ok(urls.length >= 3, `${name}: url attributes recorded`);
+      for (const v of urls) assert.ok(v.startsWith(`${gate.url}/${repo.name}.git`) && !v.includes('@'), `${name}: url attribute ${v}`);
+    }
+  } finally { await gate.close(); }
+});
+
+test('I6d a refused URL credential is `auth`; the server echoing it reaches no error and no span (a short user name stays readable)', async () => {
+  const gate = await startAuthGate(srv.url, () => false); // refuses everything, quoting the header and its decoded form
+  try {
+    for (const [name, ui, secrets] of USERINFO) {
+      const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
+      const url = `http://${ui}${new URL(gate.url).host}/r.git`;
+      const errs = [
+        await readFile(url, { path: FILE }, { tracer }).catch(e => e),
+        await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer }).catch(e => e),
+        await new GitHttp(url, { tracer }).discover().catch(e => e),
+      ];
+      const said = gate.seen.at(-1).authorization;
+      assert.ok(said, `${name}: no Authorization sent`);
+      for (const e of errs) {
+        assert.equal(e.code, 'auth', `${name}: ${e.code} ${e.message}`);
+        const text = `${reachableText(e)}\n${String(e)}\n${inspect(e, { depth: 20, showHidden: true })}`;
+        for (const s of [...secrets, said, said.slice(6), ui]) for (const frag of [s, ...Array.from({ length: Math.max(0, s.length - 11) }, (_, i) => s.slice(i, i + 12))]) {
+          assert.ok(!text.includes(frag), `${name}: ${JSON.stringify(frag)} in the error: ${e.message}`);
+        }
+      }
+      assert.match(errs[0].message, /\[redacted\]/, `${name}: the echo was scrubbed`);
+      const dump = JSON.stringify(exporter.lines);
+      for (const s of [...secrets, said.slice(6), ui]) assert.ok(!dump.includes(s), `${name}: ${JSON.stringify(s)} in a span`);
+    }
+    // `git@` and `ivar@` alone are names: sent as `git:` / `ivar:` like git does, and not scrubbed from server text
+    const e = await readFile(`http://ivar@${new URL(gate.url).host}/r.git`, { path: FILE }, { tracer: new Tracer() }).catch(x => x);
+    assert.equal(gate.seen.at(-1).authorization, `Basic ${btoa('ivar:')}`);
+    assert.equal(e.code, 'auth'); assert.match(e.message, /\(ivar:\)/);
+  } finally { await gate.close(); }
+});
+
+test('I6d unusable userinfo or a malformed URL is bad_request before any request, and the error carries no credential', async () => {
+  const cases = [['LF', `${GHP}%0A@`, 'url userinfo'], ['CR', `${GHP}%0D@`, 'url userinfo'], ['NUL', `x:${GHP}%00@`, 'url userinfo']];
+  for (const [name, ui, what] of cases) {
+    let calls = 0;
+    const fetchImpl = async () => { calls++; throw new Error('should not be called'); };
+    const e = await readFile(`http://${ui}127.0.0.1:1/r.git`, { path: FILE }, { tracer: new Tracer(), fetchImpl }).catch(x => x);
+    assert.equal(e.code, 'bad_request', `${name}: ${e.code} ${e.message}`); assert.equal(e.what, what);
+    assert.equal(calls, 0, name);
+    assert.ok(!reachableText(e).includes(GHP.slice(0, 12)), `${name}: credential in the error`);
+  }
+  // git refuses LF and NUL here and sends CR; ply refuses all three. A URL that does not parse: Node's TypeError
+  // carries what it was given (`input`), credential and all.
+  const e = (() => { try { createTransport(`http://${GHP}@127.0.0.1:99999/r.git`); } catch (x) { return x; } })();
+  assert.equal(e?.code, 'bad_request'); assert.equal(e.what, 'url');
+  assert.ok(!reachableText(e).includes(GHP.slice(0, 12)) && !inspect(e, { showHidden: true }).includes(GHP.slice(0, 12)), 'credential in the error');
+});
 
 test('#16 ls-refs attributes never override the parsed oid or name: oid:/name: extras leave the edit on the real head', async () => {
   for (const extra of ['oid:junk name:refs/heads/other', `oid:${'1'.repeat(40)}`, 'name:refs/heads/other', 'name:HEAD oid:junk __proto__:x constructor:y']) {
