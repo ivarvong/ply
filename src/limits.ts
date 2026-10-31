@@ -139,7 +139,7 @@ export const withLimits = (o: Partial<Limits> = {}): Limits => Object.freeze({ .
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
 export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf<'bad_request'>> =>
-  typeof value === 'number' && Number.isFinite(value) && value >= 0
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
 export const readLimit = (limits: Partial<Limits> | null | undefined, key: LimitKey): Result<number, ErrorOf<'bad_request'>> =>
@@ -153,7 +153,7 @@ export const limitExceeded = (what: string, got: number, max: number): ErrorOf<'
 // calling it, so a bundle of unconverted callers carries no Result plumbing (bundle budgets); it goes away, with the
 // repetition, when the last caller converts.
 export const finiteLimit = (value: unknown, what: string): number => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) { 
     throw plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value });
   }
   return value;

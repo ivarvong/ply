@@ -17,9 +17,9 @@ export function pkt(payload) {
   // a ref name read from ls-refs may hold escaped bytes (#43): encodeBytes writes them back as the server sent them
   const p = typeof payload === 'string' ? encodeBytes(payload, 'pkt-line') : payload;
   if (p.length > MAX_PKT_PAYLOAD) throw fail('bad_request', `pkt-line payload too large: ${p.length} bytes, the most git frames is ${MAX_PKT_PAYLOAD}`, { what: 'pkt-line', got: p.length, max: MAX_PKT_PAYLOAD });
-  const out = new Uint8Array(PKT_LEN_HEX + p.length);
-  out.set(te.encode((p.length + PKT_LEN_HEX).toString(PKT_HEX_BASE).padStart(PKT_LEN_HEX, '0')));
-  out.set(p, PKT_LEN_HEX);
+  const out = new Uint8Array(PKT_LEN_HEX + p.length); 
+  out.set(te.encode((p.length + PKT_LEN_HEX).toString(PKT_HEX_BASE).padStart(PKT_LEN_HEX, '0'))); 
+  out.set(p, PKT_LEN_HEX); 
   return out;
 }
 export const FLUSH = te.encode('0000');
