@@ -12,7 +12,7 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
 export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
-export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, ident, TYPE, TYPE_NAME } from './objects.js';
+export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, encodeTag, ident, TYPE, TYPE_NAME } from './objects.js';
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny, cpuNow, cpuSince } from './otel.js';
 export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';

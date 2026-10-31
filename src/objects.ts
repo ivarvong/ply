@@ -3,7 +3,7 @@ import { thrown as fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
-import { isDotGitName, isDotFileName, isValidatedIdent } from './validate.js';
+import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
@@ -397,11 +397,21 @@ export function encodeCommit({ tree, parents = [], author, committer = author, e
   return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
 }
 
+// The four types a tag can name (git's type_from_string_gently: object_type_strings, nothing else).
+export type TagTargetType = keyof typeof TYPE_ID;
+// An annotated tag: `tag` is the short name (`v1`, not `refs/tags/v1`); `tagger` an ident line (ident(validateIdent(…))).
 export type TagInput = {
-  readonly object: string; readonly type: string; readonly tag: string; readonly tagger: string;
+  readonly object: string; readonly type: TagTargetType; readonly tag: string; readonly tagger: string;
   readonly message?: string | null; readonly extra?: readonly string[];
 };
-export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }: TagInput): Uint8Array {
+// git's annotated-tag object bytes (`git tag -a`, `git mktag`): object, type, tag and tagger lines, the extra header
+// lines, then a blank line and the message verbatim (null: no body section; git's own tags end the message with a
+// newline, which the caller adds). A signature is part of the message, as `git tag -s` appends its armored block to
+// the body. Refuses (bad_request) what `git hash-object -t tag` refuses, which is fsck_tag_standalone with every
+// message an error: a bad object id, a type outside the four, a tag name that is not a refname under refs/tags/
+// (check_refname_format), a bad tagger ident; and a NUL or newline in a header value or a NUL in the message. So the
+// bytes hash (hashObject('tag', …)) to an object git stores as is.
+export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }: TagInput): Uint8Array<ArrayBuffer> {
   headerValue(object, 'object');
   headerValue(type, 'type');
   headerValue(tag, 'tag');
@@ -412,5 +422,10 @@ export function encodeTag({ object, type, tag, tagger, message = null, extra = [
     `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
     ...extra,
   ];
-  return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'tag');
+  const bytes = encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'tag');
+  // fsck_tag_standalone's badTagName is check_refname_format("refs/tags/<tag>", 0), validateRef's rule; the rest
+  // (badObjectSha1, badType, the tagger's fsck_ident) is parseTag's. Either refusal is the caller's bad request.
+  try { validateRef(`refs/tags/${tag}`); } catch { throw fail('bad_request', "tag: badTagName: invalid 'tag' name", { what: 'tag' }); }
+  try { parseTag(bytes); } catch (e) { throw fail('bad_request', e instanceof Error ? e.message : String(e), { what: 'tag' }); }
+  return bytes;
 }
