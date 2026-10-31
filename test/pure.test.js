@@ -258,7 +258,8 @@ test('error taxonomy: every fail(\'code\') literal in src/ is in the table (stat
   const used = new Set();
   for (const f of readdirSync('src')) if (/\.[jt]s$/.test(f)) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
   for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);
-  assert.ok(used.size >= 20);
+  // a floor so a broken regex cannot pass on nothing: 19 literal codes since the SSH transport (the only `fail('auth'` site) left, 2026-10-31
+  assert.ok(used.size >= 19, `only ${used.size} fail('code') literals found`);
 });
 
 test('scrubError walks prototype-less maps (#16: merge reasons, report-status options) as it walks plain objects', () => {
