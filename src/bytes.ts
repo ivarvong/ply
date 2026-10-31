@@ -128,7 +128,7 @@ export const shortRead = <C extends ShortReadCode>(code: C, off: number, n: numb
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- plyError's member for C; the compiler cannot resolve Payload<C> for a type parameter
   plyError<ShortReadCode>(code, shortReadMessage(off, n, have), { reason: 'short_read' }) as ErrorOf<C>;
 const inBounds = (buf: Uint8Array | null | undefined, off: number, n: number): buf is Uint8Array =>
-  Boolean(buf) && Number.isInteger(off) && Number.isInteger(n) && off >= 0 && n >= 0 && off + n <= (buf?.length ?? 0);
+  buf !== null && buf !== undefined && Number.isInteger(off) && Number.isInteger(n) && off >= 0 && n >= 0 && off + n <= buf.length;
 export function takeResult<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null | undefined, off: number, n: number, code?: C): Result<Uint8Array, ErrorOf<C>> {
   const have = buf?.length ?? 0;
   // an omitted code is C's default, 'pack_corrupt'; the compiler cannot tie a default value to a type parameter
