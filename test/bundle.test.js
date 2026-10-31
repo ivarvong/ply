@@ -6,7 +6,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const bundle = async entry => (await build({ entryPoints: [entry], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true }));
-const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, ''), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
+const retained = out => Object.entries(Object.values(out.metafile.outputs)[0].inputs).map(([k, v]) => [k.replace(/^src\//, '').replace(/\.ts$/, '.js'), v.bytesInOutput]).sort((a, b) => b[1] - a[1]);
 
 test('edit entry carries only what the edit path uses', async () => {
   const out = await bundle('src/edit.js');
@@ -54,11 +54,12 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-31: 73,215 B / 28,144 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 73,369 B / 28,212 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
   assert.ok(min < 73_370, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 28_213, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 73,090 B / 28,222 B gz. strict TS (T2: objects, format, validate, scrub): min down, gz up a few dozen bytes from strict-lint forms (/u regexes, Number.parseInt, explicit length checks, noUncheckedIndexedAccess guards) and identifier remangling.
+  assert.ok(gz < 28_223, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('merge entry: the line merge rides with merge/rebase only, under its own budget', async () => {
-  const out = await bundle('src/merge.js');
+  const out = await bundle('src/merge.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
   assert.ok(files.includes('linemerge.js'));
   assert.ok(!/node:|\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/.test(js), 'no node builtins or classes');
@@ -148,7 +149,8 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-31: 53,946 B / 21,069 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 55,816 B / 21,786 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 55_817, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 21_787, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 55,506 B / 21,791 B gz. T2 strict TS (see the edit budget).
+  assert.ok(gz < 21_792, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -178,14 +180,15 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-31: 69,891 B / 27,043 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 70,045 B / 27,104 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
   assert.ok(min < 70_046, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 27_105, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 69,763 B / 27,134 B gz. T2 strict TS (see the edit budget).
+  assert.ok(gz < 27_135, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the two Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
-  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
+  const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
   assert.deepEqual(withNode, ['checkout-node.js', 'tree-node.js']);
 });
 
@@ -219,7 +222,8 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-31: 50,542 B / 20,121 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 52,917 B / 20,911 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   assert.ok(min < 52_918, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 20_912, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-31: 52,604 B / 20,928 B gz. T2 strict TS (see the edit budget).
+  assert.ok(gz < 20_929, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

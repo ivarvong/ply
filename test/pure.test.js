@@ -256,7 +256,7 @@ test('error taxonomy: every fail(\'code\') literal in src/ is in the table (stat
   const { readdirSync, readFileSync } = await import('node:fs');
   const { CODES } = await import('../src/errors.js');
   const used = new Set();
-  for (const f of readdirSync('src')) if (f.endsWith('.js')) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
+  for (const f of readdirSync('src')) if (/\.[jt]s$/.test(f)) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
   for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);
   assert.ok(used.size >= 20);
 });

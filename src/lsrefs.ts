@@ -1,4 +1,7 @@
 // v2 ls-refs: the ref namespace, filtered by prefix. The one request that cannot be cached (it is the freshness source).
+/* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal */
+import type { Span } from './otel.js';
+import type { Transport } from './transport.js';
 import { thrown as fail } from './errors.js';
 import { pkts } from './pktline.js';
 import { decodeBytes } from './bytes.js';
@@ -23,8 +26,12 @@ const UNBORN = 'unborn';
 // One ls-refs line, as connect.c process_ref_v2 reads it: split on every space, so a doubled space is an empty field.
 // Returns { oid, name, peeled?, symref-target? }, or null for an `unborn <name> …` line (git records it only for the
 // unborn HEAD of a clone that asked for it, which ply never does; it is no ref).
+// One listed ref. Only `peeled` and `symref-target` are kept from the attributes.
+export type LsRef = { readonly oid: string; readonly name: string; readonly peeled?: string; readonly 'symref-target'?: string };
+export type LsRefsResult = { readonly refs: Map<string, LsRef>; readonly head: string | null };
+
 // @decoder parseLsRefLine prefix=ls-ref
-export function parseLsRefLine(line) {
+export function parseLsRefLine(line: string): LsRef | null {
   if (line.startsWith(ERR)) throw fail('remote_error', `remote: ${line.slice(ERR.length)}`);
   const sp = line.indexOf(' ');
   // Stryker disable next-line EqualityOperator: a leading space still fails the oid check with this same malformed-line error
@@ -42,7 +49,7 @@ export function parseLsRefLine(line) {
   if (!OID_SHA1.test(oid)) throw proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
   // server attribute can never stand in for the parsed oid or name. A bad peeled oid is malformed (git: invalid ls-refs response).
-  const rec = { oid: oid.toLowerCase(), name };
+  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: oid.toLowerCase(), name };
   for (const a of attrs) {
     const colon = a.indexOf(':');
     // Stryker disable next-line EqualityOperator: a token starting with ':' has the empty key, which is neither kept attribute
@@ -55,16 +62,19 @@ export function parseLsRefLine(line) {
   return rec;
 }
 
-export const lsRefsBody = (prefixes = [], { peel = true, symrefs = true } = {}) =>
-  pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n'].filter(Boolean), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
+export const lsRefsBody = (prefixes: readonly string[] = [], { peel = true, symrefs = true }: { readonly peel?: boolean; readonly symrefs?: boolean } = {}): Uint8Array<ArrayBuffer> =>
+  pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
 
-export async function lsRefs(t, prefixes = []) {
+// async: a synchronous failure (a bad prefix, a missing limit) is a rejection, as it always was
+// oxlint-disable-next-line require-await -- see above
+export async function lsRefs(t: Transport, prefixes: readonly string[] = []): Promise<LsRefsResult> {
   for (const p of prefixes) validateWire(p, 'ref prefix');
   const maxBytes = requireLimit(t.limits, 'maxLsRefsBytes');
   const maxRefs = requireLimit(t.limits, 'maxRefs');
-  return coded('protocol', () => t.tracer.span('git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async span => {
-    const refs = new Map();
-    let head = null;
+  // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
+  return coded('protocol', () => t.tracer.span('git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<LsRefsResult> => {
+    const refs = new Map<string, LsRef>();
+    let head: string | null = null;
     // gitprotocol-v2 ls-refs: output = *ref flush-pkt. git dies "expected flush after ref listing" (connect.c) when the
     // flush is missing; a truncated listing must never read as "these are all the refs" (found by the calibration harness).
     let ended = false;
@@ -83,6 +93,7 @@ export async function lsRefs(t, prefixes = []) {
       if (rec === null || refs.has(rec.name)) continue;
       if (refs.size >= maxRefs) throw limitError('ls-refs lines', refs.size + 1, maxRefs);
       refs.set(rec.name, rec);
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- an empty symref-target names no HEAD, as before
       if (rec.name === 'HEAD' && rec['symref-target']) head = rec['symref-target'];
     }
     if (!ended) throw proto('ls-refs: response ended without the terminating flush-pkt');
