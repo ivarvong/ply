@@ -3,7 +3,7 @@
 //      blob:none is supported." ply falls back to blob:none (learned from that answer, remembered on the transport).
 //   2. every ref-update rejection is `ng <ref> stale ref` → must classify as cas_conflict (editFile's fresh retry fires).
 // Mimicked by test/proxy.js in front of git http-backend; git is the judge of every result.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';

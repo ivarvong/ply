@@ -18,7 +18,7 @@ export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit,
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny, cpuNow, cpuSince } from './otel.js';
 export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';
-export { CODES, RETRY, fail, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
+export { CODES, RETRY, thrown as fail, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';
 export { createTransport, redactUrl } from './http.js';

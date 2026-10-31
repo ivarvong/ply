@@ -2,7 +2,7 @@
 // service outcome, and git over OpenSSH (ls-remote, push) as the oracle on the same server and key setup. ply's code and
 // message must be the cell's within the time bound; git's class must be the cell's (ply's unless a divergence is named),
 // and for every refusal git's stderr and ply's message carry the same server line.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs';

@@ -1,6 +1,6 @@
 // Branch and message assertions for the mutation gate. Prefix and round-trip tests kill the happy path;
 // these kill a mutant that deletes one check, flips one comparison, or empties one error string.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -1275,7 +1275,7 @@ const spanStub = { set() {}, event() {} };
 const tracerStub = { span: async (_name, _opts, fn) => fn(spanStub) };
 
 test('every DEFAULT_LIMITS key is read outside limits.js', () => {
-  const src = readdirSync('src').filter(f => f.endsWith('.js') && f !== 'limits.js').map(f => readFileSync(join('src', f), 'utf8')).join('\n');
+  const src = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && !f.startsWith('limits.')).map(f => readFileSync(join('src', f), 'utf8')).join('\n');
   for (const key of Object.keys(DEFAULT_LIMITS)) assert.match(src, new RegExp(key), key);
   assert.equal(DEFAULT_LIMITS.maxInflatedTotal, DEFAULT_LIMITS.maxObjectSize * 4);
   assert.equal(DEFAULT_LIMITS.maxPackObjects, 100_000);

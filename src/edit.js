@@ -3,7 +3,7 @@
 // Shape: pure decisions between thin effects. Every decision (validateSpec, decideHead, lookupEntry, buildCommitObjects,
 // memFromScan, summarize) is a function of its arguments; the effects (lsRefs, fetchObject, packStream, push) are free
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
-import { fail, isPlyCode } from './errors.js';
+import { thrown as fail, isPlyCode } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';

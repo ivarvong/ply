@@ -3,6 +3,7 @@
 // cases and one `reproduce:` command per case (the lines the nightly issue quotes), plus a step summary on Actions.
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const [seedArg, fuzzer, ...rest] = process.argv.slice(2);
 if (!/^\d+$/.test(seedArg ?? '') || !/^[a-z-]+\.mjs$/.test(fuzzer ?? '')) {
@@ -29,7 +30,9 @@ const RULES = [
 ];
 
 const out = [];
-const child = spawn(process.execPath, argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+// src/ keeps .js specifiers for .ts files; the hook resolves them under plain node (test/ts-resolve.mjs).
+const hook = fileURLToPath(new URL('../test/ts-resolve.mjs', import.meta.url));
+const child = spawn(process.execPath, ['--import', hook, ...argv], { stdio: ['ignore', 'pipe', 'pipe'] });
 let buf = '';
 const onData = (stream, d) => { stream.write(d); buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { out.push(buf.slice(0, i)); buf = buf.slice(i + 1); } };
 child.stdout.on('data', d => onData(process.stdout, d));

@@ -11,10 +11,10 @@
 // FSCK_TREE_SRC=<dir> runs ply's side against another copy of src/ (`git archive <rev> src | tar -x -C <dir>`), to count
 // what that revision got wrong. FSCK_TREE_LIST=1 prints every disagreeing cell. FSCK_TREE_LARGE=1 adds the three
 // 100 MiB .gitattributes cells (about 300 MB of blobs).
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir, availableParallelism } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -25,7 +25,8 @@ import { attributesFor, bytesToStr } from '../../src/attributes.js';
 import { encodeBytes, decodeBytes } from '../../src/bytes.js';
 
 const SRC = process.env.FSCK_TREE_SRC ?? new URL('../../src', import.meta.url).pathname;
-const { parseTree } = await import(`${SRC}/objects.js`);
+// an absolute specifier: the .js -> .ts resolve hook maps relative ones only (objects is TypeScript since T2; an older src copy is .js)
+const { parseTree } = await import(existsSync(`${SRC}/objects.ts`) ? `${SRC}/objects.ts` : `${SRC}/objects.js`);
 const LIST = !!process.env.FSCK_TREE_LIST;
 
 const sha1 = (type, data) => createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');

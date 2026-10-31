@@ -6,7 +6,7 @@
 //                    then each command's response ends at a top-level flush; the channel stays open for the next command.
 //   git-receive-pack (v0): the server speaks first — ref advertisement with capabilities + flush — then one push.
 // URL forms: ssh://[user@]host[:port]/path and the scp-like user@host:path (GitHub: git@github.com:owner/repo.git).
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { SshClient, hostKeyFromLine } from './ssh.js';
 import { pktInit, pktStep, FLUSH } from './pktline.js';
 import { td, te, concat, decodeStrict } from './bytes.js';

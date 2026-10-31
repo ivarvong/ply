@@ -1,5 +1,5 @@
 // Pure property tests: chunking invariance of every step function, codec roundtrips, oracle vs node:zlib/crypto.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';

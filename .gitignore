@@ -4,4 +4,5 @@ coverage/
 reports/
 .stryker-tmp/
 .DS_Store
+dist/
 .failsites/

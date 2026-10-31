@@ -1,14 +1,14 @@
 // Prefix closure: for a valid encoding, every strict prefix throws a typed error, or — when the cut lands on an
 // entry boundary — parses to a prefix of the entries. A new `export function parse*` (or the other decoder names)
 // without an `@decoder name prefix=<id>` annotation fails the registry test at the bottom of this file.
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
 import { te, td, concat, take } from '../src/bytes.js';
 import { fromHex } from '../src/sha1.js';
-import { fail } from '../src/errors.js';
+import { thrown as fail } from '../src/errors.js';
 import { validateIdent } from '../src/validate.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,
@@ -492,7 +492,7 @@ const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|in
 test('every exported decoder has a prefix-closure property', () => {
   const missing = [];
   const annotated = [];
-  for (const file of readdirSync('src').filter(f => f.endsWith('.js'))) {
+  for (const file of readdirSync('src').filter(f => /\.[jt]s$/.test(f))) {
     const text = readFileSync(join('src', file), 'utf8');
     const anns = [...text.matchAll(/@decoder\s+(\w+)\s+prefix=([\w-]+)/g)].map(m => ({ name: m[1], prefix: m[2] }));
     for (const a of anns) annotated.push({ file, ...a });

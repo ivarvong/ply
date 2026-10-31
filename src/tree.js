@@ -10,7 +10,7 @@
 //
 // Shape: pure decisions between thin effects, as edit.js. fileEntries, buildTree, selectObjects are functions of their
 // arguments; the effects (lsRefs, fetchObject, push, verifyRef) are free functions over a transport record.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';

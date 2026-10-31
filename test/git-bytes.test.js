@@ -5,7 +5,7 @@
 // when both refuse (git cannot store or read the value, and ply's refusal is typed). A ply refusal where git succeeds is
 // allowed only with a reason listed in ALLOWED_REFUSALS. Strings carry bytes as bytes.js decodeBytes maps them:
 // well-formed UTF-8 as itself (a BOM anywhere stays), every other byte as U+DC00 + byte; encodeBytes is the inverse.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -287,9 +287,9 @@ test('src/ constructs TextDecoder and TextEncoder only in bytes.js', () => {
   const dir = new URL('../src/', import.meta.url);
   const found = [];
   for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.js')) continue;
+    if (!/\.[jt]s$/.test(f)) continue;
     const text = readFileSync(new URL(f, dir), 'utf8');
     for (const m of text.matchAll(/new Text(De|En)coder\(([^)]*)\)/g)) found.push(`${f}: ${m[0]}`);
   }
-  assert.deepEqual(found, ["bytes.js: new TextEncoder()", "bytes.js: new TextDecoder('utf-8', { ignoreBOM: true })", "bytes.js: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })"]);
+  assert.deepEqual(found, ["bytes.ts: new TextEncoder()", "bytes.ts: new TextDecoder('utf-8', { ignoreBOM: true })", "bytes.ts: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })"]);
 });

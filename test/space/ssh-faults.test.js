@@ -3,7 +3,7 @@
 // must be the cell's (a typed code and message, or ok) within the time bound; git's class (ok / refused) must be the
 // cell's, which is ply's unless the space names a divergence. A fault-free run first proves the server speaks SSH to
 // both. Then the host-key pin, the caller's input to the same handshake: ssh-keygen is its oracle.
-import { test, before, after } from 'node:test';
+import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
