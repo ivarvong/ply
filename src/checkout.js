@@ -21,8 +21,9 @@
 // Memory. The tree pack is one buffered fetch (maxPackBytes, maxInflatedTotal, maxPackObjects); the entries walked are
 // bounded by maxPackObjects (a tree reused at many paths cannot multiply them past it) and the depth by maxPathDepth.
 // A blob batch is one buffered fetch under the same caps; one that hits a cap is split in half and refetched, down to
-// single blobs, which stream in O(1) memory whatever their size. The iterator holds at most the batch it is yielding
-// (and the previous one while its streams are unread).
+// single blobs, which stream in O(1) memory. Every fetch, streamed or buffered, delivers at most maxPackBytes of pack
+// (v2Step): a single blob whose pack is over it is limit_exceeded, not fetched (the default, 128 MiB, is above GitHub's
+// 100 MiB file cap). The iterator holds at most the batch it is yielding (and the previous one while its streams are unread).
 //
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
 import { fail } from './errors.js';
@@ -139,9 +140,11 @@ const isWantsRefusal = e => ['http', 'remote_error', 'protocol'].includes(e?.cod
 const bytesStream = data => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
 // The files iterator. Gitlinks first (nothing to fetch), then the unique blobs in `batch`-sized wants lists; every path
-// naming a blob is yielded with it. Its span, `git.checkout.blobs`, ends when the iteration does.
-async function* blobFiles(transport, tracer, parent, entries, batch) {
-  const span = tracer.start('git.checkout.blobs', { parent });
+// naming a blob is yielded with it. Its span, `git.checkout.blobs`, starts at the first next() and ends when the
+// iteration does, both after the checkout root has ended: it is the root of its own trace with a follows_from link to
+// the checkout root (README "Span lifetimes"), and each streamed blob's git.read.blob follows it in turn.
+async function* blobFiles(transport, tracer, opener, entries, batch) {
+  const span = tracer.start('git.checkout.blobs', { follows: opener });
   const t = withParent(transport, span);
   const byOid = new Map();
   for (const e of entries) if (e.mode !== MODE_COMMIT) { const l = byOid.get(e.oid); if (l) l.push(e); else byOid.set(e.oid, [e]); }

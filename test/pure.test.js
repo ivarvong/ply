@@ -131,6 +131,26 @@ test('otel: links, event cap, isolate counter, flatten round-trip', () => {
   assert.equal(ex.lines.flatMap(flattenLine)[2].attrs['ply.isolate.invocation'], undefined, 'child spans do not count as invocations');
 });
 
+test('otel: a follows span is the root of its own trace, linked both ways while the followed span is open; links are capped', () => {
+  const ex = arrayExporter(); const t = new Tracer({ exporter: ex, maxEvents: 2 });
+  const op = t.start('git.op', { scrub: s => s.replaceAll('SECRET', '[redacted]') });
+  const f = t.start('git.op.stream', { follows: op, attrs: { 'git.op.stream.note': 'SECRET' } });
+  assert.notEqual(f.traceId, op.traceId); assert.equal(f.parentSpanId, undefined);
+  op.end();
+  const late = t.start('git.op.late', { follows: op }); late.end(); // op already exported: no link back
+  t.start('x', { follows: f }); t.start('y', { follows: f }); // f has follows_from + 2 followed_by → the second is dropped
+  f.end();
+  const [fo, fl, ff] = ex.lines.map(l => l.resourceSpans[0].scopeSpans[0].spans[0]);
+  const flat = ex.lines.flatMap(flattenLine);
+  assert.deepEqual(flat[0].links.map(l => [l.spanId, l.attrs['ply.link']]), [[f.spanId, 'followed_by']]);
+  assert.deepEqual(flat[1].links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']]), [[op.traceId, op.spanId, 'follows_from']]);
+  assert.deepEqual(flat[2].links.map(l => l.attrs['ply.link']), ['follows_from', 'followed_by']);
+  assert.deepEqual([fo.droppedLinksCount, fl.droppedLinksCount, ff.droppedLinksCount], [0, 0, 1]);
+  assert.equal(flat[2].attrs['git.op.stream.note'], '[redacted]', 'a follower inherits the scrub of the span it follows');
+  assert.equal(flat[2].attrs['ply.isolate.invocation'], undefined, 'a follower is not an invocation');
+  assert.throws(() => t.start('z', { parent: op, follows: op }), TypeError);
+});
+
 test('inflate: an incomplete huffman table with a hole is rejected (invalid huffman code), and zlib agrees', () => {
   // Dynamic block whose lit/len table has a single code (EOB, length 8): the table is incomplete, so a bit pattern that is
   // not that code decodes to nothing. Built bit by bit, LSB-first as deflate reads it.
@@ -191,7 +211,7 @@ test('span naming convention: every span and attribute key in a trace follows th
   //                git.<op>.<phase>         operation children (git.edit.tree, git.edit.blob)
   //                ssh.<phase>              transport phases (ssh.connect, ssh.userauth, ssh.exec)
   //   attr keys:   dotted lowercase ascii with underscores, under one of: git. http. ssh. url. server. mem. error. ply. exception.
-  //   outcomes:    every root span has <name>.outcome
+  //   outcomes:    every root span has <name>.outcome (operation roots, and the spans that follow them: README "Span lifetimes")
   const { startGitServer, makeBareRepo, tmpRoot, commitFiles, git } = await import('./server.js');
   const { editFile } = await import('../src/edit.js');
   const { join } = await import('node:path'); const { mkdirSync } = await import('node:fs');
@@ -221,7 +241,9 @@ test('error taxonomy: runtime table and documentation agree; fail refuses unknow
   assert.throws(() => fail('not_a_code', 'x'), /unknown error code/);
   assert.equal(retryPolicy(fail('cas_conflict', 'x')), 'fresh'); assert.equal(retryPolicy(fail('ambiguous', 'x')), 'read'); assert.equal(retryPolicy({ code: 'nope' }), 'no');
   assert.equal(ambiguousAfterPush(fail('network', 'dropped')).code, 'ambiguous'); assert.equal(ambiguousAfterPush(fail('network', 'dropped')).original, 'network');
-  assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).code, 'limit_exceeded', 'our own pre-send refusals keep their code');
+  // a limit hit while reading the report is after the send: the ref may have moved (pre-send refusals never reach it)
+  assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).code, 'ambiguous'); assert.equal(ambiguousAfterPush(fail('limit_exceeded', 'x')).original, 'limit_exceeded');
+  const amb = fail('ambiguous', 'y'); assert.equal(ambiguousAfterPush(amb), amb);
 });
 
 test('error taxonomy: every fail(\'code\') literal in src/ is in the table (static)', async () => {

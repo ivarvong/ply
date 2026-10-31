@@ -9,7 +9,7 @@
 import { fail } from './errors.js';
 import { SshClient, hostKeyFromLine } from './ssh.js';
 import { pktInit, pktStep, FLUSH } from './pktline.js';
-import { td, te, concat } from './bytes.js';
+import { td, te, concat, decodeStrict } from './bytes.js';
 import { scrubber, secretUser, REDACTED } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
@@ -21,7 +21,6 @@ import { wrapNet } from './transport.js';
 // an invalid escape (`%ZZ`), kept too. The scp-like form is not decoded (git: `iv%40ar@host:p` logs in as `iv%40ar`).
 // SSH strings are UTF-8 (RFC 4252), so bytes that are not are refused.
 const SSH_URL = 'invalid ssh url: expected ssh://[user@]host[:port]/path or [user@]host:path';
-const strict = new TextDecoder('utf-8', { fatal: true });
 const sshDecode = s => {
   if (!s.includes('%')) return s;
   const parts = s.split(/(%[0-9a-f]{2})/i);
@@ -30,7 +29,7 @@ const sshDecode = s => {
     if (/^%[0-9a-f]{2}$/i.test(p) && p !== '%00') bytes.push(parseInt(p.slice(1), 16));
     else for (const b of te.encode(p)) bytes.push(b);
   }
-  try { return strict.decode(Uint8Array.from(bytes)); } catch { throw fail('bad_request', 'invalid ssh url: a percent-escape is not UTF-8', { what: 'ssh url' }); }
+  try { return decodeStrict(Uint8Array.from(bytes)); } catch { throw fail('bad_request', 'invalid ssh url: a percent-escape is not UTF-8', { what: 'ssh url' }); }
 };
 // A `:` in the userinfo is a password. ply authenticates by public key only, and git hands `user:pass@host` to ssh,
 // which logs in as `user:pass`: the password goes to the server as the login name (measured, every form: `ivar:@`,
@@ -73,7 +72,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     conn.reason = e; conn.kill(e);
     try { conn.raw?.close(); } catch { /* already closed */ }
     if (st.conn !== conn) return;
-    for (const entry of st.channels.values()) { entry.span.error(e); entry.span.end(); }
+    for (const entry of st.channels.values()) { entry.span.error(e).set({ 'ssh.exec.outcome': e?.code ?? 'error' }); entry.span.end(); }
     if (st.client) st.lastStats = st.client.stats;
     st.channels = new Map(); st.opening = new Map(); st.client = null; st.connecting = null; st.conn = fresh();
   };
@@ -121,7 +120,9 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     async openChannel(service, span) {
       const c = await t.connectOnce(span);
       const quoted = `'${u.path.replace(/'/g, `'\\''`)}'`;
-      const chSpan = tracer.start('ssh.exec', { parent: span ?? t.parent, scrub: t.scrub, attrs: { 'ssh.command': `${service} ${quoted}`, 'git.service': service } });
+      // the channel (one git process) lives until closeChannel, across commands and operations: it follows the span that
+      // opened it rather than being its child (README "Span lifetimes")
+      const chSpan = tracer.start('ssh.exec', { follows: span ?? t.parent, scrub: t.scrub, attrs: { 'ssh.command': `${service} ${quoted}`, 'git.service': service } });
       try {
         const ch = await c.exec(`${service} ${quoted}`, { env: service === 'git-upload-pack' ? { GIT_PROTOCOL: 'version=2' } : {} });
         const entry = { ch, pkt: pktInit(), carry: [], carryAt: 0, adv: null, caps: null, span: chSpan, bytesIn: 0, bytesOut: 0, lock: Promise.resolve() };
@@ -141,7 +142,7 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
         chSpan.set({ 'git.advertisement.bytes': entry.adv.length, 'git.advertisement.caps': entry.caps.slice(0, 32) });
         st.channels.set(service, entry);
         return entry;
-      } catch (e) { chSpan.error(e); chSpan.end(); await t.close(); throw e; }
+      } catch (e) { chSpan.error(e).set({ 'ssh.exec.outcome': e?.code ?? 'error' }); chSpan.end(); await t.close(); throw e; }
     },
     // Frames from the channel up to and including the next top-level flush (the decoder state carries across commands).
     async *readUntilFlush(entry, rawOut = null) {
@@ -203,8 +204,8 @@ export function createSshTransport(url, { privateKey, publicKeyRaw, hostKey, con
     },
     async closeChannel(service) {
       const entry = st.channels.get(service); if (!entry) return; st.channels.delete(service);
-      try { if (service === 'git-upload-pack') { await entry.ch.write(FLUSH); } await entry.ch.eof(); const code = await entry.ch.exit(); entry.span.set({ 'ssh.exit': code ?? -1, 'ssh.bytes.in': entry.bytesIn, 'ssh.bytes.out': entry.bytesOut }); await entry.ch.close(); }
-      catch (e) { entry.span.error(e); }
+      try { if (service === 'git-upload-pack') { await entry.ch.write(FLUSH); } await entry.ch.eof(); const code = await entry.ch.exit(); entry.span.set({ 'ssh.exit': code ?? -1, 'ssh.bytes.in': entry.bytesIn, 'ssh.bytes.out': entry.bytesOut, 'ssh.exec.outcome': 'ok' }); await entry.ch.close(); }
+      catch (e) { entry.span.error(e).set({ 'ssh.exec.outcome': e?.code ?? 'error' }); }
       entry.span.end();
     },
     // Bounded like a command; with the signal already aborted the connection is dropped without the goodbye.

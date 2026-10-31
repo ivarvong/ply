@@ -41,11 +41,17 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-30: 62,215 B / 23,900 B gz. the credential scrub (12-character fragments, the user rule) and the redirect refusal in http.js, the span scrub in otel.js (issue #15).
   // 2026-10-30: 62,420 B / 23,943 B gz. ls-refs keeps only symref-target and a checked peeled, report options and merge maps have no prototype, scrubError walks them (issue #16).
   // 2026-10-30: 62,836 B / 24,093 B gz. URL userinfo sent as git sends it (percent-decoded bytes, `user:` for a user alone), the token-as-user scrub rule, a typed bad URL (issue #32).
+  // 2026-10-30: 63,168 B / 24,230 B gz. v2Step caps band 1 and band 2 at maxPackBytes for every consumer, zlibBound in spStep and inflate, push caps band 2, the declared-size check before begin() in streamBlobEdit (issue #36).
   // 2026-10-30: 63,709 B / 24,444 B gz. Explicit credentials as UTF-8 bytes and refused when they send nothing, the scrub module shared with SSH (issue #40).
   // 2026-10-30: 63,197 B / 24,217 B gz. checkWide: the blob:none fallback drops an extra over a limit instead of failing (issue #46).
   // 2026-10-30: 64,070 B / 24,571 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 64_071, `edit bundle ${min} B exceeds budget`);
-  assert.ok(gz < 24_572, `edit bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 64,399 B / 24,708 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  // 2026-10-30: 63,148 B / 24,220 B gz. parseTree refuses one name twice anywhere in a tree, orders on raw bytes with fsck's S_ISDIR, and refuses decode-twins (issue #34).
+  // 2026-10-30: 65,439 B / 25,067 B gz. The push outcome as an allowlist: the response stream as a step machine (streamStep), the report classified against git's exact grammar (classifyReport), an exhaustive decideOutcome, push_partial (SPACE.md, SAFETY.md I36).
+  // 2026-10-30: 64,903 B / 24,908 B gz. names, messages, idents and ref names as bytes (decodeBytes/encodeBytes, surrogate-escaped), BOM kept, sideband text decoded across frames (issue #43).
+  // 2026-10-30: 68,764 B / 26,407 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 68_765, `edit bundle ${min} B exceeds budget`);
+  assert.ok(gz < 26_408, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -78,10 +84,18 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-30: 80,435 B. The same, plus the [:class:] table as a Map (issue #16).
   // 2026-10-30: 80,904 B. The walk's packs held to the deepen contract and checked with assertFetched before harvest (issue #18).
   // 2026-10-30: 81,313 B. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 81,582 B. The same pack-byte cap in v2Step, zlib-length bound and push band-2 cap (issue #36).
   // 2026-10-30: 82,181 B. The same credential handling (issue #40).
   // 2026-10-30: 81,669 B. The same checkWide, also on the merge-base walk's blob:none packs (issue #46).
   // 2026-10-30: 82,537 B. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 82_538, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-30: 82,807 B. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  // 2026-10-30: 81,637 B. The same parseTree duplicate and order rules (issue #34).
+  // 2026-10-30: 83,907 B. The same push outcome allowlist (SAFETY.md I36).
+  // 2026-10-30: 81,773 B. A settled cut one best base reaches and another does not keeps the merge-base walk going (#42);
+  // rebase fetches a base named only at the window's cut (#41).
+  // 2026-10-30: 83,592 B. The same, plus .gitattributes paths matched on their bytes and an annotated tag refused by name (issue #43).
+  // 2026-10-30: 87,511 B. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 87_512, `merge bundle ${min} B exceeds budget`);
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
@@ -111,11 +125,18 @@ test('read entry: readFile/listTree carry no push, merge, pack building or rebas
   // 2026-10-30: 47,398 B / 18,400 B gz. The same ls-refs attribute whitelist and scrub walk (issue #16).
   // 2026-10-30: 47,393 B / 18,399 B gz. openBlob's pump failure records itself and ends both spans (failHere); with #16 merged it minifies under the budget above.
   // 2026-10-30: 47,831 B / 18,565 B gz. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 48,307 B / 18,778 B gz. The same pack-byte cap and zlib-length bound, which is what caps openBlob's body; openBlob's stream wraps DecompressionStream's refusals as pack_corrupt (issue #36).
   // 2026-10-30: 48,703 B / 18,909 B gz. The same credential handling (issue #40).
   // 2026-10-30: 48,192 B / 18,710 B gz. The same checkWide (issue #46).
   // 2026-10-30: 49,064 B / 19,053 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 49_065, `read bundle ${min} B exceeds budget`);
-  assert.ok(gz < 19_054, `read bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 49,538 B / 19,272 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  // 2026-10-30: 48,142 B / 18,699 B gz. The same parseTree duplicate and order rules (issue #34).
+  // 2026-10-30: 47,849 B / 18,572 B gz. errors.js gains push_partial (SAFETY.md I36); no push code rides along.
+  // 2026-10-30: 49,816 B / 19,369 B gz. The same bytes-as-strings mapping (issue #43).
+  // 2026-10-30: 49,381 B / 19,155 B gz. git.read.blob follows the root and records a consumer's cancel (issue #35).
+  // 2026-10-30: 51,502 B / 20,042 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 51_503, `read bundle ${min} B exceeds budget`);
+  assert.ok(gz < 20_043, `read bundle ${gz} B gz exceeds budget`);
 });
 
 test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives only in tree-node.js', async () => {
@@ -132,11 +153,17 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-30: 58,891 B / 22,787 B gz. The same credential scrub and redirect refusal (issue #15).
   // 2026-10-30: 59,096 B / 22,842 B gz. The same (issue #16).
   // 2026-10-30: 59,520 B / 23,000 B gz. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 59,849 B / 23,158 B gz. The same pack-byte cap, zlib-length bound and push band-2 cap (issue #36).
   // 2026-10-30: 60,391 B / 23,353 B gz. The same credential handling (issue #40).
   // 2026-10-30: 59,881 B / 23,141 B gz. The same checkWide (issue #46).
   // 2026-10-30: 60,752 B / 23,494 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 60_753, `tree bundle ${min} B exceeds budget`);
-  assert.ok(gz < 23_495, `tree bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 61,079 B / 23,631 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  // 2026-10-30: 59,847 B / 23,153 B gz. The same parseTree duplicate and order rules (issue #34).
+  // 2026-10-30: 62,111 B / 23,985 B gz. The same push outcome allowlist (SAFETY.md I36).
+  // 2026-10-30: 61,621 B / 23,854 B gz. The same (issue #43).
+  // 2026-10-30: 65,489 B / 25,330 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 65_490, `tree bundle ${min} B exceeds budget`);
+  assert.ok(gz < 25_331, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
@@ -164,11 +191,18 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   // 2026-10-30: 44,226 B / 17,576 B gz. The same ls-refs attribute whitelist and scrub walk (issue #16).
   // 2026-10-30: 44,221 B / 17,573 B gz. The same openBlob pump-failure span fix, with #16 merged.
   // 2026-10-30: 44,658 B / 17,768 B gz. The same URL userinfo handling (issue #32).
+  // 2026-10-30: 45,292 B / 18,032 B gz. The same pack-byte cap, zlib-length bound and openBlob stream wrap (issue #36).
   // 2026-10-30: 45,530 B / 18,115 B gz. The same credential handling (issue #40).
   // 2026-10-30: 44,697 B / 17,804 B gz. fetchPackOnce takes a `check` for fetchPackTree0 (issue #46); checkWide itself is shaken out.
   // 2026-10-30: 45,569 B / 18,149 B gz. merge of #48 and #47 (credential handling, issue #40, with checkWide, issue #46).
-  assert.ok(min < 45_570, `checkout bundle ${min} B exceeds budget`);
-  assert.ok(gz < 18_150, `checkout bundle ${gz} B gz exceeds budget`);
+  // 2026-10-30: 46,201 B / 18,389 B gz. merge of #49 and #48 (body and zlib bounds, issue #36, with credential handling, issue #40).
+  // 2026-10-30: 44,984 B / 17,893 B gz. The same parseTree duplicate and order rules (issue #34).
+  // 2026-10-30: 44,676 B / 17,775 B gz. errors.js gains push_partial (SAFETY.md I36); no push code rides along.
+  // 2026-10-30: 46,321 B / 18,459 B gz. The same (issue #43).
+  // 2026-10-30: 45,887 B / 18,246 B gz. The same blob-stream cancel and follows spans (issue #35).
+  // 2026-10-30: 48,181 B / 19,164 B gz. merge of #49, #50, #51, #52, #53, #55 and #54 on main (train/1): #36 caps, #34 parseTree, the push outcome space, #41/#42 merge base, #43 bytes, #35 span contract.
+  assert.ok(min < 48_182, `checkout bundle ${min} B exceeds budget`);
+  assert.ok(gz < 19_165, `checkout bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });

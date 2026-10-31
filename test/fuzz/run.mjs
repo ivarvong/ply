@@ -4,7 +4,7 @@
 // run editFile against git http-backend, check git's truth, bucketize the OTLP spans, steer.
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync, rmSync, lstatSync, chmodSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from '../server.js';
 import { Rng } from './prng.js';
 import { genCase, KNOBS } from './gen.js';
 import { editFile } from '../../src/edit.js';
@@ -154,7 +154,7 @@ async function runCase(ctx, seed, hints) {
     const log = git(bare, ['log', '-1', '--format=%P|%an|%ae|%s', head]).trim();
     if (log !== `${base}|fuzz|fuzz@x|fuzz ${seed}`) problems.push(`commit metadata ${log}`);
     if (git(bare, ['rev-parse', `${head}^{tree}`]).trim() !== result.newTree) problems.push('tree oid mismatch');
-    const fsck = git(bare, ['fsck', '--strict', '--connectivity-only', '--no-dangling']).trim(); if (fsck) problems.push(`fsck: ${fsck}`); // --no-dangling: receive-pack unpacks before the CAS, so a lost attempt leaves dangling objects by design
+    const fsck = fsckProblems(bare); if (fsck.length) problems.push(`fsck: ${fsck.join(' | ')}`); // --no-dangling: receive-pack unpacks before the CAS, so a lost attempt leaves dangling objects by design
     const mode = git(bare, ['ls-tree', head, '--', c.path]).split(' ')[0]; if (mode !== c.files[c.path].mode) problems.push(`mode changed ${mode}`);
     // efficiency: push bytes bounded by the edit, not the file; memory O(1) in file size
     const depth = c.path.split('/').length;

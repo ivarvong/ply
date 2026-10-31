@@ -1,7 +1,7 @@
 // pkt-line framing. 4 hex length (inclusive) + payload. 0000 flush, 0001 delim, 0002 response-end.
 // Decoder is a pure step function over an immutable state record.
 import { fail } from './errors.js';
-import { te, concat, take } from './bytes.js';
+import { te, concat, take, encodeBytes } from './bytes.js';
 import {
   PKT_LEN_HEX, PKT_HEX_BASE, PKT_FLUSH, PKT_DELIM, PKT_LEN_INVALID,
   PKT_DATA_MIN, PKT_MAX_PAYLOAD, PKT_LEN_SHIFTS, BYTE_VALUES,
@@ -11,7 +11,8 @@ export const MAX_PKT_PAYLOAD = PKT_MAX_PAYLOAD;
 const proto = msg => fail('protocol', msg);
 
 export function pkt(payload) {
-  const p = typeof payload === 'string' ? te.encode(payload) : payload;
+  // a ref name read from ls-refs may hold escaped bytes (#43): encodeBytes writes them back as the server sent them
+  const p = typeof payload === 'string' ? encodeBytes(payload, 'pkt-line') : payload;
   if (p.length > MAX_PKT_PAYLOAD) throw new Error(`pkt-line payload too large: ${p.length}`);
   const out = new Uint8Array(PKT_LEN_HEX + p.length);
   out.set(te.encode((p.length + PKT_LEN_HEX).toString(PKT_HEX_BASE).padStart(PKT_LEN_HEX, '0')));

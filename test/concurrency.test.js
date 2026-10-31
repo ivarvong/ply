@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { editFile } from '../src/edit.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
@@ -45,7 +45,7 @@ test('concurrent CAS writers converge; conflicts are observed and retried, never
       assert.equal(git(bare, ['rev-list', '--parents', '-n1', c]).trim().split(' ').length, 2);
       assert.equal(git(bare, ['diff-tree', '--no-commit-id', '--name-only', '-r', c]).trim().split('\n').length, 1);
     }
-    assert.equal(git(bare, ['fsck', '--strict', '--no-dangling']).trim(), ''); // losers' packs were unpacked before the CAS failed: dangling by design
+    assert.deepEqual(fsckProblems(bare), []); // losers' packs were unpacked before the CAS failed: dangling by design
     // conflicts were real: with 6 writers racing, at least one cas_conflict must have occurred and been retried
     // editFile redoes a cas_conflict once internally (attempt 1, span-linked); what the caller sees is only the conflicts
     // that lost twice. Every lost CAS, internal or surfaced, is one failed receive-pack span and one failed git.edit root.

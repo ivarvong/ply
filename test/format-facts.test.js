@@ -20,6 +20,11 @@ test('format facts match the specs they cite', () => {
     MODE_LINK: fmt.MODE_LINK,
     MODE_TREE: fmt.MODE_TREE,
     MODE_COMMIT: fmt.MODE_COMMIT,
+    MODE_S_IFMT: fmt.MODE_S_IFMT,
+    MODE_S_IFDIR: fmt.MODE_S_IFDIR,
+    MODE_BITS: fmt.MODE_BITS,
+    MODE_LOW_DIGITS: fmt.MODE_LOW_DIGITS,
+    TREE_SORT_SLASH: fmt.TREE_SORT_SLASH,
     TREE_MODE_MIN_DIGITS: fmt.TREE_MODE_MIN_DIGITS,
     TREE_NAME_MIN_BYTES: fmt.TREE_NAME_MIN_BYTES,
     TREE_ENTRY_OVERHEAD: fmt.TREE_ENTRY_OVERHEAD,
@@ -132,10 +137,14 @@ test('format facts match the specs they cite', () => {
     DEFLATE_REPEAT17_BITS: fmt.DEFLATE_REPEAT17_BITS,
     DEFLATE_REPEAT18_BASE: fmt.DEFLATE_REPEAT18_BASE,
     DEFLATE_REPEAT18_BITS: fmt.DEFLATE_REPEAT18_BITS,
+    ZLIB_BOUND_LITERAL_DIV: fmt.ZLIB_BOUND_LITERAL_DIV,
+    ZLIB_BOUND_BLOCK_DIV: fmt.ZLIB_BOUND_BLOCK_DIV,
+    ZLIB_BOUND_SLACK: fmt.ZLIB_BOUND_SLACK,
   }, {
     OID_BYTES: 20, OID_HEX_CHARS: 40, SHA256_HEX_CHARS: 64, BYTE_VALUES: 256, BYTE_MASK: 255,
     BE32_SHIFTS: [24, 16, 8, 0], UINT32_BYTES: 4,
     TREE_MODE_SEP: 0x20, TREE_NUL: 0, MODE_BLOB: '100644', MODE_EXEC: '100755', MODE_LINK: '120000', MODE_TREE: '40000', MODE_COMMIT: '160000',
+    MODE_S_IFMT: 0o170000, MODE_S_IFDIR: 0o040000, MODE_BITS: 0xffff, MODE_LOW_DIGITS: 6, TREE_SORT_SLASH: 0x2f,
     TREE_MODE_MIN_DIGITS: 1, TREE_NAME_MIN_BYTES: 1, TREE_ENTRY_OVERHEAD: 4, TREE_ENTRY_MIN: 24,
     PKT_LEN_HEX: 4, PKT_HEX_BASE: 16, PKT_FLUSH: 0, PKT_DELIM: 1, PKT_RESPONSE_END: 2, PKT_LEN_INVALID: 3, PKT_DATA_MIN: 4,
     PKT_MAX_SIZE: 65520, PKT_MAX_PAYLOAD: 65516, NIBBLE_BITS: 4, PKT_LEN_SHIFTS: [12, 8, 4, 0],
@@ -169,8 +178,39 @@ test('format facts match the specs they cite', () => {
     DEFLATE_REPEAT_PREV: 16, DEFLATE_REPEAT_ZERO3: 17, DEFLATE_REPEAT_ZERO11: 18,
     DEFLATE_REPEAT16_BASE: 3, DEFLATE_REPEAT16_BITS: 2, DEFLATE_REPEAT17_BASE: 3, DEFLATE_REPEAT17_BITS: 3,
     DEFLATE_REPEAT18_BASE: 11, DEFLATE_REPEAT18_BITS: 7,
+    ZLIB_BOUND_LITERAL_DIV: 8, ZLIB_BOUND_BLOCK_DIV: 64, ZLIB_BOUND_SLACK: 13,
   });
   assert.equal(fmt.varintScale(0), 1);
   assert.equal(fmt.varintScale(4), 16);
   assert.equal(fmt.varintScale(7), 128);
+});
+
+// zlibBound(S) = S + ⌈S/8⌉ + ⌈S/64⌉ + 13: the longest zlib stream accepted for an object declared S bytes. The S/8 and S/64
+// terms are zlib's conservative deflateBound ("complen", deflate.c ≤ 1.2.13: sourceLen + ((sourceLen + 7) >> 3) +
+// ((sourceLen + 63) >> 6) + 5 — 9-bit literals in fixed blocks plus per-block overhead); 13 is compressBound's constant
+// (compress.c: the 6-byte zlib wrapper + 7). The function dominates every value deflateBound returns for a zlib-wrapped
+// stream without a dictionary — complen + 6, and the fixedlen (+4) and storelen (+7) forms zlib 1.3 switched to for
+// memLevel 2 and 1 — at every size, which the inequalities below check; the empirical half (node:zlib at every level,
+// strategy, memLevel and windowBits never exceeds it) is in mutant-kill.test.js.
+test('zlibBound: the pinned values, and it dominates every form of zlib deflateBound for a zlib-wrapped stream', () => {
+  const { zlibBound } = fmt;
+  assert.deepEqual([0, 1, 2, 7, 8, 9, 10, 63, 64, 65, 1000, 65535, 65536, 1 << 20, 64 << 20].map(zlibBound),
+    [13, 16, 17, 22, 23, 25, 26, 85, 86, 89, 1154, 74764, 74765, 1196045, 76546061]);
+  assert.equal(zlibBound(64 << 20), (64 << 20) + (8 << 20) + (1 << 20) + 13);
+  const wrap = 6;                                                                             // 2-byte header + 4-byte Adler-32
+  const complen = s => s + ((s + 7) >> 3) + ((s + 63) >> 6) + 5 + wrap;                      // deflate.c (≤ 1.2.13) deflateBound, non-default parameters
+  const fixedlen = s => s + (s >> 3) + (s >> 8) + (s >> 9) + 4 + wrap;                       // deflate.c (1.3) fixed blocks, 9-bit literals, memLevel 2
+  const storelen = s => s + (s >> 5) + (s >> 7) + (s >> 11) + 7 + wrap;                      // deflate.c (1.3) stored blocks of 127 bytes, memLevel 1
+  const tight = s => s + (s >> 12) + (s >> 14) + (s >> 25) + 13;                             // compress.c compressBound: default windowBits/memLevel
+  const stored = s => s + 5 * Math.max(1, Math.ceil(s / 65535)) + wrap;                      // 65535-byte stored blocks, the layout a level-0 encoder emits
+  for (let s = 0; s <= 200_000; s++) {
+    const b = zlibBound(s);
+    assert.ok(b >= complen(s) && b >= fixedlen(s) && b >= storelen(s) && b >= tight(s) && b >= stored(s), `zlibBound(${s}) = ${b}`);
+  }
+  for (const s of [1 << 20, 16 << 20, 64 << 20, 2 ** 31 - 1]) {
+    const b = zlibBound(s);
+    assert.ok(b >= complen(s) && b >= fixedlen(s) && b >= storelen(s) && b >= tight(s) && b >= stored(s), `zlibBound(${s}) = ${b}`);
+  }
+  // a size the 10-byte varint can declare (readObjHeader: up to ~2^70) stays finite; the object-size cap refuses it anyway
+  assert.ok(Number.isFinite(zlibBound(2 ** 69)));
 });

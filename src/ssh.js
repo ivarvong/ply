@@ -6,7 +6,7 @@
 // Pure parts: the wire codec (ssh strings/mpints/name-lists), KEXINIT, the exchange hash, key derivation layout, packet
 // padding. Effects: the stream and crypto.subtle. Spans: one per phase, attributes carry the negotiated algorithms.
 import { fail } from './errors.js';
-import { te, td, concat } from './bytes.js';
+import { te, td, concat, decodeChunk } from './bytes.js';
 import { KIND } from './otel.js';
 
 const MSG = { DISCONNECT: 1, IGNORE: 2, UNIMPLEMENTED: 3, DEBUG: 4, SERVICE_REQUEST: 5, SERVICE_ACCEPT: 6, EXT_INFO: 7, KEXINIT: 20, NEWKEYS: 21, KEX_ECDH_INIT: 30, KEX_ECDH_REPLY: 31,
@@ -246,7 +246,7 @@ export class SshClient {
   // Run a command on a session channel. Returns { stdout: AsyncIterable<Uint8Array>, write(bytes), eof(), stderr(): string, exit(): Promise<number|null> }.
   async exec(command, { env = {} } = {}) {
     const id = this.nextChannel++;
-    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], queued: 0, replies: [], waiters: [], eof: false, closed: false, stderr: '', exit: null, exitWaiters: [], winWaiters: [] };
+    const ch = { id, remote: null, winLocal: this.windowSize, winRemote: 0, maxRemote: 0, queue: [], queued: 0, replies: [], waiters: [], eof: false, closed: false, stderr: '', stderrCarry: new Uint8Array(0), exit: null, exitWaiters: [], winWaiters: [] };
     this.channels.set(id, ch);
     await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_OPEN]), str('session'), u32(id), u32(this.windowSize), u32(this.maxPacket)]));
     const conf = await this.readChannelMsg(ch, [MSG.CHANNEL_OPEN_CONFIRMATION, MSG.CHANNEL_OPEN_FAILURE]);
@@ -297,7 +297,7 @@ export class SshClient {
     const ch = this.channels.get(r.u32()); if (!ch) return;
     if (type === MSG.CHANNEL_OPEN_CONFIRMATION || type === MSG.CHANNEL_OPEN_FAILURE || type === MSG.CHANNEL_SUCCESS || type === MSG.CHANNEL_FAILURE) ch.replies.push(m);
     else if (type === MSG.CHANNEL_DATA) { const d = r.string(); this.arrived(ch, d.length); ch.queue.push(d.slice()); ch.queued += d.length; }
-    else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); this.arrived(ch, d.length); ch.stderr = (ch.stderr + td.decode(d)).slice(-8192); await this.consumed(ch); }
+    else if (type === MSG.CHANNEL_EXTENDED_DATA) { r.u32(); const d = r.string(); this.arrived(ch, d.length); const t = decodeChunk(ch.stderrCarry, d); ch.stderrCarry = t.carry; ch.stderr = (ch.stderr + t.text).slice(-8192); await this.consumed(ch); }
     else if (type === MSG.CHANNEL_WINDOW_ADJUST) ch.winRemote += r.u32();
     else if (type === MSG.CHANNEL_EOF) ch.eof = true;
     else if (type === MSG.CHANNEL_CLOSE) { ch.closed = true; ch.eof = true; if (!ch.sentClose) { ch.sentClose = true; try { await this.writePacket(concat([Uint8Array.from([MSG.CHANNEL_CLOSE]), u32(ch.remote)])); } catch { /* peer gone */ } } }

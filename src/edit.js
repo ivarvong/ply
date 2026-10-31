@@ -249,14 +249,16 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     };
     try {
       for await (const chunk of ds.readable) {
+        // before begin(): a stream that inflates past its declared size is the server's lie (pack_corrupt), even when the
+        // declared size is shorter than find (an empty blob followed by a byte used to be reported as match_count)
+        inflated += chunk.length;
+        if (inflated > sp.size) throw fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
         if (sha === null) {
           if (sp.phase !== 'body') throw fail('pack_corrupt', 'inflated bytes before header');
           const lfs = isLfsPointerPrefix(chunk); span.set({ 'git.edit.blob.lfs_pointer': lfs });
           if (lfs && !allowLfsPointer) throw fail('lfs_pointer', `${blobOid} is a Git LFS pointer (${sp.size} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`, { size: sp.size });
           await begin();
         }
-        inflated += chunk.length;
-        if (inflated > sp.size) throw fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
         const c0 = cpuNow();
         const r = scanStep(scan, chunk); scan = r.state;
         for (const p of r.emit) await sha.update(p);

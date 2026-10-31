@@ -2,6 +2,7 @@
 // Anything that could terminate a header line or a pkt-line field is rejected rather than escaped: git has no escaping.
 import { fail } from './errors.js';
 import { requireLimit } from './limits.js';
+import { encodeBytes } from './bytes.js';
 import { IDENT_TZ_DIGITS, IDENT_TZ_HOUR_MIN, IDENT_TZ_HOUR_MAX, IDENT_TZ_MINUTE_MAX } from './format.js';
 const bad = (what, why) => fail('bad_request', `invalid ${what}: ${why}`, { what });
 
@@ -46,6 +47,8 @@ export function validateRef(ref) {
   // git check-ref-format rules that matter for injection and server acceptance
   if (/[\0\n\r ~^:?*\[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\.|[\x01-\x1f\x7f]/.test(ref)) throw bad('ref', 'fails check-ref-format');
   if (ref.length > 1024) throw bad('ref', 'too long');
+  // a lone surrogate would be written as U+FFFD (TextEncoder); only an escaped byte from a read maps back (#43)
+  encodeBytes(ref, 'ref');
   return ref;
 }
 
@@ -71,12 +74,14 @@ export function validatePath(path, limits) {
     if (c.includes('\0')) throw bad('path', 'NUL in component');
     if (c.length > maxComponent) throw bad('path', 'component too long');
   }
+  encodeBytes(path, 'path');
   return comps;
 }
 
 export function validateMessage(message) {
   if (typeof message !== 'string') throw bad('message', 'must be a string');
   if (message.includes('\0')) throw bad('message', 'NUL not allowed');
+  encodeBytes(message, 'message');
   return message;
 }
 

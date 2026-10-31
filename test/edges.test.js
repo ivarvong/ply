@@ -3,7 +3,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -71,7 +71,7 @@ test('modes: symlink and submodule along the path are refused; executable preser
   const files = {}; for (const nm of odd) files[`odd/${nm}`] = 'MARK';
   commitFiles(r2.work, r2.bare, files, 's');
   for (const nm of odd) { await edit(r2, `odd/${nm}`); assert.equal(gitBuf(r2.bare, ['cat-file', 'blob', `main:odd/${nm}`]).toString(), 'OK', nm); }
-  assert.equal(git(r2.bare, ['fsck', '--strict']).trim(), '');
+  assert.deepEqual(fsckProblems(r2.bare, { dangling: true }), []);
 });
 
 test('refs: missing ref, non-main branch, unborn HEAD repo, ref pointing at a tag', async () => {

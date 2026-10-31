@@ -5,7 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, cpSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { GitHttp, ZERO_OID } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
@@ -114,7 +114,10 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
         const reasons = [...ourRejects.values()];
         const isCas = r => /^(failed to update ref|failed to lock|atomic push failure|bad ref|incorrect old value provided)$/.test(r) || /fetch first|non-fast-forward|already exists/.test(r); // 'bad ref': denyNonFastForwards could not parse the (stale, unknown) old oid. 'incorrect old value provided': git ≥ 2.50.
         const expectCas = reasons.length && reasons.every(isCas) && reasons.some(r => r !== 'atomic push failure');
-        assert.equal(err.code, expectCas ? 'cas_conflict' : 'push_rejected', `${label}: code for ${JSON.stringify(reasons)}`);
+        // a non-atomic push git applied in part is push_partial, naming what landed (SAFETY.md I33)
+        const landed = err.report?.refs?.filter(r => r.ok).map(r => r.ref) ?? [];
+        if (landed.length && !ours.atomic) { assert.equal(err.code, 'push_partial', `${label}: ${err.message}`); assert.deepEqual(err.landed, landed, label); }
+        else assert.equal(err.code, expectCas ? 'cas_conflict' : 'push_rejected', `${label}: code for ${JSON.stringify(reasons)}`);
       } else stats.ok++;
       // 5. hook output on band 2 when requested
       if (caps.sideband && hk === 'pre-receive-accept-noisy') assert.match((err?.hookOutput ?? res.hookOutput), /hello from hook\r?\nline two/, `${label}: band 2`);
@@ -122,9 +125,9 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
       // 6. report-status-v2 is accepted; git 2.43 emits `option` lines only through proc-receive, so none are expected here
       if (caps.reportV2 && !err) assert.deepEqual(res.report.refs.map(r => ({ ...r.options })), res.report.refs.map(() => ({})), label);
       // 6b. push options: only valid when the server advertises them; git refuses client-side otherwise, we get the server's refusal
-      if (caps.pushOptions && !err) assert.match(res.hookOutput, hk === 'pre-receive-echo-options' ? /opts=2:ci\.skip:reviewer=alice/ : /.*/, `${label}: options reached the hook`);
+      if (caps.pushOptions && !err && hk === 'pre-receive-echo-options') assert.match(res.hookOutput, /opts=2:ci\.skip:reviewer=alice/, `${label}: options reached the hook`); // only this hook prints them
       // 7. server state is sound
-      assert.equal(git(t.ours, ['fsck', '--strict', '--no-dangling']).trim(), '', label);
+      assert.deepEqual(fsckProblems(t.ours), [], label);
       // 8. the receive-pack span records the outcome
       const span = exporter.lines.flatMap(flattenLine).find(s => s.name === 'git.receive-pack');
       assert.equal(span.attrs['git.push.ok'], !err, label);
