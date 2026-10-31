@@ -1,5 +1,6 @@
 // Read one file or one directory listing from a remote, without a clone: ls-refs → the commit (tree:0, deepen 1) → one
-// tree per path level → the blob, STREAMED (inflate → SHA-1 check → caller) and never held. Built from the same
+// tree per path level → the blob, STREAMED (inflate, then the caller). The latest chunk is held until the object
+// hash and the pack trailer verify; a failure errors the stream without releasing it. Built from the same
 // primitives as edit.js; carries no push, merge or pack-building code (asserted by test/bundle.test.js).
 //
 //   readFile(url, { ref, path }, opts) → { ref, commit, blob, mode, size, stream }    stream: ReadableStream<Uint8Array>
@@ -11,7 +12,8 @@
 // remote's refs (refs/<n>, refs/tags/<n>, refs/heads/<n> — tags win over branches, as in git), or a 40-hex commit oid.
 // Annotated tags are peeled. `size` is known before the first content byte (the pack object header carries it), so a
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
-// or the server sends a different number of bytes than it declared: a consumer that saw `done` saw the right bytes.
+// or the server sends a different number of bytes than it declared, and the chunk that would have completed the body
+// stays held: a consumer that received every byte, or saw `done`, saw the right bytes.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
 import { operation } from './operation.js';
@@ -210,8 +212,10 @@ export async function readFile(url: string, { ref = null, path }: { readonly ref
 
 export type OpenedBlob = { readonly size: number; readonly stream: ReadableStream<Uint8Array> };
 // Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
-// through DecompressionStream and a verifying transform. Back-pressure: the pump awaits each write, so at most one
-// network chunk and one inflate chunk are in flight beyond what the consumer has taken.
+// through DecompressionStream and a verifying transform. The transform releases every chunk but the latest as it
+// arrives, and releases the latest only after the pack trailer and the object hash verify. A failure errors the
+// stream with that chunk still held, so the body never completes on unverified bytes. Back-pressure: the pump awaits
+// each write, so at most one network chunk and one inflate chunk are in flight beyond the chunk being held.
 // `opener` is the span the stream follows (the read root, or git.checkout.blobs): the consumer reads after it returns.
 export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: string): Promise<OpenedBlob> {
   const span = tracer.start('git.read.blob', { follows: opener, attrs: { 'git.read.blob.oid': oid } });
@@ -264,18 +268,25 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   const sha = streamingSha1();
   await sha.update(objectHeader('blob', size));
   let seen = 0;
+  // The latest inflate chunk. An empty chunk is not a chunk: releasing the real tail because a zero-length piece
+  // arrived would finish the body before the hash and the trailer were checked.
+  let held: Uint8Array | null = null;
   const verify = new TransformStream<Uint8Array, Uint8Array>({
     async transform(chunk, ctl) {
+      if (chunk.byteLength === 0) return;
       seen += chunk.length;
       if (seen > size) throw failHere(fail('pack_corrupt', `server streamed more than the ${size} bytes it declared`));
       await sha.update(chunk);
-      ctl.enqueue(chunk);
+      if (held) ctl.enqueue(held);
+      held = chunk;
     },
-    async flush() {
+    async flush(ctl) {
       try { await pump; } catch (e) { throw failHere(e); }
       if (seen !== size) throw failHere(fail('pack_corrupt', `inflated ${seen} != declared ${size}`));
       const got = await sha.hex();
       if (got !== oid) throw failHere(fail('pack_corrupt', `blob content hashes to ${got}, not ${oid}`));
+      if (held) ctl.enqueue(held);
+      held = null;
       span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.outcome': 'ok' }).end();
     },
   });
