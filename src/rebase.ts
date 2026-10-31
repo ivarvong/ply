@@ -9,29 +9,26 @@
 //   revert      commit tree          target      commit's parent tree parent [target]
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
-import type { Extra } from './errors.js';
-import { thrown as fail } from './errors.js';
+import { thrown as fail, type Extra } from './errors.js';
 import { lsRefs } from './lsrefs.js';
-import { fetchObject } from './fetch.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validateRef, validatePushRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
+import { short, commitAt, commitBytesAt } from './mergeio.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
-// A merge_conflict's payload: Detail carries `conflicts`; reasons, bases, commit and replayed are untyped extras until A6.
-type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
-
 // The unconverted modules' functions as this module calls them (see merge.ts).
-type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<{ readonly data: Uint8Array }>;
 type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
 type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array<ArrayBuffer>;
 
+// A merge_conflict's payload: Detail carries `conflicts`; reasons, commit and replayed are extras.
+type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
+
 type Rediff = NonNullable<MergeOptions['rediff']>;
-const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 
 // Pure: headers to carry over when a commit is re-created. A signature does not survive a new tree/parent (git drops it).
 export function carriedExtra(extra: readonly string[]): string[] {
@@ -136,12 +133,13 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
     const target = refs.get(onto)?.oid;
     if (tip === undefined) throw fail('not_found', `ref ${ref} not found`); if (target === undefined) throw fail('not_found', `ref ${onto} not found`);
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
-    const { base, bases, commits } = await mergeBase(t, tip, target);
-    // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto), so
-    // its chain is not linear. A6 pass: bases belongs in Detail.
-    if (bases.length > 1) throw fail('not_linear', `${ref} and ${onto} have ${bases.length} merge bases (criss-cross history); rebase needs a linear branch`, { bases } as Extra & { readonly bases: readonly string[] });
-    // base is null exactly when there is not one merge base; with more than one refused above, there are none
-    if (base === null) throw fail('unrelated_histories', `${ref} and ${onto} share no common ancestor within the search depth`);
+    const { bases, commits, verdict } = await mergeBase(t, tip, target);
+    // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
+    // so its chain is not linear
+    if (verdict.tag === 'criss-cross') throw fail('not_linear', `${ref} and ${onto} have ${bases.length} merge bases (criss-cross history); rebase needs a linear branch`, { bases } as Extra & { readonly bases: readonly string[] });
+    if (verdict.tag === 'unrelated') throw fail('unrelated_histories', `${ref} and ${onto} share no common ancestor within the search depth`);
+    // only `found` is left: a verdict added without a base does not compile here
+    const { base } = verdict;
     root.set({ 'git.rebase.base': base });
     if (base === target) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 });
     if (base === tip) { // the branch is behind: rebasing nothing onto target makes the branch equal to target
@@ -153,10 +151,8 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
     root.set({ 'git.rebase.commits': chain.length });
     // The base may sit exactly at the window's cut: named by its children on both sides, never fetched (mergeBase needs
     // no more than that; #41). Its tree is the first replay's base, so fetch it; every chain commit is above it and in hand.
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    if (!commits.has(base)) commits.set(base, parseCommit((await (fetchObject as unknown as FetchObject)(t, { oid: base, expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits));
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    const targetTree: string = parseCommit((await (fetchObject as unknown as FetchObject)(t, { oid: target, expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits).tree;
+    if (!commits.has(base)) commits.set(base, await commitAt(t, base));
+    const targetTree: string = (await commitAt(t, target)).tree;
     const who: string = ident(committerPerson);
     // a chain commit's one parent is in hand (linearChain)
     const parentTree = (c: Commit): string | undefined => commits.get(c.parents[0] ?? '')?.tree;
@@ -210,13 +206,11 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
   return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit } }, async ({ t, outcome }): Promise<PickOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref]);
     const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    const [cT, cC] = await Promise.all([target, commit].map(oid => (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })));
+    const [cT, cC] = await Promise.all([target, commit].map(oid => commitBytesAt(t, oid)));
     const tInfo: Commit = parseCommit(cT?.data ?? new Uint8Array(0), t.limits);
     const c: Commit = parseCommit(cC?.data ?? new Uint8Array(0), t.limits);
     if (c.parents.length !== 1) throw fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    const p: Commit = parseCommit((await (fetchObject as unknown as FetchObject)(t, { oid: c.parents[0], expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits);
+    const p: Commit = await commitAt(t, c.parents[0]);
     const who: string = ident(committerPerson);
     const out: Replay = { fetched: 0, rediff, attributes };
     const subject = (c.message ?? '').split('\n')[0] ?? '';

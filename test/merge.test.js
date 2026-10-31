@@ -154,6 +154,7 @@ test('line merge and renames, judged by git: disjoint edits to one file merge to
   }
 });
 
+const pick = ({ base, depth, verdict }) => ({ base, depth, verdict: verdict.tag });
 test('limits: a file over maxMergeBlobBytes is a conflict with that reason (git would merge it: the cap is ours); merge-base search depth is bounded', async () => {
   const r = repo();
   const lines = Array.from({ length: 200 }, (_, i) => `line ${i}\n`);
@@ -171,6 +172,13 @@ test('limits: a file over maxMergeBlobBytes is a conflict with that reason (git 
   const t = createTransport(r2.url, { tracer: new Tracer() });
   await assert.rejects(mergeBase(t, a, c, { maxDepth: 8 }), e => e.code === 'limit_exceeded');
   assert.equal((await mergeBase(t, a, c, { maxDepth: 16 })).base, root);
+  // #79: the doubling's last step is the cap itself. The root is 11 deep: cap 12 searches 8, then 12 (it stopped at 8
+  // and answered limit_exceeded); cap 11.5 searches whole commits; a cap under the first window searches the cap.
+  // At depth 10 the root is named by both sides' children without being fetched, which is an answer (#41); at 9 it is not.
+  for (const [maxDepth, depth] of [[12, 12], [11.5, 11], [11, 11], [10, 10]]) assert.deepEqual(pick(await mergeBase(t, a, c, { maxDepth })), { base: root, depth, verdict: 'found' }, `cap ${maxDepth}`);
+  await assert.rejects(mergeBase(t, a, c, { maxDepth: 9 }), e => e.code === 'limit_exceeded' && e.max === 9);
+  const near = branchCommit(r2, 'n', root, { 'x': 'n\n' }, 'n'); const near2 = branchCommit(r2, 'n2', root, { 'x': 'n2\n' }, 'n2');
+  assert.deepEqual(pick(await mergeBase(t, near, near2, { maxDepth: 3 })), { base: root, depth: 3, verdict: 'found' }, 'cap 3 < the first window of 8: one search of 3 (was limit_exceeded with no fetch)');
 });
 
 test('merge bases decided by git: criss-cross refuses (git builds a virtual base we do not), the summed-distance trap now picks git\'s base', async () => {
