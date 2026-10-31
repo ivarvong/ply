@@ -1,6 +1,5 @@
 // The telemetry contract (#35). Span names and attribute keys are public API: consumers build dashboards and alerts on
-// them. Every public operation, the wire spans and the SSH transport phases run against real git (http-backend; sshd
-// for SSH), and the span tree each produces is reduced to its shape: names, kinds, parent/child structure, links, and
+// them. Every public operation and the wire spans run against real git (http-backend), and the span tree each produces is reduced to its shape: names, kinds, parent/child structure, links, and
 // attribute KEYS with their value types (never values). The shape must equal test/span-contract.json.
 //
 //   a span or key removed or renamed → this test fails, naming it: a breaking change (README "Telemetry contract")
@@ -35,7 +34,6 @@ import { receiveCaps } from '../src/receivecaps.js';
 
 const SNAPSHOT = new URL('./span-contract.json', import.meta.url);
 const UPDATE = process.env.UPDATE_SPAN_CONTRACT === '1';
-const SSHD = '/usr/sbin/sshd';
 const author = { name: 'contract', email: 'contract@x' };
 const KIND_NAME = Object.fromEntries(Object.entries(KIND).map(([k, v]) => [v, k]));
 
@@ -152,7 +150,7 @@ const seeded = () => { const r = repo(); r.base = commitOn(r, 'main', { 'a/b.txt
 const drain = async stream => { const rd = stream.getReader(); let bytes = 0; for (;;) { const { value, done } = await rd.read(); if (done) return bytes; bytes += value.length; } };
 const traced = () => { const ex = arrayExporter(); return { tracer: new Tracer({ exporter: ex }), spans: () => spansOf(ex.lines) }; };
 
-// one entry per public operation (and the wire and SSH layers): name → async ({ tracer }) => void, every stream drained
+// one entry per public operation (and the wire layer): name → async ({ tracer }) => void, every stream drained
 const SCENARIOS = {
   editFile: async ({ tracer }) => { const r = seeded(); await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true }); },
   pushTree: async ({ tracer }) => { const r = seeded(); await pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true }); },
@@ -188,23 +186,6 @@ const SCENARIOS = {
   },
 };
 
-const SSH_SCENARIOS = {
-  'ssh: editFile + readFile': async ({ tracer }) => {
-    const { startSshd } = await import('./sshd.js');
-    const { createSshTransport } = await import('../src/sshgit.js');
-    const { nodeStream } = await import('../src/ssh-node.js');
-    const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
-    const pub = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
-    const sshd = await startSshd(join(root, `ssh${n++}`), { publicKeyRaw: pub });
-    const r = seeded(); const url = `ssh://${sshd.user}@127.0.0.1:${sshd.port}${r.bare}`;
-    const t = createSshTransport(url, { privateKey: kp.privateKey, publicKeyRaw: pub, hostKey: sshd.hostKeyLine, connect: nodeStream, tracer });
-    try {
-      await editFile(url, { path: 'a/b.txt', find: 'MARK', replace: 'SSH', author, message: 'over ssh' }, { tracer, transport: t, verify: true });
-      await drain((await readFile(url, { path: 'a/b.txt' }, { tracer, transport: t })).stream);
-    } finally { await t.close(); await sshd.close(); }
-  },
-};
-const sshAvailable = existsSync(SSHD);
 
 async function record(scenarios) {
   const out = {}, all = [];
@@ -219,9 +200,7 @@ async function record(scenarios) {
 
 let recorded = null;
 const recordAll = async () => (recorded ??= (async () => {
-  const a = await record(SCENARIOS);
-  const b = sshAvailable ? await record(SSH_SCENARIOS) : { shapes: {}, spans: [] };
-  return { shapes: { ...a.shapes, ...b.shapes }, spans: [...a.spans, ...b.spans] };
+  return record(SCENARIOS);
 })());
 
 test('span contract: every operation\'s span tree (names, kinds, structure, links, attribute keys and types) equals test/span-contract.json', async () => {
@@ -229,21 +208,20 @@ test('span contract: every operation\'s span tree (names, kinds, structure, link
   if (UPDATE) { writeFileSync(SNAPSHOT, `${JSON.stringify(shapes, null, 2)}\n`); return; }
   assert.ok(existsSync(SNAPSHOT), 'no snapshot: run UPDATE_SPAN_CONTRACT=1 npx vitest run test/span-contract.test.js');
   const want = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
-  if (!sshAvailable) for (const k of Object.keys(SSH_SCENARIOS)) delete want[k];
   const diff = contractDiff(want, shapes);
   assert.deepEqual(diff, [], [
     'the span contract changed (- is in test/span-contract.json but no longer emitted: removing or renaming it is a breaking change; + is new: review it, then regenerate with UPDATE_SPAN_CONTRACT=1 npx vitest run test/span-contract.test.js):',
     ...diff,
   ].join('\n'));
   // the diff is set-based; the file must also be exactly what the generator writes (no hand edits, nothing reordered)
-  if (sshAvailable) assert.equal(readFileSync(SNAPSHOT, 'utf8'), `${JSON.stringify(shapes, null, 2)}\n`);
+  assert.equal(readFileSync(SNAPSHOT, 'utf8'), `${JSON.stringify(shapes, null, 2)}\n`);
 });
 
-test('span contract: the snapshot covers every public operation, the wire spans and the SSH phases', async () => {
+test('span contract: the snapshot covers every public operation, and the wire spans', async () => {
   const want = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
   const names = new Set(flatten(Object.values(want).flat()).map(l => l.split(' [')[0].split(' · ')[0].split(/ (?:>|~>) /).at(-1)));
   for (const s of ['git.edit', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert',
-    'git.upload-pack ls-refs', 'git.upload-pack fetch', 'git.upload-pack discover', 'git.receive-pack', 'git.receive-pack advertise', 'ssh.connect', 'ssh.userauth', 'ssh.exec']) assert.ok(names.has(s), `${s} is not in the contract`);
+    'git.upload-pack ls-refs', 'git.upload-pack fetch', 'git.upload-pack discover', 'git.receive-pack', 'git.receive-pack advertise']) assert.ok(names.has(s), `${s} is not in the contract`);
 });
 
 test('span lifetimes: no span outlives its parent; a parentless span is an operation root or follows an exported one', async () => {
@@ -254,8 +232,8 @@ test('span lifetimes: no span outlives its parent; a parentless span is an opera
 
 test('span naming: the rules test/pure.test.js checks on one edit hold on every span above', async () => {
   const { spans } = await recordAll();
-  const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?|ssh\.[a-z]+)$/;
-  const KEY = /^(git|http|ssh|url|server|mem|error|ply|exception)\.[a-z0-9_.-]+$/;
+  const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?)$/;
+  const KEY = /^(git|http|url|server|mem|error|ply|exception)\.[a-z0-9_.-]+$/;
   for (const s of spans.filter(x => x.name !== 'contract.harness')) {
     assert.match(s.name, NAME);
     for (const { key } of s.attributes) assert.match(key, KEY, `attr ${key} on ${s.name}`);

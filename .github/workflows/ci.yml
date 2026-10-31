@@ -48,6 +48,9 @@ jobs:
         env:
           INDEX: ${{ strategy.job-index }}
           TOTAL: ${{ strategy.job-total }}
+          # gate c (test/space): every test process records the src/ fail sites it reaches; the `test` job judges them
+          PLY_FAILSITES: .failsites
+          NODE_OPTIONS: --import ${{ github.workspace }}/test/space/failsite-hook.mjs
         run: npx vitest run --shard "$((INDEX + 1))/${TOTAL}" --reporter=default --reporter=json --outputFile.json="reports/vitest/shard-$((INDEX + 1)).json"
       # Per-file test counts and durations from a real runner (test/durations.json is refreshed from these).
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -56,6 +59,14 @@ jobs:
           name: vitest-shard-${{ matrix.shard }}
           path: reports/vitest/
           if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: success() || failure()
+        with:
+          name: failsites-${{ matrix.shard }}
+          path: .failsites
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 14
 
   # Types (tsc, isolated declarations, the TS ratchet against the PR base), lint, the dist build consumers import, and
@@ -144,7 +155,9 @@ jobs:
     needs: [test-shard, lint-fuzz]
     if: always()
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
+      actions: read # the shards' fail-site records
     steps:
       - name: every shard succeeded
         env:
@@ -155,6 +168,25 @@ jobs:
             echo "test-shard: $SHARDS, lint-fuzz: $LINT_FUZZ"
             exit 1
           fi
+      # gate c over every shard's records: each fail site reached by a cell, each merged space's claims reached by it, and
+      # every merged CI space's runners recorded on Linux (test/space/failsites.test.js)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: failsites-*
+          path: .failsites
+          merge-multiple: true
+      - name: gate c (fail sites)
+        env:
+          PLY_FAILSITES: .failsites
+          PLY_FAILSITES_GATE: 1
+        run: npx vitest run test/space/failsites.test.js
 
   # Stryker over the src files a PR changed (all of src/ on main), split into 16 shards balanced by measured cost
   # (scripts/mutate.mjs --plan 16, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
