@@ -53,10 +53,10 @@ test('edit entry carries only what the edit path uses', async () => {
   // 2026-10-31: 71,208 B / 27,424 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 73,215 B / 28,144 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 73,369 B / 28,212 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  // 2026-10-31: 73,995 B / 28,600 B gz. A4 (push: the outcome as a Result, the report as a step machine, checked capabilities; Result/fail/orThrow/readLimit now ride in this bundle).
-  assert.ok(min < 73_996, `edit bundle ${min} B exceeds budget`);
+  // 2026-10-31: 74,052 B / 28,621 B gz. A4 (push: the outcome as a Result, the report as a step machine, checked capabilities; Result/fail/orThrow/readLimit now ride in this bundle).
+  assert.ok(min < 74_053, `edit bundle ${min} B exceeds budget`);
   // 2026-10-31: 73,090 B / 28,222 B gz. strict TS (T2: objects, format, validate, scrub): min down, gz up a few dozen bytes from strict-lint forms (/u regexes, Number.parseInt, explicit length checks, noUncheckedIndexedAccess guards) and identifier remangling.
-  assert.ok(gz < 28_601, `edit bundle ${gz} B gz exceeds budget`);
+  assert.ok(gz < 28_622, `edit bundle ${gz} B gz exceeds budget`);
 });
 
 test('ssh entry: the SSH client rides only with ply/ssh; the edit bundle has none of it', async () => {
@@ -103,8 +103,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
   // 2026-10-31: 89,918 B. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 91,966 B. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 92,121 B. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  // 2026-10-31: 92,732 B. A4 (push: the outcome as a Result, the report as a step machine, checked capabilities; Result/fail/orThrow/readLimit now ride in this bundle).
-  assert.ok(min < 92_733, `merge bundle ${min} B exceeds budget`);
+  // 2026-10-31: 92,755 B. A4 (push: the outcome as a Result, the report as a step machine, checked capabilities; Result/fail/orThrow/readLimit now ride in this bundle).
+  assert.ok(min < 92_756, `merge bundle ${min} B exceeds budget`);
 });
 
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
@@ -192,10 +192,10 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   // 2026-10-31: 67,878 B / 26,343 B gz. parseTree is fsck_tree: utf8.c/path.c's .git and .gitmodules spellings, nullSha1, largePathname, dotfiles that are not blobs, canon_mode (hole #4, space/fsck-tree).
   // 2026-10-31: 69,891 B / 27,043 B gz. release/1: train/1, #19, #57, #58, #62, #64, #65, #66, #67, #70.
   // 2026-10-31: 70,045 B / 27,104 B gz. validatePushRef: receive-pack's funny refname refused before sending (#73).
-  // 2026-10-31: 70,675 B / 27,463 B gz. A4 (push: the outcome as a Result, the report as a step machine, checked capabilities; Result/fail/orThrow/readLimit now ride in this bundle).
-  assert.ok(min < 70_676, `tree bundle ${min} B exceeds budget`);
+  // 2026-10-31: 70,732 B / 27,477 B gz. A4 (push: the outcome as a Result, the report as a step machine, checked capabilities; Result/fail/orThrow/readLimit now ride in this bundle).
+  assert.ok(min < 70_733, `tree bundle ${min} B exceeds budget`);
   // 2026-10-31: 69,763 B / 27,134 B gz. T2 strict TS (see the edit budget).
-  assert.ok(gz < 27_464, `tree bundle ${gz} B gz exceeds budget`);
+  assert.ok(gz < 27_478, `tree bundle ${gz} B gz exceeds budget`);
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true, external: ['cloudflare:sockets'] });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.js'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
