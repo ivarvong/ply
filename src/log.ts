@@ -23,32 +23,47 @@
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail } from './errors.js';
+import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { parseCommit, TYPE, TYPE_NAME } from './objects.js';
 import { DEFAULT_LIMITS, requireLimit } from './limits.js';
+import type { CommitView, ReadOptions } from './read.js';
+import type { FetchPackResult } from './fetchpack.js';
+import type { Transport } from './transport.js';
+import type { Caught, TypeNames } from './boundary.js';
+
+type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
+type PackObjects = NonNullable<FetchPackResult['objects']>;
+/* oxlint-disable require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 export const DEFAULT_LOG_LIMIT = 20;
-const isObject = v => v !== null && typeof v === 'object';
+const isObject = (v: unknown): v is object => v !== null && typeof v === 'object';
 
+type Parents = { readonly parents: readonly string[] };
 // Pure: the first-parent log of `head` over a deepen window. `commits` is oid → { parents } (every commit the pack held),
 // `shallow` the server's shallow lines. Throws pack_corrupt when the window breaks the deepen contract. Returns
 // { chain: [oid], truncated, cut } where `cut` says the chain stopped at a shallow commit before `limit`.
-export function logWindow(commits, shallow, head, limit) {
+export type LogWindow = { readonly chain: string[]; readonly truncated: boolean; readonly cut: boolean };
+export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterable<string>, head: string, limit: number): LogWindow {
   if (!commits.has(head)) throw fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
+  // every oid in q is in `commits`: head was checked, and a parent joins only when present
   const reach = new Set([head]); const q = [head];
-  for (let i = 0; i < q.length; i++) for (const p of commits.get(q[i]).parents) if (commits.has(p) && !reach.has(p)) { reach.add(p); q.push(p); }
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+  for (const c of q) for (const p of (commits.get(c) as Parents).parents) if (commits.has(p) && !reach.has(p)) { reach.add(p); q.push(p); }
   const cut = new Set(shallow);
   for (const [oid, c] of commits) {
     if (!reach.has(oid)) throw fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
     const missing = cut.has(oid) ? undefined : c.parents.find(p => !commits.has(p));
-    if (missing) throw fail('pack_corrupt', `parent ${missing} of ${oid} withheld and ${oid} not reported shallow`);
+    if (missing !== undefined) throw fail('pack_corrupt', `parent ${missing} of ${oid} withheld and ${oid} not reported shallow`);
   }
-  const chain = [];
+  const chain: string[] = [];
   for (let c = head; ;) {
     chain.push(c);
-    const first = commits.get(c).parents[0];
+    // c is head or a first parent the window holds (checked below before stepping to it)
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const first = (commits.get(c) as Parents).parents[0];
     if (first === undefined) return { chain, truncated: false, cut: false };
     if (chain.length === limit) return { chain, truncated: true, cut: false };
     if (!commits.has(first)) return { chain, truncated: true, cut: true };
@@ -57,31 +72,39 @@ export function logWindow(commits, shallow, head, limit) {
 }
 
 // Effect: the window's pack, with a want that is not a commit (or not on the server) as the caller's not_found.
-async function fetchWindow(t, commit, limit) {
-  let r;
+async function fetchWindow(t: Transport, commit: string, limit: number): Promise<FetchedPack> {
+  let r: FetchedPack;
   try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
-    if (e?.code === 'remote_error' && /not our ref/.test(e.message)) throw fail('not_found', `commit ${commit} not found on the remote`);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (boundary.ts Caught)
+    if ((e as Caught)?.code === 'remote_error' && /not our ref/.test((e as NonNullable<Caught>).message)) throw fail('not_found', `commit ${commit} not found on the remote`);
     throw e;
   }
   const want = r.objects?.get(commit);
-  if (want && want.type !== TYPE.COMMIT) throw fail('not_found', `${commit} is not a commit (${TYPE_NAME[want.type] ?? want.type})`);
+  if (want && want.type !== TYPE.COMMIT) throw fail('not_found', `${commit} is not a commit (${(TYPE_NAME as TypeNames)[want.type] ?? want.type})`);
   return r;
 }
 
-export async function readLog(url, spec = {}, opts = {}) {
+export type LogSpec = { readonly ref?: string | null; readonly limit?: number; readonly path?: unknown };
+export type LogCommit = CommitView & { readonly oid: string };
+export type LogResult = { readonly ref: string; readonly oid: string; readonly commits: readonly LogCommit[]; readonly truncated: boolean };
+// oxlint-disable-next-line require-await -- async so that a throw while checking arguments is a rejection, as before
+export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<LogResult> {
   if (!isObject(spec)) throw fail('bad_request', 'readLog: the second argument must be an object ({ ref, limit })');
   if (!isObject(opts) || typeof opts.tracer?.start !== 'function') throw fail('bad_request', 'readLog: opts.tracer is required');
   const { ref = null, limit = DEFAULT_LOG_LIMIT, path } = spec;
   if (path !== undefined && path !== null) throw fail('bad_request', 'readLog: path filtering is not supported');
   const cap = requireLimit(opts.limits ?? DEFAULT_LIMITS, 'maxMergeDepth');
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap) throw fail('bad_request', `readLog: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' });
-  return operation('read_log', url, { ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const r = await fetchWindow(t, commit, limit);
-    const parsed = new Map();
+    const parsed = new Map<string, Parents>();
     for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) parsed.set(oid, parseCommit(o.data, t.limits));
     const w = logWindow(parsed, r.shallow ?? [], commit, limit);
-    const commits = w.chain.map(oid => ({ oid, ...commitView(r.objects.get(oid).data, t.limits) }));
+    // every oid in the chain is a commit the pack held (logWindow walked them), so the pack and the object are there
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const commits = w.chain.map(oid => ({ oid, ...commitView(((r.objects as PackObjects).get(oid) as { readonly data: Uint8Array }).data, t.limits) }));
     return outcome('ok', { ref: name, oid: commit, commits, truncated: w.truncated }, {
       'git.read_log.oid': commit, 'git.read_log.commits': commits.length, 'git.read_log.truncated': w.truncated, 'git.read_log.cut': w.cut,
       'git.read_log.window.commits': parsed.size, 'git.read_log.window.shallow': (r.shallow ?? []).length, 'git.read_log.filter': r.filter,
