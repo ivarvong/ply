@@ -196,7 +196,7 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
   // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
-  const withNode = readdirSync('src').filter(f => f.endsWith('.js') && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
+  const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
   assert.deepEqual(withNode, ['checkout-node.js', 'ssh-node.js', 'tree-node.js']);
 });
 
