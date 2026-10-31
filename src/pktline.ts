@@ -74,14 +74,14 @@ export function pktStepResult(st: PktState, chunk: Uint8Array): Result<PktSteppe
   frame: while (buf.length - p >= PKT_LEN_HEX) {
     // the four length bytes are in buf (the loop), HEXV covers every byte value and PKT_LEN_SHIFTS has four entries:
     // every read here is in range, which noUncheckedIndexedAccess cannot see (`as number`, not the `!` src/ forbids)
-    /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range reads, see above */
+    /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, no-magic-numbers -- in-range reads of the four length bytes at p, see above */
     const a = HEXV[buf[p] as number] as number;
     const b = HEXV[buf[p + 1] as number] as number;
     const c = HEXV[buf[p + 2] as number] as number;
     const d = HEXV[buf[p + 3] as number] as number;
     if ((a | b | c | d) < 0) return proto(`bad pkt-line length at byte ${st.bytes - (buf.length - chunk.length) + p}`);
     const len = (a << (PKT_LEN_SHIFTS[0] as number)) | (b << (PKT_LEN_SHIFTS[1] as number)) | (c << (PKT_LEN_SHIFTS[2] as number)) | d;
-    /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
+    /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, no-magic-numbers */
     // git's packet_read_with_status, by length: the three control packets, the invalid 0003, then data
     switch (len) {
       case PKT_FLUSH: flush++; frames.push({ kind: 'flush' }); break;
