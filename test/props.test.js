@@ -13,6 +13,7 @@ import { parseTree, encodeTree, treeSort, hashObject, parseCommit, encodeCommit 
 import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish, MATCH_OFFSETS_KEPT } from '../src/edit.js';
 import { v2Init, v2Step } from '../src/client.js';
 import { concat, indexOfBytes } from '../src/bytes.js';
+import { assertBytes } from './bytes-assert.js';
 
 const N = parseInt(process.env.PROP_N ?? '200', 10);
 const SEED = parseInt(process.env.SEED ?? '1', 10);
@@ -43,7 +44,7 @@ forAll('inflate: raw deflate', rng => {
   const d = rng.bytes(rng.int(0, 2000));
   const z = zlib.deflateRawSync(d);
   const r = inflate(concat([z, rng.bytes(3)]), 0, { raw: true });
-  assert.equal(r.consumed, z.length); assert.deepEqual([...r.out], [...d]);
+  assert.equal(r.consumed, z.length); assertBytes(r.out, d);
 });
 
 forAll('pkt-line: decode is chunking-invariant and inverts encode', rng => {
@@ -53,8 +54,19 @@ forAll('pkt-line: decode is chunking-invariant and inverts encode', rng => {
   for (const c of splitRandom(rng, enc)) { const r = pktStep(st, c); st = r.state; got.push(...r.frames); assert.ok(!st.carry || st.carry.length < 65520); }
   pktFinish(st);
   assert.equal(got.length, frames.length);
-  got.forEach((g, i) => { assert.equal(g.kind, frames[i].kind); if (g.kind === 'data') assert.deepEqual([...g.payload], [...frames[i].payload]); });
+  got.forEach((g, i) => { assert.equal(g.kind, frames[i].kind); if (g.kind === 'data') assertBytes(g.payload, frames[i].payload, `frame ${i} payload`); });
   assert.equal(st.bytes, enc.length);
+});
+
+// #85: a failed comparison of two maximum pkt-line payloads must cost a short message, not a diff of 65,516 elements
+// (node:assert's diff of that pair went past 23 GB when a mutant zeroed the payload).
+test('pkt-line: a wrong maximum-size payload fails in bounded time and message', () => {
+  const want = Uint8Array.from({ length: 65516 }, (_, i) => (i * 7 + 1) & 0xff);
+  const got = new Uint8Array(want.length);
+  const t = Date.now();
+  assert.throws(() => assertBytes(got, want, 'payload'), e => e.message.length < 200 && /first difference at byte 0 of 65516/.test(e.message));
+  assert.throws(() => assertBytes(got.subarray(1), want, 'payload'), /65515 bytes, want 65516/);
+  assert.ok(Date.now() - t < 1000);
 });
 
 test('pkt-line: garbage throws', () => { assert.throws(() => pktStep(pktInit(), new TextEncoder().encode('zzzz'))); assert.throws(() => pktStep(pktInit(), new TextEncoder().encode('0003'))); });
@@ -76,9 +88,9 @@ forAll('delta: spliceDelta/makeDelta ∘ applyDelta == reference splice', rng =>
   assert.equal(d1.resultLen, ref.length);
   // git's patch_delta rejects deltas < 4 bytes (DELTA_SIZE_MIN); applyDelta mirrors that so a pack we would reject, git rejects too
   if (d1.delta.length < 4) { assert.throws(() => applyDelta(base, d1.delta), /DELTA_SIZE_MIN/); assert.equal(ref.length, 0); return; }
-  assert.deepEqual([...applyDelta(base, d1.delta).out], [...ref]);
+  assertBytes(applyDelta(base, d1.delta).out, ref);
   const d2 = makeDelta(base, ref);
-  assert.deepEqual([...applyDelta(base, d2.delta).out], [...ref]);
+  assertBytes(applyDelta(base, d2.delta).out, ref);
   assert.ok(d2.delta.length <= insert.length + 2 * Math.ceil(base.length / 65536) * 8 + 20 + Math.ceil(insert.length / 127));
 });
 
@@ -105,7 +117,7 @@ forAll('scan: chunking-invariant, equals replace-all, offsets exact, carry bound
   for (const c of splitRandom(rng, data, { maxChunks: 64 })) { const r = scanStep(st, c); st = r.state; out.push(...r.emit); assert.ok(st.carry.length <= find.length - 1); }
   const f = scanFinish(st); st = f.state; out.push(...f.emit);
   const got = concat(out);
-  assert.deepEqual([...got], [...ref]);
+  assertBytes(got, ref);
   assert.deepEqual(st.matches, refOffs.slice(0, MATCH_OFFSETS_KEPT));
   assert.equal(st.count, refOffs.length);
   assert.equal(st.emitted, ref.length);
@@ -118,7 +130,7 @@ forAll('single-object pack stream: chunking-invariant, trailer verified, zlib by
   for (const c of splitRandom(rng, pack, { maxChunks: 40 })) { const r = spStep(st, c); st = r.state; z.push(...r.zlib); assert.ok(st.lag.length <= 20); }
   st = spFinish(st);
   const hdrLen = 12 + encodeObjHeader(3, data.length).length;
-  assert.deepEqual([...concat(z)], [...pack.subarray(hdrLen, pack.length - 20)]);
+  assertBytes(concat(z), pack.subarray(hdrLen, pack.length - 20));
   assert.equal(st.size, data.length); assert.equal(st.type, 3); assert.equal(st.trailer, toHex(pack.subarray(-20)));
   // corrupt one byte → must throw
   const bad = pack.slice(); bad[rng.int(0, bad.length - 1)] ^= 0x01;
@@ -149,7 +161,7 @@ forAll('single-object pack stream: the zlib-length bound is chunking-invariant a
   const under = packOf(streamOf(room)), over = packOf(streamOf(room + 1));
   assert.ok(under.length - 32 - encodeObjHeader(3, data.length).length <= bound && over.length - 32 - encodeObjHeader(3, data.length).length > bound);
   const okRuns = splits(under).map(c => run(under, c));
-  for (const r of okRuns) { assert.equal(r.threw, null); assert.equal(r.size, data.length); assert.ok(r.zlibBytes <= bound); assert.deepEqual([...zlib.inflateSync(r.zlib)], [...data]); assert.deepEqual([...inflate(r.zlib, 0, { expectedSize: data.length }).out], [...data]); }
+  for (const r of okRuns) { assert.equal(r.threw, null); assert.equal(r.size, data.length); assert.ok(r.zlibBytes <= bound); assertBytes(zlib.inflateSync(r.zlib), data); assertBytes(inflate(r.zlib, 0, { expectedSize: data.length }).out, data); }
   const badRuns = splits(over).map(c => run(over, c));
   for (const r of badRuns) assert.equal(r.threw, `pack_corrupt: pack: zlib stream longer than its declared size allows (${data.length}-byte object, ${bound}-byte bound)`);
   // the buffered inflate agrees with the streamed parser on both sides of the bound
@@ -168,7 +180,7 @@ forAll('pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-de
   assert.equal(parsed.stats.count, objs.length); assert.equal(parsed.stats.refDelta, 1);
   const r = resolvePack(parsed, oid => (oid === baseOid && !inPack ? { type: 3, data: base } : undefined));
   const t = r.objects.get(hashObject('blob', target));
-  assert.ok(t); assert.deepEqual([...t.data], [...target]); assert.equal(t.chain, 1);
+  assert.ok(t); assertBytes(t.data, target); assert.equal(t.chain, 1);
   assert.equal(r.stats.externalBases, inPack ? 0 : 1);
   // trailer corruption
   const bad = pack.slice(); bad[bad.length - 1] ^= 1; assert.throws(() => parsePack(bad));
@@ -185,7 +197,7 @@ forAll('tree: parse ∘ encode roundtrip and sort is total order with dir-as-sla
   const enc = encodeTree(entries);
   const parsed = parseTree(enc);
   assert.deepEqual(parsed.map(e => [e.mode, e.name, e.oid]), treeSort(entries).map(e => [e.mode, e.name, e.oid]));
-  assert.deepEqual([...encodeTree(parsed)], [...enc]);
+  assertBytes(encodeTree(parsed), enc);
   parsed.forEach(e => assert.equal(toHex(enc.subarray(e.oidOffset, e.oidOffset + 20)), e.oid));
 });
 
