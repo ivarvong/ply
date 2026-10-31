@@ -12,7 +12,7 @@
 // Ratchet (test/space/ratchet.json): per category, the ids that are holes today. A category stored with 0 holes is in
 // ENFORCE mode: any hole fails. Otherwise REPORT mode: the holes are printed and the gate passes, unless a hole is not
 // in the stored list (a new hole: the count can only go down, and a fixed hole cannot be traded for a new one). A fixed
-// hole is reported until the ratchet is rewritten (`node scripts/spaces.mjs --ratchet`), which never adds an id.
+// hole is reported until the ratchet is rewritten (`npm run spaces -- --ratchet`), which never adds an id.
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -18,17 +18,21 @@
 //
 //   node scripts/decision-points.mjs            table
 //   node scripts/decision-points.mjs --json     JSON (what test/space/gates.test.js reads)
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const { parse } = createRequire(import.meta.url)('@babel/parser');
-const { CODES } = await import(join(ROOT, 'src/errors.js'));
+const { CODES } = await import(join(ROOT, 'src/errors.ts'));
 const CODE_SET = new Set(CODES);
 // Files that define or document the taxonomy rather than decide with it.
-const SKIP_PRODUCERS = new Set(['src/errors.js', 'src/errors-doc.js']);
+const SKIP_PRODUCERS = new Set(['src/errors.ts', 'src/errors-doc.ts']);
+// The constructors a site calls: `fail` (unconverted modules import `thrown as fail`), and plyError itself.
+const CONSTRUCTORS = new Set(['fail', 'thrown', 'plyError']);
+// Source keeps `.js` specifiers for .ts files (test/ts-resolve.mjs): the file an import names is whichever exists.
+const srcFile = spec => { const js = `src/${spec.slice(2)}`; const ts = js.replace(/\.js$/, '.ts'); return existsSync(join(ROOT, ts)) ? ts : js; };
 const EXPORT_NAME = /^(parse|decode|classify|decide)/i;
 const STEM = 56;
 
@@ -78,7 +82,7 @@ const stemOf = s => (s.length > STEM ? `${s.slice(0, STEM)}…` : s);
 
 function parseFile(file) {
   const text = readFileSync(join(ROOT, file), 'utf8');
-  const ast = parse(text, { sourceType: 'module', errorRecovery: false });
+  const ast = parse(text, { sourceType: 'module', errorRecovery: false, plugins: file.endsWith('.ts') ? ['typescript'] : [] });
   return { file, text, ast: ast.program };
 }
 
@@ -115,12 +119,15 @@ const nameAt = (f, anc) => {
   for (let i = anc.length - 1; i >= 0; i--) if (isFn(anc[i])) { const n = f.fns.find(x => x.node === anc[i])?.name; if (n) return n; }
   return '(top)';
 };
-const calleeName = c => (c.callee.type === 'Identifier' ? c.callee.name : null);
+// A callee under a type-only wrapper (`(fail as (code: 'limit_exceeded', ...) => Thrown)(...)`) is the callee itself.
+const TS_WRAPPERS = new Set(['TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion', 'TSInstantiationExpression']);
+const bare = n => (TS_WRAPPERS.has(n.type) ? bare(n.expression) : n);
+const calleeName = c => { const k = bare(c.callee); return k.type === 'Identifier' ? k.name : null; };
 const calleePos = c => (c.callee.type === 'MemberExpression' ? c.callee.property.loc.start : c.callee.loc.start);
 const usesAny = (n, names) => { let hit = false; walk(n, x => { if (x.type === 'Identifier' && names.has(x.name)) hit = true; }); return hit; };
 
 export function inventory() {
-  const files = readdirSync(join(ROOT, 'src')).filter(x => x.endsWith('.js')).sort().map(x => parseFile(`src/${x}`));
+  const files = readdirSync(join(ROOT, 'src')).filter(x => /\.(js|ts)$/.test(x) && !x.endsWith('.d.ts')).sort().map(x => parseFile(`src/${x}`));
   // ---- wrappers, to a fixpoint: (file, name) -> { code, def } ----
   const wrappers = new Map(); // `${file}:${name}` -> [{ fn, file, codeArg }]
   const imports = new Map(); // file -> Map(local -> `${srcFile}:${imported}`)
@@ -128,7 +135,7 @@ export function inventory() {
     const m = new Map();
     for (const st of f.ast.body) {
       if (st.type !== 'ImportDeclaration' || !st.source.value.startsWith('./')) continue;
-      const from = `src/${st.source.value.slice(2)}`;
+      const from = srcFile(st.source.value);
       for (const s of st.specifiers) if (s.type === 'ImportSpecifier') m.set(s.local.name, `${from}:${s.imported.name}`);
     }
     imports.set(f.file, m);
@@ -137,7 +144,7 @@ export function inventory() {
   const isProducerCall = (f, call) => {
     const name = calleeName(call);
     if (!name) return null;
-    if (name === 'fail') return { kind: 'fail' };
+    if (CONSTRUCTORS.has(name)) return { kind: 'fail' };
     if (name === 'failHere') return { kind: 'failHere' };
     const imp = imports.get(f.file).get(name);
     const key = imp ?? `${f.file}:${name}`;
@@ -180,6 +187,14 @@ export function inventory() {
       changed = true;
     }
   }
+  // a wrapper exported under another name (`export { limitExceeded as limitError }`) is that wrapper under both names
+  for (const f of files) for (const st of f.ast.body) {
+    if (st.type !== 'ExportNamedDeclaration' || st.source) continue;
+    for (const sp of st.specifiers ?? []) {
+      const from = `${f.file}:${sp.local.name}`, to = `${f.file}:${keyName(sp.exported)}`;
+      if (from !== to && wrappers.has(from) && !wrappers.has(to)) wrappers.set(to, wrappers.get(from));
+    }
+  }
   // the code a wrapper produces: its inner call's literal code, or the default of the parameter it forwards
   const wrapperCode = (w, args, text) => {
     const call = w.inner.call;
@@ -211,12 +226,14 @@ export function inventory() {
       if (n.type !== 'CallExpression') return;
       const p = isProducerCall(f, n);
       if (!p) return;
+      // errors.ts's constructors calling one another (fail -> plyError) are the taxonomy, not a decision
+      if (SKIP_PRODUCERS.has(f.file) && p.kind === 'fail' && CONSTRUCTORS.has(nameAt(f, anc))) return;
       siteCalls.add(n);
       const fname = nameAt(f, anc);
       const pos = calleePos(n);
       let code, what;
       if (p.kind === 'fail') { code = codeText(f.text, n.arguments[0]); what = messageText(f.text, n.arguments[1]); }
-      else if (p.kind === 'failHere') { code = n.arguments[0]?.type === 'CallExpression' && calleeName(n.arguments[0]) === 'fail' ? codeText(f.text, n.arguments[0].arguments[0]) : '<rethrown or pack_corrupt>'; what = n.arguments[0]?.type === 'CallExpression' ? messageText(f.text, n.arguments[0].arguments[1]) : messageText(f.text, n.arguments[0]); }
+      else if (p.kind === 'failHere') { code = n.arguments[0]?.type === 'CallExpression' && CONSTRUCTORS.has(calleeName(n.arguments[0])) ? codeText(f.text, n.arguments[0].arguments[0]) : '<rethrown or pack_corrupt>'; what = n.arguments[0]?.type === 'CallExpression' ? messageText(f.text, n.arguments[0].arguments[1]) : messageText(f.text, n.arguments[0]); }
       else { code = wrapperCode(p.wrapper, n.arguments, f.text); what = wrapperWhat(f.text, n, p.wrapper); }
       // a fail() passed straight into failHere is one decision, recorded as the failHere site
       if (p.kind === 'fail' && anc[anc.length - 1]?.type === 'CallExpression' && calleeName(anc[anc.length - 1]) === 'failHere') return;
@@ -253,7 +270,7 @@ export function inventory() {
       if (!mode) return;
       decodes.push({ file: f.file, line: n.loc.start.line, fn: nameAt(f, anc), kind: 'decode', mode, via, code: `<decode:${mode}>`, what: src(f.text, n.arguments[0] ?? n).replace(/\s+/g, ' ').slice(0, 60) });
     });
-    if (f.file !== 'src/errors.js') walk(f.ast, (n, anc) => {
+    if (f.file !== 'src/errors.ts') walk(f.ast, (n, anc) => {
       if (n.type !== 'NewExpression' || n.callee.type !== 'Identifier' || !/^(Error|TypeError|RangeError)$/.test(n.callee.name)) return;
       untyped.push({ file: f.file, line: n.loc.start.line, fn: nameAt(f, anc), kind: 'untyped', code: '<untyped>', what: messageText(f.text, n.arguments[0]) });
     });

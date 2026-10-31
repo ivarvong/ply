@@ -1,6 +1,6 @@
 // Gates a and b, the registry's own consistency, and SPACES.md drift. See test/space/holes.js for the categories and the
-// ratchet; `node scripts/spaces.mjs` prints the same report.
-import { test } from 'node:test';
+// ratchet; `npm run spaces --` prints the same report.
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,13 +8,13 @@ import { compute, judge, registryProblems, ROOT, ratchet } from './holes.js';
 import { renderMd } from '../../scripts/spaces.mjs';
 
 const all = compute();
-const show = (t, cat, v) => {
-  t.diagnostic(`${cat}: ${v.mode} ${v.count} hole(s) (ratchet ${v.stored})${v.fixed.length ? `; ${v.fixed.length} fixed since the ratchet: lower it with \`node scripts/spaces.mjs --ratchet\`` : ''}`);
-  for (const id of (v.mode === 'ENFORCE' ? v.problems : all.holes[cat]).slice(0, 400)) t.diagnostic(`  ${v.problems.includes(id) ? 'NEW ' : ''}${id}`);
+const show = (cat, v) => {
+  console.log(`${cat}: ${v.mode} ${v.count} hole(s) (ratchet ${v.stored})${v.fixed.length ? `; ${v.fixed.length} fixed since the ratchet: lower it with \`npm run spaces -- --ratchet\`` : ''}`);
+  for (const id of (v.mode === 'ENFORCE' ? v.problems : all.holes[cat]).slice(0, 400)) console.log(`  ${v.problems.includes(id) ? 'NEW ' : ''}${id}`);
 };
-const gate = (cat, what) => t => {
+const gate = (cat, what) => () => {
   const v = judge(cat, all.holes[cat]);
-  show(t, cat, v);
+  show(cat, v);
   assert.deepEqual(v.problems, [], `${cat}: ${v.problems.length} ${what} (${v.mode}):\n  ${v.problems.join('\n  ')}`);
 };
 
@@ -43,6 +43,6 @@ test('the git manifest is the pinned git version and the ratchet lists every cat
   for (const c of ['decisions', 'git', 'failsites', 'claims', 'linux', 'stale']) assert.ok(ratchet().categories[c], `ratchet.json has no ${c}`);
 });
 
-test('SPACES.md is generated from the registry (node scripts/spaces.mjs --md)', () => {
+test('SPACES.md is generated from the registry (npm run spaces -- --md)', () => {
   assert.equal(readFileSync(join(ROOT, 'SPACES.md'), 'utf8'), renderMd(all));
 });

@@ -2,11 +2,11 @@
 // inventory (scripts/decision-points.mjs), the git manifest (test/space/git-manifest.json) and, for gate c, the
 // fail-site records of a suite run (PLY_FAILSITES=<dir>, written by test/space/failsite-hook.mjs).
 //
-//   node scripts/spaces.mjs                 the hole report, every category, ranked by severity
-//   node scripts/spaces.mjs --md            regenerate SPACES.md
-//   node scripts/spaces.mjs --ratchet       lower test/space/ratchet.json to today's holes (never adds a hole; failsites
+//   npm run spaces                    the hole report, every category, ranked by severity
+//   npm run spaces -- --md            regenerate SPACES.md
+//   npm run spaces -- --ratchet       lower test/space/ratchet.json to today's holes (never adds a hole; failsites
 //                                           and claims need PLY_FAILSITES, else they keep their stored ids)
-//   node scripts/spaces.mjs --ratchet --init   write today's holes as they are (bootstrapping a category only)
+//   npm run spaces -- --ratchet --init   write today's holes as they are (bootstrapping a category only)
 import { writeFileSync, existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,7 +56,7 @@ export function renderMd(all) {
   L.push('- `scripts/decision-points.mjs` extracts every decision point from `src/` (each `fail(`/`failHere(` call, each call to a fail wrapper, each produced error code, each untyped `throw new Error`, each exported `parse*`/`decode*`/`classify*`/`decide*`).');
   L.push(`- \`scripts/git-manifest.mjs\` extracts git ${all.man.git.tag}'s own checks (fsck msg ids, die/error/ng/reject strings of the protocol files, capabilities, request arguments, ref-name rules, fsck_tree modes) into \`test/space/git-manifest.json\`.`);
   L.push('- `test/space/registry.js` maps each one to the space and axis that covers it, or excludes it with a reason.');
-  L.push('- Gates (`test/space/registry.test.js`, `test/space/failsites.test.js`, in CI): **a** every decision point is registered; **b** every git check is covered or excluded; **c** every fail site is reached by a cell (stacks recorded by `test/space/failsite-hook.mjs`, a module-load hook: `src/` and the bundle are untouched), and every site the registry gives a merged space is reached by that space. A category with holes is in REPORT mode (holes printed; only a hole not in `test/space/ratchet.json` fails); at 0 it switches to ENFORCE. The ratchet only goes down: `node scripts/spaces.mjs --ratchet`.', '');
+  L.push('- Gates (`test/space/registry.test.js`, `test/space/failsites.test.js`, in CI): **a** every decision point is registered; **b** every git check is covered or excluded; **c** every fail site is reached by a cell (stacks recorded at `plyError` by `test/space/failsite-hook.mjs` in node and by the plugin in `vitest.config.ts` under vitest: `src/` and the bundle are untouched), and every site the registry gives a merged space is reached by that space. A category with holes is in REPORT mode (holes printed; only a hole not in `test/space/ratchet.json` fails); at 0 it switches to ENFORCE. The ratchet only goes down: `npm run spaces -- --ratchet`.', '');
   L.push('## Status', '');
   L.push('| category | holes (ratchet) | mode |', '|---|---:|---|');
   for (const c of CATEGORIES) L.push(`| ${c} | ${fmt(st[c].count)} | ${st[c].count === 0 ? 'ENFORCE' : 'REPORT'} |`);
@@ -139,7 +139,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       else { const keep = new Set(old[c].ids); ids = now.filter(id => keep.has(id)); }
       categories[c] = { count: ids.length, ids: [...ids].sort() };
     }
-    writeFileSync(RATCHET, `${JSON.stringify({ note: 'Holes per category (test/space/holes.js). Only ever lowered: node scripts/spaces.mjs --ratchet. A category at 0 is enforced.', categories }, null, 1)}\n`);
+    writeFileSync(RATCHET, `${JSON.stringify({ note: 'Holes per category (test/space/holes.js). Only ever lowered: npm run spaces -- --ratchet. A category at 0 is enforced.', categories }, null, 1)}\n`);
     for (const c of CATEGORIES) console.log(`${c}: ${categories[c].count}`);
   }
   if (process.argv.includes('--md')) writeFileSync(join(ROOT, 'SPACES.md'), renderMd(all));
