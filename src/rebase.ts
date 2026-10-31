@@ -8,6 +8,7 @@
 //   cherry-pick commit's parent tree target      commit tree          parent [target], author+message kept
 //   revert      commit tree          target      commit's parent tree parent [target]
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
+import type { ValidatedIdent } from './validate.js';
 import type { Extra } from './errors.js';
 import { thrown as fail } from './errors.js';
 import { lsRefs } from './lsrefs.js';
@@ -27,7 +28,7 @@ type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
 type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<{ readonly data: Uint8Array }>;
 type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array;
+type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[] }) => Uint8Array<ArrayBuffer>;
 
 type Rediff = NonNullable<MergeOptions['rediff']>;
 const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
@@ -125,8 +126,8 @@ export type RebaseOutcome =
 /* oxlint-disable eslint/complexity -- one operation's steps in order; the A6 pass makes the replay a RebaseState machine */
 export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time = Math.floor(Date.now() / 1000), squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
   validateAttributes(attributes); validatePushRef(ref, false); validateRef(onto);
-  const committerPerson: object = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
-  const authorPerson: object | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+  const committerPerson: ValidatedIdent = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
+  const authorPerson: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== null) validateMessage(message);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
@@ -200,7 +201,7 @@ export type PickOutcome =
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
 export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, time = Math.floor(Date.now() / 1000), revert = false, message = null }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
   validateAttributes(attributes); validatePushRef(ref, false);
-  const committerPerson: object = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
+  const committerPerson: ValidatedIdent = validateIdent({ name: committer?.name, email: committer?.email, time, tz: committer?.tz });
   if (message !== null) validateMessage(message);
   if (!/^[0-9a-f]{40}$/u.test(commit)) throw fail('bad_request', 'commit must be a 40-hex oid');
   const op = revert ? 'revert' : 'cherry_pick';
@@ -211,8 +212,8 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
     const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     const [cT, cC] = await Promise.all([target, commit].map(oid => (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })));
-    const tInfo: Commit = parseCommit(cT?.data, t.limits);
-    const c: Commit = parseCommit(cC?.data, t.limits);
+    const tInfo: Commit = parseCommit(cT?.data ?? new Uint8Array(0), t.limits);
+    const c: Commit = parseCommit(cC?.data ?? new Uint8Array(0), t.limits);
     if (c.parents.length !== 1) throw fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     const p: Commit = parseCommit((await (fetchObject as unknown as FetchObject)(t, { oid: c.parents[0], expectType: TYPE.COMMIT, deepen: 1 })).data, t.limits);

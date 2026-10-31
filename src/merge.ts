@@ -14,6 +14,7 @@
 // The pure parts: threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits), uniqueObjects; linemerge.js. The effects: lsRefs, fetchObject, push.
 /* oxlint-disable import/max-dependencies -- a merge drives ls-refs, fetch, push, the object codecs and the line merge */
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
+import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import type { Extra } from './errors.js';
@@ -46,14 +47,20 @@ export type Commit = {
   readonly extra: readonly string[];
 };
 export type PackObject = { readonly type: number; readonly data: Uint8Array; readonly oid: string };
-export type Transport = { readonly limits: Limits };
-export type Span = { set(attrs: Readonly<Record<string, unknown>>): unknown };
+// the transport every operation runs on (src/transport.ts); re-exported for rebase.ts
+export type { Transport } from './transport.js';
+import type { Transport } from './transport.js';
+// the span every operation records on (src/otel.js); re-exported for rebase.ts
+export type { Span } from './otel.js';
+import type { Span } from './otel.js';
 export type Outcome = <R>(kind: string, result: R, attrs?: Readonly<Record<string, unknown>>) => R;
 export type OpContext = { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits };
 export type PushResult = { readonly packBytes: number };
 export type Refs = { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }> };
 export type Author = { readonly name: string; readonly email: string; readonly tz?: string };
-export type Signer = { readonly sign: (message: Uint8Array, namespace?: string) => Promise<string> };
+// a commit signer (src/sign.ts); re-exported for rebase.ts
+export type { Signer } from './sign.js';
+import type { Signer } from './sign.js';
 export type TreeCache = Map<string, Uint8Array>;
 type Fetched = { readonly data: Uint8Array };
 export type PushObject = { readonly type: number; readonly data: Uint8Array };
@@ -64,7 +71,7 @@ export type PushObject = { readonly type: number; readonly data: Uint8Array };
 type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<Fetched>;
 type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
 type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array;
+type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array<ArrayBuffer>;
 
 const EMPTY: readonly TreeEntry[] = [];
 // An entry absent on a side is undefined.
@@ -475,7 +482,7 @@ export type MergeOutcome =
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
 export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
   validatePushRef(ref, false); validateRef(from);
-  const person: object | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
+  const person: ValidatedIdent | null = author ? validateIdent({ name: author.name, email: author.email, time, tz: author.tz }) : null;
   if (message !== undefined && message !== null && message !== '') validateMessage(message); validateAttributes(attributes);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
@@ -504,7 +511,7 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
     const [cB, cO, cT]: Array<{ readonly data: Uint8Array }> = await Promise.all([base, ours, theirs].map(oid => (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.COMMIT, deepen: 1 })));
-    const tree = (c: { readonly data: Uint8Array } | undefined): string => parseCommit(c?.data, t.limits).tree;
+    const tree = (c: { readonly data: Uint8Array } | undefined): string => parseCommit(c?.data ?? new Uint8Array(0), t.limits).tree;
     const trees = { base: tree(cB), ours: tree(cO), theirs: tree(cT) };
     const mergeBlob = blobMerger(t, { maxMergeBlobBytes: requireLimit(t.limits, 'maxMergeBlobBytes'), rediff });
     const attrTree = await attributeTree(t, attributes, trees);

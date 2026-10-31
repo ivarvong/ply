@@ -1,14 +1,39 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "testRunner": "vitest",
-  "vitest": { "configFile": "vitest.stryker.config.ts", "related": false },
+  "vitest": {
+    "configFile": "vitest.stryker.config.ts",
+    "related": false,
+    "pool": "forks"
+  },
   "coverageAnalysis": "perTest",
-  "mutate": ["src/**/*.js", "src/**/*.ts"],
-  "ignorePatterns": ["reports", ".stryker-tmp", "fuzz-out", "coverage", "dist"],
+  "tsconfigFile": ".stryker-no-tsconfig",
+  "dryRunTimeoutMinutes": 20,
+  "mutate": [
+    "src/**/*.js",
+    "src/**/*.ts"
+  ],
+  "ignorePatterns": [
+    "reports",
+    ".stryker-tmp",
+    "fuzz-out",
+    "coverage",
+    "dist"
+  ],
   "tempDirName": ".stryker-tmp",
-  "reporters": ["clear-text", "json", "progress"],
-  "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
-  "thresholds": { "high": 80, "low": 60, "break": 23.54 },
+  "reporters": [
+    "clear-text",
+    "json",
+    "progress"
+  ],
+  "jsonReporter": {
+    "fileName": "reports/mutation/mutation.json"
+  },
+  "thresholds": {
+    "high": 80,
+    "low": 60,
+    "break": 23.54
+  },
   "timeoutMS": 8000,
   "timeoutFactor": 2,
   "concurrency": 4
