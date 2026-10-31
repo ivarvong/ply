@@ -3,7 +3,7 @@
 // Every case: generate repo+edit from a seed (optionally steered toward an under-covered bucket),
 // run editFile against git http-backend, check git's truth, bucketize the OTLP spans, steer.
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, symlinkSync, rmSync, lstatSync, chmodSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from '../server.js';
 import { Rng } from './prng.js';
 import { genCase, KNOBS } from './gen.js';
@@ -93,6 +93,24 @@ const TARGETS = {
 };
 
 // ---- one case ----
+// One fast-import stream onto refs/heads/main: each commit adds/replaces `files` on top of the previous tree.
+const te = new TextEncoder();
+const cquote = p => '"' + [...te.encode(p)].map(b => b === 0x22 ? '\\"' : b === 0x5c ? '\\\\' : b < 0x20 || b >= 0x7f ? '\\' + b.toString(8).padStart(3, '0') : String.fromCharCode(b)).join('') + '"';
+function commits(dir, list, fromExisting = false) {
+  const parts = [];
+  list.forEach(({ who, msg, files }, i) => {
+    parts.push(te.encode(`commit refs/heads/main\ncommitter ${who} <${who}@x> now\ndata ${te.encode(msg).length}\n${msg}\n`));
+    if (i === 0 && fromExisting) parts.push(te.encode('from refs/heads/main^0\n'));
+    for (const [p, v] of Object.entries(files)) {
+      const d = v.symlink ? te.encode(v.symlink) : typeof v.data === 'string' ? te.encode(v.data) : v.data;
+      parts.push(te.encode(`M ${v.symlink ? '120000' : v.mode} inline ${cquote(p)}\ndata ${d.length}\n`), d, te.encode('\n'));
+    }
+  });
+  parts.push(te.encode('done\n'));
+  // core.ignorecase=false: `git init` sets it on macOS, and fast-import would then fold `A` into `a` (one entry, not two)
+  gitBuf(dir, ['-c', 'core.ignorecase=false', 'fast-import', '--quiet', '--date-format=now', '--done'], concat(parts));
+}
+
 async function runCase(ctx, seed, hints) {
   const rng = new Rng(seed);
   const c = genCase(rng, hints);
@@ -101,17 +119,21 @@ async function runCase(ctx, seed, hints) {
   git(bare, ['config', 'core.compression', String(c.compression)]);
   git(bare, ['config', 'pack.compression', String(c.compression)]);
   const work = join(ctx.root, `w${seed}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
-  const write = files => { for (const [p, v] of Object.entries(files)) { const full = join(work, p); mkdirSync(join(full, '..'), { recursive: true }); if (v.symlink) { try { lstatSync(full); } catch { symlinkSync(v.symlink, full); } } else { writeFileSync(full, v.data); chmodSync(full, v.mode === '100755' ? 0o755 : 0o644); } } };
+  // Commits are built with `git fast-import`, never a checkout: case-only twins (`a/` beside `A`), valid in git, would
+  // collide in a worktree on a case-insensitive filesystem (macOS) and crash the harness. Modes and symlinks go in as-is.
+  const commit = (who, msg, files, fromExisting = false) => commits(work, [{ who, msg, files }], fromExisting);
   // history: earlier commits with a different version of the target so trees/blobs have ancestry
-  for (let h = 1; h < c.history; h++) { write({ ...(h === 1 ? c.files : {}), [`hist${h}.txt`]: { mode: '100644', data: rng.bytes(rng.int(0, 50)) } }); git(work, ['add', '-A']); git(work, ['-c', 'user.name=h', '-c', 'user.email=h@x', 'commit', '-q', '--allow-empty', '-m', `h${h}`]); }
-  write(c.files); git(work, ['add', '-A']); git(work, ['-c', 'user.name=seed', '-c', 'user.email=seed@x', 'commit', '-q', '--allow-empty', '-m', 'seed']);
+  const plan = [];
+  for (let h = 1; h < c.history; h++) plan.push({ who: 'h', msg: `h${h}`, files: { ...(h === 1 ? c.files : {}), [`hist${h}.txt`]: { mode: '100644', data: rng.bytes(rng.int(0, 50)) } } });
+  plan.push({ who: 'seed', msg: 'seed', files: c.files });
+  commits(work, plan);
   git(work, ['push', '-q', bare, 'HEAD:refs/heads/main']);
   // server object-store shape: GitHub serves from packed, bitmapped, multi-pack-indexed stores
   switch (c.knobs.server) {
     case 'packed': git(bare, ['-c', 'repack.writeBitmaps=false', 'gc', '-q']); break;
     case 'bitmap': git(bare, ['-c', 'repack.writeBitmaps=true', 'gc', '-q']); break;
     case 'midx-bitmap': git(bare, ['-c', 'repack.writeBitmaps=false', 'gc', '-q']); git(bare, ['multi-pack-index', 'write', '--bitmap']); git(bare, ['config', 'core.multiPackIndex', 'true']); break;
-    case 'mixed': git(bare, ['-c', 'repack.writeBitmaps=true', 'gc', '-q']); writeFileSync(join(work, 'late.txt'), 'late'); git(work, ['add', '-A']); git(work, ['-c', 'user.name=l', '-c', 'user.email=l@x', 'commit', '-q', '-m', 'late']); git(work, ['push', '-q', bare, 'HEAD:refs/heads/main']); break; // bitmapped pack + loose objects on top
+    case 'mixed': git(bare, ['-c', 'repack.writeBitmaps=true', 'gc', '-q']); commit('l', 'late', { 'late.txt': { mode: '100644', data: 'late' } }, true); git(work, ['push', '-q', bare, 'HEAD:refs/heads/main']); break; // bitmapped pack + loose objects on top
   }
   const oldHead = git(bare, ['rev-parse', 'main']).trim();
 
@@ -120,7 +142,7 @@ async function runCase(ctx, seed, hints) {
   // CAS conflict injection: move main between our ls-refs and our push.
   let raced = null;
   const fetchImpl = c.knobs.outcome === 'cas_conflict' ? async (url, init) => {
-    if (url.endsWith('/git-receive-pack') && !raced) { writeFileSync(join(work, 'race.txt'), 'race'); git(work, ['add', '-A']); git(work, ['-c', 'user.name=r', '-c', 'user.email=r@x', 'commit', '-q', '-m', 'race']); git(work, ['push', '-q', bare, 'HEAD:refs/heads/main']); raced = git(bare, ['rev-parse', 'main']).trim(); }
+    if (url.endsWith('/git-receive-pack') && !raced) { commit('r', 'race', { 'race.txt': { mode: '100644', data: 'race' } }, true); git(work, ['push', '-q', bare, 'HEAD:refs/heads/main']); raced = git(bare, ['rev-parse', 'main']).trim(); }
     return fetch(url, init);
   } : undefined;
   const cache = new Map();

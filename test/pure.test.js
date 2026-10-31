@@ -94,18 +94,25 @@ test('deflate only: a stored-block zlib stream never beats CompressionStream (th
 });
 
 test('scanStep counts every match and keeps the first MATCH_OFFSETS_KEPT offsets; each hit is O(1) (#13)', () => {
+  // CPU time, not wall clock, so load on the box does not count; scaling 16 -> 128 KiB, so a slow machine cancels.
+  // Linear is ~8x (measured 4-7x); the old per-hit offset copy was quadratic (64x and up). A noisy 24-64x is re-measured.
   const run = n => {
     const data = new Uint8Array(n).fill(0x61);
     let st = scanInit({ find: Uint8Array.of(0x61), replace: Uint8Array.of(0x62) });
-    const t0 = performance.now();
+    const t0 = process.cpuUsage();
     for (let o = 0; o < n; o += 16384) st = scanStep(st, data.subarray(o, o + 16384)).state;
-    return { st, ms: performance.now() - t0 };
+    const d = process.cpuUsage(t0);
+    return { st, ms: (d.user + d.system) / 1000 };
   };
-  const { st, ms } = run(128 << 10);
+  run(16 << 10); // warm-up
+  const small = Math.max(Math.min(run(16 << 10).ms, run(16 << 10).ms, run(16 << 10).ms), 0.05);
+  let big = run(128 << 10);
+  for (let k = 0; k < 2 && big.ms >= 24 * small && big.ms < 64 * small; k++) { const r = run(128 << 10); if (r.ms < big.ms) big = r; }
+  assert.ok(big.ms < 24 * small, `128 KiB of matches cost ${big.ms.toFixed(2)} ms CPU, ${(big.ms / small).toFixed(1)}x 16 KiB (${small.toFixed(2)} ms); linear is ~8x`);
+  const { st } = big;
   assert.equal(st.count, 128 << 10);
   assert.equal(st.emitted, 128 << 10);
   assert.deepEqual(st.matches, Array.from({ length: MATCH_OFFSETS_KEPT }, (_, i) => i));
-  assert.ok(ms < 500, `128 KiB of matches took ${ms.toFixed(0)} ms`);
   const two = scanStep(scanInit({ find: Uint8Array.of(1), replace: new Uint8Array(0) }), Uint8Array.of(1, 0, 1)).state;
   assert.equal(two.count, 2);
   assert.deepEqual(two.matches, [0, 2]);

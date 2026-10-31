@@ -176,15 +176,21 @@ test('a one-byte find over 128 KiB of that byte (#13): match_count with the full
   const r = repo();
   commitFiles(r.work, r.bare, { 'run.txt': 'a'.repeat(128 << 10) }, 's');
   const head = git(r.bare, ['rev-parse', 'main']).trim();
+  // O(n) calibration in this process: the same edit over 16 KiB of hits, so the ratio cancels a slow machine, and CPU
+  // time, not wall clock, so parallel load on the box does not count. Linear is at most 8x (measured 4.6-5.5x, also beside
+  // 3 fuzzers); the old scan, which kept every offset in a fresh array per hit, measured 71-78x (~20 s). Spans keep 16.
+  const small = repo();
+  commitFiles(small.work, small.bare, { 'run.txt': 'a'.repeat(16 << 10) }, 's');
+  const cpuMs = async f => { const t = process.cpuUsage(); const v = await f(); const d = process.cpuUsage(t); return { v, ms: (d.user + d.system) / 1000 }; };
+  const run = (u, ex = arrayExporter()) => cpuMs(() => editFile(u, { path: 'run.txt', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }).then(() => null, e => e));
+  await run(small.url); // warm-up, discarded
+  const base = [(await run(small.url)).ms, (await run(small.url)).ms, (await run(small.url)).ms].sort((a, b) => a - b)[1];
   const ex = arrayExporter();
-  const t0 = performance.now();
-  const err = await editFile(r.url, { path: 'run.txt', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }).then(() => null, e => e);
-  const ms = performance.now() - t0;
+  const { v: err, ms } = await run(r.url, ex);
+  assert.ok(ms < 24 * base, `128 KiB of hits cost ${ms.toFixed(0)} ms CPU, ${(ms / base).toFixed(1)}x 16 KiB (${base.toFixed(0)} ms); linear is <= 8x`);
   assert.equal(err?.code, 'match_count', err?.message);
   assert.equal(err.matches, 128 << 10);
   assert.equal(err.message, `expected exactly one match, found ${128 << 10}`);
-  // the scan used to keep every offset in a fresh array per hit: 400 s at this size; the span keeps the first 16
-  assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
   const blob = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit.blob');
   assert.equal(blob.attrs['git.edit.blob.scan.matches'], 128 << 10);
   assert.deepEqual(blob.attrs['git.edit.blob.scan.match_offsets'], Array.from({ length: 16 }, (_, i) => i));

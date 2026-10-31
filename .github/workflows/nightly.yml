@@ -1,0 +1,184 @@
+name: nightly
+
+# Deep fuzz against main with a seed that rotates daily (the UTC date as YYYYMMDD), the full `npm test`, and a full
+# Stryker run. A failure prints the seed, the failing case and a one-line reproduce command (NIGHTLY-FAIL lines),
+# and the report job opens or comments on the issue "nightly fuzz failure <date>".
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "fuzz seed (digits); empty = today's UTC date as YYYYMMDD"
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    name: seed
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      seed: ${{ steps.seed.outputs.seed }}
+      date: ${{ steps.seed.outputs.date }}
+    steps:
+      - id: seed
+        env:
+          SEED_INPUT: ${{ inputs.seed }}
+        run: |
+          set -euo pipefail
+          date=$(date -u +%Y-%m-%d)
+          seed="${SEED_INPUT:-$(date -u +%Y%m%d)}"
+          [[ "$seed" =~ ^[0-9]{1,9}$ ]] || { echo "::error::seed must be 1-9 digits, got '$seed'"; exit 1; }
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+          echo "nightly seed $seed ($date)"
+
+  fuzz:
+    name: fuzz ${{ matrix.fuzzer }} ${{ matrix.args }}
+    needs: seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { fuzzer: run.mjs, args: "--n 1000" }
+          - { fuzzer: hostile.mjs, args: "--n 3000" }
+          - { fuzzer: liar.mjs, args: "--n 2000" }
+          - { fuzzer: protocol.mjs, args: "--n 5000" }
+          - { fuzzer: packs.mjs, args: "--n 1000" }
+          - { fuzzer: packgen.mjs, args: "--n 2000" }
+          - { fuzzer: codec.mjs, args: "--n 300000" }
+          - { fuzzer: attributes.mjs, args: "--n 2000" }
+          - { fuzzer: below-hash.mjs, args: "--n 2000" }
+          - { fuzzer: git-semantic.mjs, args: "--n 5000" }
+          - { fuzzer: linemerge.mjs, args: "--n 20000" }
+          - { fuzzer: linemerge.mjs, args: "--n 5000 --runs" }
+          - { fuzzer: linemerge.mjs, args: "--n 5000 --driver union" }
+          - { fuzzer: diffscript.mjs, args: "--n 5000" }
+          - { fuzzer: diffscript.mjs, args: "--n 2000 --snake" }
+          - { fuzzer: diffscript.mjs, args: "--n 200 --huge" }
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: fuzz
+        env:
+          SEED: ${{ needs.seed.outputs.seed }}
+          FUZZER: ${{ matrix.fuzzer }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          # ARGS is word-split on purpose: it is a fixed list from the matrix above
+          # shellcheck disable=SC2086
+          node scripts/nightly-fuzz.mjs "$SEED" "$FUZZER" $ARGS
+
+  test:
+    name: npm test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: npm test
+        run: |
+          # npm test's unseeded fuzz lines print their own `repro: ... --case <seed>` on a failure
+          npm test || { echo "NIGHTLY-FAIL npm-test reproduce: npm test (unseeded fuzz lines: see the repro: lines above)"; exit 1; }
+
+  mutate:
+    name: stryker (full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: stryker
+        env:
+          GITHUB_EVENT_NAME: schedule # anything but pull_request: mutate.mjs runs every src file
+        run: |
+          node scripts/mutate.mjs || { echo "NIGHTLY-FAIL stryker reproduce: npm run test:mutate"; exit 1; }
+
+  report:
+    name: report failure
+    needs: [seed, fuzz, test, mutate]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read # the failed jobs' logs, for their NIGHTLY-FAIL lines
+    steps:
+      - name: open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SEED: ${{ needs.seed.outputs.seed }}
+          DATE: ${{ needs.seed.outputs.date }}
+        run: |
+          set -euo pipefail
+          date="${DATE:-$(date -u +%Y-%m-%d)}"
+          title="nightly fuzz failure $date"
+          body=$(mktemp)
+          {
+            echo "Nightly run $RUN_URL failed on main (seed \`${SEED:-unknown}\`)."
+            echo
+            gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | select(.conclusion == "failure") | "\(.id)\t\(.name)"' |
+              while IFS=$'\t' read -r id name; do
+                echo "### $name"
+                echo '```'
+                # a log line is "<timestamp> <text>": anchoring skips the echoed script and the ##[error] copies
+                gh api "repos/$GH_REPO/actions/jobs/$id/logs" 2>/dev/null | grep -E '^[0-9TZ:.-]+ NIGHTLY-FAIL ' | cut -d' ' -f2- | head -20 || true
+                echo '```'
+              done
+          } > "$body"
+          cat "$body"
+          num=$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body-file "$body"
+          else
+            gh issue create --title "$title" --body-file "$body"
+          fi
