@@ -1,5 +1,6 @@
 // pkt-line framing. 4 hex length (inclusive) + payload. 0000 flush, 0001 delim, 0002 response-end.
 // Decoder is a pure step function over an immutable state record.
+import type { Thrown } from './errors.js';
 import { thrown as fail } from './errors.js';
 import { te, concat, encodeBytes } from './bytes.js';
 import {
@@ -7,13 +8,13 @@ import {
   PKT_DATA_MIN, PKT_MAX_PAYLOAD, PKT_READ_MAX_PAYLOAD, PKT_LEN_SHIFTS, BYTE_VALUES,
 } from './format.js';
 
-export const MAX_PKT_PAYLOAD = PKT_MAX_PAYLOAD;
-const proto = msg => fail('protocol', msg);
+export const MAX_PKT_PAYLOAD: number = PKT_MAX_PAYLOAD;
+const proto = (msg: string): Thrown => fail('protocol', msg);
 
 // The one pkt-line writer. A line longer than git's LARGE_PACKET_MAX is the caller's (a push option, a ref prefix, a
 // want or filter: fields without a length rule of their own), refused before any byte is written, as git's
 // format_packet dies "impossibly long line" (pkt-line.c). bad_request: no retry can make the line shorter.
-export function pkt(payload) {
+export function pkt(payload: string | Uint8Array): Uint8Array {
   // a ref name read from ls-refs may hold escaped bytes (#43): encodeBytes writes them back as the server sent them
   const p = typeof payload === 'string' ? encodeBytes(payload, 'pkt-line') : payload;
   if (p.length > MAX_PKT_PAYLOAD) throw fail('bad_request', `pkt-line payload too large: ${p.length} bytes, the most git frames is ${MAX_PKT_PAYLOAD}`, { what: 'pkt-line', got: p.length, max: MAX_PKT_PAYLOAD });
@@ -22,17 +23,40 @@ export function pkt(payload) {
   out.set(p, PKT_LEN_HEX);
   return out;
 }
-export const FLUSH = te.encode('0000');
-export const DELIM = te.encode('0001');
+export const FLUSH: Uint8Array = te.encode('0000');
+export const DELIM: Uint8Array = te.encode('0001');
 
-export const pkts = (lines, { delimAfter = -1, flush = true } = {}) =>
+export type PktsOptions = { readonly delimAfter?: number; readonly flush?: boolean };
+export const pkts = (lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Uint8Array =>
   concat(lines.flatMap((l, i) => (i === delimAfter ? [pkt(l), DELIM] : [pkt(l)])).concat(flush ? [FLUSH] : []));
 
 // oxlint-disable-next-line no-magic-numbers -- sentinel: this byte is not a hex digit
-const HEXV = new Int8Array(BYTE_VALUES).fill(-1);
+const NOT_HEX = -1;
+const HEXV = new Int8Array(BYTE_VALUES).fill(NOT_HEX);
+// PKT_LEN_SHIFTS has four entries (format.js); the defaults only satisfy the checker
+const [SHIFT0 = 0, SHIFT1 = 0, SHIFT2 = 0] = PKT_LEN_SHIFTS;
+// ASCII digits: a code unit is the code point
+// oxlint-disable-next-line unicorn/prefer-code-point -- see above
 for (let i = 0; i < PKT_HEX_BASE; i++) { HEXV['0123456789abcdef'.charCodeAt(i)] = i; HEXV['0123456789ABCDEF'.charCodeAt(i)] = i; }
 
-export const pktInit = () => Object.freeze({
+export type PktState = {
+  readonly carry: Uint8Array | null;
+  readonly frames: number;
+  readonly data: number;
+  readonly flush: number;
+  readonly delim: number;
+  readonly end: number;
+  readonly bytes: number;
+  readonly maxPayload: number;
+  readonly carryMax: number;
+};
+export type PktFrame =
+  | { readonly kind: 'flush' }
+  | { readonly kind: 'delim' }
+  | { readonly kind: 'end' }
+  | { readonly kind: 'data'; readonly payload: Uint8Array };
+
+export const pktInit = (): PktState => Object.freeze({
   carry: null, frames: 0, data: 0, flush: 0, delim: 0, end: 0, bytes: 0, maxPayload: 0, carryMax: 0,
 });
 
@@ -43,19 +67,27 @@ export const pktInit = () => Object.freeze({
 // reads is 65523 bytes, three past the 65520 its writer emits. Every slice below is inside a length the loop has
 // already checked, so it is a view, not a bounded read: nothing here can be short.
 // @decoder pktStep prefix=pkt
-export function pktStep(st, chunk) {
-  const frames = [];
+// oxlint-disable-next-line eslint/complexity -- one frame loop; the `??`s on in-range reads count as branches
+export function pktStep(st: PktState, chunk: Uint8Array): { frames: PktFrame[]; state: PktState } {
+  const frames: PktFrame[] = [];
   const buf = st.carry ? concat([st.carry, chunk]) : chunk;
-  let p = 0, data = st.data, flush = st.flush, delim = st.delim, end = st.end, maxPayload = st.maxPayload;
+  let p = 0;
+  let { data, flush, delim, end, maxPayload } = st;
   while (buf.length - p >= PKT_LEN_HEX) {
     const h = buf.subarray(p, p + PKT_LEN_HEX);
-    const a = HEXV[h[0]], b = HEXV[h[1]], c = HEXV[h[2]], d = HEXV[h[3]];
+    // h holds PKT_LEN_HEX bytes and HEXV covers every byte value: `?? -1` only satisfies the checker
+    const a = HEXV[h[0] ?? 0] ?? NOT_HEX;
+    const b = HEXV[h[1] ?? 0] ?? NOT_HEX;
+    const c = HEXV[h[2] ?? 0] ?? NOT_HEX;
+    const d = HEXV[h[3] ?? 0] ?? NOT_HEX;
     if ((a | b | c | d) < 0) throw proto(`bad pkt-line length at byte ${st.bytes - (buf.length - chunk.length) + p}`);
-    const len = (a << PKT_LEN_SHIFTS[0]) | (b << PKT_LEN_SHIFTS[1]) | (c << PKT_LEN_SHIFTS[2]) | d;
+    const len = (a << SHIFT0) | (b << SHIFT1) | (c << SHIFT2) | d;
     if (len < PKT_DATA_MIN) {
       if (len === PKT_LEN_INVALID) throw proto('invalid pkt-line length 3');
       // 0, 1 and 2 are the only remaining lengths below PKT_DATA_MIN.
-      const kind = len === PKT_FLUSH ? 'flush' : len === PKT_DELIM ? 'delim' : 'end';
+      let kind: 'flush' | 'delim' | 'end' = 'end';
+      if (len === PKT_FLUSH) kind = 'flush';
+      else if (len === PKT_DELIM) kind = 'delim';
       if (kind === 'flush') flush++; else if (kind === 'delim') delim++; else end++;
       frames.push({ kind });
       p += PKT_LEN_HEX;
@@ -84,12 +116,12 @@ export function pktStep(st, chunk) {
 }
 
 // @decoder pktFinish prefix=pkt
-export function pktFinish(st) {
-  if (st.carry && st.carry.length) throw proto(`trailing ${st.carry.length} bytes after last pkt-line`);
+export function pktFinish(st: PktState): PktState {
+  if (st.carry && st.carry.length > 0) throw proto(`trailing ${st.carry.length} bytes after last pkt-line`);
   return st;
 }
 
-export const pktAttrs = (st, prefix = 'git.pkt') => ({
+export const pktAttrs = (st: PktState, prefix = 'git.pkt'): Record<string, number> => ({
   [`${prefix}.frames`]: st.frames, [`${prefix}.data`]: st.data, [`${prefix}.flush`]: st.flush,
   [`${prefix}.delim`]: st.delim, [`${prefix}.end`]: st.end, [`${prefix}.bytes`]: st.bytes,
   [`${prefix}.payload.max`]: st.maxPayload, [`${prefix}.carry.max`]: st.carryMax,

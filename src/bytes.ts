@@ -1,14 +1,24 @@
 // Byte helpers.
+import type { Code } from './errors.js';
 import { thrown as fail } from './errors.js';
 
-export const te = new TextEncoder();
+export const te: TextEncoder = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
-// does not find `\ufeffREADME`), so no decoder here swallows it the way the default one does (#43). `td` is for text
+// does not find `<U+FEFF>README`), so no decoder here swallows it the way the default one does (#43). `td` is for text
 // git itself only prints (sideband progress, remote errors, ssh banners): an invalid sequence there becomes U+FFFD.
-export const td = new TextDecoder('utf-8', { ignoreBOM: true });
+export const td: TextDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 // Well-formed UTF-8 or a throw; a leading BOM is kept (it is a byte of the text to git, #43).
-export const decodeStrict = b => strict.decode(b);
+export const decodeStrict = (b: Uint8Array): string => strict.decode(b);
+
+export function concat(parts: readonly Uint8Array[]): Uint8Array {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
 
 // ---- git bytes as strings, losslessly (#43) ----
 // Names, messages, idents and ref names are bytes to git; it never requires UTF-8 and never interprets a BOM. ply hands
@@ -18,12 +28,23 @@ export const decodeStrict = b => strict.decode(b);
 // (PEP 383's surrogateescape). `encodeBytes` is the inverse, so a name read from a tree goes back into a tree, a ref,
 // or a commit as the bytes git had. A string `encodeBytes` cannot map back exactly is a typed refusal, never U+FFFD.
 /* oxlint-disable no-magic-numbers -- UTF-8 is Unicode Table 3-7: lead and continuation byte ranges and sequence lengths */
-const LEAD2 = 0xc2, LEAD3 = 0xe0, LEAD4 = 0xf0, LEAD_END = 0xf4, CONT = 0x80, CONT_END = 0xbf, ASCII_END = 0x80;
-const ESCAPE = 0xdc00, ESCAPE_LO = 0xdc80, ESCAPE_HI = 0xdcff, SUR_LO = 0xd800, SUR_HI = 0xdfff, HIGH_END = 0xdbff;
-const inRange = (b, lo, hi) => b !== undefined && b >= lo && b <= hi;
-// Length of the well-formed UTF-8 sequence at i (Unicode Table 3-7), or 0.
-function wellFormedAt(b, i) {
-  const c = b[i];
+const LEAD2 = 0xc2;
+const LEAD3 = 0xe0;
+const LEAD4 = 0xf0;
+const LEAD_END = 0xf4;
+const CONT = 0x80;
+const CONT_END = 0xbf;
+const ASCII_END = 0x80;
+const ESCAPE = 0xdc_00;
+const ESCAPE_LO = 0xdc_80;
+const ESCAPE_HI = 0xdc_ff;
+const SUR_LO = 0xd8_00;
+const SUR_HI = 0xdf_ff;
+const HIGH_END = 0xdb_ff;
+const inRange = (b: number | undefined, lo: number, hi: number): boolean => b !== undefined && b >= lo && b <= hi;
+// Length of the well-formed UTF-8 sequence at i (Unicode Table 3-7), or 0. `i` is always < b.length (both callers).
+function wellFormedAt(b: Uint8Array, i: number): number {
+  const c = b[i] ?? 0;
   if (c < ASCII_END) return 1;
   if (c < LEAD2) return 0;
   if (c < LEAD3) return inRange(b[i + 1], CONT, CONT_END) ? 2 : 0;
@@ -33,27 +54,30 @@ function wellFormedAt(b, i) {
   return 0;
 }
 
-export function decodeBytes(b) {
+export function decodeBytes(b: Uint8Array): string {
   try { return strict.decode(b); } catch { /* ill-formed: escape byte by byte below */ }
-  let s = '', run = 0, i = 0;
+  let s = '';
+  let run = 0;
+  let i = 0;
   while (i < b.length) {
     const n = wellFormedAt(b, i);
     if (n) { i += n; continue; }
-    s += strict.decode(b.subarray(run, i)) + String.fromCharCode(ESCAPE + b[i]);
+    s += strict.decode(b.subarray(run, i)) + String.fromCodePoint(ESCAPE + (b[i] ?? 0));
     run = ++i;
   }
   return s + strict.decode(b.subarray(run));
 }
 
-export function encodeBytes(s, what = 'string') {
+export function encodeBytes(s: unknown, what = 'string'): Uint8Array {
   if (typeof s !== 'string') throw fail('bad_request', `${what} must be a string`, { what });
   if (s.isWellFormed()) return te.encode(s);
-  const parts = [];
+  const parts: Uint8Array[] = [];
   let run = 0;
   for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
+    // UTF-16 code units, not code points: the loop looks at each surrogate on its own
+    const c = s.charCodeAt(i); // oxlint-disable-line unicorn/prefer-code-point -- see above
     if (c < SUR_LO || c > SUR_HI) continue;
-    if (c <= HIGH_END && inRange(s.charCodeAt(i + 1), HIGH_END + 1, SUR_HI)) { i++; continue; }
+    if (c <= HIGH_END && inRange(s.charCodeAt(i + 1), HIGH_END + 1, SUR_HI)) { i++; continue; } // oxlint-disable-line unicorn/prefer-code-point -- see above
     if (c < ESCAPE_LO || c > ESCAPE_HI) throw fail('bad_request', `${what}: lone surrogate U+${c.toString(16).toUpperCase()} is no byte sequence`, { what });
     parts.push(te.encode(s.slice(run, i)), Uint8Array.of(c - ESCAPE));
     run = i + 1;
@@ -67,13 +91,18 @@ export function encodeBytes(s, what = 'string') {
 
 // Text that arrives in pieces (sideband band 2, ssh stderr): a sequence cut by a frame boundary waits in `carry` for its
 // tail instead of decoding as two U+FFFD. Pure: returns { text, carry }.
-export function decodeChunk(carry, chunk) {
-  const buf = carry.length ? concat([carry, chunk]) : chunk;
+export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: string; carry: Uint8Array } {
+  const buf = carry.length > 0 ? concat([carry, chunk]) : chunk;
   let cut = buf.length;
   for (let k = 1; k <= 3 && k <= buf.length; k++) {
-    const c = buf[buf.length - k];
+    const c = buf[buf.length - k] ?? 0;
     if (c < ASCII_END) break;
-    if (c >= LEAD2) { if (k < (c >= LEAD4 ? 4 : c >= LEAD3 ? 3 : 2)) cut = buf.length - k; break; }
+    if (c >= LEAD2) {
+      let need = 2;
+      if (c >= LEAD3) need = c >= LEAD4 ? 4 : 3;
+      if (k < need) cut = buf.length - k;
+      break;
+    }
   }
   return { text: td.decode(buf.subarray(0, cut)), carry: buf.slice(cut) };
 }
@@ -84,30 +113,24 @@ export function decodeChunk(carry, chunk) {
  * trusted that view accepted truncated fields (the tree-oid off-by-one). `take` throws the typed short-read error
  * instead, so the length is the bound.
  */
-export function take(buf, off, n, code = 'pack_corrupt') {
+export function take(buf: Uint8Array | null | undefined, off: number, n: number, code: Code = 'pack_corrupt'): Uint8Array {
   const len = buf?.length ?? 0;
-  if (!Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) {
+  // `!buf` refuses take(absent, 0, 0), the one absent buffer the length check let through (no caller passes one)
+  if (!buf || !Number.isInteger(off) || !Number.isInteger(n) || off < 0 || n < 0 || off + n > len) {
     throw fail(code, `short read: need ${n} bytes at ${off}, have ${len}`);
   }
   return buf.subarray(off, off + n);
 }
 
-export function concat(parts) {
-  let n = 0;
-  for (const p of parts) n += p.length;
-  const out = new Uint8Array(n);
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-}
 
 
 // First index of needle in hay at or after from; -1 if none.
-export function indexOfBytes(hay, needle, from = 0) {
+export function indexOfBytes(hay: Uint8Array, needle: Uint8Array, from = 0): number {
   const n = needle.length;
   if (n === 0) return from;
+  const first = needle[0];
   // Stryker disable next-line ArithmeticOperator: an end index past hay only reads undefined, which is never a needle byte
-  const first = needle[0], last = hay.length - n;
+  const last = hay.length - n;
   outer: for (let i = from; i <= last; i++) {
     if (hay[i] !== first) continue;
     for (let j = 1; j < n; j++) if (hay[i + j] !== needle[j]) continue outer;
@@ -117,6 +140,6 @@ export function indexOfBytes(hay, needle, from = 0) {
   return -1;
 }
 
-export function bytesOf(x) {
+export function bytesOf(x: string | Uint8Array): Uint8Array {
   return typeof x === 'string' ? te.encode(x) : x;
 }

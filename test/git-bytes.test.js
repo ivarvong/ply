@@ -287,9 +287,9 @@ test('src/ constructs TextDecoder and TextEncoder only in bytes.js', () => {
   const dir = new URL('../src/', import.meta.url);
   const found = [];
   for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.js')) continue;
+    if (!/\.[jt]s$/.test(f)) continue;
     const text = readFileSync(new URL(f, dir), 'utf8');
     for (const m of text.matchAll(/new Text(De|En)coder\(([^)]*)\)/g)) found.push(`${f}: ${m[0]}`);
   }
-  assert.deepEqual(found, ["bytes.js: new TextEncoder()", "bytes.js: new TextDecoder('utf-8', { ignoreBOM: true })", "bytes.js: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })"]);
+  assert.deepEqual(found, ["bytes.ts: new TextEncoder()", "bytes.ts: new TextDecoder('utf-8', { ignoreBOM: true })", "bytes.ts: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })"]);
 });
