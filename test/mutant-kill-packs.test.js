@@ -327,3 +327,31 @@ test('inflateResult converts only its own STOP: a bug inside the block loop prop
   errOf(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xfe, 0x41), 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
   assert.equal(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xff, 0x41), 0, { raw: true }).value.out[0], 0x41);
 });
+
+test('readOfsDelta: an empty buffer is a short read, not offset 0', () => {
+  assert.equal(errOf(readOfsDeltaResult(new Uint8Array(0), 0), 'pack_corrupt', 'short read: need 1 bytes at 0, have 0').reason, 'short_read');
+  assert.equal(errOf(readOfsDeltaResult(Uint8Array.of(1, 2), 2), 'pack_corrupt', 'short read: need 1 bytes at 2, have 2').reason, 'short_read');
+});
+
+// The bit reader must not read a byte it does not need: a stored block drops the bits left in the current byte and reads
+// its LEN at the next byte boundary, so one byte read ahead is one byte lost. Every count of bits left over by the block
+// before it (8 here, by 0..7 nine-bit literals), against zlib.
+test('inflate: a stored block after a fixed one, at every leftover bit count, equals zlib', () => {
+  for (let k = 0; k < 8; k++) {
+    const bitsOut = [];
+    const put = (v, n) => { for (let i = 0; i < n; i++) bitsOut.push((v >> i) & 1); };
+    const putCode = (code, n) => { for (let i = n - 1; i >= 0; i--) bitsOut.push((code >> i) & 1); }; // Huffman codes MSB first
+    put(0, 1); put(1, 2); // not final, fixed
+    for (let i = 0; i < k; i++) putCode(0b110010000 + (0x90 - 144), 9); // literal 0x90: 9-bit code 110010000 + (lit - 144)
+    putCode(0, 7); // end of block (256): 7-bit 0000000
+    put(1, 1); put(0, 2); // final, stored
+    while (bitsOut.length % 8) bitsOut.push(0);
+    const head = Uint8Array.from({ length: bitsOut.length / 8 }, (_, i) => bitsOut.slice(i * 8, i * 8 + 8).reduce((a, b, j) => a | (b << j), 0));
+    const raw = concat([head, Uint8Array.of(2, 0, 0xfd, 0xff, 0x5a, 0x59)]);
+    const want = zlib.inflateRawSync(raw);
+    const got = inflateResult(raw, 0, { raw: true });
+    assert.equal(got.ok, true, `k=${k}: ${got.error?.message}`);
+    assert.equal(Buffer.compare(Buffer.from(got.value.out), want), 0, `k=${k}`);
+    assert.equal(got.value.consumed, raw.length, `k=${k}`);
+  }
+});

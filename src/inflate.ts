@@ -241,7 +241,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
         return;
       }
       case undefined: throw bad('inflate: invalid block type');
-      // Stryker disable next-line ConditionalExpression,BlockStatement: unreachable, the compiler's exhaustiveness check
+      // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
       default: assertNever(type);
     }
   };

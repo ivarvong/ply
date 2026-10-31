@@ -86,6 +86,7 @@ export function encodeBytesResult(s: unknown, what = 'string'): Result<Uint8Arra
     if (c < SUR_LO || c > SUR_HI) continue;
     if (c <= HIGH_END && inRange(s.charCodeAt(i + 1), HIGH_END + 1, SUR_HI)) { i++; continue; } // oxlint-disable-line unicorn/prefer-code-point -- see above
     if (c < ESCAPE_LO || c > ESCAPE_HI) return fail('bad_request', `${what}: lone surrogate U+${c.toString(16).toUpperCase()} is no byte sequence`, { what });
+    // Stryker disable next-line ArithmeticOperator: c ± 0xDC00 are one byte mod 256 (0xDC00 is a multiple of 256), which is what the array keeps
     parts.push(te.encode(s.slice(run, i)), Uint8Array.of(c - ESCAPE));
     run = i + 1;
   }
