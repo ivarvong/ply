@@ -11,7 +11,7 @@ import { editFile } from '../../src/edit.js';
 import { GitHttp } from '../../src/client.js';
 import { TYPE } from '../../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.js';
+import { withLimits } from '../../src/limits.ts';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '300', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;

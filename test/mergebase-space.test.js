@@ -37,7 +37,7 @@ import { oracleRediff } from './gitversion.js';
 import { mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { createTransport } from '../src/http.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits } from '../src/limits.ts';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 

@@ -4,7 +4,7 @@ import { editFile } from '../../src/edit.js';
 import { readFile } from '../../src/read.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { GitHttp } from '../../src/client.js';
-import { withLimits } from '../../src/limits.js';
+import { withLimits } from '../../src/limits.ts';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
 import { createSshTransport } from '../../src/sshgit.js';

@@ -25,7 +25,7 @@ import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { kexInit, parseKexInit } from '../src/ssh.js';
 import { parseSshUrl, createSshTransport } from '../src/sshgit.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.ts';
 import { validateIdent, isValidatedIdent } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
 import { negotiate } from '../src/negotiate.js';

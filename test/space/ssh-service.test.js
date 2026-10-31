@@ -16,7 +16,7 @@ import { lsRefs } from '../../src/lsrefs.js';
 import { receiveCaps } from '../../src/receivecaps.js';
 import { sshPublicKey } from '../../src/sign.js';
 import { Tracer } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.js';
+import { withLimits } from '../../src/limits.ts';
 
 const TIMEOUT_MS = 8000, BOUND_MS = 5000, GIT_KILL_MS = 15000;
 const run = (cmd, args, env) => new Promise(res => {

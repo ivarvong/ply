@@ -3,9 +3,9 @@
 // Pack objects are concatenated zlib streams with no length prefix; `consumed`
 // is what positions the pack parser at the next object header.
 
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { take } from './bytes.js';
-import { DEFAULT_LIMITS, requireLimit, finiteLimit } from './limits.js';
+import { DEFAULT_LIMITS, requireLimit, finiteLimit } from './limits.ts';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ADLER_BYTES, ADLER_MOD,
   DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC, DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,

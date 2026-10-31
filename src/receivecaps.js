@@ -1,6 +1,6 @@
 // v0 receive-pack capability advertisement (GET info/refs). Only needed to check optional capabilities (atomic,
 // push-options) before relying on them; the v2 fetch path never needs it.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { parseCapabilitiesV2 } from './discover.js';

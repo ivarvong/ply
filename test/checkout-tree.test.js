@@ -14,7 +14,7 @@ import { startProxy } from './proxy.js';
 import { checkoutTree, treeFiles, canonMode } from '../src/checkout.js';
 import { checkoutDir, writeFiles } from '../src/checkout-node.js';
 import { readCommit, listTree, readFile } from '../src/read.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits } from '../src/limits.ts';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 let root, cleanup, srv, R, n = 0;

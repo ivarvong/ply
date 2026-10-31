@@ -30,7 +30,7 @@ import { readFile, listTree } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits } from '../src/limits.ts';
 
 const L = 10; // maxTreeEntries; every "over" directory holds L + 1 entries, the issue's core cell (limit = size − 1)
 const LIMITS = withLimits({ maxTreeEntries: L });

@@ -10,7 +10,7 @@
 // The 64-record hash-chain limit in scanA is modelled exactly (buckets of the per-diff class index): git's merge fails
 // there ("failed to execute internal merge"), so we answer 'undecided' — the 64/65 boundary is pinned against git.
 
-import { LIMIT_MERGE_BLOB } from './limits.js';
+import { LIMIT_MERGE_BLOB } from './limits.ts';
 
 const BINARY_SNIFF = 8000; // git's FIRST_FEW_BYTES: a NUL in the first 8000 bytes makes the merge binary (= conflict)
 const MAX_CHAIN = 64;      // xhistogram.c max_chain_length

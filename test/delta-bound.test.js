@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyDelta, parsePack, resolvePack, makeDelta } from '../src/packresolve.js';
 import { encodeVarint, encodeObjHeader, zlibDeflate } from '../src/pack.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { DEFAULT_LIMITS, withLimits } from '../src/limits.ts';
 import {
   DELTA_COPY, DELTA_COPY_MAX, PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, UINT32_BYTES,
   OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE,

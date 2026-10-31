@@ -7,7 +7,7 @@ import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckPr
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits } from '../src/limits.ts';
 import { TYPE_NAME } from '../src/objects.js';
 
 let root, cleanup, srv, n = 0;

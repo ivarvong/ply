@@ -2,7 +2,7 @@
 // so `grep '"key":"git.pack.objects"' trace.jsonl` works and the same lines can be
 // POSTed to any OTLP/HTTP collector unchanged.
 
-import { scrubError } from './errors.js';
+import { scrubError } from './errors.ts';
 
 // Platform clocks are probed, not type-checked: newer Workers compatibility dates define a `process` global whose
 // `hrtime`/`cpuUsage` exist but throw "not implemented" (found under workerd 2026-10-18, compat date 2026-10-18).

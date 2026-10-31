@@ -2,7 +2,7 @@
 // AbortSignal.any holds its sources weakly, and the timeout signal is retained only by that weak timer.
 import http from 'node:http';
 import { createTransport } from '../src/http.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits } from '../src/limits.ts';
 
 if (typeof globalThis.gc !== 'function') {
   console.error('node --expose-gc is required');

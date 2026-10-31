@@ -1,6 +1,6 @@
 // pkt-line framing. 4 hex length (inclusive) + payload. 0000 flush, 0001 delim, 0002 response-end.
 // Decoder is a pure step function over an immutable state record.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { te, concat, encodeBytes } from './bytes.js';
 import {
   PKT_LEN_HEX, PKT_HEX_BASE, PKT_FLUSH, PKT_DELIM, PKT_LEN_INVALID,

@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, fsckProblemsOf } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
-import { DEFAULT_LIMITS } from '../src/limits.js';
+import { DEFAULT_LIMITS } from '../src/limits.ts';
 
 let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });

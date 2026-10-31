@@ -3,7 +3,7 @@
 // Shape: pure decisions between thin effects. Every decision (validateSpec, decideHead, lookupEntry, buildCommitObjects,
 // memFromScan, summarize) is a function of its arguments; the effects (lsRefs, fetchObject, packStream, push) are free
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
-import { fail, isPlyCode } from './errors.js';
+import { thrown as fail, isPlyCode } from './errors.ts';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -13,7 +13,7 @@ import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident
 import { fromHex, streamingSha1 } from './sha1.js';
 import { te, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS } from './limits.ts';
 import { validateIdent, validateRef, validatePath, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 

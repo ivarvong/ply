@@ -10,8 +10,8 @@
 import { createTransport, redactUrl } from './http.js';
 import { withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
-import { fail } from './errors.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { thrown as fail } from './errors.ts';
+import { DEFAULT_LIMITS } from './limits.ts';
 
 export async function operation(op, url, { auth, tracer, parent = null, fetchImpl, limits = DEFAULT_LIMITS, signal = null, quirks, transport = null, attrs = {}, link = null, onFinish = null }, body) {
   const name = `git.${op}`;

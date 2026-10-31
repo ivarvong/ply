@@ -1,7 +1,7 @@
 // v2 negotiation: send haves in rounds without `done` until the server says ready (or we run out), then done.
 // Returns the final fetchPack result plus the rounds' acks. `external` supplies thin-pack bases.
-import { fail } from './errors.js';
-import { finiteLimit } from './limits.js';
+import { thrown as fail } from './errors.ts';
+import { finiteLimit } from './limits.ts';
 import { fetchPack } from './fetchpack.js';
 
 const NEGOTIATE_BATCH = 16;

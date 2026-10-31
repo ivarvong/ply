@@ -28,7 +28,7 @@ import { fetchObject, spInit, spStep, spFinish } from '../../src/fetch.js';
 import { fetchPack } from '../../src/fetchpack.js';
 import { inflate } from '../../src/inflate.js';
 import { hashObject, TYPE_NAME } from '../../src/objects.js';
-import { DEFAULT_LIMITS } from '../../src/limits.js';
+import { DEFAULT_LIMITS } from '../../src/limits.ts';
 import { encodeObjHeader, encodeVarint } from '../../src/pack.js';
 
 const FULL = process.env.PACK_SPACE === 'full';

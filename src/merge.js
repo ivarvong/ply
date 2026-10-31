@@ -12,7 +12,7 @@
 //                         classic Myers, which we do not port (test/fuzz/linemerge.mjs measures it). Where we succeed, the
 //                         tree is what `git merge-tree --write-tree` produces (test/merge.test.js).
 // The pure parts: threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits), uniqueObjects; linemerge.js. The effects: lsRefs, fetchObject, push.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
@@ -23,7 +23,7 @@ import { validateRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
-import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.js';
+import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.ts';
 
 const EMPTY = [];
 const same = (a, b) => (a === null && b === null) || (a !== null && b !== null && a.mode === b.mode && a.oid === b.oid);

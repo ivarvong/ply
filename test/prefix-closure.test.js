@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import zlib from 'node:zlib';
 import { te, td, concat, take } from '../src/bytes.js';
 import { fromHex } from '../src/sha1.js';
-import { fail } from '../src/errors.js';
+import { thrown as fail } from '../src/errors.ts';
 import { validateIdent } from '../src/validate.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,

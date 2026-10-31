@@ -16,8 +16,8 @@ import { createSshTransport, parseSshUrl, sshRedact, refusalCode } from '../src/
 import { nodeStream } from '../src/ssh-node.js';
 import { SshClient, hostKeyLine, hostKeyFromLine, padded, unpad, mpint, str, u32, parseKexInit, kexInit, fingerprint } from '../src/ssh.js';
 import { createTransport } from '../src/http.js';
-import { withLimits } from '../src/limits.js';
-import { retryPolicy } from '../src/errors.js';
+import { withLimits } from '../src/limits.ts';
+import { retryPolicy } from '../src/errors.ts';
 import { concat, td } from '../src/bytes.js';
 import { readFile } from '../src/read.js';
 import { editFile } from '../src/edit.js';

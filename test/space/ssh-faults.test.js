@@ -16,7 +16,7 @@ import { nodeStream } from '../../src/ssh-node.js';
 import { SshClient, hostKeyFromLine } from '../../src/ssh.js';
 import { lsRefs } from '../../src/lsrefs.js';
 import { Tracer } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.js';
+import { withLimits } from '../../src/limits.ts';
 import { concat } from '../../src/bytes.js';
 
 const TIMEOUT_MS = 4000;   // ply's requestTimeoutMs: a cell that hangs ends as `timeout`, which no cell expects

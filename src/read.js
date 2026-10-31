@@ -12,14 +12,14 @@
 // Annotated tags are peeled. `size` is known before the first content byte (the pack object header carries it), so a
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
 // or the server sends a different number of bytes than it declared: a consumer that saw `done` saw the right bytes.
-import { fail, isPlyCode } from './errors.js';
+import { thrown as fail, isPlyCode } from './errors.ts';
 import { operation } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { KIND } from './otel.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS } from './limits.ts';
 import { validateRef, validatePath } from './validate.js';
 
 const OID = /^[0-9a-f]{40}$/;

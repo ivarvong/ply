@@ -12,8 +12,8 @@ import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan,
 import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
-import { fail, scrubError } from '../src/errors.js';
+import { DEFAULT_LIMITS, withLimits } from '../src/limits.ts';
+import { thrown as fail, scrubError } from '../src/errors.ts';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
@@ -241,8 +241,8 @@ test('span naming convention: every span and attribute key in a trace follows th
 });
 
 test('error taxonomy: runtime table and documentation agree; fail refuses unknown codes', async () => {
-  const { RETRY, CODES, fail, retryPolicy, ambiguousAfterPush } = await import('../src/errors.js');
-  const { CODE_DOCS } = await import('../src/errors-doc.js');
+  const { RETRY, CODES, thrown: fail, retryPolicy, ambiguousAfterPush } = await import('../src/errors.ts');
+  const { CODE_DOCS } = await import('../src/errors-doc.ts');
   assert.deepEqual(Object.keys(CODE_DOCS).sort(), [...CODES].sort(), 'every code documented, nothing documented that does not exist');
   for (const c of CODES) assert.ok(['yes', 'no', 'fresh', 'read'].includes(RETRY[c]), c);
   assert.throws(() => fail('not_a_code', 'x'), /unknown error code/);
@@ -255,7 +255,7 @@ test('error taxonomy: runtime table and documentation agree; fail refuses unknow
 
 test('error taxonomy: every fail(\'code\') literal in src/ is in the table (static)', async () => {
   const { readdirSync, readFileSync } = await import('node:fs');
-  const { CODES } = await import('../src/errors.js');
+  const { CODES } = await import('../src/errors.ts');
   const used = new Set();
   for (const f of readdirSync('src')) if (f.endsWith('.js')) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
   for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);

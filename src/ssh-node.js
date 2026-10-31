@@ -1,5 +1,5 @@
 // node byte stream for the SSH client (not for the Workers bundle: node:net). The Workers counterpart is ssh-workers.js.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import net from 'node:net';
 export function nodeStream(host, port, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {

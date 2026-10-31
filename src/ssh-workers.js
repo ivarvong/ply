@@ -1,5 +1,5 @@
 // Cloudflare Workers byte stream for the SSH client: `connect()` from cloudflare:sockets (outbound TCP).
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { connect } from 'cloudflare:sockets';
 export async function workersStream(host, port, { timeoutMs = 30000 } = {}) {
   const sock = connect({ hostname: host, port }, { allowHalfOpen: false });

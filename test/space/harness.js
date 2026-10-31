@@ -3,8 +3,8 @@
 // PUSH_SPACE_SRC=<dir>: run the space against another copy of src/ (e.g. `git archive main src`) to see where it disagrees
 const { push } = await import(process.env.PUSH_SPACE_SRC ? `${process.env.PUSH_SPACE_SRC}/push.js` : '../../src/push.js');
 import { pktInit, pktStep, pktFinish } from '../../src/pktline.js';
-import { withLimits } from '../../src/limits.js';
-import { fail } from '../../src/errors.js';
+import { withLimits } from '../../src/limits.ts';
+import { thrown as fail } from '../../src/errors.ts';
 
 const spanStub = { set() {}, event() {} };
 const tracer = { span: async (_name, _opts, fn) => fn(spanStub) };

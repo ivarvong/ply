@@ -232,7 +232,7 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   await assert.rejects(readLog(url, { path: 'f0.txt' }, opts()), code('bad_request'), 'path is not supported');
   await assert.rejects(readLog(url, { ref: 'a..b' }, opts()), code('bad_request'));
   await assert.rejects(readLog(url, { ref: 7 }, opts()), code('bad_request'));
-  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
+  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.ts')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
 });
 
 test('readLog on blob:none: the trees are harvested; a following listTree on the same transport costs no fetch', async () => {

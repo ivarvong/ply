@@ -31,7 +31,7 @@ import { lsRefs } from '../src/lsrefs.js';
 import { fetchObject } from '../src/fetch.js';
 import { fetchPack, fetchPackTree0 } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS } from '../src/limits.ts';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1 } from '../src/sha1.js';

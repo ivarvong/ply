@@ -1,9 +1,9 @@
 // Git object encoding/decoding. All pure.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent } from './validate.js';
-import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
+import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.ts';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
   MODE_S_IFREG, MODE_S_IFLNK, MODE_OWNER_EXEC, TREE_MAX_NAME_BYTES,

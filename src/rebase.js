@@ -7,7 +7,7 @@
 //   squash      merge-base tree      target      branch tip tree      parent [target]
 //   cherry-pick commit's parent tree target      commit tree          parent [target], author+message kept
 //   revert      commit tree          target      commit's parent tree parent [target]
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { push } from './push.js';
@@ -16,7 +16,7 @@ import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attrib
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validateRef, validateIdent, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
-import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
+import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.ts';
 
 const short = r => r.replace(/^refs\/heads\//, '');
 

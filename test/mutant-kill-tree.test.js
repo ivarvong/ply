@@ -16,8 +16,8 @@ import { pkts } from '../src/pktline.js';
 import { te, td, concat, bytesOf } from '../src/bytes.js';
 import { Sha1 } from '../src/sha1.js';
 import { ZERO_OID } from '../src/push.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
-import { fail } from '../src/errors.js';
+import { DEFAULT_LIMITS, withLimits } from '../src/limits.ts';
+import { thrown as fail } from '../src/errors.ts';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 const GITLINK = 'c0ffee'.padEnd(40, '0');

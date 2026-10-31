@@ -14,7 +14,7 @@ const rediff = oracleRediff();
 import { editFile } from '../src/edit.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { mergeBranch, deleteBranch, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
-import { DEFAULT_LIMITS } from '../src/limits.js';
+import { DEFAULT_LIMITS } from '../src/limits.ts';
 import { attributesFor } from '../src/attributes.js';
 import { createTransport } from '../src/http.js';
 import { GitHttp } from '../src/client.js';

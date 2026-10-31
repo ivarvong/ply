@@ -14,7 +14,7 @@ import { filesFromDir, pushDir } from '../src/tree-node.js';
 import { encodeTree } from '../src/objects.js';
 import { concat, te } from '../src/bytes.js';
 import { fromHex } from '../src/sha1.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits } from '../src/limits.ts';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
 let root, cleanup, srv, n = 0;

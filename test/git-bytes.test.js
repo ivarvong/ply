@@ -18,7 +18,7 @@ import { writeFiles } from '../src/checkout-node.js';
 import { editFile } from '../src/edit.js';
 import { mergeBranch } from '../src/merge.js';
 import { decodeBytes, encodeBytes } from '../src/bytes.js';
-import { isPlyCode } from '../src/errors.js';
+import { isPlyCode } from '../src/errors.ts';
 import { Tracer } from '../src/otel.js';
 
 const O = (extra = {}) => ({ tracer: new Tracer(), ...extra });

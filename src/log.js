@@ -22,12 +22,12 @@
 //
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
-import { fail } from './errors.js';
+import { thrown as fail } from './errors.ts';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { parseCommit, TYPE, TYPE_NAME } from './objects.js';
-import { DEFAULT_LIMITS, requireLimit } from './limits.js';
+import { DEFAULT_LIMITS, requireLimit } from './limits.ts';
 
 export const DEFAULT_LOG_LIMIT = 20;
 const isObject = v => v !== null && typeof v === 'object';
