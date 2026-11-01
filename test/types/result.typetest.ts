@@ -22,16 +22,16 @@ const describe = (e: PlyError): string => {
     case 'push_rejected': case 'push_partial': case 'not_fast_forward':
     case 'not_linear': case 'unrelated_histories': case 'internal':
       return e.message;
-    default: return assertNever(e);
   }
+  return assertNever(e);
 };
 void describe;
 const missingCase = (e: PlyError): string => {
   switch (e.code) {
     case 'http': return 'x';
-    // @ts-expect-error not exhaustive: e is not never here
-    default: return assertNever(e);
   }
+  // @ts-expect-error not exhaustive: e is not never here
+  return assertNever(e);
 };
 void missingCase;
 

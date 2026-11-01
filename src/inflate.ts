@@ -11,7 +11,8 @@ import { DEFAULT_LIMITS, checkLimit } from './limits.js';
 import { takeResult } from './bytes.js';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ADLER_BYTES, ADLER_MOD,
-  DEFLATE_BTYPE_BITS, DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,
+  DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC,
+  DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,
   DEFLATE_BIT_TABLE, DEFLATE_LITERALS, DEFLATE_EOB, DEFLATE_LENGTH_CODES,
   DEFLATE_HLIT_BASE, DEFLATE_HLIT_BITS, DEFLATE_HDIST_BASE, DEFLATE_HDIST_BITS, DEFLATE_HCLEN_BASE, DEFLATE_HCLEN_BITS,
   DEFLATE_HLIT_MAX, DEFLATE_HDIST_MAX, DEFLATE_CODELEN_CODES, DEFLATE_CODELEN_BITS,
@@ -76,10 +77,18 @@ export type InflateStats = {
 export type Inflated = { readonly out: Uint8Array; readonly consumed: number; readonly stats: InflateStats };
 export type InflateError = ErrorOf<'pack_corrupt'> | ErrorOf<'limit_exceeded'> | ErrorOf<'bad_request'>;
 
-// A deflate block's type (BTYPE, RFC 1951 §3.2.3), indexed by its two bits: 3 is reserved, an invalid block.
+// A deflate block's type (BTYPE, RFC 1951 §3.2.3). Bit value 3 is reserved and invalid.
 export type BlockType = 'stored' | 'fixed' | 'dynamic';
-// DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC (format.ts) are these indices
-const BLOCK_TYPE: ReadonlyArray<BlockType | undefined> = ['stored', 'fixed', 'dynamic'];
+type BlockKind = BlockType | 'invalid';
+// DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC (format.ts) are BTYPE 0, 1, 2.
+const blockKind = (btype: number): BlockKind => {
+  switch (btype) {
+    case DEFLATE_STORED: return 'stored';
+    case DEFLATE_FIXED: return 'fixed';
+    case DEFLATE_DYNAMIC: return 'dynamic';
+    default: return 'invalid';
+  }
+};
 const corrupt = (msg: string): Err<ErrorOf<'pack_corrupt'>> => fail('pack_corrupt', msg);
 // the same refusal, thrown inside the block loop (below)
 const bad = (msg: string): ErrorOf<'pack_corrupt'> => plyError('pack_corrupt', msg);
@@ -195,7 +204,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
     }
   };
   // One block: its header bits are read, then its body by its type, exhaustively.
-  const block = (type: BlockType | undefined): void => {
+  const block = (type: BlockKind): void => {
     switch (type) {
       case 'stored': {
         stats.stored++;
@@ -240,10 +249,10 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
         codes(huffBuild(Array.from(lengths.subarray(0, nlen))), huffBuild(Array.from(lengths.subarray(nlen, nlen + ndist))));
         return;
       }
-      case undefined: throw bad('inflate: invalid block type');
-      // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
-      default: assertNever(type);
+      case 'invalid': throw bad('inflate: invalid block type');
     }
+    // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+    assertNever(type);
   };
 
   try {
@@ -251,7 +260,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
     do {
       if (p - start > maxInput) throw tooLong(p - start);
       last = bits(DEFLATE_BFINAL_BITS);
-      const type = BLOCK_TYPE[bits(DEFLATE_BTYPE_BITS)];
+      const type = blockKind(bits(DEFLATE_BTYPE_BITS));
       stats.blocks++;
       block(type);
     } while (!last);

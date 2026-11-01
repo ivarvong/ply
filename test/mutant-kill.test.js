@@ -1819,11 +1819,11 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: ZERO_OID }], {}), ['report-status', 'side-band-64k', 'delete-refs', 'agent=ply/0.1.0']);
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], { sideband: false, reportV2: true }, orThrow(checkPushCaps(caps('atomic', 'push-options'), { atomic: true, pushOptions: ['o'] }))), ['report-status-v2', 'atomic', 'push-options', 'agent=ply/0.1.0']);
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], {}, orThrow(checkPushCaps(caps(), {}))), ['report-status', 'side-band-64k', 'agent=ply/0.1.0']);
-  assert.equal(capsProblem(caps('atomic')), null);
+  assert.deepEqual(capsProblem(caps('atomic')), { tag: 'ok' });
   assert.deepEqual(capsProblem(caps('object-format=sha256', 'atomic'), { atomic: true }), { tag: 'objectFormat', format: 'sha256' });
   assert.deepEqual(capsProblem(caps('object-format=sha1'), { atomic: true }), { tag: 'noAtomic' });
   assert.deepEqual(capsProblem(caps('atomic'), { atomic: true, pushOptions: ['x'] }), { tag: 'noPushOptions' });
-  assert.equal(capsProblem(caps(), { pushOptions: [] }), null);
+  assert.deepEqual(capsProblem(caps(), { pushOptions: [] }), { tag: 'ok' });
   const unsup = checkPushCaps(caps('agent=x'), { pushOptions: ['x'] });
   assert.deepEqual([unsup.ok, unsup.error.code, unsup.error.message, unsup.error.caps], [false, 'unsupported', 'server does not advertise push-options', ['agent=x']]);
   assert.equal(checkPushCaps(caps('object-format=sha256')).error.message, 'server repository is object-format sha256');
