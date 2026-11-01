@@ -23,11 +23,15 @@
 //   openBlob(transport, oid, { maxBytes, follows }) → Result<{ kind:'stream', size, stream } | { kind:'too_big', size }, PlyError>
 //   readBlob(transport, oid, { maxBytes, follows }) → Result<{ kind:'bytes', data } | { kind:'too_big', size }, PlyError>
 // `too_big` is decided from the pack object header. The fetch is cancelled and no body byte is delivered.
+//
+// Errors are values inside this module (…Result functions, walkPath, openBlob, readBlob). The public entries readFile,
+// listTree, readCommit, resolveCommit and refCandidates still raise theirs (orThrow at the boundary: docs/STACK.md step 2). The
+// blob stream errors as a stream does: its pull, transform and flush raise the PlyError the consumer reads.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { thrown as fail, isPlyCode, isPlyError, orThrow, plyError } from './errors.js';
+import { fail, isPlyCode, orThrow, plyError } from './errors.js';
 import type { Miss, PlyError } from './errors.js';
-import { assertNever, err as resultErr, ok } from './result.js';
-import type { Result } from './result.js';
+import { assertNever, err, getOrElse, isSome, mapOption, none, ok, some } from './result.js';
+import type { Err, Option, Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs, parseUnbornLine, type LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
@@ -45,24 +49,30 @@ import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
-import { fetchCommit } from './commit.js';
+import { attempt, attemptSync, caughtErr, fetchCommit } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
+import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
+import type { Input } from './absent.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
-/* oxlint-disable require-await -- the entry points are async so that a throw while checking arguments is a rejection, as before */
+/* oxlint-disable require-await -- the entry points are async so that a refused argument is a rejection, as before */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 const OID = /^[0-9a-f]{40}$/;
+// null or the platform's missing value: what a caller's `ref` or `path` left out.
+const isNothing = (v: unknown): boolean => fromNullish(v).tag === 'none';
 
 // Pure: what to ask ls-refs for, and which answer wins. git's ref_rev_parse_rules minus the remote-tracking forms.
-// `ref` is the caller's, checked here: anything but null, undefined or a string is bad_request.
-export function refCandidates(ref: unknown): string[] {
-  if (ref === null || ref === undefined || ref === '' || ref === 'HEAD') return ['HEAD'];
-  if (typeof ref !== 'string') throw fail('bad_request', 'ref must be a string');
-  if (OID.test(ref)) return [];
-  if (ref.startsWith('refs/')) return [validateRef(ref)];
-  return [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`].map(r => validateRef(r));
+// `ref` is the caller's, checked here: anything but null, the missing value or a string is bad_request.
+export function refCandidatesResult(ref: unknown): Result<string[], PlyError> {
+  if (isNothing(ref) || ref === '' || ref === 'HEAD') return ok(['HEAD']);
+  if (typeof ref !== 'string') return fail('bad_request', 'ref must be a string');
+  if (OID.test(ref)) return ok([]);
+  if (ref.startsWith('refs/')) return attemptSync(() => [validateRef(ref)]);
+  return attemptSync(() => [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`].map(r => validateRef(r)));
 }
+// The throwing entry (public API until the Result cut-over).
+export const refCandidates = (ref: unknown): string[] => orThrow(refCandidatesResult(ref));
 
 // git ls-tree's object types.
 export type EntryType = 'tree' | 'commit' | 'blob';
@@ -76,22 +86,24 @@ export const lsMode = (mode: string): string => mode.padStart(6, '0');
 
 // The caller's name and the unborn target name the same branch: HEAD, the full ref, or the short branch name.
 const sameBranch = (requested: unknown, full: string): boolean => {
-  const name = requested === null || requested === undefined || requested === '' ? 'HEAD' : requested;
+  const name = isNothing(requested) || requested === '' ? 'HEAD' : requested;
   return typeof name === 'string' && (name === full || name === 'HEAD' || (!name.startsWith('refs/') && full === `refs/heads/${name}`));
 };
 
-// Effect: the unborn HEAD's target, or null when the server does not advertise ls-refs=unborn or lists no unborn line
+// Effect: the unborn HEAD's target, or None when the server does not advertise ls-refs=unborn or lists no unborn line
 // (a deleted branch, a born HEAD). discover runs only on a ref miss; the happy path never asks.
-async function unbornTarget(t: Transport): Promise<string | null> {
-  const info = await discover(t);
-  if (!info.lsRefsUnborn) return null;
-  const listed = await lsRefs(t, ['HEAD'], { unborn: parseUnbornLine });
-  const target = listed.unborn?.target;
-  return target === undefined || target === '' ? null : target;
+async function unbornTarget(t: Transport): Promise<Result<Option<string>, PlyError>> {
+  const info = await attempt(async () => discover(t));
+  if (!info.ok) return info;
+  if (!info.value.lsRefsUnborn) return ok(none);
+  const listed = await attempt(async () => lsRefs(t, ['HEAD'], { unborn: parseUnbornLine }));
+  if (!listed.ok) return listed;
+  const target = mapOption(fromNullish(listed.value.unborn), u => u.target);
+  return ok(getOrElse(target, '') === '' ? none : target);
 }
 
-// A ref as the caller names it: null/undefined/'' or 'HEAD' for the remote's HEAD, a name, or a 40-hex oid.
-export type RefSpec = string | null | undefined;
+// A ref as the caller names it: null or 'HEAD' for the remote's HEAD (as is '' or leaving it out), a name, or a 40-hex oid.
+export type RefSpec = string | null;
 export type Resolved = { readonly name: string; readonly commit: string };
 // How far a short hex string is an object id. `'off'` (the default): it is a ref name. `'advertised'`: after the name
 // misses, it is a prefix of an advertised tip.
@@ -105,70 +117,93 @@ export type AbbrevResolution =
   | { readonly kind: 'none' }
   | { readonly kind: 'ambiguous'; readonly oids: readonly string[] };
 export function resolveAbbrev(prefix: string, listed: LsRefsResult): Result<AbbrevResolution, PlyError> {
-  if (!ABBREV.test(prefix)) return resultErr(plyError('bad_request', 'abbreviated oid must be 4..39 lowercase hex', { what: 'ref' }));
+  if (!ABBREV.test(prefix)) return fail('bad_request', 'abbreviated oid must be 4..39 lowercase hex', { what: 'ref' });
   const byOid = new Map<string, string[]>();
   for (const rec of listed.refs.values()) {
-    const hits: ReadonlyArray<readonly [string, string]> = rec.peeled === undefined ? [[rec.oid, rec.name]] : [[rec.oid, rec.name], [rec.peeled, rec.name]];
+    const peeled = fromNullish(rec.peeled);
+    const hits: ReadonlyArray<readonly [string, string]> = peeled.tag === 'none' ? [[rec.oid, rec.name]] : [[rec.oid, rec.name], [peeled.value, rec.name]];
     for (const [oid, name] of hits) {
       if (!oid.startsWith(prefix)) continue;
-      const names = byOid.get(oid);
-      if (names === undefined) byOid.set(oid, [name]);
-      else if (!names.includes(name)) names.push(name);
+      const names = mapGet(byOid, oid);
+      if (names.tag === 'none') byOid.set(oid, [name]);
+      else if (!names.value.includes(name)) names.value.push(name);
     }
   }
   const oids = [...byOid.keys()].toSorted();
-  const oid = oids[0];
-  if (oid === undefined) return ok({ kind: 'none' });
+  const oid = at(oids, 0);
+  if (oid.tag === 'none') return ok({ kind: 'none' });
   if (oids.length > 1) return ok({ kind: 'ambiguous', oids });
-  return ok({ kind: 'unique_among_advertised', oid, refs: byOid.get(oid) ?? [] });
+  return ok({ kind: 'unique_among_advertised', oid: oid.value, refs: getOrElse(mapGet(byOid, oid.value), []) });
 }
 // The name missed. A unique advertised oid is that commit; more than one is bad_request; none leaves the caller to
 // report not_found. The prefix already matched ABBREV, so resolveAbbrev's own bad_request does not run.
-function advertisedCommit(prefix: string, listed: LsRefsResult): Resolved | null {
+function advertisedCommit(prefix: string, listed: LsRefsResult): Result<Option<Resolved>, PlyError> {
   const resolved = resolveAbbrev(prefix, listed);
-  if (!resolved.ok) throw resolved.error;
-  if (resolved.value.kind === 'unique_among_advertised') return { name: resolved.value.oid, commit: resolved.value.oid };
-  if (resolved.value.kind === 'ambiguous') throw fail('bad_request', `abbreviated oid ${prefix} matches ${resolved.value.oids.length} advertised objects`, { what: 'ref', got: resolved.value.oids });
-  return null;
+  if (!resolved.ok) return resolved;
+  const found = resolved.value;
+  switch (found.kind) {
+    case 'unique_among_advertised': return ok(some({ name: found.oid, commit: found.oid }));
+    case 'ambiguous': return fail('bad_request', `abbreviated oid ${prefix} matches ${found.oids.length} advertised objects`, { what: 'ref', got: found.oids });
+    case 'none': return ok(none);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(found);
 }
-// One ls-refs. `hit` is the ref name, a bare oid, or a unique advertised prefix. `cands` is the miss: the name was not
-// listed and the prefix was not unique. The abbrev refusal lives here so resolveCommit's only fail() is not_found.
-async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promise<{ readonly hit: Resolved } | { readonly cands: readonly string[] }> {
-  if (abbrev !== 'off' && abbrev !== 'advertised') throw fail('bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
-  const cands = refCandidates(ref);
-  // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it threw).
-  if (cands.length === 0 && typeof ref === 'string') return { hit: { name: ref, commit: ref } };
+// One ls-refs. `hit` is the ref name, a bare oid, or a unique advertised prefix. `miss` is the name not listed and the
+// prefix not unique. The abbrev refusal lives here so resolveCommitResult's only fail() is not_found.
+type Lookup = { readonly kind: 'hit'; readonly resolved: Resolved } | { readonly kind: 'miss'; readonly candidates: readonly string[] };
+async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promise<Result<Lookup, PlyError>> {
+  if (abbrev !== 'off' && abbrev !== 'advertised') return fail('bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
+  const named = refCandidatesResult(ref);
+  if (!named.ok) return named;
+  const cands = named.value;
+  // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it refused).
+  if (cands.length === 0 && typeof ref === 'string') return ok({ kind: 'hit', resolved: { name: ref, commit: ref } });
   // null: this call is a name. A string: the prefix, and the listing is wide enough to answer it.
   const prefix = abbrev === 'advertised' && typeof ref === 'string' && ABBREV.test(ref) ? ref : null;
-  const listed = await lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']);
+  const listing = await attempt(async () => lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']));
+  if (!listing.ok) return listing;
+  const listed = listing.value;
   for (const name of cands) {
-    const r = listed.refs.get(name);
-    if (r) return { hit: { name: name === 'HEAD' ? (listed.head ?? 'HEAD') : name, commit: r.peeled ?? r.oid } };
+    const r = mapGet(listed.refs, name);
+    if (r.tag === 'some') return ok({ kind: 'hit', resolved: { name: name === 'HEAD' ? getOrElse(fromNullish(listed.head), 'HEAD') : name, commit: getOrElse(fromNullish(r.value.peeled), r.value.oid) } });
   }
   if (prefix !== null) {
     const found = advertisedCommit(prefix, listed);
-    if (found) return { hit: found };
+    if (!found.ok) return found;
+    if (found.value.tag === 'some') return ok({ kind: 'hit', resolved: found.value.value });
   }
-  return { cands };
+  return ok({ kind: 'miss', candidates: cands });
 }
+
+export type ResolveConfig = { readonly abbrev: AbbrevMode };
+export type ResolveOptions = Input<ResolveConfig>;
 // Effect: ref → { name, commit } (annotated tags peeled; a bare oid is taken as given and checked by the commit fetch).
 // `abbrev: 'advertised'` asks once for the name's candidates plus HEAD, branches and tags, tries the name first, then
 // the prefix. `'off'` is the candidates alone. A miss is not_found, and an unborn HEAD the caller named is head_unborn.
-export async function resolveCommit(t: Transport, ref: unknown, { abbrev = 'off' }: { readonly abbrev?: AbbrevMode } = {}): Promise<Resolved> {
+export async function resolveCommitResult(t: Transport, ref: unknown, options: ResolveOptions = {}): Promise<Result<Resolved, PlyError>> {
+  const { abbrev } = withDefaults<ResolveConfig>(options, { abbrev: 'off' });
   const looked = await lookupRef(t, ref, abbrev);
-  if ('hit' in looked) return looked.hit;
-  const { cands } = looked;
-  const first = cands[0];
+  if (!looked.ok) return looked;
+  if (looked.value.kind === 'hit') return ok(looked.value.resolved);
+  const { candidates } = looked.value;
+  const head = getOrElse(at(candidates, 0), '') === 'HEAD';
   // The unborn question is a second ls-refs, and only after a miss: the advertisement is read then, and `unborn` is
   // sent only when the server lists ls-refs=unborn. A path miss never reaches here.
-  const target = await unbornTarget(t);
-  // refCandidates threw on a non-string, and a HEAD miss does not read this. The false arm stays so the type is a string.
+  const unborn = await unbornTarget(t);
+  if (!unborn.ok) return unborn;
+  // refCandidates refused a non-string, and a HEAD miss does not read this. The false arm stays so the type is a string.
   const asked = typeof ref === 'string' ? ref : '';
+  const target = unborn.value;
   let miss: Miss;
-  if (target !== null && sameBranch(ref, target)) miss = { kind: 'head_unborn', target };
-  else if (first === 'HEAD') miss = { kind: 'head_absent' };
-  else miss = { kind: 'ref', ref: asked, candidates: cands };
-  throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${asked} not found`, { miss });
+  if (target.tag === 'some' && sameBranch(ref, target.value)) miss = { kind: 'head_unborn', target: target.value };
+  else if (head) miss = { kind: 'head_absent' };
+  else miss = { kind: 'ref', ref: asked, candidates };
+  return fail('not_found', head ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${asked} not found`, { miss });
+}
+// The throwing entry (public API until the Result cut-over).
+export async function resolveCommit(t: Transport, ref: unknown, options: ResolveOptions = {}): Promise<Resolved> {
+  return orThrow(await resolveCommitResult(t, ref, options));
 }
 
 export { fetchCommit, type FetchedCommit, type CommitMiss } from './commit.js';
@@ -194,10 +229,10 @@ export type CommitView = {
   readonly message: string;
   readonly signed: boolean;
 };
-// Pure: a commit object's view.
+// Pure: a commit object's view. parseCommit (objects.ts) throws on a malformed commit; this is public API that throws.
 export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): CommitView {
   const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = parseCommit(data, limits);
-  return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message ?? '', signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
+  return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message === null ? '' : c.message, signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
 }
 
 // The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …).
@@ -208,79 +243,120 @@ export type CommitResult = CommitView & { readonly ref: string; readonly oid: st
 // An unborn HEAD (or that branch by name): git log's "does not have any commits yet". Not a not_found.
 export type EmptyCommit = { readonly empty: true; readonly ref: string };
 
-export async function readCommit(url: string, { ref = null }: { readonly ref?: RefSpec } = {}, opts: ReadOptions = {}): Promise<CommitResult | EmptyCommit> {
+// What readCommit, listTree and readFile take as their second argument. `ref: null` is the remote's HEAD.
+export type RefConfig = { readonly ref: RefSpec };
+export type ReadCommitSpec = Input<RefConfig>;
+// An unborn HEAD the caller named is a state (EmptyCommit), not a failure. Every other answer is the resolution's own.
+const unbornState = (r: Result<Resolved, PlyError>): Option<EmptyCommit> => {
+  if (r.ok || r.error.code !== 'not_found' || r.error.miss.kind !== 'head_unborn') return none;
+  return some({ empty: true, ref: r.error.miss.target });
+};
+export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: ReadOptions = {}): Promise<CommitResult | EmptyCommit> {
+  const { ref } = withDefaults<RefConfig>(spec, { ref: null });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } } as OperationOpts), async ({ t, outcome }) => {
-    let resolved: Resolved | EmptyCommit;
-    try { resolved = await resolveCommit(t, ref); } catch (e) {
-      if (!(isPlyError(e) && e.code === 'not_found' && e.miss.kind === 'head_unborn')) throw e;
-      const empty: EmptyCommit = { empty: true, ref: e.miss.target };
-      resolved = empty;
-    }
-    if ('empty' in resolved) return outcome('ok', resolved);
-    const { name, commit } = resolved;
+  return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } } as OperationOpts), async ({ t, outcome }) => {
+    const resolved = await resolveCommitResult(t, ref);
+    const empty = unbornState(resolved);
+    if (empty.tag === 'some') return outcome('ok', empty.value);
+    const { name, commit } = orThrow(resolved);
     const view = commitView(orThrow(await fetchCommit(t, commit)).data, t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
   });
 }
 
+// Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
+async function fetchTree(t: Transport, cache: TreeCache, oid: string): Promise<Result<Uint8Array, PlyError>> {
+  const fetched = await attempt(async () => fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE }));
+  if (!fetched.ok) return fetched;
+  cache.set(oid, fetched.value.data);
+  return ok(fetched.value.data);
+}
+// A failure inside a span: recorded on it (the span's own end follows), and passed on.
+const spanErr = <E>(span: Span, r: Err<E>): Err<E> => { span.error(r.error); return r; };
+
 export type Walked = { readonly tree: string; readonly entry: TreeEntry | null };
+export type WalkConfig = { readonly cache: TreeCache };
+export type WalkOptions = Input<WalkConfig>;
 // Effect: walk `comps` from a tree the caller already has. `tree` is that starting oid; `entry` is the last component
 // (null when comps is empty). A missing component or a non-directory along the way is not_found with its miss. Each
 // level is a `git.read.tree` span under the transport's parent, so a readFile/listTree walk stays on that trace.
-export async function walkPath(t: Transport, treeOid: string, comps: readonly string[], { cache = new Map<string, Uint8Array>() }: { readonly cache?: TreeCache } = {}): Promise<Result<Walked, PlyError>> {
-  let at = treeOid;
+export async function walkPath(t: Transport, treeOid: string, comps: readonly string[], options: WalkOptions = {}): Promise<Result<Walked, PlyError>> {
+  const { cache } = withDefaults<WalkConfig>(options, { cache: new Map<string, Uint8Array>() });
+  let here = treeOid;
   let entry: TreeEntry | null = null;
-  try {
-    for (const [depth, name] of comps.entries()) {
-      // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
-      entry = await t.tracer.span('git.read.tree', { parent: t.parent, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': at, 'git.read.tree.lookup': name } }, async span => {
-        let data = cache.get(at);
-        span.set({ 'git.read.tree.cache_hit': !!data });
-        if (!data) { data = (await fetchObject(t, { oid: at, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(at, data); }
-        const entries: readonly TreeEntry[] = parseTree(data, t.limits);
-        const found = entries.find(x => x.name === name);
-        span.set({ 'git.read.tree.entries': entries.length, 'git.read.tree.entry.found': !!found, 'git.read.tree.entry.mode': found?.mode ?? '' });
-        if (!found) throw fail('not_found', `path component ${name} not found`, { miss: { kind: 'path', missing: name, existingPath: comps.slice(0, depth).join('/') } });
-        if (depth < comps.length - 1 && found.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { miss: { kind: 'not_directory', path: comps.slice(0, depth + 1).join('/'), mode: found.mode } });
-        return found;
-      });
-      at = entry.oid;
-    }
-    return ok({ tree: treeOid, entry });
-  } catch (e) {
-    if (isPlyError(e)) return resultErr(e);
-    throw e;
+  for (const [depth, name] of comps.entries()) {
+    // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
+    const level = await t.tracer.span('git.read.tree', { parent: t.parent, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': here, 'git.read.tree.lookup': name } }, async (span): Promise<Result<TreeEntry, PlyError>> => {
+      const cached = mapGet(cache, here);
+      span.set({ 'git.read.tree.cache_hit': isSome(cached) });
+      const tree = cached.tag === 'some' ? ok(cached.value) : await fetchTree(t, cache, here);
+      if (!tree.ok) return spanErr(span, tree);
+      const entries = attemptSync(() => parseTree(tree.value, t.limits));
+      if (!entries.ok) return spanErr(span, entries);
+      const found = fromNullable(entries.value.find(x => x.name === name));
+      span.set({ 'git.read.tree.entries': entries.value.length, 'git.read.tree.entry.found': found.tag === 'some', 'git.read.tree.entry.mode': getOrElse(mapOption(found, f => f.mode), '') });
+      if (found.tag === 'none') return spanErr(span, fail('not_found', `path component ${name} not found`, { miss: { kind: 'path', missing: name, existingPath: comps.slice(0, depth).join('/') } }));
+      if (depth < comps.length - 1 && found.value.mode !== '40000') return spanErr(span, fail('not_found', `${name} is not a directory`, { miss: { kind: 'not_directory', path: comps.slice(0, depth + 1).join('/'), mode: found.value.mode } }));
+      return ok(found.value);
+    });
+    if (!level.ok) return level;
+    entry = level.value;
+    here = entry.oid;
   }
+  return ok({ tree: treeOid, entry });
 }
 
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
-async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Walked> {
-  const info: { readonly tree: string } = parseCommit(orThrow(await fetchCommit(t, commit)).data, limits);
-  root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.tree });
-  const walked = orThrow(await walkPath(t, info.tree, comps, { cache }));
-  return { tree: info.tree, entry: walked.entry };
+async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Result<Walked, PlyError>> {
+  const fetched = await fetchCommit(t, commit);
+  if (!fetched.ok) return fetched;
+  const info = attemptSync(() => parseCommit(fetched.value.data, limits));
+  if (!info.ok) return info;
+  root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
+  const walked = await walkPath(t, info.value.tree, comps, { cache });
+  if (!walked.ok) return walked;
+  return ok({ tree: info.value.tree, entry: walked.value.entry });
 }
 
-const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): string[] => {
-  if (allowRoot && (path === undefined || path === null || path === '' || path === '/')) return [];
-  return validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
+// A path as the entries take it: validated components. With `allowRoot`, a missing, null, empty or '/' path is the root.
+export const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): Result<string[], PlyError> => {
+  if (allowRoot && (isNothing(path) || path === '' || path === '/')) return ok([]);
+  return attemptSync(() => validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits));
 };
+
+// What listTree and readFile take as their second argument. `path: null` is the root for listTree, and refused by readFile.
+export type PathConfig = RefConfig & { readonly path: string | null };
+export type PathSpec = Input<PathConfig>;
+// The options of listTree and readFile: operation()'s, plus the caller's tree cache.
+export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: Limits };
+export type TreeReadOptions = ReadOptions & Input<TreeReadConfig>;
+// A null or missing limits record is the default, as the nullish read had it; the cache is fresh per call.
+const treeReadConfig = (options: TreeReadOptions): TreeReadConfig => ({
+  cache: getOrElse(readKey(options, 'cache'), new Map<string, Uint8Array>()),
+  limits: getOrElse(fromNullish(options.limits), DEFAULT_LIMITS),
+});
 
 export type ListEntry = { readonly name: string; readonly mode: string; readonly oid: string; readonly type: EntryType };
 export type ListResult = { readonly ref: string; readonly commit: string; readonly tree: string; readonly entries: readonly ListEntry[] };
-export async function listTree(url: string, { ref = null, path = '' }: { readonly ref?: RefSpec; readonly path?: string | null } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<ListResult> {
-  const limits = opts.limits ?? DEFAULT_LIMITS;
-  const comps = pathComps(path, limits, { allowRoot: true });
+// The listed directory: the walk's last entry when it is a tree, the root when the path was. not_found otherwise.
+function listedDir(walked: Walked, comps: readonly string[]): Result<string, PlyError> {
+  const { entry } = walked;
+  if (entry === null) return ok(walked.tree);
+  if (entry.mode !== '40000') return fail('not_found', `${comps.join('/')} is not a directory (mode ${entry.mode})`, { miss: { kind: 'not_directory', path: comps.join('/'), mode: entry.mode } });
+  return ok(entry.oid);
+}
+export async function listTree(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<ListResult> {
+  const { ref, path } = withDefaults<PathConfig>(spec, { ref: null, path: '' });
+  const { cache, limits } = treeReadConfig(options);
+  const comps = orThrow(pathComps(path, limits, { allowRoot: true }));
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('ls_tree', url, ({ ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
-    const { name, commit } = await resolveCommit(t, ref);
+  return operation('ls_tree', url, ({ ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+    const { name, commit } = orThrow(await resolveCommitResult(t, ref));
     // the tracer operation() started the root span on (opts.tracer)
-    const { tree, entry } = await walk(t, root, { commit, comps, cache, limits });
-    if (entry && entry.mode !== '40000') throw fail('not_found', `${comps.join('/')} is not a directory (mode ${entry.mode})`, { miss: { kind: 'not_directory', path: comps.join('/'), mode: entry.mode } });
-    const oid = entry ? entry.oid : tree;
-    let data = cache.get(oid);
-    if (!data) { data = (await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE })).data; cache.set(oid, data); }
+    const walked = orThrow(await walk(t, root, { commit, comps, cache, limits }));
+    const oid = orThrow(listedDir(walked, comps));
+    const cached = mapGet(cache, oid);
+    const data = cached.tag === 'some' ? cached.value : orThrow(await fetchTree(t, cache, oid));
     const entries: readonly TreeEntry[] = parseTree(data, limits);
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
   });
@@ -294,21 +370,26 @@ export type FileResult = {
   readonly size: number;
   readonly stream: ReadableStream<Uint8Array>;
 };
+// The file's entry: a symlink's blob is its target (what `git show <ref>:<path>` prints); a directory has no blob, and a
+// gitlink has none in this repository.
+function fileEntry(entry: TreeEntry, comps: readonly string[]): Result<TreeEntry, PlyError> {
+  if (entry.mode === '40000') return fail('not_found', `${comps.join('/')} is a directory`, { miss: { kind: 'is_directory', path: comps.join('/'), tree: entry.oid } });
+  if (entry.mode === '160000') return fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`, { miss: { kind: 'submodule', path: comps.join('/'), commit: entry.oid } });
+  return ok(entry);
+}
 // The root span ends when the stream is open (size known); the content's own span, `git.read.blob`, ends when the
 // stream does, with the bytes delivered and whether the oid verified. It outlives the root, so it is not the root's child
 // but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
-export async function readFile(url: string, { ref = null, path }: { readonly ref?: RefSpec; readonly path?: string } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<FileResult> {
-  const limits = opts.limits ?? DEFAULT_LIMITS;
-  const comps = pathComps(path, limits, { allowRoot: false });
+export async function readFile(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<FileResult> {
+  const { ref, path } = withDefaults<PathConfig>(spec, { ref: null, path: null });
+  const { cache, limits } = treeReadConfig(options);
+  const comps = orThrow(pathComps(path, limits, { allowRoot: false }));
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read', url, ({ ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
-    const { name, commit } = await resolveCommit(t, ref);
+  return operation('read', url, ({ ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+    const { name, commit } = orThrow(await resolveCommitResult(t, ref));
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const entry = (await walk(t, root, { commit, comps, cache, limits })).entry as TreeEntry;
-    // a symlink's blob is its target (what `git show <ref>:<path>` prints); a gitlink has no blob in this repository
-    if (entry.mode === '40000') throw fail('not_found', `${comps.join('/')} is a directory`, { miss: { kind: 'is_directory', path: comps.join('/'), tree: entry.oid } });
-    if (entry.mode === '160000') throw fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`, { miss: { kind: 'submodule', path: comps.join('/'), commit: entry.oid } });
+    const entry = orThrow(fileEntry(orThrow(await walk(t, root, { commit, comps, cache, limits })).entry as TreeEntry, comps));
     // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
     const opened = orThrow(await openBlob(t, entry.oid, { follows: root }));
     return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: opened.size, stream: opened.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': opened.size, 'git.read.blob.mode': entry.mode });
@@ -318,12 +399,41 @@ export async function readFile(url: string, { ref = null, path }: { readonly ref
 export type BlobStream = { readonly kind: 'stream'; readonly size: number; readonly stream: ReadableStream<Uint8Array> };
 export type BlobTooBig = { readonly kind: 'too_big'; readonly size: number };
 export type OpenedBlob = BlobStream | BlobTooBig;
-export type BlobOpts = { readonly maxBytes?: number; readonly follows?: Span };
+// `maxBytes`: the declared size above which the blob is too_big (left out: no cap). `follows`: the span the stream
+// follows (null: none).
+export type BlobConfig = { readonly maxBytes: number; readonly follows: Span | null };
+export type BlobOpts = Input<BlobConfig>;
+// The options without a cap: the answer is always a stream.
+export type FollowOpts = Input<Pick<BlobConfig, 'follows'>>;
+export type CappedOpts = Pick<BlobConfig, 'maxBytes'> & FollowOpts;
 
 // The fail-site recorder (test/space/failsite-hook.mjs) installs this only when PLY_FAILSITES is set. A guard, not a
 // cast: under the hook the value is a function and the property is absent otherwise, so the call is a no-op in a bundle.
 const FAIL_SITE = Symbol.for('ply.failsite');
 const isFailSiteRecorder = (v: unknown): v is (holder: (e: unknown) => unknown) => void => typeof v === 'function';
+type BodyState = Extract<SpState, { readonly phase: 'body' }>;
+// A pull of the pack stream, or a parser step, as a value: what it threw is the failure (failHere classifies it).
+const nextChunk = async (it: AsyncIterator<Uint8Array>): Promise<Result<IteratorResult<Uint8Array>, unknown>> => {
+  try { return ok(await it.next()); } catch (e) { return err(e); }
+};
+const stepHeader = (sp: SpState, chunk: Uint8Array): Result<ReturnType<typeof spStep>, unknown> => {
+  try { return ok(spStep(sp, chunk)); } catch (e) { return err(e); }
+};
+// Effect: pull until the object header is read (→ type and size). The zlib bytes after it go to `early`.
+async function blobHeader(it: AsyncIterator<Uint8Array>, early: Uint8Array[]): Promise<Result<BodyState, unknown>> {
+  let sp: SpState = spInit();
+  while (sp.phase !== 'body') {
+    const next = await nextChunk(it);
+    if (!next.ok) return next;
+    if (next.value.done === true) return err(plyError('pack_corrupt', 'pack ended before the object header'));
+    const r = stepHeader(sp, next.value.value);
+    if (!r.ok) return r;
+    sp = r.value.state;
+    early.push(...r.value.zlib);
+  }
+  if (sp.type !== TYPE.BLOB) return err(plyError('pack_corrupt', `expected blob, got ${getOrElse<string | number>(fromNullish((TYPE_NAME as TypeNames)[sp.type]), sp.type)}`));
+  return ok(sp);
+}
 // Effect: one blob on the caller's transport. Reads the pack until the object header (→ size). A declared size above
 // `maxBytes` is `{ kind: 'too_big' }`: the fetch is cancelled and no body byte is delivered (`git.read.blob.header_only`).
 // Otherwise the zlib bytes go through DecompressionStream and a verifying transform. The transform releases every chunk
@@ -333,20 +443,25 @@ const isFailSiteRecorder = (v: unknown): v is (holder: (e: unknown) => unknown) 
 // `follows` is the span the stream follows (the read root, or git.checkout.blobs): the consumer reads after it returns.
 // The tracer is the transport's. Header and cap failures are a Result; a bad `maxBytes` is too. Without `maxBytes` the
 // result is a stream (a cap is the only way the header refuses the blob).
-export function openBlob(t: Transport, oid: string, opts?: { readonly follows?: Span }): Promise<Result<BlobStream, PlyError>>;
-export function openBlob(t: Transport, oid: string, opts: { readonly maxBytes: number; readonly follows?: Span }): Promise<Result<OpenedBlob, PlyError>>;
-export async function openBlob(t: Transport, oid: string, { maxBytes, follows }: BlobOpts = {}): Promise<Result<OpenedBlob, PlyError>> {
-  if (maxBytes !== undefined && (!Number.isInteger(maxBytes) || maxBytes < 0)) return resultErr(plyError('bad_request', 'maxBytes must be an integer >= 0', { what: 'maxBytes' }));
-  const span = t.tracer.start('git.read.blob', { ...(follows ? { follows } : {}), attrs: { 'git.read.blob.oid': oid } });
+export function openBlob(t: Transport, oid: string, ...opts: [] | [FollowOpts]): Promise<Result<BlobStream, PlyError>>;
+export function openBlob(t: Transport, oid: string, opts: CappedOpts): Promise<Result<OpenedBlob, PlyError>>;
+export function openBlob(t: Transport, oid: string, opts: BlobOpts): Promise<Result<OpenedBlob, PlyError>>;
+export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): Promise<Result<OpenedBlob, PlyError>> {
+  // A given maxBytes is checked, null included (a cap the caller passed); only leaving it out is no cap.
+  const cap = readKey(opts, 'maxBytes');
+  if (cap.tag === 'some' && (!Number.isInteger(cap.value) || cap.value < 0)) return fail('bad_request', 'maxBytes must be an integer >= 0', { what: 'maxBytes' });
+  const maxBytes = getOrElse(cap, Number.POSITIVE_INFINITY);
+  const { follows } = withDefaults<Pick<BlobConfig, 'follows'>>(opts, { follows: null });
+  const span = t.tracer.start('git.read.blob', { ...(follows === null ? {} : { follows }), attrs: { 'git.read.blob.oid': oid } });
   const fetchSpan = t.tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   const it: AsyncIterator<Uint8Array> = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
-  let sp: SpState = spInit();
-  const early: Uint8Array[] = [];
+  // Close the pack stream: the read failed, was cancelled, or the cap ended it. Its own failure then is not the outcome.
+  const close = async (): Promise<void> => { if (typeof it.return === 'function') await it.return().catch(() => { /* the outcome is already decided */ }); };
   // the first of failure, cancellation and verified end records the outcome; whatever follows (a cancel aborting the
   // pump) leaves the ended spans alone
   const failHere = (e: unknown): unknown => {
     // A ply error built before this call has a stack that does not name the call, so the fail-site recorder
-    // (installed only under PLY_FAILSITES) would not see it. Absent the hook the property is undefined.
+    // (installed only under PLY_FAILSITES) would not see it. Absent the hook there is no function to call.
     const record: unknown = (globalThis as Record<symbol, unknown>)[FAIL_SITE];
     if (isFailSiteRecorder(record)) record(failHere);
     const code = thrownCodeOr(e, null);
@@ -354,33 +469,26 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
       if (!span.ended) { fetchSpan.error(e).end(); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
       return e;
     }
-    const err = fail('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
-    if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); }
-    return err;
+    const wrapped = plyError('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
+    if (!span.ended) { fetchSpan.error(wrapped).end(); span.error(wrapped).set({ 'git.read.blob.outcome': wrapped.code }).end(); }
+    return wrapped;
   };
-  try {
-    while (sp.phase !== 'body') {
-      const { value, done } = await it.next();
-      // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
-      if (done) throw fail('pack_corrupt', 'pack ended before the object header');
-      const r = spStep(sp, value); sp = r.state;
-      early.push(...r.zlib);
-    }
-    if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${(TYPE_NAME as TypeNames)[sp.type] ?? sp.type}`);
-  } catch (e) {
-    await it.return?.().catch(() => { /* the read already failed */ });
-    const err = failHere(e);
-    if (isPlyError(err)) return resultErr(err);
-    throw err;
+  const early: Uint8Array[] = [];
+  const header = await blobHeader(it, early);
+  if (!header.ok) {
+    await close();
+    const e = header.error;
+    return caughtErr(failHere(e));
   }
-  const size = sp.size;
+  let sp: SpState = header.value;
+  const size = header.value.size;
   span.set({ 'git.read.blob.size': size });
   // The cap is the declared size. Bytes already in the packet that completed the header stay unread by the consumer;
   // the iterator is closed so nothing further is pulled.
-  if (maxBytes !== undefined && size > maxBytes) {
+  if (size > maxBytes) {
     span.set({ 'git.read.blob.header_only': true, 'git.read.blob.outcome': 'too_big' }).end();
     fetchSpan.end();
-    await it.return?.().catch(() => { /* the size cap ended the read */ });
+    await close();
     return ok({ kind: 'too_big', size });
   }
   const ds = new DecompressionStream('deflate');
@@ -389,7 +497,7 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
     for (const z of early) await writer.write(bufferSource(z));
     for (;;) {
       const { value, done } = await it.next();
-      // oxlint-disable-next-line typescript/strict-boolean-expressions -- see above
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) break;
       const r = spStep(sp, value); sp = r.state;
       for (const z of r.zlib) await writer.write(bufferSource(z));
@@ -400,27 +508,28 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
   })();
   // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
   // verify transform's flush never runs then (its catch is unreachable), so the failure is recorded here.
-  pump.catch(async (e: unknown) => { const err = failHere(e); await writer.abort(err).catch(() => { /* already failing */ }); await it.return?.().catch(() => { /* already failing */ }); });
+  pump.catch(async (e: unknown) => { const failed = failHere(e); await writer.abort(failed).catch(() => { /* already failing */ }); await close(); });
   const sha = streamingSha1();
   await sha.update(objectHeader('blob', size));
   let seen = 0;
   // The latest inflate chunk. An empty chunk is not a chunk: releasing the real tail because a zero-length piece
   // arrived would finish the body before the hash and the trailer were checked.
   let held: Uint8Array | null = null;
+  // The stream edge: a transform or flush that throws errors the stream, which is how the consumer is told.
   const verify = new TransformStream<Uint8Array, Uint8Array>({
     async transform(chunk, ctl) {
       if (chunk.byteLength === 0) return;
       seen += chunk.length;
-      if (seen > size) throw failHere(fail('pack_corrupt', `server streamed more than the ${size} bytes it declared`));
+      if (seen > size) throw failHere(plyError('pack_corrupt', `server streamed more than the ${size} bytes it declared`));
       await sha.update(chunk);
       if (held) ctl.enqueue(held);
       held = chunk;
     },
     async flush(ctl) {
       try { await pump; } catch (e) { throw failHere(e); }
-      if (seen !== size) throw failHere(fail('pack_corrupt', `inflated ${seen} != declared ${size}`));
+      if (seen !== size) throw failHere(plyError('pack_corrupt', `inflated ${seen} != declared ${size}`));
       const got = await sha.hex();
-      if (got !== oid) throw failHere(fail('pack_corrupt', `blob content hashes to ${got}, not ${oid}`));
+      if (got !== oid) throw failHere(plyError('pack_corrupt', `blob content hashes to ${got}, not ${oid}`));
       if (held) ctl.enqueue(held);
       held = null;
       span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.outcome': 'ok' }).end();
@@ -440,7 +549,7 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
     async cancel(reason) {
       if (!span.ended) { fetchSpan.end(); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.outcome': 'cancelled' }).end(); }
       await inner.cancel(reason).catch(() => { /* cancelling: the outcome is recorded */ });
-      await it.return?.().catch(() => { /* cancelling: the outcome is recorded */ });
+      await close();
     },
   }, { highWaterMark: 0 });
   return ok({ kind: 'stream', size, stream });
@@ -448,19 +557,20 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
 
 export type BlobData = { readonly kind: 'bytes'; readonly data: Uint8Array<ArrayBuffer> };
 // Effect: openBlob, then the whole verified stream. A stream that errors is that error; `too_big` is not read.
-export function readBlob(t: Transport, oid: string, opts?: { readonly follows?: Span }): Promise<Result<BlobData, PlyError>>;
-export function readBlob(t: Transport, oid: string, opts: { readonly maxBytes: number; readonly follows?: Span }): Promise<Result<BlobData | BlobTooBig, PlyError>>;
-export async function readBlob(t: Transport, oid: string, { maxBytes, follows }: BlobOpts = {}): Promise<Result<BlobData | BlobTooBig, PlyError>> {
-  const opened = maxBytes === undefined
-    ? await openBlob(t, oid, follows === undefined ? undefined : { follows })
-    : await openBlob(t, oid, follows === undefined ? { maxBytes } : { maxBytes, follows });
+export function readBlob(t: Transport, oid: string, ...opts: [] | [FollowOpts]): Promise<Result<BlobData, PlyError>>;
+export function readBlob(t: Transport, oid: string, opts: CappedOpts): Promise<Result<BlobData | BlobTooBig, PlyError>>;
+export function readBlob(t: Transport, oid: string, opts: BlobOpts): Promise<Result<BlobData | BlobTooBig, PlyError>>;
+export async function readBlob(t: Transport, oid: string, opts: BlobOpts = {}): Promise<Result<BlobData | BlobTooBig, PlyError>> {
+  // The general overload: a caller's options may or may not carry a cap.
+  const open: (t: Transport, oid: string, opts: BlobOpts) => Promise<Result<OpenedBlob, PlyError>> = openBlob;
+  const opened = await open(t, oid, opts);
   if (!opened.ok) return opened;
   switch (opened.value.kind) {
     case 'too_big': return ok(opened.value);
     case 'stream': {
       const parts: Uint8Array[] = [];
       try { for await (const chunk of opened.value.stream) parts.push(chunk); }
-      catch (e) { if (isPlyError(e)) return resultErr(e); throw e; }
+      catch (e) { return caughtErr(e); }
       return ok({ kind: 'bytes', data: concat(parts) });
     }
   }

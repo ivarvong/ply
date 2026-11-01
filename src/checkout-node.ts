@@ -18,7 +18,8 @@
 // path'), so nothing is ever written through a link. Files are opened O_CREAT|O_EXCL ('wx'), which neither follows a symlink nor overwrites; symlink()
 // never replaces. A stream that fails (a blob that does not hash to its oid) removes its file before the error is
 // returned as Err; a checkout that returns Err leaves `dir` partial. A filesystem error that is not EILSEQ is
-// `unsupported` (kind: filesystem). checkoutTree is unmigrated and still throws; a PlyError from it is returned as Err.
+// `unsupported` (kind: filesystem). checkoutTree is a public entry and still throws (until the Result cut-over); a
+// PlyError from it is returned as Err.
 import { mkdir, readdir, lstat, open, symlink, unlink } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a checkout path throughout this file
 import { join } from 'node:path';
@@ -92,10 +93,13 @@ async function emptyDir(dir: string): Promise<Result<true, WithKind<ErrorOf<'bad
   return ok(true);
 }
 
-// Effect: read a stream into one buffer, at most `max` bytes (a symlink target).
-async function slurp(stream: ReadableStream<Uint8Array>, max: number): Promise<Result<Uint8Array<ArrayBuffer>, WithKind<ErrorOf<'limit_exceeded'>, 'symlink_target'>>> {
+// Effect: read a stream into one buffer, at most `max` bytes (a symlink target). A stream that errors (a blob that does
+// not hash to its oid) is that error as an Err, like a regular file's.
+async function slurp(stream: ReadableStream<Uint8Array>, max: number, path: string): Promise<Result<Uint8Array<ArrayBuffer>, WriteFilesError>> {
   const parts: Uint8Array[] = []; let n = 0;
-  for await (const c of stream) { n += c.length; if (n > max) return kinded(limitError('symlink target', n, max), 'symlink_target'); parts.push(c); }
+  try {
+    for await (const c of stream) { n += c.length; if (n > max) return kinded(limitError('symlink target', n, max), 'symlink_target'); parts.push(c); }
+  } catch (e) { return caught(e, path); }
   return ok(concat(parts));
 }
 
@@ -136,7 +140,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
   if (!ready.ok) return ready;
   const made = new Set(['']);
   const out = { files: 0, bytes: 0, symlinks: 0, gitlinks: 0 };
-  // Pull by hand: a blob that fails before the entry is yielded throws from next(), and that throw is an Err.
+  // Pull by hand: a blob that fails before the entry is yielded rejects next(), and that rejection is an Err.
   // for-await would nest the body one level deeper than the depth cap.
   const iter = files[Symbol.asyncIterator]();
   const stop = async (r: Err<WriteFilesError>): Promise<Err<WriteFilesError>> => { if (iter.return) await iter.return(); return r; };
@@ -164,7 +168,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     // a regular file or a symlink: checkoutTree streams every entry that is not a gitlink (CheckoutFile)
     const stream = f.stream;
     if (f.mode === MODE_LINK) {
-      const target = await slurp(stream, maxObject);
+      const target = await slurp(stream, maxObject, f.path);
       if (!target.ok) return stop(target);
       const linked = await symlink(Buffer.from(target.value.buffer, target.value.byteOffset, target.value.length), full).then(() => ok(true), (e: unknown): Result<true, WriteFilesError> => {
         if (thrownCodeIs(e, 'EEXIST')) return kinded(collision(f.path, 'already exists').error, 'collision');
@@ -187,7 +191,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     try {
       for await (const c of stream) { let o = 0; while (o < c.length) o += (await fh.write(c, o, c.length - o)).bytesWritten; out.bytes += c.length; }
     } catch (e) {
-      await fh.close(); await unlink(full).catch(() => { /* failing: the write error is the one reported */ });
+      await fh.close().catch(() => { /* failing: the write error is the one reported */ }); await unlink(full).catch(() => { /* failing: the write error is the one reported */ });
       return stop(caught(e, f.path));
     }
     try { await fh.close(); }
@@ -199,7 +203,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
 
 export type CheckoutDirResult = Omit<CheckoutResult, 'files'> & { readonly written: Written };
 // dir is this function's own refusal. Everything else is writeFiles, or a PlyError checkoutTree still throws
-// (checkout.ts is unmigrated). A non-PlyError from checkoutTree is returned as kind filesystem.
+// (a public entry, until the Result cut-over). A non-PlyError from checkoutTree is returned as kind filesystem.
 export type CheckoutDirError = WithKind<ErrorOf<'bad_request'>, 'dir'> | WriteFilesError;
 // Absence on a pass-through field is null. ref is a name or null (the remote's HEAD). path '' is the whole tree.
 export type CheckoutDirRequest = { readonly dir: string; readonly ref: string | null; readonly path: string };
