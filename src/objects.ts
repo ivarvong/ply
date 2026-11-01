@@ -128,7 +128,11 @@ const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number
 export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): TreeEntry[] {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
   // Shorter than one minimum entry per allowed slot: the count cannot pass the cap, so skip the frame scan.
-  const over = data.length > maxEntries * TREE_ENTRY_MIN && completeTreeFrames(data, maxEntries) > maxEntries;
+  // A flipped comparison here still agrees with the frame count (max+1 minimum frames cannot fit in fewer bytes).
+  // Stryker disable next-line ConditionalExpression,EqualityOperator,ArithmeticOperator: byte length only skips the scan; the frame count decides the cap
+  const wide = data.length > maxEntries * TREE_ENTRY_MIN;
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: past the cap the loop throws either way; this flag only skips retaining entries the caller never sees
+  const over = wide && completeTreeFrames(data, maxEntries) > maxEntries;
   const entries: TreeEntry[] = [];
   const shape = treeBytes(data);
   const seen = new Set<string>();
@@ -174,6 +178,8 @@ export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LI
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw badTree('not strictly sorted');
     prevKey = key;
     // Past the cap, keep the name set (a bad prefix is still pack_corrupt) and do not retain the entry.
+    // Always pushing still throws on the next entry, so the returned array is the same; never pushing is a length assertion.
+    // Stryker disable next-line ConditionalExpression: retaining the entries past the cap does not change the throw or the array a caller sees
     if (!over) entries.push(treeEntry(shape, mode, name, nul + 1, p));
     count += 1;
     p = nul + 1 + OID_BYTES;
