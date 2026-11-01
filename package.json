@@ -127,7 +127,8 @@
     "test:mutate": "node scripts/mutate.mjs",
     "test:unit": "vitest run",
     "test:spaces": "vitest run test/space/registry.test.js",
-    "spaces": "node --import ./test/ts-resolve.mjs scripts/spaces.mjs"
+    "spaces": "node --import ./test/ts-resolve.mjs scripts/spaces.mjs",
+    "sweep": "node --import ./test/ts-resolve.mjs test/sweep/run.mjs"
   },
   "license": "MIT",
   "author": "Ivar Vong",

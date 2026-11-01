@@ -51,6 +51,7 @@
   "test/version-refname.test.js": 0,
   "test/space/registry.test.js": 2,
   "test/span-contract.test.js": 4,
+  "test/sweep/boundary.test.js": 1,
   "test/wide-limits.test.js": 12,
   "test/workerd.test.js": 12
 }
