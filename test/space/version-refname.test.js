@@ -19,6 +19,13 @@ import {
 } from './version-refname.space.js';
 import { compareVersionRefnames } from '../../src/refs.js';
 
+// The product is byte strings. An Err is a test bug, not a cell.
+function cmp(a, b, suffixes) {
+  const r = compareVersionRefnames(a, b, { suffixes });
+  if (!r.ok) throw r.error;
+  return r.value;
+}
+
 const ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
   GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0',
@@ -163,11 +170,11 @@ test('version:refname: two-name git tag -l is versioncmp, and a total listing ma
       await pool(POOL, pairs.length, async i => {
         if (wrong.length >= SHOW) return;
         const [a, b] = pairs[i];
-        const cmp = compareVersionRefnames(a, b, { suffixes: config.suffixes });
+        const ordered = cmp(a, b, config.suffixes);
         const lines = await gitPair(pairRoot, config.suffixes, a, b);
-        const want = cmp < 0 ? [a, b] : cmp > 0 ? [b, a] : null;
+        const want = ordered < 0 ? [a, b] : ordered > 0 ? [b, a] : null;
         if (!want || lines.length !== 2 || lines[0] !== want[0] || lines[1] !== want[1]) {
-          wrong.push(`${config.tag}: compare(${JSON.stringify(a)}, ${JSON.stringify(b)}) = ${cmp}, git tag -l [${lines.map(s => JSON.stringify(s)).join(', ')}]`);
+          wrong.push(`${config.tag}: compare(${JSON.stringify(a)}, ${JSON.stringify(b)}) = ${ordered}, git tag -l [${lines.map(s => JSON.stringify(s)).join(', ')}]`);
         }
       });
       if (wrong.length >= SHOW) break;
@@ -183,7 +190,7 @@ test('version:refname: two-name git tag -l is versioncmp, and a total listing ma
       const gitNames = gitList(rankRoot, config.suffixes);
       assert.equal(gitNames.length, ranked.length, `${config.tag}: git listed every tag`);
       assert.equal(new Set(gitNames).size, gitNames.length, `${config.tag}: git listed a tag twice`);
-      const plyNames = [...ranked].sort((a, b) => compareVersionRefnames(a, b, { suffixes: config.suffixes }));
+      const plyNames = [...ranked].sort((a, b) => cmp(a, b, config.suffixes));
       const at = plyNames.findIndex((name, i) => name !== gitNames[i]);
       // Pairs the two listings order differently: git's qsort and a JS sort of a cyclic versioncmp.
       // Each one is checked as two names. Two-name git is versioncmp, whichever listing placed it first.
@@ -214,11 +221,11 @@ test('version:refname: two-name git tag -l is versioncmp, and a total listing ma
         const key = `${a}\0${b}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const cmp = compareVersionRefnames(a, b, { suffixes: config.suffixes });
-        assert.notEqual(cmp, 0, `${config.tag}: ${a} and ${b}`);
+        const ordered = cmp(a, b, config.suffixes);
+        assert.notEqual(ordered, 0, `${config.tag}: ${a} and ${b}`);
         const lines = await gitPair(rankRoot, config.suffixes, a, b);
-        const want = cmp < 0 ? [a, b] : [b, a];
-        assert.deepEqual(lines, want, `${config.tag}: listings disagree on ${JSON.stringify(a)} / ${JSON.stringify(b)}; two-name git [${lines.map(s => JSON.stringify(s)).join(', ')}], compare = ${cmp}`);
+        const want = ordered < 0 ? [a, b] : [b, a];
+        assert.deepEqual(lines, want, `${config.tag}: listings disagree on ${JSON.stringify(a)} / ${JSON.stringify(b)}; two-name git [${lines.map(s => JSON.stringify(s)).join(', ')}], compare = ${ordered}`);
         inverted += 1;
       }
       listingNotes.push(`${config.tag}: ${at === -1 ? 'listing matches' : `listing differs at ${at} (${disagreed.length} pairs checked)`}`);
@@ -232,5 +239,35 @@ test('version:refname: two-name git tag -l is versioncmp, and a total listing ma
   } finally {
     rmSync(pairRoot, { recursive: true, force: true });
     rmSync(rankRoot, { recursive: true, force: true });
+  }
+});
+
+// Each refusal kind. git versioncmp is only defined on bytes: the byte strings those refusals stand next to
+// (`1`, `é`) sort the same as `git tag -l --sort=version:refname`.
+test('version:refname refusals are typed, and the byte string git sorts still matches', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-version-refname-refuse-'));
+  try {
+    initTags(dir, ['1', 'a', 'é']);
+    const gitNames = gitList(dir, []);
+    const plyNames = ['1', 'a', 'é'].sort((a, b) => cmp(a, b, []));
+    assert.deepEqual(plyNames, gitNames);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const cases = [
+    [1, 'a', undefined, 'not_string', 'left'],
+    ['a', 1, undefined, 'not_string', 'right'],
+    ['a', 'b', [1], 'not_string', 'suffix'],
+    ['\uD800', 'a', undefined, 'not_bytes', 'left'],
+    ['a', '\uD800', undefined, 'not_bytes', 'right'],
+    ['a', 'b', ['\uD800'], 'not_bytes', 'suffix'],
+    ['\udcc3\udca9', 'a', undefined, 'not_bytes', 'left'],
+  ];
+  for (const [a, b, suffixes, kind, which] of cases) {
+    const r = compareVersionRefnames(a, b, suffixes === undefined ? undefined : { suffixes });
+    assert.equal(r.ok, false, `${kind} ${which}`);
+    assert.equal(r.error.kind, kind);
+    assert.equal(r.error.which, which);
+    assert.equal(r.error.code, 'bad_request');
   }
 });
