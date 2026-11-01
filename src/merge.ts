@@ -232,7 +232,10 @@ export async function mergeBase(t: Transport, a: string, b: string, { maxDepth }
     s = searchStep(depth, top, commits, a, b);
   }
   switch (s.tag) {
-    case 'capped': throw limitError('merge-base search depth', cap, cap);
+    case 'capped': {
+      const attempted = s.depth === 0 ? 1 : s.depth * 2;
+      throw limitError('merge-base search depth', attempted, cap);
+    }
     case 'found': return { base: s.base, bases: s.bases, depth: s.depth, commits, verdict: s };
     case 'criss-cross':
     case 'unrelated': return { base: null, bases: s.bases, depth: s.depth, commits, verdict: s };

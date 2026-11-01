@@ -42,6 +42,7 @@ import { buildCommitData } from './commit-build.js';
 import type { Path } from './path.js';
 import { parsePath } from './path.js';
 import { parseRefname } from './refname.js';
+import type { Refname } from './refname.js';
 import { fromNullish } from './absent.js';
 
 const HEX40 = /^[0-9a-fA-F]{40}$/u;
