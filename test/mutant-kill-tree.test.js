@@ -1218,7 +1218,10 @@ test('openBlob: maxBytes is the declared size, and a cap does not pull the rest 
   assert.equal(big.ok, true);
   if (big.ok) assert.deepEqual(big.value, { kind: 'too_big', size: text.length });
   const cap = over.spans().find(s => s.name === 'git.read.blob');
+  const capFetch = over.spans().find(s => s.name === 'git.upload-pack fetch');
   assert.deepEqual([cap.attrs['git.read.blob.header_only'], cap.attrs['git.read.blob.outcome'], cap.attrs['git.read.blob.size']], [true, 'too_big', text.length]);
+  // the fetch span is ended (exported, status ok) when the header refuses the blob; dropping end() leaves it unexported
+  assert.equal(capFetch?.status.code, 1);
   assert.ok(over.pulls() < frames.length, `the cap pulled ${over.pulls()} of ${frames.length} frames`);
   const none = await openBlob(serve().t, oid, { maxBytes: 0 });
   assert.equal(none.ok && none.value.kind, 'too_big');
@@ -1229,18 +1232,51 @@ test('openBlob: maxBytes is the declared size, and a cap does not pull the rest 
   for (const maxBytes of [-1, 1.5, NaN]) {
     const bad = await openBlob(serve().t, oid, { maxBytes });
     assert.equal(bad.ok, false);
-    if (!bad.ok) assert.equal(bad.error.code, 'bad_request');
+    if (!bad.ok) {
+      assert.equal(bad.error.code, 'bad_request');
+      assert.equal(bad.error.message, 'maxBytes must be an integer >= 0');
+      assert.equal(bad.error.what, 'maxBytes');
+    }
   }
+  // a thrown value that already carries a ply code, and is not an Error, is rethrown: it is not a Result
+  const bare = { code: 'network', message: 'reset' };
+  await assert.rejects(openBlob(remote({ hook: async () => { throw bare; } }).transport({ tracer: new Tracer() }), oid), e => e === bare);
   const buffered = await readBlob(serve().t, oid, { maxBytes: text.length });
   assert.equal(buffered.ok, true);
-  if (buffered.ok && buffered.value.kind === 'bytes') assert.equal(td.decode(buffered.value.data), text);
+  assert.equal(buffered.ok && buffered.value.kind, 'bytes');
+  if (buffered.ok && buffered.value.kind === 'bytes') assert.deepEqual(buffered.value.data, te.encode(text));
   const capped = await readBlob(serve().t, oid, { maxBytes: 4 });
   assert.equal(capped.ok && capped.value.kind, 'too_big');
   if (capped.ok && capped.value.kind === 'too_big') assert.equal(capped.value.size, text.length);
+  // readBlob passes follows through both overloads, and a cap still wins when follows is set
+  const followed = serve();
+  const parent = followed.tracer.start('read');
+  const via = await readBlob(followed.t, oid, { follows: parent });
+  assert.equal(via.ok && via.value.kind, 'bytes');
+  if (via.ok && via.value.kind === 'bytes') assert.deepEqual(via.value.data, te.encode(text));
+  const viaSpan = followed.spans().find(s => s.name === 'git.read.blob');
+  assert.deepEqual(viaSpan.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']]), [[parent.traceId, parent.spanId, 'follows_from']]);
+  const followedCap = serve();
+  const parentCap = followedCap.tracer.start('read');
+  const viaCap = await readBlob(followedCap.t, oid, { maxBytes: 4, follows: parentCap });
+  assert.equal(viaCap.ok && viaCap.value.kind, 'too_big');
+  if (viaCap.ok && viaCap.value.kind === 'too_big') assert.equal(viaCap.value.size, text.length);
+  const capLink = followedCap.spans().find(s => s.name === 'git.read.blob');
+  assert.deepEqual(capLink.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']]), [[parentCap.traceId, parentCap.spanId, 'follows_from']]);
+  // a header refusal is the Result, not a throw from reading a value the Err does not have
+  const asCommit = await readBlob(remote({ hook: async () => packFrames(await onePack(TYPE.COMMIT, 0, '')) }).transport({ tracer: new Tracer() }), oid);
+  assert.equal(asCommit.ok, false);
+  if (!asCommit.ok) assert.equal(asCommit.error.message, 'expected blob, got commit');
   const torn = new Uint8Array(pack); torn[torn.length - 1] ^= 1;
   const lied = await readBlob(remote({ hook: async () => packFrames(torn, 8) }).transport({ tracer: new Tracer() }), oid);
   assert.equal(lied.ok, false);
   if (!lied.ok) { assert.equal(lied.error.code, 'pack_corrupt'); assert.equal(lied.value, undefined); }
+  // a body failure that is not an Error is rethrown; a ply Error from the stream is the Result
+  const cut = async function* () {
+    const all = packFrames(await onePack(TYPE.BLOB, text.length, text), 25);
+    yield all[0]; yield all[1]; throw bare;
+  };
+  await assert.rejects(readBlob(remote({ hook: async () => cut() }).transport({ tracer: new Tracer() }), oid), e => e === bare);
 });
 
 test('the details each operation stamps: prefixes, filters, nested paths, caller limits, error-code gates', async () => {
