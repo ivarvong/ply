@@ -11,9 +11,11 @@ import { pkts } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
+import { corruptCacheHit } from './cachestatus.js';
+import { assertNever } from './result.js';
+// oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1, cache)
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
-// oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1)
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
@@ -139,9 +141,17 @@ function notOurRefReason(text: string): { readonly reason: 'not_our_ref' } | und
 // (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt. Top-level so its throw is this function's.
 function refuseNonCommit(expectType: number | null, type: number, oid: string): void {
   if (expectType !== TYPE.COMMIT) return;
-  const name = nonCommitType(type);
-  if (name === null) return;
-  throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid, type: name } } });
+  const found = nonCommitType(type);
+  switch (found.tag) {
+    case 'commit':
+    case 'delta':
+    case 'invalid':
+      return;
+    case 'notCommit':
+      throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid, type: found.name } } });
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(found);
 }
 
 export const v2Init = (limits: Limits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
@@ -344,7 +354,9 @@ export const isFilterRejection = (e: unknown): boolean => {
   // sees it as the 400 it is when the server says it over HTTP.
   if (code === 'remote_error' || code === 'protocol') return isFilterRefusal(FILTER_REFUSAL_STATUS, text);
   if (code !== 'http') return false;
-  const status = (e as { readonly status?: unknown } | null)?.status;
+  if (e === null || typeof e !== 'object' || !Object.hasOwn(e, 'status')) return false;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- status is present; the http error carries it as a number
+  const status = (e as { readonly status: unknown }).status;
   return typeof status === 'number' && isFilterRefusal(status, text);
 };
 // oxlint-enable typescript/no-unsafe-type-assertion, typescript/no-base-to-string
@@ -479,7 +491,7 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
   }));
   try { return await once(false); } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
-    if ((e as Loose)?.code !== 'pack_corrupt' || (e as { cacheStatus?: unknown } | null | undefined)?.cacheStatus !== 'HIT') throw e;
+    if (!corruptCacheHit(e)) throw e;
     return once(true);
   }
 }
@@ -510,7 +522,7 @@ async function fetchWide(t: Transport, { oid, deepen, expectType, learned = fals
   }));
   try { return await once(false); } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
-    if ((e as Loose)?.code !== 'pack_corrupt' || (e as { cacheStatus?: unknown } | null | undefined)?.cacheStatus !== 'HIT') throw e;
+    if (!corruptCacheHit(e)) throw e;
     return once(true);
   }
 }

@@ -309,6 +309,16 @@ test('the exported readers: every offset of every short buffer is a typed short 
   assert.deepEqual(wrong, []);
 });
 
+// parsePack refuses type 0 and 5 before an object exists (corrupt axis, obj*.type). resolve hashes a hand-built
+// object the parser never emits, and refuses that id the same way, before the bytes are hashed.
+test('resolve refuses a type id parse never emits, before hashing', () => {
+  const data = Uint8Array.of(1);
+  const o = outcomeSync(() => resolvePack({ objects: [{ offset: 12, type: 5, size: 1, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] }));
+  assert.equal(o.tag, 'typed', JSON.stringify(o));
+  assert.equal(o.code, 'pack_corrupt');
+  assert.equal(o.message, 'pack: bad object type 5');
+});
+
 test('census', t => {
   console.log(`git ${F.version}; packs ${ALL.map(p => `${p.name}=${p.bytes.length}B`).join(' ')}`);
   console.log(`${census.cells} ply cells, ${census.oracle} cut cells judged by git index-pack (${FULL ? 'full' : 'CI subset'}), ${CORRUPT.length} corruption cells`);

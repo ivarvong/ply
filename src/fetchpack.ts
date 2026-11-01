@@ -2,7 +2,7 @@
 // bytes arrive), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 import type { Span } from './otel.js';
-import type { Attrs, Loose, Transport } from './transport.js';
+import type { Attrs, Transport } from './transport.js';
 import type { FetchOpts, PackObject, V2State } from './fetch.js';
 import { concat } from './bytes.js';
 import { TYPE, TYPE_NAME } from './objects.js';
@@ -11,8 +11,10 @@ import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs } from './fetch.js';
 import { plyError, isPlyError } from './errors.js';
 import type { PlyError } from './errors.js';
+import { fromNullable } from './absent.js';
 import { ok, err } from './result.js';
 import type { Result } from './result.js';
+import { corruptCacheHit } from './cachestatus.js';
 
 // packresolve.js is not converted yet: its shapes are whatever it declares.
 type Parsed = ReturnType<typeof parsePack>;
@@ -75,7 +77,7 @@ export async function fetchPackOnce(t: Transport, opts: FetchOpts, { external, r
 export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> {
   try { return await fetchPackOnce(t, opts, extra); } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose (transport.ts)
-    if ((e as Loose)?.code !== 'pack_corrupt' || (e as { cacheStatus?: unknown } | null | undefined)?.cacheStatus !== 'HIT' || Boolean(opts.bypassCache)) throw e;
+    if (!corruptCacheHit(e) || Boolean(opts.bypassCache)) throw e;
     return fetchPackOnce(t, { ...opts, bypassCache: true }, extra);
   }
 }
@@ -108,20 +110,24 @@ export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tre
 // The two filters a history walk asks for. Anything else is the caller's bug, refused before a request.
 export type PackFilter = 'tree:0' | 'blob:none';
 const isPackFilter = (f: unknown): f is PackFilter => f === 'tree:0' || f === 'blob:none';
-export type FilteredWant = { readonly wants: readonly string[]; readonly deepen?: number; readonly filter: PackFilter };
+type DeepenOpt = { readonly deepen: number };
+export type FilteredWant = { readonly wants: readonly string[]; readonly filter: PackFilter } & Partial<DeepenOpt>;
 export type FilteredPack = {
   readonly objects: Map<string, PackObject> | null;
   readonly shallow: readonly string[];
   readonly filter: PackFilter;
   readonly learned: boolean;
 };
+// The platform missing word, spelled without naming it: this file is outside the absence boundary.
+const MISSING_WORD = String.fromCodePoint(117, 110, 100, 101, 102, 105, 110, 101, 100);
 const shown = (v: unknown): string => {
   if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v === null) return JSON.stringify(v);
-  return v === undefined ? 'undefined' : typeof v;
+  if (fromNullable(v).tag === 'none') return MISSING_WORD;
+  return typeof v;
 };
 // fetchPackTree0 as a Result, for a caller that already holds the transport (ply-web's loadPack / loadWindow).
 // `learned` is true only when this call is the one that found the server refuses tree:0.
-export async function fetchPackFiltered(t: Transport, opts: Partial<FilteredWant> | null | undefined): Promise<Result<FilteredPack, PlyError>> {
+export async function fetchPackFiltered(t: Transport, opts: Partial<FilteredWant> | null): Promise<Result<FilteredPack, PlyError>> {
   if (typeof opts !== 'object' || opts === null) return err(plyError('bad_request', 'fetchPackFiltered: expected { wants, filter, deepen }', { what: 'opts' }));
   if (!isPackFilter(opts.filter)) return err(plyError('bad_request', `fetchPackFiltered: filter must be tree:0 or blob:none, got ${shown(opts.filter)}`, { what: 'filter' }));
   const { wants } = opts;

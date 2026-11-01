@@ -14,8 +14,11 @@ export type Ident = { readonly name: string; readonly email: string; readonly ti
 export type ValidatedIdent = Ident & { readonly [VALIDATED_IDENT]: true };
 // What a caller hands validateIdent: anything, field by field.
 export type IdentInput = { readonly name?: unknown; readonly email?: unknown; readonly time?: unknown; readonly tz?: unknown };
-type MaybeBranded = { readonly [VALIDATED_IDENT]?: unknown } | null | undefined;
-export const isValidatedIdent = (person: MaybeBranded): person is ValidatedIdent => !!person && person[VALIDATED_IDENT] === true;
+export const isValidatedIdent = (person: unknown): person is ValidatedIdent => {
+  if (typeof person !== 'object' || person === null) return false;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the brand is a symbol property, invisible on the public ident type
+  return (person as { readonly [VALIDATED_IDENT]?: unknown })[VALIDATED_IDENT] === true;
+};
 const TZ_TEXT = new RegExp(`^[+-][0-9]{${IDENT_TZ_DIGITS}}$`, 'u');
 
 export function validateIdent({ name, email, time, tz = '+0000' }: IdentInput = {}): ValidatedIdent {

@@ -1,5 +1,5 @@
 // Compile-time checks: `tsc --noEmit` must pass; every @ts-expect-error must still be an error.
-import { assertNever, match, matchKind, ok, andThen, type Result } from '../../src/result.js';
+import { assertNever, match, matchKind, matchOption, ok, some, none, optionToResult, resultToOption, transposeOptionResult, transposeResultOption, andThen, type Option, type Result } from '../../src/result.js';
 import { fail, type PlyError, type Code, type Miss } from '../../src/errors.js';
 
 const r: Result<number, PlyError> = Math.random() > 0.5 ? ok(1) : fail('timeout', 't');
@@ -22,16 +22,16 @@ const describe = (e: PlyError): string => {
     case 'push_rejected': case 'push_partial': case 'not_fast_forward':
     case 'not_linear': case 'unrelated_histories': case 'internal':
       return e.message;
-    default: return assertNever(e);
   }
+  return assertNever(e);
 };
 void describe;
 const missingCase = (e: PlyError): string => {
   switch (e.code) {
     case 'http': return 'x';
-    // @ts-expect-error not exhaustive: e is not never here
-    default: return assertNever(e);
   }
+  // @ts-expect-error not exhaustive: e is not never here
+  return assertNever(e);
 };
 void missingCase;
 
@@ -75,6 +75,18 @@ declare const opErr: OpErr;
 matchKind(opErr, { not_string: x => x.which, not_bytes: x => x.which });
 // @ts-expect-error missing not_bytes
 matchKind(opErr, { not_string: x => x.which });
+
+// Option: both tags, and it composes with Result.
+const present: Option<number> = some(1);
+const absent: Option<number> = none;
+matchOption(present, { some: n => n, none: () => 0 });
+// @ts-expect-error missing none
+matchOption(present, { some: n => n });
+const back: Result<number, 'missing'> = optionToResult(absent, 'missing');
+const dropped: Option<number> = resultToOption(back);
+const nested: Option<Result<number, 'missing'>> = transposeResultOption(ok(absent));
+const flat: Result<Option<number>, 'missing'> = transposeOptionResult(some(ok(1)));
+void dropped; void nested; void flat;
 
 // andThen unions error types
 const a = andThen(ok(1) as Result<number, 'e1'>, n => (n > 0 ? ok(String(n)) : { ok: false as const, error: 'e2' as const }));

@@ -27,20 +27,20 @@
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail, plyError, isPlyError, orThrow } from './errors.js';
-import type { Miss, PlyError } from './errors.js';
-import { ok, err } from './result.js';
+import type { CommitMiss, PlyError } from './errors.js';
+import { fromNullable } from './absent.js';
+import { assertNever, ok, err } from './result.js';
 import type { Result } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
-import { parseCommit, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
+import { parseCommit, TYPE, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, requireLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import { thrownCode, thrownReason } from './boundary.js';
-import type { TypeNames } from './boundary.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
@@ -87,11 +87,22 @@ async function fetchWindow(t: Transport, commit: string, limit: number): Promise
   }
   const want = r.objects?.get(commit);
   if (want && want.type !== TYPE.COMMIT) {
-    const name = nonCommitType(want.type);
-    const shown = (TYPE_NAME as TypeNames)[want.type] ?? want.type;
-    // A resolved object is a tree, blob, or tag. Anything else still has to carry a miss; it is not a commit the server stored.
-    const miss: Miss = name === null ? { kind: 'commit', miss: { kind: 'absent', oid: commit } } : { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: name } };
-    throw fail('not_found', `${commit} is not a commit (${shown})`, { miss });
+    const found = nonCommitType(want.type);
+    const detail = ((): { readonly shown: string; readonly miss: CommitMiss } => {
+      switch (found.tag) {
+        case 'notCommit':
+          return { shown: found.name, miss: { kind: 'not_commit', oid: commit, type: found.name } };
+        case 'delta':
+          return { shown: found.name, miss: { kind: 'absent', oid: commit } };
+        case 'commit':
+          return { shown: 'commit', miss: { kind: 'absent', oid: commit } };
+        case 'invalid':
+          return { shown: String(want.type), miss: { kind: 'absent', oid: commit } };
+      }
+      // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(found);
+    })();
+    throw fail('not_found', `${commit} is not a commit (${detail.shown})`, { miss: { kind: 'commit', miss: detail.miss } });
   }
   return r;
 }
@@ -105,23 +116,25 @@ export type LogOnValue = {
   readonly commits: readonly LogCommit[];
   readonly truncated: boolean;
   readonly cut: boolean;
-  readonly filter: string | undefined;
+  readonly filter: string | null;
   readonly window: { readonly commits: number; readonly shallow: number };
 };
-export type LogOnSpec = { readonly commit?: unknown; readonly limit?: unknown };
+type LogOnFields = { readonly commit: unknown; readonly limit: unknown };
+export type LogOnSpec = Partial<LogOnFields>;
 // Effect: one first-parent window of `commit` on the caller's transport. Trees of a blob:none answer are harvested
 // into `t.objects`. A bad limit is bad_request; a pack that breaks the deepen contract is pack_corrupt.
-export async function logOn(t: Transport, spec: LogOnSpec | null | undefined): Promise<Result<LogOnValue, PlyError>> {
+export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Result<LogOnValue, PlyError>> {
   if (!isObject(spec)) return err(plyError('bad_request', 'logOn: the second argument must be an object ({ commit, limit })', { what: 'spec' }));
   if (typeof spec.commit !== 'string') return err(plyError('bad_request', 'logOn: commit must be a string', { what: 'commit' }));
-  // `??` would treat null as the default; a caller who passed null asked for null, which is not a limit.
-  const limit = spec.limit === undefined ? DEFAULT_LOG_LIMIT : spec.limit;
+  // A missing limit is the default. Null is not a limit: the caller passed it.
+  const givenLimit = fromNullable(spec.limit);
+  const limit = givenLimit.tag === 'none' ? DEFAULT_LOG_LIMIT : givenLimit.value;
   const commit = spec.commit;
   try {
     const cap = requireLimit(t.limits, 'maxMergeDepth');
-    // `undefined < 1` is false, so a rejected limit has to be its own comparison. null would pass `< 1` by coercion.
-    const depth = typeof limit === 'number' && Number.isSafeInteger(limit) ? limit : undefined;
-    if (depth === undefined || depth < 1 || depth > cap) return err(plyError('bad_request', `logOn: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' }));
+    // A rejected limit is not a number. Null would pass a bare `< 1` by coercion, so it stays its own case.
+    const depth = typeof limit === 'number' && Number.isSafeInteger(limit) ? limit : null;
+    if (depth === null || depth < 1 || depth > cap) return err(plyError('bad_request', `logOn: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' }));
     const r = await fetchWindow(t, commit, depth);
     const parsed = new Map<string, Parents>();
     for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) parsed.set(oid, parseCommit(o.data, t.limits));
@@ -129,7 +142,8 @@ export async function logOn(t: Transport, spec: LogOnSpec | null | undefined): P
     // every oid in the chain is a commit the pack held (logWindow walked them), so the pack and the object are there
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
     const commits = w.chain.map(oid => ({ oid, ...commitView(((r.objects as PackObjects).get(oid) as { readonly data: Uint8Array }).data, t.limits) }));
-    return ok({ commits, truncated: w.truncated, cut: w.cut, filter: r.filter, window: { commits: parsed.size, shallow: (r.shallow ?? []).length } });
+    const answered = fromNullable(r.filter);
+    return ok({ commits, truncated: w.truncated, cut: w.cut, filter: answered.tag === 'some' ? answered.value : null, window: { commits: parsed.size, shallow: (r.shallow ?? []).length } });
   } catch (e) {
     if (isPlyError(e)) return err(e);
     throw e;
