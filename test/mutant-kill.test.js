@@ -1328,6 +1328,12 @@ test('aggregate caps fail closed before allocation', async () => {
   const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
   assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
   throws(() => parseTree(twoEntries, { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  // Longer than one minimum frame, one entry: the byte hint must not treat it as past the cap.
+  const longName = 'n'.repeat(40);
+  const wideTree = encodeTree([{ mode: '100644', name: longName, oid: oid(1) }]);
+  const underCap = parseTree(wideTree, { maxTreeEntries: 1 });
+  assert.equal(underCap.length, 1);
+  assert.equal(underCap[0].name, longName);
   throws(() => parseTree(twoEntries, {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
 
   const tree = oid(1);
