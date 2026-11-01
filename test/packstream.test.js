@@ -11,7 +11,8 @@ import { deflateOpen, deflatePull, zlibDeflate, encodeObjHeader, buildPack } fro
 import { parsePack } from '../src/packresolve.js';
 import { adler32, huffBuild, DEFLATE_TABLES } from '../src/inflate.js';
 import {
-  inflate, inflateInit, inflateFeed, inflatePull, inflateEnd, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs,
+  inflate, inflateInit, inflateFeed, inflatePull, inflateEnd, inflateRelease, inflateUnread,
+  cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs,
 } from '../src/inflatestream.js';
 import {
   parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts,
@@ -24,7 +25,7 @@ import { Sha1 } from '../src/sha1.js';
 import { git, gitBuf, tmpRoot } from './server.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, PKT_MAX_SIZE, INFLATE_WINDOW, INFLATE_CHUNK,
-  SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, ZLIB_CINFO_MAX, ZLIB_WINDOW_EXPONENT, zlibBound,
+  SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_PROGRESS_KEEP, ZLIB_CINFO_MAX, ZLIB_WINDOW_EXPONENT, zlibBound,
 } from '../src/format.js';
 
 const HOLD = INFLATE_WINDOW + INFLATE_CHUNK + PKT_MAX_SIZE;
@@ -135,11 +136,10 @@ function packBits(bits) {
 }
 const litTab = huffCodes(huffBuild(Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8))));
 const distTab = huffCodes(huffBuild(Array.from({ length: 30 }, () => 5)));
-function fixed(ops) {
-  const bits = [];
+function fixed(ops, final = true, bits = []) {
   const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
   const putCode = rec => { for (let i = rec.len - 1; i >= 0; i--) bits.push((rec.code >> i) & 1); };
-  put(1, 1); put(1, 2);
+  put(final ? 1 : 0, 1); put(1, 2);
   for (const op of ops) {
     if (op.kind === 'lit') putCode(litTab.get(op.lit));
     else if (op.kind === 'match') {
@@ -280,6 +280,19 @@ test('inflate refusals name the same failures a whole member hits', () => {
   grown.fill(7, 5);
   throws(() => inflate(grown, 0, { bound: cappedBound(100), wrap: rawWrap() }), 'limit_exceeded', 'inflate: output exceeds limit 100');
   throws(() => inflate(fixed([{ kind: 'lit', lit: 97 }]), 0, rawOpts), 'pack_corrupt', 'inflate: unexpected end of input');
+  const twoBits = [];
+  fixed([{ kind: 'lit', lit: 97 }, { kind: 'eob' }], false, twoBits);
+  fixed([{ kind: 'lit', lit: 98 }, { kind: 'eob' }], true, twoBits);
+  assert.deepEqual([...inflate(packBits(twoBits), 0, rawOpts).out], [97, 98]);
+  const partial = storedBlock(Uint8Array.of(1, 2, 3, 4, 5), true);
+  const mid = must(inflateInit(rawOpts));
+  inflateFeed(mid, partial.subarray(0, 6));
+  const oneByte = must(inflatePull(mid));
+  assert.equal(oneByte.kind, 'chunk');
+  assert.equal(oneByte.bytes[0], 1);
+  const waiting = inflatePull(mid);
+  assert.equal(waiting.ok, true);
+  assert.equal(waiting.value.kind, 'need');
   throws(() => inflate(fixed([{ kind: 'match', sym: 286, extra: 0, extraBits: 0, dist: 0, distExtra: 0, distExtraBits: 0 }]), 0, rawOpts), 'pack_corrupt', 'inflate: bad length symbol');
   throws(() => inflate(fixed([{ kind: 'match', sym: 257, extra: 0, extraBits: 0, dist: 0, distExtra: 0, distExtraBits: 0 }]), 0, rawOpts), 'pack_corrupt', 'inflate: distance too far back');
   throws(() => inflate(dyn(30, 0), 0, rawOpts), 'pack_corrupt', 'inflate: bad dynamic counts');
@@ -312,6 +325,20 @@ test('a match past the zlib window is refused; the same bytes inside the window 
   throws(() => inflate(narrow, 0, { bound: cappedBound(distance + 3), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: distance too far back');
   const wide = concat([Uint8Array.of(0x78, 0x01), raw, adler]);
   assert.equal(inflate(wide, 0, { bound: cappedBound(distance + 3), wrap: zlibWrap(true) }).out.length, distance + 3);
+  // Distance equal to the declared window is still inside it. `>=` would refuse a byte the window still holds.
+  const exact = 1 << ZLIB_WINDOW_EXPONENT;
+  const at = distOf(exact);
+  const exactOps = [];
+  for (let i = 0; i < exact; i++) exactOps.push({ kind: 'lit', lit: 97 });
+  exactOps.push({ kind: 'match', sym: 257, extra: 0, extraBits: 0, dist: at.dist, distExtra: at.distExtra, distExtraBits: at.distExtraBits }, { kind: 'eob' });
+  const exactRaw = fixed(exactOps);
+  const exactOut = must(pullMember(exactRaw, { bound: cappedBound(exact + 3), wrap: rawWrap() }, exactRaw.length));
+  const exactAdler = new Uint8Array(4);
+  new DataView(exactAdler.buffer).setUint32(0, adler32(exactOut.out));
+  const atWindow = concat([Uint8Array.of(0x08, 0x1d), exactRaw, exactAdler]);
+  const kept = inflate(atWindow, 0, { bound: cappedBound(exact + 3), wrap: zlibWrap(true) });
+  assert.equal(kept.out.length, exact + 3);
+  assert.equal(kept.stats.maxDist, exact);
 });
 
 test('a pack scan at every cut matches parsePack, and git cat-file matches a non-delta object', async () => {
@@ -483,19 +510,28 @@ test('sideband demux copies the body, caps each band, and names a remote error',
   assert.equal(flush.error.message, 'sideband: flush is not a sideband frame');
   const empty = sidebandStep(st, { kind: 'data', payload: new Uint8Array(0) });
   assert.equal(empty.ok, false);
-  assert.equal(empty.error.code, 'protocol');
-  const pack = sidebandStep(st, { kind: 'data', payload: Uint8Array.of(SIDEBAND_PACK, 1, 2) });
+  assert.equal(empty.error.message, 'short read: need 1 bytes at 0, have 0');
+  const payload = Uint8Array.of(SIDEBAND_PACK, 1, 2);
+  const pack = sidebandStep(st, { kind: 'data', payload });
   assert.equal(pack.ok, true);
   assert.equal(pack.value.piece.kind, 'pack');
-  const frame = Uint8Array.of(SIDEBAND_PACK, 9, 9, 9);
-  pack.value.piece.body[0] = 0;
-  assert.equal(frame[1], 9);
+  payload[1] = 9;
+  assert.equal(pack.value.piece.body[0], 1);
+  const exact = must(sidebandInit(withLimits({ maxPackBytes: 2 })));
+  const filled = sidebandStep(exact, { kind: 'data', payload: Uint8Array.of(SIDEBAND_PACK, 1, 2) });
+  assert.equal(filled.ok, true);
+  assert.equal(filled.value.piece.kind, 'pack');
   const over = sidebandStep(pack.value.state, { kind: 'data', payload: Uint8Array.of(SIDEBAND_PACK, 1, 2, 3) });
   assert.equal(over.ok, false);
   assert.equal(over.error.message, 'pack bytes 5 exceeds limit 4');
   const progress = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PROGRESS), te.encode('hi')]) });
   assert.equal(progress.ok, true);
+  assert.equal(progress.value.piece.kind, 'progress');
   assert.equal(progress.value.piece.text, 'hi');
+  assert.equal(progress.value.state.progress, 'hi');
+  const progressRoom = must(sidebandInit(withLimits({ maxPackBytes: 2 })));
+  const progressFull = sidebandStep(progressRoom, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PROGRESS), te.encode('hi')]) });
+  assert.equal(progressFull.ok, true);
   const more = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PROGRESS), te.encode('hello')]) });
   assert.equal(more.ok, false);
   assert.equal(more.error.message, 'progress bytes 5 exceeds limit 4');
@@ -512,9 +548,102 @@ test('sideband demux copies the body, caps each band, and names a remote error',
   const other = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_ERROR), te.encode('fatal: boom')]) });
   assert.equal(other.ok, false);
   assert.equal(other.error.message, 'remote: fatal: boom');
+  assert.notEqual(other.error.reason, 'not_our_ref');
+  const prefixed = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_ERROR), te.encode('not our ref abc')]) });
+  assert.equal(prefixed.ok, false);
+  assert.equal(prefixed.error.reason, 'not_our_ref');
+  const upload = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_ERROR), te.encode('upload-pack: not our ref abc')]) });
+  assert.equal(upload.ok, false);
+  assert.equal(upload.error.reason, 'not_our_ref');
+  const uploadExact = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_ERROR), te.encode('upload-pack: not our ref')]) });
+  assert.equal(uploadExact.ok, false);
+  assert.equal(uploadExact.error.reason, 'not_our_ref');
+  const spaced = sidebandStep(st, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_ERROR), te.encode('fatal: boom\n')]) });
+  assert.equal(spaced.ok, false);
+  assert.equal(spaced.error.message, 'remote: fatal: boom');
+  const roomy = must(sidebandInit(withLimits({ maxPackBytes: SIDEBAND_PROGRESS_KEEP + 64 })));
+  const long = 'x'.repeat(SIDEBAND_PROGRESS_KEEP + 20);
+  const tail = sidebandStep(roomy, { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PROGRESS), te.encode(long)]) });
+  assert.equal(tail.ok, true);
+  assert.equal(tail.value.piece.text, long);
+  assert.equal(tail.value.state.progress, long.slice(-512));
   const bad = sidebandStep(st, { kind: 'data', payload: Uint8Array.of(9) });
   assert.equal(bad.ok, false);
   assert.equal(bad.error.message, 'sideband: bad sideband 9');
   const attrs = streamSidebandAttrs(euro2.value.state);
   assert.equal(typeof attrs['git.sideband.progress.tail'], 'string');
+});
+
+test('inflate pull yields a half-window chunk, and a second feed keeps bytes the first pull has not consumed', () => {
+  assert.deepEqual(cappedBound(), { kind: 'capped', maxOutput: DEFAULT_LIMITS.maxObjectSize });
+  assert.deepEqual(declaredBound(3, 5), { kind: 'declared', size: 3, maxOutput: 5 });
+  assert.deepEqual(zlibWrap(false), { kind: 'zlib', verifyAdler: false });
+  assert.deepEqual(rawWrap(), { kind: 'raw' });
+  const badPack = parsePackInit(packScanOpts(withLimits({ maxPackObjects: Number.NaN })));
+  assert.equal(badPack.ok, false);
+  assert.equal(badPack.error.code, 'bad_request');
+  const badTotal = parsePackInit(packScanOpts(withLimits({ maxInflatedTotal: Number.NaN })));
+  assert.equal(badTotal.ok, false);
+  assert.equal(badTotal.error.message, 'limits.maxInflatedTotal must be a finite non-negative number');
+  const badSize = parsePackInit(packScanOpts(withLimits({ maxObjectSize: Number.NaN })));
+  assert.equal(badSize.ok, false);
+  assert.equal(badSize.error.message, 'limits.maxObjectSize must be a finite non-negative number');
+  const unverified = must(parsePackInit(packScanOpts(DEFAULT_LIMITS, false)));
+  assert.equal(unverified.hash.kind, 'off');
+  assert.equal(unverified.baseRef.kind, 'none');
+  assert.equal(unverified.inf.kind, 'closed');
+  const held = new Uint8Array(4);
+  const fresh = must(parsePackInit(packScanOpts()));
+  parsePackFeed(fresh, held);
+  assert.equal(fresh.carry.buffer, held.buffer);
+  const badBand = sidebandInit(withLimits({ maxPackBytes: -1 }));
+  assert.equal(badBand.ok, false);
+  assert.equal(badBand.error.code, 'bad_request');
+
+  const hello = te.encode('hello');
+  const z = new Uint8Array(zlib.deflateSync(hello));
+  const one = must(inflateInit(opts));
+  const fed = z.slice();
+  inflateFeed(one, fed);
+  assert.equal(inflateUnread(one).buffer, fed.buffer);
+  const pieces = [];
+  for (;;) {
+    const step = must(inflatePull(one));
+    pieces.push(step.kind === 'chunk' ? step.bytes.length : step.kind);
+    if (step.kind === 'end') break;
+  }
+  assert.deepEqual(pieces, [hello.length, 'end']);
+
+  const big = Buffer.alloc(20_000, 7);
+  const zb = new Uint8Array(zlib.deflateSync(big));
+  const st = must(inflateInit({ bound: declaredBound(big.length), wrap: zlibWrap(true) }));
+  const head = zb.subarray(0, zb.length - 1);
+  inflateFeed(st, head);
+  const first = must(inflatePull(st));
+  assert.equal(first.kind, 'chunk');
+  assert.equal(first.bytes.length, 16384);
+  assert.ok(inflateUnread(st).length > 0);
+  inflateFeed(st, zb.subarray(zb.length - 1));
+  const rest = [first.bytes];
+  for (;;) {
+    const step = must(inflatePull(st));
+    if (step.kind === 'chunk') rest.push(step.bytes);
+    else {
+      assert.equal(step.kind, 'end');
+      assert.equal(step.consumed, zb.length);
+      break;
+    }
+  }
+  assert.equal(concat(rest).length, big.length);
+
+  const dropped = must(inflateInit(opts));
+  inflateFeed(dropped, z);
+  inflateRelease(dropped);
+  assert.equal(inflateUnread(dropped).length, 0);
+  const waiting = inflatePull(dropped);
+  assert.equal(waiting.ok, true);
+  assert.equal(waiting.value.kind, 'need');
+  const closed = inflateEnd(dropped);
+  assert.equal(closed.ok, false);
+  assert.equal(closed.error.message, 'short read: need 2 bytes at 0, have 0');
 });

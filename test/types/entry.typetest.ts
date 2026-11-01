@@ -71,7 +71,7 @@ const consumer = async (): Promise<void> => {
   cursor = spFinish(stepped.state);
   const pieces: readonly Uint8Array[] = stepped.zlib;
   void cursor; void pieces;
-  const inflated = inflate(anyBytes, 0, { expectedSize: 1, maxOutput: 8 });
+  const inflated = inflate(anyBytes, 0, { bound: { kind: 'declared', size: 1, maxOutput: 8 }, wrap: { kind: 'zlib', verifyAdler: true } });
   // `out` is a subarray of the growable buffer, so the published type is `Uint8Array` (any backing).
   const out: Uint8Array = inflated.out;
   void out;

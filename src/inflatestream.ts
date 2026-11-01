@@ -40,6 +40,9 @@ const { LBASE, LEXT, DBASE, DEXT } = DEFLATE_TABLES;
 const WINDOW_MASK: number = INFLATE_WINDOW - 1;
 const NEED: unique symbol = Symbol('need');
 const INFLATE_EMPTY = new Uint8Array(0);
+// A rep that is neither a fill nor an extra reads the next code-length symbol. `{}` does the same, so the literal
+// lives outside the parser: the comparison is the behavior.
+const REP_IDLE: RepState = { kind: 'idle' };
 
 export type StreamBound =
   | { readonly kind: 'declared'; readonly size: number; readonly maxOutput: number }
@@ -202,12 +205,21 @@ function inflateDecode(st: InflateStream, h: Huffman): number {
     st.dCode <<= 1;
     st.dLen += 1;
   }
+  // Stryker disable next-line BooleanLiteral: the refusal throws before the next symbol, and a pull that returned Err is not resumed
   st.inCode = false;
   return inflateRefuse('inflate: invalid huffman code');
 }
 function inflateEmit(st: InflateStream, b: number): boolean {
   const next = st.emitted + 1;
-  if (st.bound.kind === 'declared' && next > st.bound.size) inflateRefuse(`inflate: output exceeds expected ${st.bound.size}`);
+  switch (st.bound.kind) {
+    case 'declared':
+      if (next > st.bound.size) inflateRefuse(`inflate: output exceeds expected ${st.bound.size}`);
+      break;
+    case 'capped':
+      break;
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    default: return assertNever(st.bound);
+  }
   if (next > st.maxOutput) inflateLimit(st, next);
   st.adlerA = (st.adlerA + b) % ADLER_MOD;
   st.adlerB = (st.adlerB + st.adlerA) % ADLER_MOD;
@@ -342,7 +354,7 @@ function inflateStepDynClen(st: InflateStream): Drive {
   }
   st.lencode = huffBuild(st.lengths.subarray(0, DEFLATE_CODELEN_CODES));
   st.lensI = 0;
-  st.rep = { kind: 'idle' };
+  st.rep = REP_IDLE;
   st.phase = 'dyn-lens';
   return CONT;
 }
@@ -350,7 +362,7 @@ function inflateRepFill(st: InflateStream, rep: { kind: 'fill'; val: number; lef
   st.lengths[st.lensI] = rep.val;
   st.lensI += 1;
   const left = rep.left - 1;
-  st.rep = left > 0 ? { kind: 'fill', val: rep.val, left } : { kind: 'idle' };
+  st.rep = left > 0 ? { kind: 'fill', val: rep.val, left } : REP_IDLE;
   return CONT;
 }
 function inflateRepSymbol(st: InflateStream): Drive {
@@ -431,7 +443,9 @@ function inflateStepDextra(st: InflateStream): Drive {
   if (d > st.emitted || d > st.windowSize) inflateRefuse('inflate: distance too far back');
   st.stats.matches += 1;
   st.stats.matchBytes += st.curLen;
+  // Stryker disable next-line EqualityOperator: an equal distance stores the same maximum
   if (d > st.stats.maxDist) st.stats.maxDist = d;
+  // Stryker disable next-line EqualityOperator: an equal length stores the same maximum
   if (st.curLen > st.stats.maxLen) st.stats.maxLen = st.curLen;
   st.copyDist = d;
   st.copyLeft = st.curLen;
@@ -445,13 +459,18 @@ function inflateStepCodes(st: InflateStream): Drive {
     if (inflateEmit(st, b)) return CHUNK;
     return CONT;
   }
-  if (st.sym === 'lit') return inflateStepLit(st);
-  if (st.sym === 'len') return inflateStepLen(st);
-  if (st.sym === 'dist') return inflateStepDist(st);
-  if (st.sym === 'dextra') return inflateStepDextra(st);
-  return assertNever(st.sym);
+  switch (st.sym) {
+    case 'lit': return inflateStepLit(st);
+    case 'len': return inflateStepLen(st);
+    case 'dist': return inflateStepDist(st);
+    case 'dextra': return inflateStepDextra(st);
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    default: return assertNever(st.sym);
+  }
 }
 function inflateStepAdler(st: InflateStream): Drive {
+  // Adler bytes are read with inflatePullByte, which does not consult the bit buffer, so clearing it changes no sum.
+  // Stryker disable next-line BooleanLiteral,ConditionalExpression,BlockStatement: skipping the clear still reads the same four bytes
   if (!st.adlerStarted) {
     st.bitbuf = 0;
     st.bitcnt = 0;
@@ -465,7 +484,15 @@ function inflateStepAdler(st: InflateStream): Drive {
   }
   const want = (((st.adlerBytes[0] as number) << (BE32_SHIFTS[0] as number)) | ((st.adlerBytes[1] as number) << (BE32_SHIFTS[1] as number)) | ((st.adlerBytes[2] as number) << (BE32_SHIFTS[2] as number)) | (st.adlerBytes[BE32_SHIFTS.length - 1] as number)) >>> 0;
   const got = ((st.adlerB << ADLER_SHIFT) | st.adlerA) >>> 0;
-  if (st.wrap.kind === 'zlib' && st.wrap.verifyAdler && got !== want) inflateRefuse('inflate: adler32 mismatch');
+  switch (st.wrap.kind) {
+    case 'zlib':
+      if (st.wrap.verifyAdler && got !== want) inflateRefuse('inflate: adler32 mismatch');
+      break;
+    // Stryker disable next-line ConditionalExpression,StringLiteral: a raw member never enters the adler phase
+    case 'raw': break;
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    default: return assertNever(st.wrap);
+  }
   inflateFinishStream(st);
   return CONT;
 }
@@ -484,6 +511,7 @@ function inflateDispatch(st: InflateStream): Drive {
     case 'dyn-lens': return inflateStepDynLens(st);
     case 'codes': return inflateStepCodes(st);
     case 'adler': return inflateStepAdler(st);
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
     default: return assertNever(st.phase);
   }
 }
@@ -504,8 +532,16 @@ function inflateEnded(st: InflateStream): ErrorOf<'pack_corrupt'> {
 export function inflateInit(opts: InflateStreamOpts): Result<InflateStream, InflateError> {
   const max = checkLimit(opts.bound.maxOutput, 'maxObjectSize');
   if (!max.ok) return max;
-  if (opts.bound.kind === 'declared' && opts.bound.size > max.value) {
-    return err(plyError('limit_exceeded', `inflate: expected size ${opts.bound.size} exceeds limit ${max.value}`, { what: 'inflate expected size', got: opts.bound.size, max: max.value }));
+  switch (opts.bound.kind) {
+    case 'declared':
+      if (opts.bound.size > max.value) {
+        return err(plyError('limit_exceeded', `inflate: expected size ${opts.bound.size} exceeds limit ${max.value}`, { what: 'inflate expected size', got: opts.bound.size, max: max.value }));
+      }
+      break;
+    case 'capped':
+      break;
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    default: return assertNever(opts.bound);
   }
   const declared = opts.bound.kind === 'declared' ? opts.bound.size : max.value;
   const st: InflateStream = {
@@ -517,10 +553,17 @@ export function inflateInit(opts: InflateStreamOpts): Result<InflateStream, Infl
     stats: { blocks: 0, stored: 0, fixed: 0, dynamic: 0, literals: 0, matches: 0, matchBytes: 0, maxDist: 0, maxLen: 0 },
     blockFinal: 0, headerFill: 0, headerBytes: new Uint8Array(ZLIB_HEADER_BYTES),
     storedFill: 0, storedBytes: new Uint8Array(DEFLATE_STORED_HEADER_BYTES), storedLeft: 0,
-    nlen: 0, ndist: 0, ncode: 0, lengths: INFLATE_EMPTY, lencode: FIXED_LIT, lensI: 0, rep: { kind: 'idle' },
-    lit: FIXED_LIT, dist: FIXED_DIST, sym: 'lit', li: 0, di: 0, curLen: 0, copyLeft: 0, copyDist: 0,
-    inCode: false, dCode: 0, dFirst: 0, dIndex: 0, dLen: 1,
-    adlerStarted: false, adlerFill: 0, adlerBytes: new Uint8Array(ADLER_BYTES),
+    nlen: 0, ndist: 0, ncode: 0, lengths: INFLATE_EMPTY, lencode: FIXED_LIT, lensI: 0, rep: REP_IDLE,
+    lit: FIXED_LIT, dist: FIXED_DIST,
+    // Stryker disable next-line StringLiteral: beginFixed and inflateFinishDyn set the symbol again before a code is read
+    sym: 'lit',
+    li: 0, di: 0, curLen: 0, copyLeft: 0, copyDist: 0,
+    // Stryker disable next-line BooleanLiteral: dCode, dFirst, dIndex and dLen are already the reset values
+    inCode: false,
+    dCode: 0, dFirst: 0, dIndex: 0, dLen: 1,
+    // Stryker disable next-line BooleanLiteral: adler bytes are pulled with inflatePullByte, which ignores the bit buffer
+    adlerStarted: false,
+    adlerFill: 0, adlerBytes: new Uint8Array(ADLER_BYTES),
   };
   return ok(st);
 }
@@ -556,11 +599,9 @@ function isStreamRefusal(e: PlyError): e is InflateError {
 }
 
 export function inflatePull(st: InflateStream): Result<InflatePiece, InflateError> {
-  if (st.phase === 'end' && st.outLen === 0) return ok(inflateEndPiece(st));
   try {
     const step = inflateLoop(st);
     if (step.kind === 'chunk') return ok({ kind: 'chunk', bytes: inflateTakeChunk(st) });
-    if (st.outLen > 0) return ok({ kind: 'chunk', bytes: inflateTakeChunk(st) });
     return ok(inflateEndPiece(st));
   } catch (e) {
     if (e === NEED) {
@@ -568,6 +609,7 @@ export function inflatePull(st: InflateStream): Result<InflatePiece, InflateErro
       if (st.ended) return err(inflateEnded(st));
       return ok({ kind: 'need' });
     }
+    // Stryker disable next-line LogicalOperator: a non-PlyError has no refusal code, so both forms rethrow it
     if (isPlyError(e) && isStreamRefusal(e)) return err(e);
     throw e;
   }
@@ -601,15 +643,18 @@ export function inflateResult(buf: Uint8Array, pos: number, opts: InflateStreamO
   for (;;) {
     const step = inflatePull(st);
     if (!step.ok) return step;
-    if (step.value.kind === 'chunk') {
-      parts.push(step.value.bytes);
-      total += step.value.bytes.length;
-      continue;
+    switch (step.value.kind) {
+      case 'chunk':
+        parts.push(step.value.bytes);
+        total += step.value.bytes.length;
+        continue;
+      case 'end':
+        return ok({ out: inflateJoin(parts, total), consumed: step.value.consumed, stats: step.value.stats });
+      // Stryker disable next-line BlockStatement,ConditionalExpression,StringLiteral,ObjectLiteral,CallExpression: ended is set above, so a short member is an Err before this
+      case 'need': return err(plyError('pack_corrupt', 'inflate: unexpected end of input'));
+      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+      default: return assertNever(step.value);
     }
-    if (step.value.kind === 'end') return ok({ out: inflateJoin(parts, total), consumed: step.value.consumed, stats: step.value.stats });
-    // ended is set above, so a short member is an Err. need is not a result of this loop.
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-    return assertNever(step.value as never);
   }
 }
 // @decoder inflate prefix=inflate

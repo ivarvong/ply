@@ -321,6 +321,16 @@ test('parsePackResult passes each part\'s Err through: object header, ofs offset
   errOf(parsePackResult(packOf(Uint8Array.of(0x32), Uint8Array.of(0x78, 0x00, 0, 0, 0, 0))), 'pack_corrupt', 'zlib: bad header check');
 });
 
+test('parsePackResult refuses an adler mismatch inside an otherwise well-framed pack', async () => {
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('hello') }]);
+  const flipped = new Uint8Array(pack);
+  flipped[flipped.length - 21] ^= 1;
+  const body = flipped.subarray(0, flipped.length - 20);
+  const sha = globalThis.process.getBuiltinModule('node:crypto').createHash('sha1').update(body).digest();
+  flipped.set(sha, body.length);
+  errOf(parsePackResult(flipped), 'pack_corrupt', 'inflate: adler32 mismatch');
+});
+
 test('inflateResult converts only its own STOP: a bug inside the block loop propagates', () => {
   // A byte read that throws is a bug in the caller, not a refusal. The pull must let it out.
   const raw = new Proxy(new Uint8Array([0b001, 1, 0, 0xfe, 0xff, 0x41]), {
