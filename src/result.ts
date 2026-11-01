@@ -94,3 +94,12 @@ export const transposeOptionResult = <T, E>(o: Option<Result<T, E>>): Result<Opt
   if (o.tag === 'none') return ok(none);
   return o.value.ok ? ok(some(o.value.value)) : err(o.value.error);
 };
+
+// map, flatMap, and getOrElse. matchOption is the exhaustive eliminator; these are its two branches.
+// Names follow matchOption: `map` is already Result's. None is returned as itself, so a chain does not allocate a fresh absence.
+// getOrElse takes a value the caller already computed. A fallback that should run only on None belongs in matchOption.
+export const mapOption = <T, U>(o: Option<T>, f: (value: T) => U): Option<U> => (o.tag === 'some' ? some(f(o.value)) : o);
+
+export const flatMapOption = <T, U>(o: Option<T>, f: (value: T) => Option<U>): Option<U> => (o.tag === 'some' ? f(o.value) : o);
+
+export const getOrElse = <T>(o: Option<T>, fallback: T): T => (o.tag === 'some' ? o.value : fallback);
