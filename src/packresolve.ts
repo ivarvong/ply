@@ -9,7 +9,7 @@ import { ok, err, assertNever } from './result.js';
 import type { InflateStats } from './inflate.js';
 import { inflateResult } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
-import { TYPE_NAME, hashObject } from './objects.js';
+import { TYPE, TYPE_NAME, hashObject } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
 import { DEFAULT_LIMITS, limitError, requireLimit, checkLimit, readLimit } from './limits.js';
 // pack.js re-exports this module's parsers: a cycle of a re-export and one function, which ES modules resolve
@@ -311,6 +311,8 @@ export function makeDelta(base: Uint8Array, target: Uint8Array): ReturnType<type
 // ---- resolve ----
 // objects from parsePack; external(oid) -> {type, data} for thin bases. Returns Map oid -> resolved.
 // A base from outside the pack (a thin pack's), as the caller's `external` returns it.
+// `type` is the pack type number of a commit, tree, blob or tag. The bytes are that object, so
+// hashObject(type, data) is `oid`. Anything else is refused before applyDelta (externalBase).
 export type ExternalBase = { readonly type: number; readonly data: Uint8Array };
 export type ResolvedObject = {
   readonly type: number;
@@ -328,6 +330,25 @@ export type ResolvedObject = {
 export type PackToResolve = { readonly objects: readonly PackObject[]; readonly stats?: { readonly inflated?: number | undefined } | undefined };
 export type ResolvedPack = { readonly objects: Map<string, ResolvedObject>; readonly stats: { maxChain: number; externalBases: number; baseLookups: number } };
 type Base = { readonly type: number; readonly data: Uint8Array; readonly chain: number };
+
+// git hash-object stores only these four. A delta type, or 0 or 5, is not an object an oid can name.
+function storedKind(type: number): 'commit' | 'tree' | 'blob' | 'tag' | null {
+  if (type === TYPE.COMMIT) return 'commit';
+  if (type === TYPE.TREE) return 'tree';
+  if (type === TYPE.BLOB) return 'blob';
+  if (type === TYPE.TAG) return 'tag';
+  return null;
+}
+
+// A thin REF base is the object git stored under that oid: SHA-1("type size\0" + body). A wrong type or wrong
+// bytes hashes to a different oid, which is pack_corrupt before applyDelta. Pure, so the span stays on the fetch.
+function externalBase(oid: string, ext: ExternalBase): Result<Base, Corrupt> {
+  const kind = storedKind(ext.type);
+  if (kind === null) return corrupt(`pack: ref delta base ${oid} has type ${ext.type}`);
+  const hashed = hashObject(kind, ext.data);
+  if (hashed !== oid) return corrupt(`pack: ref delta base ${oid} hashes to ${hashed}`);
+  return ok({ type: ext.type, data: ext.data, chain: 0 });
+}
 
 // One object's resolution: done, waiting on a REF_DELTA base that has not been resolved yet (in this phase), or refused.
 // `waiting` is the typed form of what used to be a pack_corrupt "ref delta base … not found" caught back by a regex on
@@ -384,8 +405,10 @@ export function resolvePackResult(
       } else {
         const ext = phase === 'external' ? external(obj.baseOid) : undefined;
         if (!ext) return { tag: 'waiting', oid: obj.baseOid };
+        const checked = externalBase(obj.baseOid, ext);
+        if (!checked.ok) return failed(checked.error);
         stats.externalBases++;
-        base = { type: ext.type, data: ext.data, chain: 0 };
+        base = checked.value;
       }
     }
     let core: Base & { deltaOps?: DeltaOps };

@@ -8,7 +8,7 @@ import { takeResult, take, shortRead, encodeBytesResult, encodeBytes, HEXV, te, 
 import { pktResult, pktStepResult, pktFinishResult, pktInit, pktStep } from '../src/pktline.js';
 import { inflateResult, inflate, DEFLATE_TABLES } from '../src/inflate.js';
 import {
-  readObjHeaderResult, readOfsDeltaResult, readUint32BEResult, parsePackResult, applyDeltaResult, resolvePackResult, resolvePack, parsePack,
+  readObjHeaderResult, readOfsDeltaResult, readUint32BEResult, parsePackResult, applyDeltaResult, resolvePackResult, resolvePack, parsePack, makeDelta,
 } from '../src/packresolve.js';
 import { buildPack, encodeObjHeader, spliceDelta } from '../src/pack.js';
 import { fromHex, toHex } from '../src/sha1.js';
@@ -79,6 +79,24 @@ test('#76 a thin pack resolves through the external phase; a base missing from b
   const p2 = parsePack(bad.pack);
   const broken = { ...p2, objects: p2.objects.map((o, i) => (i === 1 ? { ...o, data: Uint8Array.of(v0.length + 1, 1, 1, 0x41) } : o)) };
   errOf(resolvePackResult(broken), 'pack_corrupt', `delta: base size ${v0.length + 1} != ${v0.length}`);
+});
+
+test('a thin base of the wrong type or bytes is pack_corrupt before applyDelta', async () => {
+  const v0 = te.encode('base object, long enough to delta against\n');
+  const v1 = te.encode('base object, long enough to delta against\nplus a line\n');
+  const id0 = hashObject('blob', v0);
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: makeDelta(v0, v1).delta, baseOid: id0 }]);
+  const parsed = parsePack(pack);
+  const honest = resolvePackResult(parsed, () => ({ type: TYPE.BLOB, data: v0 }));
+  assert.equal(honest.ok, true);
+  assert.deepEqual(honest.value.objects.get(hashObject('blob', v1))?.data, v1);
+  const flipped = Uint8Array.from(v0);
+  flipped[flipped.length - 1] ^= 1;
+  const badBytes = resolvePackResult(parsed, () => ({ type: TYPE.BLOB, data: flipped }));
+  errOf(badBytes, 'pack_corrupt', `pack: ref delta base ${id0} hashes to ${hashObject('blob', flipped)}`);
+  errOf(resolvePackResult(parsed, () => ({ type: TYPE.OFS_DELTA, data: v0 })), 'pack_corrupt', `pack: ref delta base ${id0} has type ${TYPE.OFS_DELTA}`);
+  errOf(resolvePackResult(parsed, () => ({ type: 0, data: v0 })), 'pack_corrupt', `pack: ref delta base ${id0} has type 0`);
+  errOf(resolvePackResult(parsed, () => ({ type: TYPE.COMMIT, data: v0 })), 'pack_corrupt', `pack: ref delta base ${id0} hashes to ${hashObject('commit', v0)}`);
 });
 
 test('#76 no src module in the packs cluster branches on an error message', () => {

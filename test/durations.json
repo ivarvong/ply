@@ -42,6 +42,7 @@
   "test/space/push-outcome-boundary.test.js": 169,
   "test/space/push-outcome.test.js": 98,
   "test/space/refname.test.js": 10,
+  "test/space/thin-base.test.js": 1,
   "test/space/version-refname.test.js": 58,
   "test/version-refname.test.js": 0,
   "test/space/registry.test.js": 2,
