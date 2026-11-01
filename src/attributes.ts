@@ -14,7 +14,14 @@
 // Verified against `git check-attr --source` (test/fuzz/attributes.mjs).
 
 /* oxlint-disable unicorn/prefer-code-point -- byte strings (above): charCodeAt/fromCharCode are the byte <-> char map; codePointAt would pair surrogates */
+import type { Option } from './result.js';
+import type { Input } from './absent.js';
 import { encodeBytes } from './bytes.js';
+import { none, some, getOrElse } from './result.js';
+import { fromNullable, mapGet, withDefaults } from './absent.js';
+
+// The last element of a stack, taken off it; None when the stack is empty.
+export const popLast = <T>(xs: T[]): Option<T> => fromNullable(xs.pop());
 
 // A state as a line assigns it: true (set), false (-unset), null (!unspecified), or a =value (A6: an AttrValue union).
 export type AttrValue = boolean | null | string;
@@ -27,14 +34,15 @@ export type Pattern = {
   readonly prefix: number;
   readonly endsWith: boolean;
 };
-// The A6 pass makes this AttrLine = skip{why} | macro | pattern, tagged
+// A line that defines a macro, or a pattern line: `'pat' in line` tells them apart. A skipped line is null.
 export type AttrLine =
-  | { readonly macro: string; readonly pat?: never; readonly states: readonly AttrState[] }
-  | { readonly macro?: never; readonly pat: Pattern; readonly states: readonly AttrState[] };
-export type ParseOptions = { readonly macrosOk?: boolean; readonly reserveBuiltin?: boolean };
+  | { readonly macro: string; readonly states: readonly AttrState[] }
+  | { readonly pat: Pattern; readonly states: readonly AttrState[] };
+export type ParseConfig = { readonly macrosOk: boolean; readonly reserveBuiltin: boolean };
+export type ParseOptions = Input<ParseConfig>;
+const parseDefaults = (): ParseConfig => ({ macrosOk: false, reserveBuiltin: true });
 
 export const UNSET = null;    // '!attr'  — explicitly unspecified
-const UNKNOWN = undefined;          // never mentioned
 const BLANK = ' \t\r\n';
 const MAX_LINE = 2048;
 const MAX_FILE = 100 * 1024 * 1024;
@@ -150,7 +158,7 @@ function dowild(P: string, pi: number, T: string, ti: number, pathname: boolean)
   return ti < T.length ? NOMATCH : MATCH;
 }
 /* oxlint-enable eslint/no-param-reassign, eslint/max-depth, eslint/complexity, eslint/no-unmodified-loop-condition */
-export const wildmatch = (pattern: string, text: string, { pathname = false }: { readonly pathname?: boolean } = {}): boolean => dowild(pattern, 0, text, 0, pathname) === MATCH;
+export const wildmatch = (pattern: string, text: string, pathname = false): boolean => dowild(pattern, 0, text, 0, pathname) === MATCH;
 
 // ---- dir.c: parse_path_pattern, match_basename, match_pathname ----
 const simpleLength = (s: string): number => { let i = 0; while (i < s.length && !isGlobSpecial(s.charCodeAt(i))) i++; return i; };
@@ -183,7 +191,7 @@ function matchPathname(path: string, origin: string, pat: Pattern): boolean {
     if (pattern.length === prefix && name.length === prefix) return true;
     prefix--; pattern = pattern.slice(prefix); name = name.slice(prefix);
   }
-  return wildmatch(pattern, name, { pathname: true });
+  return wildmatch(pattern, name, true);
 }
 // path_matches for a file (attributes are only ever asked of files here)
 function pathMatches(path: string, origin: string, pat: Pattern): boolean {
@@ -193,24 +201,26 @@ function pathMatches(path: string, origin: string, pat: Pattern): boolean {
 }
 
 // ---- quote.c: unquote_c_style ----
-const ESCAPES: Readonly<Record<string, number>> = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '\\': 92, '"': 34 };
-function unquote(s: string): { value: string; rest: string } | null { // s starts with '"'
+// quote.c's escapes, by the character after the backslash (a Map: a miss is None)
+const ESCAPES = new Map<string, number>([['a', 7], ['b', 8], ['f', 12], ['n', 10], ['r', 13], ['t', 9], ['v', 11], ['\\', 92], ['"', 34]]);
+// None: an unterminated string or a bad escape (the name is then read unquoted, as git does)
+function unquote(s: string): Option<{ readonly value: string; readonly rest: string }> { // s starts with '"'
   let i = 1, out = '';
   for (;;) {
     let j = i; while (j < s.length && s[j] !== '"' && s[j] !== '\\') j++;
     out += s.slice(i, j); i = j;
-    if (i >= s.length) return null;
-    if (s[i++] === '"') return { value: out, rest: s.slice(i) };
-    const ch = s[i++] ?? ''; // past the end: no escape, no digit → null below
-    const simple = ESCAPES[ch];
-    if (simple !== undefined) { out += String.fromCharCode(simple); continue; }
+    if (i >= s.length) return none;
+    if (s[i++] === '"') return some({ value: out, rest: s.slice(i) });
+    const ch = s.charAt(i++); // past the end: '', no escape and no digit → none below
+    const simple = mapGet(ESCAPES, ch);
+    if (simple.tag === 'some') { out += String.fromCharCode(simple.value); continue; }
     if (ch >= '0' && ch <= '3') {
-      const d1 = s[i++] ?? '';
-      const d2 = s[i++] ?? '';
-      if (!(d1 >= '0' && d1 <= '7') || !(d2 >= '0' && d2 <= '7')) return null;
+      const d1 = s.charAt(i++);
+      const d2 = s.charAt(i++);
+      if (!(d1 >= '0' && d1 <= '7') || !(d2 >= '0' && d2 <= '7')) return none;
       out += String.fromCharCode(((ch.charCodeAt(0) - 48) << 6) | ((d1.charCodeAt(0) - 48) << 3) | (d2.charCodeAt(0) - 48)); continue;
     }
-    return null;
+    return none;
   }
 }
 
@@ -219,7 +229,7 @@ const validName = (n: string): boolean => n.length > 0 && n[0] !== '-' && /^[-A-
 // git ≥ 2.44 reserves builtin_* (builtin_objectmode): a line naming one is invalid as a whole; older git accepts it
 const reservedIn = (reserveBuiltin: boolean) => (n: string): boolean => reserveBuiltin && n.startsWith('builtin_');
 // oxlint-disable-next-line eslint/no-param-reassign -- the scan index is the result
-const span = (s: string, i: number, set: string, inSet: boolean): number => { while (i < s.length && set.includes(s[i] ?? '') === inSet) i++; return i; };
+const span = (s: string, i: number, set: string, inSet: boolean): number => { while (i < s.length && set.includes(s.charAt(i)) === inSet) i++; return i; };
 function parseStates(s: string, reserved: (n: string) => boolean): AttrState[] | null { // any invalid state voids the line
   const out: AttrState[] = []; let i = 0;
   while (i < s.length) {
@@ -244,16 +254,15 @@ function parseStates(s: string, reserved: (n: string) => boolean): AttrState[] |
   }
   return out;
 }
-// @decoder parseLine prefix=attr-line
-export function parseLine(line: string, { macrosOk = false, reserveBuiltin = true }: ParseOptions): AttrLine | null {
+function parseLineWith(line: string, { macrosOk, reserveBuiltin }: ParseConfig): AttrLine | null {
   const reserved = reservedIn(reserveBuiltin);
   const cp = span(line, 0, BLANK, true);
   if (cp >= line.length || line[cp] === '#') return null;
   if (line.length >= MAX_LINE) return null;
   let name: string;
   let states: string;
-  const q = line[cp] === '"' ? unquote(line.slice(cp)) : null;
-  if (q) { name = q.value; states = q.rest; }
+  const q = line[cp] === '"' ? unquote(line.slice(cp)) : none;
+  if (q.tag === 'some') { name = q.value.value; states = q.value.rest; }
   else { const e = span(line, cp, BLANK, false); name = line.slice(cp, e); states = line.slice(e); }
   let macro = ''; // validName: a macro's name is never ''
   if (name.length > 6 && name.startsWith('[attr]')) {
@@ -271,14 +280,20 @@ export function parseLine(line: string, { macrosOk = false, reserveBuiltin = tru
   if (pat.negative) return null; // negative patterns are ignored in attributes
   return { pat, states: parsed };
 }
+// @decoder parseLine prefix=attr-line
+export function parseLine(line: string, options: ParseOptions): AttrLine | null {
+  return parseLineWith(line, withDefaults(options, parseDefaults()));
+}
 // @decoder parseFile prefix=attr-file
 // maxFile defaults to git's 100MiB attribute-file cap. Tests pass a smaller cap so the boundary is reachable
 // without allocating that buffer on every run.
-export function parseFile(file: string, { macrosOk = false, reserveBuiltin = true, maxFile = MAX_FILE }: ParseOptions & { readonly maxFile?: number } = {}): AttrLine[] {
+export type ParseFileConfig = ParseConfig & { readonly maxFile: number };
+export function parseFile(file: string, options: Input<ParseFileConfig> = {}): AttrLine[] {
+  const { macrosOk, reserveBuiltin, maxFile } = withDefaults(options, { ...parseDefaults(), maxFile: MAX_FILE });
   if (file.length >= maxFile) return [];
   const nul = file.indexOf('\0'); const text = nul >= 0 ? file.slice(0, nul) : file; // C string
   const lines: AttrLine[] = []; let sp = 0;
-  while (sp < text.length) { let ep = text.indexOf('\n', sp); const more = ep >= 0; if (!more) ep = text.length; const l = parseLine(text.slice(sp, ep), { macrosOk, reserveBuiltin }); if (l) lines.push(l); sp = ep + (more ? 1 : 0); }
+  while (sp < text.length) { let ep = text.indexOf('\n', sp); const more = ep >= 0; if (!more) ep = text.length; const l = parseLineWith(text.slice(sp, ep), { macrosOk, reserveBuiltin }); if (l) lines.push(l); sp = ep + (more ? 1 : 0); }
   return lines;
 }
 const BUILTIN_FILE = parseFile(BUILTIN, { macrosOk: true });
@@ -286,27 +301,29 @@ const BUILTIN_FILE = parseFile(BUILTIN, { macrosOk: true });
 // Attributes of `path` (byte string, no trailing slash) given the .gitattributes texts by directory:
 // files: Map(dir byte string → file text byte string), '' for the root. Returns Map(name → true | false | null | string).
 // The built-in frame's origin is never read (it holds only the macro); '' keeps the frames one type.
-export function attributesFor(path: string, files: ReadonlyMap<string, string>, { reserveBuiltin = true }: { readonly reserveBuiltin?: boolean } = {}): Map<string, AttrValue> {
+export type AttributesConfig = { readonly reserveBuiltin: boolean };
+export function attributesFor(path: string, files: ReadonlyMap<string, string>, options: Input<AttributesConfig> = {}): Map<string, AttrValue> {
+  const { reserveBuiltin } = withDefaults(options, { reserveBuiltin: true });
   const frames: Array<{ readonly origin: string; readonly lines: readonly AttrLine[] }> = [{ origin: '', lines: BUILTIN_FILE }];
   const dirs = ['']; const last = path.lastIndexOf('/');
   for (let i = path.indexOf('/'); i >= 0 && i <= last; i = path.indexOf('/', i + 1)) dirs.push(path.slice(0, i));
-  for (const d of dirs) { const text = files.get(d); if (text !== undefined) frames.push({ origin: d, lines: parseFile(text, { macrosOk: d === '', reserveBuiltin }) }); }
+  for (const d of dirs) { const text = mapGet(files, d); if (text.tag === 'some') frames.push({ origin: d, lines: parseFile(text.value, { macrosOk: d === '', reserveBuiltin }) }); }
   // determine_macros: the most specific definition wins (frames top-down, lines bottom-up)
   const macros = new Map<string, readonly AttrState[]>();
-  for (const { lines } of frames.toReversed()) for (const l of lines.toReversed()) if (!l.pat && !macros.has(l.macro)) macros.set(l.macro, l.states);
+  for (const { lines } of frames.toReversed()) for (const l of lines.toReversed()) if ('macro' in l && !macros.has(l.macro)) macros.set(l.macro, l.states);
   const out = new Map<string, AttrValue>();
   const fillOne = (states: readonly AttrState[]): void => {
     const todo = [...states];
-    let s: AttrState | undefined;
-    while ((s = todo.pop())) {
-      const [name, value] = s;
+    for (let s = popLast(todo); s.tag === 'some'; s = popLast(todo)) {
+      const [name, value] = s.value;
       if (out.has(name)) continue;
       out.set(name, value);
-      if (value === true) todo.push(...macros.get(name) ?? []);
+      if (value === true) todo.push(...getOrElse(mapGet(macros, name), []));
     }
   };
   // the built-in frame holds only a macro, which fills nothing
-  for (const { origin, lines } of frames.toReversed()) for (const l of lines.toReversed()) if (l.pat && pathMatches(path, origin, l.pat)) fillOne(l.states);
+  for (const { origin, lines } of frames.toReversed()) for (const l of lines.toReversed()) if ('pat' in l && pathMatches(path, origin, l.pat)) fillOne(l.states);
   return out;
 }
-export const attributeOf = (attrs: ReadonlyMap<string, AttrValue>, name: string): AttrValue | undefined => (attrs.has(name) ? attrs.get(name) : UNKNOWN);
+// None: never mentioned. Some(null): explicitly unspecified ('!attr').
+export const attributeOf = (attrs: ReadonlyMap<string, AttrValue>, name: string): Option<AttrValue> => mapGet(attrs, name);
