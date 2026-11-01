@@ -4,7 +4,7 @@
 import type { Code, Detail, Extra } from './errors.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
-import type { Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
+import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
 import { thrown as fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
@@ -25,6 +25,52 @@ export const httpCode = (status: number): HttpCode => {
 // An error page is quoted, not stored. Past this many bytes the rest cannot change the message and must not be buffered.
 const ERROR_PREVIEW = 4096;
 const ERROR_QUOTE = 200;
+
+// Opt-in response headers on the exchange span (`http.response.header.<lowercased name>`). A name has to be a token the
+// telemetry key grammar already allows (letters, digits, `.`, `_`, `-`): that is an RFC 7230 tchar subset, and a name
+// outside it would mint an attribute key no dashboard contract accepts. Values are scrubbed (the transport's credential
+// scrub, same as every other span string) then cut. The cap is a support id (cf-ray, x-github-request-id, x-request-id),
+// not a body. Too many names is a caller's bug and is refused before any request.
+export const HEADER_VALUE_MAX = 128;
+export const MAX_RECORDED_HEADERS = 8;
+const HEADER_NAME = /^[0-9A-Za-z._-]+$/;
+// Private channel to cachingFetch (packcache.ts keeps the same literals). The edit bundle must not import that module.
+// The hint is set only when fetchImpl is cachingFetch, and that wrapper strips it before the origin fetch.
+const RECORD_HEADERS_REQUEST = 'x-ply-record-headers';
+const CACHING_FETCH_BRAND = 'plyCachingFetch';
+const PACK_CACHE_HEADER = 'x-ply-pack-cache';
+
+function recordResponseHeaderNames(names: unknown): readonly string[] {
+  if (names === undefined) return [];
+  if (!Array.isArray(names)) throw fail('bad_request', 'recordResponseHeaders: expected a list of header names', { what: 'recordResponseHeaders' });
+  if (names.length > MAX_RECORDED_HEADERS) throw fail('bad_request', `recordResponseHeaders: at most ${MAX_RECORDED_HEADERS} names`, { what: 'recordResponseHeaders' });
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (typeof name !== 'string' || !HEADER_NAME.test(name)) {
+      const shown = typeof name === 'string' ? JSON.stringify(name) : 'not a string';
+      throw fail('bad_request', `recordResponseHeaders: ${shown} is not a header name`, { what: 'recordResponseHeaders' });
+    }
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(lower);
+  }
+  return out;
+}
+
+// Scrub the whole value, then cap: slicing first could leave a secret fragment shorter than the scrubber's window.
+function recordedHeaderAttrs(res: Response, names: readonly string[], scrub: Scrub | null): Attrs {
+  const attrs: Attrs = {};
+  for (const name of names) {
+    const raw = res.headers.get(name);
+    if (raw === null) continue;
+    const text = scrub ? scrub(raw) : raw;
+    attrs[`http.response.header.${name}`] = text.length > HEADER_VALUE_MAX ? text.slice(0, HEADER_VALUE_MAX) : text;
+  }
+  if (res.headers.get(PACK_CACHE_HEADER) === 'HIT') attrs['http.response.headers.from_cache'] = true;
+  return attrs;
+}
 
 const headerField = (value: string | null | undefined, what: string): void => { if (value !== null && value !== undefined) validateWire(value, what); };
 
@@ -137,12 +183,15 @@ export type HttpOptions = {
   readonly limits?: Limits | undefined;
   readonly signal?: AbortSignal | null | undefined;
   readonly quirks?: Quirks | undefined;
+  // Response header names to copy onto each exchange span. Default: none (the span contract is unchanged).
+  readonly recordResponseHeaders?: readonly string[] | undefined;
 };
 export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
 
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
-export function createTransport(url: string | URL, { auth, tracer, parent = null, fetchImpl = globalThis.fetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {} }: HttpOptions = {}): HttpTransport {
+export function createTransport(url: string | URL, { auth, tracer, parent = null, fetchImpl = globalThis.fetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {}, recordResponseHeaders }: HttpOptions = {}): HttpTransport {
   headerField(userAgent, 'user agent');
+  const recordNames = recordResponseHeaderNames(recordResponseHeaders);
   headerField(auth?.header, 'authorization');
   headerField(auth?.token, 'token');
   headerField(auth?.bearer, 'bearer');
@@ -159,6 +208,8 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
   const base = u.toString().replace(/\/$/, '');
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
+  // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
+  const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
   // oxlint-disable-next-line no-nested-ternary -- three forms, one pair
   const [authorization, given]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth !== null && auth !== undefined ? explicitAuth(auth) : [null, null];
@@ -196,7 +247,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
   async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Uint8Array, void, undefined> {
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
-    const extra = { 'Git-Protocol': 'version=2', ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
+    const extra = { 'Git-Protocol': 'version=2', ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
     span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': u.host, 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': limits.requestTimeoutMs });
     const t0 = Date.now();
     const sig = requestSignal();
@@ -204,8 +255,9 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     try {
     try { res = await f(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body), signal: sig.signal, redirect: 'manual' }); }
     catch (e) { throw wrapNet(e, sig.signal); }
-    const cache = res.headers.get('x-ply-pack-cache') ?? '';
+    const cache = res.headers.get(PACK_CACHE_HEADER) ?? '';
     span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': res.headers.get('content-type') ?? '', 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
+    if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
     if (isRedirect(res)) throw redirectError(res, target, service, scrub);
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
@@ -247,8 +299,9 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
       try {
       const t0 = Date.now();
       let res: Response;
-      try { res = await f(target, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
+      try { res = await f(target, { headers: headers(service, { 'Git-Protocol': 'version=2', ...recordHint() }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
       span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
+      if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
       if (isRedirect(res)) throw redirectError(res, target, `${service} advertisement`, scrub);
       if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status } as Detail['http'] & Extra);
       if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
