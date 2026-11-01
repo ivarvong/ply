@@ -272,6 +272,7 @@ test('#84 encodeBytes: surrogate pairs at the edges are characters, lone ones ou
   ok('\udc80\udcff', [0x80, 0xff]);
   const lone = (s, u) => assert.equal(errOf(encodeBytesResult(s, 'name'), 'bad_request', `name: lone surrogate U+${u} is no byte sequence`).what, 'name');
   lone('\ud800􏳩', 'D800'); // a high surrogate followed by a high one is no pair
+  lone('\ud800', 'D800'); // nor followed by a code unit past the low surrogates (U+E000)
   lone('\udc7f', 'DC7F');
   lone('\udd00', 'DD00');
   lone('\udbff', 'DBFF');
