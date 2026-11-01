@@ -503,6 +503,7 @@ export const DECISIONS = [
   { match: "src/read.ts#listTree:*", space: 'wide-limits', axisTag: 'wanted' },
   { match: "src/read.ts#readFile:*", space: 'read', axisTag: 'case' },
   { match: "src/read.ts#failHere:*", space: 'checkout-tree', axisTag: 'case' },
+  { match: "src/read.ts#openBlob:bad_request:maxBytes must be an integer >= 0", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#openBlob:pack_corrupt:pack ended before the object header", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#openBlob:pack_corrupt:expected blob, got …", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#openBlob:<rethrown or pack_corrupt>:<e>", space: 'claims-owed', axisTag: 'site' },

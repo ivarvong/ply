@@ -119,10 +119,16 @@ export function baseFromRedirect(asked: string, got: URL, service: string): stri
     return b.toString().replace(/\/$/, '');
   } catch { return null; }
 }
+// A caller may not return a Result even though the type says so. `ok` is read off an unknown object so a
+// non-boolean still fails, which a boolean compare on the Result type cannot see.
+function isUrlResult(v: unknown): v is Result<URL, PlyError> {
+  if (v === null || typeof v !== 'object' || !('ok' in v)) return false;
+  return v.ok === true || v.ok === false;
+}
 function useAllowed(allow: AllowUrl | undefined, url: URL): URL {
   if (!allow) return url;
-  const got = allow(url);
-  if (got === null || typeof got !== 'object' || (got.ok !== true && got.ok !== false)) throw fail('bad_request', 'allowUrl must return a Result', { what: 'allowUrl' });
+  const got: unknown = allow(url);
+  if (!isUrlResult(got)) throw fail('bad_request', 'allowUrl must return a Result', { what: 'allowUrl' });
   if (!got.ok) throw got.error;
   const next = got.value;
   if (!(next instanceof URL) || (next.protocol !== 'http:' && next.protocol !== 'https:')) throw fail('bad_request', 'allowUrl must return an http(s) URL', { what: 'allowUrl' });
@@ -276,7 +282,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
   };
   const rebase = (next: string): void => {
     if (new URL(next).origin !== new URL(base).origin) liveAuth = null;
-    if (rebasedFrom === null) rebasedFrom = base;
+    rebasedFrom ??= base;
     base = next;
     redirectCount += 1;
   };
