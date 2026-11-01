@@ -48,6 +48,10 @@ export const SPACES = [
   { name: 'wide-limits', status: 'main', kind: 'enumerated', runners: ['test/wide-limits.test.js'], run: 'ci',
     axes: [{ tag: 'server', n: 2 }, { tag: 'wanted', n: 3 }, { tag: 'sibling', n: 4 }, { tag: 'op', n: 5 }],
     cells: 120, observed: 120, derived: 0, oracle: 'git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47)' },
+  { name: 'limits-sweep', status: 'main', kind: 'enumerated', runners: ['test/sweep/run.mjs'], run: 'ci-step',
+    axes: [{ tag: 'param', doc: 'every Limits key; keys with later:true in test/sweep/params.mjs are registered and not swept yet' }, { tag: 'value', doc: '0, 1, limit−1, limit, limit+1, and powers of two through the first power past the limit' }, { tag: 'heap', n: 2, doc: 'the default heap, and --max-old-space-size=128' }],
+    cells: 'CI: bytes ≤ 16 MiB and entries ≤ 65536, both heaps; nightly: the rest of the matrix',
+    oracle: 'git http-backend over a per-cell fixture (cat-file, ls-tree, rev-list --first-parent, ls-remote, merge-base, verify-pack, fsck). A divergence from the desired status fails unless test/sweep/ratchet.json names that cell and heap; a ratchet line whose cell now matches is itself a failure' },
 
   // ---- enumerated, in open PRs ----
   { name: 'push-outcome', status: 'main', kind: 'enumerated', runners: ['test/space/push-outcome.test.js', 'test/space/push-outcome-boundary.test.js'], run: 'ci',
