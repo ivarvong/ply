@@ -10,6 +10,7 @@ import { ok } from './result.js';
 import type { Result } from './result.js';
 import { te, bufferSource, concat, decodeBytes, encodeBytes } from './bytes.js';
 import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
+import { atOr } from './absent.js';
 
 const u32 = (n: number): Uint8Array => Uint8Array.from([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
 const sshString = (b: string | Uint8Array): Uint8Array => { const bytes: Uint8Array = typeof b === 'string' ? te.encode(b) : b; return concat([u32(bytes.length), bytes]); };
@@ -31,7 +32,8 @@ export function armor(blob: Uint8Array): string {
 export type Signer = {
   readonly kind: 'ssh-ed25519';
   readonly publicKeyLine: string;
-  sign(message: Uint8Array, namespace?: string): Promise<string>;
+  // namespace: 'git' when none is given (ssh-keygen -Y sign -n git)
+  sign(message: Uint8Array, ...namespace: [] | [string]): Promise<string>;
 };
 export type SignerKey = { readonly privateKey: CryptoKey; readonly publicKeyRaw: Uint8Array };
 
@@ -39,7 +41,8 @@ export function ed25519Signer({ privateKey, publicKeyRaw }: SignerKey): Signer {
   const pub = sshPublicKey(publicKeyRaw);
   return {
     kind: KEY_TYPE, publicKeyLine: pub.line,
-    async sign(message: Uint8Array, namespace = 'git'): Promise<string> {
+    async sign(message: Uint8Array, ...given: [] | [string]): Promise<string> {
+      const [namespace = 'git'] = given;
       const h = new Uint8Array(await crypto.subtle.digest('SHA-512', bufferSource(message)));
       const toSign: Uint8Array<ArrayBuffer> = concat([MAGIC, sshString(namespace), sshString(''), sshString('sha512'), sshString(h)]);
       const sig = new Uint8Array(await crypto.subtle.sign('Ed25519', privateKey, toSign));
@@ -59,7 +62,7 @@ export function gpgsigSplice(commitBytes: Uint8Array, signatureText: string): Re
   const headers = (nl < 0 ? text : text.slice(0, nl)).split('\n');
   let i = headers.findIndex(l => l.startsWith(`${COMMIT_HEADER_COMMITTER} `));
   if (i < 0) return fail('bad_request', 'commit has no committer line');
-  if ((headers[i + 1] ?? '').startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
+  if (atOr(headers, i + 1, '').startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
   // the gpgsig header: the armored signature, its continuation lines prefixed by a space
   headers.splice(i + 1, 0, `gpgsig ${signatureText.replace(/\n$/u, '').split('\n').join('\n ')}`);
   return ok(encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit'));
@@ -67,9 +70,14 @@ export function gpgsigSplice(commitBytes: Uint8Array, signatureText: string): Re
 // The throwing form the public API and unconverted callers use until the Result cut-over (docs/STACK.md).
 export const withGpgsig = (commitBytes: Uint8Array, signatureText: string): Uint8Array<ArrayBuffer> => orThrow(gpgsigSplice(commitBytes, signatureText));
 
-// Sign an encoded (unsigned) commit: returns the signed commit bytes. The message signed is the unsigned commit.
+// Sign an encoded (unsigned) commit: the signed commit bytes. The message signed is the unsigned commit. The signer is
+// the caller's: its rejection is the caller's own and passes through as it is.
+export async function signCommitResult(commitBytes: Uint8Array, signer: Signer, namespace = 'git'): Promise<Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>>> {
+  return gpgsigSplice(commitBytes, await signer.sign(commitBytes, namespace));
+}
+// The throwing form merge and rebase use until the Result cut-over.
 export async function signCommit(commitBytes: Uint8Array, signer: Signer, namespace = 'git'): Promise<Uint8Array<ArrayBuffer>> {
-  return withGpgsig(commitBytes, await signer.sign(commitBytes, namespace));
+  return orThrow(await signCommitResult(commitBytes, signer, namespace));
 }
 
 // Convenience for node/tests: a fresh Ed25519 key pair as a signer.

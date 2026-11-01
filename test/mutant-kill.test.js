@@ -1363,7 +1363,7 @@ test('aggregate caps fail closed before allocation', async () => {
     assert.equal(r.ok, false); assert.equal(r.error.code, 'bad_request'); assert.equal(r.error.message, `limits.${key} must be a finite non-negative number`);
   }
   const planned = orThrow(planPush(delA, withLimits({ maxReportLines: 1, maxPackBytes: 2 })));
-  assert.deepEqual([planned.maxReportLines, planned.maxPack, planned.needPack, planned.checked], [1, 2, false, undefined]);
+  assert.deepEqual([planned.maxReportLines, planned.maxPack, planned.needPack, planned.checked], [1, 2, false, null]);
 
   const base = te.encode('abcd');
   const delta = makeDelta(base, te.encode('abXY')).delta;
