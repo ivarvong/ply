@@ -21,8 +21,8 @@ const label = (miss: CommitMiss): string => {
   switch (miss.kind) {
     case 'absent': return miss.oid;
     case 'not_commit': return miss.type;
-    default: return assertNever(miss);
   }
+  return assertNever(miss);
 };
 void label;
 
@@ -34,8 +34,8 @@ if (!fetched.ok && fetched.error.code === 'not_found' && fetched.error.miss.kind
 const incomplete = (miss: CommitMiss): string => {
   switch (miss.kind) {
     case 'absent': return miss.oid;
-    // @ts-expect-error not exhaustive: not_commit is not handled
-    default: return assertNever(miss);
   }
+  // @ts-expect-error not exhaustive: not_commit is not handled
+  return assertNever(miss);
 };
 void incomplete;

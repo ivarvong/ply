@@ -282,6 +282,14 @@ test('span lifetimes: a cancelled blob stream ends its spans with outcome cancel
   }
 });
 
+test('span contract: opt-in response-header attributes are absent unless recordResponseHeaders is set', async () => {
+  const { spans } = await recordAll();
+  for (const s of spans) for (const { key } of s.attributes) {
+    assert.ok(key === 'http.response.header.content-type' || !key.startsWith('http.response.header.'), `${s.name} emitted ${key} with no recordResponseHeaders`);
+    assert.notEqual(key, 'http.response.headers.from_cache', s.name);
+  }
+});
+
 test('span contract: the differ names removed, renamed and added keys and spans', () => {
   const base = { op: [{ name: 'git.x', kind: 'INTERNAL', attrs: { 'git.x.a': 'number', 'git.x.outcome': 'string' }, children: [{ name: 'git.x.y', kind: 'INTERNAL', attrs: {} }] }] };
   const renamed = structuredClone(base); delete renamed.op[0].attrs['git.x.a']; renamed.op[0].attrs['git.x.b'] = 'number';

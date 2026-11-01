@@ -19,6 +19,7 @@ import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import type { Extra, Miss } from './errors.js';
 import { thrown as fail } from './errors.js';
+import { assertNever } from './result.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
@@ -230,8 +231,14 @@ export async function mergeBase(t: Transport, a: string, b: string, { maxDepth }
     commits = new Map([...B, ...A]);
     s = searchStep(depth, top, commits, a, b);
   }
-  if (s.tag === 'capped') throw limitError('merge-base search depth', cap, cap);
-  return { base: s.tag === 'found' ? s.base : null, bases: s.bases, depth: s.depth, commits, verdict: s };
+  switch (s.tag) {
+    case 'capped': throw limitError('merge-base search depth', cap, cap);
+    case 'found': return { base: s.base, bases: s.bases, depth: s.depth, commits, verdict: s };
+    case 'criss-cross':
+    case 'unrelated': return { base: null, bases: s.bases, depth: s.depth, commits, verdict: s };
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(s);
 }
 
 // Effect: a tree's entries, from the oid → bytes cache or fetched into it (`fetched` counts a fetch)
@@ -555,10 +562,15 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     root.set({ 'git.merge.base': one ?? '', 'git.merge.bases': bases.length, 'git.merge.base.depth': depth });
     // criss-cross history: git merges the bases into a virtual one (merge-ort, recursively); a single base can give a
     // clean result that differs from git's, so we refuse rather than guess
-    if (verdict.tag === 'criss-cross') throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases } as ConflictDetail);
-    if (verdict.tag === 'unrelated') throw fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
-    // only `found` is left: a verdict added without a base does not compile here
-    const { base } = verdict;
+    const base = ((): string => {
+      switch (verdict.tag) {
+        case 'criss-cross': throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases } as ConflictDetail);
+        case 'unrelated': throw fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
+        case 'found': return verdict.base;
+      }
+      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(verdict);
+    })();
     if (base === theirs) return upToDate(base);
     if (base === ours && !noFastForward) {
       const r = await fastForward(t, { ref, from: ours, to: theirs });

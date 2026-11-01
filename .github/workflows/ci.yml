@@ -148,6 +148,35 @@ jobs:
       - name: attributes fuzzer
         run: node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 120 --seed 1
 
+  # Cells at or under 16 MiB and 65_536 entries, each in its own process on the default heap and at 128 MiB.
+  # The full matrix (past those sizes, and the long delta chains) is the nightly job. Not part of the `test` gate:
+  # a sweep failure is its own check, and the vitest shards do not run this file.
+  sweep:
+    name: limit sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: write # setup-node persists the npm cache
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: sweep (small cells)
+        run: node --import ./test/ts-resolve.mjs test/sweep/run.mjs --ci
+
   # The gate. Its name stays `test` so anything waiting on that check still works. It runs even when a shard fails or
   # is cancelled (a skipped check would count as passing), and fails unless every shard and lint + fuzz succeeded.
   test:

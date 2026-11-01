@@ -14,9 +14,15 @@
 import type { Attrs, Loose } from './transport.js';
 import type { FetchLike } from './http.js';
 import { te, td } from './bytes.js';
+import { cacheHeader } from './cachestatus.js';
 
 const CACHE_HEADER = 'x-ply-pack-cache';
 export const CACHE_CONTROL_HEADER = 'x-ply-cache';
+// Same literals as http.ts. createTransport sets the request header only on a fetchImpl that carries the brand;
+// this wrapper strips it so the origin never sees the hint, and copies those response headers into the stored
+// response. A HIT then replays them (the span marks http.response.headers.from_cache).
+const RECORD_HEADERS_REQUEST = 'x-ply-record-headers';
+const CACHING_FETCH_BRAND = 'plyCachingFetch';
 
 export function isCacheableFetch(body: string | Uint8Array): boolean {
   const t: string = typeof body === 'string' ? body : td.decode(body);
@@ -35,6 +41,15 @@ export async function cacheKey(url: string, auth: string | null | undefined, bod
 
 // A plain-object header bag is matched case-insensitively. (An array of pairs reads as its indices, as it always has.)
 const headerOf = (headers: HeadersInit | undefined, name: string): string | null => headers instanceof Headers ? headers.get(name) : (Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1] ?? null);
+
+function peelRecordHeaders(init: RequestInit): { readonly init: RequestInit; readonly names: readonly string[] } {
+  const raw = headerOf(init.headers, RECORD_HEADERS_REQUEST);
+  if (raw === null || raw === '') return { init, names: [] };
+  const names = raw.split(',').map(s => s.trim().toLowerCase()).filter(s => s !== '');
+  const headers = new Headers(init.headers);
+  headers.delete(RECORD_HEADERS_REQUEST);
+  return { init: { ...init, headers }, names };
+}
 
 // Anything with the Cache API's shape: `caches.default` on Workers, memoryCache() in tests.
 export type PackCache = {
@@ -56,10 +71,11 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, { waitUntil
   const inner = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
   const stats: CacheStats = { hit: 0, miss: 0, bust: 0, bypass: 0, putOk: 0, putFailed: 0, putError: '' };
   const f = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
-    const body = init.body;
-    if (init.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !shouldCache(body)) { stats.bypass++; return inner(url, init); }
-    const mode = headerOf(init.headers, CACHE_CONTROL_HEADER);
-    const key = await cacheKey(String(url), headerOf(init.headers, 'authorization'), body, namespace);
+    const { init: wire, names } = peelRecordHeaders(init);
+    const body = wire.body;
+    if (wire.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !shouldCache(body)) { stats.bypass++; return inner(url, wire); }
+    const mode = headerOf(wire.headers, CACHE_CONTROL_HEADER);
+    const key = await cacheKey(String(url), headerOf(wire.headers, 'authorization'), body, namespace);
     // oxlint-disable-next-line unicorn/no-useless-undefined -- a failed delete is ignored
     if (mode === 'bust') { stats.bust++; await cache.delete(key).catch(() => undefined); }
     else {
@@ -67,22 +83,27 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, { waitUntil
       const hit = await cache.match(key).catch(() => undefined);
       if (hit) {
         stats.hit++;
-        const h = new Headers(hit.headers); h.set(CACHE_HEADER, 'HIT');
+        const h = new Headers(hit.headers); h.set(CACHE_HEADER, cacheHeader('HIT'));
         return new Response(hit.body, { status: 200, headers: h });
       }
     }
-    const res = await inner(url, init);
+    const res = await inner(url, wire);
     const ct = res.headers.get('content-type') ?? '';
-    const h = new Headers(res.headers); h.set(CACHE_HEADER, mode === 'bust' ? 'BUST' : 'MISS');
+    const h = new Headers(res.headers); h.set(CACHE_HEADER, cacheHeader(mode === 'bust' ? 'BUST' : 'MISS'));
     if (!res.ok || !ct.startsWith('application/x-git-upload-pack-result') || !res.body) return new Response(res.body, { status: res.status, headers: h });
     stats.miss++;
     const [toClient, toCache] = res.body.tee();
+    const stored = new Headers();
+    for (const name of names) { const v = res.headers.get(name); if (v !== null) stored.set(name, v); }
+    stored.set('content-type', ct);
+    stored.set('cache-control', `public, max-age=${maxAge}, immutable`);
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
     // oxlint-disable-next-line promise/always-return -- the counters are the outcome; the promise's value is unused (waitUntil)
-    const put = cache.put(key, new Response(toCache, { status: 200, headers: { 'content-type': ct, 'cache-control': `public, max-age=${maxAge}, immutable` } })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = String((e as Loose)?.message ?? e).slice(0, 200); }); // oxlint-disable-line typescript/no-unsafe-type-assertion -- see Loose (transport.ts)
+    const put = cache.put(key, new Response(toCache, { status: 200, headers: stored })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = String((e as Loose)?.message ?? e).slice(0, 200); }); // oxlint-disable-line typescript/no-unsafe-type-assertion -- see Loose (transport.ts)
     if (waitUntil) waitUntil(put);
     return new Response(toClient, { status: 200, headers: h });
   };
+  Object.defineProperty(f, CACHING_FETCH_BRAND, { value: true });
   f.stats = stats;
   f.attrs = (prefix = 'git.pack.cache') => ({ [`${prefix}.hit`]: stats.hit, [`${prefix}.miss`]: stats.miss, [`${prefix}.bust`]: stats.bust, [`${prefix}.bypass`]: stats.bypass, [`${prefix}.put.ok`]: stats.putOk, [`${prefix}.put.failed`]: stats.putFailed, [`${prefix}.put.error`]: stats.putError });
   return f;
