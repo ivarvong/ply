@@ -14,6 +14,7 @@ import { frames, coded, clientSpan, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePushRef, validateWire } from './validate.js';
+import type { Refname } from './refname.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -29,7 +30,7 @@ const OID = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`, 'u');
 export { ZERO_OID };
 
 // One ref update. create: oldOid = zeros; delete: newOid = zeros.
-export type Command = { readonly ref: string; readonly oldOid: string; readonly newOid: string };
+export type Command = { readonly ref: Refname; readonly oldOid: string; readonly newOid: string };
 // At least one: push reads the first command for its span (an empty list is refused there, by a TypeError coded 'protocol').
 export type Commands = readonly [Command, ...Command[]];
 // A pkt-line frame as pktStep and the transports' frames() yield it.
@@ -306,7 +307,7 @@ export type PackEntry = BuiltEntry;
 //   checked: atomic (all-or-nothing) and push options, as checked against the server's advertisement (receivecaps.ts
 //            checkPushCaps; pushWithOptions and GitHttp.push do it).
 export type PushOptions = {
-  readonly ref?: string;
+  readonly ref?: Refname;
   readonly oldOid?: string;
   readonly newOid?: string;
   readonly objects?: readonly PackObject[];
