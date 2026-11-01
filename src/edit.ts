@@ -320,6 +320,8 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
         inflated += chunk.length;
         if (inflated > sp.size) throw fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
         if (sha === null) {
+          // Unreachable: zlib is written only after phase is body, and a header-phase size is 0, so any positive
+          // chunk has already thrown on the declared-size check. DecompressionStream emits no empty chunk.
           if (sp.phase !== 'body') throw fail('pack_corrupt', 'inflated bytes before header');
           const lfs = isLfsPointerPrefix(chunk); span.set({ 'git.edit.blob.lfs_pointer': lfs });
           // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the pointer's size rides as an ad-hoc field (errors.ts Extra), as fetch.ts's size does

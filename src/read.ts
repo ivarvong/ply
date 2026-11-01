@@ -203,6 +203,11 @@ export async function readFile(url: string, { ref = null, path }: { readonly ref
 }
 
 export type OpenedBlob = { readonly size: number; readonly stream: ReadableStream<Uint8Array> };
+
+// The fail-site recorder (test/space/failsite-hook.mjs) installs this only when PLY_FAILSITES is set. A guard, not a
+// cast: under the hook the value is a function and the property is absent otherwise, so the call is a no-op in a bundle.
+const FAIL_SITE = Symbol.for('ply.failsite');
+const isFailSiteRecorder = (v: unknown): v is (holder: (e: unknown) => unknown) => void => typeof v === 'function';
 // Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
 // through DecompressionStream and a verifying transform. The transform releases every chunk but the latest as it
 // arrives, and releases the latest only after the pack trailer and the object hash verify. A failure errors the
@@ -218,6 +223,10 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
   // the first of failure, cancellation and verified end records the outcome; whatever follows (a cancel aborting the
   // pump) leaves the ended spans alone
   const failHere = (e: unknown): unknown => {
+    // A ply error built before this call has a stack that does not name the call, so the fail-site recorder
+    // (installed only under PLY_FAILSITES) would not see it. Absent the hook the property is undefined.
+    const record: unknown = (globalThis as Record<symbol, unknown>)[FAIL_SITE];
+    if (isFailSiteRecorder(record)) record(failHere);
     const code = thrownCode(e);
     if (isPlyCode(code)) {
       if (!span.ended) { fetchSpan.error(e).end(); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
@@ -255,7 +264,7 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
     await writer.close();
   })();
   // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
-  // verify transform's flush never runs then, so the failure is recorded (and both spans ended) here.
+  // verify transform's flush never runs then (its catch is unreachable), so the failure is recorded here.
   pump.catch(async (e: unknown) => { const err = failHere(e); await writer.abort(err).catch(() => { /* already failing */ }); await it.return?.().catch(() => { /* already failing */ }); });
   const sha = streamingSha1();
   await sha.update(objectHeader('blob', size));
