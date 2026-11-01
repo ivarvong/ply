@@ -14,7 +14,7 @@ import type { ValidatedIdent } from './validate.js';
 import { thrown as fail, type Extra, type Miss } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
-import { operation } from './operation.js';
+import { operation, operationTime } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
@@ -125,7 +125,8 @@ export type RebaseOutcome =
 
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 /* oxlint-disable eslint/complexity -- one operation's steps in order; the A6 pass makes the replay a RebaseState machine */
-export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time = Math.floor(Date.now() / 1000), squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
+export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time: timeIn, squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
+  const time = operationTime(opts['clock'], timeIn);
   validateAttributes(attributes); validatePushRef(ref, false); const ontoOid = givenOid(onto, 'onto');
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
@@ -247,7 +248,8 @@ function writtenKind(sameTree: boolean, empty: EmptyPolicy): 'empty' | 'kept_emp
 export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
 export function pickCommit(url: string, spec: PickSpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
 export function pickCommit(url: string, spec: PickSpec, opts?: RebaseOptions): Promise<PickOutcome>;
-export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time = Math.floor(Date.now() / 1000), revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
+export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time: timeIn, revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
+  const time = operationTime(opts['clock'], timeIn);
   validateAttributes(attributes); validatePushRef(ref, false);
   const empty = emptyPolicy(emptyGiven);
   const committerPerson: ValidatedIdent = stamp(committer, time);

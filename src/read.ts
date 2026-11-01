@@ -37,7 +37,6 @@ import type { Span } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
-import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
@@ -151,8 +150,7 @@ export type CommitResult = CommitView & { readonly ref: string; readonly oid: st
 export type EmptyCommit = { readonly empty: true; readonly ref: string };
 
 export async function readCommit(url: string, { ref = null }: { readonly ref?: RefSpec } = {}, opts: ReadOptions = {}): Promise<CommitResult | EmptyCommit> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } } as OperationOpts), async ({ t, outcome }) => {
+  return operation('read_commit', url, { ...opts, attrs: { 'git.read_commit.ref': ref ?? 'HEAD' } }, async ({ t, outcome }) => {
     let resolved: Resolved | EmptyCommit;
     try { resolved = await resolveCommit(t, ref); } catch (e) {
       if (!(isPlyError(e) && e.code === 'not_found' && e.miss.kind === 'head_unborn')) throw e;
@@ -214,8 +212,7 @@ export type ListResult = { readonly ref: string; readonly commit: string; readon
 export async function listTree(url: string, { ref = null, path = '' }: { readonly ref?: RefSpec; readonly path?: string | null } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<ListResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: true });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('ls_tree', url, ({ ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('ls_tree', url, { ...opts, attrs: { 'git.ls_tree.ref': ref ?? 'HEAD', 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } }, async ({ t, root, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     // the tracer operation() started the root span on (opts.tracer)
     const { tree, entry } = await walk(t, root, { commit, comps, cache, limits });
@@ -242,8 +239,7 @@ export type FileResult = {
 export async function readFile(url: string, { ref = null, path }: { readonly ref?: RefSpec; readonly path?: string } = {}, { cache = new Map<string, Uint8Array>(), ...opts }: ReadOptions & { readonly cache?: TreeCache } = {}): Promise<FileResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = pathComps(path, limits, { allowRoot: false });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read', url, ({ ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('read', url, { ...opts, attrs: { 'git.read.ref': ref ?? 'HEAD', 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } }, async ({ t, root, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)

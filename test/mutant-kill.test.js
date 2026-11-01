@@ -18,7 +18,7 @@ import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, isShortRead } from '../src/fetch.js';
 import { attributeTree, bestBases, mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
-import { Tracer } from '../src/otel.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { parseLsRefLine, parseUnbornLine, lsRefs, lsRefsBody } from '../src/lsrefs.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
 import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
@@ -28,8 +28,9 @@ import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
+import { clockOf, commitUnix, freshStorage, noopTracer, platformFetch, resolveCapabilities, systemClock } from '../src/capabilities.js';
 import { createTransport } from '../src/http.js';
-import { verifyRef } from '../src/operation.js';
+import { operation, verifyRef } from '../src/operation.js';
 import { negotiate } from '../src/negotiate.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import {
@@ -2166,4 +2167,75 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   const waited = spStep(spInit(), concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), continued.subarray(0, 1)]));
   assert.equal(waited.state.phase, 'header');
   assert.equal(isShortRead(Object.assign(new Error('short read: need 1 bytes at 12, have 13'), { code: 'pack_corrupt', reason: 'short_read' })), true);
+});
+
+test('capabilities: omitted is the typed default, never undefined, and a frozen clock zeroes HTTP durations', async () => {
+  const a = resolveCapabilities();
+  const b = resolveCapabilities();
+  assert.equal(a.tracer, noopTracer);
+  assert.equal(b.tracer, noopTracer);
+  assert.equal(a.clock, systemClock);
+  assert.equal(a.fetch, platformFetch);
+  assert.notEqual(a.storage, b.storage);
+  const fetch = async () => new Response();
+  const clock = { now: () => 5_000, cpu: () => 3 };
+  const storage = freshStorage();
+  const chosen = resolveCapabilities({ fetch, fetchImpl: async () => { throw new Error('fetchImpl loses to fetch'); }, clock, storage, tracer: noopTracer });
+  assert.equal(chosen.fetch, fetch);
+  assert.equal(chosen.clock, clock);
+  assert.equal(chosen.storage, storage);
+  assert.equal(resolveCapabilities({ fetchImpl: fetch }).fetch, fetch);
+  assert.equal(resolveCapabilities({ tracer: undefined, fetch: undefined, fetchImpl: undefined, clock: undefined, storage: undefined }).tracer, noopTracer);
+  assert.equal(resolveCapabilities({ tracer: undefined, fetch: undefined, fetchImpl: undefined, clock: undefined, storage: undefined }).fetch, platformFetch);
+  assert.equal(clockOf(undefined), systemClock);
+  assert.equal(clockOf(null), systemClock);
+  assert.equal(clockOf(clock), clock);
+  assert.equal(commitUnix(clock, undefined), 5);
+  assert.equal(commitUnix(clock, 9), 9);
+  const span = noopTracer.start('git.cap');
+  const leaked = new Error('secret-token-value');
+  span.scrub = s => s.replaceAll('secret-token-value', '[red]');
+  span.error(leaked);
+  assert.equal(leaked.message, '[red]');
+  span.end();
+  const held = freshStorage();
+  const bare = createTransport('http://127.0.0.1:9/r.git', { storage: held, fetchImpl: async () => { throw new Error('unused'); } });
+  assert.equal(bare.objects, held);
+  assert.equal(bare.tracer, noopTracer);
+  const real = new Tracer();
+  assert.equal(createTransport('http://127.0.0.1:9/r.git', { tracer: real, fetchImpl: async () => { throw new Error('unused'); } }).tracer, real);
+  const transport = { kind: 'http', url: 'http://example.test/r.git', tracer: real, parent: null, limits: DEFAULT_LIMITS, signal: null, quirks: {}, scrub: null, objects: freshStorage() };
+  const out = await operation('cap', transport.url, { transport }, async ({ t, root, outcome }) => {
+    assert.equal(root.tracer, noopTracer);
+    assert.equal(root.name, 'git.cap');
+    return outcome('ok', t.url);
+  });
+  assert.equal(out, transport.url);
+  const ex = arrayExporter();
+  const empty = () => new ReadableStream({ start(c) { c.close(); } });
+  const headers = type => ({ get: n => (n === 'content-type' ? type : null) });
+  const timed = createTransport('http://127.0.0.1:9/r.git', {
+    clock, tracer: new Tracer({ exporter: ex }),
+    fetchImpl: async () => ({ ok: true, status: 200, headers: headers('application/x-git-upload-pack-result'), body: empty() }),
+  });
+  const posted = timed.tracer.start('root');
+  let frames = 0;
+  for await (const _f of timed.frames('git-upload-pack', new Uint8Array(0), posted)) frames++;
+  posted.end();
+  assert.equal(frames, 0);
+  assert.equal(Number(posted.attrs['http.response.duration_ms']), 0);
+  assert.equal(Number(posted.attrs['git.response.duration_ms']), 0);
+  assert.equal(Number(posted.attrs['http.response.ttfb_ms']), 0);
+  const advEx = arrayExporter();
+  const adv = createTransport('http://127.0.0.1:9/r.git', {
+    clock, tracer: new Tracer({ exporter: advEx }),
+    fetchImpl: async () => ({ ok: true, status: 200, headers: headers('application/x-git-upload-pack-advertisement'), body: empty() }),
+  });
+  const advertised = adv.tracer.start('root');
+  assert.equal((await adv.advertise('git-upload-pack', advertised)).length, 0);
+  advertised.end();
+  assert.equal(Number(advertised.attrs['http.response.ttfb_ms']), 0);
+  const exported = line => line.flatMap(flattenLine);
+  assert.equal(exported(ex.lines).some(s => Number(s.attrs['http.response.duration_ms']) === 0), true);
+  assert.equal(exported(advEx.lines).some(s => Number(s.attrs['http.response.ttfb_ms']) === 0), true);
 });

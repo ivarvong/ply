@@ -293,7 +293,7 @@ export const DECISIONS = [
   { match: "src/log.ts#logWindow:pack_corrupt:commit … sent but not an ancestor of …", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logWindow:pack_corrupt:parent … of … withheld and … not reported shallow", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#readLog:bad_request:readLog: limit must be an integer from 1 to … (limits.ma…", space: 'read', axisTag: 'case' },
-  { match: "src/log.ts#readLog:bad_request:readLog: opts.tracer is required", space: 'read', axisTag: 'case' },
+  { match: "src/log.ts#readLog:bad_request:readLog: opts must be an object", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#readLog:bad_request:readLog: path filtering is not supported", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#readLog:bad_request:readLog: the second argument must be an object ({ ref, l…", space: 'read', axisTag: 'case' },
   { match: "src/merge.ts#mergeBranch:unsupported:… is an annotated tag (git merge writes a mergetag heade…", space: 'git-bytes', axisTag: 'op' },

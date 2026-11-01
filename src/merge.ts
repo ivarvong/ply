@@ -23,7 +23,7 @@ import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, operationTime, verifyRef } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
@@ -533,7 +533,8 @@ export type MergeOutcome =
   | Sides & { readonly outcome: 'merge'; readonly tree: string; readonly base: string; readonly pushBytes: number; readonly newTrees: number; readonly contentMerged: number };
 
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
-export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
+export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time: timeIn, fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
+  const time = operationTime(opts['clock'], timeIn);
   validatePushRef(ref, false); const fromOid = givenOid(from, 'from');
   const person: ValidatedIdent | null = author ? stamp(author, time) : null;
   const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;

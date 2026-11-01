@@ -13,7 +13,6 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 import { thrown as fail } from './errors.js';
-import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -23,6 +22,8 @@ import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TY
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
+import { commitUnix, systemClock } from './capabilities.js';
+import type { Clock } from './capabilities.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
@@ -185,7 +186,8 @@ export type TreePlan = {
 // Pure: every caller-controlled field, checked before any I/O. `base` as in editFile: the ref whose head is the
 // parent (default `ref`); base ≠ ref creates `ref` (zero old oid). base = ref and the ref absent: the first commit of a
 // new ref, no parent, zero old oid — a deploy's first push.
-export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, author, message, time = Math.floor(Date.now() / 1000) }: TreeSpec, limits: Limits, head: string | null = null): TreePlan {
+export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, author, message, time: timeIn }: TreeSpec, limits: Limits, head: string | null = null, clock: Clock = systemClock): TreePlan {
+  const time = commitUnix(clock, timeIn);
   validatePushRef(ref, false); validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
@@ -268,8 +270,8 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
   const limits = opts.limits ?? DEFAULT_LIMITS;
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head ?? '', 'git.push_tree.attempt': attempt };
-  // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
-  return operation('push_tree', url, ({ ...opts, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint ?? '' }), link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
+  return operation('push_tree', url, { ...opts, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint ?? '' }), link: linkTo ? { span: linkTo, kind: 'retry_of' } : null }, async ({ t, root, outcome }) => {
     // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
     const commitOf = (oid: string): Promise<Fetched> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     try {
@@ -322,7 +324,7 @@ const isAttemptError = (e: unknown): e is Error & Tagged => e instanceof Error;
 
 export async function pushTree(url: string, spec: TreeSpec, { head = null, strictHead = false, ...opts }: PushTreeOptions = {}): Promise<PushTreeResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
-  const s = validateTreeSpec(spec, opts.limits ?? DEFAULT_LIMITS, head);
+  const s = validateTreeSpec(spec, opts.limits ?? DEFAULT_LIMITS, head, opts.clock ?? systemClock);
   try {
     return await pushTreeOnce(url, s, { ...opts, strictHead }, { head, attempt: 0, linkTo: null });
   } catch (e) {

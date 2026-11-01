@@ -33,6 +33,19 @@ export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, encodeTag, ident, TYPE, TYPE_NAME } from './objects.js';
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny, cpuNow, cpuSince } from './otel.js';
+/**
+ * Wall time in milliseconds and a CPU clock (null where the platform has none).
+ * @typedef {import('./capabilities.js').Clock} Clock
+ */
+/**
+ * The object store a transport harvests into. A fresh map is the default, one per operation.
+ * @typedef {import('./capabilities.js').Storage} Storage
+ */
+/**
+ * tracer, fetch, clock and storage. Each is present after resolution: an omitted one is the typed default, never undefined.
+ * @typedef {import('./capabilities.js').Capabilities} Capabilities
+ */
+export { noopTracer, systemClock, platformFetch, freshStorage, resolveCapabilities } from './capabilities.js';
 export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';
 export { CODES, RETRY, thrown as fail, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';

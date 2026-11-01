@@ -230,7 +230,7 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(readLog(url, { limit }, opts()), code('bad_request'), String(limit));
   for (const bad of [null, 5, 'main']) await assert.rejects(readLog(url, bad, opts()), code('bad_request'), String(bad));
   await assert.rejects(readLog(url, {}, null), code('bad_request'));
-  await assert.rejects(readLog(url, {}, {}), code('bad_request'), 'no tracer');
+  assert.deepEqual((await readLog(url, { limit: 2 }, {})).commits.map(c => c.oid), (await readLog(url, { limit: 2 }, opts())).commits.map(c => c.oid), 'omitted tracer is the no-op, same log');
   await assert.rejects(readLog(url, { path: 'f0.txt' }, opts()), code('bad_request'), 'path is not supported');
   await assert.rejects(readLog(url, { ref: 'a..b' }, opts()), code('bad_request'));
   await assert.rejects(readLog(url, { ref: 7 }, opts()), code('bad_request'));

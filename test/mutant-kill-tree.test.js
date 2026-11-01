@@ -7,7 +7,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
-import { editFile, lookupEntry } from '../src/edit.js';
+import { editFile, lookupEntry, validateSpec } from '../src/edit.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
 import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, readBlob, fetchCommit, walkPath } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
@@ -317,6 +317,9 @@ test('validateTreeSpec: defaults, create, head, and each field checked before I/
   const t0 = Math.floor(Date.now() / 1000);
   const now = validateTreeSpec({ files: {}, author: A, message: '' }, DEFAULT_LIMITS).author.time;
   assert.ok(now >= t0 && now <= t0 + 2, `${now} vs ${t0}`);
+  const frozen = { now: () => 1_700_000_000_000, cpu: () => null };
+  assert.equal(validateTreeSpec({ files: {}, author: A, message: 'm' }, DEFAULT_LIMITS, null, frozen).author.time, 1700000000, 'an omitted time is the clock');
+  assert.equal(validateTreeSpec({ files: {}, author: A, message: 'm', time: 1600000000 }, DEFAULT_LIMITS, null, frozen).author.time, 1600000000, 'an explicit time wins over the clock');
   const ok = { files: {}, author: A, message: 'm', time: T0 };
   throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, 'abc'), 'bad_request', 'head must be a 40-hex oid');
   throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, 'A'.repeat(40)), 'bad_request', 'head must be a 40-hex oid');
@@ -1407,4 +1410,11 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
   const blob = be.span('git.read.blob');
   const fetch = be.all('git.upload-pack fetch').find(s => s.parentSpanId === blob.spanId);
   assert.equal(fetch?.kind, 3);
+});
+
+test('validateSpec: an omitted time is the clock, and an explicit time wins', () => {
+  const clock = { now: () => 1_700_000_000_000, cpu: () => null };
+  const spec = { path: 'a', find: 'x', replace: 'y', author: A, message: 'm' };
+  assert.equal(validateSpec(spec, DEFAULT_LIMITS, null, clock).time, 1700000000);
+  assert.equal(validateSpec({ ...spec, time: 1600000000 }, DEFAULT_LIMITS, null, clock).time, 1600000000);
 });
