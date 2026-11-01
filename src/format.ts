@@ -101,6 +101,12 @@ export const OBJ_BLOB = 3;
 export const OBJ_TAG = 4;
 export const OBJ_OFS_DELTA = 6;
 export const OBJ_REF_DELTA = 7;
+/** The four object types git stores. Deltas exist only inside a pack. */
+export type ObjectTypeName = 'commit' | 'tree' | 'blob' | 'tag';
+/** Pack type name: a stored object, or one of the two delta kinds. */
+export type PackKind = ObjectTypeName | 'ofs_delta' | 'ref_delta';
+/** Numeric type id (pack.h OBJ_*). 0 and 5 are not members. */
+export type ObjType = typeof OBJ_COMMIT | typeof OBJ_TREE | typeof OBJ_BLOB | typeof OBJ_TAG | typeof OBJ_OFS_DELTA | typeof OBJ_REF_DELTA;
 export const OBJ_TYPE_SHIFT = 4;
 export const OBJ_TYPE_MASK = 7;
 /** Low nibble of the first header byte is the size; later bytes carry 7 bits. MSB continues. */

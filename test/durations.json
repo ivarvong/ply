@@ -30,6 +30,7 @@
   "test/props.test.js": 5,
   "test/protocol.test.js": 150,
   "test/pure.test.js": 1,
+  "test/push-budget.test.js": 15,
   "test/push-tree.test.js": 8,
   "test/push.test.js": 53,
   "test/read.test.js": 10,
@@ -51,6 +52,8 @@
   "test/version-refname.test.js": 0,
   "test/space/registry.test.js": 2,
   "test/span-contract.test.js": 4,
+  "test/sweep/boundary.test.js": 1,
+  "test/tree-budget.test.js": 8,
   "test/wide-limits.test.js": 12,
   "test/workerd.test.js": 12
 }

@@ -77,6 +77,16 @@
     "eslint/no-duplicate-imports": "off",
     "import/no-duplicates": "error",
     "eslint/no-else-return": "error",
+    "eslint/default-case": "off",
+    "eslint/no-fallthrough": "error",
+    "typescript/switch-exhaustiveness-check": [
+      "error",
+      {
+        "allowDefaultCaseForExhaustiveSwitch": false,
+        "considerDefaultExhaustiveForUnions": false,
+        "requireDefaultForNonUnion": true
+      }
+    ],
     "eslint/no-useless-computed-key": "error",
     "eslint/object-shorthand": "error",
     "eslint/yoda": "error",

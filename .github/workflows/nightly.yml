@@ -167,9 +167,35 @@ jobs:
         run: |
           npx vitest run test/space/pack-cut.test.js || { echo "NIGHTLY-FAIL pack-cut reproduce: PACK_SPACE=full npx vitest run test/space/pack-cut.test.js"; exit 1; }
 
+  sweep:
+    name: limit sweep (full)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - name: sweep (full matrix)
+        run: |
+          node --import ./test/ts-resolve.mjs test/sweep/run.mjs --full || { echo "NIGHTLY-FAIL sweep reproduce: npm run sweep -- --full"; exit 1; }
+
   report:
     name: report failure
-    needs: [seed, fuzz, test, mutate, pack-cut-full]
+    needs: [seed, fuzz, test, mutate, pack-cut-full, sweep]
     if: failure()
     runs-on: ubuntu-latest
     permissions:
