@@ -18,13 +18,15 @@ const isBlobMode = (m: string): m is '100644' | '100755' | '120000' =>
 
 export function parseMode(value: unknown): Result<Mode, ErrorOf<'bad_request'>> {
   if (typeof value !== 'string') return fail('bad_request', 'mode must be a string', { what: 'mode' });
-  if (!/^(100644|100755|120000|40000|160000)$/.test(value)) return fail('bad_request', 'invalid mode', { what: 'mode' });
+  if (!/^(100644|100755|120000|40000|160000)$/u.test(value)) return fail('bad_request', 'invalid mode', { what: 'mode' });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
   return ok(value as Mode);
 }
 
 export function parseBlobMode(value: unknown): Result<BlobMode, ErrorOf<'bad_request'>> {
   if (typeof value !== 'string') return fail('bad_request', 'mode must be a string', { what: 'mode' });
   if (!isBlobMode(value)) return fail('bad_request', 'invalid blob mode', { what: 'mode' });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
   return ok(value as BlobMode);
 }
 

@@ -17,7 +17,7 @@ export type BlobEditLite = { readonly oldOid: string; readonly newOid: string; r
 
 export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
 export type Built = {
-  readonly trees: ReadonlyArray<NewTree>;
+  readonly trees: readonly NewTree[];
   readonly newTree: string;
   readonly commitData: Uint8Array;
   readonly newCommit: string;

@@ -42,7 +42,6 @@ import { buildCommitData } from './commit-build.js';
 import type { Path } from './path.js';
 import { parseRefname } from './refname.js';
 import { fromNullish } from './absent.js';
-import { orThrow } from './errors.js';
 
 const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = hashObject('tree', encodeTree([]));
@@ -182,7 +181,9 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
   const changes = list.map(c => normalize(c, limits));
   const authorTime = fromNullish(spec.author?.time);
   const specTime = fromNullish(spec.time);
-  const time = authorTime.tag === 'some' ? authorTime.value : (specTime.tag === 'some' ? specTime.value : Math.floor(Date.now() / 1000));
+  let time = Math.floor(Date.now() / 1000);
+  if (specTime.tag === 'some') time = specTime.value;
+  if (authorTime.tag === 'some') time = authorTime.value;
   const aTz = fromNullish(spec.author?.tz);
   const author = validateIdent(aTz.tag === 'some'
     ? { name: spec.author?.name, email: spec.author?.email, time, tz: aTz.value }
@@ -419,7 +420,7 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
     const branded = parseRefname(target.ref);
     if (!branded.ok) throw branded.error;
     const edited = await editFile(url, {
-      ref: branded.value, base: parent.baseOid ?? parent.baseRef ?? target.ref, path: edit.path as unknown as Path, find: edit.find, replace: edit.replace,
+      ref: branded.value, base: parent.baseOid ?? parent.baseRef ?? target.ref, path: edit.path, find: edit.find, replace: edit.replace,
       author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
     }, {
       ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,

@@ -14,12 +14,16 @@ export type Refname = string & { readonly [refBrand]: typeof refBrand };
 export type BranchName = string & { readonly [branchBrand]: typeof branchBrand };
 export type TagName = string & { readonly [tagBrand]: typeof tagBrand };
 
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion
 const asRef = (v: string): Refname => v as Refname;
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion
 const asBranch = (v: string): BranchName => v as BranchName;
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion
 const asTag = (v: string): TagName => v as TagName;
 
 export function parseRefname(value: unknown): Result<Refname, ErrorOf<'bad_request'>> {
   try { return ok(asRef(validateRef(value))); }
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
   catch (e) { return fail('bad_request', (e as { message?: string }).message ?? 'invalid ref', { what: 'ref', cause: e }); }
 }
 
@@ -27,9 +31,10 @@ export function parseRefname(value: unknown): Result<Refname, ErrorOf<'bad_reque
 export function parseBranchName(value: unknown): Result<BranchName, ErrorOf<'bad_request'>> {
   try {
     const ref = validatePushRef(String(value), false);
-    if (!ref.startsWith('refs/heads/')) throw fail('bad_request', 'must start with refs/heads/', { what: 'branch' });
+    if (!ref.startsWith('refs/heads/')) return fail('bad_request', 'must start with refs/heads/', { what: 'branch' });
     return ok(asBranch(ref));
   } catch (e) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion
     return fail('bad_request', (e as { message?: string }).message ?? 'invalid branch', { what: 'branch', cause: e });
   }
 }
@@ -37,9 +42,10 @@ export function parseBranchName(value: unknown): Result<BranchName, ErrorOf<'bad
 export function parseTagName(value: unknown): Result<TagName, ErrorOf<'bad_request'>> {
   try {
     const ref = validateRef(value);
-    if (!ref.startsWith('refs/tags/')) throw fail('bad_request', 'must start with refs/tags/', { what: 'tag' });
+    if (!ref.startsWith('refs/tags/')) return fail('bad_request', 'must start with refs/tags/', { what: 'tag' });
     return ok(asTag(ref));
   } catch (e) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion
     return fail('bad_request', (e as { message?: string }).message ?? 'invalid tag', { what: 'tag', cause: e });
   }
 }

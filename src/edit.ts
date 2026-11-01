@@ -12,13 +12,13 @@ import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
 import { spliceDelta } from './pack.js';
 import { parseCommit, parseTree, objectHeader, TYPE } from './objects.js';
-import { fromHex, streamingSha1 } from './sha1.js';
+import { streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, isValidatedIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { parseCommitId } from './oid.js';
 import { signCommit } from './sign.js';
 import type { OperationOpts } from './operation.js';
@@ -32,8 +32,8 @@ import type { EntryOptions } from './boundary.js';
 import { fromNullish } from './absent.js';
 import type { Refname } from './refname.js';
 import type { Path } from './path.js';
-import { buildCommitObjects, withCommitData } from './commit/build.js';
-import type { Level as BuiltLevel, NewTree as BuiltNewTree } from './commit/build.js';
+import { buildCommitObjects, withCommitData } from './commit-build.js';
+import type { Level as BuiltLevel, NewTree as BuiltNewTree } from './commit-build.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -140,13 +140,20 @@ function resolvedBase(base: string): { readonly base: string; readonly oid: bool
   return { base: id.value, oid: true };
 }
 import { parseRefname } from './refname.js';
-import { parsePath as parsePathBrand } from './path.js';
 export function validateSpec(spec: EditSpec, limits: Limits, head: string | null = null): EditPlan {
   const fallbackRef = parseRefname('refs/heads/main');
   const givenRef = spec.ref ?? (fallbackRef.ok ? fallbackRef.value : (() => { throw fail('bad_request', 'invalid default ref'); })());
-  const { base: baseIn = givenRef, path: pathIn, find: findIn, replace: replaceIn, author, committer = null, message, time = Math.floor(Date.now() / 1000) } = { ...spec, base: (spec as { base?: string }).base };
+  const baseIn: string | Refname = (spec as { base?: string }).base ?? givenRef;
+  const pathIn = spec.path;
+  const findIn = spec.find;
+  const replaceIn = spec.replace;
+  const author = spec.author;
+  const committer = spec.committer ?? null;
+  const message = spec.message;
+  const time = spec.author.time ?? spec.time ?? Math.floor(Date.now() / 1000);
   validatePushRef(givenRef, false);
-  const parsed = resolvedBase(baseIn as unknown as string);
+  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion
+  const parsed = resolvedBase(String(baseIn));
   const resolved = parsed.base;
   const baseIsOid = parsed.oid;
   const atAuthorTime = fromNullish(author.time);
@@ -166,12 +173,13 @@ export function validateSpec(spec: EditSpec, limits: Limits, head: string | null
     return validateIdent(cTz.tag === 'some' ? { ...base, tz: cTz.value } : base);
   })();
   validateMessage(message);
-  const comps = validatePath(pathIn as unknown as string, limits);
+  const comps = validatePath(pathIn, limits);
   const find: unknown = bytesOf(findIn), replace: unknown = bytesOf(replaceIn);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
   if (!find.length) throw fail('bad_request', 'find must be non-empty');
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
-  return Object.freeze({ ref: givenRef, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== (givenRef as unknown as string), path: pathIn as unknown as string, comps, find, replace, author: person, committer: written, message, time: person.time, head });
+  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion
+  return Object.freeze({ ref: givenRef, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== String(givenRef), path: String(pathIn), comps, find, replace, author: person, committer: written, message, time: person.time, head });
 }
 
 // The ref exists and the caller named a commit that is not its tip. Committing there would move the ref off its

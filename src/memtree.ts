@@ -3,7 +3,8 @@
 // a lazy node contributes its oid and no bytes. Empty directories are pruned; only the root may be empty.
 import { thrown as failThrown, fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { ok, err } from './result.js';
+import { ok } from './result.js';
+import type { Result } from './result.js';
 import { encodeTree, hashObject } from './objects.js';
 import { indexOfBytes } from './bytes.js';
 import { limitError, requireLimit } from './limits.js';
@@ -130,7 +131,7 @@ export function renameAt(root: Mem, from: readonly string[], to: readonly string
   }
   const srcName = leafName(from);
   const node = srcEntries.get(srcName);
-  if (node === undefined) throw fail('not_found', `${fromPath} not found`, { what: 'path', path: fromPath, miss: pathMiss(fromPath) });
+  if (node === undefined) throw failThrown('not_found', `${fromPath} not found`, { what: 'path', path: fromPath, miss: pathMiss(fromPath) });
   let destEntries = requireDir(root, '');
   let destWalked = '';
   for (const name of to.slice(0, -1)) {
@@ -154,7 +155,7 @@ export function renameAt(root: Mem, from: readonly string[], to: readonly string
 }
 
 // Exactly one non-overlapping match. Zero or several is match_count; an empty find is bad_request.
-export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Array): import('./result.js').Result<Uint8Array, ErrorOf<'bad_request' | 'match_count'>> {
+export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Array): Result<Uint8Array, ErrorOf<'bad_request' | 'match_count'>> {
   if (find.length === 0) return fail('bad_request', 'find must be non-empty');
   let count = 0;
   let at = 0;

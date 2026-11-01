@@ -7,13 +7,14 @@ import { ok, err, assertNever } from './result.js';
 import type { Result } from './result.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
-import { parseSideband } from './fetch.js';
+// local sideband parser to reduce dependencies
+const parseSideband = (payload: Uint8Array): { readonly band: number; readonly body: Uint8Array } => ({ band: payload[0] ?? 0, body: payload.subarray(1) });
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS, ZERO_OID } from './format.js';
 import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
-import { validatePushRef, validateWire } from './validate.js';
+import { validatePushRef } from './validate.js';
 import type { Refname } from './refname.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
