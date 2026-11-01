@@ -11,7 +11,7 @@
 //               (a root's parent is the empty tree)
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
-import { thrown as fail, type Extra } from './errors.js';
+import { thrown as fail, type Extra, type Miss } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
@@ -21,6 +21,8 @@ import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
+
+const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 
 // The unconverted modules' functions as this module calls them (see merge.ts).
 type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
@@ -133,7 +135,7 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
     const { refs }: Refs = await lsRefs(t, ontoOid === null ? [ref, onto] : [ref]);
     const tip = refs.get(ref)?.oid;
     const target = ontoOid ?? refs.get(onto)?.oid;
-    if (tip === undefined) throw fail('not_found', `ref ${ref} not found`); if (target === undefined) throw fail('not_found', `ref ${onto} not found`);
+    if (tip === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) }); if (target === undefined) throw fail('not_found', `ref ${onto} not found`, { miss: refMiss(onto) });
     if (ontoOid !== null) await assertCommit(t, ontoOid, 'onto');
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
     const { bases, commits, verdict } = await mergeBase(t, tip, target);
@@ -257,7 +259,7 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
   return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty } }, async ({ t, outcome }): Promise<PickOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref]);
-    const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`);
+    const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const [cT, cC] = await Promise.all([target, commit].map(oid => commitBytesAt(t, oid)));
     const tInfo: Commit = parseCommit(cT?.data ?? new Uint8Array(0), t.limits);
     const c: Commit = parseCommit(cC?.data ?? new Uint8Array(0), t.limits);

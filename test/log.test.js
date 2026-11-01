@@ -224,9 +224,9 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   const code = c => e => e.code === c && !(e instanceof TypeError);
   await assert.rejects(readLog(url, { ref: 'nope' }, opts()), code('not_found'));
   const absent = 'f'.repeat(40);
-  await assert.rejects(readLog(url, { ref: absent }, opts()), e => e.code === 'not_found' && e.miss?.kind === 'absent' && e.miss.oid === absent && !(e instanceof TypeError));
+  await assert.rejects(readLog(url, { ref: absent }, opts()), e => e.code === 'not_found' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === absent && !(e instanceof TypeError));
   const treeOid = git(bare, ['rev-parse', 'main^{tree}']).trim();
-  await assert.rejects(readLog(url, { ref: treeOid }, opts()), e => e.code === 'not_found' && e.message === `${treeOid} is not a commit (tree)` && e.miss?.kind === 'not_commit' && e.miss.type === 'tree' && !(e instanceof TypeError));
+  await assert.rejects(readLog(url, { ref: treeOid }, opts()), e => e.code === 'not_found' && e.message === `${treeOid} is not a commit (tree)` && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && !(e instanceof TypeError));
   for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(readLog(url, { limit }, opts()), code('bad_request'), String(limit));
   for (const bad of [null, 5, 'main']) await assert.rejects(readLog(url, bad, opts()), code('bad_request'), String(bad));
   await assert.rejects(readLog(url, {}, null), code('bad_request'));
