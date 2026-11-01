@@ -40,6 +40,7 @@ import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
 import { buildCommitData } from './commit/build.js';
 import type { Path } from './path.js';
+import { fromNullish } from './absent.js';
 
 const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = hashObject('tree', encodeTree([]));
@@ -177,9 +178,23 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
   const max = requireLimit(limits, 'maxPackObjects');
   if (list.length > max) throw limitError('changes', list.length, max);
   const changes = list.map(c => normalize(c, limits));
-  const time = spec.author?.time ?? spec.time ?? Math.floor(Date.now() / 1000);
-  const author = validateIdent({ name: spec.author?.name, email: spec.author?.email, time, tz: spec.author?.tz });
-  const committer = spec.committer === undefined || spec.committer === null ? author : validateIdent({ name: spec.committer.name, email: spec.committer.email, time: spec.committer.time ?? time, tz: spec.committer.tz });
+  const authorTime = fromNullish(spec.author?.time);
+  const specTime = fromNullish(spec.time);
+  const time = authorTime.tag === 'some' ? authorTime.value : (specTime.tag === 'some' ? specTime.value : Math.floor(Date.now() / 1000));
+  const aTz = fromNullish(spec.author?.tz);
+  const author = validateIdent(aTz.tag === 'some'
+    ? { name: spec.author?.name, email: spec.author?.email, time, tz: aTz.value }
+    : { name: spec.author?.name, email: spec.author?.email, time });
+  const committer = spec.committer === undefined || spec.committer === null
+    ? author
+    : (() => {
+        const cTime = fromNullish(spec.committer.time);
+        const when = cTime.tag === 'some' ? cTime.value : time;
+        const cTz = fromNullish(spec.committer.tz);
+        return validateIdent(cTz.tag === 'some'
+          ? { name: spec.committer.name, email: spec.committer.email, time: when, tz: cTz.value }
+          : { name: spec.committer.name, email: spec.committer.email, time: when });
+      })();
   validateMessage(spec.message);
   return { ref, base, baseText: baseLabel(base), changes, author, committer, message: spec.message, head: validateHead(head) };
 }

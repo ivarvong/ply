@@ -75,7 +75,9 @@ export function putAt(root: Mem, comps: readonly string[], leaf: Mem, overwrite:
   const name = leafName(comps);
   const full = walked === '' ? name : `${walked}/${name}`;
   const existing = entries.get(name);
-  if (existing?.kind === 'dir' || (existing?.kind === 'lazy' && existing.mode === MODE_TREE)) throw fail('bad_request', `${full} is a directory`, { what: 'path', path: full });
+  if ((existing !== undefined && existing.kind === 'dir') || (existing !== undefined && existing.kind === 'lazy' && existing.mode === MODE_TREE)) {
+    throw fail('bad_request', `${full} is a directory`, { what: 'path', path: full });
+  }
   if (existing !== undefined && !overwrite) throw fail('bad_request', `${full} already exists`, { what: 'path', path: full });
   insertChild(entries, name, leaf, limits);
 }
