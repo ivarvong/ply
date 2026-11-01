@@ -29,6 +29,11 @@ export const LIMIT_HARVEST: number = LIMIT_OBJECT / 2;
  * somewhere a caller controls: 128 MiB is above GitHub's 100 MiB file cap, so any blob GitHub stores streams under it.
  */
 export const LIMIT_PACK_WIRE: number = LIMIT_OBJECT * 2;
+/**
+ * Blob bytes one pushTree may hold before it builds the tree. The same ceiling as the pack on the wire, so one
+ * maximum object still fits and three 48 MiB blobs (144 MiB, which peaked near 440 MB RSS) do not.
+ */
+export const LIMIT_PUSH_BYTES: number = LIMIT_PACK_WIRE;
 /** Result size a delta header may claim (gitformat-pack "Deltified representation"). Same ceiling as one object. */
 export const LIMIT_DELTA_RESULT: number = LIMIT_OBJECT;
 /**
@@ -93,6 +98,7 @@ export type Limits = {
   readonly maxObjectSize: number;
   readonly maxHarvestBytes: number;
   readonly maxPackBytes: number;
+  readonly maxPushBytes: number;
   readonly maxDeltaResult: number;
   readonly maxDeltaChain: number;
   readonly maxInflatedTotal: number;
@@ -116,6 +122,7 @@ export const DEFAULT_LIMITS: Limits = Object.freeze({
   maxObjectSize: LIMIT_OBJECT,
   maxHarvestBytes: LIMIT_HARVEST,
   maxPackBytes: LIMIT_PACK_WIRE,
+  maxPushBytes: LIMIT_PUSH_BYTES,
   maxDeltaResult: LIMIT_DELTA_RESULT,
   maxDeltaChain: LIMIT_DELTA_CHAIN,
   maxInflatedTotal: LIMIT_INFLATED_TOTAL,
