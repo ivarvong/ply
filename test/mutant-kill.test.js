@@ -15,7 +15,7 @@ import {
 } from '../src/packresolve.js';
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
-import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
+import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, isShortRead } from '../src/fetch.js';
 import { bestBases, mergeBase } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
@@ -29,6 +29,7 @@ import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
+import { verifyRef } from '../src/operation.js';
 import { negotiate } from '../src/negotiate.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import {
@@ -2047,4 +2048,123 @@ test('validatePushRef: receive-pack\'s funny refname (the cells test/space/refna
     assert.equal(ok(ref, false), create, `${ref} create`);
     assert.equal(ok(ref, true), del, `${ref} delete`);
   }
+});
+
+// T3 noticed these and left them: a null throw in verifyRef became a TypeError, redirect cancel() was not awaited,
+// a 2xx with no body was `network`, and spStep matched the short-read message instead of reason (#76, emitted by #99).
+test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with no body is protocol, short reads switch on reason', async () => {
+  const root = { set() {} };
+  const ref = 'refs/heads/main';
+  const expected = 'a'.repeat(40);
+  const readBack = async (thrown) => verifyRef({ get limits() { throw thrown; } }, root, 'git.edit', ref, expected).then(() => null, e => e);
+  const eNull = await readBack(null);
+  assert.equal(eNull.code, 'ambiguous');
+  assert.equal(eNull.message, 'push reported ok but the verification read-back failed: null');
+  assert.equal(eNull.cause, null);
+  assert.equal(eNull.original, undefined);
+  const eUndef = await readBack(undefined);
+  assert.equal(eUndef.code, 'ambiguous');
+  assert.equal(eUndef.message, 'push reported ok but the verification read-back failed: undefined');
+  const boom = Object.assign(new Error('boom'), { code: 'network' });
+  const eBoom = await readBack(boom);
+  assert.equal(eBoom.code, 'ambiguous');
+  assert.equal(eBoom.message, 'push reported ok but the verification read-back failed: boom');
+  assert.equal(eBoom.original, 'network');
+  assert.equal(eBoom.cause, boom);
+  const eStr = await readBack('nope');
+  assert.equal(eStr.code, 'ambiguous');
+  assert.equal(eStr.message, 'push reported ok but the verification read-back failed: nope');
+  // an empty message is still the message: `??` keeps it, `||` would stringify the Error ("Error")
+  const eEmpty = await readBack(Object.assign(new Error(''), { code: 'network' }));
+  assert.equal(eEmpty.message, 'push reported ok but the verification read-back failed: ');
+  assert.equal(eEmpty.original, 'network');
+
+  const unhandled = [];
+  const onUnhandled = (err) => { unhandled.push(err); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const held = () => {
+      let release;
+      const gate = new Promise(r => { release = r; });
+      let started;
+      const startedP = new Promise(r => { started = r; });
+      const body = { cancel: () => { started(); return gate.then(() => { throw new Error('cancel rejected'); }); } };
+      return { body, startedP, release: () => release() };
+    };
+    const postHold = held();
+    const http = createTransport('http://127.0.0.1:9/r.git', {
+      fetchImpl: async () => ({
+        ok: false, status: 302, type: 'basic',
+        headers: { get: n => (n === 'location' ? 'http://127.0.0.1:9/moved.git/git-upload-pack' : null) },
+        body: postHold.body,
+      }),
+      tracer: tracerStub,
+    });
+    let settled = false;
+    const pending = (async () => { for await (const frame of http.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })();
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    await postHold.startedP;
+    assert.equal(settled, false, 'a redirect waits until body.cancel() settles');
+    postHold.release();
+    const redir = await pending.then(() => null, e => e);
+    assert.equal(redir.code, 'http');
+    assert.match(redir.message, /redirected to http:\/\/127\.0\.0\.1:9\/moved\.git\/git-upload-pack/);
+
+    const advHold = held();
+    const declared = createTransport('http://127.0.0.1:9/r.git', {
+      fetchImpl: async () => ({
+        ok: true, status: 200,
+        headers: { get: n => (n === 'content-type' ? 'application/x-git-upload-pack-advertisement' : n === 'content-length' ? '999999999' : null) },
+        body: advHold.body,
+      }),
+      limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
+    });
+    let advSettled = false;
+    const advPending = declared.advertise('git-upload-pack', spanStub);
+    advPending.then(() => { advSettled = true; }, () => { advSettled = true; });
+    await advHold.startedP;
+    assert.equal(advSettled, false, 'an over-cap advertisement waits until body.cancel() settles');
+    advHold.release();
+    const adv = await advPending.then(() => null, e => e);
+    assert.equal(adv.code, 'limit_exceeded');
+    assert.equal(adv.what, 'advertisement bytes');
+    await new Promise(r => { setImmediate(r); });
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+
+  const reply = (status, contentType, body) => createTransport('http://127.0.0.1:9/r.git', {
+    fetchImpl: async () => ({ ok: status >= 200 && status < 300, status, headers: { get: n => (n === 'content-type' ? contentType : null) }, body }),
+    tracer: tracerStub,
+  });
+  const drain = t => (async () => { for await (const frame of t.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })().then(() => null, e => e);
+  const post = await drain(reply(200, 'application/x-git-upload-pack-result', null));
+  assert.equal(post.code, 'protocol');
+  assert.equal(post.message, 'git-upload-pack: HTTP 200 response has no body');
+  const postUndef = await drain(reply(200, 'application/x-git-upload-pack-result', undefined));
+  assert.equal(postUndef.message, 'git-upload-pack: HTTP 200 response has no body');
+  const wrongType = await drain(reply(200, 'text/html', null));
+  assert.equal(wrongType.code, 'not_git');
+  const empty = new ReadableStream({ start(c) { c.close(); } });
+  let frames = 0;
+  for await (const _frame of reply(200, 'application/x-git-upload-pack-result', empty).frames('git-upload-pack', new Uint8Array(0), spanStub)) frames++;
+  assert.equal(frames, 0, 'an empty body is bytes, not a missing body');
+  const advNull = await reply(200, 'application/x-git-upload-pack-advertisement', null).advertise('git-upload-pack', spanStub).then(() => null, e => e);
+  assert.equal(advNull.code, 'protocol');
+  assert.equal(advNull.message, 'git-upload-pack advertisement: HTTP 200 response has no body');
+  const advEmpty = await reply(200, 'application/x-git-upload-pack-advertisement', new ReadableStream({ start(c) { c.close(); } })).advertise('git-upload-pack', spanStub);
+  assert.equal(advEmpty.length, 0);
+
+  const shaped = (message, reason, code = 'pack_corrupt') => Object.assign(new Error(message), { code, reason });
+  assert.equal(isShortRead(shaped('not the short-read text', 'short_read')), true);
+  assert.equal(isShortRead(shaped('short read: need 1 bytes at 0, have 0')), false);
+  assert.equal(isShortRead(shaped('short read: need 1 bytes at 0, have 0', 'other')), false);
+  assert.equal(isShortRead(shaped('short read: need 1', 'short_read', 'protocol')), false);
+  assert.equal(isShortRead(null), false);
+  assert.equal(isShortRead(undefined), false);
+  const continued = encodeObjHeader(TYPE.BLOB, 300);
+  const waited = spStep(spInit(), concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), continued.subarray(0, 1)]));
+  assert.equal(waited.state.phase, 'header');
+  assert.equal(isShortRead(Object.assign(new Error('short read: need 1 bytes at 12, have 13'), { code: 'pack_corrupt', reason: 'short_read' })), true);
 });
