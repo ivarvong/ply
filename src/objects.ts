@@ -10,7 +10,7 @@ import type { Limits } from './limits.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
   MODE_S_IFREG, MODE_S_IFLNK, MODE_OWNER_EXEC, TREE_MAX_NAME_BYTES,
-  MODE_S_IFMT, MODE_S_IFDIR, MODE_BITS, MODE_LOW_DIGITS, TREE_SORT_SLASH,
+  MODE_S_IFMT, MODE_S_IFDIR, MODE_BITS, MODE_LOW_DIGITS, TREE_SORT_SLASH, TREE_ENTRY_MIN,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
   TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER,
@@ -77,23 +77,66 @@ export type TreeEntryInput = { readonly mode: string; readonly name: string; rea
 // Every tree refusal is pack_corrupt with this prefix (one constructor: the code and prefix ship once).
 const badTree = (why: string): ErrorOf<'pack_corrupt'> => fail('pack_corrupt', `tree: ${why}`);
 
+// How many entries are fully framed (mode, space, name, NUL, OID_BYTES). A short tail is not an entry: the parser
+// reports that as pack_corrupt. Stops at one past the cap, so a huge tree is not scanned twice end to end.
+const completeTreeFrames = (data: Uint8Array, maxEntries: number): number => {
+  const stop = maxEntries + 1;
+  let p = 0;
+  let n = 0;
+  while (p < data.length && n < stop) {
+    const sp = data.indexOf(TREE_MODE_SEP, p);
+    if (sp < p) return n;
+    const nul = data.indexOf(TREE_NUL, sp + 1);
+    if (nul < sp + 1 || data.length - (nul + 1) < OID_BYTES) return n;
+    n += 1;
+    p = nul + 1 + OID_BYTES;
+  }
+  return n;
+};
+
+// The hex id is computed when a reader asks. Caching it on the entry would put a 40-character string beside every
+// name, which is what exhausted a 128 MiB heap at the cap. `bytes` is not enumerable, so equality and JSON see the
+// mode, the name, and the offsets.
+type TreeEntryState = { readonly bytes: Uint8Array; readonly oidOffset: number };
+const treeEntryProto: TreeEntry = Object.create(null);
+Object.defineProperty(treeEntryProto, 'oid', {
+  get(this: TreeEntryState): string {
+    return toHex(this.bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
+  },
+});
+// One prototype per tree carries the buffer. Entries are ordinary assigned objects: defineProperty on every
+// entry puts it in dictionary mode, and that is what exhausted a 128 MiB heap at the cap.
+const treeBytes = (bytes: Uint8Array): TreeEntry => {
+  const proto: TreeEntry = Object.create(treeEntryProto);
+  Object.defineProperty(proto, 'bytes', { value: bytes });
+  return proto;
+};
+const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number, entryOffset: number): TreeEntry =>
+  Object.assign(Object.create(proto), { mode, name, oidOffset, entryOffset });
+
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
 // Duplicates and order are git's rules (fsck duplicateEntries and treeNotSorted, both errors under --strict) on the
 // raw name bytes. A file `d` and a directory `d` need not be neighbours (`d` < `d.x` < `d/`), so the duplicate check is
 // over the whole tree, as fsck's verify_ordered does with its stack of file names a later directory could repeat. It
 // runs before the order check: by then every earlier pair was in order, and on a sorted prefix fsck's stack finds
 // exactly the duplicates this set finds, so the message is one fsck prints. Names decode losslessly (decodeBytes, #43):
-// distinct bytes are distinct names, so the raw-byte duplicate check is also the decoded-name one.
+// distinct bytes are distinct names, so the set holds that name and not a second hex copy of the bytes.
+// A tree that cannot fit in maxTreeEntries is counted before any entry object exists. The cap still fires as
+// `tree entries <max+1>`, and bytes past it are not validated: a bad mode there stays limit_exceeded.
 // @decoder parseTree prefix=tree
 // oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, inline: a helper costs bytes on every entry
 export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): TreeEntry[] {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
+  // Shorter than one minimum entry per allowed slot: the count cannot pass the cap, so skip the frame scan.
+  const over = data.length > maxEntries * TREE_ENTRY_MIN && completeTreeFrames(data, maxEntries) > maxEntries;
   const entries: TreeEntry[] = [];
+  const shape = treeBytes(data);
   const seen = new Set<string>();
   let p = 0;
+  let count = 0;
   let prevKey: Uint8Array | null = null;
   while (p < data.length) {
-    if (entries.length >= maxEntries) throw limitError('tree entries', entries.length + 1, maxEntries);
+    if (count >= maxEntries) throw limitError('tree entries', count + 1, maxEntries);
     const sp = data.indexOf(TREE_MODE_SEP, p);
     // A negative fromIndex would wrap; indexOf returns -1 when the separator is absent.
     if (sp < p) throw badTree('malformed entry');
@@ -124,14 +167,15 @@ export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LI
       if (mode === MODE_TREE || mode === MODE_COMMIT) throw badTree('.gitmodules is not a blob');
     }
     if ((mode === MODE_TREE || mode === MODE_COMMIT) && isDotFileName(nameBytes, 'gitattributes')) throw badTree('.gitattributes is not a blob');
-    const rawName: string = toHex(nameBytes);
-    if (seen.has(rawName)) throw badTree(`duplicate entry ${JSON.stringify(name)}`);
-    seen.add(rawName);
+    if (seen.has(name)) throw badTree(`duplicate entry ${JSON.stringify(name)}`);
+    seen.add(name);
     const key: Uint8Array = isDirMode(raw) ? concat([nameBytes, SLASH]) : nameBytes;
     // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw badTree('not strictly sorted');
     prevKey = key;
-    entries.push({ mode, name, oid: toHex(oidBytes), oidOffset: nul + 1, entryOffset: p });
+    // Past the cap, keep the name set (a bad prefix is still pack_corrupt) and do not retain the entry.
+    if (!over) entries.push(treeEntry(shape, mode, name, nul + 1, p));
+    count += 1;
     p = nul + 1 + OID_BYTES;
   }
   return entries;
