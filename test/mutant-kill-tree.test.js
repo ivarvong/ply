@@ -8,7 +8,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
 import { editFile, lookupEntry } from '../src/edit.js';
-import { commitTimeOf, commitUnix } from '../src/capabilities.js';
+import { commitTimeOf, commitUnix , defaultCapabilities} from '../src/capabilities.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
 import { refCandidates, entryType, lsMode, resolveCommit, resolveAbbrev, commitView, readCommit, listTree, readFile, openBlob, readBlob, fetchCommit, walkPath } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
@@ -156,7 +156,7 @@ function env(r, { limits = DEFAULT_LIMITS, quirks = {} } = {}) {
   const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
   const transport = r.transport({ tracer, limits, quirks });
   const spans = () => ex.lines.flatMap(flattenLine);
-  return { opts: { tracer, transport, limits }, transport, spans, span: name => spans().find(s => s.name === name), all: name => spans().filter(s => s.name === name) };
+  return { opts: { capabilities: { ...defaultCapabilities(), tracer }, transport, limits }, transport, spans, span: name => spans().find(s => s.name === name), all: name => spans().filter(s => s.name === name) };
 }
 
 // ======================================================================================================================
@@ -534,7 +534,7 @@ test('pushTree: git.push_tree.diff belongs to the operation tracer, in the root 
   const r = remote(); r.commit(FILES());
   const opEx = arrayExporter(); const opTracer = new Tracer({ exporter: opEx });
   const wireEx = arrayExporter(); const wireTracer = new Tracer({ exporter: wireEx });
-  await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { tracer: opTracer, transport: r.transport({ tracer: wireTracer }) });
+  await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { capabilities: { ...defaultCapabilities(), tracer: opTracer }, transport: r.transport({ tracer: wireTracer }) });
   const op = opEx.lines.flatMap(flattenLine);
   const root = op.find(s => s.name === 'git.push_tree');
   const diff = op.find(s => s.name === 'git.push_tree.diff');
@@ -958,7 +958,7 @@ test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwis
     const ex = arrayExporter();
     const tracer = new Tracer({ exporter: ex });
     const transport = { ...r.transport({ tracer }), advertise };
-    return { r, opts: { tracer, transport }, transport, spans: () => ex.lines.flatMap(flattenLine) };
+    return { r, opts: { capabilities: { ...defaultCapabilities(), tracer }, transport }, transport, spans: () => ex.lines.flatMap(flattenLine) };
   };
   const born = server(`unborn HEAD symref-target:${target}\n`);
   for (const ref of [null, undefined, '', 'HEAD', 'main', 'refs/heads/main']) {
@@ -971,9 +971,9 @@ test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwis
   await rejects(readCommit('http://fake/r.git', { ref: 'other' }, born.opts), 'not_found', 'ref other not found', { miss: { kind: 'ref', ref: 'other', candidates: ['refs/other', 'refs/tags/other', 'refs/heads/other'] } });
   const plain = { code: 'not_found', miss: { kind: 'head_unborn', target } };
   const liar = remote({ hook: async req => { if (req.command === 'ls-refs') throw plain; } });
-  await assert.rejects(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...liar.transport({ tracer: new Tracer() }), advertise } }), e => e === plain);
+  await assert.rejects(readCommit('http://fake/r.git', {}, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, transport: { ...liar.transport({ tracer: new Tracer() }), advertise } }), e => e === plain);
   const typed = remote({ hook: async req => { if (req.command === 'ls-refs') throw fail('pack_corrupt', 'odd', { miss: { kind: 'head_unborn', target } }); } });
-  await rejects(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...typed.transport({ tracer: new Tracer() }), advertise } }), 'pack_corrupt', 'odd');
+  await rejects(readCommit('http://fake/r.git', {}, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, transport: { ...typed.transport({ tracer: new Tracer() }), advertise } }), 'pack_corrupt', 'odd');
   const blank = server('unborn HEAD symref-target:\n');
   await rejects(resolveCommit(blank.transport, 'HEAD'), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_absent' } });
   await rejects(resolveCommit(born.transport, undefined), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_unborn', target } });
@@ -1287,7 +1287,7 @@ test('openBlob: maxBytes is the declared size, and a cap does not pull the rest 
     let pulls = 0;
     const r = remote({ hook: async req => (req.command === 'fetch' ? (async function* () { for (const f of frames) { pulls += 1; yield f; } })() : undefined) });
     const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
-    return { t: r.transport({ tracer }), tracer, pulls: () => pulls, spans: () => ex.lines.flatMap(flattenLine) };
+    return { t: r.transport({ tracer }), capabilities: { ...defaultCapabilities(), tracer }, pulls: () => pulls, spans: () => ex.lines.flatMap(flattenLine) };
   };
   const exact = serve();
   const at = streamOf(await openBlob(exact.t, oid, { maxBytes: text.length, follows: exact.tracer.start('p') }));
@@ -1418,7 +1418,7 @@ test('editFile: an omitted time is the capability clock', async () => {
   r.commit(FILES());
   const e = env(r);
   const clock = { now: () => 1_700_000_000_000, cpu: () => null };
-  await editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm' }, { ...e.opts, clock });
+  await editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm' }, { ...e.opts, capabilities: { ...e.opts.capabilities, clock } });
   const tip = r.refs.get('refs/heads/main');
   const commit = parseCommit(r.objects.get(tip).data);
   assert.equal(commit.author.includes('1700000000'), true);

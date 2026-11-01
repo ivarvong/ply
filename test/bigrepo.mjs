@@ -8,6 +8,7 @@ import { startGitServer } from './server.js';
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const COMMITS = +(args.commits ?? 1000), HEAD_MB = +(args.headMB ?? 50), TOTAL_GB = +(args.totalGB ?? 10), DIR = args.dir ?? '/tmp/bigrepo';
@@ -66,7 +67,7 @@ const head = git(['rev-parse', 'main']).trim();
 const run = async (label, fn) => { const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex }); const t0 = Date.now(); let r, err; try { r = await fn(tracer); } catch (e) { err = e; } const ms = Date.now() - t0; const spans = ex.lines.flatMap(flattenLine); const root = spans.find(s => s.name === 'git.edit') ?? spans[spans.length - 1]; const http = spans.filter(s => s.attrs['http.response.body.size'] !== undefined); console.log(`${label.padEnd(44)} ${String(ms).padStart(6)}ms  rtt=${http.length}  wire_in=${http.reduce((n, s) => n + s.attrs['http.response.body.size'], 0)}B  wire_out=${http.reduce((n, s) => n + (s.attrs['http.request.body.size'] ?? 0), 0)}B  max_alloc=${root?.attrs['mem.alloc.max_single'] ?? '-'}  alloc=${root?.attrs['mem.alloc.bytes'] ?? '-'}${err ? '  ERR ' + err.code + ' ' + err.message.slice(0, 60) : ''}`); return { r, spans, ms, http }; };
 
 const cache = new Map();
-const edit = (tracer, rev, c = new Map()) => editFile(url, { path: 'src/mod17/file9.ts', find: `MARK_${rev}`, replace: `EDITED_${rev}`, author: { name: 'e', email: 'e@x' }, message: 'edit' }, { tracer, cache: c });
+const edit = (tracer, rev, c = new Map()) => editFile(url, { path: 'src/mod17/file9.ts', find: `MARK_${rev}`, replace: `EDITED_${rev}`, author: { name: 'e', email: 'e@x' }, message: 'edit' }, { capabilities: { ...defaultCapabilities(), tracer }, cache: c });
 const lastRev = Math.floor((COMMITS - 1) / 50) * 50;
 console.log('\n--- edit src/mod17/file9.ts (depth 3, 40-wide src dir, 25-wide leaf)');
 const a = await run('cold (ls-refs + commit + 3 trees + blob + push)', t => edit(t, lastRev, cache));
@@ -75,7 +76,7 @@ git(['update-ref', 'refs/heads/main', head]); // undo for the next run
 const b = await run('warm tree cache (same root tree → 0 tree fetches)', t => edit(t, lastRev, cache));
 git(['update-ref', 'refs/heads/main', head]);
 console.log('\n--- what the naive alternatives cost on this repo (server side, wire bytes)');
-const c = new GitHttp(url, { tracer: new Tracer() });
+const c = new GitHttp(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
 for (const [label, req] of [['blob:none (textbook blobless, depth 1)', { wants: [head], filter: 'blob:none', deepen: 1 }], ['tree:0 (our commit fetch)', { wants: [head], filter: 'tree:0', deepen: 1 }], ['combine:blob:none+tree:3 (one-shot trees to depth 3)', { wants: [head], filter: 'combine:blob:none+tree:3', deepen: 1 }], ['depth-1 full clone pack (what `git clone --depth 1` moves)', { wants: [head], deepen: 1 }]]) {
   const t0 = Date.now(); let n = 0, objs = 0; try { const r = await c.fetchPack(req); n = r.parsed.bytes; objs = r.parsed.stats.count; } catch (e) { console.log(label, 'ERR', e.message.slice(0, 80)); continue; }
   console.log(`${label.padEnd(60)} ${String(Date.now() - t0).padStart(6)}ms  ${String(n).padStart(10)}B  ${objs} objects`);

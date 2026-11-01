@@ -11,6 +11,7 @@ import { parsePack, resolvePack, buildPack, makeDelta } from '../src/pack.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter } from '../src/otel.js';
 import { toHex } from '../src/sha1.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const SEED = parseInt(process.env.SEED ?? '7', 10);
 let root, cleanup, srv, bare, work;
@@ -116,7 +117,7 @@ test('v2 fetch filter=blob:none deepen=1 returns exactly git rev-list --objects 
   const head = commitFiles(work, bare, { 'a/b/c.txt': 'c', 'a/d.txt': 'd', 'e/f/g/h.txt': 'h', 'top.txt': 'top' }, 'one');
   const head2 = commitFiles(work, bare, { 'top.txt': 'top2' }, 'two');
   const tracer = new Tracer({ exporter: arrayExporter() });
-  const c = new GitHttp(`${srv.url}/o.git`, { tracer });
+  const c = new GitHttp(`${srv.url}/o.git`, { capabilities: { ...defaultCapabilities(), tracer } });
   const { refs } = await c.lsRefs(['refs/heads/main']);
   assert.equal(refs.get('refs/heads/main').oid, head2);
   const r = await c.fetchPack({ wants: [head2], filter: 'blob:none', deepen: 1 });

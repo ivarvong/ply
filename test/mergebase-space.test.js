@@ -40,6 +40,7 @@ import { createTransport } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const rediff = oracleRediff();
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -133,9 +134,9 @@ async function cell(S, R, server, op, seed, git) {
   const url = `${proxy.url}/${R.name}.git`; const limits = withLimits({ requestTimeoutMs: 5000, maxMergeDepth: CAP });
   let res = null, err = null;
   try {
-    if (op === 'mergeBase') res = await mergeBase(createTransport(url, { tracer: new Tracer(), limits }), ours, theirs, { maxDepth: CAP });
-    else if (op === 'mergeBranch') res = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { tracer: new Tracer(), limits, rediff });
-    else res = await rebaseBranch(url, { ref: 'refs/heads/main', onto: 'refs/heads/feat', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { tracer: new Tracer(), limits, rediff });
+    if (op === 'mergeBase') res = await mergeBase(createTransport(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, limits }), ours, theirs, { maxDepth: CAP });
+    else if (op === 'mergeBranch') res = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, limits, rediff });
+    else res = await rebaseBranch(url, { ref: 'refs/heads/main', onto: 'refs/heads/feat', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, limits, rediff });
   } catch (e) { err = e; }
   await proxy.close();
   const p = []; const lied = M.lied > 0;

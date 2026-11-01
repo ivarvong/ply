@@ -3,7 +3,7 @@
 import {
   fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs,
   fetchObject, packStream, spInit, spStep, spFinish, inflate, commitView, entryType, lsMode, refCandidates,
-  isFilterRejection, isPlyCode, DEFAULT_LIMITS,
+  isFilterRejection, isPlyCode, DEFAULT_LIMITS, defaultCapabilities,
   type Transport, type ExportLine, type Exporter, type Limits, type FetchOpts, type SpState, type PackObject, type OperationOpts,
 } from '../../src/index.js';
 
@@ -28,11 +28,15 @@ void stored;
 
 const limits: Limits = DEFAULT_LIMITS;
 const made: Transport = createTransport('https://example.test/repo.git', {
-  tracer, userAgent: 'ply-web', limits, signal: new AbortController().signal, fetchImpl: globalThis.fetch, quirks: {},
+  capabilities: { ...defaultCapabilities(), tracer, fetch: globalThis.fetch },
+  userAgent: 'ply-web',
+  limits,
+  signal: new AbortController().signal,
+  quirks: {}
 });
 void made;
 
-const opts: OperationOpts = { tracer };
+const opts: OperationOpts = { capabilities: { ...defaultCapabilities(), tracer } };
 void opts;
 
 const fetchOpts: FetchOpts = { wants: ['a'.repeat(40)], filter: 'blob:none' };

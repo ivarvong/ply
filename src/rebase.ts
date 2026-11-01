@@ -14,7 +14,7 @@ import type { ValidatedIdent } from './validate.js';
 import { thrown as fail, type Extra, type Miss } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
-import { operation, operationTime } from './operation.js';
+import { operation, operationTime, entryOptions, type Capabilities } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, type AttributeSource, type Author, type Commit, type MergeBlob, type MergeOptions, type OpContext, type PackObject, type PushObject, type PushResult, type Refs, type Signer, type Transport, type TreeCache } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
@@ -101,6 +101,7 @@ export type RebaseSpec = {
 };
 // The operation options (auth, tracer, limits, …) pass through to operation(); these are the ones a replay reads.
 export type RebaseOptions = {
+  readonly capabilities: Capabilities;
   readonly cache?: TreeCache;
   readonly signer?: Signer | null;
   readonly rediff?: Rediff;
@@ -125,14 +126,14 @@ export type RebaseOutcome =
 
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 /* oxlint-disable eslint/complexity -- one operation's steps in order; the A6 pass makes the replay a RebaseState machine */
-export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time: timeIn, squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
-  const time = operationTime(opts, timeIn);
+export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time: timeIn, squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, capabilities, ...opts }: RebaseOptions = entryOptions()): Promise<RebaseOutcome> {
+  const time = operationTime(capabilities, timeIn);
   validateAttributes(attributes); validatePushRef(ref, false); const ontoOid = givenOid(onto, 'onto');
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
   if (message !== null) validateMessage(message);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  return (operation as unknown as Operation)('rebase', url, { ...opts, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
+  return (operation as unknown as Operation)('rebase', url, { ...opts, capabilities, attrs: { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash } }, async ({ t, root, outcome, limits }): Promise<RebaseOutcome> => {
     const { refs }: Refs = await lsRefs(t, ontoOid === null ? [ref, onto] : [ref]);
     const tip = refs.get(ref)?.oid;
     const target = ontoOid ?? refs.get(onto)?.oid;
@@ -248,8 +249,8 @@ function writtenKind(sameTree: boolean, empty: EmptyPolicy): 'empty' | 'kept_emp
 export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
 export function pickCommit(url: string, spec: PickSpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
 export function pickCommit(url: string, spec: PickSpec, opts?: RebaseOptions): Promise<PickOutcome>;
-export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time: timeIn, revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
-  const time = operationTime(opts, timeIn);
+export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time: timeIn, revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, capabilities, ...opts }: RebaseOptions = entryOptions()): Promise<PickOutcome> {
+  const time = operationTime(capabilities, timeIn);
   validateAttributes(attributes); validatePushRef(ref, false);
   const empty = emptyPolicy(emptyGiven);
   const committerPerson: ValidatedIdent = stamp(committer, time);
@@ -259,7 +260,7 @@ export async function pickCommit(url: string, { ref = 'refs/heads/main', commit,
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  return (operation as unknown as Operation)(op, url, { ...opts, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty } }, async ({ t, outcome }): Promise<PickOutcome> => {
+  return (operation as unknown as Operation)(op, url, { ...opts, capabilities, attrs: { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty } }, async ({ t, outcome }): Promise<PickOutcome> => {
     const { refs }: Refs = await lsRefs(t, [ref]);
     const target = refs.get(ref)?.oid; if (target === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const [cT, cC] = await Promise.all([target, commit].map(oid => commitBytesAt(t, oid)));
@@ -285,12 +286,12 @@ type CherrySpec = Omit<PickSpec, 'revert'>;
 export function cherryPick(url: string, spec: CherrySpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
 export function cherryPick(url: string, spec: CherrySpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
 export function cherryPick(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome>;
-export function cherryPick(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome> {
+export function cherryPick(url: string, spec: CherrySpec, opts: RebaseOptions = entryOptions()): Promise<PickOutcome> {
   return pickCommit(url, { ...spec, revert: false }, opts);
 }
 export function revertCommit(url: string, spec: CherrySpec & { readonly empty: 'keep' }, opts?: RebaseOptions): Promise<PickKept | PickOk>;
 export function revertCommit(url: string, spec: CherrySpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
 export function revertCommit(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome>;
-export function revertCommit(url: string, spec: CherrySpec, opts?: RebaseOptions): Promise<PickOutcome> {
+export function revertCommit(url: string, spec: CherrySpec, opts: RebaseOptions = entryOptions()): Promise<PickOutcome> {
   return pickCommit(url, { ...spec, revert: true }, opts);
 }

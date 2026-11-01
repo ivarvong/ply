@@ -9,21 +9,23 @@
 // stamp the error's code as the outcome and are rethrown with `e.span = root` so a caller can link a retry to it.
 import type { Extra } from './errors.js';
 import type { Limits } from './limits.js';
-import type { Span, Tracer } from './otel.js';
+import type { Span } from './otel.js';
 import type { Attrs, Loose, Quirks, Transport } from './transport.js';
-import type { FetchLike, HttpAuth } from './http.js';
+import type { HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
 import { withParent } from './transport.js';
-import { adoptCapabilities, commitTimeOf, commitUnix } from './capabilities.js';
+import { commitTimeOf, commitUnix, defaultCapabilities } from './capabilities.js';
+import type { Capabilities } from './capabilities.js';
+export type { Capabilities };
+export { defaultCapabilities };
 import { lsRefs } from './lsrefs.js';
 import { thrown as fail } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 
 export type OperationOpts = {
   readonly auth?: HttpAuth | null | undefined;
-  readonly tracer: Tracer;
+  readonly capabilities: Capabilities;
   readonly parent?: Span | null | undefined;
-  readonly fetchImpl?: FetchLike | undefined;
   readonly limits?: Limits | undefined;
   readonly signal?: AbortSignal | null | undefined;
   readonly quirks?: Quirks | undefined;
@@ -33,16 +35,16 @@ export type OperationOpts = {
   readonly onFinish?: (() => Attrs) | null | undefined;
 };
 // Commit unix seconds for an operation that stamps a commit before its transport exists. An explicit time wins;
-// otherwise the clock on the options bag (the system clock when the caller did not pass one).
-export const operationTime = (bag: object, given: unknown): number => commitUnix(adoptCapabilities(bag).clock, commitTimeOf(given));
+// otherwise the clock on the capabilities record (systemClock inside defaultCapabilities()).
+export const operationTime = (capabilities: Capabilities, given: unknown): number => commitUnix(capabilities.clock, commitTimeOf(given));
+export const entryOptions = (): { readonly capabilities: Capabilities } => ({ capabilities: defaultCapabilities() });
 
 export type Outcome = <R>(kind: string, result: R, extra?: Attrs) => R;
 export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits }) => Promise<R>;
 
 export async function operation<R>(op: string, url: string | URL, input: OperationOpts, body: OperationBody<R>): Promise<R> {
-  const caps = adoptCapabilities(input);
-  const { auth, parent = null, limits = DEFAULT_LIMITS, signal = null, quirks, transport = null, attrs = {}, link = null, onFinish = null } = input;
-  const { tracer } = caps;
+  const { capabilities, auth, parent = null, limits = DEFAULT_LIMITS, signal = null, quirks, transport = null, attrs = {}, link = null, onFinish = null } = input;
+  const { tracer } = capabilities;
   const name = `git.${op}`;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- otel.js infers `parent` from its default (null) until its cluster converts
   const root = tracer.start(name, { parent: parent as null, attrs: { [`${name}.url`]: transport?.url ?? redactUrl(url), ...attrs } });
@@ -52,7 +54,7 @@ export async function operation<R>(op: string, url: string | URL, input: Operati
   try {
     // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
     // error recorded, like any other failure, instead of leaving it open and missing from the trace.
-    const carried = { auth, tracer, parent: root, fetchImpl: caps.fetch, clock: caps.clock, storage: caps.storage, limits, signal, quirks };
+    const carried = { capabilities, auth, parent: root, limits, signal, quirks };
     const t = transport ? withParent(transport, root) : createTransport(url, carried);
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub) root.scrub = t.scrub;

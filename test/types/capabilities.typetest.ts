@@ -3,7 +3,7 @@ import { readCommit } from '../../src/read.js';
 import { createTransport } from '../../src/http.js';
 import { editFile } from '../../src/edit.js';
 import {
-  adoptCapabilities, defaultCapabilities, freshStorage, noopTracer, platformFetch, systemClock,
+  defaultCapabilities, freshStorage, noopTracer, platformFetch, systemClock,
   type Capabilities, type Clock,
 } from '../../src/capabilities.js';
 
@@ -12,13 +12,12 @@ readCommit(url, {});
 createTransport(url);
 
 const caps: Capabilities = defaultCapabilities();
-const again: Capabilities = adoptCapabilities({});
 const custom: Capabilities = { tracer: noopTracer, fetch: platformFetch, clock: systemClock, storage: freshStorage() };
 const clock: Clock = { now: () => 0, cpu: () => null };
-const withClock = { tracer: noopTracer, clock, capabilities: custom };
+const withClock = { capabilities: { ...defaultCapabilities(), clock } };
 void readCommit(url, {}, withClock);
 void caps;
-void again;
+void custom;
 void editFile;
 
 // @ts-expect-error every capability is required

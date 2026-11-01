@@ -16,6 +16,7 @@ import { concat, te } from '../src/bytes.js';
 import { fromHex } from '../src/sha1.js';
 import { withLimits } from '../src/limits.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -23,7 +24,7 @@ after(async () => { await srv.close(); cleanup(); });
 
 const A = { name: 'deploy', email: 'deploy@x' };
 const GITLINK = 'c0ffee'.padEnd(40, '0');
-const traced = () => { const ex = arrayExporter(); return { ex, tracer: new Tracer({ exporter: ex }), spans: () => ex.lines.flatMap(flattenLine) }; };
+const traced = () => { const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex }); return { ex, tracer, capabilities: { ...defaultCapabilities(), tracer }, spans: () => ex.lines.flatMap(flattenLine) }; };
 const emptyRepo = () => { const name = `t${n++}`; const bare = makeBareRepo(root, name); return { name, bare, url: `${srv.url}/${name}.git` }; };
 // counts requests per service; `before(kind)` runs ahead of each one (the CAS tests move the ref there)
 const counting = (hook = () => {}) => {
@@ -80,7 +81,7 @@ const receivePack = spans => spans.filter(s => s.name === 'git.receive-pack');
 
 test('first push creates the ref: tree == git write-tree, ls-tree modes/oids, fsck --strict, clone matches', async () => {
   const r = emptyRepo(), files = site(), t = traced();
-  const res = await pushTree(r.url, { ref: 'refs/heads/main', files, author: A, message: 'deploy 1' }, { tracer: t.tracer, verify: true });
+  const res = await pushTree(r.url, { ref: 'refs/heads/main', files, author: A, message: 'deploy 1' }, { capabilities: { ...defaultCapabilities(), tracer: t.tracer }, verify: true });
   assert.equal(res.oldCommit, null); assert.equal(res.attempt, 0); assert.equal(res.noop, false);
   assert.equal(git(r.bare, ['rev-parse', 'refs/heads/main']).trim(), res.newCommit);
   assert.equal(git(r.bare, ['rev-list', '--count', 'main']).trim(), '1', 'a root commit');
@@ -100,11 +101,11 @@ test('first push creates the ref: tree == git write-tree, ls-tree modes/oids, fs
 
 test('repeat pushes are thin: only changed blobs and the trees on their paths (as REF_DELTAs), == rev-list --objects new ^old', async () => {
   const r = emptyRepo(), files = site();
-  const first = await pushTree(r.url, { files, author: A, message: 'deploy 1' }, { tracer: new Tracer() });
+  const first = await pushTree(r.url, { files, author: A, message: 'deploy 1' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   const t1 = traced(); const { c, f } = counting(); const cache = new Map();
   // change one file, add one, delete one, in three different directories
   const next = { ...files, 'd07/f3.txt': text(9999, 1024), 'd11/new.txt': 'new\n' }; delete next['d03/f5.txt'];
-  const second = await pushTree(r.url, { files: next, author: A, message: 'deploy 2' }, { tracer: t1.tracer, fetchImpl: f, cache });
+  const second = await pushTree(r.url, { files: next, author: A, message: 'deploy 2' }, { capabilities: { ...defaultCapabilities(), tracer: t1.tracer, fetch: f }, cache });
   assert.equal(second.oldCommit, first.newCommit);
   assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), second.newCommit);
   const want = git(r.bare, ['rev-list', '--objects', '--no-object-names', second.newCommit, `^${first.newCommit}`]).trim().split('\n');
@@ -120,7 +121,7 @@ test('repeat pushes are thin: only changed blobs and the trees on their paths (a
   // push 3, a one-byte change, with the head hint and push 2's cache: no tree is fetched, the commit fetch overlaps ls-refs
   const third = { ...next, 'd19/f9.txt': next['d19/f9.txt'].replace(/^./, '#') };
   const t2 = traced(); const warm = counting();
-  const res3 = await pushTree(r.url, { files: third, author: A, message: 'deploy 3' }, { tracer: t2.tracer, cache, head: second.newCommit, fetchImpl: warm.f });
+  const res3 = await pushTree(r.url, { files: third, author: A, message: 'deploy 3' }, { capabilities: { ...defaultCapabilities(), tracer: t2.tracer, fetch: warm.f }, cache, head: second.newCommit });
   assert.equal(res3.hint, 'used'); assert.equal(res3.oldCommit, second.newCommit);
   assert.equal(res3.treesRead, 0, 'root and d19 come from the cache');
   assert.equal(warm.c['git-upload-pack'], 2, 'ls-refs and the hinted commit, concurrently');
@@ -132,7 +133,7 @@ test('repeat pushes are thin: only changed blobs and the trees on their paths (a
 
   // push 4 restores push 1's files. Only the parent's trees are consulted: the three blobs push 1 had and push 3 does not
   // (d03/f5, d07/f3, d19/f9) are on the server in older history but are sent again. Correct, not minimal.
-  const back = await pushTree(r.url, { files, author: A, message: 'revert to 1' }, { tracer: new Tracer() });
+  const back = await pushTree(r.url, { files, author: A, message: 'revert to 1' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   assert.equal(back.newTree, first.newTree, 'same files, same tree as push 1');
   assert.equal(back.objects.sentBlobs, 3); assert.equal(back.objects.sentTrees, 5, 'root, d03, d07, d11, d19');
   fsck(r.bare);
@@ -140,29 +141,29 @@ test('repeat pushes are thin: only changed blobs and the trees on their paths (a
 
 test('identical files: noop, no receive-pack; base ≠ ref with identical files still creates the branch', async () => {
   const r = emptyRepo(), files = { 'a.txt': 'a\n' };
-  const first = await pushTree(r.url, { files, author: A, message: 'one' }, { tracer: new Tracer() });
+  const first = await pushTree(r.url, { files, author: A, message: 'one' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   const t = traced();
-  const again = await pushTree(r.url, { files, author: A, message: 'two' }, { tracer: t.tracer });
+  const again = await pushTree(r.url, { files, author: A, message: 'two' }, { capabilities: { ...defaultCapabilities(), tracer: t.tracer } });
   assert.equal(again.noop, true); assert.equal(again.newCommit, first.newCommit);
   assert.equal(receivePack(t.spans()).length, 0);
   assert.equal(t.spans().find(s => s.name === 'git.push_tree').attrs['git.push_tree.outcome'], 'noop');
-  const branch = await pushTree(r.url, { ref: 'refs/heads/preview', base: 'refs/heads/main', files, author: A, message: 'preview' }, { tracer: new Tracer() });
+  const branch = await pushTree(r.url, { ref: 'refs/heads/preview', base: 'refs/heads/main', files, author: A, message: 'preview' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   assert.equal(branch.objects.sent, 1, 'only the commit: the server has the tree');
   assert.equal(git(r.bare, ['rev-parse', 'preview^']).trim(), first.newCommit);
   fsck(r.bare);
   // create is a CAS on "absent": a second create of the same branch is cas_conflict on both attempts
-  await assert.rejects(pushTree(r.url, { ref: 'refs/heads/preview', base: 'refs/heads/main', files: { 'b.txt': 'b' }, author: A, message: 'again' }, { tracer: new Tracer() }), e => e.code === 'cas_conflict' && e.attempt === 1);
-  await assert.rejects(pushTree(r.url, { ref: 'refs/heads/x', base: 'refs/heads/nope', files, author: A, message: 'm' }, { tracer: new Tracer() }), e => e.code === 'not_found');
+  await assert.rejects(pushTree(r.url, { ref: 'refs/heads/preview', base: 'refs/heads/main', files: { 'b.txt': 'b' }, author: A, message: 'again' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }), e => e.code === 'cas_conflict' && e.attempt === 1);
+  await assert.rejects(pushTree(r.url, { ref: 'refs/heads/x', base: 'refs/heads/nope', files, author: A, message: 'm' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }), e => e.code === 'not_found');
 });
 
 test('cas_conflict: a ref moved between ls-refs and receive-pack is redone once from a fresh head; strictHead is not', async () => {
   const r = emptyRepo();
-  const first = await pushTree(r.url, { files: { 'a.txt': 'one\n' }, author: A, message: 'one' }, { tracer: new Tracer() });
+  const first = await pushTree(r.url, { files: { 'a.txt': 'one\n' }, author: A, message: 'one' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   const work = join(root, `w${n++}`); git(root, ['clone', '-q', r.bare, work]);
   let moved = null;
   const { f } = counting(kind => { if (kind === 'git-receive-pack' && moved === null) moved = commitFiles(work, r.bare, { 'theirs.txt': 'theirs\n' }, 'competitor'); });
   const t = traced();
-  const res = await pushTree(r.url, { files: { 'a.txt': 'ours\n' }, author: A, message: 'ours' }, { tracer: t.tracer, fetchImpl: f, verify: true });
+  const res = await pushTree(r.url, { files: { 'a.txt': 'ours\n' }, author: A, message: 'ours' }, { capabilities: { ...defaultCapabilities(), tracer: t.tracer, fetch: f }, verify: true });
   assert.equal(res.attempt, 1, 'retried once');
   assert.equal(res.oldCommit, moved, 'the retry\'s parent is the commit that won the race');
   assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), res.newCommit);
@@ -175,11 +176,11 @@ test('cas_conflict: a ref moved between ls-refs and receive-pack is redone once 
 
   // strictHead: the hint is a precondition. Stale before the push → cas_conflict with no receive-pack; lost race → not retried.
   const stale = counting();
-  await assert.rejects(pushTree(r.url, { files: { 'a.txt': 'x\n' }, author: A, message: 'x' }, { tracer: new Tracer(), head: first.newCommit, strictHead: true, fetchImpl: stale.f }), e => e.code === 'cas_conflict' && e.actual === res.newCommit);
+  await assert.rejects(pushTree(r.url, { files: { 'a.txt': 'x\n' }, author: A, message: 'x' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer(), fetch: stale.f }, head: first.newCommit, strictHead: true }), e => e.code === 'cas_conflict' && e.actual === res.newCommit);
   assert.equal(stale.c['git-receive-pack'], 0);
   let moved2 = null;
   const race = counting(kind => { if (kind === 'git-receive-pack' && moved2 === null) { git(work, ['pull', '-q', '--ff-only', r.bare, 'main']); moved2 = commitFiles(work, r.bare, { 'again.txt': 'x\n' }, 'competitor 2'); } });
-  await assert.rejects(pushTree(r.url, { files: { 'a.txt': 'y\n' }, author: A, message: 'y' }, { tracer: new Tracer(), head: res.newCommit, strictHead: true, fetchImpl: race.f }), e => e.code === 'cas_conflict' && e.attempt === 0);
+  await assert.rejects(pushTree(r.url, { files: { 'a.txt': 'y\n' }, author: A, message: 'y' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer(), fetch: race.f }, head: res.newCommit, strictHead: true }), e => e.code === 'cas_conflict' && e.attempt === 0);
   assert.equal(race.c['git-receive-pack'], 1);
   assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), moved2);
   fsck(r.bare);
@@ -188,7 +189,7 @@ test('cas_conflict: a ref moved between ls-refs and receive-pack is redone once 
 test('after an acknowledged push, a failed read-back is ambiguous and the ref is at our commit', async () => {
   const r = emptyRepo();
   const { f } = counting((kind, c) => { if (kind === 'git-upload-pack' && c['git-receive-pack'] > 0) throw new TypeError('fetch failed'); });
-  const err = await pushTree(r.url, { files: { 'a.txt': 'a\n' }, author: A, message: 'm' }, { tracer: new Tracer(), fetchImpl: f, verify: true }).catch(e => e);
+  const err = await pushTree(r.url, { files: { 'a.txt': 'a\n' }, author: A, message: 'm' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer(), fetch: f }, verify: true }).catch(e => e);
   assert.equal(err.code, 'ambiguous'); assert.equal(err.original, 'network');
   assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), err.expected, 'the push landed');
   fsck(r.bare);
@@ -199,14 +200,14 @@ test('a pack over maxPackBytes is refused with its measured size before receive-
   const files = {}; for (let i = 0; i < 100; i++) files[`f${i}.bin`] = text(i, 2048);
   const t = traced(); const { c, f } = counting();
   const max = 64 * 1024;
-  const err = await pushTree(r.url, { files, author: A, message: 'big' }, { tracer: t.tracer, fetchImpl: f, limits: withLimits({ maxPackBytes: max }) }).catch(e => e);
+  const err = await pushTree(r.url, { files, author: A, message: 'big' }, { capabilities: { ...defaultCapabilities(), tracer: t.tracer, fetch: f }, limits: withLimits({ maxPackBytes: max }) }).catch(e => e);
   assert.equal(err.code, 'limit_exceeded'); assert.equal(err.what, 'push pack bytes'); assert.equal(err.max, max);
   assert.ok(err.got > max, `measured ${err.got}`);
   assert.equal(c['git-receive-pack'], 0, 'nothing uploaded');
   assert.equal(receivePack(t.spans())[0].attrs['git.push.pack.bytes'], err.got, 'the span records the size that was refused');
   assert.equal(git(r.bare, ['for-each-ref']).trim(), '', 'ref not created');
   // the same files under the default cap land
-  await pushTree(r.url, { files, author: A, message: 'big' }, { tracer: new Tracer() }); fsck(r.bare);
+  await pushTree(r.url, { files, author: A, message: 'big' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }); fsck(r.bare);
 });
 
 test('duplicate names: encodeTree refuses them (git fsck duplicateEntries); pushTree refuses before any I/O; case-only twins are git-valid', async () => {
@@ -235,10 +236,10 @@ test('duplicate names: encodeTree refuses them (git fsck duplicateEntries); push
     { 'x': { mode: '120000', data: '' } },
     { '.git/config': 'x' }, { 'a//b': 'x' }, { 'a/../b': 'x' },
   ];
-  for (const files of bad) await assert.rejects(pushTree(r.url, { files, author: A, message: 'm' }, { tracer: new Tracer(), fetchImpl: f }), e => e.code === 'bad_request', JSON.stringify(files));
+  for (const files of bad) await assert.rejects(pushTree(r.url, { files, author: A, message: 'm' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer(), fetch: f } }), e => e.code === 'bad_request', JSON.stringify(files));
   assert.deepEqual(c, { 'git-upload-pack': 0, 'git-receive-pack': 0 });
   // README and readme are two names to git: fsck --strict accepts the tree; they collide only on a case-insensitive checkout
-  const res = await pushTree(r.url, { files: { README: 'upper\n', readme: 'lower\n' }, author: A, message: 'case' }, { tracer: new Tracer() });
+  const res = await pushTree(r.url, { files: { README: 'upper\n', readme: 'lower\n' }, author: A, message: 'case' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   fsck(r.bare);
   assert.deepEqual([...lsTree(r.bare, res.newCommit).keys()].sort(), ['README', 'readme']);
 });
@@ -265,10 +266,10 @@ test('Artifacts-like host (blob:none only): the repeat push reads the parent\'s 
   const proxy = await startProxy(srv.url, ctx => (ctx.stage === 'fetch' && filterOf(ctx.reqBody) && filterOf(ctx.reqBody) !== 'blob:none' ? { type: 'status', status: 400, contentType: 'text/plain; charset=utf-8', body: 'Unsupported Git fetch filter; only blob:none is supported.' } : { type: 'pass' }));
   try {
     const url = `${proxy.url}/${r.name}.git`;
-    await pushTree(url, { files, author: A, message: 'one' }, { tracer: new Tracer() });
+    await pushTree(url, { files, author: A, message: 'one' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
     const next = { ...files, 'd07/f3.txt': 'changed\n' };
     const t = traced(), quirks = {};
-    const res = await pushTree(url, { files: next, author: A, message: 'two' }, { tracer: t.tracer, quirks });
+    const res = await pushTree(url, { files: next, author: A, message: 'two' }, { capabilities: { ...defaultCapabilities(), tracer: t.tracer }, quirks });
     assert.equal(quirks.treeFilter, 'blob:none');
     const fetches = t.spans().filter(s => s.name === 'git.upload-pack fetch');
     assert.equal(fetches.filter(s => s.attrs['git.fetch.filter.fallback'] === 'blob:none').length, 1, 'one blob:none fetch');
@@ -294,7 +295,7 @@ test('filesFromDir/pushDir (Node): exec bit, symlinks as 120000, nested dirs, .g
   assert.equal(byPath.get('bin/build').mode, '100755'); assert.equal(byPath.get('group-exec-only').mode, '100644', 'git looks at the owner\'s execute bit only');
   assert.equal(byPath.get('app-link').mode, '120000'); assert.equal(Buffer.from(byPath.get('dangling').data).toString(), 'does/not/exist');
   const r = emptyRepo();
-  const res = await pushDir(r.url, { dir: src, filter, author: A, message: 'dir' }, { tracer: new Tracer() });
+  const res = await pushDir(r.url, { dir: src, filter, author: A, message: 'dir' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   assert.equal(res.newTree, gitWriteTree(files));
   // git's own reading of the same directory: `git add -A` in a copy (minus node_modules) writes the same tree
   const wt = join(root, `addA${n++}`); execFileSync('cp', ['-R', src, wt]); execFileSync('rm', ['-rf', join(wt, '.git'), join(wt, 'node_modules')]);

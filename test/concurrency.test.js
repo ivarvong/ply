@@ -7,6 +7,7 @@ import { mkdirSync } from 'node:fs';
 import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { editFile } from '../src/edit.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 test('concurrent CAS writers converge; conflicts are observed and retried, never lost', async () => {
   const { root, cleanup } = tmpRoot();
@@ -25,7 +26,7 @@ test('concurrent CAS writers converge; conflicts are observed and retried, never
       for (let r = 1; r <= ROUNDS; r++) {
         for (let tries = 0; ; tries++) {
           try {
-            const res = await editFile(`${srv.url}/cc.git`, { path: `dir${i % 2}/f${i}.txt`, find: `v${r - 1} marker${i}`, replace: `v${r} marker${i}`, author: { name: `w${i}`, email: `w${i}@x` }, message: `w${i} r${r}` }, { tracer, cache });
+            const res = await editFile(`${srv.url}/cc.git`, { path: `dir${i % 2}/f${i}.txt`, find: `v${r - 1} marker${i}`, replace: `v${r} marker${i}`, author: { name: `w${i}`, email: `w${i}@x` }, message: `w${i} r${r}` }, { capabilities: { ...defaultCapabilities(), tracer }, cache });
             attempts.push({ i, r, tries, ok: true, res }); break;
           } catch (e) {
             if (e.code !== 'cas_conflict') throw e;

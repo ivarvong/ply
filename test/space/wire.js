@@ -2,6 +2,7 @@
 // fetch that answers with exactly the bytes a cell renders, so every cell goes through ply's own pkt-line reader
 // (pktStep/pktFinish in the transport), its own consumers and its own error typing. No network, no server process.
 import { createTransport } from '../../src/http.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { isPlyCode } from '../../src/errors.js';
@@ -29,7 +30,8 @@ export function fakeFetch(responder) {
 }
 
 export function transport(responder, limits = {}, extra = {}) {
-  return createTransport('https://git.example/repo.git', { tracer: new Tracer(), fetchImpl: fakeFetch(responder), limits: withLimits(limits), ...extra });
+  const capabilities = { ...defaultCapabilities(), ...extra.capabilities, tracer: new Tracer(), fetch: fakeFetch(responder) };
+  return createTransport('https://git.example/repo.git', { limits: withLimits(limits), ...extra, capabilities });
 }
 
 // The outcome of an operation as a tagged union. `typed` holds only an error ply built with fail() (a code from its

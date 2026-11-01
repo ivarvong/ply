@@ -20,6 +20,7 @@ const { root, cleanup } = tmpRoot();
 // capture the real pack-objects invocation through uploadpack.packObjectsHook (honored from protected config only)
 import { writeFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { defaultCapabilities } from '../../src/capabilities.js';
 const hookCfg = join(root, 'gitconfig'); const hookLog = join(root, 'hooklog');
 writeFileSync(hookCfg, `[uploadpack]\n\tpackObjectsHook = ${fileURLToPath(new URL('./pack-objects-hook.sh', import.meta.url))}\n`);
 const srv = await startGitServer(root, { GIT_CONFIG_GLOBAL: hookCfg, PLY_HOOK_LOG: hookLog });
@@ -75,7 +76,7 @@ try {
     const wantCommits = wants.map(w => model.tags.get(w) ?? w).filter(w => model.commits.has(w));
     const degenerate = (deepenSince || deepenNot.length) && (wantCommits.length === 0 || wantCommits.some(w => (deepenSince && model.commits.get(w).date < deepenSince) || (deepenNot.length && !exp.inDepth.has(w))));
     const exporter = arrayExporter();
-    const c = new GitHttp(`${srv.url}/${R.name}.git`, { tracer: new Tracer({ exporter }) });
+    const c = new GitHttp(`${srv.url}/${R.name}.git`, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) } });
     const external = oid => (model.type.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[model.type.get(oid)], data: new Uint8Array(gitBuf(R.bare, ['cat-file', model.type.get(oid), oid])) } : undefined);
     const problems = [];
     let r, usedNegotiate = false;

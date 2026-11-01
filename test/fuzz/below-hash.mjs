@@ -23,6 +23,7 @@ import { Tracer, arrayExporter } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { Rng } from './prng.js';
 import { OID_BYTES } from '../../src/format.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '20', 10);
@@ -102,10 +103,10 @@ const url = `http://127.0.0.1:${server.address().port}/hostile.git`;
 async function plyAccepts(focus, head) {
   const tracer = new Tracer({ exporter: arrayExporter() });
   try {
-    if (focus === 'tree') await listTree(url, { ref: 'refs/heads/main' }, { tracer, limits: LIMITS });
-    else if (focus === 'commit') await readCommit(url, { ref: 'refs/heads/main' }, { tracer, limits: LIMITS });
+    if (focus === 'tree') await listTree(url, { ref: 'refs/heads/main' }, { capabilities: { ...defaultCapabilities(), tracer }, limits: LIMITS });
+    else if (focus === 'commit') await readCommit(url, { ref: 'refs/heads/main' }, { capabilities: { ...defaultCapabilities(), tracer }, limits: LIMITS });
     else {
-      const t = createTransport(url, { tracer, limits: LIMITS });
+      const t = createTransport(url, { capabilities: { ...defaultCapabilities(), tracer }, limits: LIMITS });
       await fetchObject(t, { oid: head, filter: 'blob:none', expectType: TYPE.TAG });
     }
     return { accepted: true };

@@ -31,6 +31,7 @@ import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const L = 10; // maxTreeEntries; every "over" directory holds L + 1 entries, the issue's core cell (limit = size − 1)
 const LIMITS = withLimits({ maxTreeEntries: L });
@@ -137,7 +138,7 @@ async function cell(c) {
   const ex = arrayExporter(); const quirks = {};
   const url = `${c.server === 'tree0' ? srv.url : proxy.url}/${name}.git`;
   let got, answer = null, err = null;
-  try { const r = await runOp(c.op, url, c.wanted, { tracer: new Tracer({ exporter: ex }), limits: LIMITS, quirks }); answer = r.answer; r.check(bare); got = 'ok'; }
+  try { const r = await runOp(c.op, url, c.wanted, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, limits: LIMITS, quirks }); answer = r.answer; r.check(bare); got = 'ok'; }
   catch (e) { if (e?.code === 'ERR_ASSERTION') throw e; err = e; got = e?.code ?? String(e); answer = `${e?.code}: ${String(e?.message).replace(/[0-9a-f]{40}/g, '<oid>')}`; }
   const fetches = ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.upload-pack fetch');
   const wide = fetches.filter(s => s.attrs['git.fetch.filter.fallback'] === 'blob:none');

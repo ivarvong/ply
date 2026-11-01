@@ -1,9 +1,8 @@
 // What the entry modules (edit, read, log, checkout, tree) read that no converted module declares. The types go in the
 // A pass (A7), when the entries stop catching thrown values. The readers below are the runtime: one narrowing per
 // field, so a catch does not cast.
-import type { Attrs, Tracer } from './otel.js';
+import type { Attrs } from './otel.js';
 import type { OperationOpts } from './operation.js';
-import type { FetchLike } from './http.js';
 
 // A thrown value, read loosely as the JS did (`e?.code`): any field may be missing, and a primitive has none. Errors
 // become values in the A pass; until then a `catch` reads them through the functions below, which are that read.
@@ -25,14 +24,9 @@ export const thrownMessageMatches = (e: unknown, re: RegExp): boolean => {
   return typeof message === 'string' ? re.test(message) : re.test(String(message));
 };
 
-// operation.ts's options as the entries take them. The entries default their options to {} as the JS did, so `tracer`
-// stays optional here though operation() needs it at run time (it starts the root span on it); each entry hands its
-// options to operation() through one assertion. fetchImpl may be packcache's cachingFetch, whose attrs() the edit
-// reports.
-export type EntryOptions = Omit<OperationOpts, 'tracer' | 'fetchImpl' | 'attrs' | 'onFinish' | 'link'> & {
-  readonly tracer?: Tracer | undefined;
-  readonly fetchImpl?: (FetchLike & { readonly attrs?: () => Attrs }) | undefined;
-};
+// operation.ts's options as the entries take them. `capabilities` is required (a total record). The entries add
+// `attrs`, `onFinish` and `link` when they call operation(), and hand the object through one assertion.
+export type EntryOptions = Omit<OperationOpts, 'attrs' | 'onFinish' | 'link'>;
 
 // objects.ts TYPE_NAME, indexed by a type number read off the wire (any number: a lookup may miss).
 export type TypeNames = Readonly<Record<number, string | undefined>>;

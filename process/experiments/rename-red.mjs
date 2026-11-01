@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { startGitServer, makeBareRepo, tmpRoot } from '/home/claude/ply/test/server.js';
 import { mergeBranch } from '/home/claude/ply/src/merge.js';
 import { Tracer } from '/home/claude/ply/src/otel.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
 const sh = (cwd, a) => spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8', env: ENV });
 const { root, cleanup } = tmpRoot(); const srv = await startGitServer(root);
@@ -23,7 +24,7 @@ for (const [name, c] of Object.entries(CASES)) {
   sh(w, ['checkout', '-q', 'main']); c.ours(w); sh(w, ['add', '-A']); sh(w, ['commit', '-q', '-m', 'ours']);
   sh(w, ['push', '-q', bare, 'main', 'feat']);
   const g = sh(bare, ['merge-tree', '--write-tree', '--name-only', 'main', 'feat']);
-  let ours; try { ours = (await mergeBranch(`${srv.url}/rr${i - 1}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { tracer: new Tracer() })).outcome; } catch (e) { ours = e.code; }
+  let ours; try { ours = (await mergeBranch(`${srv.url}/rr${i - 1}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } })).outcome; } catch (e) { ours = e.code; }
   console.log(`${name.padEnd(22)} git: ${g.status === 0 ? 'clean' : 'CONFLICT'}   ply: ${ours}${g.status !== 0 && ours === 'merge' ? '   <-- WRONG: clean where git conflicts' : ''}`);
 }
 await srv.close(); cleanup();

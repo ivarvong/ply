@@ -17,9 +17,15 @@ import { Tracer } from '../src/otel.js';
 import { lsRefs, discover, GitHttp } from '../src/client.js';
 import { lsRefs as lsRefsWire, parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
 import { pkts } from '../src/pktline.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const td = new TextDecoder();
-const createTransport = (u, opts = {}) => rawTransport(u, { tracer: new Tracer(), ...opts });
+const createTransport = (u, opts = {}) => {
+  const given = 'capabilities' in opts ? opts.capabilities : null;
+  const base = given === null ? defaultCapabilities() : { ...defaultCapabilities(), ...given };
+  const tracer = given !== null && given.tracer ? given.tracer : new Tracer();
+  return rawTransport(u, { ...opts, capabilities: { ...base, tracer } });
+};
 const DEFAULT_BRANCH = 'zz-default';
 let root, cleanup, srv, oid;
 const repos = {};
@@ -63,7 +69,7 @@ function recorded(name) {
     seen.push({ request: td.decode(init.body), response: body });
     return new Response(body, { status: res.status, headers: res.headers });
   };
-  return { t: createTransport(url(name), { fetchImpl }), seen };
+  return { t: createTransport(url(name), { capabilities: { ...defaultCapabilities(), fetch: fetchImpl } }), seen };
 }
 
 // pkt-lines of a response body, as text (data packets only; the flush ends the listing)
@@ -164,12 +170,16 @@ test('lsRefs unborn: a discover() result in hand answers the capability, with no
     assert.equal(info.lsRefsUnborn, cfg === 'advertise');
     const { t, seen } = recorded(name);
     const gets = [];
-    const t2 = createTransport(url(name), { fetchImpl: async (u, init) => { if ((init?.method ?? 'GET') === 'GET') gets.push(u); return fetch(u, init); } });
+    const t2 = createTransport(url(name), { capabilities: { ...defaultCapabilities(), fetch: async (u, init) => {
+      const method = init != null && typeof init.method === 'string' ? init.method : 'GET';
+      if (method === 'GET') gets.push(u);
+      return fetch(u, init);
+    } } });
     const r = await lsRefs(t2, [], { unborn: true, info });
     assert.deepEqual(gets, [], `${cfg}: no advertisement fetched`);
     assert.deepEqual(r.unborn, cfg === 'advertise' ? { name: 'HEAD', target: 'refs/heads/main' } : null);
     // the GitHttp method takes the same options
-    const viaClient = await new GitHttp(url(name), { tracer: new Tracer() }).lsRefs([], { unborn: true });
+    const viaClient = await new GitHttp(url(name), { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }).lsRefs([], { unborn: true });
     assert.deepEqual(viaClient.unborn, r.unborn);
     // asking costs exactly one advertisement GET without info
     await lsRefs(t, [], { unborn: true });
@@ -186,7 +196,7 @@ test('lsRefs: not asked, an unborn line a server sends anyway is skipped; the wi
   // a hand-built response with unborn lines and no request for them: git's process_ref_v2 records them only into a
   // target its caller supplied; ply with no reader skips them
   const body = pkts(['unborn HEAD symref-target:refs/heads/x\n', `${oid} refs/heads/main\n`]);
-  const fake = createTransport('http://fake.invalid/r.git', { fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) });
+  const fake = createTransport('http://fake.invalid/r.git', { capabilities: { ...defaultCapabilities(), fetch: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) } });
   const r2 = await lsRefsWire(fake, []);
   assert.equal(r2.unborn, null);
   assert.equal(r2.refs.size, 1);

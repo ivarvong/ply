@@ -6,6 +6,7 @@ import { statSync, readdirSync } from 'node:fs';
 import { startGitServer } from './server.js';
 import { editFile } from '../src/edit.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const DIR = process.argv.includes('--dir') ? process.argv[process.argv.indexOf('--dir') + 1] : '/tmp/bigrepo';
 const bare = join(DIR, 'big.git');
@@ -33,7 +34,7 @@ hr();
 const srv = await startGitServer(DIR);
 const exporter = arrayExporter();
 const t0 = Date.now();
-const r = await editFile(`${srv.url}/big.git`, { path: PATH, find: FIND, replace: REPLACE, author: { name: 'demo', email: 'demo@edge' }, message: 'demo edit' }, { tracer: new Tracer({ exporter }), verify: true });
+const r = await editFile(`${srv.url}/big.git`, { path: PATH, find: FIND, replace: REPLACE, author: { name: 'demo', email: 'demo@edge' }, message: 'demo edit' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) }, verify: true });
 const wall = Date.now() - t0;
 await srv.close();
 const spans = exporter.lines.flatMap(flattenLine);

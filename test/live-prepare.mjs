@@ -10,11 +10,12 @@ import { te } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
 import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish } from '../src/edit.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 export async function prepare({ url, ref = 'refs/heads/main', path, find, replace, author = { name: 'ply', email: 'ply@edge' }, message = 'ply edit', auth, fetchImpl, head: hint = null }) {
   const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
   const root = tracer.start('git.edit.prepare', { attrs: { 'git.edit.path': path } });
-  const client = new GitHttp(url, { tracer, parent: root, limits: withLimits({ requestTimeoutMs: 25000 }), auth, fetchImpl });
+  const client = new GitHttp(url, { capabilities: { ...defaultCapabilities(), tracer, fetch: fetchImpl }, parent: root, limits: withLimits({ requestTimeoutMs: 25000 }), auth });
   const t0 = Date.now();
   let oldCommit = hint;
   if (!oldCommit) { const { refs, head } = await client.lsRefs([ref, 'HEAD']); oldCommit = refs.get(ref)?.oid; if (!oldCommit) throw Object.assign(new Error(`no ${ref} (HEAD→${head})`), { code: 'not_found' }); }

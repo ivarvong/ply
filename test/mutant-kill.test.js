@@ -28,7 +28,7 @@ import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
-import { adoptCapabilities, commitTimeOf, commitUnix, defaultCapabilities, freshStorage, noopTracer, platformFetch, systemClock } from '../src/capabilities.js';
+import { commitTimeOf, commitUnix, defaultCapabilities, freshStorage, noopTracer, platformFetch, systemClock } from '../src/capabilities.js';
 import { createTransport } from '../src/http.js';
 import { operation, verifyRef } from '../src/operation.js';
 import { negotiate } from '../src/negotiate.js';
@@ -1423,8 +1423,10 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
 
   const refLine = `${oid(4)} refs/heads/main\n`;
   const framesOf = list => ({
-    limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async *frames() { for (const f of list) yield f; },
+    limits: DEFAULT_LIMITS,
+    tracer: tracerStub,
+    parent: null,
+    async *frames() { for (const f of list) yield f; }
   });
   await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
   await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }, { kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: data after the terminating flush-pkt');
@@ -1491,8 +1493,10 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
 
   const reportLines = ['unpack ok\n', 'ok refs/heads/a\n', 'ng refs/heads/b failed to lock\n'];
   const receipt = () => ({
-    limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; yield { kind: 'flush' }; },
+    limits: DEFAULT_LIMITS,
+    tracer: tracerStub,
+    parent: null,
+    async *frames() { for (const l of reportLines) yield { kind: 'data', payload: te.encode(l) }; yield { kind: 'flush' }; }
   });
   const deletes = [
     { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID },
@@ -1513,42 +1517,41 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     const keep = setInterval(() => {}, 50);
     init.signal.addEventListener('abort', () => { clearInterval(keep); reject(init.signal.reason); });
   });
-  const http = createTransport('http://127.0.0.1:9/r.git', { fetchImpl, limits: withLimits({ requestTimeoutMs: 40 }), tracer: tracerStub });
+  const http = createTransport('http://127.0.0.1:9/r.git', { capabilities: { ...defaultCapabilities(), fetch: fetchImpl, tracer: tracerStub }, limits: withLimits({ requestTimeoutMs: 40 }) });
   const t0 = Date.now();
   await assert.rejects((async () => { for await (const frame of http.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'timeout');
   assert.ok(Date.now() - t0 < 2000);
 
-  assert.throws(() => createTransport('http://127.0.0.1/r.git', { userAgent: 'ply\r\nX: 1' }), e => e.code === 'bad_request' && e.what === 'user agent');
-  assert.throws(() => createTransport('http://127.0.0.1/r.git', { auth: { bearer: 'tok\n' } }), e => e.code === 'bad_request' && e.what === 'bearer');
+  assert.throws(() => createTransport('http://127.0.0.1/r.git', { capabilities: defaultCapabilities(), userAgent: 'ply\r\nX: 1' }), e => e.code === 'bad_request' && e.what === 'user agent');
+  assert.throws(() => createTransport('http://127.0.0.1/r.git', { capabilities: defaultCapabilities(), auth: { bearer: 'tok\n' } }), e => e.code === 'bad_request' && e.what === 'bearer');
   let pulls = 0;
   const advBody = new ReadableStream({ pull(controller) { pulls++; controller.enqueue(new Uint8Array(1000)); if (pulls > 8) controller.close(); } });
   const advHttp = createTransport('http://127.0.0.1:9/r.git', {
-    fetchImpl: async () => new Response(advBody, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } }),
-    limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
+    capabilities: { ...defaultCapabilities(), fetch: async () => new Response(advBody, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } }), tracer: tracerStub },
+    limits: withLimits({ maxPackBytes: 2500 })
   });
   await assert.rejects(advHttp.advertise('git-upload-pack', spanStub), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got > 2500);
   assert.ok(pulls <= 4, `advertisement kept reading (${pulls} chunks)`);
   const declared = createTransport('http://127.0.0.1:9/r.git', {
-    fetchImpl: async () => ({
+    capabilities: { ...defaultCapabilities(), fetch: async () => ({
       ok: true, status: 200,
       headers: { get: n => (n === 'content-type' ? 'application/x-git-upload-pack-advertisement' : n === 'content-length' ? '999999999' : null) },
       body: { async *[Symbol.asyncIterator]() { throw new Error('body should not be read'); }, async cancel() {} },
-    }),
-    limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
+    }), tracer: tracerStub },
+    limits: withLimits({ maxPackBytes: 2500 })
   });
   await assert.rejects(declared.advertise('git-upload-pack', spanStub), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got === 999999999);
   let errPulls = 0;
   const errBody = new ReadableStream({ pull(controller) { errPulls++; controller.enqueue(te.encode('x'.repeat(3000))); if (errPulls > 6) controller.close(); } });
   const errHttp = createTransport('http://127.0.0.1:9/r.git', {
-    fetchImpl: async () => new Response(errBody, { status: 500, headers: { 'content-type': 'text/plain' } }),
-    limits: withLimits({ requestTimeoutMs: 2000 }), tracer: tracerStub,
+    capabilities: { ...defaultCapabilities(), fetch: async () => new Response(errBody, { status: 500, headers: { 'content-type': 'text/plain' } }), tracer: tracerStub },
+    limits: withLimits({ requestTimeoutMs: 2000 })
   });
   await assert.rejects((async () => { for await (const frame of errHttp.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'upstream_5xx' && e.message.includes('xxx') && e.miss === undefined);
   assert.ok(errPulls <= 3, `error body kept reading (${errPulls} chunks)`);
   const page = `missing repo ${'y'.repeat(500)}`;
   const missingRepo = createTransport('http://127.0.0.1:9/missing.git', {
-    fetchImpl: async () => new Response(page, { status: 404, headers: { 'content-type': 'text/plain' } }),
-    tracer: tracerStub,
+    capabilities: { ...defaultCapabilities(), fetch: async () => new Response(page, { status: 404, headers: { 'content-type': 'text/plain' } }), tracer: tracerStub }
   });
   // the advertisement names the status and the miss; it does not quote the body
   await assert.rejects(missingRepo.advertise('git-upload-pack', spanStub), e => e.code === 'not_found' && e.message === 'HTTP 404 git-upload-pack advertisement' && e.miss?.kind === 'repository');
@@ -1832,9 +1835,13 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.deepEqual(orThrow(checkPushCaps(caps('push-options'), { pushOptions: ['p'] })), { atomic: false, pushOptions: ['p'] });
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
   let adverts = 0;
-  const advertised = advertCaps => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
+  const advertised = advertCaps => ({
+    limits: DEFAULT_LIMITS,
+    tracer: tracerStub,
+    parent: null,
     async advertise() { adverts++; return concat([pkt(`${oid(1)} refs/heads/a\0${advertCaps}\n`), FLUSH]); },
-    async *frames() { yield { kind: 'data', payload: te.encode('unpack ok\n') }; yield { kind: 'data', payload: te.encode('ok refs/heads/a\n') }; yield { kind: 'flush' }; } });
+    async *frames() { yield { kind: 'data', payload: te.encode('unpack ok\n') }; yield { kind: 'data', payload: te.encode('ok refs/heads/a\n') }; yield { kind: 'flush' }; }
+  });
   const del1 = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: false };
   assert.equal((await pushWithOptions(advertised('report-status'), del1)).report.tag, 'statuses'); assert.equal(adverts, 0);
   await assert.rejects(pushWithOptions(advertised('report-status'), { ...del1, atomic: true }), e2 => e2.code === 'unsupported' && e2.caps.join() === 'report-status'); assert.equal(adverts, 1);
@@ -1935,16 +1942,25 @@ test('a missing ref is not_found with a ref miss, for attributes and for rebase'
   s.t.refs.set('refs/heads/main', s.oid('root'));
   s.t.refs.set('refs/heads/feat', s.oid('root'));
   assert.match(await attributeTree(s.t, 'refs/heads/main', {}), /^[0-9a-f]{40}$/);
-  const same = await mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+  const same = await mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, capabilities: { ...defaultCapabilities(), tracer: s.t.tracer } });
   assert.equal(same.outcome, 'up_to_date');
-  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/gone', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  const missingFrom = await mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/gone', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, capabilities: { ...defaultCapabilities(), tracer: s.t.tracer } }).then(() => null, e => e);
+  assert.equal(missingFrom.code, 'not_found');
+  assert.equal(missingFrom.message, 'ref refs/heads/gone not found');
+  assert.equal(missingFrom.miss.kind, 'ref');
+  assert.equal(missingFrom.miss.ref, 'refs/heads/gone');
   s.t.refs.delete('refs/heads/main');
   s.t.refs.delete('refs/heads/feat');
   await assert.rejects(attributeTree(s.t, 'refs/heads/gone', {}), e => e.code === 'not_found' && e.message === 'attributes ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === gone.ref && e.miss.candidates.length === 1 && e.miss.candidates[0] === gone.ref);
-  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/gone', from: 'refs/heads/main', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone' && e.miss.candidates[0] === 'refs/heads/gone');
-  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  const missingRef = await mergeBranch('stub://graph', { ref: 'refs/heads/gone', from: 'refs/heads/main', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, capabilities: { ...defaultCapabilities(), tracer: s.t.tracer } }).then(() => null, e => e);
+  assert.equal(missingRef.code, 'not_found');
+  assert.equal(missingRef.message, 'ref refs/heads/gone not found');
+  assert.equal(missingRef.miss.kind, 'ref');
+  assert.equal(missingRef.miss.ref, 'refs/heads/gone');
+  assert.equal(missingRef.miss.candidates[0], 'refs/heads/gone');
+  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, capabilities: { ...defaultCapabilities(), tracer: s.t.tracer } }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
   s.t.refs.set('refs/heads/feat', s.oid('root'));
-  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/main not found' && e.miss.ref === 'refs/heads/main' && e.miss.candidates[0] === 'refs/heads/main');
+  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, capabilities: { ...defaultCapabilities(), tracer: s.t.tracer } }), e => e.code === 'not_found' && e.message === 'ref refs/heads/main not found' && e.miss.ref === 'refs/heads/main' && e.miss.candidates[0] === 'refs/heads/main');
 });
 
 test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was only named, and a cut below two candidates deepens', async () => {
@@ -1953,7 +1969,7 @@ test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was onl
   for (const n of [8, 7]) {
     const s = graphServer({ root: [], ...chain('f', n, 'root'), ...chain('m', n, 'root') });
     s.t.refs.set('refs/heads/feat', s.oid('f1')); s.t.refs.set('refs/heads/main', s.oid('m1'));
-    const res = await rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+    const res = await rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, capabilities: { ...defaultCapabilities(), tracer: s.t.tracer } });
     assert.deepEqual([res.outcome, res.commits, res.base, res.onto], ['rebase', n, s.oid('root'), s.oid('m1')]);
     assert.equal(s.t.refs.get('refs/heads/feat'), res.oid, 'the branch was force-updated to the new tip');
     assert.equal(s.t.requests.filter(q => q.want === s.oid('root') && q.deepen === 1).length, n === 8 ? 1 : 0, 'base fetched once at the cut (n=8), not when the window held it (n=7)');
@@ -2093,12 +2109,11 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
     };
     const postHold = held();
     const http = createTransport('http://127.0.0.1:9/r.git', {
-      fetchImpl: async () => ({
+      capabilities: { ...defaultCapabilities(), fetch: async () => ({
         ok: false, status: 302, type: 'basic',
         headers: { get: n => (n === 'location' ? 'http://127.0.0.1:9/moved.git/git-upload-pack' : null) },
         body: postHold.body,
-      }),
-      tracer: tracerStub,
+      }), tracer: tracerStub }
     });
     let settled = false;
     const pending = (async () => { for await (const frame of http.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })();
@@ -2112,12 +2127,12 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
 
     const advHold = held();
     const declared = createTransport('http://127.0.0.1:9/r.git', {
-      fetchImpl: async () => ({
+      capabilities: { ...defaultCapabilities(), fetch: async () => ({
         ok: true, status: 200,
         headers: { get: n => (n === 'content-type' ? 'application/x-git-upload-pack-advertisement' : n === 'content-length' ? '999999999' : null) },
         body: advHold.body,
-      }),
-      limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
+      }), tracer: tracerStub },
+      limits: withLimits({ maxPackBytes: 2500 })
     });
     let advSettled = false;
     const advPending = declared.advertise('git-upload-pack', spanStub);
@@ -2135,8 +2150,7 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   }
 
   const reply = (status, contentType, body) => createTransport('http://127.0.0.1:9/r.git', {
-    fetchImpl: async () => ({ ok: status >= 200 && status < 300, status, headers: { get: n => (n === 'content-type' ? contentType : null) }, body }),
-    tracer: tracerStub,
+    capabilities: { ...defaultCapabilities(), fetch: async () => ({ ok: status >= 200 && status < 300, status, headers: { get: n => (n === 'content-type' ? contentType : null) }, body }), tracer: tracerStub }
   });
   const drain = t => (async () => { for await (const frame of t.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })().then(() => null, e => e);
   const post = await drain(reply(200, 'application/x-git-upload-pack-result', null));
@@ -2169,28 +2183,25 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   assert.equal(isShortRead(Object.assign(new Error('short read: need 1 bytes at 12, have 13'), { code: 'pack_corrupt', reason: 'short_read' })), true);
 });
 
-test('capabilities: omitted fields are the platform defaults, and a frozen clock zeroes HTTP durations', async () => {
-  const a = adoptCapabilities({});
-  const b = defaultCapabilities();
-  assert.equal(a.tracer, noopTracer);
-  assert.equal(b.tracer, noopTracer);
-  assert.equal(a.clock, systemClock);
-  assert.equal(a.fetch, platformFetch);
-  assert.notEqual(a.storage, b.storage);
+test('capabilities: a total record is the platform defaults, and a frozen clock zeroes HTTP durations', async () => {
+  const caps = defaultCapabilities();
+  const again = defaultCapabilities();
+  assert.equal(caps.tracer, noopTracer);
+  assert.equal(again.tracer, noopTracer);
+  assert.equal(caps.clock, systemClock);
+  assert.equal(caps.fetch, platformFetch);
+  assert.notEqual(caps.storage, again.storage);
   const fetch = async () => new Response();
   const clock = { now: () => 5_000, cpu: () => 3 };
   const storage = freshStorage();
-  const chosen = adoptCapabilities({ fetch, fetchImpl: async () => { throw new Error('fetchImpl loses to fetch'); }, clock, storage, tracer: noopTracer });
+  const chosen = { ...defaultCapabilities(), fetch, clock, storage, tracer: noopTracer };
   assert.equal(chosen.fetch, fetch);
   assert.equal(chosen.clock, clock);
   assert.equal(chosen.storage, storage);
-  assert.equal(adoptCapabilities({ fetchImpl: fetch }).fetch, fetch);
-  assert.equal(adoptCapabilities({}).tracer, noopTracer);
-  assert.equal(adoptCapabilities({}).fetch, platformFetch);
   assert.equal(commitUnix(systemClock, commitTimeOf(null)), Math.floor(systemClock.now() / 1000));
   assert.equal(commitUnix(clock, commitTimeOf(null)), 5);
   assert.equal(commitUnix(clock, commitTimeOf(9)), 9);
-  const nested = adoptCapabilities({ capabilities: { tracer: noopTracer, fetch, clock, storage } });
+  const nested = { tracer: noopTracer, fetch, clock, storage };
   assert.equal(nested.fetch, fetch);
   assert.equal(nested.clock, clock);
   assert.equal(nested.storage, storage);
@@ -2201,13 +2212,13 @@ test('capabilities: omitted fields are the platform defaults, and a frozen clock
   assert.equal(leaked.message, '[red]');
   span.end();
   const held = freshStorage();
-  const bare = createTransport('http://127.0.0.1:9/r.git', { storage: held, fetchImpl: async () => { throw new Error('unused'); } });
+  const bare = createTransport('http://127.0.0.1:9/r.git', { capabilities: { ...defaultCapabilities(), storage: held, fetch: async () => { throw new Error('unused'); } } });
   assert.equal(bare.objects, held);
   assert.equal(bare.tracer, noopTracer);
   const real = new Tracer();
-  assert.equal(createTransport('http://127.0.0.1:9/r.git', { tracer: real, fetchImpl: async () => { throw new Error('unused'); } }).tracer, real);
+  assert.equal(createTransport('http://127.0.0.1:9/r.git', { capabilities: { ...defaultCapabilities(), tracer: real, fetch: async () => { throw new Error('unused'); } } }).tracer, real);
   const transport = { kind: 'http', url: 'http://example.test/r.git', tracer: real, parent: null, limits: DEFAULT_LIMITS, signal: null, quirks: {}, scrub: null, objects: freshStorage() };
-  const out = await operation('cap', transport.url, { transport }, async ({ t, root, outcome }) => {
+  const out = await operation('cap', transport.url, { capabilities: defaultCapabilities(), transport }, async ({ t, root, outcome }) => {
     assert.equal(root.tracer, noopTracer);
     assert.equal(root.name, 'git.cap');
     return outcome('ok', t.url);
@@ -2217,8 +2228,7 @@ test('capabilities: omitted fields are the platform defaults, and a frozen clock
   const empty = () => new ReadableStream({ start(c) { c.close(); } });
   const headers = type => ({ get: n => (n === 'content-type' ? type : null) });
   const timed = createTransport('http://127.0.0.1:9/r.git', {
-    clock, tracer: new Tracer({ exporter: ex }),
-    fetchImpl: async () => ({ ok: true, status: 200, headers: headers('application/x-git-upload-pack-result'), body: empty() }),
+    capabilities: { ...defaultCapabilities(), clock, tracer: new Tracer({ exporter: ex }), fetch: async () => ({ ok: true, status: 200, headers: headers('application/x-git-upload-pack-result'), body: empty() }) }
   });
   const posted = timed.tracer.start('root');
   let frames = 0;
@@ -2230,8 +2240,7 @@ test('capabilities: omitted fields are the platform defaults, and a frozen clock
   assert.equal(Number(posted.attrs['http.response.ttfb_ms']), 0);
   const advEx = arrayExporter();
   const adv = createTransport('http://127.0.0.1:9/r.git', {
-    clock, tracer: new Tracer({ exporter: advEx }),
-    fetchImpl: async () => ({ ok: true, status: 200, headers: headers('application/x-git-upload-pack-advertisement'), body: empty() }),
+    capabilities: { ...defaultCapabilities(), clock, tracer: new Tracer({ exporter: advEx }), fetch: async () => ({ ok: true, status: 200, headers: headers('application/x-git-upload-pack-advertisement'), body: empty() }) }
   });
   const advertised = adv.tracer.start('root');
   assert.equal((await adv.advertise('git-upload-pack', advertised)).length, 0);

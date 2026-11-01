@@ -23,7 +23,7 @@ import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
-import { operation, operationTime, verifyRef } from './operation.js';
+import { operation, operationTime, verifyRef, entryOptions, type Capabilities } from './operation.js';
 import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
@@ -520,6 +520,7 @@ export type MergeSpec = {
 };
 // The operation options (auth, tracer, limits, …) pass through to operation(); these are the ones merge reads.
 export type MergeOptions = {
+  readonly capabilities: Capabilities;
   readonly cache?: TreeCache;
   readonly signer?: Signer | null;
   readonly verify?: boolean;
@@ -533,14 +534,14 @@ export type MergeOutcome =
   | Sides & { readonly outcome: 'merge'; readonly tree: string; readonly base: string; readonly pushBytes: number; readonly newTrees: number; readonly contentMerged: number };
 
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
-export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time: timeIn, fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
-  const time = operationTime(opts, timeIn);
+export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time: timeIn, fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, capabilities, ...opts }: MergeOptions = entryOptions()): Promise<MergeOutcome> {
+  const time = operationTime(capabilities, timeIn);
   validatePushRef(ref, false); const fromOid = givenOid(from, 'from');
   const person: ValidatedIdent | null = author ? stamp(author, time) : null;
   const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;
   if (message !== undefined && message !== null && message !== '') validateMessage(message); validateAttributes(attributes);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  return (operation as unknown as Operation)('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
+  return (operation as unknown as Operation)('merge', url, { ...opts, capabilities, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
     const { refs }: Refs = await lsRefs(t, fromOid === null ? [ref, from] : [ref]);
     const ours = refs.get(ref)?.oid;
     const theirs = fromOid ?? refs.get(from)?.oid;

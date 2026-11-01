@@ -18,6 +18,7 @@ import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
 import { pushTree } from './tree.js';
+import { defaultCapabilities } from './capabilities.js';
 import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 
 /* oxlint-disable no-await-in-loop -- the walk reads one entry at a time, in sorted order, under the byte bound */
@@ -60,6 +61,19 @@ export async function filesFromDir(dir: string, { limits = DEFAULT_LIMITS, filte
   return out;
 }
 
-export async function pushDir(url: string, { dir, filter = null, ...spec }: Omit<TreeSpec, 'files'> & { readonly dir: string; readonly filter?: DirFilter | null }, opts: PushTreeOptions = {}): Promise<PushTreeResult> {
+type DirInput = (Omit<TreeSpec, 'files'> & { readonly dir: string; readonly filter: DirFilter | null }) | (Omit<TreeSpec, 'files'> & { readonly dir: string });
+const pushOptions = (): PushTreeOptions => ({ capabilities: defaultCapabilities() });
+const specOf = (input: DirInput): Omit<TreeSpec, 'files'> => {
+  if ('filter' in input) {
+    const { dir: _dir, filter: _filter, ...spec } = input;
+    return spec;
+  }
+  const { dir: _dir, ...spec } = input;
+  return spec;
+};
+export async function pushDir(url: string, input: DirInput, opts: PushTreeOptions = pushOptions()): Promise<PushTreeResult> {
+  const dir = input.dir;
+  const filter = 'filter' in input ? input.filter : null;
+  const spec = specOf(input);
   return pushTree(url, { ...spec, files: await filesFromDir(dir, { limits: opts.limits ?? DEFAULT_LIMITS, filter }) }, opts);
 }

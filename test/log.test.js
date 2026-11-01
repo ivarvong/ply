@@ -22,6 +22,7 @@ import { createTransport } from '../src/http.js';
 import { pkt } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const N = 5, BIG = 64;
@@ -173,7 +174,7 @@ test('readLog: server × shape × limit × behaviour, every cell against git', a
           const cell = `${server} × ${shape} × limit ${lname} (${limit}) × ${behaviour}`;
           const fetchesBefore = proxy.log.filter(l => l.stage === 'fetch').length;
           const ex = arrayExporter(); const quirks = {};
-          const run = readLog(url, { ref: 'main', limit }, { tracer: new Tracer({ exporter: ex }), quirks });
+          const run = readLog(url, { ref: 'main', limit }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, quirks });
           tally.cells++;
           if (behaviour === 'foreign' || (behaviour === 'omit-shallow' && want.cut)) {
             await assert.rejects(run, e => e.code === 'pack_corrupt' && (behaviour === 'foreign' ? /not an ancestor/ : /not reported shallow/).test(e.message), cell);
@@ -205,7 +206,7 @@ test('readLog on a shallow server repository: the log stops at the server\'s cut
   for (const server of SERVERS) {
     const proxy = await startProxy(srv.url, serverFault({ server, behaviour: 'honest' }));
     try {
-      const got = await readLog(`${proxy.url}/log-shallow.git`, { ref: 'main', limit: N }, { tracer: new Tracer() });
+      const got = await readLog(`${proxy.url}/log-shallow.git`, { ref: 'main', limit: N }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
       assert.deepEqual(got.commits.map(c => c.oid), git(bare, ['rev-list', '--first-parent', head]).trim().split('\n'), server);
       assert.equal(got.commits.length, 3); assert.equal(got.truncated, true, 'history continues past the cut');
     } finally { await proxy.close(); }
@@ -215,7 +216,7 @@ test('readLog on a shallow server repository: the log stops at the server\'s cut
 test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   const bare = makeBareRepo(root, 'log-refs'); const head = buildShape(bare, 'root');
   git(bare, ['tag', '-a', '-m', 'annotated', 'v1', head]);
-  const url = `${srv.url}/log-refs.git`; const opts = () => ({ tracer: new Tracer() });
+  const url = `${srv.url}/log-refs.git`; const opts = () => ({ capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   for (const [ref, name] of [[null, 'refs/heads/main'], ['HEAD', 'refs/heads/main'], ['v1', 'refs/tags/v1'], [head, head]]) {
     const r = await readLog(url, { ref, limit: 2 }, opts());
     assert.equal(r.ref, name); assert.equal(r.oid, head); assert.equal(r.commits.length, 2); assert.equal(r.truncated, true);
@@ -230,23 +231,23 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(readLog(url, { limit }, opts()), code('bad_request'), String(limit));
   for (const bad of [null, 5, 'main']) await assert.rejects(readLog(url, bad, opts()), code('bad_request'), String(bad));
   await assert.rejects(readLog(url, {}, null), code('bad_request'));
-  assert.deepEqual((await readLog(url, { limit: 2 }, {})).commits.map(c => c.oid), (await readLog(url, { limit: 2 }, opts())).commits.map(c => c.oid), 'omitted tracer is the no-op, same log');
+  assert.deepEqual((await readLog(url, { limit: 2 }, { capabilities: defaultCapabilities() })).commits.map(c => c.oid), (await readLog(url, { limit: 2 }, opts())).commits.map(c => c.oid), 'omitted tracer is the no-op, same log');
   await assert.rejects(readLog(url, { path: 'f0.txt' }, opts()), code('bad_request'), 'path is not supported');
   await assert.rejects(readLog(url, { ref: 'a..b' }, opts()), code('bad_request'));
   await assert.rejects(readLog(url, { ref: 7 }, opts()), code('bad_request'));
-  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
+  assert.equal((await readLog(url, { limit: 1 }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
 });
 
 test('readLog on blob:none: the trees are harvested; a following listTree on the same transport costs no fetch', async () => {
   const bare = makeBareRepo(root, 'log-harvest'); buildShape(bare, 'merges');
   const proxy = await startProxy(srv.url, serverFault({ server: 'blobnone', behaviour: 'honest' }));
   try {
-    const tracer = new Tracer(); const t = createTransport(`${proxy.url}/log-harvest.git`, { tracer });
-    const log = await readLog(null, { ref: 'main', limit: N }, { tracer, transport: t });
+    const tracer = new Tracer(); const t = createTransport(`${proxy.url}/log-harvest.git`, { capabilities: { ...defaultCapabilities(), tracer } });
+    const log = await readLog(null, { ref: 'main', limit: N }, { capabilities: { ...defaultCapabilities(), tracer }, transport: t });
     const fetches = () => proxy.log.filter(l => l.stage === 'fetch').length;
     const before = fetches();
     for (const c of log.commits) {
-      const ls = await listTree(null, { ref: c.oid }, { tracer, transport: t });
+      const ls = await listTree(null, { ref: c.oid }, { capabilities: { ...defaultCapabilities(), tracer }, transport: t });
       assert.equal(ls.tree, c.tree); assert.deepEqual(ls.entries.map(e => e.oid), git(bare, ['ls-tree', '--format=%(objectname)', c.oid]).trim().split('\n'));
     }
     assert.equal(fetches(), before, 'every commit and root tree came from the harvest');
@@ -269,7 +270,7 @@ test('bytes: a 10-commit window on a wide repository, tree:0 vs blob:none', asyn
     try {
       const quirks = server === 'blobnone' ? { treeFilter: 'blob:none' } : {};
       const ex = arrayExporter();
-      const r = await readLog(`${proxy.url}/log-wide.git`, { ref: 'main', limit: 10 }, { tracer: new Tracer({ exporter: ex }), quirks });
+      const r = await readLog(`${proxy.url}/log-wide.git`, { ref: 'main', limit: 10 }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, quirks });
       assert.deepEqual(r.commits.map(c => c.oid), git(bare, ['rev-list', '--first-parent', '-n', '10', 'main']).trim().split('\n'));
       const f = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
       assert.equal(f.length, 1);

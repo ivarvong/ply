@@ -13,6 +13,7 @@ import { pktInit, pktStep, FLUSH } from '../../src/pktline.js';
 import { concat, te, indexOfBytes } from '../../src/bytes.js';
 import { ZERO_OID } from '../../src/push.js';
 import * as space from './push-outcome.space.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 const ev = (name, tag, extra = {}) => {
   const vs = space.axis(name).variants.filter(v => v.tag === tag && Object.entries(extra).every(([k, x]) => (typeof x === 'string' && typeof v[k] === 'object' ? v[k].tag === x : v[k] === x)));
@@ -133,7 +134,7 @@ export async function observeAll() {
       const cell = cellOf(spec);
       const n = N[cell.refs.tag];
       const bare = makeBareRepo(root, `s${id}`);
-      const seed = new GitHttp(`${srv.url}/s${id}.git`, { tracer: new Tracer({ exporter: arrayExporter() }) });
+      const seed = new GitHttp(`${srv.url}/s${id}.git`, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: arrayExporter() }) } });
       id++;
       // r0..r2 at C0; C1 exists on the server (refs/keep/c1) so a stale old oid names a known object, unless unknownOld
       await seed.push({ commands: [...space.REFS.map(ref => ({ ref, oldOid: ZERO_OID, newOid: C0.oid })), ...(unknownOld ? [] : [{ ref: 'refs/keep/c1', oldOid: ZERO_OID, newOid: C1.oid }])], objects: unknownOld ? C0.objects : [...C0.objects, ...C1.objects], sideband: false });
@@ -150,7 +151,7 @@ export async function observeAll() {
         if (f.drop) throw new TypeError('fetch failed (injected: connection reset)');
         return new Response(bytes, { status: res.status, headers: res.headers });
       };
-      const client = new GitHttp(`${srv.url}/s${id - 1}.git`, { fetchImpl, tracer: new Tracer({ exporter: arrayExporter() }) });
+      const client = new GitHttp(`${srv.url}/s${id - 1}.git`, { capabilities: { ...defaultCapabilities(), fetch: fetchImpl, tracer: new Tracer({ exporter: arrayExporter() }) } });
       const before = git(bare, ['for-each-ref', '--format=%(refname) %(objectname)']);
       let err = null;
       try { await client.push({ commands, objects: del ? [] : C1.objects, sideband: cell.framing.tag === 'sideband', reportV2: cell.format.tag === 'v2', atomic: cell.atomic.tag === 'on' }); } catch (e) { err = e; }

@@ -9,16 +9,18 @@ The hosted HTTP API and the public repository viewer live in [ply-web](https://g
 `parsePack` accepts optional `maxObjects` and `maxInflatedTotal`. Omitting them uses `DEFAULT_LIMITS` (`maxPackObjects` 100_000, `maxInflatedTotal` 256 MiB). A limits object that drops either key fails closed (`bad_request`) instead of leaving the cap off. `validateIdent({ name, email, time, tz })` is the only way to build an author, committer, or tagger: `time` is a non-negative safe integer, `tz` is a civil offset (`-1200`..`+1400`), and the result is branded so a spread cannot reach `ident()`. [ply-web](https://github.com/ivarvong/ply-web) also uses these entry-point exports: `validateIdent`, `validateRef`, `validatePath`, `concat`, `limitError`, `isFilterRejection`, `fromAny`, `packParseOpts`.
 
 ```js
-import { editFile, Tracer, jsonlExporter } from 'ply';
+import { editFile, Tracer, jsonlExporter, defaultCapabilities } from 'ply';
 
 const tracer = new Tracer({ exporter: await jsonlExporter('trace.jsonl') });
 const r = await editFile('https://github.com/o/r.git', {
   ref: 'refs/heads/main', path: 'src/config.ts',
   find: 'VERSION = "1.2.3"', replace: 'VERSION = "1.2.4"',
   author: { name: 'bot', email: 'bot@x' }, message: 'bump',
-}, { auth: { token: PAT }, tracer, cache });
+}, { auth: { token: PAT }, capabilities: { ...defaultCapabilities(), tracer }, cache });
 // r.newCommit, r.pushBytes (≈ 300 + |replace| + 80·depth), r.noop
 ```
+
+`capabilities` is a total record (`tracer`, `fetch`, `clock`, `storage`). `defaultCapabilities()` is the platform set, including a no-op tracer. Omit the options argument to use it. A passed options object that leaves `capabilities` out throws.
 
 Credentials: `auth: { token, user? }` (Basic `<user>:<token>`, user defaulting to `x-access-token`, sent as UTF-8 bytes as git sends a credential helper's), `{ bearer }`, or `{ header }` (an Authorization value forwarded verbatim; it and a bearer token must be printable ASCII). An `auth` that would send nothing is `bad_request`: `{}`, an empty token with no user, and `{ user }` alone (git's credential API asks for the password there; `{ user, token: '' }` sends Basic `<user>:`, the `https://<user>@host` form). Without `auth`, userinfo in the URL is sent as git sends it, byte for byte (percent-decoded): `https://user:pass@host/…` is Basic `user:pass`, a token as the user (`https://<token>@host/…`, the GitHub and GitLab form) is Basic `<token>:`, `https://:pass@host/…` is `:pass`; a NUL, CR or LF in it, or a URL that does not parse, is `bad_request` before any request. None reaches a span, a URL attribute or an error message, even when a server echoes it (the Basic user too, when it is token-shaped or the whole credential). Redirects are never followed: a 3xx is an `http` error naming the target, so no credential can follow it to another origin.
 
@@ -40,7 +42,7 @@ With a warm tree cache (root tree oid unchanged) steps 3…N+2 vanish: 3 roundtr
 
 Two ideas from [gitgrep](https://github.com/ivarvong/gitgrep):
 
-- `cachingFetch(fetch, caches.default, { waitUntil })` as `fetchImpl`: the commit/tree fetches are wants-only, filtered, and every object is hash-verified on arrival, so the responses are immutable and cached per colo under `sha256(url, credential, body)`. A poisoned entry is evicted and refetched once (`git.pack.cache.bust` on the span). The blob stream is never cached.
+- `cachingFetch(fetch, caches.default, { waitUntil })` as `capabilities.fetch`: the commit/tree fetches are wants-only, filtered, and every object is hash-verified on arrival, so the responses are immutable and cached per colo under `sha256(url, credential, body)`. A poisoned entry is evicted and refetched once (`git.pack.cache.bust` on the span). The blob stream is never cached.
 - `head`: the oid you believe the ref points at (your last `newCommit`). Skips ls-refs; receive-pack's compare-and-swap is the freshness check, and a stale hint is redone once from a real ls-refs (`result.hint` is `'used' | 'stale' | null`).
 
 Against github.com: 4 rtt / 549 ms cold → 3 rtt / 73 ms with both.
@@ -64,14 +66,15 @@ Also: `client.discover()` is a capability canary (agent, object-format, `fetch=`
 ```js
 import { pushTree } from 'ply/tree';            // Workers-safe
 import { pushDir } from 'ply/tree-node';         // Node: walks a directory (node:fs)
+import { defaultCapabilities } from 'ply';
 
 await pushTree(url, { ref: 'refs/heads/main', author, message: 'deploy', files: {
   'index.html': '<h1>hi</h1>',                                  // string or Uint8Array → 100644
   'bin/build': { data: script, mode: '100755' },
   'latest': { mode: '120000', data: 'v2/index.html' },          // symlink: the target is the blob
   'vendor/lib': { mode: '160000', oid: submoduleCommit },       // gitlink: no data; the server need not have the commit
-} }, { auth, tracer, head: lastCommit });
-await pushDir(url, { dir: './dist', ref: 'refs/heads/main', author, message: 'deploy' }, { auth, tracer });
+} }, { auth, capabilities: { ...defaultCapabilities(), tracer }, head: lastCommit });
+await pushDir(url, { dir: './dist', ref: 'refs/heads/main', author, message: 'deploy' }, { auth, capabilities: { ...defaultCapabilities(), tracer } });
 ```
 
 `files` is an object, a `Map`, or an iterable of `{ path, mode?, data?, oid? }`. Paths are validated like `editFile`'s (no `.git`, `..`, empty components); a path given twice, or as both a file and a directory, is `bad_request` before any request (git's fsck calls that tree `duplicateEntries`; `encodeTree` now refuses it too). `README` and `readme` are two names to git and are accepted: they collide only on a case-insensitive checkout. Each blob is bounded by `maxObjectSize`, the file count by `maxPackObjects`, each directory by `maxTreeEntries`.
@@ -87,10 +90,11 @@ Repeat pushes are thin: ply reads the parent's trees only where the new tree dif
 ```js
 import { checkoutTree } from 'ply/checkout';       // Workers-safe
 import { checkoutDir } from 'ply/checkout-node';    // Node: writes a directory (node:fs)
+import { defaultCapabilities } from 'ply';
 
-const r = await checkoutTree(url, { ref: 'main', path: 'site' }, { auth, tracer });
+const r = await checkoutTree(url, { ref: 'main', path: 'site' }, { auth, capabilities: { ...defaultCapabilities(), tracer } });
 for await (const f of r.files) if (f.stream) await env.BUCKET.put(f.path, f.stream, { httpMetadata: { contentLength: f.size } });
-await checkoutDir(url, { dir: './out', ref: 'v1.2.0' }, { auth, tracer });  // == git clone, minus .git
+await checkoutDir(url, { dir: './out', ref: 'v1.2.0' }, { auth, capabilities: { ...defaultCapabilities(), tracer } });  // == git clone, minus .git
 ```
 
 Every object is checked against its oid: a blob batch is delta-resolved and keyed by computed hash before any file is yielded (an object nobody asked for is `pack_corrupt`); a blob fetched alone streams through `readFile`'s verifier (the stream errors rather than ends on wrong bytes). A batch that hits `maxPackBytes`, `maxInflatedTotal` or `maxObjectSize` is split in half and refetched, down to single blobs, which stream in O(1) memory (a single blob whose pack is over `maxPackBytes` is `limit_exceeded`: every fetch, streamed or not, delivers at most that much pack); a host that refuses a many-wants fetch (an HTTP error, `ERR`) gets one blob per request from then on (`quirks.blobWants = 'single'`). A wrong blob is never a reason to fall back. Entries walked are bounded by `maxPackObjects` (a tree reused at many paths cannot multiply past it), depth by `maxPathDepth`, and a tree naming one entry twice (a symlink `a` beside a directory `a`) is `pack_corrupt`.
@@ -214,7 +218,7 @@ An equivalent mutant stays only as `// Stryker disable next-line <Mutator>: <rea
 
 ### The fuzzer
 
-`test/fuzz/gen.js` draws from a product space of named classes: blob content (`empty tiny text random repetitive boundary big binaryish`), match position (`start end middle chunk16k chunk32k chunk64k random`), find/replace length classes (incl. >127 for insert-op chunking, 64K copy-op boundaries, empty), server `core.compression` 0…9/−1 (stored / fixed / dynamic Huffman blocks), path depth 1…10, sibling shape (`none few many sortedge`: names that sort differently as dir vs file, unicode, leading `-`), history depth (so `deepen 1` reports `shallow`), file mode, and intended outcome (`ok noop zero_matches two_matches missing_path not_a_file cas_conflict` — the CAS case injects a competing push between our `ls-refs` and our `receive-pack` via `fetchImpl`).
+`test/fuzz/gen.js` draws from a product space of named classes: blob content (`empty tiny text random repetitive boundary big binaryish`), match position (`start end middle chunk16k chunk32k chunk64k random`), find/replace length classes (incl. >127 for insert-op chunking, 64K copy-op boundaries, empty), server `core.compression` 0…9/−1 (stored / fixed / dynamic Huffman blocks), path depth 1…10, sibling shape (`none few many sortedge`: names that sort differently as dir vs file, unicode, leading `-`), history depth (so `deepen 1` reports `shallow`), file mode, and intended outcome (`ok noop zero_matches two_matches missing_path not_a_file cas_conflict` — the CAS case injects a competing push between our `ls-refs` and our `receive-pack` via `capabilities.fetch`).
 
 Each case is checked against git: ref advanced to our commit, `cat-file` bytes equal the expected splice, `diff --name-only -z` touches exactly the path, parent/author/message, tree oid, mode preserved, `fsck --strict`, plus two efficiency properties — push bytes ≤ `220 + 80·depth + |replace| + ⌈|replace|/127⌉ + 5·⌈|replace|/16K⌉ + 16·⌈|blob|/64K⌉` and max single allocation ≤ 70 KB regardless of blob size — then a second edit that must hit the tree cache at every level. Failures write `fuzz-out/fail-<seed>.jsonl` and print `--case <seed>` to replay.
 

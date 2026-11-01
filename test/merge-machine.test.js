@@ -39,13 +39,21 @@ test('merge-base search: windows double from 8 and the last step is the cap itse
 function blobServer(data, failures) {
   const line = s => ({ kind: 'data', payload: te.encode(s) });
   const sideband = b => ({ kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), b]) });
-  const t = { limits: DEFAULT_LIMITS, tracer: new Tracer(), parent: null, objects: new Map(), quirks: {}, url: 'stub://attrs', requests: 0,
+  const t = {
+    limits: DEFAULT_LIMITS,
+    tracer: new Tracer(),
+    parent: null,
+    objects: new Map(),
+    quirks: {},
+    url: 'stub://attrs',
+    requests: 0,
     async *frames() {
       t.requests++;
       if (t.requests <= failures) throw plyError('network', 'connection reset');
       const { pack } = await buildPack([{ type: TYPE.BLOB, data }]);
       yield line('packfile\n'); yield sideband(pack); yield { kind: 'flush' };
-    } };
+    }
+  };
   return t;
 }
 

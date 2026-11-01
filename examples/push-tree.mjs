@@ -8,7 +8,7 @@
 // on its path and the commit, and a repeat with nothing changed is a noop (no push at all).
 import { parseArgs } from 'node:util';
 import { pushDir } from 'ply/tree-node';
-import { Tracer } from 'ply';
+import { Tracer, defaultCapabilities } from 'ply';
 
 const { positionals: [dir, url], values } = parseArgs({ allowPositionals: true, options: { ref: { type: 'string', default: 'main' }, message: { type: 'string' } } });
 if (!dir || !url) { console.error('usage: node examples/push-tree.mjs <dir> <remote-url> [--ref main] [--message "..."]'); process.exit(2); }
@@ -18,7 +18,9 @@ const auth = env.PLY_TOKEN ? { token: env.PLY_TOKEN, ...(env.PLY_USER && { user:
 const ref = values.ref.startsWith('refs/') ? values.ref : `refs/heads/${values.ref}`;
 const author = { name: env.GIT_AUTHOR_NAME ?? 'ply', email: env.GIT_AUTHOR_EMAIL ?? 'ply@localhost' };
 
-const r = await pushDir(url, { dir, ref, author, message: values.message ?? `push ${dir}` }, { auth, tracer: new Tracer() });
+const messageArg = values.message;
+const message = typeof messageArg === 'string' ? messageArg : `push ${dir}`;
+const r = await pushDir(url, { dir, ref, author, message }, { auth, capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
 const { files, trees, sent, sentBlobs, sentTrees } = r.objects;
 console.log(r.noop
   ? `noop: ${ref} already has this tree (${r.newTree}); nothing sent`

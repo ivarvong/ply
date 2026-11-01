@@ -23,6 +23,7 @@ import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { TYPE } from '../../src/objects.js';
 import { concat, te } from '../../src/bytes.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;
@@ -109,8 +110,8 @@ async function mergeBaseCase(rng, i, seed, decoy) {
   let result = null, error = null;
   const url = `${proxy.url}/${M.name}.git`;
   try {
-    if (op === 'mergeBase') result = await mergeBase(createTransport(url, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }) }), a, b, maxDepth ? { maxDepth } : {});
-    else result = await mergeBranch(url, { ref: 'refs/heads/ours', from: 'refs/heads/theirs', author: { name: 'l', email: 'l@x' } }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000, ...(maxDepth ? { maxMergeDepth: maxDepth } : {}) }) });
+    if (op === 'mergeBase') result = await mergeBase(createTransport(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) }, limits: withLimits({ requestTimeoutMs: 3000 }) }), a, b, maxDepth ? { maxDepth } : {});
+    else result = await mergeBranch(url, { ref: 'refs/heads/ours', from: 'refs/heads/theirs', author: { name: 'l', email: 'l@x' } }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) }, limits: withLimits({ requestTimeoutMs: 3000, ...(maxDepth ? { maxMergeDepth: maxDepth } : {}) }) });
   } catch (e) { error = e; }
   await proxy.close();
   const problems = [];
@@ -174,7 +175,7 @@ try {
     const exporter = arrayExporter();
     let result = null, error = null;
     const verify = rng.bool(0.5);
-    try { result = await editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'l', email: 'l@x' }, message: 'l' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }), verify }); }
+    try { result = await editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'l', email: 'l@x' }, message: 'l' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) }, limits: withLimits({ requestTimeoutMs: 3000 }), verify }); }
     catch (e) { error = e; }
     await proxy.close();
     const problems = [];

@@ -19,6 +19,7 @@ import { attributesFor } from '../src/attributes.js';
 import { createTransport } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 // the empty tree as attr.tree: git reads no .gitattributes (our default) whatever its version's bare-repo default is
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -45,7 +46,7 @@ const branchCommit = (r, branch, from, files, msg) => {
 // --name-only output: <tree>\n<conflicted paths…>\n\n<informational messages>; exit 0 clean, 1 conflicts
 const gitMergeTree = (bare, ours, theirs, attrTree = EMPTY_TREE) => { const r = sh(bare, ['-c', `attr.tree=${attrTree}`, 'merge-tree', '--write-tree', '--name-only', ours, theirs]); assert.ok(r.status === 0 || r.status === 1, r.stderr); const [head] = r.stdout.split('\n\n'); const lines = head.split('\n'); return { clean: r.status === 0, tree: lines[0].trim(), conflicts: lines.slice(1).filter(Boolean), info: r.stdout.split('\n\n').slice(1).join(' ').trim() }; };
 const gitMerge = (bare, ref, from) => { const d = mkdtempSync(join(tmpdir(), 'gm-')); try { sh(d, ['clone', '-q', bare, '.']); sh(d, ['checkout', '-q', ref]); const m = sh(d, ['merge', '--no-edit', `origin/${from}`]); return { clean: m.status === 0, tree: sh(d, ['rev-parse', 'HEAD^{tree}']).stdout.trim(), parents: sh(d, ['rev-list', '--parents', '-n1', 'HEAD']).stdout.trim().split(' ').slice(1) }; } finally { rmSync(d, { recursive: true, force: true }); } };
-const merge = (r, opts = {}, ex = arrayExporter()) => mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, ...opts }, { tracer: new Tracer({ exporter: ex }), rediff });
+const merge = (r, opts = {}, ex = arrayExporter()) => mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, ...opts }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, rediff });
 
 test('threeWay: the trivial-merge rules, one directory', () => {
   const e = (name, oid, mode = '100644') => ({ name, oid, mode });
@@ -162,14 +163,14 @@ test('limits: a file over maxMergeBlobBytes is a conflict with that reason (git 
   branchCommit(r, 'feat', b, { 'big.txt': [...lines.slice(0, -1), 'END\n'].join('') }, 'theirs');
   const ours = branchCommit(r, 'main', b, { 'big.txt': ['TOP\n', ...lines.slice(1)].join('') }, 'ours');
   const limits = { ...DEFAULT_LIMITS, maxMergeBlobBytes: 1000 };
-  await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), rediff, limits }), e => e.code === 'merge_conflict' && e.reasons['big.txt'] === 'too large to merge');
+  await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff, limits }), e => e.code === 'merge_conflict' && e.reasons['big.txt'] === 'too large to merge');
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), ours, 'nothing pushed');
   assert.equal((await merge(r)).outcome, 'merge', 'within the default cap the same merge is clean');
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:big.txt']).stdout, ['TOP\n', ...lines.slice(1, -1), 'END\n'].join(''));
   // two branches 10 commits from their common root, search capped at depth 8 → limit_exceeded (not a wrong answer)
   const r2 = repo(); const root = commitFiles(r2.work, r2.bare, { 'x': '0\n' }, 'root');
   let a = root, c = root; for (let i = 1; i <= 10; i++) { a = branchCommit(r2, 'a', a, { 'x': `a${i}\n` }, `a${i}`); c = branchCommit(r2, 'c', c, { 'x': `c${i}\n` }, `c${i}`); }
-  const t = createTransport(r2.url, { tracer: new Tracer() });
+  const t = createTransport(r2.url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   await assert.rejects(mergeBase(t, a, c, { maxDepth: 8 }), e => e.code === 'limit_exceeded');
   assert.equal((await mergeBase(t, a, c, { maxDepth: 16 })).base, root);
   // #79: the doubling's last step is the cap itself. The root is 11 deep: cap 12 searches 8, then 12 (it stopped at 8
@@ -197,7 +198,7 @@ test('merge bases decided by git: criss-cross refuses (git builds a virtual base
     const g = gitMergeTree(r.bare, M, F); assert.ok(g.clean); assert.equal(run(r.bare, ['cat-file', '-p', `${g.tree}:f`]), 'x', 'git: virtual base → f=x');
     await assert.rejects(merge(r), e => e.code === 'merge_conflict' && e.bases.length === 2 && /criss-cross/.test(e.message));
     assert.equal(run(r.bare, ['rev-parse', 'main']), M, 'nothing pushed');
-    await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { tracer: new Tracer() }), e => e.code === 'not_linear');
+    await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }), e => e.code === 'not_linear');
   }
   // the trap: main = merge(r, p3) with first parent the old root r, p3 ← … ← y ← r; feat ← y. Best base is y (r is its
   // ancestor). main's merge reverted f to r's content; feat left y's. git: base y → f=r. Base r would give f=y.
@@ -232,7 +233,7 @@ test('#42: a cut below two candidates is deepened, as git merge-base --all says 
   run(w, ['push', '-q', '-f', r.bare, `${A}:refs/heads/main`, `${B}:refs/heads/feat`]);
   assert.deepEqual(run(r.bare, ['rev-list', '--parents', '-n1', A]).split(' ').slice(1), [C, Z]);
   assert.equal(run(r.bare, ['merge-base', '--all', A, B]), C, 'git: one base');
-  const mb = await mergeBase(createTransport(r.url, { tracer: new Tracer() }), A, B);
+  const mb = await mergeBase(createTransport(r.url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }), A, B);
   assert.deepEqual([mb.bases, mb.depth], [[C], 16], 'deepened past the cut; main answered [C, Z] at depth 8');
   const g = gitMergeTree(r.bare, A, B); assert.ok(g.clean);
   const m = await merge(r); assert.equal(m.outcome, 'merge'); assert.equal(m.base, C); assert.equal(m.tree, g.tree, 'tree == git merge-tree');
@@ -254,7 +255,7 @@ test('.gitattributes merge drivers, judged by git (attr.tree): union, -merge, bi
     if (attrsOn === 'attrs') { attrRev = branchCommit(r, 'attrs', b, { '.gitattributes': rootAttrs, 'docs/.gitattributes': 'a.md -merge\n' }, 'attributes only'); }
     const g = gitMergeTree(r.bare, ours, theirs, attrRev);
     const ex = arrayExporter();
-    let m = null, err = null; try { m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer({ exporter: ex }), rediff, attributes: source }); } catch (e) { err = e; }
+    let m = null, err = null; try { m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, rediff, attributes: source }); } catch (e) { err = e; }
     const label = `attributes=${source}`;
     if (g.clean) { assert.ok(m, `${label}: git clean, we ${err?.message}`); assert.equal(m.tree, g.tree, `${label}: tree == git`); }
     else { assert.equal(err?.code, 'merge_conflict', `${label}: git conflicts on ${g.conflicts}`); for (const p of g.conflicts) assert.ok(err.conflicts.includes(p), `${label}: git conflicts on ${p}, we did not (${err.message})`); }
@@ -272,11 +273,11 @@ test('.gitattributes merge drivers, judged by git (attr.tree): union, -merge, bi
   const theirs = branchCommit(r, 'feat', b, { 'CHANGELOG': L(3) + 'theirs 1\ntheirs 2' }, 'theirs'); // no final newline: union adds one between
   const ours = branchCommit(r, 'main', b, { 'CHANGELOG': L(3) + 'ours 1\nours 2' }, 'ours');
   const g = gitMergeTree(r.bare, ours, theirs, ours); assert.ok(g.clean);
-  const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), rediff, attributes: 'ours' });
+  const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff, attributes: 'ours' });
   assert.equal(m.tree, g.tree);
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:CHANGELOG']).stdout, L(3) + 'ours 1\nours 2\ntheirs 1\ntheirs 2');
-  await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), attributes: 'nope nope' }), e => e.code === 'bad_request');
-  await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), attributes: 42 }), e => e.code === 'bad_request');
+  await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, attributes: 'nope nope' }), e => e.code === 'bad_request');
+  await assert.rejects(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, attributes: 42 }), e => e.code === 'bad_request');
 });
 
 test('names that are Object.prototype members (#16): a directory rename + add inside `constructor`/`__proto__`/…, a rename onto `__proto__`, a `__proto__` content conflict — each judged by git', async () => {
@@ -325,7 +326,7 @@ test('.gitattributes [:class:] names that are Object.prototype members (#16): at
   const theirs = branchCommit(r, 'feat', b, Object.fromEntries(paths.map(p => [p, L(5) + 'theirs\n'])), 'theirs');
   const ours = branchCommit(r, 'main', b, Object.fromEntries(paths.map(p => [p, L(5) + 'ours\n'])), 'ours');
   const g = gitMergeTree(r.bare, ours, theirs, ours);
-  let err = null; try { await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), rediff, attributes: 'ours' }); } catch (e) { err = e; }
+  let err = null; try { await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff, attributes: 'ours' }); } catch (e) { err = e; }
   assert.equal(err?.code, 'merge_conflict', `git conflicts on ${g.conflicts}; we: ${err?.code} ${err?.message}`);
   assert.deepEqual([...err.conflicts].sort(), [...g.conflicts].sort(), 'conflicts == git merge-tree');
   for (const p of err.conflicts) assert.match(err.reasons[p], /^content/, `${p}: a text conflict, not -merge from a pattern git does not match`);
@@ -334,15 +335,15 @@ test('.gitattributes [:class:] names that are Object.prototype members (#16): at
 test('branch workflow: editFile creates the branch from main (CAS: must not exist), merge lands it, delete removes it', async () => {
   const r = repo();
   const base = commitFiles(r.work, r.bare, { 'README.md': 'hello MARK\n' }, 'base');
-  const e = await editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'EDITED', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'edit on a branch' }, { tracer: new Tracer() });
+  const e = await editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'EDITED', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'edit on a branch' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   assert.equal(e.oldCommit, base); assert.equal(sh(r.bare, ['rev-parse', 'refs/heads/ply/edit-1']).stdout.trim(), e.newCommit);
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), base, 'main untouched');
   assert.equal(sh(r.bare, ['rev-parse', `${e.newCommit}^`]).stdout.trim(), base, 'parent is main\'s head');
-  await assert.rejects(editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'AGAIN', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'm' }, { tracer: new Tracer() }), e => e.code === 'cas_conflict', 'branch exists → create refused');
-  const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/ply/edit-1', author }, { tracer: new Tracer() });
+  await assert.rejects(editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'AGAIN', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'm' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }), e => e.code === 'cas_conflict', 'branch exists → create refused');
+  const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/ply/edit-1', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   assert.equal(m.outcome, 'fast_forward'); assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit);
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:README.md']).stdout, 'hello EDITED\n');
-  const t = createTransport(r.url, { tracer: new Tracer() });
+  const t = createTransport(r.url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   await deleteBranch(t, { ref: 'refs/heads/ply/edit-1', oid: e.newCommit });
   assert.notEqual(sh(r.bare, ['show-ref', '--verify', 'refs/heads/ply/edit-1']).status, 0, 'branch gone');
   // deleting with a stale oid is a CAS failure; deleting the current branch is refused by policy (receive.denyDeleteCurrent)
@@ -400,7 +401,7 @@ test('property: random three-way tree edits — clean merges equal git merge-tre
     const baseOid = sh(r.bare, ['merge-base', ours, theirs]).stdout.trim();
     const g = gitMergeTree(r.bare, ours, theirs, attrSource === null ? EMPTY_TREE : { ours, theirs, base: baseOid }[attrSource]);
     const ex = arrayExporter();
-    let m, err = null; try { m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer({ exporter: ex }), rediff, attributes: attrSource }); } catch (e) { err = e; }
+    let m, err = null; try { m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, rediff, attributes: attrSource }); } catch (e) { err = e; }
     if (attrSource) stats.withAttrs++;
     { const a = ex.lines.flatMap(flattenLine).find(sp => sp.name === 'git.merge')?.attrs ?? {}; stats.unioned += a['git.merge.content.unioned'] ?? 0; stats.attrBinary += a['git.merge.content.attr_binary'] ?? 0; }
     stats.lineMerged += ex.lines.flatMap(flattenLine).find(s => s.name === 'git.merge')?.attrs['git.merge.content.merged'] ?? 0;

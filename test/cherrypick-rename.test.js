@@ -22,6 +22,7 @@ import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { oracleRediff } from './gitversion.js';
 import { cherryPick } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const rediff = oracleRediff();
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -84,7 +85,7 @@ function gitPick(bare, p) {
 
 async function plyPick(url, p) {
   try {
-    const res = await cherryPick(url, { ref: 'refs/heads/dst', commit: p, committer: { name: 'w', email: 'w@x' }, time: 1700000000 }, { tracer: new Tracer(), rediff });
+    const res = await cherryPick(url, { ref: 'refs/heads/dst', commit: p, committer: { name: 'w', email: 'w@x' }, time: 1700000000 }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff });
     return res.outcome === 'empty' ? { cls: 'empty' } : { cls: 'clean', tree: res.tree };
   } catch (e) {
     if (e.code !== 'merge_conflict') throw e;

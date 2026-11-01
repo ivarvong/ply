@@ -14,6 +14,7 @@ import { editFile } from '../src/edit.js';
 import { generateSigner } from '../src/sign.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { oracleRediff } from './gitversion.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 const rediff = oracleRediff();
 
 let root, cleanup, srv, n = 0;
@@ -35,7 +36,7 @@ const commitOn = (r, branch, from, files, msg) => {
 const clone = bare => { const d = mkdtempSync(join(tmpdir(), 'rb-')); ok(sh(d, ['clone', '-q', bare, '.'])); return d; };
 const treeOf = (cwd, rev) => ok(sh(cwd, ['rev-parse', `${rev}^{tree}`]));
 const log = (cwd, range) => ok(sh(cwd, ['log', '--format=%T|%an|%ae|%s', '--reverse', range])).split('\n').filter(Boolean);
-const T = () => ({ tracer: new Tracer(), rediff });
+const T = () => ({ capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff });
 
 test('pure: linearChain and carriedExtra', () => {
   const c = new Map([['3', { parents: ['2'], tree: 't3' }], ['2', { parents: ['1'], tree: 't2' }], ['1', { parents: ['0'], tree: 't1' }], ['m', { parents: ['3', 'x'], tree: 'tm' }]]);
@@ -55,7 +56,7 @@ test('rebase: three commits onto a moved main — trees, authors, messages equal
   // git's answer
   const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitLog = log(d, 'origin/main..HEAD'); rmSync(d, { recursive: true, force: true });
   const ex = arrayExporter();
-  const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { tracer: new Tracer({ exporter: ex }) });
+  const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) } });
   assert.equal(res.outcome, 'rebase'); assert.equal(res.commits, 3); assert.equal(res.oldTip, tip); assert.equal(res.onto, mainNow); assert.equal(res.base, base);
   assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), res.oid);
   const ours = log(r.bare, `main..feat`);
@@ -121,7 +122,7 @@ test('cherry-pick and revert: trees equal git; signature not carried; signed res
   commitOn(r, 'main', 'main', { 'c.txt': 'c\n' }, 'main moved');
   const d = clone(r.bare); ok(sh(d, ['cherry-pick', fix])); const gitPick = treeOf(d, 'HEAD'); ok(sh(d, ['revert', '--no-edit', 'HEAD'])); const gitRevert = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
   const { signer } = await generateSigner();
-  const p = await cherryPick(r.url, { ref: 'refs/heads/main', commit: fix, committer }, { tracer: new Tracer(), signer });
+  const p = await cherryPick(r.url, { ref: 'refs/heads/main', commit: fix, committer }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, signer });
   assert.equal(p.outcome, 'ok'); assert.equal(p.tree, gitPick); assert.equal(ok(sh(r.bare, ['rev-parse', 'main'])), p.oid);
   assert.equal(ok(sh(r.bare, ['log', '-1', '--format=%an|%s', 'main'])), 'w|the fix', 'author and message kept');
   assert.match(ok(sh(r.bare, ['cat-file', 'commit', p.oid])), /gpgsig -----BEGIN SSH SIGNATURE/);

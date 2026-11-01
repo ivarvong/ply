@@ -7,6 +7,7 @@ import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 // module-scoped: survives across requests within the isolate, like a real worker would hold it
 const packCache = typeof caches !== 'undefined' ? caches.default : null;
@@ -31,7 +32,7 @@ export default {
     if (u.pathname === '/fetchpack') {
       const body = await req.json();
       const exporter = arrayExporter();
-      const c = new GitHttp(body.url, { tracer: new Tracer({ exporter }) });
+      const c = new GitHttp(body.url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) } });
       const t0 = Date.now();
       try {
         const r = await c.fetchPack(body.req);
@@ -40,7 +41,7 @@ export default {
     }
     if (u.pathname === '/redirect') { // ply against a redirecting server; plus what workerd's own `follow` does with Authorization
       const body = await req.json();
-      const c = new GitHttp(body.url, { tracer: new Tracer(), auth: body.auth });
+      const c = new GitHttp(body.url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, auth: body.auth });
       const res = {};
       for (const [k, op] of [['get', () => c.discover()], ['post', () => c.lsRefs()]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
       try { const r = await fetch(`${body.url}/info/refs?service=git-upload-pack`, { headers: { Authorization: 'Bearer workerd-follow-probe' } }); res.follow = { status: r.status, url: r.url }; await r.body?.cancel(); } catch (e) { res.follow = { error: e.message }; }
@@ -50,7 +51,7 @@ export default {
       const body = await req.json();
       const exporter = arrayExporter();
       try {
-        const r = await readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) });
+        const r = await readFile(body.url, { path: body.path }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) } });
         let bytes = 0;
         const rd = r.stream.getReader();
         if (body.cancel) { const { value } = await rd.read(); bytes = value?.length ?? 0; await rd.cancel('enough'); }
@@ -70,7 +71,9 @@ export default {
       const one = async i => {
         const t0 = Date.now();
         try {
-          const r = await editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: `wd ${i}` }, { tracer, cache, limits, auth: body.auth, fetchImpl, head: body.head ?? null, signer: signing?.signer ?? null });
+          const head = body.head == null ? null : body.head;
+          const signer = signing == null || signing.signer == null ? null : signing.signer;
+          const r = await editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: `wd ${i}` }, { capabilities: { ...defaultCapabilities(), tracer, fetch: fetchImpl }, cache, limits, auth: body.auth, head, signer });
           return { ok: true, ms: Date.now() - t0, newCommit: r.newCommit, oldCommit: r.oldCommit, pushBytes: r.pushBytes, noop: !!r.noop, hint: r.hint, packCache: fetchImpl.stats ?? null };
         } catch (e) { return { ok: false, ms: Date.now() - t0, code: e.code, message: e.message }; }
       };

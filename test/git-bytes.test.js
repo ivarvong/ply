@@ -20,8 +20,9 @@ import { mergeBranch } from '../src/merge.js';
 import { decodeBytes, encodeBytes } from '../src/bytes.js';
 import { isPlyCode } from '../src/errors.js';
 import { Tracer } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
-const O = (extra = {}) => ({ tracer: new Tracer(), ...extra });
+const O = (extra = {}) => ({ ...extra, capabilities: { ...defaultCapabilities(), ...extra.capabilities, tracer: new Tracer() } });
 
 // ---- the space ----
 const BOM = [0xef, 0xbb, 0xbf];

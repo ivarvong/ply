@@ -3,7 +3,7 @@
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { Code, Detail, Extra } from './errors.js';
 import type { Limits } from './limits.js';
-import type { Span, Tracer } from './otel.js';
+import type { Span } from './otel.js';
 import type { Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
 import { thrown as fail } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
@@ -12,7 +12,7 @@ import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
 import { UA, wrapNet } from './transport.js';
-import { adoptCapabilities } from './capabilities.js';
+import { defaultCapabilities, type Capabilities } from './capabilities.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -140,9 +140,8 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
 export type FetchLike = (url: string | URL, init: RequestInit) => Promise<Response>;
 export type HttpOptions = {
   readonly auth?: HttpAuth | null | undefined;
-  readonly tracer?: Tracer | undefined;
+  readonly capabilities: Capabilities;
   readonly parent?: Span | null | undefined;
-  readonly fetchImpl?: FetchLike | undefined;
   readonly userAgent?: string | undefined;
   readonly limits?: Limits | undefined;
   readonly signal?: AbortSignal | null | undefined;
@@ -150,14 +149,11 @@ export type HttpOptions = {
 };
 export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
 
+export const httpOptions = (): HttpOptions => ({ capabilities: defaultCapabilities() });
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
-export function createTransport(url: string | URL, options: HttpOptions = {}): HttpTransport {
-  const caps = adoptCapabilities(options);
-  const { auth, parent = null, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {} } = options;
-  const tracer = caps.tracer;
-  const fetchImpl = caps.fetch;
-  const clock = caps.clock;
-  const storage = caps.storage;
+export function createTransport(url: string | URL, options: HttpOptions = httpOptions()): HttpTransport {
+  const { capabilities, auth, parent = null, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {} } = options;
+  const { tracer, fetch: fetchImpl, clock, storage } = capabilities;
   headerField(userAgent, 'user agent');
   headerField(auth?.header, 'authorization');
   headerField(auth?.token, 'token');
@@ -250,7 +246,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
-    // tracer, clock and storage come from adoptCapabilities: a missing tracer is the no-op, a missing store is a fresh map.
+    // tracer, fetch, clock and storage are the caller's Capabilities. The tracer on the transport is that record's tracer.
     kind: 'http', url: base, tracer, parent, limits, signal, quirks, objects: storage, scrub,
     async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncGenerator<Frame, void, undefined> {
       let st: ReturnType<typeof pktStep>['state'] = pktInit();

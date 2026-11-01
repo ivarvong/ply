@@ -31,8 +31,7 @@
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 import { thrown as fail, orThrow } from './errors.js';
 import type { Miss } from './errors.js';
-import type { OperationOpts } from './operation.js';
-import { operation } from './operation.js';
+import { operation, entryOptions } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { resolveCommit, openBlob } from './read.js';
 import type { ReadOptions, RefSpec } from './read.js';
@@ -227,13 +226,29 @@ export type CheckoutResult = {
   readonly entries: readonly CheckoutEntry[];
   readonly files: AsyncGenerator<CheckoutFile, void, undefined>;
 };
+type TreeQuery =
+  | { readonly ref: RefSpec; readonly path: string | null }
+  | { readonly ref: RefSpec }
+  | { readonly path: string | null }
+  | Record<string, never>;
+type CheckoutOptions = ReadOptions | (ReadOptions & { readonly batch: number });
+const batchOf = (options: object): unknown => {
+  if (!('batch' in options)) return BATCH;
+  return options.batch;
+};
+const rootQuery = (): TreeQuery => ({ ref: null, path: '' });
 // oxlint-disable-next-line require-await -- async so that a throw while checking arguments is a rejection, as before
-export async function checkoutTree(url: string, { ref = null, path = '' }: { readonly ref?: RefSpec; readonly path?: string | null } = {}, { batch = BATCH, ...opts }: ReadOptions & { readonly batch?: number } = {}): Promise<CheckoutResult> {
+export async function checkoutTree(url: string, query: TreeQuery = rootQuery(), options: CheckoutOptions = entryOptions()): Promise<CheckoutResult> {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ref and path default when the query omits them
+  const { ref = null, path = '' } = query as { readonly ref: RefSpec; readonly path: RefSpec };
+  const rawBatch = batchOf(options);
+  const opts = options;
   const limits = opts.limits ?? DEFAULT_LIMITS;
   const comps = path === undefined || path === null || path === '' || path === '/' ? [] : validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
-  if (!Number.isSafeInteger(batch) || batch < 1 || batch > requireLimit(limits, 'maxPackObjects')) throw fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('checkout', url, ({ ...opts, attrs: { 'git.checkout.ref': ref ?? 'HEAD', 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
+  if (typeof rawBatch !== 'number' || !Number.isSafeInteger(rawBatch) || rawBatch < 1 || rawBatch > requireLimit(limits, 'maxPackObjects')) throw fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
+  const batch = rawBatch;
+  const refLabel = typeof ref === 'string' ? ref : 'HEAD';
+  return operation('checkout', url, { ...opts, attrs: { 'git.checkout.ref': refLabel, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } }, async ({ t, root, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const trees = await fetchTrees(t, commit, limits);
     const oid = subtree(trees.tree, trees.root, comps);

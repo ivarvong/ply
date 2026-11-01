@@ -12,6 +12,7 @@ import { Tracer, flattenLine } from '../../src/otel.js';
 import { jsonlExporter } from '../jsonl.mjs';
 import { hashObject } from '../../src/objects.js';
 import { concat } from '../../src/bytes.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? process.env.FUZZ_N ?? '60', 10);
@@ -149,7 +150,7 @@ async function runCase(ctx, seed, hints) {
   let result = null, err = null;
   const t0 = performance.now();
   try {
-    result = await editFile(`${ctx.url}/${name}.git`, { path: c.editPath, find: c.find, replace: c.replace, author: { name: 'fuzz', email: 'fuzz@x' }, message: `fuzz ${seed}` }, { tracer, cache, fetchImpl });
+    result = await editFile(`${ctx.url}/${name}.git`, { path: c.editPath, find: c.find, replace: c.replace, author: { name: 'fuzz', email: 'fuzz@x' }, message: `fuzz ${seed}` }, { capabilities: { ...defaultCapabilities(), tracer, fetch: fetchImpl }, cache });
   } catch (e) { err = e; }
   const ms = performance.now() - t0;
   const spans = lines.flatMap(flattenLine);
@@ -194,7 +195,7 @@ async function runCase(ctx, seed, hints) {
       if (occ === 1) {
         const j = Buffer.from(expectedBlob).indexOf(Buffer.from(find2));
         const undoExpected = concat([expectedBlob.subarray(0, j), c.find, expectedBlob.subarray(j + find2.length)]);
-        await editFile(`${ctx.url}/${name}.git`, { path: c.path, find: find2, replace: c.find, author: { name: 'fuzz', email: 'fuzz@x' }, message: 'undo' }, { tracer: t2, cache });
+        await editFile(`${ctx.url}/${name}.git`, { path: c.path, find: find2, replace: c.find, author: { name: 'fuzz', email: 'fuzz@x' }, message: 'undo' }, { capabilities: { ...defaultCapabilities(), tracer: t2 }, cache });
         const hits = r2lines.flatMap(flattenLine).find(s => s.name === 'git.edit').attrs['git.edit.tree.cache_hits'];
         if (hits !== depth) problems.push(`second edit cache hits ${hits} != ${depth}`);
         const back = gitBuf(bare, ['cat-file', 'blob', `main:${c.path}`]);

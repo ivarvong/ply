@@ -27,7 +27,7 @@ import { concat, encodeBytes } from './bytes.js';
 import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
 import { checkoutTree } from './checkout.js';
 import type { CheckoutFile, CheckoutResult } from './checkout.js';
-import type { ReadOptions, RefSpec } from './read.js';
+import { entryOptions, type ReadOptions, type RefSpec } from './read.js';
 import { thrownCode } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- files are written one at a time, in order, each stream drained before the next */
@@ -102,7 +102,19 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
 }
 
 export type CheckoutDirResult = Omit<CheckoutResult, 'files'> & { readonly written: Written };
-export async function checkoutDir(url: string, { dir, ref = null, path = '' }: { readonly dir?: string; readonly ref?: RefSpec; readonly path?: string | null } = {}, opts: ReadOptions = {}): Promise<CheckoutDirResult> {
+type DirQuery =
+  | { readonly dir: string; readonly ref: RefSpec; readonly path: string | null }
+  | { readonly dir: string; readonly ref: RefSpec }
+  | { readonly dir: string; readonly path: string | null }
+  | { readonly dir: string }
+  | { readonly ref: RefSpec; readonly path: string | null }
+  | { readonly ref: RefSpec }
+  | { readonly path: string | null }
+  | Record<string, never>;
+const dirQuery = (): DirQuery => ({ ref: null, path: '' });
+export async function checkoutDir(url: string, query: DirQuery = dirQuery(), opts: ReadOptions = entryOptions()): Promise<CheckoutDirResult> {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- dir, ref and path default when the query omits them
+  const { dir, ref = null, path = '' } = query as { readonly dir: string; readonly ref: RefSpec; readonly path: RefSpec };
   if (typeof dir !== 'string' || dir === '') throw fail('bad_request', 'dir must be a non-empty string', { what: 'dir' });
   await emptyDir(dir);
   const { files, ...rest } = await checkoutTree(url, { ref, path }, opts);

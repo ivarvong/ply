@@ -19,6 +19,7 @@ import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { oracleRediff } from './gitversion.js';
 import { cherryPick, revertCommit, pickCommit } from '../src/rebase.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const rediff = oracleRediff();
 const BASE_ENV = { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -41,7 +42,7 @@ const put = (b, file, text) => writeFileSync(join(b.w, file), text);
 const clone = (bare, branch) => { const d = mkdtempSync(join(tmpdir(), 'pe-')); ok(d, ['clone', '-q', '-b', branch, bare, '.']); return d; };
 const raw = (repo, rev) => ok(repo, ['cat-file', '-p', rev]);
 const tip = (bare, branch) => ok(bare, ['rev-parse', branch]);
-const opts = tracer => ({ tracer, rediff });
+const opts = tracer => ({ capabilities: { ...defaultCapabilities(), tracer }, rediff });
 const who = (a, c) => ({ author: a, committer: c });
 
 // same-content history: root (f.txt), main (m.txt), feat (b.txt, not on main), an empty commit on feat.

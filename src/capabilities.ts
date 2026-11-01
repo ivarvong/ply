@@ -39,25 +39,6 @@ export const freshStorage = (): Storage => new Map();
 
 const isRecord = (value: unknown): value is object => typeof value === 'object' && value !== null;
 
-const field = (bag: object, key: string): unknown => {
-  if (!(key in bag)) return null;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- an options bag is an object; the key's value is checked by the guards below
-  return (bag as Record<string, unknown>)[key];
-};
-
-const isTracer = (value: unknown): value is Tracer =>
-  isRecord(value) && 'start' in value && typeof value.start === 'function';
-
-const isFetch = (value: unknown): value is FetchFn => typeof value === 'function';
-
-const isClock = (value: unknown): value is Clock =>
-  isRecord(value) && 'now' in value && 'cpu' in value && typeof value.now === 'function' && typeof value.cpu === 'function';
-
-const isStorage = (value: unknown): value is Storage => value instanceof Map;
-
-const isCapabilities = (value: unknown): value is Capabilities =>
-  isRecord(value) && isTracer(field(value, 'tracer')) && isFetch(field(value, 'fetch')) && isClock(field(value, 'clock')) && isStorage(field(value, 'storage'));
-
 export const commitTimeOf = (value: unknown): CommitTime =>
   typeof value === 'number' ? { tag: 'at', seconds: value } : { tag: 'clock' };
 
@@ -145,46 +126,3 @@ export const defaultCapabilities = (): Capabilities => ({
   clock: systemClock,
   storage: freshStorage(),
 });
-
-const pickFetch = (bag: object, base: Capabilities | null): FetchFn => {
-  const fetchValue = field(bag, 'fetch');
-  if (isFetch(fetchValue)) return fetchValue;
-  const fetchImplValue = field(bag, 'fetchImpl');
-  if (isFetch(fetchImplValue)) return fetchImplValue;
-  if (base === null) return platformFetch;
-  return base.fetch;
-};
-
-const pickStorage = (bag: object, base: Capabilities | null): Storage => {
-  const storageValue = field(bag, 'storage');
-  if (isStorage(storageValue)) return storageValue;
-  if (base === null) return freshStorage();
-  return base.storage;
-};
-
-const pickClock = (bag: object, base: Capabilities | null): Clock => {
-  const clockValue = field(bag, 'clock');
-  if (isClock(clockValue)) return clockValue;
-  if (base === null) return systemClock;
-  return base.clock;
-};
-
-const pickTracer = (bag: object, base: Capabilities | null): Tracer => {
-  const tracerValue = field(bag, 'tracer');
-  if (isTracer(tracerValue)) return tracerValue;
-  if (base === null) return noopTracer;
-  return base.tracer;
-};
-
-// A pre-existing options bag (tracer, fetch, fetchImpl, clock, storage, or a total `capabilities` record) becomes a
-// Capabilities. A field that is not the right shape is the platform default, so a missing tracer still has `.start`.
-export function adoptCapabilities(bag: object): Capabilities {
-  const nested = field(bag, 'capabilities');
-  const base = isCapabilities(nested) ? nested : null;
-  return {
-    tracer: pickTracer(bag, base),
-    fetch: pickFetch(bag, base),
-    clock: pickClock(bag, base),
-    storage: pickStorage(bag, base),
-  };
-}

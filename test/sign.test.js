@@ -10,6 +10,7 @@ import { editFile, buildCommitObjects, withCommitData } from '../src/edit.js';
 import { generateSigner, signCommit, withGpgsig, armor } from '../src/sign.js';
 import { encodeCommit, hashObject, parseCommit } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 let root, cleanup, srv, bare, work, url, signers;
 const author = { name: 'signer', email: 'signer@x' };
@@ -30,7 +31,7 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
   const { signer, publicKeyRaw } = await generateSigner();
   writeFileSync(signers, `${author.email} namespaces="git" ${signer.publicKeyLine}\n`);
   const ex = arrayExporter();
-  const r = await editFile(url, { path: 'f.txt', find: 'MARK', replace: 'SIGNED', author, message: 'signed edit' }, { tracer: new Tracer({ exporter: ex }), signer });
+  const r = await editFile(url, { path: 'f.txt', find: 'MARK', replace: 'SIGNED', author, message: 'signed edit' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, signer });
   assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.newCommit);
   const rootSpan = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit');
   assert.equal(rootSpan.attrs['git.edit.commit.signed'], 'ssh-ed25519'); assert.equal(rootSpan.attrs['git.edit.commit.signer'], signer.publicKeyLine);

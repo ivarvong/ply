@@ -13,8 +13,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 import { thrown as fail } from './errors.js';
-import type { OperationOpts } from './operation.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyRef, entryOptions } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
@@ -23,7 +22,7 @@ import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TY
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { adoptCapabilities, commitTimeOf, commitUnix } from './capabilities.js';
+import { commitTimeOf, commitUnix } from './capabilities.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { decideHead } from './edit.js';
 import type { Author, EditOptions, HintOutcome, Ident } from './edit.js';
@@ -265,12 +264,13 @@ type Attempt = { readonly head: string | null; readonly attempt: number; readonl
 export type PushTreeOptions = Omit<EditOptions, 'allowLfsPointer'>;
 
 // oxlint-disable-next-line require-await -- async, as before: a throw while starting the operation is a rejection
-async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, Uint8Array>(), verify = false, signer = null, strictHead = false, ...opts }: Omit<PushTreeOptions, 'head'> = {}, { head, attempt, linkTo, hintWas = null }: Attempt): Promise<PushTreeResult> {
+async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, Uint8Array>(), verify = false, signer = null, strictHead = false, ...opts }: Omit<PushTreeOptions, 'head'>, { head, attempt, linkTo, hintWas = null }: Attempt): Promise<PushTreeResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head ?? '', 'git.push_tree.attempt': attempt };
-  // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
-  return operation('push_tree', url, ({ ...opts, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint ?? '' }), link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
+  const hintOutcome = (): string => (typeof hint === 'string' ? hint : '');
+  // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
+  return operation('push_tree', url, { ...opts, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hintOutcome() }), link: linkTo ? { span: linkTo, kind: 'retry_of' } : null }, async ({ t, root, outcome }) => {
     // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
     const commitOf = (oid: string): Promise<Fetched> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     try {
@@ -321,9 +321,9 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
 // a result: resolving with it reported success for a failed first attempt.
 const isAttemptError = (e: unknown): e is Error & Tagged => e instanceof Error;
 
-export async function pushTree(url: string, spec: TreeSpec, { head = null, strictHead = false, ...opts }: PushTreeOptions = {}): Promise<PushTreeResult> {
+export async function pushTree(url: string, spec: TreeSpec, { head = null, strictHead = false, ...opts }: PushTreeOptions = entryOptions()): Promise<PushTreeResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
-  const stamped = { ...spec, time: commitUnix(adoptCapabilities(opts).clock, commitTimeOf(spec.time)) };
+  const stamped = { ...spec, time: commitUnix(opts.capabilities.clock, commitTimeOf(spec.time)) };
   const treeLimits = typeof opts.limits === 'object' && opts.limits !== null ? opts.limits : DEFAULT_LIMITS;
   const s = validateTreeSpec(stamped, treeLimits, head);
   try {

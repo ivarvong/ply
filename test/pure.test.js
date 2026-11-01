@@ -15,6 +15,7 @@ import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { thrown as fail, scrubError } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 
@@ -226,7 +227,7 @@ test('span naming convention: every span and attribute key in a trace follows th
     const bare = makeBareRepo(root, 'nm'); const work = join(root, 'w'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
     commitFiles(work, bare, { 'a/b.txt': 'MARK\n' }, 'seed');
     const ex = arrayExporter();
-    await editFile(`${srv.url}/nm.git`, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: { name: 'n', email: 'n@x' }, message: 'm' }, { tracer: new Tracer({ exporter: ex }), verify: true });
+    await editFile(`${srv.url}/nm.git`, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: { name: 'n', email: 'n@x' }, message: 'm' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, verify: true });
     const spans = ex.lines.flatMap(flattenLine);
     const NAME = /^(git\.(upload-pack|receive-pack)( [a-z-]+)?|git\.[a-z_]+(\.[a-z_]+)?)$/;
     const KEY = /^(git|http|url|server|mem|error|ply|exception)\.[a-z0-9_.-]+$/;

@@ -12,6 +12,7 @@ import { GitHttp } from '../../src/client.js';
 import { TYPE } from '../../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '300', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;
@@ -56,10 +57,10 @@ try {
         const w2 = join(root, `p${i}`); mkdirSync(w2); git(w2, ['clone', '-q', bare, '.']); writeFileSync(join(w2, FILE), EXPECTED); git(w2, ['add', '-A']); git(w2, ['-c', 'user.name=h', '-c', 'user.email=h@x', 'commit', '-q', '-m', 'sb']);
         const nxt = git(w2, ['rev-parse', 'HEAD']).trim();
         const objs = git(w2, ['rev-list', '--objects', '--no-object-names', nxt, '-n1', `^${head}`]).trim().split('\n').map(o => { const t = git(w2, ['cat-file', '-t', o]).trim(); return { type: TYPE[t.toUpperCase()], data: new Uint8Array(gitBuf(w2, ['cat-file', t, o])) }; });
-        const c = new GitHttp(`${proxy.url}/${name}.git`, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }) });
+        const c = new GitHttp(`${proxy.url}/${name}.git`, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) }, limits: withLimits({ requestTimeoutMs: 3000 }) });
         const r = await c.push({ ref: 'refs/heads/main', oldOid: head, newOid: nxt, objects: objs, sideband: true, reportV2: true });
         result = { newCommit: nxt, report: r.report };
-      } else result = await editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'h', email: 'h@x' }, message: 'h' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }) });
+      } else result = await editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'h', email: 'h@x' }, message: 'h' }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter }) }, limits: withLimits({ requestTimeoutMs: 3000 }) });
     } catch (e) { error = e; }
     const ms = performance.now() - t0;
     await proxy.close();

@@ -13,6 +13,7 @@ import { oracleRediff } from './gitversion.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const rediff = oracleRediff();
 const BASE_ENV = { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -55,7 +56,7 @@ const range = (repo, from, to) => run(repo, ['rev-list', '--reverse', `${from}..
 
 // one cell: [ply's raw commits, git's raw commits]
 async function cell(op, a, c) {
-  const r = build(); const opts = { tracer: new Tracer(), rediff };
+  const r = build(); const opts = { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff };
   const d = clone(r.bare, op.startsWith('rebase') || op === 'squash' ? 'feat' : 'main');
   try {
     const env = as(a, c);
@@ -99,7 +100,7 @@ test('author and committer stamps with zones, from/onto by commit id: every comm
 });
 
 test('from / onto: the zero oid is refused before any request; an oid that is not a commit is not_found', async () => {
-  const r = build(); const opts = { tracer: new Tracer(), rediff };
+  const r = build(); const opts = { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, rediff };
   const zero = '0'.repeat(40);
   await assert.rejects(mergeBranch(r.url, { from: zero, author: PAIRS[0][0] }, opts), e => e.code === 'bad_request' && e.what === 'from');
   await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: zero, committer: PAIRS[0][1] }, opts), e => e.code === 'bad_request' && e.what === 'onto');

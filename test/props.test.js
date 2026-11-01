@@ -14,6 +14,7 @@ import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish, MATCH_OFFSETS
 import { v2Init, v2Step } from '../src/client.js';
 import { concat, indexOfBytes } from '../src/bytes.js';
 import { assertBytes } from './bytes-assert.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const N = parseInt(process.env.PROP_N ?? '200', 10);
 const SEED = parseInt(process.env.SEED ?? '1', 10);
@@ -240,6 +241,6 @@ test('ls-refs: sha256 object ids are rejected as unsupported before any fetch', 
   const body = concat([pkt(te2.encode(`${'ab'.repeat(32)} refs/heads/main\n`)), FLUSH]);
   const { GitHttp } = await import('../src/client.js');
   const { Tracer } = await import('../src/otel.js');
-  const c = new GitHttp('http://x.invalid/r.git', { tracer: new Tracer(), fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) });
+  const c = new GitHttp('http://x.invalid/r.git', { capabilities: { ...defaultCapabilities(), tracer: new Tracer(), fetch: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) } });
   await assert.rejects(c.lsRefs(['refs/heads/main']), e => e.code === 'unsupported');
 });

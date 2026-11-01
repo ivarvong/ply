@@ -31,6 +31,7 @@ import { lsRefs } from '../src/lsrefs.js';
 import { fetchPack } from '../src/fetchpack.js';
 import { discover } from '../src/discover.js';
 import { receiveCaps } from '../src/receivecaps.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const SNAPSHOT = new URL('./span-contract.json', import.meta.url);
 const UPDATE = process.env.UPDATE_SPAN_CONTRACT === '1';
@@ -148,37 +149,37 @@ const commitOn = (r, branch, files, msg, from = branch) => {
 };
 const seeded = () => { const r = repo(); r.base = commitOn(r, 'main', { 'a/b.txt': 'MARK\n', 'a/c.txt': 'c\n', 'big.bin': Buffer.alloc(200_000, 7), 'README.md': '# r\n' }, 'seed'); return r; };
 const drain = async stream => { const rd = stream.getReader(); let bytes = 0; for (;;) { const { value, done } = await rd.read(); if (done) return bytes; bytes += value.length; } };
-const traced = () => { const ex = arrayExporter(); return { tracer: new Tracer({ exporter: ex }), spans: () => spansOf(ex.lines) }; };
+const traced = () => { const ex = arrayExporter(); return { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) }, spans: () => spansOf(ex.lines) }; };
 
 // one entry per public operation (and the wire layer): name → async ({ tracer }) => void, every stream drained
 const SCENARIOS = {
-  editFile: async ({ tracer }) => { const r = seeded(); await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true }); },
-  pushTree: async ({ tracer }) => { const r = seeded(); await pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true }); },
-  checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, {}, { tracer }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
-  'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, { path: 'a' }, { tracer, batch: 1 }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
-  readFile: async ({ tracer }) => { const r = seeded(); const res = await readFile(r.url, { path: 'a/b.txt' }, { tracer }); await drain(res.stream); },
-  listTree: async ({ tracer }) => { const r = seeded(); await listTree(r.url, { path: 'a' }, { tracer }); },
-  readCommit: async ({ tracer }) => { const r = seeded(); await readCommit(r.url, {}, { tracer }); },
+  editFile: async ({ tracer }) => { const r = seeded(); await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { capabilities: { ...defaultCapabilities(), tracer }, verify: true }); },
+  pushTree: async ({ tracer }) => { const r = seeded(); await pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { capabilities: { ...defaultCapabilities(), tracer }, verify: true }); },
+  checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, {}, { capabilities: { ...defaultCapabilities(), tracer } }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
+  'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, { path: 'a' }, { capabilities: { ...defaultCapabilities(), tracer }, batch: 1 }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
+  readFile: async ({ tracer }) => { const r = seeded(); const res = await readFile(r.url, { path: 'a/b.txt' }, { capabilities: { ...defaultCapabilities(), tracer } }); await drain(res.stream); },
+  listTree: async ({ tracer }) => { const r = seeded(); await listTree(r.url, { path: 'a' }, { capabilities: { ...defaultCapabilities(), tracer } }); },
+  readCommit: async ({ tracer }) => { const r = seeded(); await readCommit(r.url, {}, { capabilities: { ...defaultCapabilities(), tracer } }); },
   mergeBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, message: 'merge feat' }, { tracer, verify: true });
+    await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, message: 'merge feat' }, { capabilities: { ...defaultCapabilities(), tracer }, verify: true });
   },
   rebaseBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat 1', 'main'); commitOn(r, 'feat', { 'g.txt': 'g\n' }, 'feat 2'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { tracer });
+    await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { capabilities: { ...defaultCapabilities(), tracer } });
   },
   cherryPick: async ({ tracer }) => {
     const r = seeded(); const pick = commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer: author }, { tracer });
+    await cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer: author }, { capabilities: { ...defaultCapabilities(), tracer } });
   },
   revertCommit: async ({ tracer }) => {
     const r = seeded(); const bad = commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'oops'); commitOn(r, 'main', { 'f.txt': 'f\n' }, 'later');
-    await revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { tracer });
+    await revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { capabilities: { ...defaultCapabilities(), tracer } });
   },
   // the wire spans on their own, under a harness span that is not part of the contract
   wire: async ({ tracer }) => {
     const r = seeded(); const holder = tracer.start('contract.harness');
-    const t = createTransport(r.url, { tracer, parent: holder });
+    const t = createTransport(r.url, { capabilities: { ...defaultCapabilities(), tracer }, parent: holder });
     await discover(t); await receiveCaps(t);
     const { refs } = await lsRefs(t, ['refs/heads/main']);
     await fetchPack(t, { wants: [refs.get('refs/heads/main').oid], filter: 'blob:none', deepen: 1 });
@@ -190,7 +191,7 @@ const SCENARIOS = {
 async function record(scenarios) {
   const out = {}, all = [];
   for (const [name, run] of Object.entries(scenarios)) {
-    const { tracer, spans } = traced();
+    const { capabilities: { tracer }, spans } = traced();
     await run({ tracer });
     const s = spans(); all.push(...s);
     out[name] = shape(s, { skipRoot: name === 'wire' ? 'contract.harness' : null });
@@ -242,8 +243,8 @@ test('span naming: the rules test/pure.test.js checks on one edit hold on every 
 });
 
 test('span lifetimes: a blob read long after readFile returns is its own trace, linked both ways, and ends with the stream', async () => {
-  const r = seeded(); const { tracer, spans } = traced();
-  const res = await readFile(r.url, { path: 'big.bin' }, { tracer });
+  const r = seeded(); const { capabilities: { tracer }, spans } = traced();
+  const res = await readFile(r.url, { path: 'big.bin' }, { capabilities: { ...defaultCapabilities(), tracer } });
   const rootSpan = spans().find(s => s.name === 'git.read');
   assert.ok(rootSpan, 'the root is exported when readFile returns, before the stream is read');
   assert.equal(spans().find(s => s.name === 'git.read.blob'), undefined, 'the blob span is still open');
@@ -262,8 +263,8 @@ test('span lifetimes: a blob read long after readFile returns is its own trace, 
 test('span lifetimes: a cancelled blob stream ends its spans with outcome cancelled (before or after the bytes arrive)', async () => {
   const r = seeded();
   for (const [path, how] of [['a/b.txt', 'before-read'], ['big.bin', 'mid-read']]) {
-    const { tracer, spans } = traced();
-    const res = await readFile(r.url, { path }, { tracer });
+    const { capabilities: { tracer }, spans } = traced();
+    const res = await readFile(r.url, { path }, { capabilities: { ...defaultCapabilities(), tracer } });
     if (how === 'before-read') { await new Promise(ok => setTimeout(ok, 50)); await res.stream.cancel('done'); }
     else { const rd = res.stream.getReader(); await rd.read(); await rd.cancel('done'); }
     const blob = spans().find(s => s.name === 'git.read.blob');

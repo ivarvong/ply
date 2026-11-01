@@ -11,6 +11,7 @@ import { genDag, readModel } from './fuzz/dag.js';
 import { Rng } from './fuzz/prng.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer } from '../src/otel.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 let root, cleanup, srv, hookLog, bare, model, dag, url, anc;
 before(async () => {
@@ -43,7 +44,7 @@ const cli = (args, cwd = root) => { rmSync(hookLog + '.args', { force: true }); 
 
 test('clone --depth N / --filter / --shallow-since / --shallow-exclude: same invocation, same shallow set, same objects', async () => {
   const tip = dag.tip;
-  const c = new GitHttp(url, { tracer: new Tracer() });
+  const c = new GitHttp(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   const scenarios = [
     ['--depth=1', { wants: [tip], deepen: 1 }],
     ['--depth=2', { wants: [tip], deepen: 2 }],
@@ -76,7 +77,7 @@ test('clone --depth N / --filter / --shallow-since / --shallow-exclude: same inv
 
 test('fetch after a shallow clone: --deepen (relative), --depth=N, --unshallow, --shallow-since, --shallow-exclude', async () => {
   const tip = dag.tip;
-  const c = new GitHttp(url, { tracer: new Tracer() });
+  const c = new GitHttp(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   for (const [flags, mk] of [
     ['--deepen=1', s => ({ deepen: 1, deepenRelative: true })],
     ['--deepen=2', s => ({ deepen: 2, deepenRelative: true })],
@@ -110,7 +111,7 @@ test('ls-refs == git ls-remote (prefixes, symrefs, peeled tags, many refs)', asy
   for (let i = 0; i < 300; i++) git(bare, ['update-ref', `refs/heads/many/b${String(i).padStart(4, '0')}`, anc[i % anc.length]]);
   git(bare, ['update-ref', 'refs/tags/light', dag.tip]);
   git(bare, ['symbolic-ref', 'refs/heads/alias', 'refs/heads/main']);
-  const c = new GitHttp(url, { tracer: new Tracer() });
+  const c = new GitHttp(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   for (const prefixes of [[], ['refs/heads/'], ['refs/tags/'], ['refs/heads/many/b00'], ['refs/heads/main', 'refs/tags/v1'], ['HEAD']]) {
     const { refs, head } = await c.lsRefs(prefixes);
     const remote = git(bare, ['ls-remote', '--symref', ...(prefixes.length ? ['.', ...prefixes.map(p => p.replace(/\/$/, '/*'))] : ['.'])]).trim().split('\n').filter(Boolean);

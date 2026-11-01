@@ -16,7 +16,10 @@ const tracer = { span: async (_name, _opts, fn) => fn(spanStub) };
 
 export function fakeTransport(response, limits) {
   const t = {
-    limits: withLimits(limits), tracer, parent: null, sent: 0,
+    limits: withLimits(limits),
+    tracer,
+    parent: null,
+    sent: 0,
     async *frames(service, body) {
       t.sent++;
       if (service !== 'git-receive-pack' || !(body instanceof Uint8Array)) throw new Error('harness: bad request');
@@ -25,7 +28,7 @@ export function fakeTransport(response, limits) {
       yield* r.frames;
       if (response.end === 'throw') throw fail('network', 'connection reset after the response');
       pktFinish(r.state);
-    },
+    }
   };
   return t;
 }

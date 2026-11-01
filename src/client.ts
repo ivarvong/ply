@@ -10,7 +10,7 @@ import type { FetchPackExtra, FetchPackResult } from './fetchpack.js';
 import type { NegotiateOpts, NegotiateResult } from './negotiate.js';
 import type { LsRefsResult } from './lsrefs.js';
 import type { DiscoverInfo } from './discover.js';
-import { createTransport } from './http.js';
+import { createTransport, httpOptions } from './http.js';
 import { lsRefs as lsRefsWire, parseUnbornLine } from './lsrefs.js';
 import { packStream, fetchObject } from './fetch.js';
 import { fetchPack } from './fetchpack.js';
@@ -54,7 +54,7 @@ type ReceiveCaps = ReturnType<typeof receiveCaps>;
 /* oxlint-disable typescript/promise-function-async -- pass-throughs: each returns the free function's own promise (an argument that throws synchronously still does) */
 export class GitHttp {
   declare public readonly t: Transport;
-  public constructor(url: string, opts: HttpOptions = {}) { this.t = createTransport(url, opts); }
+  public constructor(url: string, opts: HttpOptions = httpOptions()) { this.t = createTransport(url, opts); }
   public get url(): string { return this.t.url; }
   public get limits(): Limits { return this.t.limits; }
   public get tracer(): Tracer { return this.t.tracer; }

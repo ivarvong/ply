@@ -5,13 +5,14 @@ import { editFile } from '../src/edit.js';
 import {Tracer,  flattenLine} from '../src/otel.js';
 import { jsonlExporter } from './jsonl.mjs';
 import { parseCommit, parseTree, TYPE } from '../src/objects.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 const [url, ref = 'refs/heads/main', path, flag, find, replace] = process.argv.slice(2);
 const auth = process.env.PLY_TOKEN ? { token: process.env.PLY_TOKEN } : undefined;
 const lines = [];
 const file = await jsonlExporter('live-trace.jsonl');
 const tracer = new Tracer({ exporter: l => { lines.push(l); file(l); } });
-const c = new GitHttp(url, { auth, tracer });
+const c = new GitHttp(url, { auth, capabilities: { ...defaultCapabilities(), tracer } });
 const { refs } = await c.lsRefs([ref]);
 const head = refs.get(ref)?.oid; if (!head) throw new Error(`no ${ref}`);
 const cf = await c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
@@ -25,7 +26,7 @@ for (const name of (path ?? '').split('/').filter(Boolean)) {
   tree = e.oid;
 }
 if (flag === '--push') {
-  const r = await editFile(url, { ref, path, find, replace, author: { name: 'ply', email: 'ply@localhost' }, message: `ply: ${find} → ${replace}` }, { auth, tracer });
+  const r = await editFile(url, { ref, path, find, replace, author: { name: 'ply', email: 'ply@localhost' }, message: `ply: ${find} → ${replace}` }, { auth, capabilities: { ...defaultCapabilities(), tracer } });
   console.log('pushed', r);
 }
 file.close();

@@ -1,5 +1,6 @@
 import { join } from 'node:path'; import { mkdirSync, writeFileSync, copyFileSync } from 'node:fs'; import { spawnSync } from 'node:child_process';
 import { startGitServer, makeBareRepo, tmpRoot } from '/home/claude/ply/test/server.js'; import { Tracer } from '/home/claude/ply/src/otel.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
 const sh = (cwd, a) => spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8', env: ENV }).stdout.trim();
 copyFileSync('/tmp/oldmerge.js', '/home/claude/ply/src/merge.old.js');
@@ -15,7 +16,7 @@ for (const which of ['merge.old.js', 'merge.js']) {
   sh(w, ['checkout', '-q', '--detach', R]); sh(w, ['merge', '-q', '--no-ff', '--no-commit', P3]); put('f', 'r\n'); sh(w, ['commit', '-qm', 'm']); const MM = sh(w, ['rev-parse', 'HEAD']);
   sh(w, ['push', '-q', '-f', bare, `${MM}:refs/heads/main`, `${FT}:refs/heads/feat`]);
   const g = spawnSync('git', ['-C', bare, 'merge-tree', '--write-tree', 'main', 'feat'], { encoding: 'utf8' }); const gitF = sh(bare, ['cat-file', '-p', `${g.stdout.split('\n')[0]}:f`]);
-  const m = await mergeBranch(`${srv.url}/${name}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { tracer: new Tracer() });
+  const m = await mergeBranch(`${srv.url}/${name}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
   console.log(`${which}: base ${m.base === Y ? 'y' : m.base === R ? 'r' : m.base}; git f=${gitF}; ply f=${sh(bare, ['cat-file', '-p', `${m.oid}:f`])}`);
 }
 await srv.close(); cleanup();

@@ -1,4 +1,4 @@
-// Every public entry that talks to a remote, with the tracer omitted and with one passed (issue #137).
+// Every public entry that talks to a remote, with defaultCapabilities() and with a real tracer (issue #137).
 // Each cell's answer is git's: reads against `git rev-parse` / `show` / `ls-tree` / `rev-list`, writes against
 // `write-tree`, `merge-tree --write-tree`, `rebase`, `cherry-pick` and `revert` on a clone of the same history.
 // A frozen clock stamps the commit and zeroes the HTTP durations; an explicit time wins over the clock.
@@ -19,7 +19,7 @@ import { GitHttp, lsRefs } from '../src/client.js';
 import { lsRefs as lsRefsWire } from '../src/lsrefs.js';
 import { operation } from '../src/operation.js';
 import { createTransport } from '../src/http.js';
-import { freshStorage } from '../src/capabilities.js';
+import { freshStorage , defaultCapabilities} from '../src/capabilities.js';
 import { TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
@@ -41,9 +41,9 @@ const spansOf = ex => ex.lines.flatMap(flattenLine);
 const ref = (entry, mode) => `refs/heads/${entry}-${mode}`;
 
 function tracing(mode) {
-  if (mode === 'omit') return { opts: {} };
+  if (mode === 'omit') return { opts: { capabilities: defaultCapabilities() } };
   const ex = arrayExporter();
-  return { opts: { tracer: new Tracer({ exporter: ex }) }, ex };
+  return { opts: { capabilities: { ...defaultCapabilities(), tracer: new Tracer({ exporter: ex }) } }, ex };
 }
 function assertSpan(mode, pack, name) {
   if (mode !== 'with') return;
@@ -262,27 +262,27 @@ test.each(CELLS)('%s with tracer %s matches git', async (entry, mode) => { await
 test('a frozen clock stamps the commit and zeroes HTTP durations; an explicit time wins', async () => {
   const clock = { now: () => FROZEN, cpu: () => 0 };
   const ex = arrayExporter();
-  const edited = await editFile(url, { ref: 'refs/heads/clock-edit', path: 'README.md', find: 'hello\n', replace: 'clock\n', author: AUTHOR, message: 'clock\n' }, { clock, tracer: new Tracer({ exporter: ex }) });
+  const edited = await editFile(url, { ref: 'refs/heads/clock-edit', path: 'README.md', find: 'hello\n', replace: 'clock\n', author: AUTHOR, message: 'clock\n' }, { capabilities: { ...defaultCapabilities(), clock, tracer: new Tracer({ exporter: ex }) } });
   assert.equal(git(bare, ['log', '-1', '--format=%at', 'refs/heads/clock-edit']).trim(), String(TIME));
   assert.equal(git(bare, ['log', '-1', '--format=%ct', 'refs/heads/clock-edit']).trim(), String(TIME));
   const posted = spansOf(ex).find(s => typeof s.attrs['http.response.duration_ms'] === 'number');
   assert.equal(Number(posted.attrs['http.response.duration_ms']), 0);
   assert.equal(Number(posted.attrs['http.response.ttfb_ms']), 0);
   assert.equal(edited.newCommit.length, 40);
-  await editFile(url, { ref: 'refs/heads/clock-explicit', path: 'README.md', find: 'hello\n', replace: 'pin\n', author: AUTHOR, message: 'pin\n', time: 1_600_000_000 }, { clock });
+  await editFile(url, { ref: 'refs/heads/clock-explicit', path: 'README.md', find: 'hello\n', replace: 'pin\n', author: AUTHOR, message: 'pin\n', time: 1_600_000_000 }, { capabilities: { ...defaultCapabilities(), clock } });
   assert.equal(git(bare, ['log', '-1', '--format=%at', 'refs/heads/clock-explicit']).trim(), '1600000000');
-  await pushTree(url, { ref: 'refs/heads/clock-push', files: { 'NOTE.txt': 'note\n' }, author: AUTHOR, message: 'push\n' }, { clock });
+  await pushTree(url, { ref: 'refs/heads/clock-push', files: { 'NOTE.txt': 'note\n' }, author: AUTHOR, message: 'push\n' }, { capabilities: { ...defaultCapabilities(), clock } });
   assert.equal(git(bare, ['log', '-1', '--format=%at', 'refs/heads/clock-push']).trim(), String(TIME));
-  await mergeBranch(url, { ref: 'refs/heads/clock-merge', from: 'refs/heads/side', author: AUTHOR, message: 'merge\n' }, { clock });
+  await mergeBranch(url, { ref: 'refs/heads/clock-merge', from: 'refs/heads/side', author: AUTHOR, message: 'merge\n' }, { capabilities: { ...defaultCapabilities(), clock } });
   assert.equal(git(bare, ['log', '-1', '--format=%at', 'refs/heads/clock-merge']).trim(), String(TIME));
   assert.equal(git(bare, ['log', '-1', '--format=%ct', 'refs/heads/clock-merge']).trim(), String(TIME));
-  await rebaseBranch(url, { ref: 'refs/heads/clock-rebase', onto: 'refs/heads/main', committer: AUTHOR }, { clock });
+  await rebaseBranch(url, { ref: 'refs/heads/clock-rebase', onto: 'refs/heads/main', committer: AUTHOR }, { capabilities: { ...defaultCapabilities(), clock } });
   assert.equal(git(bare, ['log', '-1', '--format=%ct', 'refs/heads/clock-rebase']).trim(), String(TIME));
 });
 
 test('storage passed to readLog is the map the wide pack is harvested into', async () => {
   const storage = freshStorage();
-  const r = await readLog(url, { ref: 'refs/heads/main', limit: 2 }, { storage, quirks: { treeFilter: 'blob:none' } });
+  const r = await readLog(url, { ref: 'refs/heads/main', limit: 2 }, { capabilities: { ...defaultCapabilities(), storage }, quirks: { treeFilter: 'blob:none' } });
   const held = storage.get(r.oid);
   assert.equal(typeof held === 'object' && held !== null ? held.type : 0, TYPE.COMMIT);
   assert.ok(held.data.byteLength > 0);

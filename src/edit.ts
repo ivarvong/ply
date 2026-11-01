@@ -6,8 +6,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
 import type { Extra, Miss } from './errors.js';
-import type { OperationOpts } from './operation.js';
-import { operation, verifyRef } from './operation.js';
+import { operation, verifyRef, entryOptions } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
@@ -16,7 +15,7 @@ import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident
 import { fromHex, streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND } from './otel.js';
-import { adoptCapabilities, commitTimeOf, commitUnix } from './capabilities.js';
+import { commitTimeOf, commitUnix } from './capabilities.js';
 import type { Clock } from './capabilities.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
@@ -259,7 +258,7 @@ const summarize = ({ oldCommit, commit, blob, hint, attempt, newCommit = oldComm
 }): EditResult =>
   ({ noop, oldCommit, newCommit, oldTree: commit.tree, newTree, oldBlob: blob.oldOid, newBlob: blob.newOid, matchOffset: blob.matchOffset, baseLen: blob.baseLen, newLen: blob.newLen, pushBytes, trees: trees.map(t => ({ old: t.baseOid, new: t.newOid })), hint, attempt });
 
-// The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …); these are the edit's own.
+// The options operation() reads pass through (capabilities, auth, limits, transport, …); these are the edit's own.
 export type EditOptions = EntryOptions & {
   readonly head?: string | null;
   readonly strictHead?: boolean;
@@ -364,10 +363,10 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
 }
 
 // oxlint-disable-next-line require-await -- async: a synchronous throw (validateSpec) is a rejection, which editFile's .catch sees
-async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, Uint8Array>(), verify = false, allowLfsPointer = false, signer = null, fetchImpl, strictHead = false, ...opts }: Omit<EditOptions, 'head'> = {}, { head, attempt, linkTo, hintWas = null }: Attempt): Promise<EditResult> {
+async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, Uint8Array>(), verify = false, allowLfsPointer = false, signer = null, strictHead = false, ...opts }: Omit<EditOptions, 'head'>, { head, attempt, linkTo, hintWas = null }: Attempt): Promise<EditResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
-  const caps = adoptCapabilities(opts);
-  const clock = caps.clock;
+  const capabilities = opts.capabilities;
+  const clock = capabilities.clock;
   const stamped = { ...spec, time: commitUnix(clock, commitTimeOf(spec.time)) };
   const s = validateSpec(stamped, limits, head);
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
@@ -375,9 +374,13 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
   let hint = hintWas;
   const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head ?? '', 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
-  const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint ?? '', ...memAttrs({ objects: held, ...streamed }), ...(fetchImpl?.attrs ? fetchImpl.attrs() : {}) });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('edit', url, ({ ...opts, fetchImpl, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
+  const onFinish = (): Attrs => {
+    const fetchFn = capabilities.fetch;
+    const reported = 'attrs' in fetchFn && typeof fetchFn.attrs === 'function' ? fetchFn.attrs() : {};
+    const headOutcome = typeof hint === 'string' ? hint : '';
+    return { 'git.edit.head.outcome': headOutcome, ...memAttrs({ objects: held, ...streamed }), ...reported };
+  };
+  return operation('edit', url, { ...opts, capabilities, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null }, async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
     const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
@@ -450,7 +453,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
 // a result: resolving with it reported success for a failed first attempt.
 const isAttemptError = (e: unknown): e is Error & Tagged => e instanceof Error;
 
-export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, ...opts }: EditOptions = {}): Promise<EditResult> {
+export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, ...opts }: EditOptions = entryOptions()): Promise<EditResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
   try {
     return await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null });

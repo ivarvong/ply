@@ -1,6 +1,7 @@
 import { join } from 'node:path'; import { mkdirSync, writeFileSync } from 'node:fs'; import { spawnSync } from 'node:child_process';
 import { startGitServer, makeBareRepo, tmpRoot } from '/home/claude/ply/test/server.js';
 import { mergeBranch } from '/home/claude/ply/src/merge.js'; import { Tracer } from '/home/claude/ply/src/otel.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
 const sh = (cwd, a) => spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8', env: ENV });
 const { root, cleanup } = tmpRoot(); const srv = await startGitServer(root);
@@ -19,7 +20,7 @@ for (const flip of [false, true]) {
   sh(w, ['push', '-q', bare, 'main', 'feat']);
   const bases = sh(bare, ['merge-base', '--all', 'main', 'feat']).stdout.trim().split('\n').length;
   const g = sh(bare, ['merge-tree', '--write-tree', 'main', 'feat']); const gitF = g.status === 0 ? sh(bare, ['cat-file', '-p', `${g.stdout.split('\n')[0]}:f`]).stdout.trim() : 'CONFLICT';
-  let ours; try { const m = await mergeBranch(`${srv.url}/${name}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { tracer: new Tracer() }); ours = sh(bare, ['cat-file', '-p', `${m.oid}:f`]).stdout.trim(); } catch (e) { ours = e.code; }
+  let ours; try { const m = await mergeBranch(`${srv.url}/${name}.git`, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } }); ours = sh(bare, ['cat-file', '-p', `${m.oid}:f`]).stdout.trim(); } catch (e) { ours = e.code; }
   console.log(`merge bases: ${bases}; git f=${gitF}; ply f=${ours}${gitF !== 'CONFLICT' && ours !== 'merge_conflict' && ours !== gitF ? '   <-- WRONG' : ''}`);
 }
 await srv.close(); cleanup();

@@ -82,7 +82,7 @@ export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAn
  * tracer, fetch, clock and storage. Every field is present. `defaultCapabilities` is the platform set.
  * @typedef {import('./capabilities.js').Capabilities} Capabilities
  */
-export { noopTracer, systemClock, platformFetch, freshStorage, defaultCapabilities, adoptCapabilities } from './capabilities.js';
+export { noopTracer, systemClock, platformFetch, freshStorage, defaultCapabilities } from './capabilities.js';
 export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';
 export { CODES, RETRY, thrown as fail, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';

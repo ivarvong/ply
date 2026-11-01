@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { createTransport } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
+import { defaultCapabilities } from '../src/capabilities.js';
 
 if (typeof globalThis.gc !== 'function') {
   console.error('node --expose-gc is required');
@@ -19,7 +20,7 @@ const ms = 300;
 const span = { set() {}, event() {} };
 const transport = createTransport(`http://127.0.0.1:${port}/r.git`, {
   limits: withLimits({ requestTimeoutMs: ms }),
-  tracer: { span: async (_name, _opts, fn) => fn(span) },
+  capabilities: { ...defaultCapabilities(), tracer: { span: async (_name, _opts, fn) => fn(span) } }
 });
 const gcTimer = setInterval(() => globalThis.gc(), 30);
 const t0 = Date.now();

@@ -24,6 +24,7 @@ const { lsRefs } = await import(`${SRC}/lsrefs.js`);
 import { pktInit, pktStep } from '../../src/pktline.js';
 import { Tracer } from '../../src/otel.js';
 import { td } from '../../src/bytes.js';
+import { defaultCapabilities } from '../../src/capabilities.js';
 
 const spanStub = { set() {}, event() {}, end() {} };
 const tracer = { span: async (_n, _o, fn) => fn(spanStub) };
@@ -57,7 +58,7 @@ function stubTransport(serve) {
     if (r.reset) throw new TypeError('fetch failed');
     return new Response(r.body, { status: r.status ?? 200, headers: { 'content-type': r.contentType } });
   };
-  return createTransport('http://cell.invalid/r.git', { tracer, fetchImpl });
+  return createTransport('http://cell.invalid/r.git', { capabilities: { ...defaultCapabilities(), tracer, fetch: fetchImpl } });
 }
 const lsRefsReply = body => ({ status: 200, contentType: 'application/x-git-upload-pack-result', body });
 
@@ -137,7 +138,7 @@ function startFront(backendUrl) {
 let keyN = 0;
 const route = r => { const key = `k${keyN++}`; routes.set(key, r); return key; };
 const urlOf = key => `${front.url}/${key}/r.git`;
-const ply = url => new GitHttp(url, { tracer: new Tracer() });
+const ply = url => new GitHttp(url, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() } });
 const gitIn = async (args, cwd) => gitAsync(cwd ?? root, ['-c', 'protocol.version=2', ...args]);
 const freshRepo = name => { const d = join(root, `c-${name}-${keyN}`); rmSync(d, { recursive: true, force: true }); git(root, ['init', '-q', d]); return d; };
 // the request lines of a v2 command body, after the delim (capabilities before it: command, agent, object-format)

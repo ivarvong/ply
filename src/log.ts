@@ -24,8 +24,7 @@
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail } from './errors.js';
 import type { Miss } from './errors.js';
-import type { OperationOpts } from './operation.js';
-import { operation } from './operation.js';
+import { operation, entryOptions } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { parseCommit, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
@@ -94,15 +93,15 @@ export type LogSpec = { readonly ref?: string | null; readonly limit?: number; r
 export type LogCommit = CommitView & { readonly oid: string };
 export type LogResult = { readonly ref: string; readonly oid: string; readonly commits: readonly LogCommit[]; readonly truncated: boolean };
 // oxlint-disable-next-line require-await -- async so that a throw while checking arguments is a rejection, as before
-export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<LogResult> {
+export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = entryOptions()): Promise<LogResult> {
   if (!isObject(spec)) throw fail('bad_request', 'readLog: the second argument must be an object ({ ref, limit })');
   if (!isObject(opts)) throw fail('bad_request', 'readLog: opts must be an object');
   const { ref = null, limit = DEFAULT_LOG_LIMIT, path } = spec;
   if (path !== undefined && path !== null) throw fail('bad_request', 'readLog: path filtering is not supported');
   const cap = requireLimit(opts.limits ?? DEFAULT_LIMITS, 'maxMergeDepth');
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap) throw fail('bad_request', `readLog: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
+  const refLabel = typeof ref === 'string' ? ref : 'HEAD';
+  return operation('read_log', url, { ...opts, attrs: { 'git.read_log.ref': refLabel, 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const r = await fetchWindow(t, commit, limit);
     const parsed = new Map<string, Parents>();
