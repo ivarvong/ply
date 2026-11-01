@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
 import { editFile } from '../src/edit.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
-import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, fetchCommit } from '../src/read.js';
+import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, readBlob, fetchCommit } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
 import { buildPack, encodeObjHeader, zlibDeflate } from '../src/pack.js';
 import { parsePack, resolvePack, makeDelta } from '../src/packresolve.js';
@@ -52,6 +52,8 @@ const throws = (fn, code, message, extra = {}) => assert.throws(fn, e => {
   return true;
 });
 const readAll = async stream => { const parts = []; for await (const c of stream) parts.push(c); return td.decode(concat(parts)); };
+const streamOf = r => { assert.equal(r.ok, true, r.ok ? '' : r.error?.message); if (!r.ok || r.value.kind !== 'stream') throw new Error('expected a stream'); return r.value; };
+const errOf = r => { assert.equal(r.ok, false); if (r.ok) throw new Error('expected an error'); return r.error; };
 
 // ---- the fake remote ----
 
@@ -1067,10 +1069,10 @@ test('openBlob: every way a streamed blob can lie is pack_corrupt on the stream,
     const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
     const parent = tracer.start('p');
     const t = r.transport({ tracer });
-    return { open: () => openBlob(t, tracer, parent, want), spans: () => ex.lines.flatMap(flattenLine) };
+    return { open: () => openBlob(t, want, { follows: parent }), spans: () => ex.lines.flatMap(flattenLine) };
   };
   const good = await run(packFrames(await onePack(TYPE.BLOB, 5, 'hello'), 3));
-  const ok = await good.open();
+  const ok = streamOf(await good.open());
   assert.equal(ok.size, 5);
   assert.equal(await readAll(ok.stream), 'hello');
   const okSpan = good.spans().find(s => s.name === 'git.read.blob');
@@ -1084,30 +1086,32 @@ test('openBlob: every way a streamed blob can lie is pack_corrupt on the stream,
   ];
   for (const [label, pack, message] of cases) {
     const c = await run(packFrames(pack, 4));
-    const { stream } = await c.open();
+    const { stream } = streamOf(await c.open());
     await rejects(readAll(stream), 'pack_corrupt', message);
     const s = c.spans().find(x => x.name === 'git.read.blob');
     assert.equal(s.attrs['git.read.blob.outcome'], 'pack_corrupt', label);
     assert.equal(s.status.code, 2, label);
     assert.equal(s.status.message, message, label);
   }
-  // header-phase failures reject openBlob itself
+  // header-phase failures are the Result, and the spans still record them
   const tree = await run(packFrames(await onePack(TYPE.TREE, 0, '')));
-  await rejects(tree.open(), 'pack_corrupt', 'expected blob, got tree');
+  const treeErr = errOf(await tree.open());
+  assert.equal(treeErr.code, 'pack_corrupt'); assert.equal(treeErr.message, 'expected blob, got tree');
   assert.equal(tree.spans().find(x => x.name === 'git.read.blob').attrs['git.read.blob.outcome'], 'pack_corrupt');
   assert.equal(tree.spans().find(x => x.name === 'git.upload-pack fetch').status.code, 2);
   const commit = await run(packFrames(await onePack(TYPE.COMMIT, 0, '')));
-  await rejects(commit.open(), 'pack_corrupt', 'expected blob, got commit');
+  assert.equal(errOf(await commit.open()).message, 'expected blob, got commit');
   const empty = await run([dataFrame('packfile\n'), band(1, Uint8Array.of(0x50, 0x41)), { kind: 'flush' }]);
-  await rejects(empty.open(), 'pack_corrupt', 'pack ended before the object header');
+  assert.equal(errOf(await empty.open()).message, 'pack ended before the object header');
   const err = await run([dataFrame('ERR upload-pack: not our ref x')]);
-  await rejects(err.open(), 'remote_error', 'remote: upload-pack: not our ref x');
+  const remoteErr = errOf(await err.open());
+  assert.equal(remoteErr.code, 'remote_error'); assert.equal(remoteErr.message, 'remote: upload-pack: not our ref x');
   assert.equal(err.spans().find(x => x.name === 'git.read.blob').attrs['git.read.blob.outcome'], 'remote_error');
   // a failure after the header errors the stream typed, and still ends both spans with it (they used to be left open and never exported)
   const pack = await onePack(TYPE.BLOB, 5, 'hello'); pack[pack.length - 1] ^= 1;
   const midway = async (label, frames, code, message) => {
     const c = await run(frames);
-    await rejects(readAll((await c.open()).stream), code, message);
+    await rejects(readAll(streamOf(await c.open()).stream), code, message);
     await new Promise(resolve => setTimeout(resolve, 0));
     const [blob, fetch] = ['git.read.blob', 'git.upload-pack fetch'].map(n => c.spans().find(x => x.name === n));
     assert.ok(blob && fetch, `${label}: both spans exported`);
@@ -1148,7 +1152,7 @@ test('openBlob holds the last chunk until the hash and the trailer verify', asyn
     const r = remote({ hook: async () => wire });
     const ex = arrayExporter();
     const tracer = new Tracer({ exporter: ex });
-    const opened = await openBlob(r.transport({ tracer }), tracer, tracer.start('p'), want);
+    const opened = streamOf(await openBlob(r.transport({ tracer }), want, { follows: tracer.start('p') }));
     return { size: opened.size, ...(await pullChunks(opened.stream)), spans: () => ex.lines.flatMap(flattenLine) };
   };
   const good = await open(oid);
@@ -1191,6 +1195,52 @@ test('openBlob holds the last chunk until the hash and the trailer verify', asyn
   const trailerBytes = trailer.chunks.length ? concat(trailer.chunks) : new Uint8Array();
   assert.ok(trailerBytes.length < text.length);
   assert.equal(td.decode(trailerBytes), text.slice(0, trailerBytes.length));
+});
+
+test('openBlob: maxBytes is the declared size, and a cap does not pull the rest of the pack', async () => {
+  const text = 'hello world';
+  const oid = hashObject('blob', te.encode(text));
+  const pack = await onePack(TYPE.BLOB, text.length, text);
+  const frames = packFrames(pack, 8);
+  const serve = () => {
+    let pulls = 0;
+    const r = remote({ hook: async req => (req.command === 'fetch' ? (async function* () { for (const f of frames) { pulls += 1; yield f; } })() : undefined) });
+    const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
+    return { t: r.transport({ tracer }), tracer, pulls: () => pulls, spans: () => ex.lines.flatMap(flattenLine) };
+  };
+  const exact = serve();
+  const at = streamOf(await openBlob(exact.t, oid, { maxBytes: text.length, follows: exact.tracer.start('p') }));
+  assert.equal(await readAll(at.stream), text);
+  assert.equal(exact.spans().find(s => s.name === 'git.read.blob').attrs['git.read.blob.header_only'], undefined);
+  assert.equal(exact.pulls(), frames.length);
+  const over = serve();
+  const big = await openBlob(over.t, oid, { maxBytes: text.length - 1, follows: over.tracer.start('p') });
+  assert.equal(big.ok, true);
+  if (big.ok) assert.deepEqual(big.value, { kind: 'too_big', size: text.length });
+  const cap = over.spans().find(s => s.name === 'git.read.blob');
+  assert.deepEqual([cap.attrs['git.read.blob.header_only'], cap.attrs['git.read.blob.outcome'], cap.attrs['git.read.blob.size']], [true, 'too_big', text.length]);
+  assert.ok(over.pulls() < frames.length, `the cap pulled ${over.pulls()} of ${frames.length} frames`);
+  const none = await openBlob(serve().t, oid, { maxBytes: 0 });
+  assert.equal(none.ok && none.value.kind, 'too_big');
+  const emptyOid = hashObject('blob', new Uint8Array(0));
+  const empty = streamOf(await openBlob(remote({ hook: async () => packFrames(await onePack(TYPE.BLOB, 0, ''), 8) }).transport({ tracer: new Tracer() }), emptyOid, { maxBytes: 0 }));
+  assert.equal(empty.size, 0);
+  assert.equal(await readAll(empty.stream), '');
+  for (const maxBytes of [-1, 1.5, NaN]) {
+    const bad = await openBlob(serve().t, oid, { maxBytes });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) assert.equal(bad.error.code, 'bad_request');
+  }
+  const buffered = await readBlob(serve().t, oid, { maxBytes: text.length });
+  assert.equal(buffered.ok, true);
+  if (buffered.ok && buffered.value.kind === 'bytes') assert.equal(td.decode(buffered.value.data), text);
+  const capped = await readBlob(serve().t, oid, { maxBytes: 4 });
+  assert.equal(capped.ok && capped.value.kind, 'too_big');
+  if (capped.ok && capped.value.kind === 'too_big') assert.equal(capped.value.size, text.length);
+  const torn = new Uint8Array(pack); torn[torn.length - 1] ^= 1;
+  const lied = await readBlob(remote({ hook: async () => packFrames(torn, 8) }).transport({ tracer: new Tracer() }), oid);
+  assert.equal(lied.ok, false);
+  if (!lied.ok) { assert.equal(lied.error.code, 'pack_corrupt'); assert.equal(lied.value, undefined); }
 });
 
 test('the details each operation stamps: prefixes, filters, nested paths, caller limits, error-code gates', async () => {
