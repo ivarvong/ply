@@ -2,6 +2,8 @@
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { Code, Detail, Extra } from './errors.js';
+import { fromNullable } from './absent.js';
+import { assertNever } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
@@ -15,11 +17,33 @@ import { UA, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
+/** Statuses with their own code. Every other status stays the 5xx range or `http`. */
+export type NamedHttpStatus = 401 | 403 | 404 | 429;
+type StatusClass = { readonly tag: 'named'; readonly status: NamedHttpStatus } | { readonly tag: 'other' };
+const classifyStatus = (status: number): StatusClass => {
+  switch (status) {
+    case 401: case 403: case 404: case 429: return { tag: 'named', status };
+    default: return { tag: 'other' };
+  }
+};
+const namedCode = (status: NamedHttpStatus): HttpCode => {
+  switch (status) {
+    case 401:
+    case 403: return 'auth';
+    case 404: return 'not_found';
+    case 429: return 'rate_limited';
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(status);
+};
 export const httpCode = (status: number): HttpCode => {
-  if (status === 401 || status === 403) return 'auth';
-  if (status === 404) return 'not_found';
-  if (status === 429) return 'rate_limited';
-  return status >= 500 ? 'upstream_5xx' : 'http';
+  const classified = classifyStatus(status);
+  switch (classified.tag) {
+    case 'other': return status >= 500 ? 'upstream_5xx' : 'http';
+    case 'named': return namedCode(classified.status);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(classified);
 };
 
 // An error page is quoted, not stored. Past this many bytes the rest cannot change the message and must not be buffered.
@@ -41,12 +65,14 @@ const CACHING_FETCH_BRAND = 'plyCachingFetch';
 const PACK_CACHE_HEADER = 'x-ply-pack-cache';
 
 function recordResponseHeaderNames(names: unknown): readonly string[] {
-  if (names === undefined) return [];
-  if (!Array.isArray(names)) throw fail('bad_request', 'recordResponseHeaders: expected a list of header names', { what: 'recordResponseHeaders' });
-  if (names.length > MAX_RECORDED_HEADERS) throw fail('bad_request', `recordResponseHeaders: at most ${MAX_RECORDED_HEADERS} names`, { what: 'recordResponseHeaders' });
+  const given = fromNullable(names);
+  if (given.tag === 'none') return [];
+  const list = given.value;
+  if (!Array.isArray(list)) throw fail('bad_request', 'recordResponseHeaders: expected a list of header names', { what: 'recordResponseHeaders' });
+  if (list.length > MAX_RECORDED_HEADERS) throw fail('bad_request', `recordResponseHeaders: at most ${MAX_RECORDED_HEADERS} names`, { what: 'recordResponseHeaders' });
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const name of names) {
+  for (const name of list) {
     if (typeof name !== 'string' || !HEADER_NAME.test(name)) {
       const shown = typeof name === 'string' ? JSON.stringify(name) : 'not a string';
       throw fail('bad_request', `recordResponseHeaders: ${shown} is not a header name`, { what: 'recordResponseHeaders' });
@@ -183,7 +209,7 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
 
 // What the transport calls: the platform fetch, or a wrapper with its signature (packcache.ts cachingFetch).
 export type FetchLike = (url: string | URL, init: RequestInit) => Promise<Response>;
-export type HttpOptions = {
+type HttpOptionsFields = {
   readonly auth?: HttpAuth | null | undefined;
   readonly tracer?: Tracer | undefined;
   readonly parent?: Span | null | undefined;
@@ -192,9 +218,10 @@ export type HttpOptions = {
   readonly limits?: Limits | undefined;
   readonly signal?: AbortSignal | null | undefined;
   readonly quirks?: Quirks | undefined;
-  // Response header names to copy onto each exchange span. Default: none (the span contract is unchanged).
-  readonly recordResponseHeaders?: readonly string[] | undefined;
 };
+// Response header names to copy onto each exchange span. Omission records none (the span contract is unchanged).
+type RecordedHeaders = { readonly recordResponseHeaders: readonly string[] };
+export type HttpOptions = HttpOptionsFields & Partial<RecordedHeaders>;
 export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
 
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place

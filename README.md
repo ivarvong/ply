@@ -80,6 +80,16 @@ Repeat pushes are thin: ply reads the parent's trees only where the new tree dif
 
 `pushDir` / `filesFromDir(dir, { filter, limits })` read a directory as git's index would: the owner's execute bit makes `100755`, a symlink is `120000` with its target (never followed), empty directories vanish, `.git` is skipped, anything else (FIFO, socket) is `bad_request`. `filter(path, { directory, symlink })` → `false` leaves a path out; `.gitignore` is not read, and there is no `ply push` CLI. Gitlinks come only from `files` (`{ mode: '160000', oid }`): a nested checkout is walked as a plain directory. A tree oid from `filesFromDir` equals `git add -A && git write-tree` on the same directory (tested).
 
+## One commit from a change list
+
+`commitChanges(url, { ref?, base?, changes, author, committer?, message, time? }, opts)` writes one commit. `changes` is applied in order: `create` (refuses a path that already exists; `write` overwrites, which is what `git add` does), `edit` (exactly one non-overlapping match, or `match_count`), `delete` (a file or a directory; empty directories are pruned), `rename`. Modes are `100644`, `100755` and `120000`. A single `edit` of an existing blob goes through `editFile`, so a large file stays a stream; every other list is an in-memory tree of the paths it touches.
+
+`ref` defaults to the remote HEAD, born or unborn (an empty `git init --bare -b main` commits `refs/heads/main`; a symref to a branch with no commit does the same). A detached HEAD is `bad_request`. A server that will not name an unborn HEAD is `not_found`. Pass `ref` for either. `base` defaults to that ref's tip. Another ref creates `ref` from it and is `cas_conflict` (`expected` the zero id, `actual` the tip) when `ref` already exists. A 40-hex `base` is that commit — lowercase, as everywhere else in ply — and `bad_request` when the target exists at a different tip. The zero id is `bad_request` before any request.
+
+An absent ref with no `base` is a root commit. A result tree equal to the parent does not write an empty commit: an existing ref returns `{ outcome: 'noop' }`; a new ref is `bad_request` (`nothing to commit`) and stays absent. `head` is the tip the ref must have, or the zero id when it must be absent; a mismatch is `cas_conflict` and is not retried. A lost push reads the ref back, so `actual` is the oid that won. `author.time` and `committer` are separate stamps. `import { commitChanges } from 'ply'`.
+
+`editFile` accepts the same 40-hex `base` (the commit to edit) and an optional `committer`. A commit id that is not the tip of an existing ref is `bad_request`.
+
 ## Checking out a whole tree (no git binary, no clone)
 
 `checkoutTree(url, { ref, path? }, opts)` → `{ ref, commit, tree, path, entries, files }`: ls-refs → one `blob:none` fetch of the commit (deepen 1: the commit and every tree under it — on Artifacts, the only filter it serves anyway) → the blobs, up to `batch` (default 1,000) wants per request. `entries` is every non-tree entry under `path` as `[{ path, mode, oid }]` in `git ls-tree -r` order, paths relative to `path`; `files` is an async iterator of `{ path, mode, oid, size, stream }`. Modes are git's canonical `100644`, `100755`, `120000` (a symlink: the stream is its target) and `160000` (a gitlink: `size` 0, `stream` null, the submodule's commit is not in this repository).
@@ -146,14 +156,14 @@ Each layer is testable without the one below it, and `test/bundle.test.js` asser
 
 ## Telemetry conventions (enforced by `test/pure.test.js` and `test/span-contract.test.js`)
 
-- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children.
+- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.commit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children.
 - Attribute keys: dotted lowercase under `git.` `http.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
 - Every trace root (operation roots and the spans that follow them, below) carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, `cancelled`, …, or the error code).
 - Every wire span carries `git.transport`, `git.request.bytes`, `git.response.bytes`, `server.address`.
 
 ### Telemetry contract
 
-Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit), and the wire spans against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
+Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, commitChanges, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit), and the wire spans against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
 
 - **Removing or renaming** a span or key, changing a value's type, or moving a span is a **breaking change** for consumers' dashboards and alerts, and is called out as one in the PR and the release notes.
 - **Adding** one also fails the test until the snapshot is regenerated (`npm run test:spans:update`), so every addition is visible in review as a diff of `test/span-contract.json`.

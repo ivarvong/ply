@@ -1328,6 +1328,12 @@ test('aggregate caps fail closed before allocation', async () => {
   const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
   assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
   throws(() => parseTree(twoEntries, { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  // Longer than one minimum frame, one entry: the byte hint must not treat it as past the cap.
+  const longName = 'n'.repeat(40);
+  const wideTree = encodeTree([{ mode: '100644', name: longName, oid: oid(1) }]);
+  const underCap = parseTree(wideTree, { maxTreeEntries: 1 });
+  assert.equal(underCap.length, 1);
+  assert.equal(underCap[0].name, longName);
   throws(() => parseTree(twoEntries, {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
 
   const tree = oid(1);
@@ -1819,11 +1825,11 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: ZERO_OID }], {}), ['report-status', 'side-band-64k', 'delete-refs', 'agent=ply/0.1.0']);
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], { sideband: false, reportV2: true }, orThrow(checkPushCaps(caps('atomic', 'push-options'), { atomic: true, pushOptions: ['o'] }))), ['report-status-v2', 'atomic', 'push-options', 'agent=ply/0.1.0']);
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], {}, orThrow(checkPushCaps(caps(), {}))), ['report-status', 'side-band-64k', 'agent=ply/0.1.0']);
-  assert.equal(capsProblem(caps('atomic')), null);
+  assert.deepEqual(capsProblem(caps('atomic')), { tag: 'ok' });
   assert.deepEqual(capsProblem(caps('object-format=sha256', 'atomic'), { atomic: true }), { tag: 'objectFormat', format: 'sha256' });
   assert.deepEqual(capsProblem(caps('object-format=sha1'), { atomic: true }), { tag: 'noAtomic' });
   assert.deepEqual(capsProblem(caps('atomic'), { atomic: true, pushOptions: ['x'] }), { tag: 'noPushOptions' });
-  assert.equal(capsProblem(caps(), { pushOptions: [] }), null);
+  assert.deepEqual(capsProblem(caps(), { pushOptions: [] }), { tag: 'ok' });
   const unsup = checkPushCaps(caps('agent=x'), { pushOptions: ['x'] });
   assert.deepEqual([unsup.ok, unsup.error.code, unsup.error.message, unsup.error.caps], [false, 'unsupported', 'server does not advertise push-options', ['agent=x']]);
   assert.equal(checkPushCaps(caps('object-format=sha256')).error.message, 'server repository is object-format sha256');

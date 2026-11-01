@@ -6,6 +6,7 @@
 //        'fresh' — retry from a fresh read (a compare-and-swap lost; the parent must be re-resolved)
 //        'no'    — retrying the same request cannot succeed
 //        'read'  — do not retry blindly: the server MAY have applied the change; read the ref back first
+import type { ObjectTypeName } from './format.js';
 import type { Err, Result } from './result.js';
 import { err } from './result.js';
 
@@ -37,7 +38,7 @@ export const CODES: readonly Code[] = /* @__PURE__ */ Object.freeze(/* @__PURE__
 // is not its ref. `not_commit`: the object arrived and it is a tree, blob, or tag.
 export type CommitMiss =
   | { readonly kind: 'absent'; readonly oid: string }
-  | { readonly kind: 'not_commit'; readonly oid: string; readonly type: 'tree' | 'blob' | 'tag' };
+  | { readonly kind: 'not_commit'; readonly oid: string; readonly type: Exclude<ObjectTypeName, 'commit'> };
 
 // Why a not_found missed (#115). Callers switch on `kind`. A corrupt pack stays pack_corrupt and carries none of these.
 export type Miss =

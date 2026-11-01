@@ -1,0 +1,88 @@
+{
+  "entries": [
+    {
+      "id": "refs.lsRefs.10000",
+      "heap": "default",
+      "actual": { "status": "refused", "code": "limit_exceeded", "what": "ls-refs lines", "got": 10001, "max": 10000 },
+      "why": "HEAD is inserted into the same map as the refs, so 10000 refs plus HEAD is refused one line early"
+    },
+    {
+      "id": "refs.lsRefs.10000",
+      "heap": "128",
+      "actual": { "status": "refused", "code": "limit_exceeded", "what": "ls-refs lines", "got": 10001, "max": 10000 },
+      "why": "HEAD is inserted into the same map as the refs, so 10000 refs plus HEAD is refused one line early"
+    },
+    {
+      "id": "depth.mergebase.k1025",
+      "heap": "default",
+      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
+      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
+    },
+    {
+      "id": "depth.mergebase.k1025",
+      "heap": "128",
+      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
+      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
+    },
+    {
+      "id": "depth.mergebase.k2048",
+      "heap": "default",
+      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
+      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
+    },
+    {
+      "id": "depth.mergebase.k2048",
+      "heap": "128",
+      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
+      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
+    },
+    {
+      "id": "tree.listTree.199999",
+      "heap": "128",
+      "actual": { "status": "oom" },
+      "why": "parseTree allocates every entry before the cap can fire, so 199999 entries exhaust a 128 MiB heap"
+    },
+    {
+      "id": "tree.listTree.200000",
+      "heap": "128",
+      "actual": { "status": "oom" },
+      "why": "parseTree allocates every entry before the cap can fire, so 200000 entries exhaust a 128 MiB heap"
+    },
+    {
+      "id": "tree.listTree.200001",
+      "heap": "128",
+      "actual": { "status": "oom" },
+      "why": "the 200001 refusal allocates the capped entry array first, so a 128 MiB heap dies before the typed error"
+    },
+    {
+      "id": "tree.listTree.262144",
+      "heap": "128",
+      "actual": { "status": "oom" },
+      "why": "the 262144 tree hits the entry cap only after the capped array exists, and a 128 MiB heap dies first"
+    },
+    {
+      "id": "tree.readFile.200000",
+      "heap": "128",
+      "actual": { "status": "oom" },
+      "why": "readFile parses the same entry array listTree does, so 200000 entries exhaust a 128 MiB heap"
+    },
+    {
+      "id": "tree.readFile.200001",
+      "heap": "128",
+      "actual": { "status": "oom" },
+      "why": "readFile parses the tree before the entry cap is reported, so a 128 MiB heap dies before the typed error"
+    },
+    {
+      "id": "push.total.3x50331648",
+      "heap": "default",
+      "actual": { "status": "ok" },
+      "why": "validateTreeSpec has no total-bytes cap, so 3 × 48 MiB (144 MiB) is pushed; RSS about 440 MiB"
+    },
+    {
+      "id": "push.total.3x50331648",
+      "heap": "128",
+      "actual": { "status": "ok" },
+      "why": "the file bytes are ArrayBuffers, outside the 128 MiB heap cap, and there is no total-bytes check to refuse them"
+    }
+  ]
+}

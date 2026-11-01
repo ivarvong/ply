@@ -15,7 +15,11 @@
 // Two names are versioncmp, which is the order `git tag -l --sort=version:refname` prints for those two names.
 // A longer listing is git's qsort of that relation, and a cyclic relation has no listing that keeps every pair,
 // so a whole tag list sorted here follows versioncmp.
-import { encodeBytes } from './bytes.js';
+import { encodeBytesResult } from './bytes.js';
+import { fail } from './errors.js';
+import type { ErrorOf } from './errors.js';
+import { err, ok } from './result.js';
+import type { Result } from './result.js';
 
 /** `versionsort.suffix`, in the order git config lists them. `''` is the release, placed among the suffixes. */
 export type VersionRefnameOrder = {
@@ -172,16 +176,49 @@ function versioncmp(left: Uint8Array, right: Uint8Array, suffixes: readonly Uint
   return kind;
 }
 
+// Which argument was not a byte string. `left` / `right` are the names; `suffix` is a versionsort.suffix entry.
+export type VersionRefnameWhich = 'left' | 'right' | 'suffix';
+// `not_string`: the value is not a string. `not_bytes`: it is a string encodeBytes refuses (a lone surrogate, or
+// escaped bytes that already spell UTF-8). git's versioncmp only sees bytes, so both are typed refusals.
+// A union of intersections, not one object whose `kind` is a union: matchKind / Extract narrow a discriminant.
+type VersionRefnameBase = { readonly which: VersionRefnameWhich };
+export type VersionRefnameError =
+  | (ErrorOf<'bad_request'> & { readonly kind: 'not_string' } & VersionRefnameBase)
+  | (ErrorOf<'bad_request'> & { readonly kind: 'not_bytes' } & VersionRefnameBase);
+
+const nameOf = (which: VersionRefnameWhich): string => (which === 'suffix' ? 'versionsort.suffix' : 'refname');
+
+function notString(which: VersionRefnameWhich): Result<never, VersionRefnameError> {
+  const what = nameOf(which);
+  const made = fail('bad_request', `${what} must be a string`, { what });
+  return err(Object.assign(made.error, { kind: 'not_string' as const, which }));
+}
+
+function asBytes(value: unknown, which: VersionRefnameWhich): Result<Uint8Array<ArrayBuffer>, VersionRefnameError> {
+  if (typeof value !== 'string') return notString(which);
+  const encoded = encodeBytesResult(value, nameOf(which));
+  if (encoded.ok) return encoded;
+  return err(Object.assign(encoded.error, { kind: 'not_bytes' as const, which }));
+}
+
 /**
  * git `versioncmp` for two refnames, with `versionsort.suffix` applied.
  * Negative when `a` sorts first. The value is versioncmp's own: a byte difference, a longer digit run, or the
  * distance between two matched suffixes. Equal names compare equal.
- * A non-string, or a lone surrogate that is not a byte, is `bad_request` (the same refusal as any other ref byte string).
+ * A non-string is `not_string`. A string that is not a byte sequence is `not_bytes`. Pure: no span of its own (I39);
+ * a caller records `error.kind` from the `Err`.
  */
-export function compareVersionRefnames(a: string, b: string, order?: VersionRefnameOrder): number {
+export function compareVersionRefnames(a: unknown, b: unknown, order?: VersionRefnameOrder): Result<number, VersionRefnameError> {
   const listed = order?.suffixes ?? [];
-  // Stryker disable next-line ArrayDeclaration: a non-byte element never equals a suffix byte, so it matches no name
-  const suffixes: Uint8Array[] = [];
-  for (const suffix of listed) suffixes.push(encodeBytes(suffix, 'versionsort.suffix'));
-  return versioncmp(encodeBytes(a, 'refname'), encodeBytes(b, 'refname'), suffixes);
+  const suffixes: Array<Uint8Array<ArrayBuffer>> = [];
+  for (const suffix of listed) {
+    const encoded = asBytes(suffix, 'suffix');
+    if (!encoded.ok) return encoded;
+    suffixes.push(encoded.value);
+  }
+  const left = asBytes(a, 'left');
+  if (!left.ok) return left;
+  const right = asBytes(b, 'right');
+  if (!right.ok) return right;
+  return ok(versioncmp(left.value, right.value, suffixes));
 }
