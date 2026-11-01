@@ -437,7 +437,7 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
       // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
       // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
       let sp = spInit(); const zlibParts: Uint8Array[] = [];
-      // One size check, in `once`: a nested function that threw would rename this decision (the #2 claims-owed hole).
+      // One size check, in `once`: a nested function that threw would be a different fail site than this one.
       const feed = (chunk: Uint8Array): void => {
         const r = spStep(sp, chunk); sp = r.state;
         for (const z of r.zlib) zlibParts.push(z);
