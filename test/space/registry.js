@@ -483,6 +483,7 @@ export const DECISIONS = [
   { match: "src/push.ts#send:ambiguous:<r.cause>", space: 'hostile-server', axisTag: 'case' },
   { match: "src/push.ts#push:coded=protocol:return coded('protocol', () => t.tracer.span('git.receiv…", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#refCandidates:*", space: 'mutant-kill', axisTag: 'case' },
+  { match: 'src/read.ts#resolveCommit:bad_request:abbrev must be "advertised" or "off"', space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#resolveCommit:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/read.ts#resolveAbbrev:bad_request:abbreviated oid must be 4..39 lowercase hex", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#advertisedCommit:bad_request:abbreviated oid … matches … advertised objects", space: 'mutant-kill', axisTag: 'case' },
