@@ -7,6 +7,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
+import { editFile } from '../src/edit.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
 import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, fetchCommit, walkPath } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
@@ -445,6 +446,96 @@ test('pushTree: a lost race is retried once from a fresh ls-refs, linked to the 
   const e2 = env(r);
   await rejects(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'deploy', time: T0 }, e2.opts), 'cas_conflict', 'push rejected: fetch first', { attempt: 1 });
   assert.equal(e2.all('git.push_tree').length, 2);
+});
+
+const settled = p => p.then(value => ({ settled: 'resolved', value }), reason => ({ settled: 'rejected', reason }));
+
+test('editFile: a lost race is retried once from a fresh ls-refs', async () => {
+  let moves = 1;
+  // the raced commit keeps the current tree, so the retry still finds the file the edit names
+  const r = remote({ hook: async req => {
+    if (req.service !== 'git-receive-pack' || moves-- <= 0) return;
+    const cur = r.refs.get('refs/heads/main');
+    const tree = parseCommit(r.objects.get(cur).data).tree;
+    const who = `A <a@x> ${T0} +0000`;
+    r.refs.set('refs/heads/main', r.put('commit', encodeCommit({ tree, parents: [cur], author: who, committer: who, message: 'raced\n' })));
+  } });
+  r.commit(FILES());
+  const e = env(r);
+  const res = await editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts);
+  assert.equal(res.attempt, 1);
+  assert.equal(res.noop, false);
+  assert.deepEqual(e.all('git.edit').map(s => [s.attrs['git.edit.attempt'], s.attrs['git.edit.outcome']]), [[0, 'cas_conflict'], [1, 'ok']]);
+  // a hint on the lost attempt is what the retry reports, and the retry's span links to the first
+  moves = 1;
+  const hinted = env(r);
+  const again = await editFile('http://fake/r.git', { path: 'README', find: 'HELLO', replace: 'AGAIN', author: A, message: 'm', time: T0 }, { ...hinted.opts, head: r.refs.get('refs/heads/main') });
+  assert.deepEqual([again.attempt, again.hint], [1, 'used']);
+  const roots = hinted.all('git.edit');
+  assert.deepEqual(roots[1].links.map(l => [l.spanId, l.attrs['ply.link']]), [[roots[0].spanId, 'retry_of']]);
+  // a non-conflict error is the one attempt, not a retry
+  const missing = env(r);
+  await rejects(editFile('http://fake/r.git', { ref: 'refs/heads/missing', path: 'README', find: 'a', replace: 'b', author: A, message: 'm', time: T0 }, missing.opts), 'not_found', 'ref refs/heads/missing not found');
+  assert.equal(missing.all('git.edit').length, 1);
+});
+
+test('editFile and pushTree: a non-Error from the first attempt is a rejection, and is not retried', async () => {
+  // a plain object whose code is cas_conflict used to come back as the resolved value; an Error with that code is retried once
+  const plain = { code: 'cas_conflict', message: 'not an Error' };
+  const r = remote();
+  r.commit(FILES());
+  let calls = 0;
+  const e = env(r);
+  const real = e.transport.frames;
+  e.transport.frames = (...args) => { calls += 1; if (calls === 1) throw plain; return real(...args); };
+  const edit = await settled(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts));
+  assert.deepEqual(edit, { settled: 'rejected', reason: plain });
+  assert.equal(calls, 1, 'a non-Error is not a cas_conflict retry');
+  calls = 0;
+  const tree = await settled(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'm', time: T0 }, e.opts));
+  assert.deepEqual(tree, { settled: 'rejected', reason: plain });
+  assert.equal(calls, 1);
+  // a string thrown after the protocol (the caller's signer) is not wrapped, and is not the return value
+  const e2 = env(r);
+  const before = r.pushes().length;
+  const signer = { kind: 'ssh-ed25519', publicKeyLine: 'ssh-ed25519 AAAA', sign() { throw 'x'; } };
+  const signed = await settled(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'm', time: T0 }, { ...e2.opts, signer }));
+  assert.deepEqual(signed, { settled: 'rejected', reason: 'x' });
+  assert.equal(r.pushes().length, before);
+  const editSigned = await settled(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, { ...env(r).opts, signer: { ...signer, sign() { throw 'y'; } } }));
+  assert.deepEqual(editSigned, { settled: 'rejected', reason: 'y' });
+});
+
+test('pushTree: git.push_tree.diff belongs to the operation tracer, in the root span\'s trace', async () => {
+  const r = remote(); r.commit(FILES());
+  const opEx = arrayExporter(); const opTracer = new Tracer({ exporter: opEx });
+  const wireEx = arrayExporter(); const wireTracer = new Tracer({ exporter: wireEx });
+  await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { tracer: opTracer, transport: r.transport({ tracer: wireTracer }) });
+  const op = opEx.lines.flatMap(flattenLine);
+  const root = op.find(s => s.name === 'git.push_tree');
+  const diff = op.find(s => s.name === 'git.push_tree.diff');
+  assert.ok(root && diff, 'the diff span is exported with the operation');
+  assert.equal(diff.traceId, root.traceId);
+  assert.equal(diff.parentSpanId, root.spanId);
+  const wire = wireEx.lines.flatMap(flattenLine);
+  assert.equal(wire.some(s => s.name === 'git.push_tree.diff'), false);
+  assert.equal(wire.some(s => s.name === 'git.upload-pack ls-refs'), true);
+});
+
+test('otel: end() scrubs an empty status message and leaves an unset message unset', () => {
+  const ex = arrayExporter(); const t = new Tracer({ exporter: ex });
+  const empty = t.start('git.op', { scrub: s => (s === '' ? 'EMPTY' : s.replaceAll('SECRET', '[redacted]')) });
+  empty.status = { code: 2, message: '' };
+  empty.end();
+  const secret = t.start('git.op', { scrub: s => s.replaceAll('SECRET', '[redacted]') });
+  secret.status = { code: 2, message: 'SECRET' };
+  secret.end();
+  const ok = t.start('git.op', { scrub: () => 'CALLED' });
+  ok.end();
+  const [a, b, c] = ex.lines.flatMap(flattenLine);
+  assert.equal(a.status.message, 'EMPTY');
+  assert.equal(b.status.message, '[redacted]');
+  assert.equal(c.status.message, undefined);
 });
 
 test('pushTree: the head hint — used, stale, a failed speculative fetch, and strictHead', async () => {
