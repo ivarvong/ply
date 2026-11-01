@@ -4,6 +4,11 @@ export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, loo
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
 /**
+ * An abbreviated oid among advertised tips. `unique_among_advertised` names the one oid and the refs that carried it;
+ * `ambiguous` names the oids; `none` matched nothing. Weaker than `git rev-parse` (interior objects are not candidates).
+ * @typedef {import('./read.js').AbbrevResolution} AbbrevResolution
+ */
+/**
  * Why a not_found missed. Switch on `kind`. A commit id is `{ kind: 'commit', miss }` (`absent`, or `not_commit`).
  * @typedef {import('./errors.js').Miss} Miss
  */
@@ -15,7 +20,7 @@ export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing i
  * A blob from the caller's transport. `kind: 'too_big'` is the pack object header's size above `maxBytes`; the fetch was cancelled.
  * @typedef {import('./read.js').OpenedBlob} OpenedBlob
  */
-export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
+export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbrev, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
@@ -59,7 +64,19 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
  */
 export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
 export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';
-export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
+/**
+ * A pack as `git verify-pack -v` prints it. `missingBases` are thin REF bases, first-seen in pack order.
+ * @typedef {import('./packresolve.js').PackLayout} PackLayout
+ */
+/**
+ * One object row of {@link PackLayout}.
+ * @typedef {import('./packresolve.js').PackLayoutObject} PackLayoutObject
+ */
+/**
+ * An OFS base (offset, and the base id once that object resolved) or a REF base (an id).
+ * @typedef {import('./packresolve.js').PackBase} PackBase
+ */
+export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, encodeTag, ident, TYPE, TYPE_NAME } from './objects.js';

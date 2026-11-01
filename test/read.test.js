@@ -6,10 +6,11 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
-import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit, openBlob, readBlob } from '../src/read.js';
+import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit, openBlob, readBlob, resolveCommit, resolveAbbrev } from '../src/read.js';
+import { lsRefs } from '../src/lsrefs.js';
 import { createTransport } from '../src/http.js';
 import { fetchObject } from '../src/fetch.js';
 import { parseIdent, TYPE } from '../src/objects.js';
@@ -374,6 +375,105 @@ test('readCommit fetches the commit object only: one tree:0 deepen-1 fetch, no t
   assert.equal(fetches[0].attrs['git.object.type'], 'commit');
   assert.equal(fetches[0].attrs['git.fetch.filter'], 'tree:0'); assert.equal(fetches[0].attrs['git.fetch.deepen'], 1);
   assert.ok(!spans.some(s => s.name === 'git.read.tree'));
+});
+
+test('abbreviated oids: unique among advertised tips agrees with git, and a ref name wins', async () => {
+  const bare = makeBareRepo(root, 'abbrev');
+  const work = join(root, 'abbrev-work');
+  mkdirSync(work);
+  git(work, ['init', '-q', '-b', 'main']);
+  const empty = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+  const oids = [];
+  const bucket = (n) => {
+    const m = new Map();
+    for (const oid of oids) {
+      const k = oid.slice(0, n);
+      const g = m.get(k);
+      if (g) g.push(oid); else m.set(k, [oid]);
+    }
+    return m;
+  };
+  let parent = null;
+  for (let i = 0; i < 4000; i++) {
+    const args = ['-c', 'user.name=seed', '-c', 'user.email=seed@x', '-c', 'commit.gpgsign=false', 'commit-tree', empty, '-m', String(i)];
+    if (parent) args.push('-p', parent);
+    parent = git(work, args).trim();
+    oids.push(parent);
+    if ([...bucket(4).values()].some(v => v.length >= 2) && [...bucket(5).values()].some(v => v.length >= 2) && oids.length > 64) break;
+  }
+  const g4 = bucket(4);
+  const g5 = bucket(5);
+  const pair4 = [...g4.entries()].find(([, v]) => v.length >= 2);
+  const pair5 = [...g5.entries()].find(([, v]) => v.length >= 2);
+  const singles = [...g4.entries()].filter(([, v]) => v.length === 1);
+  assert.ok(pair4 && pair5 && singles.length >= 4, `no shared prefix in ${oids.length} commits`);
+  const used = new Set([...pair4[1], ...pair5[1]]);
+  const free = singles.filter(([, v]) => !used.has(v[0]));
+  assert.ok(free.length >= 4, `free singles ${free.length}`);
+  const [uniquePrefix, [uniqueOid]] = free[0];
+  const [namePrefix, [nameOid]] = free[1];
+  const nameTarget = free[2][1][0];
+  const [interiorPrefix, [interiorOid]] = free[3];
+  git(work, ['update-ref', 'refs/heads/main', parent]);
+  git(work, ['push', '-q', bare, 'refs/heads/main']);
+  const point = (ref, oid) => git(bare, ['update-ref', ref, oid]);
+  point('refs/heads/main', uniqueOid);
+  point('refs/heads/a', pair4[1][0]);
+  point('refs/heads/b', pair4[1][1]);
+  point('refs/heads/c', pair5[1][0]);
+  point('refs/heads/d', pair5[1][1]);
+  point('refs/heads/hold', nameOid);
+  point(`refs/heads/${namePrefix}`, nameTarget);
+  git(bare, ['-c', 'user.name=seed', '-c', 'user.email=seed@x', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', 'tag', '-a', '-m', 'ann', 'v1', uniqueOid]);
+  const tagOid = git(bare, ['rev-parse', 'v1']).trim();
+  let up = uniquePrefix;
+  if (tagOid.startsWith(up)) {
+    for (let n = 5; n < 40 && tagOid.startsWith(uniqueOid.slice(0, n)); n++) up = uniqueOid.slice(0, n + 1);
+  }
+  const url = `${srv.url}/abbrev.git`;
+  const t = () => createTransport(url, { tracer: tracer() });
+  const disambiguate = prefix => git(bare, ['rev-parse', `--disambiguate=${prefix}`]).trim().split('\n').filter(Boolean);
+  const advertised = git(bare, ['for-each-ref', '--format=%(objectname) %(objecttype) %(*objectname)']).trim().split('\n').flatMap(l => l.split(' ').filter(x => /^[0-9a-f]{40}$/.test(x)));
+  const expectOids = prefix => [...new Set(advertised.filter(o => o.startsWith(prefix)))].sort();
+  // a ref named like the prefix wins (git warns that the name is ambiguous, and still answers the ref)
+  const named = await resolveCommit(t(), namePrefix, { abbrev: 'advertised' });
+  assert.deepEqual(named, { name: `refs/heads/${namePrefix}`, commit: nameTarget });
+  const rev = spawnSync('git', ['rev-parse', namePrefix], { cwd: bare, encoding: 'utf8' });
+  assert.equal(rev.status, 0);
+  assert.match(`${rev.stderr}`, /ambiguous/);
+  assert.equal(rev.stdout.trim(), nameTarget);
+  assert.equal(git(bare, ['rev-parse', `${namePrefix}^{commit}`]).trim(), nameTarget);
+  // unique among advertised tips: git's candidates include that commit
+  const unique = await resolveCommit(t(), up, { abbrev: 'advertised' });
+  assert.deepEqual(unique, { name: uniqueOid, commit: uniqueOid });
+  const uniqueObjs = disambiguate(up);
+  assert.ok(uniqueObjs.includes(uniqueOid), uniqueObjs.join(' '));
+  assert.equal(git(bare, ['cat-file', '-t', uniqueOid]).trim(), 'commit');
+  const listed = await lsRefs(t(), ['HEAD', 'refs/heads/', 'refs/tags/']);
+  const peeled = resolveAbbrev(up, listed);
+  assert.equal(peeled.ok && peeled.value.kind, 'unique_among_advertised');
+  if (peeled.ok && peeled.value.kind === 'unique_among_advertised') {
+    assert.equal(peeled.value.oid, uniqueOid);
+    assert.ok(peeled.value.refs.includes('refs/tags/v1'));
+  }
+  // two advertised tips: ply is ambiguous, and each oid is one of git's
+  for (const prefix of [pair4[0], pair5[0]]) {
+    const want = expectOids(prefix);
+    assert.ok(want.length >= 2, prefix);
+    await assert.rejects(resolveCommit(t(), prefix, { abbrev: 'advertised' }), e => {
+      assert.equal(e.code, 'bad_request');
+      assert.deepEqual([...e.got].sort(), want);
+      return true;
+    });
+    const objs = disambiguate(prefix);
+    for (const oid of want) assert.ok(objs.includes(oid), `${prefix} ${oid}`);
+  }
+  // git's only object for this prefix is an interior commit: ply does not call it ambiguous
+  assert.deepEqual(disambiguate(interiorPrefix), [interiorOid]);
+  await assert.rejects(resolveCommit(t(), interiorPrefix, { abbrev: 'advertised' }), e => e.code === 'not_found');
+  // default off: the same prefix is a ref name that does not exist, not an object id
+  await assert.rejects(resolveCommit(t(), up), e => e.code === 'not_found');
+  console.log(`  abbrev oracle over ${oids.length} commits`);
 });
 
 test('openBlob and readBlob match git cat-file; too_big is the object header', async () => {

@@ -1,6 +1,7 @@
 // Pack parsing and delta resolution (buffered, general-purpose): parsePack walks a whole pack verifying the trailer,
 // applyDelta is git's patch_delta, resolvePack resolves OFS/REF chains to a fixpoint with external bases as a last
-// resort, makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
+// resort, describePack reports that layout the way `git verify-pack -v` prints it (a thin base is data, not an error),
+// makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
 // pack.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
 import type { ErrorOf } from './errors.js';
 import { fail, plyError, orThrow } from './errors.js';
@@ -10,6 +11,7 @@ import type { InflateStats } from './inflate.js';
 import { inflateResult } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, hashObject, nameOfTypeId } from './objects.js';
+import type { ObjType } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
 import { DEFAULT_LIMITS, limitError, requireLimit, checkLimit, readLimit } from './limits.js';
 // pack.js re-exports this module's parsers: a cycle of a re-export and one function, which ES modules resolve
@@ -374,12 +376,32 @@ type Step =
 // missing base is the error.
 type Phase = 'in_pack' | 'external';
 
+// A REF_DELTA whose base is not in the pack, kept instead of refused. `oid` is that missing base (the root the fixpoint
+// was waiting on), in pack order of the objects that could not be resolved.
+export type UnresolvedBase = { readonly object: PackObject; readonly oid: string };
+export type CollectedPack = ResolvedPack & { readonly unresolved: readonly UnresolvedBase[] };
+
+// `collectMissing` is describePack's path: a thin base is data, not an error. The default still refuses it
+// (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
+export function resolvePackResult(
+  parsed: PackToResolve,
+  external: (oid: string) => ExternalBase | null | undefined,
+  limits: Limits,
+  collectMissing: true,
+): Result<CollectedPack, PackError>;
+export function resolvePackResult(
+  parsed: PackToResolve,
+  external?: (oid: string) => ExternalBase | null | undefined,
+  limits?: Limits,
+  collectMissing?: false,
+): Result<ResolvedPack, PackError>;
 // oxlint-disable-next-line eslint/complexity -- one fixpoint over the pack's objects
 export function resolvePackResult(
   parsed: PackToResolve,
   external: (oid: string) => ExternalBase | null | undefined = () => null,
   limits: Limits = DEFAULT_LIMITS,
-): Result<ResolvedPack, PackError> {
+  collectMissing = false,
+): Result<ResolvedPack | CollectedPack, PackError> {
   const caps = capsOf(limits, ['maxDeltaChain', 'maxDeltaResult', 'maxInflatedTotal']);
   if (!caps.ok) return caps;
   const [maxChain, maxDelta, inflatedCap] = caps.value;
@@ -476,12 +498,14 @@ export function resolvePackResult(
     const next: PackObject[] = [];
     let missingOid = '';
     let haveMissing = false;
+    const waited: UnresolvedBase[] = [];
     for (const o of pending) {
       const s = resolveObj(o);
       switch (s.tag) {
         case 'failed': return err(s.error);
         case 'waiting':
           next.push(o);
+          waited.push({ object: o, oid: s.oid });
           if (!haveMissing) { missingOid = s.oid; haveMissing = true; }
           continue;
         case 'resolved': continue;
@@ -491,12 +515,15 @@ export function resolvePackResult(
     }
     if (next.length === pending.length) {
       // no progress even with external bases: the first waiting object's base is missing from the pack and the caller
-      if (phase === 'external') return corrupt(`pack: ref delta base ${missingOid} not found`);
+      if (phase === 'external') {
+        if (collectMissing) return ok({ objects: resolved, stats, unresolved: waited });
+        return corrupt(`pack: ref delta base ${missingOid} not found`);
+      }
       phase = 'external'; // every in-pack base is known now; the rest are thin bases
     }
     pending = next;
   }
-  return ok({ objects: resolved, stats });
+  return ok(collectMissing ? { objects: resolved, stats, unresolved: [] } : { objects: resolved, stats });
 }
 export function resolvePack(
   parsed: PackToResolve,
@@ -504,4 +531,118 @@ export function resolvePack(
   limits: Limits = DEFAULT_LIMITS,
 ): ResolvedPack {
   return orThrow(resolvePackResult(parsed, external, limits));
+}
+
+// ---- layout (git verify-pack -v) ----
+// What verify-pack prints for one object, plus the wire type it does not print. `size` is the pack header's inflated
+// size (the delta or the object), not the resolved object. `type` is the resolved object type, which a missing thin
+// base hides. No span: this is a pure read of bytes already in hand; the span belongs to the fetch that received them.
+export type ResolvedObjType = typeof TYPE.COMMIT | typeof TYPE.TREE | typeof TYPE.BLOB | typeof TYPE.TAG;
+// An OFS_DELTA base is an offset, and the base object's id once that object resolved. A REF_DELTA base is an id,
+// whether or not the object is in the pack.
+export type PackBase =
+  | { readonly offset: number; readonly oid: string | null }
+  | { readonly oid: string };
+export type PackLayoutObject = {
+  readonly offset: number;
+  readonly headerBytes: number;
+  readonly compressed: number;
+  readonly size: number;
+  readonly wireType: ObjType;
+  readonly type: ResolvedObjType | null;
+  readonly oid: string | null;
+  readonly base: PackBase | null;
+  readonly depth: number;
+};
+export type PackLayout = {
+  readonly version: typeof PACK_VERSION;
+  readonly count: number;
+  readonly trailer: string;
+  readonly objects: readonly PackLayoutObject[];
+  // First-seen unique REF bases that are not in the pack, in pack order. These are the objects
+  // `git index-pack --fix-thin` appends.
+  readonly missingBases: readonly string[];
+};
+
+function wireOf(n: number): ObjType {
+  switch (n) {
+    case TYPE.COMMIT: return TYPE.COMMIT;
+    case TYPE.TREE: return TYPE.TREE;
+    case TYPE.BLOB: return TYPE.BLOB;
+    case TYPE.TAG: return TYPE.TAG;
+    case TYPE.OFS_DELTA: return TYPE.OFS_DELTA;
+    case TYPE.REF_DELTA: return TYPE.REF_DELTA;
+    // parsePack never returns an object of any other type
+    default: throw new Error(`unreachable: ${String(n)}`);
+  }
+}
+function resolvedObjType(n: number): ResolvedObjType | null {
+  switch (n) {
+    case TYPE.COMMIT:
+    case TYPE.TREE:
+    case TYPE.BLOB:
+    case TYPE.TAG:
+      return n;
+    // Stryker disable next-line ConditionalExpression: a resolved object's type is the base object's, one of the four
+    default: return null;
+  }
+}
+function baseOf(obj: PackObject, memo: ReadonlyMap<number, ResolvedObject>): PackBase | null {
+  if (obj.baseOffset !== undefined) {
+    const base = memo.get(obj.baseOffset);
+    return { offset: obj.baseOffset, oid: base?.oid ?? null };
+  }
+  if (obj.baseOid !== undefined) return { oid: obj.baseOid };
+  return null;
+}
+// Depth of an object the fixpoint could not hash. That only happens when a REF base is outside the pack, and a
+// resolved base would have resolved this object too, so the walk never lands on a memoised object. An external base
+// is chain 0: a REF_DELTA on it is 1, and an OFS_DELTA on that object is one deeper. Same numbers verify-pack prints
+// once index-pack has appended the base.
+function chainDepth(obj: PackObject, byOffset: ReadonlyMap<number, PackObject>): number {
+  if (obj.baseOffset === undefined) return 1;
+  const base = byOffset.get(obj.baseOffset);
+  // Stryker disable next-line ConditionalExpression: an ofs offset that is not an object is pack_corrupt before layout
+  if (!base) return 0;
+  return chainDepth(base, byOffset) + 1;
+}
+function packLayout(parsed: ParsedPack, resolved: CollectedPack): PackLayout {
+  const memo = new Map<number, ResolvedObject>();
+  for (const r of resolved.objects.values()) memo.set(r.offset, r);
+  const byOffset = new Map(parsed.objects.map(o => [o.offset, o]));
+  const objects: PackLayoutObject[] = parsed.objects.map(obj => {
+    const r = memo.get(obj.offset);
+    return {
+      offset: obj.offset,
+      headerBytes: obj.headerBytes,
+      compressed: obj.compressed,
+      size: obj.size,
+      wireType: wireOf(obj.type),
+      type: r ? resolvedObjType(r.type) : null,
+      oid: r ? r.oid : null,
+      base: baseOf(obj, memo),
+      depth: r ? r.chain : chainDepth(obj, byOffset),
+    };
+  });
+  const missingBases: string[] = [];
+  const seenOid = new Set<string>();
+  for (const u of resolved.unresolved) {
+    if (seenOid.has(u.oid)) continue;
+    seenOid.add(u.oid);
+    missingBases.push(u.oid);
+  }
+  return { version: PACK_VERSION, count: parsed.stats.count, trailer: parsed.trailer, objects, missingBases };
+}
+
+// Stryker disable next-line ArrowFunction: null and undefined both mean the base is not in the pack
+const noBase = (): null => null;
+
+// The pack's layout as `git verify-pack -v` prints it. A thin REF base is `missingBases`, not an error and not a
+// message to match. Limits are the same ones parse and resolve already enforce.
+export function describePack(buf: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<PackLayout, PackError> {
+  const parsed = parsePackResult(buf, { limits });
+  if (!parsed.ok) return parsed;
+  const resolved = resolvePackResult(parsed.value, noBase, limits, true);
+  if (!resolved.ok) return resolved;
+  return ok(packLayout(parsed.value, resolved.value));
 }
