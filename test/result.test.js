@@ -37,13 +37,28 @@ test('errorKind is the span attribute: miss, then kind, then reason, then code',
   assert.equal(errorKind('x'), 'Error');
   const e = { code: 'not_found', miss: { kind: 'head_absent' } };
   assert.deepEqual(errorKindAttr(e), { 'error.kind': 'head_absent' });
-  const ex = arrayExporter();
-  const span = new Tracer({ exporter: ex }).start('git.result.kind');
-  span.set(errorKindAttr(e)).error(e, e.code).end();
-  const flat = flattenLine(ex.lines[0])[0];
-  assert.equal(flat.attrs['error.kind'], 'head_absent');
-  assert.equal(flat.attrs['error.type'], 'not_found');
-  assert.equal(flat.name, 'git.result.kind');
+});
+
+// Span.error writes error.kind itself. A caller who stamped a stale kind is overwritten, so the attribute is the value.
+test('Span.error records error.kind beside error.type', () => {
+  const cells = [
+    [{ code: 'not_found', miss: { kind: 'head_absent' }, kind: 'other', reason: 'short_read' }, 'not_found', 'head_absent'],
+    [{ code: 'bad_request', kind: 'not_string', reason: 'short_read' }, 'bad_request', 'not_string'],
+    [{ code: 'remote_error', reason: 'not_our_ref' }, 'remote_error', 'not_our_ref'],
+    [{ code: 'timeout' }, 'timeout', 'timeout'],
+    [{ miss: { kind: 1 }, code: 'not_found' }, 'not_found', 'not_found'],
+    ['plain', undefined, 'Error'],
+    [null, 'bad_request', 'Error'],
+  ];
+  for (const [value, type, kind] of cells) {
+    const ex = arrayExporter();
+    const span = new Tracer({ exporter: ex }).start('git.otel.kind');
+    span.set({ 'error.kind': 'stale' }).error(value, type).end();
+    const flat = flattenLine(ex.lines[0])[0];
+    assert.equal(flat.attrs['error.kind'], kind, kind);
+    assert.equal(flat.attrs['error.type'], type ?? 'Error');
+    assert.equal(flat.name, 'git.otel.kind');
+  }
 });
 
 test('PlyError: one constructor, an Error carrying its fields; fail wraps it; orThrow throws it as is', () => {
