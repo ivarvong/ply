@@ -107,10 +107,14 @@ export function streamStep(st: StreamState, f: Frame): StreamState {
   let phase: Reading['phase'] = st.phase;
   for (const g of r.frames) {
     if (phase !== 'report') return broken('band 1 after the report');
-    if (g.kind === 'flush') phase = 'reported';
-    // Stryker disable next-line ConditionalExpression: a delim/end pkt has no payload; pushed as a line it is not LF-terminated, so the report is malformed
-    else if (g.kind === 'data') st.lines.push(g.payload);
-    else return broken(`${g.kind} packet in the report`);
+    switch (g.kind) {
+      case 'flush': phase = 'reported'; continue;
+      case 'data': st.lines.push(g.payload); continue;
+      case 'delim':
+      case 'end': return broken(`${g.kind} packet in the report`);
+    }
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(g);
   }
   return { ...st, inner: r.state, phase };
 }
@@ -142,11 +146,32 @@ export type ReportShape =
   | { readonly tag: 'statuses'; readonly refs: readonly RefStatus[] }
   | { readonly tag: 'unpackFailed'; readonly status: string; readonly refs: readonly RefStatus[] }
   | Malformed;
-export const GIT_UNPACK_ERRORS: readonly string[] = Object.freeze([
+const GIT_UNPACK_ERROR_LIST = [
   'eof before pack header was fully read', 'protocol error (pack signature mismatch detected)', 'protocol error (pack version unsupported)',
   'unknown error in parse_pack_header', 'unable to create temporary object directory', 'unpack-objects abnormal exit', 'index-pack fork failed',
   'index-pack abnormal exit',
-]);
+] as const;
+export type GitUnpackError = typeof GIT_UNPACK_ERROR_LIST[number];
+export const GIT_UNPACK_ERRORS: readonly GitUnpackError[] = Object.freeze(GIT_UNPACK_ERROR_LIST);
+const seenUnpack = (status: GitUnpackError): true => {
+  switch (status) {
+    case 'eof before pack header was fully read':
+    case 'protocol error (pack signature mismatch detected)':
+    case 'protocol error (pack version unsupported)':
+    case 'unknown error in parse_pack_header':
+    case 'unable to create temporary object directory':
+    case 'unpack-objects abnormal exit':
+    case 'index-pack fork failed':
+    case 'index-pack abnormal exit':
+      return true;
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(status);
+};
+const isGitUnpackError = (status: string): boolean => {
+  for (const item of GIT_UNPACK_ERRORS) if (item === status) return seenUnpack(item);
+  return false;
+};
 const UNPACKER_ERROR = 'unpacker error';
 const malformed = (why: string): Malformed => ({ tag: 'malformed', why });
 // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrayDeclaration: reportStep calls it on "ng <rest>" only; with no space or a leading one, every split names no commanded ref
@@ -166,7 +191,7 @@ export function reportStep(st: ReportState, payload: Uint8Array): ReportState {
     case 'unpack': {
       // '' (no unpack line) is neither "ok" nor one of git's failures
       const unpack = line.startsWith(UNPACK) ? line.slice(UNPACK.length) : '';
-      return unpack === 'ok' || GIT_UNPACK_ERRORS.includes(unpack) ? { tag: 'refs', unpack, want: st.want, seen: new Map() } : malformed('no git unpack line first');
+      return unpack === 'ok' || isGitUnpackError(unpack) ? { tag: 'refs', unpack, want: st.want, seen: new Map() } : malformed('no git unpack line first');
     }
     case 'refs': {
       const isOk = line.startsWith(OK_REF);
@@ -181,8 +206,9 @@ export function reportStep(st: ReportState, payload: Uint8Array): ReportState {
       else return malformed(`no readable reason for ${ref}`);
       return st;
     }
-    default: return assertNever(st);
   }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(st);
 }
 export function reportFinish(st: ReportState): ReportShape {
   switch (st.tag) {
@@ -195,8 +221,9 @@ export function reportFinish(st: ReportState): ReportShape {
       if (refs.some(r => !r.ok && r.reason === UNPACKER_ERROR)) return malformed('"unpacker error" beside "unpack ok"');
       return { tag: 'statuses', refs };
     }
-    default: return assertNever(st);
   }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(st);
 }
 // The driver: the report's pkt payloads (StreamReport.lines) against the commands sent.
 // @decoder classifyReport prefix=report
@@ -219,9 +246,34 @@ export function classifyReport(payloads: readonly Uint8Array[], commands: Readon
 // Cloudflare Artifacts' only ref-update rejection (stale old oid, create over an existing ref, stale delete, and the
 // innocent members of a multi-ref push, which it always treats as atomic; observed 2026-10-23, SAFETY.md I31).
 export type NgClass = 'cas' | 'nff' | 'innocent' | 'ambiguous' | 'rejected';
-const NG_CLASS = new Map<string, NgClass>([['failed to update ref', 'cas'], ['atomic transaction failed', 'cas'], ['bad ref', 'cas'], ['incorrect old value provided', 'cas'], ['reference already exists', 'cas'], ['reference does not exist', 'cas'], ['non-fast-forward', 'nff'], ['atomic push failure', 'innocent'], ['proc-receive failed to report status', 'ambiguous'], ['fail to run proc-receive hook', 'ambiguous']]);
+const KNOWN_NG = [
+  'failed to update ref', 'atomic transaction failed', 'bad ref', 'incorrect old value provided', 'reference already exists', 'reference does not exist',
+  'non-fast-forward', 'atomic push failure', 'proc-receive failed to report status', 'fail to run proc-receive hook',
+] as const;
+type KnownNgReason = typeof KNOWN_NG[number];
+const knownNgClass = (reason: KnownNgReason): NgClass => {
+  switch (reason) {
+    case 'failed to update ref':
+    case 'atomic transaction failed':
+    case 'bad ref':
+    case 'incorrect old value provided':
+    case 'reference already exists':
+    case 'reference does not exist':
+      return 'cas';
+    case 'non-fast-forward': return 'nff';
+    case 'atomic push failure': return 'innocent';
+    case 'proc-receive failed to report status':
+    case 'fail to run proc-receive hook':
+      return 'ambiguous';
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(reason);
+};
 const HOST_CAS = /^(failed to lock|stale ref)$|fetch first|non-fast-forward|already exists/u;
-export const ngClass = (reason: string): NgClass => NG_CLASS.get(reason) ?? (HOST_CAS.test(reason) ? 'cas' : 'rejected');
+export const ngClass = (reason: string): NgClass => {
+  for (const known of KNOWN_NG) if (known === reason) return knownNgClass(known);
+  return HOST_CAS.test(reason) ? 'cas' : 'rejected';
+};
 
 // 3. The outcome. An exhaustive match on the report shape; 'ambiguous' is the only fallthrough. A refused ref carries
 // its reason and the reason's class. Every ref refused is a rejection whose code is the classes' verdict: a refusal
@@ -260,8 +312,9 @@ export function decideOutcome(shape: ReportShape | Broken, { atomic = false, pac
     }
     case 'malformed':
     case 'broken': return { tag: 'ambiguous', why: shape.why };
-    default: return assertNever(shape);
   }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(shape);
 }
 
 // The report as classified (one parser: classifyReport), for the caller and the span: null when it was not git's.
@@ -285,8 +338,9 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
     }
     case 'partial': return fail('push_partial', `push partially applied: ${o.landed.join(', ')} updated; ${o.rejected.map(r => `${r.ref} (${r.reason})`).join(', ')} refused`, { ...extra, landed: o.landed, rejected: o.rejected });
     case 'ambiguous': return fail('ambiguous', `push outcome unknown: ${remote === undefined ? '' : `remote: ${remote}: `}${o.why}`, remote === undefined ? extra : { ...extra, original: 'remote_error' });
-    default: return assertNever(o);
   }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(o);
 }
 const bandLines = (text: string): string[] => text.split(/\r?\n|\r/u).map(l => l.trim()).filter(Boolean).slice(-REPORT_KEEP);
 
@@ -320,8 +374,22 @@ export type PushResult = { readonly report: PushReport | null; readonly packByte
 // The request, planned before anything is built or sent (pure): every refusal here happens with nothing on the wire.
 export type PushPlan = { readonly commands: Commands; readonly caps: readonly string[]; readonly checked: CheckedCaps | undefined; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number };
 // The capabilities a push asks for; atomic and push-options only from a CheckedCaps.
+export type PushRequestCap = 'report-status' | 'report-status-v2' | 'side-band-64k' | 'atomic' | 'delete-refs' | 'push-options';
+const requestCap = (cap: PushRequestCap): PushRequestCap => {
+  switch (cap) {
+    case 'report-status':
+    case 'report-status-v2':
+    case 'side-band-64k':
+    case 'atomic':
+    case 'delete-refs':
+    case 'push-options':
+      return cap;
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(cap);
+};
 export const requestCaps = (commands: readonly Command[], { sideband = true, reportV2 = false }: { readonly sideband?: boolean; readonly reportV2?: boolean }, checked?: CheckedCaps): string[] =>
-  [reportV2 ? 'report-status-v2' : 'report-status', ...(sideband ? ['side-band-64k'] : []), ...(checked?.atomic === true ? ['atomic'] : []), ...(commands.some(c => c.newOid === ZERO_OID) ? ['delete-refs'] : []), ...((checked?.pushOptions.length ?? 0) > 0 ? ['push-options'] : []), `agent=${UA.replace(/ .*/u, '')}`];
+  [reportV2 ? requestCap('report-status-v2') : requestCap('report-status'), ...(sideband ? [requestCap('side-band-64k')] : []), ...(checked?.atomic === true ? [requestCap('atomic')] : []), ...(commands.some(c => c.newOid === ZERO_OID) ? [requestCap('delete-refs')] : []), ...((checked?.pushOptions.length ?? 0) > 0 ? [requestCap('push-options')] : []), `agent=${UA.replace(/ .*/u, '')}`];
 // An untyped (JS) caller's atomic / pushOptions, which the type no longer has: refused rather than silently dropped.
 type Unchecked = { readonly atomic?: unknown; readonly pushOptions?: { readonly length?: unknown } };
 export function planPush(o: PushOptions, limits: Partial<Limits> | null | undefined): Result<PushPlan, ErrorOf<'bad_request' | 'limit_exceeded'>> {

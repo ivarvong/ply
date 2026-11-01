@@ -2,6 +2,7 @@
   "test/adversarial.test.js": 181,
   "test/artifacts-compat.test.js": 2,
   "test/bundle.test.js": 0,
+  "test/changes.test.js": 8,
   "test/checkout-tree.test.js": 9,
   "test/compliance.test.js": 17,
   "test/concurrency.test.js": 4,
@@ -51,6 +52,8 @@
   "test/version-refname.test.js": 0,
   "test/space/registry.test.js": 2,
   "test/span-contract.test.js": 4,
+  "test/sweep/boundary.test.js": 1,
+  "test/tree-budget.test.js": 8,
   "test/wide-limits.test.js": 12,
   "test/workerd.test.js": 12
 }

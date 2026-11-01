@@ -2,6 +2,7 @@
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { Code, Detail, Extra } from './errors.js';
+import { assertNever } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
@@ -15,11 +16,33 @@ import { UA, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
+/** Statuses with their own code. Every other status stays the 5xx range or `http`. */
+export type NamedHttpStatus = 401 | 403 | 404 | 429;
+type StatusClass = { readonly tag: 'named'; readonly status: NamedHttpStatus } | { readonly tag: 'other' };
+const classifyStatus = (status: number): StatusClass => {
+  switch (status) {
+    case 401: case 403: case 404: case 429: return { tag: 'named', status };
+    default: return { tag: 'other' };
+  }
+};
+const namedCode = (status: NamedHttpStatus): HttpCode => {
+  switch (status) {
+    case 401:
+    case 403: return 'auth';
+    case 404: return 'not_found';
+    case 429: return 'rate_limited';
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(status);
+};
 export const httpCode = (status: number): HttpCode => {
-  if (status === 401 || status === 403) return 'auth';
-  if (status === 404) return 'not_found';
-  if (status === 429) return 'rate_limited';
-  return status >= 500 ? 'upstream_5xx' : 'http';
+  const classified = classifyStatus(status);
+  switch (classified.tag) {
+    case 'other': return status >= 500 ? 'upstream_5xx' : 'http';
+    case 'named': return namedCode(classified.status);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(classified);
 };
 
 // An error page is quoted, not stored. Past this many bytes the rest cannot change the message and must not be buffered.
