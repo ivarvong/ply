@@ -18,7 +18,7 @@ import { fetchCommit } from './commit.js';
 import { push, ZERO_OID } from './push.js';
 import type { PackObject } from './push.js';
 import { parseOid, parseCommitId } from './oid.js';
-import { parseTree, encodeTree, encodeCommit, hashObject, ident, TYPE } from './objects.js';
+import { parseTree, encodeTree, hashObject, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
@@ -38,17 +38,19 @@ import { thrownCode } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
+import { buildCommitData } from './commit/build.js';
+import type { Path } from './path.js';
 
 const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = hashObject('tree', encodeTree([]));
 
 export type { BlobMode };
 export type Change =
-  | { readonly kind: 'create'; readonly path: string; readonly content: string | Uint8Array; readonly mode?: BlobMode }
-  | { readonly kind: 'write'; readonly path: string; readonly content: string | Uint8Array; readonly mode?: BlobMode }
-  | { readonly kind: 'edit'; readonly path: string; readonly find: string | Uint8Array; readonly replace: string | Uint8Array }
-  | { readonly kind: 'delete'; readonly path: string }
-  | { readonly kind: 'rename'; readonly from: string; readonly to: string };
+  | { readonly kind: 'create'; readonly path: Path; readonly content: string | Uint8Array; readonly mode?: BlobMode }
+  | { readonly kind: 'write'; readonly path: Path; readonly content: string | Uint8Array; readonly mode?: BlobMode }
+  | { readonly kind: 'edit'; readonly path: Path; readonly find: string | Uint8Array; readonly replace: string | Uint8Array }
+  | { readonly kind: 'delete'; readonly path: Path }
+  | { readonly kind: 'rename'; readonly from: Path; readonly to: Path };
 
 export type CommitChangesSpec = {
   readonly ref?: string | null;
@@ -456,9 +458,10 @@ async function writeMem(job: MemJob): Promise<MemOutcome> {
   if (decision === 'noop') return { retry: false, objects: 0, done: resultOf(target.ref, parent, { tree: applied.tree, oid: parent.oid ?? applied.tree, pushBytes: 0, outcome: 'noop' }) };
   const message = plan.message.endsWith('\n') ? plan.message : `${plan.message}\n`;
   const parents = parent.oid === null ? [] : [parent.oid];
-  let commitData = encodeCommit({ tree: applied.tree, parents, author: ident(plan.author), committer: ident(plan.committer), message });
-  if (signer) commitData = await signCommit(commitData, signer);
-  const oid = hashObject('commit', commitData);
+  let built = buildCommitData({ tree: applied.tree, parents, author: plan.author, committer: plan.committer, time: plan.author.time, message });
+  if (signer) { const signed = await signCommit(built.data, signer); built = { data: signed, oid: hashObject('commit', signed) }; }
+  const commitData = built.data;
+  const oid = built.oid;
   const objects: PackObject[] = [{ type: TYPE.COMMIT, data: commitData }, ...applied.objects];
   const oldOid = oldOidOf(parent);
   try {

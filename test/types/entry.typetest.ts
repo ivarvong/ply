@@ -3,7 +3,7 @@
 import {
   fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs,
   fetchObject, packStream, spInit, spStep, spFinish, inflate, commitView, entryType, lsMode, refCandidates,
-  isFilterRejection, isPlyCode, DEFAULT_LIMITS,
+  isFilterRejection, isPlyCode, DEFAULT_LIMITS, parseBranchName,
   type Transport, type ExportLine, type Exporter, type Limits, type FetchOpts, type SpState, type PackObject, type OperationOpts,
 } from '../../src/index.js';
 
@@ -41,7 +41,10 @@ const fetchOpts: FetchOpts = { wants: ['a'.repeat(40)], filter: 'blob:none' };
 const consumer = async (): Promise<void> => {
   const fetched = await fetchPack(transport, fetchOpts);
   const objects: PackObject[] = [...(fetched.objects?.values() ?? [])].map(o => ({ type: o.type, data: o.data }));
-  await push(transport, { ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'b'.repeat(40), objects });
+  // helper: unwrap a Result Ok (type-level)
+  const expectOk = <T, E>(r: { ok: true; value: T } | { ok: false; error: E }): T => (r.ok ? r.value : (null as unknown as T));
+  const branch = expectOk(parseBranchName('refs/heads/x'));
+  await push(transport, { ref: branch, oldOid: '0'.repeat(40), newOid: 'b'.repeat(40), objects });
   const { delta } = spliceDelta({ baseLen: 8, off: 0, oldLen: 1, insert: anyBytes });
   const deflated: Uint8Array<ArrayBuffer> = await zlibDeflate(delta);
   await zlibDeflate(shared);

@@ -11,7 +11,7 @@ import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
 import { spliceDelta } from './pack.js';
-import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident, objectHeader, TYPE } from './objects.js';
+import { parseCommit, parseTree, objectHeader, TYPE } from './objects.js';
 import { fromHex, streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
@@ -30,6 +30,10 @@ import type { TreeEntry } from './objects.js';
 import { thrownAttrs, thrownCode, thrownMessage } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import { fromNullish } from './absent.js';
+import type { Refname } from './refname.js';
+import type { Path } from './path.js';
+import { buildCommitObjects, withCommitData } from './commit/build.js';
+import type { Level as BuiltLevel, NewTree as BuiltNewTree } from './commit/build.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -98,9 +102,9 @@ export const scanAttrs = (st: ScanState): Attrs => ({
 const OID = /^[0-9a-f]{40}$/;
 
 export type EditSpec = {
-  readonly ref?: string;
+  readonly ref?: Refname;
   readonly base?: string;
-  readonly path: string;
+  readonly path: Path;
   readonly find: string | Uint8Array;
   readonly replace: string | Uint8Array;
   readonly author: Author;
@@ -196,7 +200,7 @@ export function lookupEntry(data: Uint8Array, name: string, last: boolean, limit
   return { entry, attrs };
 }
 
-export type Level = { readonly treeOid: string; readonly data: Uint8Array; readonly entry: TreeEntry };
+export type Level = BuiltLevel;
 // The blob side of an edit, as streamBlobEdit returns it.
 export type BlobEdit = {
   readonly oldOid: string;
@@ -208,7 +212,7 @@ export type BlobEdit = {
   readonly scan: ScanState;
   readonly inflated: number;
 };
-export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
+export type NewTree = BuiltNewTree;
 export type Built = {
   readonly trees: readonly NewTree[];
   readonly newTree: string;
@@ -216,49 +220,7 @@ export type Built = {
   readonly newCommit: string;
   readonly objects: readonly PackObject[];
 };
-// Pure: the new trees (bottom-up splices), the commit, and the thin pack's object list.
-function identLine(person: Author | Ident, time: number): string {
-  if (isValidatedIdent(person)) return ident(person);
-  return ident(validateIdent({ name: person.name, email: person.email, time: person.time ?? time, tz: person.tz }));
-}
-export function buildCommitObjects({ levels, blob, oldCommit, author, committer, time, message }: {
-  readonly levels: readonly Level[];
-  readonly blob: Pick<BlobEdit, 'oldOid' | 'newOid' | 'delta' | 'newLen'>;
-  readonly oldCommit: string;
-  readonly author: Author | Ident;
-  readonly committer?: Author | Ident;
-  readonly time: number;
-  readonly message: string;
-}): Built {
-  const trees: NewTree[] = [];
-  let child = blob.newOid;
-  // from the deepest level up: each level's entry gets the oid of the tree (or blob) below it
-  for (const { treeOid: oldOid, data, entry } of levels.toReversed()) {
-    const newData: Uint8Array = treeReplaceOid(data, entry, child);
-    const newOid = hashObject('tree', newData);
-    const delta = spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) }).delta;
-    trees.unshift({ type: TYPE.TREE, data: delta, baseOid: oldOid, newOid, newData });
-    child = newOid;
-  }
-  const who = identLine(author, time);
-  const written = committer === undefined ? who : identLine(committer, time);
-  // oxlint-disable-next-line prefer-template -- bundle budget: the JS's concatenation
-  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message: message.endsWith('\n') ? message : message + '\n' });
-  const newCommit = hashObject('commit', commitData);
-  const objects: PackObject[] = [
-    { type: TYPE.COMMIT, data: commitData },
-    ...trees.map(t => ({ type: t.type, data: t.data, baseOid: t.baseOid })),
-    // git's patch_delta rejects deltas < DELTA_SIZE_MIN (4 bytes); an empty result is such a delta → send the full object
-    blob.delta.length >= 4 ? { type: TYPE.BLOB, data: blob.delta, baseOid: blob.oldOid } : { type: TYPE.BLOB, data: new Uint8Array(blob.newLen) },
-  ];
-  return { trees, newTree: child, commitData, newCommit, objects };
-}
-
-// Pure: the same build with a different commit object (e.g. the signed one): identity and pack entry follow the bytes.
-export function withCommitData(built: Built, commitData: Uint8Array): Built {
-  const newCommit = hashObject('commit', commitData);
-  return { ...built, commitData, newCommit, objects: [{ type: TYPE.COMMIT, data: commitData }, ...built.objects.slice(1)] };
-}
+// buildCommitObjects and withCommitData now live in commit/build.ts
 
 // Pure: memory accounting for the whole edit, from what was actually held: each metadata object (whole, bounded by
 // limits.maxObjectSize) and the streamed blob's chunks (DecompressionStream's; counted from the scanner's state).

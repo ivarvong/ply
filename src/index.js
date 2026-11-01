@@ -76,6 +76,15 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
 export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
 export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';
 /**
+ * Branded refname and path types.
+ * @typedef {import('./refname.js').Refname} Refname
+ * @typedef {import('./refname.js').BranchName} BranchName
+ * @typedef {import('./refname.js').TagName} TagName
+ * @typedef {import('./path.js').Path} Path
+ */
+export { parseRefname, parseBranchName, parseTagName } from './refname.js';
+export { parsePath } from './path.js';
+/**
  * A pack as `git verify-pack -v` prints it. `missingBases` are thin REF bases, first-seen in pack order.
  * @typedef {import('./packresolve.js').PackLayout} PackLayout
  */
