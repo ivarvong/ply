@@ -198,13 +198,12 @@ function build() {
       expect: S > objCap ? refused('limit_exceeded', { what: 'object size' }) : ok,
     });
   }
-  // No total-bytes cap today. Desired: the sum of the file bytes is bounded by the pack wire cap (128 MiB),
-  // refused in validateTreeSpec before the blobs are copied into the pack. 3 × 48 MiB is 144 MiB (ratchet).
-  const pushCap = DEFAULT_LIMITS.maxPackBytes;
+  // The sum of the file bytes, refused in validateTreeSpec before the blobs are copied. 3 × 48 MiB is 144 MiB (ratchet).
+  const pushCap = DEFAULT_LIMITS.maxPushBytes;
   for (const [n, s] of [[1, MiB], [1, 16 * MiB], [10000, 64], [3, 48 * MiB], [100000, 8]]) {
     const total = n * s;
     add({
-      id: `push.total.${n}x${s}`, param: 'maxPackBytes', op: 'pushTree', repo: 'push-empty', writes: true,
+      id: `push.total.${n}x${s}`, param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', writes: true,
       nfiles: n, size: s, bytes: total, entries: n,
       expect: total > pushCap ? refused('limit_exceeded', { what: 'push bytes' }) : (s > objCap ? refused('limit_exceeded', { what: 'object size' }) : ok),
     });

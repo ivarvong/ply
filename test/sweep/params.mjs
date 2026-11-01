@@ -19,6 +19,7 @@ export const PARAMS = [
   { key: 'maxSectionLines', limit: DEFAULT_LIMITS.maxSectionLines, probe: null, later: true },
   { key: 'maxTreeEntries', limit: DEFAULT_LIMITS.maxTreeEntries, probe: 'listTree', later: false },
   { key: 'maxPathDepth', limit: DEFAULT_LIMITS.maxPathDepth, probe: 'readFile of a path with that many components', later: false },
+  { key: 'maxPushBytes', limit: DEFAULT_LIMITS.maxPushBytes, probe: 'pushTree of files whose bytes sum past the cap', later: false },
   { key: 'maxPathComponent', limit: DEFAULT_LIMITS.maxPathComponent, probe: 'readFile of a component of that length', later: false },
   { key: 'maxMergeDepth', limit: DEFAULT_LIMITS.maxMergeDepth, probe: 'readLog limit and merge-base distance', later: false },
   { key: 'maxReportLines', limit: DEFAULT_LIMITS.maxReportLines, probe: null, later: true },
