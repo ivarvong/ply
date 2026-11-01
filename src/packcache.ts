@@ -11,10 +11,15 @@
 // Poison: a cached body that fails verification is evicted and refetched once (`x-ply-cache: bust` from the
 // client). The response carries `x-ply-pack-cache: HIT|MISS|BUST` so spans can say which tier served it.
 /* oxlint-disable require-unicode-regexp -- ASCII pkt-line text; `u` costs a byte per literal */
-import type { Attrs, Loose } from './transport.js';
+import type { Attrs } from './transport.js';
 import type { FetchLike } from './http.js';
+import type { Input } from './absent.js';
+import type { Option } from './result.js';
 import { te, td } from './bytes.js';
 import { cacheHeader } from './cachestatus.js';
+import { fromNullish, mapGet, readKey, unwrapOrAbsent, withDefaults } from './absent.js';
+import { getOrElse, mapOption, none } from './result.js';
+import { thrownText } from './boundary.js';
 
 const CACHE_HEADER = 'x-ply-pack-cache';
 export const CACHE_CONTROL_HEADER = 'x-ply-cache';
@@ -31,8 +36,10 @@ export function isCacheableFetch(body: string | Uint8Array): boolean {
   return has(/[0-9a-f]{4}command=fetch\n/) && !has(/[0-9a-f]{4}have [0-9a-f]{40}\n/) && !has(/[0-9a-f]{4}want-ref /) && !has(/[0-9a-f]{4}deepen-(since|not) /) && !has(/[0-9a-f]{4}shallow [0-9a-f]{40}\n/) && has(/[0-9a-f]{4}filter /);
 }
 
-export async function cacheKey(url: string, auth: string | null | undefined, body: Uint8Array, namespace = 'https://ply.pack/'): Promise<string> {
-  const prefix = te.encode(`ply-pack/1\n${url}\n${auth ?? ''}\n`);
+const NAMESPACE = 'https://ply.pack/';
+// `auth` null (or left out by a JS caller) is no Authorization header: the empty string in the key.
+export async function cacheKey(url: string, auth: string | null, body: Uint8Array, namespace: string = NAMESPACE): Promise<string> {
+  const prefix = te.encode(`ply-pack/1\n${url}\n${getOrElse(fromNullish(auth), '')}\n`);
   const all = new Uint8Array(prefix.length + body.length); all.set(prefix); all.set(body, prefix.length);
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', all));
   let hex = ''; for (const b of d) hex += b.toString(16).padStart(2, '0');
@@ -40,10 +47,17 @@ export async function cacheKey(url: string, auth: string | null | undefined, bod
 }
 
 // A plain-object header bag is matched case-insensitively. (An array of pairs reads as its indices, as it always has.)
-const headerOf = (headers: HeadersInit | undefined, name: string): string | null => headers instanceof Headers ? headers.get(name) : (Object.entries(headers ?? {}).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1] ?? null);
+const headerOf = (given: Option<HeadersInit>, name: string): string | null => {
+  if (given.tag === 'none') return null;
+  const headers = given.value;
+  if (headers instanceof Headers) return headers.get(name);
+  const hit = Object.entries(headers).find(([k]) => k.toLowerCase() === name.toLowerCase());
+  return hit ? getOrElse(fromNullish(hit[1]), null) : null;
+};
+const headersOf = (init: RequestInit): Option<HeadersInit> => readKey(init, 'headers');
 
 function peelRecordHeaders(init: RequestInit): { readonly init: RequestInit; readonly names: readonly string[] } {
-  const raw = headerOf(init.headers, RECORD_HEADERS_REQUEST);
+  const raw = headerOf(headersOf(init), RECORD_HEADERS_REQUEST);
   if (raw === null || raw === '') return { init, names: [] };
   const names = raw.split(',').map(s => s.trim().toLowerCase()).filter(s => s !== '');
   const headers = new Headers(init.headers);
@@ -52,43 +66,48 @@ function peelRecordHeaders(init: RequestInit): { readonly init: RequestInit; rea
 }
 
 // Anything with the Cache API's shape: `caches.default` on Workers, memoryCache() in tests.
+// match answers as the Cache API does: the response, or the platform's missing value on a miss.
 export type PackCache = {
-  readonly match: (key: string) => Promise<Response | undefined>;
+  readonly match: (key: string) => ReturnType<Cache['match']>;
   readonly put: (key: string, res: Response) => Promise<unknown>;
   readonly delete: (key: string) => Promise<unknown>;
 };
-export type CachingOptions = {
-  readonly waitUntil?: ((p: Promise<unknown>) => void) | null;
-  readonly namespace?: string;
-  readonly shouldCache?: (body: Uint8Array) => boolean;
-  readonly maxAge?: number;
+export type CachingConfig = {
+  readonly waitUntil: ((p: Promise<unknown>) => void) | null;
+  readonly namespace: string;
+  readonly shouldCache: (body: Uint8Array) => boolean;
+  readonly maxAge: number;
 };
+export type CachingOptions = Input<CachingConfig>;
+const cachingDefaults = (): CachingConfig => ({ waitUntil: null, namespace: NAMESPACE, shouldCache: isCacheableFetch, maxAge: 31_536_000 });
 export type CacheStats = { hit: number; miss: number; bust: number; bypass: number; putOk: number; putFailed: number; putError: string };
-// The fetch ply's HTTP transport calls (http.ts FetchLike), with the cache's counters.
-export type CachingFetch = ((url: string | URL, init?: RequestInit) => Promise<Response>) & { stats: CacheStats; attrs: (prefix?: string) => Attrs };
+// The fetch ply's HTTP transport calls (http.ts FetchLike), with the cache's counters. `init` and `prefix` may be left out.
+export type CachingFetch = ((url: string | URL, ...init: [] | [RequestInit]) => Promise<Response>) & { stats: CacheStats; attrs: (...prefix: [] | [string]) => Attrs };
 
-export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, { waitUntil = null, namespace, shouldCache = isCacheableFetch, maxAge = 31_536_000 }: CachingOptions = {}): CachingFetch {
+export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: CachingOptions = {}): CachingFetch {
+  const { waitUntil, namespace, shouldCache, maxAge } = withDefaults(options, cachingDefaults());
   const inner = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
   const stats: CacheStats = { hit: 0, miss: 0, bust: 0, bypass: 0, putOk: 0, putFailed: 0, putError: '' };
   const f = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
     const { init: wire, names } = peelRecordHeaders(init);
     const body = wire.body;
     if (wire.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !shouldCache(body)) { stats.bypass++; return inner(url, wire); }
-    const mode = headerOf(wire.headers, CACHE_CONTROL_HEADER);
-    const key = await cacheKey(String(url), headerOf(wire.headers, 'authorization'), body, namespace);
-    // oxlint-disable-next-line unicorn/no-useless-undefined -- a failed delete is ignored
-    if (mode === 'bust') { stats.bust++; await cache.delete(key).catch(() => undefined); }
+    const mode = headerOf(headersOf(wire), CACHE_CONTROL_HEADER);
+    const key = await cacheKey(String(url), headerOf(headersOf(wire), 'authorization'), body, namespace);
+    // a failed delete is ignored
+    if (mode === 'bust') { stats.bust++; await cache.delete(key).catch(() => null); }
     else {
-      // oxlint-disable-next-line unicorn/no-useless-undefined -- a failed match is a miss
-      const hit = await cache.match(key).catch(() => undefined);
-      if (hit) {
+      // a failed match is a miss
+      const hit = await cache.match(key).then(fromNullish, (): Option<Response> => none);
+      // oxlint-disable-next-line typescript/strict-boolean-expressions -- a falsy answer is a miss, as before
+      if (hit.tag === 'some' && hit.value) {
         stats.hit++;
-        const h = new Headers(hit.headers); h.set(CACHE_HEADER, cacheHeader('HIT'));
-        return new Response(hit.body, { status: 200, headers: h });
+        const h = new Headers(hit.value.headers); h.set(CACHE_HEADER, cacheHeader('HIT'));
+        return new Response(hit.value.body, { status: 200, headers: h });
       }
     }
     const res = await inner(url, wire);
-    const ct = res.headers.get('content-type') ?? '';
+    const ct = getOrElse(fromNullish(res.headers.get('content-type')), '');
     const h = new Headers(res.headers); h.set(CACHE_HEADER, cacheHeader(mode === 'bust' ? 'BUST' : 'MISS'));
     if (!res.ok || !ct.startsWith('application/x-git-upload-pack-result') || !res.body) return new Response(res.body, { status: res.status, headers: h });
     stats.miss++;
@@ -99,7 +118,7 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, { waitUntil
     stored.set('cache-control', `public, max-age=${maxAge}, immutable`);
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
     // oxlint-disable-next-line promise/always-return -- the counters are the outcome; the promise's value is unused (waitUntil)
-    const put = cache.put(key, new Response(toCache, { status: 200, headers: stored })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = String((e as Loose)?.message ?? e).slice(0, 200); }); // oxlint-disable-line typescript/no-unsafe-type-assertion -- see Loose (transport.ts)
+    const put = cache.put(key, new Response(toCache, { status: 200, headers: stored })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = thrownText(e).slice(0, 200); });
     if (waitUntil) waitUntil(put);
     return new Response(toClient, { status: 200, headers: h });
   };
@@ -116,7 +135,7 @@ export function memoryCache(): MemoryCache {
   return {
     entries,
     // oxlint-disable-next-line require-await, typescript/require-await -- the Cache API's shape: every method returns a promise
-    async match(key) { const e = entries.get(key); return e ? new Response(e.body.slice(), { status: 200, headers: e.headers }) : undefined; },
+    async match(key) { return unwrapOrAbsent(mapOption(mapGet(entries, key), e => new Response(e.body.slice(), { status: 200, headers: e.headers }))); },
     async put(key, res) { entries.set(key, { body: new Uint8Array(await res.arrayBuffer()), headers: Object.fromEntries(res.headers) }); },
     // oxlint-disable-next-line require-await, typescript/require-await -- as above
     async delete(key) { return entries.delete(key); },
