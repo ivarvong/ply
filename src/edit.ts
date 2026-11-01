@@ -18,7 +18,8 @@ import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
-import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { validateIdent, isValidatedIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import { parseCommitId } from './oid.js';
 import { signCommit } from './sign.js';
 import type { OperationOpts } from './operation.js';
 import type { FetchedObject as Fetched, SpState } from './fetch.js';
@@ -34,8 +35,8 @@ import type { EntryOptions } from './boundary.js';
 
 export { spInit, spStep, spFinish }; // the single-object pack parser lives in fetch.js; re-exported for callers of old paths
 
-// A caller's identity, before validateIdent. The commit time is the spec's `time`.
-export type Author = { readonly name: string; readonly email: string; readonly tz?: string };
+// A caller's identity, before validateIdent. `time` overrides the spec's `time` for this person; omitted uses the spec's.
+export type Author = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number };
 // A validated identity (validate.js validateIdent): frozen, branded, the only input ident() accepts.
 export type Ident = ReturnType<typeof validateIdent>;
 
@@ -102,35 +103,58 @@ export type EditSpec = {
   readonly find: string | Uint8Array;
   readonly replace: string | Uint8Array;
   readonly author: Author;
+  readonly committer?: Author | null;
   readonly message: string;
   readonly time?: number;
 };
 export type EditPlan = {
   readonly ref: string;
   readonly base: string;
+  readonly baseOid: boolean;
   readonly create: boolean;
   readonly path: string;
   readonly comps: readonly string[];
   readonly find: Uint8Array;
   readonly replace: Uint8Array;
   readonly author: Ident;
+  readonly committer: Ident;
   readonly message: string;
   readonly time: number;
   readonly head: string | null;
 };
+const HEX40 = /^[0-9a-fA-F]{40}$/u;
 // Pure: everything the caller controls, checked before any I/O. None of these strings can be escaped once inside git.
-// `base`: the ref whose head the commit is built on (default: `ref` itself). With base ≠ ref the push *creates* `ref`
-// (old oid = zeros), the way a pull-request branch is made; the CAS then means "the branch must not exist yet".
-export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
-  validatePushRef(ref, false); validateRef(base);
-  const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
+// `base`: the ref whose head the commit is built on (default: `ref` itself), or a 40-hex commit id. With a ref base ≠ ref
+// the push *creates* `ref` (old oid = zeros). A commit id is that parent; the ref is created only when it is absent,
+// and when it exists the id must be its tip (refuseRebase). The zero id is not a commit (parseCommitId, before any I/O).
+function resolvedBase(base: string): { readonly base: string; readonly oid: boolean } {
+  if (!HEX40.test(base)) return { base: validateRef(base), oid: false };
+  const id = parseCommitId(base);
+  if (!id.ok) throw id.error;
+  return { base: id.value, oid: true };
+}
+export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, committer = null, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
+  validatePushRef(ref, false);
+  const parsed = resolvedBase(base);
+  const resolved = parsed.base;
+  const baseIsOid = parsed.oid;
+  const stamp = author?.time ?? time;
+  const person = validateIdent({ name: author?.name, email: author?.email, time: stamp, tz: author?.tz });
+  const written = committer === undefined || committer === null ? person : validateIdent({ name: committer.name, email: committer.email, time: committer.time ?? stamp, tz: committer.tz });
   validateMessage(message);
   const comps = validatePath(path, limits);
   const find: unknown = bytesOf(findIn), replace: unknown = bytesOf(replaceIn);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
   if (!find.length) throw fail('bad_request', 'find must be non-empty');
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
-  return Object.freeze({ ref, base, create: base !== ref, path, comps, find, replace, author: person, message, time: person.time, head });
+  return Object.freeze({ ref, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== ref, path, comps, find, replace, author: person, committer: written, message, time: person.time, head });
+}
+
+// The ref exists and the caller named a commit that is not its tip. Committing there would move the ref off its
+// history. A new ref is how that commit is published. Not inside editOnce: that function's fail sites belong to the
+// merged `edges` space.
+export function refuseRebase(ref: string, base: string, tip: string): never {
+  throw fail('bad_request', `base ${base} is not the tip of ${ref} (${tip}); omit base to commit on the tip, or name a new ref to start from that commit`, { what: 'rebase' });
 }
 
 // Pure: which oid is the parent, and what the hint turned out to be. ls-refs always wins; the hint only decides
@@ -174,11 +198,16 @@ export type Built = {
   readonly objects: readonly PackObject[];
 };
 // Pure: the new trees (bottom-up splices), the commit, and the thin pack's object list.
-export function buildCommitObjects({ levels, blob, oldCommit, author, time, message }: {
+function identLine(person: Author | Ident, time: number): string {
+  if (isValidatedIdent(person)) return ident(person);
+  return ident(validateIdent({ name: person.name, email: person.email, time: person.time ?? time, tz: person.tz }));
+}
+export function buildCommitObjects({ levels, blob, oldCommit, author, committer, time, message }: {
   readonly levels: readonly Level[];
   readonly blob: Pick<BlobEdit, 'oldOid' | 'newOid' | 'delta' | 'newLen'>;
   readonly oldCommit: string;
   readonly author: Author | Ident;
+  readonly committer?: Author | Ident;
   readonly time: number;
   readonly message: string;
 }): Built {
@@ -192,9 +221,10 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, time, mess
     trees.unshift({ type: TYPE.TREE, data: delta, baseOid: oldOid, newOid, newData });
     child = newOid;
   }
-  const who = ident(validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz }));
+  const who = identLine(author, time);
+  const written = committer === undefined ? who : identLine(committer, time);
   // oxlint-disable-next-line prefer-template -- bundle budget: the JS's concatenation
-  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: who, message: message.endsWith('\n') ? message : message + '\n' });
+  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message: message.endsWith('\n') ? message : message + '\n' });
   const newCommit = hashObject('commit', commitData);
   const objects: PackObject[] = [
     { type: TYPE.COMMIT, data: commitData },
@@ -259,6 +289,7 @@ export type EditOptions = EntryOptions & {
   readonly verify?: boolean;
   readonly allowLfsPointer?: boolean;
   readonly signer?: Signer | null;
+  readonly retry?: boolean;
 };
 // What operation() and the attempt loop attach to an error on its way out: the root span, the attempt, the hint.
 type Tagged = { code?: unknown; span?: Span; attempt?: number; hint?: HintOutcome | null };
@@ -360,6 +391,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
   let streamed: { readonly scan: Held; readonly inflated: number } = { scan: { chunks: 0, maxChunk: 0 }, inflated: 0 };
   let hint = hintWas;
+  let creating = s.create;
   const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head ?? '', 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
   const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint ?? '', ...memAttrs({ objects: held, ...streamed }), ...(fetchImpl?.attrs ? fetchImpl.attrs() : {}) });
@@ -370,10 +402,24 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
-    // oxlint-disable-next-line promise-function-async -- bundle budget: the JS's own .then chain, byte for byte
-    const resolve = (): Promise<string> => lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => { const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`); return r.oid; });
+    // A ref base keeps the original chain. A 40-hex base is that commit; the ref is listed, and a tip that is some
+    // other commit is refuseRebase (the ref is not moved off its tip).
+    const resolve = async (): Promise<string> => {
+      if (s.baseOid) {
+        const { refs } = await lsRefs(t, [s.ref]);
+        const tip = refs.get(s.ref)?.oid ?? null;
+        if (tip !== null && tip !== s.base) refuseRebase(s.ref, s.base, tip);
+        creating = tip === null;
+        return s.base;
+      }
+      const { refs } = await lsRefs(t, [s.base]);
+      const found = refs.get(s.base);
+      if (!found) throw fail('not_found', `ref ${s.base} not found`);
+      return found.oid;
+    };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
     const [resolved, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e) : null]);
+    root.set({ 'git.edit.create': creating });
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas ?? decided.hint;
     const { oldCommit } = decided;
@@ -413,11 +459,11 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     if (blob.newOid === blobOid) return outcome('noop', summarize({ oldCommit, commit, blob, hint, attempt, noop: true }), { 'git.edit.blob.new': blob.newOid });
 
     // 5+6. new trees + commit (pure), then push (effect).
-    let built = buildCommitObjects({ levels, blob, oldCommit, author: s.author, time: s.time, message: s.message });
+    let built = buildCommitObjects({ levels, blob, oldCommit, author: s.author, committer: s.committer, time: s.time, message: s.message });
     if (signer) { built = withCommitData(built, await signCommit(built.commitData, signer)); root.set({ 'git.edit.commit.signed': signer.kind, 'git.edit.commit.signer': signer.publicKeyLine ?? '' }); }
     for (const tr of built.trees) cache.set(tr.newOid, tr.newData);
     root.set({ 'git.edit.tree.new': built.newTree, 'git.edit.commit.new': built.newCommit, 'git.edit.commit.bytes': built.commitData.length });
-    const pushed = await push(t, { ref: s.ref, oldOid: s.create ? ZERO_OID : oldCommit, newOid: built.newCommit, objects: built.objects });
+    const pushed = await push(t, { ref: s.ref, oldOid: creating ? ZERO_OID : oldCommit, newOid: built.newCommit, objects: built.objects });
     // report-status is the only receipt git offers, and a middlebox can forge it. verify: re-read the ref (one ~100 B
     // roundtrip) and require it to be our commit; a mismatch is 'ambiguous' (the push was acknowledged but not observed).
     if (verify) await verifyRef(t, root, 'git.edit', s.ref, built.newCommit);
@@ -433,13 +479,13 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
 // once; the retry's root span links to the first attempt's.
 // `strictHead: true` turns the hint into a precondition: if `ref` is not at `head`, the edit is a `cas_conflict` before
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
-export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, ...opts }: EditOptions = {}): Promise<EditResult> {
+export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, retry = true, ...opts }: EditOptions = {}): Promise<EditResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
   // an Error from the first attempt: editOnce tagged it (attempt, hint) and operation() gave it its root span; a value
   // that is not an Error is editOnce's result (a thrown non-Error would land there too, as before)
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
   const first = await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e as Error & Tagged);
   if (!(first instanceof Error)) return first;
-  if (first.code !== 'cas_conflict' || first.attempt !== 0 || strictHead) throw first;
+  if (!retry || first.code !== 'cas_conflict' || first.attempt !== 0 || strictHead) throw first;
   return editOnce(url, spec, opts, { head: null, attempt: 1, linkTo: first.span ?? null, hintWas: first.hint ?? null });
 }

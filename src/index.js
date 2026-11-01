@@ -1,6 +1,17 @@
 // Full entry point. Bundles that only edit should import 'ply/edit' (src/edit.js): it pulls in only the free
 // functions it uses. Everything here is tree-shakeable (no classes on the hot path, no module side effects).
 export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, isLfsPointerPrefix, withCommitData } from './edit.js';
+/**
+ * One path change in commitChanges: create, write, edit, delete, or rename.
+ * @typedef {import('./changes.js').Change} Change
+ */
+/**
+ * @typedef {import('./changes.js').CommitChangesSpec} CommitChangesSpec
+ */
+/**
+ * @typedef {import('./changes.js').CommitChangesResult} CommitChangesResult
+ */
+export { commitChanges } from './changes.js';
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
 export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, fetchCommit } from './read.js';
