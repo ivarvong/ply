@@ -38,7 +38,8 @@ import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCode, thrownMessage, thrownReason } from './boundary.js';
+import { thrownCode, thrownMessage } from './boundary.js';
+import { fetchCommit } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
@@ -108,17 +109,7 @@ export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolve
   throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${typeof ref === 'string' ? ref : ''} not found`, { miss });
 }
 
-// Effect: the commit object alone (tree:0, deepen 1). A bare oid that is not a commit (or not on the server) is the
-// caller's not_found, not a corrupt pack.
-async function fetchCommit(t: Transport, commit: string): Promise<Uint8Array> {
-  const c = await fetchObject(t, { oid: commit, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }).catch((e: unknown) => {
-    // A tree, blob, or tag is already not_found from refuseNonCommit (`${oid} is not a commit`). An oid the server
-    // does not have is remote_error with reason not_our_ref. A corrupt pack stays pack_corrupt.
-    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
-    throw e;
-  });
-  return c.data;
-}
+export { fetchCommit, type FetchedCommit, type CommitMiss } from './commit.js';
 
 // An ident for JSON. `time` is ISO-8601 UTC, `epoch` the raw seconds, `tz` the offset as written (+0530).
 export type IdentView = { readonly name: string; readonly email: string; readonly time: string | null; readonly epoch: number | null; readonly tz: string };
@@ -166,7 +157,7 @@ export async function readCommit(url: string, { ref = null }: { readonly ref?: R
     }
     if ('empty' in resolved) return outcome('ok', resolved);
     const { name, commit } = resolved;
-    const view = commitView(await fetchCommit(t, commit), t.limits);
+    const view = commitView(orThrow(await fetchCommit(t, commit)).data, t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
   });
 }
@@ -203,7 +194,7 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
 
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
 async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Walked> {
-  const info: { readonly tree: string } = parseCommit(await fetchCommit(t, commit), limits);
+  const info: { readonly tree: string } = parseCommit(orThrow(await fetchCommit(t, commit)).data, limits);
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.tree });
   const walked = orThrow(await walkPath(t, info.tree, comps, { cache }));
   return { tree: info.tree, entry: walked.entry };

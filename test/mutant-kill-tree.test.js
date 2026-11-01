@@ -8,7 +8,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
-import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob } from '../src/read.js';
+import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, fetchCommit } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
 import { buildPack, encodeObjHeader, zlibDeflate } from '../src/pack.js';
 import { parsePack, resolvePack, makeDelta } from '../src/packresolve.js';
@@ -650,9 +650,10 @@ test('checkoutTree: a bare commit oid, a non-commit, missing trees and a short p
   assert.deepEqual([res.ref, res.commit], [c, c]);
   assert.equal(r.log.filter(x => x.command === 'ls-refs').length, 0, 'a bare oid needs no ls-refs');
   assert.equal(e.span('git.checkout').attrs['git.checkout.ref'], c);
-  await rejects(checkoutTree('http://fake/r.git', { ref: 'e'.repeat(40) }, env(r).opts), 'not_found', `commit ${'e'.repeat(40)} not found on the remote`);
-  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.src }, env(r).opts), 'not_found', `${GIT.src} is not a commit`);
-  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.readme }, env(r).opts), 'not_found', `${GIT.readme} is not a commit`);
+  const missing = 'e'.repeat(40);
+  await rejects(checkoutTree('http://fake/r.git', { ref: missing }, env(r).opts), 'not_found', `commit ${missing} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: missing } } });
+  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.src }, env(r).opts), 'not_found', `${GIT.src} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.src, type: 'tree' } } });
+  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.readme }, env(r).opts), 'not_found', `${GIT.readme} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.readme, type: 'blob' } } });
   // a pack without the commit, or without a tree under it
   const only = async oids => (await buildPack(oids.map(o => r.objects.get(o)))).pack;
   const lying = pack => remote({ hook: async req => (req.command === 'fetch' ? packFrames(await pack()) : undefined) });
@@ -871,12 +872,28 @@ test('readCommit: the commit alone (tree:0, deepen 1), its view and span; a non-
   assert.deepEqual((await readCommit('http://fake/r.git', { ref: 'main' }, e2.opts)).parents, [c]);
   assert.deepEqual([e2.span('git.read_commit').attrs['git.read_commit.ref'], e2.span('git.read_commit').attrs['git.read_commit.parents']], ['main', 1]);
   assert.equal((await readCommit('http://fake/r.git', { ref: child }, env(r).opts)).oid, child);
-  await rejects(readCommit('http://fake/r.git', { ref: GIT.root }, env(r).opts), 'not_found', `${GIT.root} is not a commit`);
-  await rejects(readCommit('http://fake/r.git', { ref: 'f'.repeat(40) }, env(r).opts), 'not_found', `commit ${'f'.repeat(40)} not found on the remote`);
+  await rejects(readCommit('http://fake/r.git', { ref: GIT.root }, env(r).opts), 'not_found', `${GIT.root} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.root, type: 'tree' } } });
+  const absentId = 'f'.repeat(40);
+  await rejects(readCommit('http://fake/r.git', { ref: absentId }, env(r).opts), 'not_found', `commit ${absentId} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: absentId } } });
+  const tagData = encodeTag({ object: c, type: 'commit', tag: 'v1', tagger: 'A <a@x> 1 +0000', message: 't\n' });
+  const tagOid = hashObject('tag', tagData);
+  r.objects.set(tagOid, { type: TYPE.TAG, data: tagData });
+  const tagged = await fetchCommit(r.transport({ tracer: new Tracer() }), tagOid);
+  assert.equal(tagged.ok, false);
+  if (!tagged.ok) assert.deepEqual({ code: tagged.error.code, message: tagged.error.message, miss: tagged.error.miss }, { code: 'not_found', message: `${tagOid} is not a commit`, miss: { kind: 'commit', miss: { kind: 'not_commit', oid: tagOid, type: 'tag' } } });
+  const blobbed = await fetchCommit(r.transport({ tracer: new Tracer() }), GIT.readme);
+  assert.equal(blobbed.ok, false);
+  if (!blobbed.ok) assert.deepEqual(blobbed.error.miss, { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.readme, type: 'blob' } });
   const other = remote({ hook: async req => (req.command === 'fetch' ? [dataFrame('ERR upload-pack: busy')] : undefined) }); other.refs.set('refs/heads/main', c);
   await rejects(readCommit('http://fake/r.git', {}, env(other).opts), 'remote_error', 'remote: upload-pack: busy');
+  const busy = await fetchCommit(other.transport({ tracer: new Tracer() }), c);
+  assert.equal(busy.ok, false);
+  if (!busy.ok) { assert.equal(busy.error.code, 'remote_error'); assert.equal(busy.error.miss, undefined); }
   const corrupt = remote({ hook: async req => (req.command === 'fetch' ? packFrames((await buildPack([r.objects.get(GIT.readme)])).pack) : undefined) }); corrupt.refs.set('refs/heads/main', c);
   await rejects(readCommit('http://fake/r.git', {}, env(corrupt).opts), 'pack_corrupt', `object ${GIT.readme} served for want ${c}`);
+  const lied = await fetchCommit(corrupt.transport({ tracer: new Tracer() }), c);
+  assert.equal(lied.ok, false);
+  if (!lied.ok) { assert.equal(lied.error.code, 'pack_corrupt'); assert.equal(lied.error.message, `object ${GIT.readme} served for want ${c}`); assert.equal(lied.error.miss, undefined); }
 });
 
 test('listTree: the root, a subdirectory, cache hits and every not_found', async () => {

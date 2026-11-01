@@ -12,8 +12,8 @@ export type Caught = { readonly code?: unknown; readonly message: string; readon
 // The same read as `e?.field` (optional chaining: null and undefined have no fields, a primitive has none of these).
 const isObject = (e: unknown): e is object => typeof e === 'object' && e !== null;
 export const thrownCode = (e: unknown): unknown => (isObject(e) && 'code' in e ? e.code : undefined);
-export const thrownMessage = (e: unknown): unknown => (isObject(e) && 'message' in e ? e.message : undefined);
 export const thrownReason = (e: unknown): unknown => (isObject(e) && 'reason' in e ? e.reason : undefined);
+export const thrownMessage = (e: unknown): unknown => (isObject(e) && 'message' in e ? e.message : undefined);
 export const thrownName = (e: unknown): unknown => (isObject(e) && 'name' in e ? e.name : undefined);
 export const thrownStack = (e: unknown): unknown => (isObject(e) && 'stack' in e ? e.stack : undefined);
 // Span attributes are a record. A missing or non-object `attrs` is absent, which is what `if (e.attrs) span.set` skipped.

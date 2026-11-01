@@ -124,8 +124,8 @@ export type V2State = {
 export type V2Step = { readonly state: V2State; readonly pack: Uint8Array | null };
 
 // upload-pack's own words for an oid it will not send. v2 prefixes `upload-pack: `; v0 and v1 do not. A trailing oid
-// is separated by a space, so `not our refresh` is a different error. Recognised once, here: callers switch on
-// `reason` instead of the message.
+// is separated by a space, so `not our refresh` is a different error. Recognised once, here (#112): callers switch
+// on `reason` instead of the message (#76).
 const NOT_OUR_REF = 'not our ref';
 const UPLOAD_PACK_NOT_OUR_REF = 'upload-pack: not our ref';
 function notOurRefReason(text: string): { readonly reason: 'not_our_ref' } | undefined {
@@ -379,6 +379,30 @@ export type FetchedObject = {
 };
 
 type Single = { readonly oid: string; readonly filter: string; readonly deepen: number | undefined; readonly expectType: number | null };
+// The object count in a pack header, or null when the header is not a version-2 pack (the single-object parser then
+// reports its own error). A commit want may be a tag plus the commit it peels to: more than one object, and still the
+// wanted object's type.
+function declaredPackCount(pack: Uint8Array): number | null {
+  if (pack.length < PACK_HEADER_BYTES) return null;
+  if (!pack.subarray(0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i])) return null;
+  if (readUint32BE(pack, PACK_SIGNATURE.length) !== PACK_VERSION) return null;
+  return readUint32BE(pack, PACK_SIGNATURE.length + UINT32_BYTES);
+}
+// A multi-object answer to a commit want: the wanted object, once its type is a commit. A tree, blob, or tag throws
+// not_found from refuseNonCommit. Null means the single-object parser should read the bytes (one object, a short
+// header, or a pack that does not hold the want).
+function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span, bust: boolean): FetchedObject | null {
+  const count = declaredPackCount(pack);
+  if (count === null || count === 1) return null;
+  const objects: Map<string, PackObject> = resolvePack(parsePack(pack, packParseOpts(t.limits)), undefined, t.limits).objects;
+  const want = objects.get(oid);
+  if (!want) return null;
+  span.set({ 'git.pack.objects': count, 'git.object.oid': oid, 'git.object.type': String((TYPE_NAME as Names)[want.type]) });
+  refuseNonCommit(TYPE.COMMIT, want.type, oid);
+  if (want.type !== TYPE.COMMIT) return null;
+  assertFetched('commit', want.data, t.limits);
+  return { type: want.type, data: want.data, oid, size: want.data.length, bust };
+}
 async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Single): Promise<FetchedObject> {
   // The span is where the transport says whether the response came from a cache; a verification failure after a HIT is
   // retried once past the cache (packcache.js), a corrupt live response is not.
@@ -389,11 +413,32 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
       // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
       // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
       let sp = spInit(); const zlibParts: Uint8Array[] = [];
-      for await (const chunk of packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span)) {
+      // One size check, in `once`: a nested function that threw would rename this decision (the #2 claims-owed hole).
+      const feed = (chunk: Uint8Array): void => {
         const r = spStep(sp, chunk); sp = r.state;
-        if (sp.phase === 'body' && sp.size > maxObject) throw limitError('object size', sp.size, maxObject);
         for (const z of r.zlib) zlibParts.push(z);
+      };
+      const wire = packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span);
+      let oversized = false;
+      // A commit id may arrive as the tag object plus the commit it peels to. The single-object parser refuses that
+      // count; the wanted object's type is still the not_commit answer. Other wants stay a stream, and stop at the
+      // declared size before the rest of the pack is read.
+      if (expectType === TYPE.COMMIT) {
+        const parts: Uint8Array[] = [];
+        for await (const chunk of wire) parts.push(chunk);
+        const pack = concat(parts);
+        const found = commitFromPack(t, oid, pack, span, bust);
+        if (found) return found;
+        feed(pack);
+        oversized = sp.phase === 'body' && sp.size > maxObject;
+      } else {
+        for await (const chunk of wire) {
+          feed(chunk);
+          oversized = sp.phase === 'body' && sp.size > maxObject;
+          if (oversized) break;
+        }
       }
+      if (oversized) throw limitError('object size', sp.size, maxObject);
       sp = spFinish(sp);
       const zlib = concat(zlibParts);
       const { out, consumed, stats } = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });

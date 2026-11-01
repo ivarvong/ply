@@ -104,8 +104,9 @@ test('from / onto: the zero oid is refused before any request; an oid that is no
   await assert.rejects(mergeBranch(r.url, { from: zero, author: PAIRS[0][0] }, opts), e => e.code === 'bad_request' && e.what === 'from');
   await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: zero, committer: PAIRS[0][1] }, opts), e => e.code === 'bad_request' && e.what === 'onto');
   const tree = run(r.bare, ['rev-parse', 'main^{tree}'], BASE_ENV);
-  await assert.rejects(mergeBranch(r.url, { from: tree, author: PAIRS[0][0] }, opts), e => e.code === 'not_found' && e.what === 'from');
-  await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'f'.repeat(40), committer: PAIRS[0][1] }, opts), e => e.code === 'not_found' && e.what === 'onto');
+  await assert.rejects(mergeBranch(r.url, { from: tree, author: PAIRS[0][0] }, opts), e => e.code === 'not_found' && e.what === 'from' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && e.miss.miss.oid === tree);
+  const onto = 'f'.repeat(40);
+  await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto, committer: PAIRS[0][1] }, opts), e => e.code === 'not_found' && e.what === 'onto' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === onto);
   assert.equal(run(r.bare, ['rev-parse', 'main'], BASE_ENV), r.main, 'nothing pushed');
   assert.equal(run(r.bare, ['rev-parse', 'feat'], BASE_ENV), r.feat, 'nothing pushed');
 });

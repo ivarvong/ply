@@ -17,7 +17,7 @@ export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   not_git: { where: 'remote', what: 'the endpoint is not a git smart-HTTP server (wrong content-type)' },
   protocol: { where: 'remote', what: 'malformed pkt-line / v2 framing from the server' },
   pack_corrupt: { where: 'remote', what: 'a pack or object failed verification (hash, size, zlib, delta; an unwanted object; a tree naming one entry twice)' },
-  remote_error: { where: 'remote', what: 'the server said ERR / band 3' },
+  remote_error: { where: 'remote', what: 'the server said ERR / band 3; reason not_our_ref when the text is upload-pack\'s not-our-ref' },
   limit_exceeded: { where: 'local', what: 'a limits.* bound was hit before allocation' },
   match_count: { where: 'content', what: 'find matched 0 or >1 times (exactly-one-match contract)' },
   lfs_pointer: { where: 'content', what: 'the blob is a Git LFS pointer (pass allowLfsPointer to edit it)' },

@@ -655,7 +655,27 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
   let st = v2Init(limits);
   const feed = frame => { const r = v2Step(st, frame); st = r.state; return r; };
   const line = s => ({ kind: 'data', payload: te.encode(s) });
-  throws(() => feed(line('ERR boom\n')), 'remote_error', 'remote: boom');
+  const errOf = (text) => {
+    st = v2Init(limits);
+    try { feed(line(`ERR ${text}\n`)); } catch (e) { return e; }
+    assert.fail(`ERR ${text} did not throw`);
+  };
+  const boom = errOf('boom');
+  assert.equal(boom.code, 'remote_error');
+  assert.equal(boom.message, 'remote: boom');
+  assert.equal(boom.reason, undefined);
+  for (const text of ['not our ref', 'not our ref abc', 'upload-pack: not our ref', 'upload-pack: not our ref abc']) {
+    const e = errOf(text);
+    assert.equal(e.code, 'remote_error', text);
+    assert.equal(e.message, `remote: ${text}`, text);
+    assert.equal(e.reason, 'not_our_ref', text);
+  }
+  for (const text of ['not our refresh', 'upload-pack: not our refresh', 'upload-pack: not our refX']) {
+    const e = errOf(text);
+    assert.equal(e.code, 'remote_error', text);
+    assert.equal(e.message, `remote: ${text}`, text);
+    assert.equal(e.reason, undefined, text);
+  }
   st = v2Init(limits);
   assert.equal(feed(line('packfile')).state.phase, 'pack');
   assert.deepEqual(feed({ kind: 'flush' }).state.done, true);
@@ -706,7 +726,19 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
   assert.equal(prog.state.band2, 600);
   assert.equal(prog.state.band2Frames, 1);
   assert.equal(prog.state.progress.length, 512);
-  throws(() => feed({ kind: 'data', payload: te.encode('\x03  boom \n') }), 'remote_error', 'remote: boom');
+  const bandErr = (body) => {
+    try { feed({ kind: 'data', payload: concat([Uint8Array.of(3), te.encode(body)]) }); } catch (e) { return e; }
+    assert.fail(body);
+  };
+  const bandBoom = bandErr('  boom \n');
+  assert.equal(bandBoom.code, 'remote_error');
+  assert.equal(bandBoom.message, 'remote: boom');
+  assert.equal(bandBoom.reason, undefined);
+  const bandAbsent = bandErr('upload-pack: not our ref abc');
+  assert.equal(bandAbsent.code, 'remote_error');
+  assert.equal(bandAbsent.message, 'remote: upload-pack: not our ref abc');
+  assert.equal(bandAbsent.reason, 'not_our_ref');
+  assert.equal(bandErr('not our refresh').reason, undefined);
   throws(() => feed({ kind: 'data', payload: Uint8Array.of(9, 1) }), 'protocol', 'v2: bad sideband 9');
   throws(() => parseSideband(new Uint8Array(0)), 'protocol', 'short read: need 1 bytes at 0, have 0');
   assert.equal(parseSideband(Uint8Array.of(SIDEBAND_PACK)).body.length, 0);

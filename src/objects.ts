@@ -29,7 +29,7 @@ export const TYPE_ID: {
   readonly commit: typeof OBJ_COMMIT; readonly tree: typeof OBJ_TREE; readonly blob: typeof OBJ_BLOB; readonly tag: typeof OBJ_TAG;
 } = Object.freeze({ commit: OBJ_COMMIT, tree: OBJ_TREE, blob: OBJ_BLOB, tag: OBJ_TAG });
 
-// A tree, blob, or tag. A commit, a delta, or an unknown type id is null: those are not "not a commit" in the typed sense.
+// A pack type that is an object and not a commit. A commit, a delta, or an unknown type id is null.
 export function nonCommitType(type: number): 'tree' | 'blob' | 'tag' | null {
   if (type === TYPE.TREE) return 'tree';
   if (type === TYPE.BLOB) return 'blob';
