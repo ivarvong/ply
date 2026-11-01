@@ -187,9 +187,13 @@ async function plan(n) {
 }
 
 // A unit as k ranges of about equal measured cost, each ending on a line none of its mutants spans past. k <= 1, or a
-// unit with no such line near a cut, stays whole.
+// unit with no such line near a cut, stays whole. A slice no mutant lies wholly inside is dropped: line cost counts
+// every mutant that *starts* on the line, including one that ends outside the changed range (Stryker's --mutate
+// range keeps only a mutant wholly inside it). Such a slice mutates nothing, the report has no file entry, and the
+// merge rejects it (http.ts:106 and http.ts:228 on #133).
 function split({ file, from, to, whole, inside, byLine, weight }, k) {
   const label = (a, b) => (whole && a === from && b === to ? file : `${file}:${a}-${b}`);
+  const held = (a, b) => inside.some(([s, e]) => s >= a && e <= b);
   if (k <= 1) return [{ unit: label(from, to), weight }];
   const crossed = new Set();
   for (const [a, b] of inside) for (let l = a; l < b; l++) crossed.add(l);
@@ -206,7 +210,11 @@ function split({ file, from, to, whole, inside, byLine, weight }, k) {
     if (best !== null) cuts.push(best);
   }
   const bounds = [from - 1, ...cuts, to];
-  return bounds.slice(1).map((b, i) => ({ unit: label(bounds[i] + 1, b), weight: upTo.get(b) - upTo.get(bounds[i]) }));
+  return bounds.slice(1).flatMap((b, i) => {
+    const start = bounds[i] + 1;
+    if (!held(start, b)) return [];
+    return [{ unit: label(start, b), weight: upTo.get(b) - upTo.get(bounds[i]) }];
+  });
 }
 
 const unitFile = unit => unit.replace(/:\d+-\d+$/, '');
