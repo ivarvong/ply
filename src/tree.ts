@@ -285,7 +285,7 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
     const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => refs.get(s.base)?.oid ?? null), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
-    if (resolved === null && s.create) throw fail('not_found', `ref ${s.base} not found`);
+    if (resolved === null && s.create) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } });
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas ?? decided.hint;
     const parent = decided.oldCommit;
