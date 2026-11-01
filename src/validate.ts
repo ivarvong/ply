@@ -1,69 +1,87 @@
 // Caller-supplied strings that reach a git object header or a protocol command line are validated here.
 // Anything that could terminate a header line or a pkt-line field is rejected rather than escaped: git has no escaping.
-import { thrown as fail } from './errors.js';
+// Each check returns a Result (`…Result`); the name without the suffix is its throwing form, for callers that still throw.
+import { fail, orThrow } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { requireLimit } from './limits.js';
+import { readLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { encodeBytes, te } from './bytes.js';
+import { encodeBytes, encodeBytesResult, te } from './bytes.js';
 import { MODE_LINK, IDENT_TZ_DIGITS, IDENT_TZ_HOUR_MIN, IDENT_TZ_HOUR_MAX, IDENT_TZ_MINUTE_MAX } from './format.js';
-const bad = (what: string, why: string): ErrorOf<'bad_request'> => fail('bad_request', `invalid ${what}: ${why}`, { what });
+import type { Err, Option, Result } from './result.js';
+import { getOrElse, none, ok, some } from './result.js';
+import type { Input } from './absent.js';
+import { atOr, withDefaults } from './absent.js';
+import type { Refname } from './refname.js';
+import type { Path } from './path.js';
+
+type Bad = ErrorOf<'bad_request'>;
+const bad = (what: string, why: string): Err<Bad> => fail('bad_request', `invalid ${what}: ${why}`, { what });
 
 // Brand for an ident that has been through validateIdent. A spread drops it, so ident() cannot be fed a copy.
 const VALIDATED_IDENT: unique symbol = Symbol('validatedIdent');
 export type Ident = { readonly name: string; readonly email: string; readonly time: number; readonly tz: string };
 export type ValidatedIdent = Ident & { readonly [VALIDATED_IDENT]: true };
-// What a caller hands validateIdent: anything, field by field.
-export type IdentInput = { readonly name?: unknown; readonly email?: unknown; readonly time?: unknown; readonly tz?: unknown };
-export const isValidatedIdent = (person: unknown): person is ValidatedIdent => {
-  if (typeof person !== 'object' || person === null) return false;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the brand is a symbol property, invisible on the public ident type
-  return (person as { readonly [VALIDATED_IDENT]?: unknown })[VALIDATED_IDENT] === true;
-};
+// What a caller hands validateIdent: anything, field by field (a public input record, parsed once below).
+export type IdentFields = { readonly name: unknown; readonly email: unknown; readonly time: unknown; readonly tz: unknown };
+export type IdentInput = Input<IdentFields>;
+export const isValidatedIdent = (person: unknown): person is ValidatedIdent =>
+  typeof person === 'object' && person !== null && Reflect.get(person, VALIDATED_IDENT) === true;
 const TZ_TEXT = new RegExp(`^[+-][0-9]{${IDENT_TZ_DIGITS}}$`, 'u');
+// A field the caller left out is null here, which every check below refuses as it refused the missing value. An
+// omitted zone means UTC (a null one is refused, as before).
+const identDefaults = (): IdentFields => ({ name: null, email: null, time: null, tz: '+0000' });
 
-export function validateIdent({ name, email, time, tz = '+0000' }: IdentInput = {}): ValidatedIdent {
+export function validateIdentResult(input: IdentInput = {}): Result<ValidatedIdent, Bad> {
+  const { name, email, time, tz } = withDefaults(input, identDefaults());
   // Exactly fsck.c fsck_ident(): name is everything before " <" and may not contain '<', '>', NUL or newline;
   // email is between '<' and '>' and may not contain '<', '>', NUL or newline. Anything else — punctuation,
   // leading/trailing spaces, tabs, empty name or email — is a valid object. (Verified against git fsck --strict.)
   for (const [k, v] of [['author name', name], ['author email', email]] as const) {
-    if (typeof v !== 'string') throw bad(k, 'must be a string');
-    if (/[\0\n<>]/u.test(v)) throw bad(k, 'must not contain NUL, newline, < or >');
+    if (typeof v !== 'string') return bad(k, 'must be a string');
+    if (/[\0\n<>]/u.test(v)) return bad(k, 'must not contain NUL, newline, < or >');
   }
   // Caller time is a unix epoch. A string would be interpolated into the header; only a safe non-negative integer is.
-  if (!Number.isSafeInteger(time) || Number(time) < 0) throw bad('time', 'must be a non-negative safe integer');
-  // Caller zones are the civil range. fsck_ident does not range-check (checkIdent still accepts +9999). Omitted means UTC
-  // (the parameter default: undefined only, as before).
-  if (typeof tz !== 'string' || !TZ_TEXT.test(tz)) throw bad('tz', 'must be a sign and four digits');
+  if (!Number.isSafeInteger(time) || Number(time) < 0) return bad('time', 'must be a non-negative safe integer');
+  // Caller zones are the civil range. fsck_ident does not range-check (checkIdent still accepts +9999).
+  if (typeof tz !== 'string' || !TZ_TEXT.test(tz)) return bad('tz', 'must be a sign and four digits');
   const hourDigits = IDENT_TZ_DIGITS / 2;
-  const sign = tz[0] === '-' ? -1 : 1;
+  const sign = tz.startsWith('-') ? -1 : 1;
   const hours = sign * Number(tz.slice(1, 1 + hourDigits));
   const minutes = Number(tz.slice(1 + hourDigits));
-  if (minutes > IDENT_TZ_MINUTE_MAX || minutes < 0) throw bad('tz', 'minutes out of range');
-  if (hours < IDENT_TZ_HOUR_MIN || hours > IDENT_TZ_HOUR_MAX) throw bad('tz', 'hours out of range');
-  if ((hours === IDENT_TZ_HOUR_MAX || hours === IDENT_TZ_HOUR_MIN) && minutes !== 0) throw bad('tz', 'extreme offset must be on the hour');
+  if (minutes > IDENT_TZ_MINUTE_MAX || minutes < 0) return bad('tz', 'minutes out of range');
+  if (hours < IDENT_TZ_HOUR_MIN || hours > IDENT_TZ_HOUR_MAX) return bad('tz', 'hours out of range');
+  if ((hours === IDENT_TZ_HOUR_MAX || hours === IDENT_TZ_HOUR_MIN) && minutes !== 0) return bad('tz', 'extreme offset must be on the hour');
   const person = { name, email, time, tz };
   Object.defineProperty(person, VALIDATED_IDENT, { value: true });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the loop above checked name and email, defineProperty added the brand; neither narrows the type
-  return Object.freeze(person) as ValidatedIdent;
+  return ok(Object.freeze(person) as ValidatedIdent);
 }
+export const validateIdent = (input: IdentInput = {}): ValidatedIdent => orThrow(validateIdentResult(input));
 
 // A pkt-line field. CR, LF, or NUL ends the line or the command the way a header injection does.
-export function validateWire(value: unknown, what: string): string {
-  if (typeof value !== 'string' || /[\0\r\n]/u.test(value)) throw bad(what, 'must be a string without NUL, CR, or LF');
-  return value;
+export function validateWireResult(value: unknown, what: string): Result<string, Bad> {
+  if (typeof value !== 'string' || /[\0\r\n]/u.test(value)) return bad(what, 'must be a string without NUL, CR, or LF');
+  return ok(value);
 }
+export const validateWire = (value: unknown, what: string): string => orThrow(validateWireResult(value, what));
 
-export function validateRef(ref: unknown): string {
-  if (typeof ref !== 'string' || !ref.startsWith('refs/')) throw bad('ref', 'must be a full ref name starting with refs/');
+// The first check of validateRefResult, and the brand it grants: a value leaves validateRefResult as a Refname only
+// after every check below it, so the brand is the whole check (refname.ts reads the brand; no second test).
+const isFullRef = (ref: unknown): ref is Refname => typeof ref === 'string' && ref.startsWith('refs/');
+
+export function validateRefResult(ref: unknown): Result<Refname, Bad> {
+  if (!isFullRef(ref)) return bad('ref', 'must be a full ref name starting with refs/');
   // git check-ref-format rules that matter for injection and server acceptance
   // (NUL, CR, LF and the other controls are one class: check-ref-format refuses all of them)
   // oxlint-disable-next-line no-control-regex -- check-ref-format refuses control characters; matching them is the point
-  if (/[\0-\u001F\u007F ~^:?*[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\./u.test(ref)) throw bad('ref', 'fails check-ref-format');
-  if (ref.length > 1024) throw bad('ref', 'too long');
+  if (/[\0-\u001F\u007F ~^:?*[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\./u.test(ref)) return bad('ref', 'fails check-ref-format');
+  if (ref.length > 1024) return bad('ref', 'too long');
   // a lone surrogate would be written as U+FFFD (TextEncoder); only an escaped byte from a read maps back (#43)
-  encodeBytes(ref, 'ref');
-  return ref;
+  const bytes = encodeBytesResult(ref, 'ref');
+  if (!bytes.ok) return bytes;
+  return ok(ref);
 }
+export const validateRef = (ref: unknown): Refname => orThrow(validateRefResult(ref));
 
 // A ref a push may name: git v2.50.0 receive-pack.c update() refuses anything else as "funny refname", checking the name
 // after "refs/" with check_refname_format(name + 5, deleting ? REFNAME_ALLOW_ONELEVEL : 0). validateRef already holds the
@@ -71,11 +89,14 @@ export function validateRef(ref: unknown): string {
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
 // The ref is typed string (push.js's callers pass one); validateRef still refuses a non-string at run time.
-export function validatePushRef(ref: string, deleting: boolean): string {
-  const name = validateRef(ref).slice(5); // after "refs/"
-  if (name === '@' || (!deleting && !name.includes('/'))) throw bad('ref', 'receive-pack refuses it (funny refname)');
-  return ref;
+export function validatePushRefResult(ref: string, deleting: boolean): Result<Refname, Bad> {
+  const full = validateRefResult(ref);
+  if (!full.ok) return full;
+  const name = full.value.slice('refs/'.length);
+  if (name === '@' || (!deleting && !name.includes('/'))) return bad('ref', 'receive-pack refuses it (funny refname)');
+  return full;
 }
+export const validatePushRef = (ref: string, deleting: boolean): Refname => orThrow(validatePushRefResult(ref, deleting));
 
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
 // Ported line by line, because the edges are where a name gets through: `git~1` but not `git~2`; `.git:x` (an NTFS
@@ -84,7 +105,7 @@ export function validatePushRef(ref: string, deleting: boolean): string {
 // NTFS fallback short names of .gitmodules); `a\.git` (fsck reads a backslash as a separator, whatever the platform).
 // Case folds ASCII only (git's tolower), never Unicode. The fuzz-free check of all of it: test/space/fsck-tree.test.js.
 // Past the end reads 0 (git's NUL terminator); no caller passes a negative index.
-const at = (b: Uint8Array, i: number): number => b[i] ?? 0;
+const at = (b: Uint8Array, i: number): number => atOr(b, i, 0);
 const lower = (c: number): number => (c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
 // ASCII needles only: their UTF-8 bytes are their code points
 const ascii = (s: string): Uint8Array => te.encode(s);
@@ -172,59 +193,77 @@ export const isDotFileName = (b: Uint8Array, file: DotFile): boolean => {
   const [name, prefix] = DOTFILES[file];
   return isHfsDot(b, name) || isNtfsDot(b, 0, name, prefix) || (file === 'gitmodules' && backslashTails(b).some(o => isNtfsDot(b, o, name, prefix)));
 };
-// A component of a caller path: refused where fsck refuses the tree entry name
+// A component of a caller path: refused where fsck refuses the tree entry name (throws on a string with no bytes)
 export const isDotGit = (c: string): boolean => isDotGitName(encodeBytes(c, 'path'));
 
 // read-cache.c verify_path for the checkout of one path (`/`-separated tree names) of `mode` (canonical) on `platform`
 // (process.platform), with git's defaults: core.protectNTFS on everywhere, core.protectHFS on macOS. Returns the reason
-// git refuses it, or null. Every name parseTree accepts passes on Linux and macOS (fsck --strict refuses a superset:
+// git refuses it, or None. Every name parseTree accepts passes on Linux and macOS (fsck --strict refuses a superset:
 // test/space/fsck-tree.test.js checks it against `git read-tree` with both protections on); this is the check at the
 // point of writing all the same. On Windows a backslash is a separator (verify_path refuses it outright) and
 // compat/mingw.c is_valid_win32_path refuses the characters `: < > " | ? *` and controls, a component ending in a space or
 // a period, and the reserved device names (AUX, CON, NUL, PRN, COM1-9, LPT0-9, CONIN$, CONOUT$, whatever follows them
-// after spaces, a period or a colon).
-export function checkoutPathRefusal(path: string, mode: string, platform: string): string | null {
+// after spaces, a period or a colon). A component with no byte form (a lone surrogate) is a bad_request.
+export function checkoutPathRefusalResult(path: string, mode: string, platform: string): Result<Option<string>, Bad> {
   const comps = path.split('/');
   for (const [k, c] of comps.entries()) {
-    const b: Uint8Array = encodeBytes(c, 'checkout path');
-    if (c === '' || c === '.' || c === '..') return 'an empty, `.` or `..` component';
-    if (isDotGitName(b)) return 'a spelling of .git';
+    const encoded = encodeBytesResult(c, 'checkout path');
+    if (!encoded.ok) return encoded;
+    const b = encoded.value;
+    if (c === '' || c === '.' || c === '..') return ok(some('an empty, `.` or `..` component'));
+    if (isDotGitName(b)) return ok(some('a spelling of .git'));
     // git compares ASCII case-insensitively; /iu would also fold U+017F to s (and U+212A to k)
     // oxlint-disable-next-line eslint/require-unicode-regexp -- see above
-    if (mode === MODE_LINK && (/^\.gitmodules$/i.test(c) || (platform === 'darwin' && isHfsDot(b, 'gitmodules')) || (k === comps.length - 1 && isDotFileName(b, 'gitmodules')))) return 'a symlink at a spelling of .gitmodules';
+    if (mode === MODE_LINK && (/^\.gitmodules$/i.test(c) || (platform === 'darwin' && isHfsDot(b, 'gitmodules')) || (k === comps.length - 1 && isDotFileName(b, 'gitmodules')))) return ok(some('a symlink at a spelling of .gitmodules'));
   }
-  if (platform !== 'win32') return null;
-  if (path.includes('\\')) return 'a backslash (a separator on Windows)';
+  if (platform !== 'win32') return ok(none);
+  if (path.includes('\\')) return ok(some('a backslash (a separator on Windows)'));
   for (const c of comps) {
     // oxlint-disable-next-line no-control-regex -- is_valid_win32_path refuses control characters; matching them is the point
-    if (/[:<>"|?*\u0001-\u001F]/u.test(c)) return 'a character Windows refuses in a name';
-    if (/[ .]$/u.test(c)) return 'a name ending in a space or a period';
+    if (/[:<>"|?*\u0001-\u001F]/u.test(c)) return ok(some('a character Windows refuses in a name'));
+    if (/[ .]$/u.test(c)) return ok(some('a name ending in a space or a period'));
     // oxlint-disable-next-line eslint/require-unicode-regexp -- ASCII case folding, as git's strncasecmp; /iu folds U+017F and U+212A too
-    if (/^(aux|prn|nul|con|com[1-9]|lpt[0-9]|conin\$|conout\$) *(?:[.:]|$)/i.test(c)) return 'a reserved Windows device name';
+    if (/^(aux|prn|nul|con|com[1-9]|lpt[0-9]|conin\$|conout\$) *([.:]|$)/i.test(c)) return ok(some('a reserved Windows device name'));
   }
-  return null;
+  return ok(none);
 }
+// The throwing form for checkout-node.ts: the reason, or null when git accepts the path.
+export const checkoutPathRefusal = (path: string, mode: string, platform: string): string | null =>
+  getOrElse<string | null>(orThrow(checkoutPathRefusalResult(path, mode, platform)), null);
 
-export function validatePath(path: unknown, limits: Partial<Limits> | null | undefined): string[] {
-  if (typeof path !== 'string' || path.length === 0) throw bad('path', 'must be a non-empty string');
-  const maxDepth = requireLimit(limits, 'maxPathDepth');
-  const maxComponent = requireLimit(limits, 'maxPathComponent');
+// The first check of validatePathResult, and the brand it grants: the value leaves as a Path only after every check
+// below it (path.ts reads the brand; no second test).
+const isPathText = (path: unknown): path is Path => typeof path === 'string' && path.length > 0;
+// A validated path and its components (the path is their `/` join: split and join are inverses).
+export type ValidPath = { readonly path: Path; readonly components: string[] };
+
+// `limits`: the caller's record (any subset; null, the default, is none), read for maxPathDepth and maxPathComponent.
+export function validatePathResult(path: unknown, limits: Input<Limits> | null = null): Result<ValidPath, Bad> {
+  if (!isPathText(path)) return bad('path', 'must be a non-empty string');
+  const maxDepth = readLimit(limits, 'maxPathDepth');
+  if (!maxDepth.ok) return maxDepth;
+  const maxComponent = readLimit(limits, 'maxPathComponent');
+  if (!maxComponent.ok) return maxComponent;
   const comps = path.split('/');
-  if (comps.length > maxDepth) throw bad('path', `depth ${comps.length} exceeds ${maxDepth}`);
+  if (comps.length > maxDepth.value) return bad('path', `depth ${comps.length} exceeds ${maxDepth.value}`);
   for (const c of comps) {
-    if (c === '' ) throw bad('path', 'empty component (leading, trailing or doubled slash)');
-    if (c === '.' || c === '..' || isDotGit(c)) throw bad('path', `component ${JSON.stringify(c)} not allowed (git fsck hasDotgit)`);
-    if (c.includes('\0')) throw bad('path', 'NUL in component');
-    if (c.length > maxComponent) throw bad('path', 'component too long');
+    if (c === '' ) return bad('path', 'empty component (leading, trailing or doubled slash)');
+    // Every component is encoded, so the whole path is too (a `/` cannot complete a surrogate pair).
+    const bytes = encodeBytesResult(c, 'path');
+    if (!bytes.ok) return bytes;
+    if (c === '.' || c === '..' || isDotGitName(bytes.value)) return bad('path', `component ${JSON.stringify(c)} not allowed (git fsck hasDotgit)`);
+    if (c.includes('\0')) return bad('path', 'NUL in component');
+    if (c.length > maxComponent.value) return bad('path', 'component too long');
   }
-  encodeBytes(path, 'path');
-  return comps;
+  return ok({ path, components: comps });
 }
+export const validatePath = (path: unknown, limits: Input<Limits> | null = null): string[] => orThrow(validatePathResult(path, limits)).components;
 
-export function validateMessage(message: unknown): string {
-  if (typeof message !== 'string') throw bad('message', 'must be a string');
-  if (message.includes('\0')) throw bad('message', 'NUL not allowed');
-  encodeBytes(message, 'message');
-  return message;
+export function validateMessageResult(message: unknown): Result<string, Bad> {
+  if (typeof message !== 'string') return bad('message', 'must be a string');
+  if (message.includes('\0')) return bad('message', 'NUL not allowed');
+  const bytes = encodeBytesResult(message, 'message');
+  if (!bytes.ok) return bytes;
+  return ok(message);
 }
-
+export const validateMessage = (message: unknown): string => orThrow(validateMessageResult(message));
