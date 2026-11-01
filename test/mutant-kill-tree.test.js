@@ -451,14 +451,31 @@ const settled = p => p.then(value => ({ settled: 'resolved', value }), reason =>
 
 test('editFile: a lost race is retried once from a fresh ls-refs', async () => {
   let moves = 1;
-  // the raced commit keeps the same tree, so the retry still finds README
-  const r = remote({ hook: async req => { if (req.service === 'git-receive-pack' && moves-- > 0) r.commit(FILES(), { parents: [r.refs.get('refs/heads/main')], message: 'raced\n' }); } });
+  // the raced commit keeps the current tree, so the retry still finds the file the edit names
+  const r = remote({ hook: async req => {
+    if (req.service !== 'git-receive-pack' || moves-- <= 0) return;
+    const cur = r.refs.get('refs/heads/main');
+    const tree = parseCommit(r.objects.get(cur).data).tree;
+    const who = `A <a@x> ${T0} +0000`;
+    r.refs.set('refs/heads/main', r.put('commit', encodeCommit({ tree, parents: [cur], author: who, committer: who, message: 'raced\n' })));
+  } });
   r.commit(FILES());
   const e = env(r);
   const res = await editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts);
   assert.equal(res.attempt, 1);
   assert.equal(res.noop, false);
   assert.deepEqual(e.all('git.edit').map(s => [s.attrs['git.edit.attempt'], s.attrs['git.edit.outcome']]), [[0, 'cas_conflict'], [1, 'ok']]);
+  // a hint on the lost attempt is what the retry reports, and the retry's span links to the first
+  moves = 1;
+  const hinted = env(r);
+  const again = await editFile('http://fake/r.git', { path: 'README', find: 'HELLO', replace: 'AGAIN', author: A, message: 'm', time: T0 }, { ...hinted.opts, head: r.refs.get('refs/heads/main') });
+  assert.deepEqual([again.attempt, again.hint], [1, 'used']);
+  const roots = hinted.all('git.edit');
+  assert.deepEqual(roots[1].links.map(l => [l.spanId, l.attrs['ply.link']]), [[roots[0].spanId, 'retry_of']]);
+  // a non-conflict error is the one attempt, not a retry
+  const missing = env(r);
+  await rejects(editFile('http://fake/r.git', { ref: 'refs/heads/missing', path: 'README', find: 'a', replace: 'b', author: A, message: 'm', time: T0 }, missing.opts), 'not_found', 'ref refs/heads/missing not found');
+  assert.equal(missing.all('git.edit').length, 1);
 });
 
 test('editFile and pushTree: a non-Error from the first attempt is a rejection, and is not retried', async () => {

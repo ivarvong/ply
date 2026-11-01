@@ -326,8 +326,9 @@ export async function pushTree(url: string, spec: TreeSpec, { head = null, stric
   try {
     return await pushTreeOnce(url, s, { ...opts, strictHead }, { head, attempt: 0, linkTo: null });
   } catch (e) {
-    // only a real Error is a cas_conflict that can be retried; anything else is the caller's throw, unchanged
-    if (!isAttemptError(e) || e.code !== 'cas_conflict' || e.attempt !== 0 || strictHead) throw e;
+    // only a real Error is a cas_conflict that can be retried; anything else is the caller's throw, unchanged.
+    // the retry is not inside this try, so a second cas_conflict propagates (attempt 0 is the only one caught)
+    if (!isAttemptError(e) || e.code !== 'cas_conflict' || strictHead) throw e;
     return pushTreeOnce(url, s, opts, { head: null, attempt: 1, linkTo: e.span ?? null, hintWas: e.hint ?? null });
   }
 }
