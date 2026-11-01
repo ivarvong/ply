@@ -29,6 +29,7 @@ import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { thrownAttrs, thrownCode, thrownMessage } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
+import { fromNullish } from './absent.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -138,9 +139,21 @@ export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: 
   const parsed = resolvedBase(base);
   const resolved = parsed.base;
   const baseIsOid = parsed.oid;
-  const stamp = author?.time ?? time;
-  const person = validateIdent({ name: author?.name, email: author?.email, time: stamp, tz: author?.tz });
-  const written = committer === undefined || committer === null ? person : validateIdent({ name: committer.name, email: committer.email, time: committer.time ?? stamp, tz: committer.tz });
+  const atAuthorTime = fromNullish(author.time);
+  const stamp = atAuthorTime.tag === 'some' ? atAuthorTime.value : time;
+  // Build ident inputs without spelling platform undefined: include tz only when present.
+  const authorBase = { name: author.name, email: author.email, time: stamp } as const;
+  const person = validateIdent(fromNullish(author.tz).tag === 'some' ? { ...authorBase, tz: fromNullish(author.tz).value as string } : authorBase);
+  const written = (() => {
+    const maybe = fromNullish(committer);
+    if (maybe.tag === 'none') return person;
+    const c = maybe.value;
+    const cTime = fromNullish(c.time);
+    const when = cTime.tag === 'some' ? cTime.value : stamp;
+    const base = { name: c.name, email: c.email, time: when } as const;
+    const cTz = fromNullish(c.tz);
+    return validateIdent(cTz.tag === 'some' ? { ...base, tz: cTz.value } : base);
+  })();
   validateMessage(message);
   const comps = validatePath(path, limits);
   const find: unknown = bytesOf(findIn), replace: unknown = bytesOf(replaceIn);
