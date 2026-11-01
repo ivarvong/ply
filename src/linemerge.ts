@@ -10,11 +10,13 @@
 // The 64-record hash-chain limit in scanA is modelled exactly (buckets of the per-diff class index): git's merge fails
 // there ("failed to execute internal merge"), so we answer 'undecided' — the 64/65 boundary is pinned against git.
 
-import type { Result } from './result.js';
+import type { Option, Result } from './result.js';
+import type { Input } from './absent.js';
 import { LIMIT_MERGE_BLOB } from './limits.js';
-import { ok, err, assertNever } from './result.js';
+import { ok, err, assertNever, getOrElse, none, some } from './result.js';
 import { plyError } from './errors.js';
-import { bytesToStr } from './attributes.js';
+import { bytesToStr, popLast } from './attributes.js';
+import { atOr, mapGet, withDefaults } from './absent.js';
 
 // A file split into line records. `ids` are classifier ids: equal id, equal content.
 export type Records = {
@@ -31,8 +33,11 @@ export type Rediff = 'myers' | 'skip' | 'undecided';
 export type Driver = 'text' | 'union' | 'binary';
 // One change of a diff script, 0-based: base lines [i1, i1 + chg1) became side lines [i2, i2 + chg2).
 export type Change = { i1: number; i2: number; chg1: number; chg2: number };
+type Hunks = { readonly ours: number; readonly theirs: number };
+// A clean merge; under merge=union, `unioned` counts the conflicts it resolved (present only when there were any).
 export type MergeLinesResult =
-  | { readonly clean: true; readonly data: Uint8Array; readonly hunks: { readonly ours: number; readonly theirs: number }; readonly unioned?: number }
+  | { readonly clean: true; readonly data: Uint8Array; readonly hunks: Hunks }
+  | { readonly clean: true; readonly data: Uint8Array; readonly hunks: Hunks; readonly unioned: number }
   | { readonly clean: false; readonly reason: 'binary (merge attribute)' | 'too large to merge' | 'binary' }
   | { readonly clean: false; readonly reason: 'content'; readonly conflicts: number }
   | { readonly clean: false; readonly reason: 'undecided'; readonly detail: string };
@@ -66,22 +71,14 @@ export function classifier(): Classify {
   const map = new Map<string, number>();
   return (bytes, s, e) => {
     const key = bytesToStr(bytes.subarray(s, e)); // the line's bytes, one char per byte
-    let id = map.get(key); if (id === undefined) { id = map.size + 1; map.set(key, id); } return id;
+    const known = mapGet(map, key); if (known.tag === 'some') return known.value;
+    const id = map.size + 1; map.set(key, id); return id;
   };
 }
 
 const undecided = (detail: string): Diffed<never> => err({ undecided: true, detail });
-// Unknown (a JS caller) reads as 'skip'. The typed members each have a case, so a new Rediff fails the build.
-function rediffMode(rediff: string): Rediff {
-  switch (rediff) {
-    case 'myers':
-    case 'skip':
-    case 'undecided':
-      return rediff;
-    default:
-      return 'skip';
-  }
-}
+// Unknown (a JS caller) reads as 'skip'.
+const rediffMode = (rediff: string): Rediff => (rediff === 'myers' || rediff === 'skip' || rediff === 'undecided' ? rediff : 'skip');
 // false: the compaction must stop as undecided. true: myers ran, or skip left the group where it is.
 function applyRediff(rediff: string, myers: () => void): boolean {
   const mode = rediffMode(rediff);
@@ -96,6 +93,7 @@ function applyRediff(rediff: string, myers: () => void): boolean {
 
 // ---- xhistogram.c ----
 type Rec = { ptr: number; cnt: number };
+const NO_REC: Readonly<Rec> = { ptr: 0, cnt: 0 };
 type Lcs = { begin1: number; end1: number; begin2: number; end2: number };
 // find_lcs's outcomes: a common subsequence, none (every line differs), the classic-diff fallback (every common line
 // occurs > 64 times), or the hash-chain limit where git's merge fails.
@@ -104,12 +102,13 @@ type Found = Lcs & { readonly tag: 'lcs' } | { readonly tag: 'none' } | { readon
 function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number): Found {
   const END1 = line1 + count1 - 1;
   const END2 = line2 + count2 - 1;
-  const recs = new Map<number | undefined, Rec>(); // id → { ptr, cnt }  (scanA: ptr = first occurrence, NEXT_PTR chains forward)
+  // Line numbers here are in range (1-based, within the region): the atOr fallbacks only satisfy the index type.
+  const recs = new Map<number, Rec>(); // id → { ptr, cnt }  (scanA: ptr = first occurrence, NEXT_PTR chains forward)
   // oxlint-disable-next-line unicorn/no-new-array -- line_map, preallocated and filled top-down
   const lineMap = new Array<Rec>(count1);
   const next = new Int32Array(count1);
   for (let ptr = END1; ptr >= line1; ptr--) {
-    const id = a[ptr - 1];
+    const id = atOr(a, ptr - 1, 0);
     const rec = recs.get(id);
     if (rec) { next[ptr - line1] = rec.ptr; rec.ptr = ptr; rec.cnt = rec.cnt + 1; lineMap[ptr - line1] = rec; }
     else { const r = { ptr, cnt: 1 }; recs.set(id, r); lineMap[ptr - line1] = r; }
@@ -120,16 +119,16 @@ function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, li
     let bits = 0; for (let v = 1; v < count1 && bits < 32; v *= 2) bits++; bits = bits || 1;
     const mask = 2 ** bits - 1;
     const load = new Map<number, number>();
-    for (const id of recs.keys()) { const h = ((id ?? 0) + Math.floor((id ?? 0) / 2 ** bits)) & mask; const l = (load.get(h) ?? 0) + 1; if (l > MAX_CHAIN) return { tag: 'chain-limit' }; load.set(h, l); }
+    for (const id of recs.keys()) { const h = (id + Math.floor(id / 2 ** bits)) & mask; const l = getOrElse(mapGet(load, h), 0) + 1; if (l > MAX_CHAIN) return { tag: 'chain-limit' }; load.set(h, l); }
   }
-  const CNT = (ptr: number): number => lineMap[ptr - line1]?.cnt ?? 0;
-  const NEXT = (ptr: number): number => next[ptr - line1] ?? 0;
+  const CNT = (ptr: number): number => atOr(lineMap, ptr - line1, NO_REC).cnt;
+  const NEXT = (ptr: number): number => atOr(next, ptr - line1, 0);
   const lcs = { tag: 'lcs' as const, begin1: 0, end1: 0, begin2: 0, end2: 0 };
   let cnt = MAX_CHAIN + 1;
   let hasCommon = false;
   for (let bPtr = line2; bPtr <= END2;) {
     let bNext = bPtr + 1;
-    const rec = recs.get(b[bPtr - 1]);
+    const rec = recs.get(atOr(b, bPtr - 1, 0));
     if (rec) {
       if (rec.cnt > cnt) { hasCommon = true; }
       else {
@@ -207,10 +206,11 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   const n2 = b.length;
   const ch1 = new Uint8Array(n1);
   const ch2 = new Uint8Array(n2);
-  const len1 = new Map<number | undefined, number>();
-  const len2 = new Map<number | undefined, number>();
-  for (const x of a) len1.set(x, (len1.get(x) ?? 0) + 1);
-  for (const x of b) len2.set(x, (len2.get(x) ?? 0) + 1);
+  // Indexes into the id arrays below are in range: the atOr fallbacks only satisfy the index type.
+  const len1 = new Map<number, number>();
+  const len2 = new Map<number, number>();
+  for (const x of a) len1.set(x, getOrElse(mapGet(len1, x), 0) + 1);
+  for (const x of b) len2.set(x, getOrElse(mapGet(len2, x), 0) + 1);
   // xdl_trim_ends
   let i = 0;
   let lim = Math.min(n1, n2);
@@ -220,12 +220,12 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   const dend1 = n1 - i - 1;
   const dend2 = n2 - i - 1;
   // xdl_cleanup_records
-  const refs = (x: Int32Array, n: number, dend: number, other: ReadonlyMap<number | undefined, number>, ch: Uint8Array): Int32Array => {
+  const refs = (x: Int32Array, n: number, dend: number, other: ReadonlyMap<number, number>, ch: Uint8Array): Int32Array => {
     const len = dend - off + 1;
     const mlim = Math.min(bogosqrt(n), MAX_EQLIMIT);
     const action = new Uint8Array(Math.max(len, 0));
     for (let k = 0; k < len; k++) {
-      const nm = other.get(x[k + off]) ?? 0;
+      const nm = getOrElse(mapGet(other, atOr(x, k + off, 0)), 0);
       const many = nm < mlim ? KEEP : INVESTIGATE;
       action[k] = nm === 0 ? DISCARD : many;
     }
@@ -239,8 +239,8 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   };
   const r1 = refs(a, n1, dend1, len2, ch1);
   const r2 = refs(b, n2, dend2, len1, ch2);
-  const h1 = Int32Array.from(r1, k => a[k] ?? 0);
-  const h2 = Int32Array.from(r2, k => b[k] ?? 0);
+  const h1 = Int32Array.from(r1, k => atOr(a, k, 0));
+  const h2 = Int32Array.from(r2, k => atOr(b, k, 0));
   // xdl_do_diff (Myers part)
   const nreff1 = r1.length;
   const nreff2 = r2.length;
@@ -249,8 +249,8 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   const F = nreff2 + 1;
   const Bk = ndiags + nreff2 + 1;
   const mxcost = Math.max(bogosqrt(ndiags), MAX_COST_MIN);
-  const kf = (d: number): number => kvd[F + d] ?? 0;
-  const kb = (d: number): number => kvd[Bk + d] ?? 0;
+  const kf = (d: number): number => atOr(kvd, F + d, 0);
+  const kb = (d: number): number => atOr(kvd, Bk + d, 0);
   const setF = (d: number, v: number): void => { kvd[F + d] = v; };
   const setB = (d: number, v: number): void => { kvd[Bk + d] = v; };
   const split = (off1: number, lim1: number, off2: number, lim2: number, needMin: boolean): Split => {
@@ -291,26 +291,26 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
       }
       if (needMin) continue;
       if (gotSnake && ec > HEUR_MIN_COST) {
-        // spl is set exactly when best > 0
+        // spl is Some exactly when best > 0
         let best = 0;
-        let spl: { i1: number; i2: number } | null = null;
+        let spl: Option<{ readonly i1: number; readonly i2: number }> = none;
         for (let d = fmax; d >= fmin; d -= 2) {
           const dd = d > fmid ? d - fmid : fmid - d; i1 = kf(d); i2 = i1 - d;
           const v = (i1 - off1) + (i2 - off2) - dd;
           if (v > K_HEUR * ec && v > best && off1 + SNAKE_CNT <= i1 && i1 < lim1 && off2 + SNAKE_CNT <= i2 && i2 < lim2) {
-            for (let k = 1; h1[i1 - k] === h2[i2 - k]; k++) if (k === SNAKE_CNT) { best = v; spl = { i1, i2 }; break; }
+            for (let k = 1; h1[i1 - k] === h2[i2 - k]; k++) if (k === SNAKE_CNT) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
-        if (spl) return { ...spl, minLo: true, minHi: false };
+        if (spl.tag === 'some') return { ...spl.value, minLo: true, minHi: false };
         best = 0;
         for (let d = bmax; d >= bmin; d -= 2) {
           const dd = d > bmid ? d - bmid : bmid - d; i1 = kb(d); i2 = i1 - d;
           const v = (lim1 - i1) + (lim2 - i2) - dd;
           if (v > K_HEUR * ec && v > best && off1 < i1 && i1 <= lim1 - SNAKE_CNT && off2 < i2 && i2 <= lim2 - SNAKE_CNT) {
-            for (let k = 0; h1[i1 + k] === h2[i2 + k]; k++) if (k === SNAKE_CNT - 1) { best = v; spl = { i1, i2 }; break; }
+            for (let k = 0; h1[i1 + k] === h2[i2 + k]; k++) if (k === SNAKE_CNT - 1) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
-        if (spl) return { ...spl, minLo: false, minHi: true };
+        if (spl.tag === 'some') return { ...spl.value, minLo: false, minHi: true };
       }
       if (ec >= mxcost) {
         let fbest = -1;
@@ -334,13 +334,13 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   };
   // xdl_recs_cmp, with an explicit stack (each box marks its own records; the k-vectors are scratch, reinitialized per split)
   const stack: Box[] = [[0, nreff1, 0, nreff2, false]];
-  let box: Box | undefined;
-  while ((box = stack.pop())) {
+  for (let top = popLast(stack); top.tag === 'some'; top = popLast(stack)) {
+    const box = top.value;
     let [off1, lim1, off2, lim2] = box;
     for (; off1 < lim1 && off2 < lim2 && h1[off1] === h2[off2]; off1++, off2++);
     for (; off1 < lim1 && off2 < lim2 && h1[lim1 - 1] === h2[lim2 - 1]; lim1--, lim2--);
-    if (off1 === lim1) { for (; off2 < lim2; off2++) ch2[r2[off2] ?? 0] = 1; }
-    else if (off2 === lim2) { for (; off1 < lim1; off1++) ch1[r1[off1] ?? 0] = 1; }
+    if (off1 === lim1) { for (; off2 < lim2; off2++) ch2[atOr(r2, off2, 0)] = 1; }
+    else if (off2 === lim2) { for (; off1 < lim1; off1++) ch1[atOr(r1, off1, 0)] = 1; }
     else {
       const spl = split(off1, lim1, off2, lim2, box[4]);
       stack.push([spl.i1, lim1, spl.i2, lim2, spl.minHi], [off1, spl.i1, off2, spl.i2, spl.minLo]);
@@ -355,9 +355,8 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
 type Region = [line1: number, count1: number, line2: number, count2: number];
 function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8Array): Diffed<null> {
   const stack: Region[] = [[1, a.length, 1, b.length]];
-  let top: Region | undefined;
-  while ((top = stack.pop())) {
-    const [line1, count1, line2, count2] = top;
+  for (let top = popLast(stack); top.tag === 'some'; top = popLast(stack)) {
+    const [line1, count1, line2, count2] = top.value;
     if (count1 <= 0 && count2 <= 0) continue;
     if (!count1) { for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
     if (!count2) { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; continue; }
@@ -445,7 +444,7 @@ function buildScript(ch1: Uint8Array, n1: number, ch2: Uint8Array, n2: number): 
 //   'myers' (default) — git ≥ 2.54 (verified against master, 2.56: every merge and every diff hunk agrees);
 //   'skip'  — git < 2.54 (verified against 2.43: every case agrees);
 //   'undecided' — conflict wherever the two differ: right against any version.
-export function diffScript(base: Lines, side: Lines, { rediff = 'myers' }: { readonly rediff?: Rediff } = {}): Diffed<Change[]> {
+function diffWith(base: Lines, side: Lines, rediff: Rediff): Diffed<Change[]> {
   const n1 = base.n;
   const n2 = side.n;
   const h1 = new Uint8Array(n1);
@@ -453,7 +452,7 @@ export function diffScript(base: Lines, side: Lines, { rediff = 'myers' }: { rea
   // git classifies per diff: class index 0, 1, … in first-occurrence order over file1 (base) then file2 (side). The
   // histogram's hash table is keyed on that index, so the chain limit below depends on it — renumber to match.
   const local = new Map<number, number>();
-  const renum = (ids: ArrayLike<number>): Int32Array => Int32Array.from(ids, id => { let k = local.get(id); if (k === undefined) { k = local.size; local.set(id, k); } return k; });
+  const renum = (ids: ArrayLike<number>): Int32Array => Int32Array.from(ids, id => { const known = mapGet(local, id); if (known.tag === 'some') return known.value; const k = local.size; local.set(id, k); return k; });
   const a = renum(base.ids);
   const b = renum(side.ids);
   const ch1 = new Uint8Array(n1 + 2);
@@ -464,13 +463,18 @@ export function diffScript(base: Lines, side: Lines, { rediff = 'myers' }: { rea
   const c2 = compact(b, ch2, n2, a, ch1, n1, rediff); if (!c2.ok) return c2;
   return ok(buildScript(ch1, n1, ch2, n2));
 }
+export type DiffConfig = { readonly rediff: Rediff };
+export function diffScript(base: Lines, side: Lines, options: Input<DiffConfig> = {}): Diffed<Change[]> {
+  return diffWith(base, side, withDefaults<DiffConfig>(options, { rediff: 'myers' }).rediff);
+}
 
 // ---- xdl_do_merge + xdl_append_merge ----
 // A hunk of the merge: a conflict, a change on one side only (ours / theirs), or a conflict whose two sides refine to the
 // same lines (identical, git's mode 4). git's bitmask modes 0/1/2/4; its 3 (both, ours then theirs) exists only as
 // merge=union's reading of a conflict, in fill.
 export type HunkKind = 'conflict' | 'ours' | 'theirs' | 'identical';
-type Hunk = { kind: HunkKind; i0?: number; chg0?: number; i1: number; chg1: number; i2: number; chg2: number };
+// A hunk by its ours / theirs ranges; xdl_do_merge's hunks (Merged) also carry the base range, which refinement drops.
+type Hunk = { kind: HunkKind; i1: number; chg1: number; i2: number; chg2: number };
 type Merged = Hunk & { i0: number; chg0: number };
 // oxlint-disable-next-line eslint/max-params -- xdl_append_merge's argument list
 function appendMerge(list: Merged[], kind: HunkKind, i0: number, chg0: number, i1: number, chg1: number, i2: number, chg2: number): void {
@@ -486,7 +490,7 @@ function doMerge(base: Records, ours: Records, theirs: Records, s1: readonly Cha
   const c: Merged[] = [];
   let x = 0;
   let y = 0;
-  // a script holds no holes: a change is undefined only past its end
+  // a script holds no holes: a change is missing only past its end
   for (let a = s1[x], b = s2[y]; a && b; a = s1[x], b = s2[y]) {
     if (a.i1 + a.chg1 < b.i1) { appendMerge(c, 'ours', a.i1, a.chg1, a.i2, a.chg2, b.i2 - b.i1 + a.i1, a.chg1); x++; continue; }
     if (b.i1 + b.chg1 < a.i1) { appendMerge(c, 'theirs', b.i1, b.chg1, a.i2 - a.i1 + b.i1, b.chg1, b.i2, b.chg2); y++; continue; }
@@ -520,7 +524,7 @@ function refine(ours: Records, theirs: Records, c: readonly Hunk[], rediff: Redi
   for (const m of c) {
     if (m.kind !== 'conflict' || m.chg1 === 0 || m.chg2 === 0) { out.push(m); continue; }
     const sub = (F: Records, i: number, n: number): Lines => ({ ids: F.ids.slice(i, i + n), n });
-    const script = diffScript(sub(ours, m.i1, m.chg1), sub(theirs, m.i2, m.chg2), { rediff });
+    const script = diffWith(sub(ours, m.i1, m.chg1), sub(theirs, m.i2, m.chg2), rediff);
     if (!script.ok) return script;
     if (script.value.length === 0) { out.push({ ...m, kind: 'identical' }); continue; }
     for (const x of script.value.toSorted((p, q) => p.i1 - q.i1)) out.push({ kind: 'conflict', i1: x.i1 + m.i1, chg1: x.chg1, i2: x.i2 + m.i2, chg2: x.chg2 });
@@ -533,7 +537,7 @@ function simplify(c: readonly Hunk[]): Hunk[] {
   const out: Hunk[] = [];
   for (const m of c) {
     const prev = out.at(-1);
-    if (prev?.kind === 'conflict' && m.kind === 'conflict' && m.i1 - (prev.i1 + prev.chg1) <= 3) { prev.chg1 = m.i1 + m.chg1 - prev.i1; prev.chg2 = m.i2 + m.chg2 - prev.i2; }
+    if (prev && prev.kind === 'conflict' && m.kind === 'conflict' && m.i1 - (prev.i1 + prev.chg1) <= 3) { prev.chg1 = m.i1 + m.chg1 - prev.i1; prev.chg2 = m.i2 + m.chg2 - prev.i2; }
     else out.push({ ...m });
   }
   return out;
@@ -541,11 +545,11 @@ function simplify(c: readonly Hunk[]): Hunk[] {
 
 // ---- xdl_fill_merge_buffer without conflict output: clean results, and merge=union (every conflict → ours then theirs) ----
 // is_eol_crlf / is_cr_needed: a union hunk whose ours side ends without a newline gets one, CRLF if the files use CRLF.
-// Record indexes here are in range: the `?? 0` only satisfies the index type.
+// Record indexes here are in range: the 0 fallback only satisfies the index type.
 function eolCrlf(F: Records, i: number): number {
-  const size = (k: number): number => (F.ends[k] ?? 0) - (F.starts[k] ?? 0);
-  // record k's byte `back` from its end (git: the byte at size - back)
-  const last = (k: number, back: number): number | undefined => F.bytes[(F.ends[k] ?? 0) - back];
+  const size = (k: number): number => atOr(F.ends, k, 0) - atOr(F.starts, k, 0);
+  // record k's byte `back` from its end (git: the byte at size - back); -1 before the file's start
+  const last = (k: number, back: number): number => atOr(F.bytes, atOr(F.ends, k, 0) - back, -1);
   if (i < F.n - 1) return size(i) > 1 && last(i, 2) === 13 ? 1 : 0;
   if (!F.n) return -1;
   if (size(i) && last(i, 1) === 10) return size(i) > 1 && last(i, 2) === 13 ? 1 : 0;
@@ -565,8 +569,8 @@ function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[],
   // oxlint-disable-next-line eslint/max-params -- (file, first, count) and the two newline flags
   const copy = (F: Records, i: number, n: number, needsCr = false, addNl = false): void => {
     if (n < 1) return;
-    const s = F.starts[i] ?? 0;
-    const e = F.ends[i + n - 1] ?? 0;
+    const s = atOr(F.starts, i, 0);
+    const e = atOr(F.ends, i + n - 1, 0);
     push(F.bytes.subarray(s, e));
     if (addNl && (e === s || F.bytes[e - 1] !== 10)) push(needsCr ? Uint8Array.of(13, 10) : Uint8Array.of(10));
   };
@@ -606,8 +610,8 @@ function mergeText({ driver, base, ours, theirs, maxBytes, rediff }: { readonly 
   const B = records(base, cl);
   const O = records(ours, cl);
   const T = records(theirs, cl);
-  const s1 = diffScript(B, O, { rediff }); if (!s1.ok) return declined(s1.error);
-  const s2 = diffScript(B, T, { rediff }); if (!s2.ok) return declined(s2.error);
+  const s1 = diffWith(B, O, rediff); if (!s1.ok) return declined(s1.error);
+  const s2 = diffWith(B, T, rediff); if (!s2.ok) return declined(s2.error);
   const hunks = { ours: s1.value.length, theirs: s2.value.length };
   if (hunks.ours === 0) return { clean: true, data: theirs, hunks };
   if (hunks.theirs === 0) return { clean: true, data: ours, hunks };
@@ -621,7 +625,9 @@ function mergeText({ driver, base, ours, theirs, maxBytes, rediff }: { readonly 
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(driver);
 }
-export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, { maxBytes = LIMIT_MERGE_BLOB, rediff = 'myers', driver = 'text' }: { readonly maxBytes?: number; readonly rediff?: Rediff; readonly driver?: Driver } = {}): MergeLinesResult {
+export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Rediff; readonly driver: Driver };
+export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, options: Input<MergeLinesConfig> = {}): MergeLinesResult {
+  const { maxBytes, rediff, driver } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text' });
   switch (driver) {
     case 'binary': return { clean: false, reason: 'binary (merge attribute)' };
     case 'text':
