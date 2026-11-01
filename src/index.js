@@ -3,7 +3,19 @@
 export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, isLfsPointerPrefix, withCommitData } from './edit.js';
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
-export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, fetchCommit } from './read.js';
+/**
+ * Why a not_found missed. Switch on `kind`. A commit id is `{ kind: 'commit', miss }` (`absent`, or `not_commit`).
+ * @typedef {import('./errors.js').Miss} Miss
+ */
+/**
+ * Why a commit id is not a commit the remote will serve. Nested under Miss when `kind` is `commit`.
+ * @typedef {import('./errors.js').CommitMiss} CommitMiss
+ */
+/**
+ * A blob from the caller's transport. `kind: 'too_big'` is the pack object header's size above `maxBytes`; the fetch was cancelled.
+ * @typedef {import('./read.js').OpenedBlob} OpenedBlob
+ */
+export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
@@ -12,10 +24,6 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
 /**
  * 40 lowercase hex characters. git also accepts abbreviations, ref names, and uppercase hex; this type does not.
  * @typedef {import('./oid.js').Oid} Oid
- */
-/**
- * Why fetchCommit's not_found happened. `absent`: the server said the oid is not its ref. `not_commit`: the object is a tree, blob, or tag.
- * @typedef {import('./commit.js').CommitMiss} CommitMiss
  */
 /**
  * The smart-HTTP transport every fetch and push takes.
@@ -65,4 +73,5 @@ export { createTransport, redactUrl } from './http.js';
 export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcache.js';
 export { isFilterRejection } from './fetch.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';
+export { compareVersionRefnames } from './refs.js';
 export { concat } from './bytes.js';
