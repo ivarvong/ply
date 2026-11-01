@@ -10,14 +10,20 @@
 //
 // `ref`: null/'HEAD' (the remote's HEAD), a full ref name, a short name resolved the way `git rev-parse` does it for a
 // remote's refs (refs/<n>, refs/tags/<n>, refs/heads/<n> — tags win over branches, as in git), or a 40-hex commit oid.
-// Annotated tags are peeled. `size` is known before the first content byte (the pack object header carries it), so a
+// `{ abbrev: 'advertised' }` also accepts a 4–39 character lowercase hex prefix, unique among the tips that one ls-refs
+// lists (HEAD, branches, tags, and peeled targets). A ref name wins over a prefix, as in git. The default `'off'`
+// leaves a short hex string as a ref name. That answer is weaker than `git rev-parse`: an interior object is not a
+// candidate. Annotated tags are peeled. `size` is known before the first content byte (the pack object header carries it), so a
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
 // or the server sends a different number of bytes than it declared, and the chunk that would have completed the body
 // stays held: a consumer that received every byte, or saw `done`, saw the right bytes.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { thrown as fail, isPlyCode, orThrow } from './errors.js';
+import { thrown as fail, isPlyCode, orThrow, plyError } from './errors.js';
+import { err as resultErr, ok } from './result.js';
+import type { Result } from './result.js';
+import type { PlyError } from './errors.js';
 import { operation } from './operation.js';
-import { lsRefs } from './lsrefs.js';
+import { lsRefs, type LsRefsResult } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
@@ -64,15 +70,62 @@ export const lsMode = (mode: string): string => mode.padStart(6, '0');
 // A ref as the caller names it: null/undefined/'' or 'HEAD' for the remote's HEAD, a name, or a 40-hex oid.
 export type RefSpec = string | null | undefined;
 export type Resolved = { readonly name: string; readonly commit: string };
+// How far a short hex string is an object id. `'off'` (the default): it is a ref name. `'advertised'`: after the name
+// misses, it is a prefix of an advertised tip.
+export type AbbrevMode = 'advertised' | 'off';
+const ABBREV = /^[0-9a-f]{4,39}$/;
+// Pure, over one ls-refs answer. `unique_among_advertised` is one oid (the ref names are every listing that carried it,
+// as the oid or as a peeled target). `none`: no advertised oid starts with the prefix. `ambiguous`: more than one oid does.
+// A bad prefix (not 4..39 lowercase hex) is `bad_request`, not a kind.
+export type AbbrevResolution =
+  | { readonly kind: 'unique_among_advertised'; readonly oid: string; readonly refs: readonly string[] }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'ambiguous'; readonly oids: readonly string[] };
+export function resolveAbbrev(prefix: string, listed: LsRefsResult): Result<AbbrevResolution, PlyError> {
+  if (!ABBREV.test(prefix)) return resultErr(plyError('bad_request', 'abbreviated oid must be 4..39 lowercase hex', { what: 'ref' }));
+  const byOid = new Map<string, string[]>();
+  for (const rec of listed.refs.values()) {
+    const hits: ReadonlyArray<readonly [string, string]> = rec.peeled === undefined ? [[rec.oid, rec.name]] : [[rec.oid, rec.name], [rec.peeled, rec.name]];
+    for (const [oid, name] of hits) {
+      if (!oid.startsWith(prefix)) continue;
+      const names = byOid.get(oid);
+      if (names === undefined) byOid.set(oid, [name]);
+      else if (!names.includes(name)) names.push(name);
+    }
+  }
+  const oids = [...byOid.keys()].toSorted();
+  const oid = oids[0];
+  if (oid === undefined) return ok({ kind: 'none' });
+  if (oids.length > 1) return ok({ kind: 'ambiguous', oids });
+  return ok({ kind: 'unique_among_advertised', oid, refs: byOid.get(oid) ?? [] });
+}
+// The name missed. A unique advertised oid is that commit; more than one is bad_request; none leaves the caller to
+// report not_found. The prefix already matched ABBREV, so resolveAbbrev's own bad_request does not run.
+function advertisedCommit(prefix: string, listed: LsRefsResult): Resolved | null {
+  const resolved = resolveAbbrev(prefix, listed);
+  if (!resolved.ok) throw resolved.error;
+  if (resolved.value.kind === 'unique_among_advertised') return { name: resolved.value.oid, commit: resolved.value.oid };
+  if (resolved.value.kind === 'ambiguous') throw fail('bad_request', `abbreviated oid ${prefix} matches ${resolved.value.oids.length} advertised objects`, { what: 'ref', got: resolved.value.oids });
+  return null;
+}
 // Effect: ref → { name, commit } (annotated tags peeled; a bare oid is taken as given and checked by the commit fetch).
-export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolved> {
+// `abbrev: 'advertised'` asks once for the name's candidates plus HEAD, branches and tags, tries the name first, then
+// the prefix. `'off'` is the candidates alone.
+export async function resolveCommit(t: Transport, ref: unknown, { abbrev = 'off' }: { readonly abbrev?: AbbrevMode } = {}): Promise<Resolved> {
+  if (abbrev !== 'off' && abbrev !== 'advertised') throw fail('bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
   const cands = refCandidates(ref);
   // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it threw).
   if (cands.length === 0 && typeof ref === 'string') return { name: ref, commit: ref };
-  const { refs, head }: { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }>; readonly head: string | null } = await lsRefs(t, cands);
+  // null: this call is a name. A string: the prefix, and the listing is wide enough to answer it.
+  const prefix = abbrev === 'advertised' && typeof ref === 'string' && ABBREV.test(ref) ? ref : null;
+  const listed = await lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']);
   for (const name of cands) {
-    const r = refs.get(name);
-    if (r) return { name: name === 'HEAD' ? (head ?? 'HEAD') : name, commit: r.peeled ?? r.oid };
+    const r = listed.refs.get(name);
+    if (r) return { name: name === 'HEAD' ? (listed.head ?? 'HEAD') : name, commit: r.peeled ?? r.oid };
+  }
+  if (prefix !== null) {
+    const found = advertisedCommit(prefix, listed);
+    if (found) return found;
   }
   const first = cands[0];
   throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${typeof ref === 'string' ? ref : ''} not found`);

@@ -484,6 +484,8 @@ export const DECISIONS = [
   { match: "src/push.ts#push:coded=protocol:return coded('protocol', () => t.tracer.span('git.receiv…", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#refCandidates:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#resolveCommit:*", space: 'checkout-tree', axisTag: 'case' },
+  { match: "src/read.ts#resolveAbbrev:bad_request:abbreviated oid must be 4..39 lowercase hex", space: 'mutant-kill', axisTag: 'case' },
+  { match: "src/read.ts#advertisedCommit:bad_request:abbreviated oid … matches … advertised objects", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/commit.ts#fetchCommit:*", space: 'read', axisTag: 'case' },
   { match: "src/read.ts#walk:*", space: 'read', axisTag: 'case' },
   { match: "src/read.ts#listTree:*", space: 'wide-limits', axisTag: 'wanted' },
