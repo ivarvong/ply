@@ -27,7 +27,7 @@
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail, plyError, isPlyError, orThrow } from './errors.js';
-import type { PlyError } from './errors.js';
+import type { Miss, PlyError } from './errors.js';
 import { ok, err } from './result.js';
 import type { Result } from './result.js';
 import type { OperationOpts } from './operation.js';
@@ -44,7 +44,6 @@ import type { TypeNames } from './boundary.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
-/* oxlint-disable require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 export const DEFAULT_LOG_LIMIT = 20;
 const isObject = (v: unknown): v is object => v !== null && typeof v === 'object';
@@ -83,14 +82,16 @@ export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterab
 async function fetchWindow(t: Transport, commit: string, limit: number): Promise<FetchedPack> {
   let r: FetchedPack;
   try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
-    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'absent', oid: commit } });
+    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     throw e;
   }
   const want = r.objects?.get(commit);
   if (want && want.type !== TYPE.COMMIT) {
     const name = nonCommitType(want.type);
     const shown = (TYPE_NAME as TypeNames)[want.type] ?? want.type;
-    throw fail('not_found', `${commit} is not a commit (${shown})`, name === null ? undefined : { miss: { kind: 'not_commit', oid: commit, type: name } });
+    // A resolved object is a tree, blob, or tag. Anything else still has to carry a miss; it is not a commit the server stored.
+    const miss: Miss = name === null ? { kind: 'commit', miss: { kind: 'absent', oid: commit } } : { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: name } };
+    throw fail('not_found', `${commit} is not a commit (${shown})`, { miss });
   }
   return r;
 }

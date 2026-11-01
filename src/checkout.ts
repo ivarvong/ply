@@ -30,6 +30,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 import { thrown as fail, orThrow } from './errors.js';
+import type { Miss } from './errors.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
@@ -100,7 +101,7 @@ type Trees = { readonly root: string; readonly tree: (oid: string) => readonly T
 // parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Trees> {
   const r: FetchedPack = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }).catch((e: unknown) => {
-    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'absent', oid: commit } });
+    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     throw e;
   });
   const objects: PackObjects = r.objects ?? new Map();
@@ -108,7 +109,8 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   if (!c) throw fail('pack_corrupt', `commit ${commit} not in the blob:none pack (${objects.size} objects)`);
   if (c.type !== TYPE.COMMIT) {
     const name = nonCommitType(c.type);
-    throw fail('not_found', `${commit} is not a commit`, name === null ? undefined : { miss: { kind: 'not_commit', oid: commit, type: name } });
+    const miss: Miss = name === null ? { kind: 'commit', miss: { kind: 'absent', oid: commit } } : { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: name } };
+    throw fail('not_found', `${commit} is not a commit`, { miss });
   }
   const tree = (oid: string): readonly TreeEntry[] => {
     const o = objects.get(oid);
@@ -126,8 +128,8 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
 // oxlint-disable-next-line unicorn/no-array-reduce -- bundle budget: the JS's fold, byte for byte
 const subtree = (tree: (oid: string) => readonly TreeEntry[], root: string, comps: readonly string[]): string => comps.reduce((oid, name, i) => {
   const e = tree(oid).find(x => x.name === name);
-  if (!e) throw fail('not_found', `path component ${name} not found`);
-  if (e.mode !== MODE_TREE) throw fail('not_found', `${comps.slice(0, i + 1).join('/')} is not a directory (mode ${e.mode})`);
+  if (!e) throw fail('not_found', `path component ${name} not found`, { miss: { kind: 'path', missing: name, existingPath: comps.slice(0, i).join('/') } });
+  if (e.mode !== MODE_TREE) throw fail('not_found', `${comps.slice(0, i + 1).join('/')} is not a directory (mode ${e.mode})`, { miss: { kind: 'not_directory', path: comps.slice(0, i + 1).join('/'), mode: e.mode } });
   return e.oid;
 }, root);
 
