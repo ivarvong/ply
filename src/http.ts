@@ -314,7 +314,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     return res;
   }
   async function advertisementBody(res: Response, service: string, span: Span): Promise<Uint8Array> {
-    if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status } as Detail['http'] & Extra);
+    if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
     if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
     const maxPack = requireLimit(limits, 'maxPackBytes');
     const declared = Number(res.headers.get('content-length'));
@@ -371,7 +371,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
       const preview = td.decode(await readCapped(res.body, ERROR_PREVIEW, { truncate: true }));
-      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${(scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE)}`, { status: res.status } as Detail['http'] & Extra);
+      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${(scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE)}`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
     }
     let bytes = 0, chunks = 0, first: number | null = null, maxChunk = 0;
     const ct = res.headers.get('content-type') ?? '';

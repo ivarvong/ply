@@ -11,7 +11,7 @@ export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   aborted: { where: 'local', what: 'the caller\'s AbortSignal fired' },
   http: { where: 'remote', what: 'an HTTP status we do not classify further, including a 3xx ply is not following (the default; status, location). followRedirects initial rebases only the first info/refs GET' },
   auth: { where: 'remote', what: '401/403' },
-  not_found: { where: 'remote', what: 'repository, ref or path does not exist; a commit id carries miss (absent or not_commit)' },
+  not_found: { where: 'remote', what: 'repository, ref, path or commit does not exist; miss.kind says which' },
   rate_limited: { where: 'remote', what: 'HTTP 429; retry after a delay' },
   upstream_5xx: { where: 'remote', what: 'HTTP 5xx' },
   not_git: { where: 'remote', what: 'the endpoint is not a git smart-HTTP server (wrong content-type)' },

@@ -17,7 +17,7 @@
 import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
-import type { Extra } from './errors.js';
+import type { Extra, Miss } from './errors.js';
 import { thrown as fail } from './errors.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -481,6 +481,7 @@ export const validateAttributes = (a: unknown): void => {
   validateRef(a);
 };
 export type Trees = { readonly base?: string | null | undefined; readonly ours?: string | null | undefined; readonly theirs?: string | null | undefined };
+const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 export async function attributeTree(t: Transport, attributes: AttributeSource | undefined, trees: Trees): Promise<string | null> {
   if (attributes === null || attributes === undefined) return null;
   if (attributes === 'ours' || attributes === 'theirs' || attributes === 'base') return trees[attributes] ?? null;
@@ -490,7 +491,7 @@ export async function attributeTree(t: Transport, attributes: AttributeSource | 
     validateRef(attributes);
     const refs: Refs = await lsRefs(t, [attributes]);
     oid = refs.refs.get(attributes)?.oid;
-    if (oid === undefined) throw fail('not_found', `attributes ref ${attributes} not found`);
+    if (oid === undefined) throw fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
   }
   return (await commitAt(t, oid)).tree;
 }
@@ -542,7 +543,7 @@ export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, 
     const { refs }: Refs = await lsRefs(t, fromOid === null ? [ref, from] : [ref]);
     const ours = refs.get(ref)?.oid;
     const theirs = fromOid ?? refs.get(from)?.oid;
-    if (ours === undefined) throw fail('not_found', `ref ${ref} not found`); if (theirs === undefined) throw fail('not_found', `ref ${from} not found`);
+    if (ours === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) }); if (theirs === undefined) throw fail('not_found', `ref ${from} not found`, { miss: refMiss(from) });
     // ls-refs names an annotated tag's object, not a commit; `git merge <tag>` records the tag in a mergetag header, which
     // ply does not write. Refused by name (it read as a missing commit, pack_corrupt, before #43's matrix ran it).
     for (const r of [ref, from]) { const peeled = refs.get(r)?.peeled; if (peeled !== undefined) throw fail('unsupported', `${r} is an annotated tag (git merge writes a mergetag header ply does not); merge its commit ${peeled}`, { what: r === ref ? 'ref' : 'from' }); }
