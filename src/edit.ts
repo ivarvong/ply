@@ -5,7 +5,7 @@
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
-import type { Extra } from './errors.js';
+import type { Extra, Miss } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -147,9 +147,15 @@ export function lookupEntry(data: Uint8Array, name: string, last: boolean, limit
   const entries: readonly TreeEntry[] = parseTree(data, limits);
   const entry = entries.find(e => e.name === name);
   const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': !!entry, 'git.edit.tree.entry.mode': entry?.mode ?? '', 'git.edit.tree.entry.oid': entry?.oid ?? '', 'git.edit.tree.entry.oid_offset': entry?.oidOffset ?? -1 };
-  if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs });
-  if (!last && entry.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { attrs });
-  if (last && !(entry.mode === '100644' || entry.mode === '100755')) throw fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs });
+  if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs, miss: { kind: 'path', missing: name, existingPath: '' } });
+  if (!last && entry.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { attrs, miss: { kind: 'not_directory', path: name, mode: entry.mode } });
+  if (last && !(entry.mode === '100644' || entry.mode === '100755')) {
+    let miss: Miss;
+    if (entry.mode === '40000') miss = { kind: 'is_directory', path: name, tree: entry.oid };
+    else if (entry.mode === '160000') miss = { kind: 'submodule', path: name, commit: entry.oid };
+    else miss = { kind: 'not_directory', path: name, mode: entry.mode };
+    throw fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs, miss });
+  }
   return { entry, attrs };
 }
 
@@ -320,6 +326,8 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
         inflated += chunk.length;
         if (inflated > sp.size) throw fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
         if (sha === null) {
+          // Unreachable: zlib is written only after phase is body, and a header-phase size is 0, so any positive
+          // chunk has already thrown on the declared-size check. DecompressionStream emits no empty chunk.
           if (sp.phase !== 'body') throw fail('pack_corrupt', 'inflated bytes before header');
           const lfs = isLfsPointerPrefix(chunk); span.set({ 'git.edit.blob.lfs_pointer': lfs });
           // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the pointer's size rides as an ad-hoc field (errors.ts Extra), as fetch.ts's size does
@@ -371,7 +379,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // oxlint-disable-next-line promise-function-async -- bundle budget: the JS's own .then chain, byte for byte
-    const resolve = (): Promise<string> => lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => { const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`); return r.oid; });
+    const resolve = (): Promise<string> => lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => { const r = refs.get(s.base); if (!r) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } }); return r.oid; });
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
     const [resolved, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e) : null]);
     const decided = decideHead({ hint: head, resolved });

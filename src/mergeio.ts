@@ -29,15 +29,14 @@ export const givenOid = (name: string, what: string): string | null => {
   if (name === ZERO_OID) throw fail('bad_request', `${what} must not be the zero oid`, { what });
   return name;
 };
-// Effect: a given commit id is a commit on the server, fetched alone (deepen 1). fetchCommit's not_found (absent, or not
-// a commit) is the caller's not_found, with the same miss. Every other code passes through: a corrupt pack stays
-// pack_corrupt (retryable), and is not reported as a missing commit.
+// Effect: a given commit id is a commit on the server, fetched alone (deepen 1). fetchCommit's not_found (a commit
+// miss: absent, or not a commit) is the caller's not_found, with that same miss. Every other code passes through: a
+// corrupt pack stays pack_corrupt (retryable), and is not reported as a missing commit.
 export const assertCommit = async (t: Transport, oid: string, what: string): Promise<unknown> => {
   const r = await fetchCommit(t, oid);
   if (r.ok) return r.value;
   if (r.error.code !== 'not_found') throw r.error;
-  const miss = r.error.miss;
-  throw fail('not_found', `${what} ${oid} is not a commit on the remote`, miss === undefined ? { what } : { what, miss });
+  throw fail('not_found', `${what} ${oid} is not a commit on the remote`, { what, miss: r.error.miss });
 };
 // A commit stamp: who and when, each stamp with its own time and zone (#103 item 4). `time` is the operation's, for a
 // stamp that gives none; an omitted zone is +0000.

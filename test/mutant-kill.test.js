@@ -17,7 +17,7 @@ import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '.
 import { huffBuild, adler32 } from '../src/inflate.js';
 import { inflate, cappedBound, declaredBound, zlibWrap, rawWrap } from '../src/inflatestream.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, isShortRead } from '../src/fetch.js';
-import { bestBases, mergeBase } from '../src/merge.js';
+import { attributeTree, bestBases, mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, parseUnbornLine, lsRefs, lsRefsBody } from '../src/lsrefs.js';
@@ -1543,8 +1543,17 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     fetchImpl: async () => new Response(errBody, { status: 500, headers: { 'content-type': 'text/plain' } }),
     limits: withLimits({ requestTimeoutMs: 2000 }), tracer: tracerStub,
   });
-  await assert.rejects((async () => { for await (const frame of errHttp.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'upstream_5xx' && e.message.includes('xxx'));
+  await assert.rejects((async () => { for await (const frame of errHttp.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'upstream_5xx' && e.message.includes('xxx') && e.miss === undefined);
   assert.ok(errPulls <= 3, `error body kept reading (${errPulls} chunks)`);
+  const page = `missing repo ${'y'.repeat(500)}`;
+  const missingRepo = createTransport('http://127.0.0.1:9/missing.git', {
+    fetchImpl: async () => new Response(page, { status: 404, headers: { 'content-type': 'text/plain' } }),
+    tracer: tracerStub,
+  });
+  // the advertisement names the status and the miss; it does not quote the body
+  await assert.rejects(missingRepo.advertise('git-upload-pack', spanStub), e => e.code === 'not_found' && e.message === 'HTTP 404 git-upload-pack advertisement' && e.miss?.kind === 'repository');
+  // the POST quotes a prefix of the page and stops: a dropped slice would keep the whole page
+  await assert.rejects((async () => { for await (const frame of missingRepo.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'not_found' && e.miss?.kind === 'repository' && e.message.includes('yyyy') && !e.message.includes('y'.repeat(250)));
 });
 
 test('encodeTree duplicate names and the pre-send push size refusal (issue #11)', async () => {
@@ -1919,6 +1928,24 @@ function graphServer(edges) {
   return { t, oid: name => oids.get(name) };
 }
 const chain = (name, n, below) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${name}${i + 1}`, [i + 1 < n ? `${name}${i + 2}` : below]]));
+
+test('a missing ref is not_found with a ref miss, for attributes and for rebase', async () => {
+  const s = graphServer({ root: [] });
+  const gone = { kind: 'ref', ref: 'refs/heads/gone', candidates: ['refs/heads/gone'] };
+  s.t.refs.set('refs/heads/main', s.oid('root'));
+  s.t.refs.set('refs/heads/feat', s.oid('root'));
+  assert.match(await attributeTree(s.t, 'refs/heads/main', {}), /^[0-9a-f]{40}$/);
+  const same = await mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+  assert.equal(same.outcome, 'up_to_date');
+  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/gone', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  s.t.refs.delete('refs/heads/main');
+  s.t.refs.delete('refs/heads/feat');
+  await assert.rejects(attributeTree(s.t, 'refs/heads/gone', {}), e => e.code === 'not_found' && e.message === 'attributes ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === gone.ref && e.miss.candidates.length === 1 && e.miss.candidates[0] === gone.ref);
+  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/gone', from: 'refs/heads/main', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone' && e.miss.candidates[0] === 'refs/heads/gone');
+  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  s.t.refs.set('refs/heads/feat', s.oid('root'));
+  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/main not found' && e.miss.ref === 'refs/heads/main' && e.miss.candidates[0] === 'refs/heads/main');
+});
 
 test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was only named, and a cut below two candidates deepens', async () => {
   // #41: the base exactly at the window's cut (8 a side) is named by both sides' children, never fetched by mergeBase; it

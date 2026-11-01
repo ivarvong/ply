@@ -142,4 +142,5 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
 // General-purpose parsing/resolution, kept out of this module so bundles of the edit path do not carry it.
 // packresolve imports spliceDelta from here: a cycle of a re-export and one function, which ES modules resolve (A1 untangles it)
 // oxlint-disable-next-line import/no-cycle -- see above
-export { parsePack, applyDelta, makeDelta, resolvePack, readObjHeader, readOfsDelta, readUint32BE, packParseOpts } from './packresolve.js';
+export { parsePack, applyDelta, makeDelta, resolvePack, describePack, readObjHeader, readOfsDelta, readUint32BE, packParseOpts } from './packresolve.js';
+export type { PackLayout, PackLayoutObject, PackBase, ResolvedObjType } from './packresolve.js';

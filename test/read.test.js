@@ -6,10 +6,11 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
-import { readFile, listTree, readCommit, refCandidates, fetchCommit } from '../src/read.js';
+import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit, openBlob, readBlob, resolveCommit, resolveAbbrev } from '../src/read.js';
+import { lsRefs } from '../src/lsrefs.js';
 import { createTransport } from '../src/http.js';
 import { fetchObject } from '../src/fetch.js';
 import { parseIdent, TYPE } from '../src/objects.js';
@@ -80,6 +81,76 @@ test('modes: symlink reads as its target (120000), executable 100755; gitlink an
   await assert.rejects(readFile(R.url, { path: 'a/b' }, { tracer: tracer() }), e => e.code === 'not_found' && /directory/.test(e.message));
 });
 
+test('typed misses match git: ref, unborn HEAD, path, directory, submodule', async () => {
+  const ref = 'no-such-branch';
+  assert.throws(() => git(R.bare, ['rev-parse', '--verify', '--quiet', ref]));
+  await assert.rejects(readFile(R.url, { ref, path: 'README.md' }, { tracer: tracer() }), e => {
+    assert.equal(e.code, 'not_found');
+    assert.equal(e.miss.kind, 'ref');
+    assert.equal(e.miss.ref, ref);
+    assert.deepEqual([...e.miss.candidates], refCandidates(ref));
+    return true;
+  });
+
+  const empty = makeBareRepo(root, 'empty');
+  // git 2.43's ls-remote receives `unborn HEAD symref-target:refs/heads/main` and prints no line (no oid to list).
+  // symbolic-ref is the target that line names; an empty listing is the unborn repository.
+  assert.equal(git(empty, ['ls-remote', '--symref', '.']).trim(), '');
+  const target = git(empty, ['symbolic-ref', 'HEAD']).trim();
+  assert.equal(target, 'refs/heads/main');
+  for (const asked of [null, 'HEAD', 'main', 'refs/heads/main']) {
+    const got = await readCommit(`${srv.url}/empty.git`, { ref: asked }, { tracer: tracer() });
+    assert.deepEqual(got, { empty: true, ref: target }, String(asked));
+  }
+  await assert.rejects(readFile(`${srv.url}/empty.git`, { path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found' && e.miss.kind === 'head_unborn' && e.miss.target === target);
+  await assert.rejects(readFile(`${srv.url}/empty.git`, { ref: 'nope', path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found' && e.miss.kind === 'ref' && e.miss.ref === 'nope');
+
+  const tree = git(R.bare, ['rev-parse', 'HEAD^{tree}']).trim();
+  const t = createTransport(R.url, { tracer: tracer() });
+  const missing = await walkPath(t, tree, ['a', 'nope']);
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.deepEqual(missing.error.miss, { kind: 'path', missing: 'nope', existingPath: 'a' });
+  assert.throws(() => git(R.bare, ['cat-file', '-e', 'HEAD:a/nope']));
+  const throughFile = await walkPath(t, tree, ['README.md', 'x']);
+  assert.equal(throughFile.ok, false);
+  if (!throughFile.ok) {
+    const mode = git(R.bare, ['ls-tree', 'HEAD', 'README.md']).slice(0, 6);
+    assert.deepEqual(throughFile.error.miss, { kind: 'not_directory', path: 'README.md', mode });
+  }
+  const dir = await readFile(R.url, { path: 'a/b' }, { tracer: tracer() }).then(() => { throw new Error('a directory was a file'); }, e => e);
+  assert.equal(dir.code, 'not_found');
+  assert.deepEqual(dir.miss, { kind: 'is_directory', path: 'a/b', tree: git(R.bare, ['rev-parse', 'HEAD:a/b']).trim() });
+  const subLine = git(R.bare, ['ls-tree', 'HEAD', 'vendor/sub']).trim();
+  const subOid = subLine.split(/\s+/)[2];
+  assert.equal(subLine.slice(0, 6), '160000');
+  const sub = await readFile(R.url, { path: 'vendor/sub' }, { tracer: tracer() }).then(() => { throw new Error('a submodule was a file'); }, e => e);
+  assert.equal(sub.code, 'not_found');
+  assert.deepEqual(sub.miss, { kind: 'submodule', path: 'vendor/sub', commit: subOid });
+});
+
+// A commit whose object is a tree, blob, or tag is not_found (refuseNonCommit). The pack_corrupt line that remains is a
+// want whose expected type is not a commit: walking a path from a blob asks for a tree and the object is a blob.
+test('a path walk that starts at a blob is pack_corrupt (expected tree, got blob)', async () => {
+  const blob = git(R.bare, ['rev-parse', 'HEAD:README.md']).trim();
+  const walked = await walkPath(createTransport(R.url, { tracer: tracer() }), blob, ['x']);
+  assert.equal(walked.ok, false);
+  if (!walked.ok) {
+    assert.equal(walked.error.code, 'pack_corrupt');
+    assert.match(walked.error.message, /expected tree, got blob/);
+  }
+});
+
+test('ply does not classify a not_found by matching its own message', async () => {
+  const { readdirSync, readFileSync } = await import('node:fs');
+  // The classifiers ply-web used, and the ones this tree used to rethrow not_found. The messages themselves stay;
+  // nothing in src tests a message to decide a code.
+  const banned = ['thrownMessageMatches(', '/not our ref/', '/expected commit', '/is a directory', '/is not a directory', '/path component', '/remote HEAD', '/^ref ', 'expected commit|not our ref'];
+  for (const f of readdirSync('src').filter(name => /\.[jt]s$/.test(name))) {
+    const text = readFileSync(`src/${f}`, 'utf8');
+    for (const needle of banned) assert.equal(text.includes(needle), false, `${f} contains ${needle}`);
+  }
+});
+
 test('fetchCommit matches git fetch and cat-file; a tree want of a blob stays pack_corrupt', async () => {
   const tip = git(R.bare, ['rev-parse', 'main']).trim();
   const tree = git(R.bare, ['rev-parse', `${tip}^{tree}`]).trim();
@@ -124,9 +195,10 @@ test('fetchCommit matches git fetch and cat-file; a tree want of a blob stays pa
       assert.equal(got.ok, false, name);
       if (got.ok) continue;
       assert.equal(got.error.code, 'not_found', `${name}: ${got.error.code} ${got.error.message}`);
-      assert.equal(got.error.miss?.kind, want, name);
-      assert.equal(got.error.miss?.oid, oid, name);
-      if (want === 'not_commit') assert.equal(got.error.miss.type, gitClass.typ, name);
+      assert.equal(got.error.miss.kind, 'commit', name);
+      assert.equal(got.error.miss.miss.kind, want, name);
+      assert.equal(got.error.miss.miss.oid, oid, name);
+      if (want === 'not_commit') assert.equal(got.error.miss.miss.type, gitClass.typ, name);
     }
   }
   await assert.rejects(fetchObject(createTransport(R.url, { tracer: tracer() }), { oid: blob, expectType: TYPE.TREE }), e => e.code === 'pack_corrupt' && e.message === 'expected tree, got blob' && e.miss === undefined);
@@ -303,4 +375,146 @@ test('readCommit fetches the commit object only: one tree:0 deepen-1 fetch, no t
   assert.equal(fetches[0].attrs['git.object.type'], 'commit');
   assert.equal(fetches[0].attrs['git.fetch.filter'], 'tree:0'); assert.equal(fetches[0].attrs['git.fetch.deepen'], 1);
   assert.ok(!spans.some(s => s.name === 'git.read.tree'));
+});
+
+test('abbreviated oids: unique among advertised tips agrees with git, and a ref name wins', async () => {
+  const bare = makeBareRepo(root, 'abbrev');
+  const work = join(root, 'abbrev-work');
+  mkdirSync(work);
+  git(work, ['init', '-q', '-b', 'main']);
+  const empty = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+  const oids = [];
+  const bucket = (n) => {
+    const m = new Map();
+    for (const oid of oids) {
+      const k = oid.slice(0, n);
+      const g = m.get(k);
+      if (g) g.push(oid); else m.set(k, [oid]);
+    }
+    return m;
+  };
+  let parent = null;
+  for (let i = 0; i < 4000; i++) {
+    const args = ['-c', 'user.name=seed', '-c', 'user.email=seed@x', '-c', 'commit.gpgsign=false', 'commit-tree', empty, '-m', String(i)];
+    if (parent) args.push('-p', parent);
+    parent = git(work, args).trim();
+    oids.push(parent);
+    if ([...bucket(4).values()].some(v => v.length >= 2) && [...bucket(5).values()].some(v => v.length >= 2) && oids.length > 64) break;
+  }
+  const g4 = bucket(4);
+  const g5 = bucket(5);
+  const pair4 = [...g4.entries()].find(([, v]) => v.length >= 2);
+  const pair5 = [...g5.entries()].find(([, v]) => v.length >= 2);
+  const singles = [...g4.entries()].filter(([, v]) => v.length === 1);
+  assert.ok(pair4 && pair5 && singles.length >= 4, `no shared prefix in ${oids.length} commits`);
+  const used = new Set([...pair4[1], ...pair5[1]]);
+  const free = singles.filter(([, v]) => !used.has(v[0]));
+  assert.ok(free.length >= 4, `free singles ${free.length}`);
+  const [uniquePrefix, [uniqueOid]] = free[0];
+  const [namePrefix, [nameOid]] = free[1];
+  const nameTarget = free[2][1][0];
+  const [interiorPrefix, [interiorOid]] = free[3];
+  git(work, ['update-ref', 'refs/heads/main', parent]);
+  git(work, ['push', '-q', bare, 'refs/heads/main']);
+  const point = (ref, oid) => git(bare, ['update-ref', ref, oid]);
+  point('refs/heads/main', uniqueOid);
+  point('refs/heads/a', pair4[1][0]);
+  point('refs/heads/b', pair4[1][1]);
+  point('refs/heads/c', pair5[1][0]);
+  point('refs/heads/d', pair5[1][1]);
+  point('refs/heads/hold', nameOid);
+  point(`refs/heads/${namePrefix}`, nameTarget);
+  git(bare, ['-c', 'user.name=seed', '-c', 'user.email=seed@x', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', 'tag', '-a', '-m', 'ann', 'v1', uniqueOid]);
+  const tagOid = git(bare, ['rev-parse', 'v1']).trim();
+  let up = uniquePrefix;
+  if (tagOid.startsWith(up)) {
+    for (let n = 5; n < 40 && tagOid.startsWith(uniqueOid.slice(0, n)); n++) up = uniqueOid.slice(0, n + 1);
+  }
+  const url = `${srv.url}/abbrev.git`;
+  const t = () => createTransport(url, { tracer: tracer() });
+  const disambiguate = prefix => git(bare, ['rev-parse', `--disambiguate=${prefix}`]).trim().split('\n').filter(Boolean);
+  const advertised = git(bare, ['for-each-ref', '--format=%(objectname) %(objecttype) %(*objectname)']).trim().split('\n').flatMap(l => l.split(' ').filter(x => /^[0-9a-f]{40}$/.test(x)));
+  const expectOids = prefix => [...new Set(advertised.filter(o => o.startsWith(prefix)))].sort();
+  // a ref named like the prefix wins (git warns that the name is ambiguous, and still answers the ref)
+  const named = await resolveCommit(t(), namePrefix, { abbrev: 'advertised' });
+  assert.deepEqual(named, { name: `refs/heads/${namePrefix}`, commit: nameTarget });
+  const rev = spawnSync('git', ['rev-parse', namePrefix], { cwd: bare, encoding: 'utf8' });
+  assert.equal(rev.status, 0);
+  assert.match(`${rev.stderr}`, /ambiguous/);
+  assert.equal(rev.stdout.trim(), nameTarget);
+  assert.equal(git(bare, ['rev-parse', `${namePrefix}^{commit}`]).trim(), nameTarget);
+  // unique among advertised tips: git's candidates include that commit
+  const unique = await resolveCommit(t(), up, { abbrev: 'advertised' });
+  assert.deepEqual(unique, { name: uniqueOid, commit: uniqueOid });
+  const uniqueObjs = disambiguate(up);
+  assert.ok(uniqueObjs.includes(uniqueOid), uniqueObjs.join(' '));
+  assert.equal(git(bare, ['cat-file', '-t', uniqueOid]).trim(), 'commit');
+  const listed = await lsRefs(t(), ['HEAD', 'refs/heads/', 'refs/tags/']);
+  const peeled = resolveAbbrev(up, listed);
+  assert.equal(peeled.ok && peeled.value.kind, 'unique_among_advertised');
+  if (peeled.ok && peeled.value.kind === 'unique_among_advertised') {
+    assert.equal(peeled.value.oid, uniqueOid);
+    assert.ok(peeled.value.refs.includes('refs/tags/v1'));
+  }
+  // two advertised tips: ply is ambiguous, and each oid is one of git's
+  for (const prefix of [pair4[0], pair5[0]]) {
+    const want = expectOids(prefix);
+    assert.ok(want.length >= 2, prefix);
+    await assert.rejects(resolveCommit(t(), prefix, { abbrev: 'advertised' }), e => {
+      assert.equal(e.code, 'bad_request');
+      assert.deepEqual([...e.got].sort(), want);
+      return true;
+    });
+    const objs = disambiguate(prefix);
+    for (const oid of want) assert.ok(objs.includes(oid), `${prefix} ${oid}`);
+  }
+  // git's only object for this prefix is an interior commit: ply does not call it ambiguous
+  assert.deepEqual(disambiguate(interiorPrefix), [interiorOid]);
+  await assert.rejects(resolveCommit(t(), interiorPrefix, { abbrev: 'advertised' }), e => e.code === 'not_found');
+  // default off: the same prefix is a ref name that does not exist, not an object id
+  await assert.rejects(resolveCommit(t(), up), e => e.code === 'not_found');
+  console.log(`  abbrev oracle over ${oids.length} commits`);
+});
+
+test('openBlob and readBlob match git cat-file; too_big is the object header', async () => {
+  // two near-copies, so git stores one as a delta. openBlob asks for one oid and sends no have, so upload-pack has no
+  // in-pack base and sends the object whole. The bytes are still cat-file's.
+  git(R.work, ['checkout', '-q', '-B', 'deltas', 'main']);
+  const base = Buffer.alloc(4000, 0x61);
+  const near = Buffer.from(base); near[20] = 0x62;
+  writeFileSync(join(R.work, 'delta-a.bin'), base);
+  writeFileSync(join(R.work, 'delta-b.bin'), near);
+  git(R.work, ['add', 'delta-a.bin', 'delta-b.bin']);
+  git(R.work, ['-c', 'user.name=seed', '-c', 'user.email=seed@x', 'commit', '-q', '-m', 'deltas']);
+  git(R.work, ['push', '-q', R.bare, 'HEAD:refs/heads/deltas']);
+  git(R.work, ['checkout', '-q', 'main']);
+  git(R.bare, ['repack', '-a', '-d', '-f']);
+  const packs = readdirSync(join(R.bare, 'objects', 'pack')).filter(n => n.endsWith('.pack'));
+  const listed = packs.map(n => git(R.bare, ['verify-pack', '-v', join(R.bare, 'objects', 'pack', n)])).join('\n');
+  const deltified = listed.split('\n').filter(l => /\sblob\s.*\s[0-9a-f]{40}$/.test(l)).map(l => l.slice(0, 40));
+  assert.ok(deltified.length >= 1, 'the fixture pack stores a blob as a delta');
+  const specs = ['empty.txt', 'README.md', 'run.sh', 'big.bin', 'deltas:delta-a.bin', 'deltas:delta-b.bin'];
+  for (const spec of specs) {
+    const oid = git(R.work, ['rev-parse', `${spec.includes(':') ? spec : `main:${spec}`}`]).trim();
+    const size = Number(git(R.work, ['cat-file', '-s', oid]));
+    const bytes = gitBuf(R.work, ['cat-file', 'blob', oid]);
+    assert.equal(bytes.length, size);
+    const ex = arrayExporter(); const tr = new Tracer({ exporter: ex });
+    const capped = await openBlob(createTransport(R.url, { tracer: tr }), oid, { maxBytes: Math.max(0, size - 1), follows: tr.start('cap') });
+    if (size === 0) {
+      assert.equal(capped.ok && capped.value.kind, 'stream', spec);
+      if (capped.ok && capped.value.kind === 'stream') assert.equal(capped.value.size, 0);
+    } else {
+      assert.equal(capped.ok, true, spec);
+      if (capped.ok) assert.deepEqual(capped.value, { kind: 'too_big', size });
+      const span = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.read.blob');
+      assert.equal(span.attrs['git.read.blob.header_only'], true, spec);
+      assert.equal(span.attrs['git.read.blob.bytes'], undefined, spec);
+    }
+    const got = await readBlob(createTransport(R.url, { tracer: tracer() }), oid, { maxBytes: size });
+    assert.equal(got.ok, true, spec);
+    if (got.ok && got.value.kind === 'bytes') assert.deepEqual(Buffer.from(got.value.data), bytes);
+    else assert.fail(`${spec} was ${got.ok ? got.value.kind : got.error.code}`);
+  }
+  assert.ok(specs.map(spec => git(R.work, ['rev-parse', `${spec.includes(':') ? spec : `main:${spec}`}`]).trim()).some(oid => deltified.includes(oid)));
 });

@@ -7,9 +7,9 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
-import { editFile } from '../src/edit.js';
+import { editFile, lookupEntry } from '../src/edit.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
-import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, fetchCommit } from '../src/read.js';
+import { refCandidates, entryType, lsMode, resolveCommit, resolveAbbrev, commitView, readCommit, listTree, readFile, openBlob, readBlob, fetchCommit, walkPath } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
 import { buildPack, encodeObjHeader, zlibDeflate } from '../src/pack.js';
 import { parsePack, resolvePack, makeDelta } from '../src/packresolve.js';
@@ -52,6 +52,8 @@ const throws = (fn, code, message, extra = {}) => assert.throws(fn, e => {
   return true;
 });
 const readAll = async stream => { const parts = []; for await (const c of stream) parts.push(c); return td.decode(concat(parts)); };
+const streamOf = r => { assert.equal(r.ok, true, r.ok ? '' : r.error?.message); if (!r.ok || r.value.kind !== 'stream') throw new Error('expected a stream'); return r.value; };
+const errOf = r => { assert.equal(r.ok, false); if (r.ok) throw new Error('expected an error'); return r.error; };
 
 // ---- the fake remote ----
 
@@ -117,7 +119,7 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
     const { lines } = requestLines(body);
     const arg = k => lines.filter(l => l.startsWith(`${k} `)).map(l => l.slice(k.length + 1));
     if (lines[0] === 'command=ls-refs') {
-      const req = { service, command: 'ls-refs', prefixes: arg('ref-prefix') };
+      const req = { service, command: 'ls-refs', prefixes: arg('ref-prefix'), unborn: lines.includes('unborn') };
       log.push(req);
       if (hook) { const r = await hook(req); if (r) { yield* r; return; } }
       const match = name => !req.prefixes.length || req.prefixes.some(p => name.startsWith(p));
@@ -142,7 +144,8 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
   const transport = ({ tracer, limits = DEFAULT_LIMITS, quirks = {} }) => ({
     kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks, scrub: null,
     frames: (service, body) => serve(service, body),
-    advertise: async () => { throw new Error('not used'); },
+    // A ref miss asks discover() before it classifies the miss. No `unborn` feature: no second ls-refs, HEAD stays head_absent.
+    advertise: async () => pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n']),
   });
   return { objects, refs, log, put, commit, transport, fetches: () => log.filter(r => r.command === 'fetch'), pushes: () => log.filter(r => r.service === 'git-receive-pack') };
 }
@@ -422,7 +425,7 @@ test('pushTree: create a ref from base, refuse an absent base', async () => {
   assert.equal(same.noop, false);
   assert.equal(r.refs.get('refs/heads/copy'), same.newCommit);
   const e = env(r);
-  await rejects(pushTree('http://fake/r.git', { ref: 'refs/heads/x', base: 'refs/heads/gone', files: {}, author: A, message: 'm', time: T0 }, e.opts), 'not_found', 'ref refs/heads/gone not found', { attempt: 0, hint: null });
+  await rejects(pushTree('http://fake/r.git', { ref: 'refs/heads/x', base: 'refs/heads/gone', files: {}, author: A, message: 'm', time: T0 }, e.opts), 'not_found', 'ref refs/heads/gone not found', { attempt: 0, hint: null, miss: { kind: 'ref', ref: 'refs/heads/gone', candidates: ['refs/heads/gone'] } });
   assert.equal(e.span('git.push_tree').attrs['git.push_tree.outcome'], 'not_found');
 });
 
@@ -474,8 +477,26 @@ test('editFile: a lost race is retried once from a fresh ls-refs', async () => {
   assert.deepEqual(roots[1].links.map(l => [l.spanId, l.attrs['ply.link']]), [[roots[0].spanId, 'retry_of']]);
   // a non-conflict error is the one attempt, not a retry
   const missing = env(r);
-  await rejects(editFile('http://fake/r.git', { ref: 'refs/heads/missing', path: 'README', find: 'a', replace: 'b', author: A, message: 'm', time: T0 }, missing.opts), 'not_found', 'ref refs/heads/missing not found');
+  await rejects(editFile('http://fake/r.git', { ref: 'refs/heads/missing', path: 'README', find: 'a', replace: 'b', author: A, message: 'm', time: T0 }, missing.opts), 'not_found', 'ref refs/heads/missing not found', { miss: { kind: 'ref', ref: 'refs/heads/missing', candidates: ['refs/heads/missing'] } });
   assert.equal(missing.all('git.edit').length, 1);
+});
+
+test('lookupEntry: a missing name, a file along the way, and a last component that is not a regular file', () => {
+  const tree = encodeTree([
+    { name: 'README', mode: '100644', oid: GIT.readme },
+    { name: 'src', mode: '40000', oid: GIT.src },
+    { name: 'sub', mode: '160000', oid: GITLINK },
+    { name: 'link', mode: '120000', oid: GIT.link },
+    { name: 'run.sh', mode: '100755', oid: GIT.run },
+  ]);
+  throws(() => lookupEntry(tree, 'nope', true, DEFAULT_LIMITS), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: '' } });
+  throws(() => lookupEntry(tree, 'README', false, DEFAULT_LIMITS), 'not_found', 'README is not a directory', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
+  assert.equal(lookupEntry(tree, 'src', false, DEFAULT_LIMITS).entry.oid, GIT.src);
+  throws(() => lookupEntry(tree, 'src', true, DEFAULT_LIMITS), 'not_found', 'src is not a regular file (mode 40000)', { miss: { kind: 'is_directory', path: 'src', tree: GIT.src } });
+  throws(() => lookupEntry(tree, 'sub', true, DEFAULT_LIMITS), 'not_found', 'sub is not a regular file (mode 160000)', { miss: { kind: 'submodule', path: 'sub', commit: GITLINK } });
+  throws(() => lookupEntry(tree, 'link', true, DEFAULT_LIMITS), 'not_found', 'link is not a regular file (mode 120000)', { miss: { kind: 'not_directory', path: 'link', mode: '120000' } });
+  assert.equal(lookupEntry(tree, 'README', true, DEFAULT_LIMITS).entry.oid, GIT.readme);
+  assert.equal(lookupEntry(tree, 'run.sh', true, DEFAULT_LIMITS).entry.mode, '100755');
 });
 
 test('editFile and pushTree: a non-Error from the first attempt is a rejection, and is not retried', async () => {
@@ -715,10 +736,11 @@ test('checkoutTree: a subtree by path, a ref by short name, batch bounds', async
   const deep = await checkoutTree('http://fake/r.git', { path: 'src/lib' }, env(r).opts);
   assert.deepEqual([deep.tree, deep.entries.map(x => x.path)], [GIT.lib, ['b.js']]);
   assert.equal((await checkoutTree('http://fake/r.git', { ref: 'v1' }, env(r).opts)).ref, 'refs/tags/v1');
-  await rejects(checkoutTree('http://fake/r.git', { path: 'nope' }, env(r).opts), 'not_found', 'path component nope not found');
-  await rejects(checkoutTree('http://fake/r.git', { path: 'src/nope' }, env(r).opts), 'not_found', 'path component nope not found');
-  await rejects(checkoutTree('http://fake/r.git', { path: 'src/a.js' }, env(r).opts), 'not_found', 'src/a.js is not a directory (mode 100644)');
-  await rejects(checkoutTree('http://fake/r.git', { path: 'README/x' }, env(r).opts), 'not_found', 'README is not a directory (mode 100644)');
+  await rejects(checkoutTree('http://fake/r.git', { path: 'nope' }, env(r).opts), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: '' } });
+  await rejects(checkoutTree('http://fake/r.git', { path: 'src/nope' }, env(r).opts), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: 'src' } });
+  await rejects(checkoutTree('http://fake/r.git', { path: 'src/lib/nope' }, env(r).opts), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: 'src/lib' } });
+  await rejects(checkoutTree('http://fake/r.git', { path: 'src/a.js' }, env(r).opts), 'not_found', 'src/a.js is not a directory (mode 100644)', { miss: { kind: 'not_directory', path: 'src/a.js', mode: '100644' } });
+  await rejects(checkoutTree('http://fake/r.git', { path: 'README/x' }, env(r).opts), 'not_found', 'README is not a directory (mode 100644)', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
   await rejects(checkoutTree('http://fake/r.git', { path: '../x' }, env(r).opts), 'bad_request');
   for (const batch of [0, -1, 1.5, NaN, '2', 3]) {
     await rejects(checkoutTree('http://fake/r.git', {}, { ...env(r).opts, batch, limits: withLimits({ maxPackObjects: 2 }) }), 'bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
@@ -741,9 +763,9 @@ test('checkoutTree: a bare commit oid, a non-commit, missing trees and a short p
   assert.equal(r.log.filter(x => x.command === 'ls-refs').length, 0, 'a bare oid needs no ls-refs');
   assert.equal(e.span('git.checkout').attrs['git.checkout.ref'], c);
   const missing = 'e'.repeat(40);
-  await rejects(checkoutTree('http://fake/r.git', { ref: missing }, env(r).opts), 'not_found', `commit ${missing} not found on the remote`, { miss: { kind: 'absent', oid: missing } });
-  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.src }, env(r).opts), 'not_found', `${GIT.src} is not a commit`, { miss: { kind: 'not_commit', oid: GIT.src, type: 'tree' } });
-  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.readme }, env(r).opts), 'not_found', `${GIT.readme} is not a commit`, { miss: { kind: 'not_commit', oid: GIT.readme, type: 'blob' } });
+  await rejects(checkoutTree('http://fake/r.git', { ref: missing }, env(r).opts), 'not_found', `commit ${missing} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: missing } } });
+  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.src }, env(r).opts), 'not_found', `${GIT.src} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.src, type: 'tree' } } });
+  await rejects(checkoutTree('http://fake/r.git', { ref: GIT.readme }, env(r).opts), 'not_found', `${GIT.readme} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.readme, type: 'blob' } } });
   // a pack without the commit, or without a tree under it
   const only = async oids => (await buildPack(oids.map(o => r.objects.get(o)))).pack;
   const lying = pack => remote({ hook: async req => (req.command === 'fetch' ? packFrames(await pack()) : undefined) });
@@ -757,7 +779,11 @@ test('checkoutTree: a bare commit oid, a non-commit, missing trees and a short p
   const other = remote({ hook: async req => (req.command === 'fetch' ? [dataFrame('ERR upload-pack: something else')] : undefined) }); other.refs.set('refs/heads/main', c);
   await rejects(checkoutTree('http://fake/r.git', {}, env(other).opts), 'remote_error', 'remote: upload-pack: something else');
   const absent = remote(); absent.refs.set('refs/heads/main', c);
-  await rejects(checkoutTree('http://fake/r.git', {}, env(absent).opts), 'not_found', `commit ${c} not found on the remote`);
+  await rejects(checkoutTree('http://fake/r.git', {}, env(absent).opts), 'not_found', `commit ${c} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: c } } });
+  // a pack_corrupt that happens to carry not_our_ref is still pack_corrupt: only remote_error is reclassified
+  const odd = remote({ hook: async req => { if (req.command !== 'fetch') return; const e = new Error('odd'); e.code = 'pack_corrupt'; e.reason = 'not_our_ref'; throw e; } });
+  odd.refs.set('refs/heads/main', c);
+  await rejects(checkoutTree('http://fake/r.git', {}, env(odd).opts), 'pack_corrupt', 'odd');
 });
 
 test('checkoutTree: one blob at two paths is fetched once and yielded twice, each with its own stream', async () => {
@@ -909,12 +935,54 @@ test('resolveCommit: HEAD\'s symref, a detached HEAD, tags over branches, peeled
   assert.deepEqual(await resolveCommit(t, 'heads/v1'), { name: 'refs/heads/v1', commit: c2 });
   assert.deepEqual(await resolveCommit(t, c2), { name: c2, commit: c2 });
   assert.deepEqual(r.log.filter(x => x.command === 'ls-refs').map(x => x.prefixes), [['HEAD'], ['HEAD'], ['refs/v1', 'refs/tags/v1', 'refs/heads/v1'], ['refs/heads/v1'], ['refs/heads/v1', 'refs/tags/heads/v1', 'refs/heads/heads/v1']]);
-  await rejects(resolveCommit(t, 'nope'), 'not_found', 'ref nope not found');
-  await rejects(resolveCommit(t, 'refs/heads/nope'), 'not_found', 'ref refs/heads/nope not found');
+  await rejects(resolveCommit(t, 'nope'), 'not_found', 'ref nope not found', { miss: { kind: 'ref', ref: 'nope', candidates: ['refs/nope', 'refs/tags/nope', 'refs/heads/nope'] } });
+  await rejects(resolveCommit(t, 'refs/heads/nope'), 'not_found', 'ref refs/heads/nope not found', { miss: { kind: 'ref', ref: 'refs/heads/nope', candidates: ['refs/heads/nope'] } });
   const detached = remote({ head: c }); detached.objects.set(c, r.objects.get(c));
   assert.deepEqual(await resolveCommit(detached.transport({ tracer: new Tracer() }), null), { name: 'HEAD', commit: c });
   const unborn = remote();
-  await rejects(resolveCommit(unborn.transport({ tracer: new Tracer() }), 'HEAD'), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly');
+  await rejects(resolveCommit(unborn.transport({ tracer: new Tracer() }), 'HEAD'), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_absent' } });
+  assert.equal(unborn.log.filter(x => x.command === 'ls-refs').length, 1, 'no ls-refs=unborn: the miss does not ask again');
+});
+
+test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwise', async () => {
+  const target = 'refs/heads/main';
+  const advertise = async () => pkts(['version 2\n', 'ls-refs=unborn\n', 'fetch\n', 'object-format=sha1\n']);
+  const unbornLine = (text) => [dataFrame(text), { kind: 'flush' }];
+  const server = (text) => {
+    // an unborn answer that is not prefixed HEAD is the server's ordinary listing: the second ls-refs must ask for HEAD
+    const r = remote({ hook: async req => (req.command === 'ls-refs' && req.unborn && req.prefixes.includes('HEAD') ? unbornLine(text) : undefined) });
+    const ex = arrayExporter();
+    const tracer = new Tracer({ exporter: ex });
+    const transport = { ...r.transport({ tracer }), advertise };
+    return { r, opts: { tracer, transport }, transport, spans: () => ex.lines.flatMap(flattenLine) };
+  };
+  const born = server(`unborn HEAD symref-target:${target}\n`);
+  for (const ref of [null, undefined, '', 'HEAD', 'main', 'refs/heads/main']) {
+    assert.deepEqual(await readCommit('http://fake/r.git', { ref }, born.opts), { empty: true, ref: target }, String(ref));
+  }
+  assert.ok(born.spans().filter(s => s.name === 'git.read_commit').every(s => s.attrs['git.read_commit.outcome'] === 'ok'));
+  await rejects(readFile('http://fake/r.git', { path: 'README' }, born.opts), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_unborn', target } });
+  await rejects(resolveCommit(born.transport, 'other'), 'not_found', 'ref other not found', { miss: { kind: 'ref', ref: 'other', candidates: ['refs/other', 'refs/tags/other', 'refs/heads/other'] } });
+  await rejects(resolveCommit(born.transport, 'refs/heads/other'), 'not_found', 'ref refs/heads/other not found', { miss: { kind: 'ref', ref: 'refs/heads/other', candidates: ['refs/heads/other'] } });
+  await rejects(readCommit('http://fake/r.git', { ref: 'other' }, born.opts), 'not_found', 'ref other not found', { miss: { kind: 'ref', ref: 'other', candidates: ['refs/other', 'refs/tags/other', 'refs/heads/other'] } });
+  const plain = { code: 'not_found', miss: { kind: 'head_unborn', target } };
+  const liar = remote({ hook: async req => { if (req.command === 'ls-refs') throw plain; } });
+  await assert.rejects(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...liar.transport({ tracer: new Tracer() }), advertise } }), e => e === plain);
+  const typed = remote({ hook: async req => { if (req.command === 'ls-refs') throw fail('pack_corrupt', 'odd', { miss: { kind: 'head_unborn', target } }); } });
+  await rejects(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...typed.transport({ tracer: new Tracer() }), advertise } }), 'pack_corrupt', 'odd');
+  const blank = server('unborn HEAD symref-target:\n');
+  await rejects(resolveCommit(blank.transport, 'HEAD'), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_absent' } });
+  await rejects(resolveCommit(born.transport, undefined), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_unborn', target } });
+  const quiet = remote({ hook: async req => (req.command === 'ls-refs' && req.unborn ? [{ kind: 'flush' }] : undefined) });
+  const quietT = { ...quiet.transport({ tracer: new Tracer() }), advertise };
+  await rejects(resolveCommit(quietT, null), 'not_found', 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly', { miss: { kind: 'head_absent' } });
+  const held = remote(); held.commit(FILES());
+  const walked = await walkPath(held.transport({ tracer: new Tracer() }), GIT.root, ['nope']);
+  assert.equal(walked.ok, false);
+  if (!walked.ok) assert.deepEqual(walked.error.miss, { kind: 'path', missing: 'nope', existingPath: '' });
+  const cache = new Map();
+  cache.get = () => { throw 'boom'; };
+  await assert.rejects(walkPath(held.transport({ tracer: new Tracer() }), GIT.root, ['x'], { cache }), e => e === 'boom');
 });
 
 test('commitView: idents for JSON, signed, parents and message', () => {
@@ -962,18 +1030,18 @@ test('readCommit: the commit alone (tree:0, deepen 1), its view and span; a non-
   assert.deepEqual((await readCommit('http://fake/r.git', { ref: 'main' }, e2.opts)).parents, [c]);
   assert.deepEqual([e2.span('git.read_commit').attrs['git.read_commit.ref'], e2.span('git.read_commit').attrs['git.read_commit.parents']], ['main', 1]);
   assert.equal((await readCommit('http://fake/r.git', { ref: child }, env(r).opts)).oid, child);
-  await rejects(readCommit('http://fake/r.git', { ref: GIT.root }, env(r).opts), 'not_found', `${GIT.root} is not a commit`, { miss: { kind: 'not_commit', oid: GIT.root, type: 'tree' } });
+  await rejects(readCommit('http://fake/r.git', { ref: GIT.root }, env(r).opts), 'not_found', `${GIT.root} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.root, type: 'tree' } } });
   const absentId = 'f'.repeat(40);
-  await rejects(readCommit('http://fake/r.git', { ref: absentId }, env(r).opts), 'not_found', `commit ${absentId} not found on the remote`, { miss: { kind: 'absent', oid: absentId } });
+  await rejects(readCommit('http://fake/r.git', { ref: absentId }, env(r).opts), 'not_found', `commit ${absentId} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: absentId } } });
   const tagData = encodeTag({ object: c, type: 'commit', tag: 'v1', tagger: 'A <a@x> 1 +0000', message: 't\n' });
   const tagOid = hashObject('tag', tagData);
   r.objects.set(tagOid, { type: TYPE.TAG, data: tagData });
   const tagged = await fetchCommit(r.transport({ tracer: new Tracer() }), tagOid);
   assert.equal(tagged.ok, false);
-  if (!tagged.ok) assert.deepEqual({ code: tagged.error.code, message: tagged.error.message, miss: tagged.error.miss }, { code: 'not_found', message: `${tagOid} is not a commit`, miss: { kind: 'not_commit', oid: tagOid, type: 'tag' } });
+  if (!tagged.ok) assert.deepEqual({ code: tagged.error.code, message: tagged.error.message, miss: tagged.error.miss }, { code: 'not_found', message: `${tagOid} is not a commit`, miss: { kind: 'commit', miss: { kind: 'not_commit', oid: tagOid, type: 'tag' } } });
   const blobbed = await fetchCommit(r.transport({ tracer: new Tracer() }), GIT.readme);
   assert.equal(blobbed.ok, false);
-  if (!blobbed.ok) assert.deepEqual(blobbed.error.miss, { kind: 'not_commit', oid: GIT.readme, type: 'blob' });
+  if (!blobbed.ok) assert.deepEqual(blobbed.error.miss, { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.readme, type: 'blob' } });
   const other = remote({ hook: async req => (req.command === 'fetch' ? [dataFrame('ERR upload-pack: busy')] : undefined) }); other.refs.set('refs/heads/main', c);
   await rejects(readCommit('http://fake/r.git', {}, env(other).opts), 'remote_error', 'remote: upload-pack: busy');
   const busy = await fetchCommit(other.transport({ tracer: new Tracer() }), c);
@@ -984,6 +1052,11 @@ test('readCommit: the commit alone (tree:0, deepen 1), its view and span; a non-
   const lied = await fetchCommit(corrupt.transport({ tracer: new Tracer() }), c);
   assert.equal(lied.ok, false);
   if (!lied.ok) { assert.equal(lied.error.code, 'pack_corrupt'); assert.equal(lied.error.message, `object ${GIT.readme} served for want ${c}`); assert.equal(lied.error.miss, undefined); }
+  const base = r.transport({ tracer: new Tracer() });
+  const odd = { ...base, frames: async function* frames() { const e = new Error('odd'); e.code = 'pack_corrupt'; e.reason = 'not_our_ref'; throw e; } };
+  const oddCommit = await fetchCommit(odd, c);
+  assert.equal(oddCommit.ok, false);
+  if (!oddCommit.ok) assert.equal(oddCommit.error.code, 'pack_corrupt');
 });
 
 test('listTree: the root, a subdirectory, cache hits and every not_found', async () => {
@@ -1014,11 +1087,14 @@ test('listTree: the root, a subdirectory, cache hits and every not_found', async
   assert.equal(r.fetches().length, before + 1, 'only the commit');
   assert.deepEqual(e3.all('git.read.tree').map(x => x.attrs['git.read.tree.cache_hit']), [true, true]);
   for (const path of [undefined, null, '', '/']) assert.equal((await listTree('http://fake/r.git', { path }, env(r).opts)).tree, GIT.root);
-  await rejects(listTree('http://fake/r.git', { path: 'README' }, env(r).opts), 'not_found', 'README is not a directory (mode 100644)');
-  await rejects(listTree('http://fake/r.git', { path: 'sub' }, env(r).opts), 'not_found', 'sub is not a directory (mode 160000)');
-  await rejects(listTree('http://fake/r.git', { path: 'README/x' }, env(r).opts), 'not_found', 'README is not a directory');
+  await rejects(listTree('http://fake/r.git', { path: 'README' }, env(r).opts), 'not_found', 'README is not a directory (mode 100644)', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
+  await rejects(listTree('http://fake/r.git', { path: 'sub' }, env(r).opts), 'not_found', 'sub is not a directory (mode 160000)', { miss: { kind: 'not_directory', path: 'sub', mode: '160000' } });
+  await rejects(listTree('http://fake/r.git', { path: 'README/x' }, env(r).opts), 'not_found', 'README is not a directory', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
+  await rejects(listTree('http://fake/r.git', { path: 'src/a.js' }, env(r).opts), 'not_found', 'src/a.js is not a directory (mode 100644)', { miss: { kind: 'not_directory', path: 'src/a.js', mode: '100644' } });
+  await rejects(listTree('http://fake/r.git', { path: 'src/a.js/x' }, env(r).opts), 'not_found', 'a.js is not a directory', { miss: { kind: 'not_directory', path: 'src/a.js', mode: '100644' } });
   const miss = env(r);
-  await rejects(listTree('http://fake/r.git', { path: 'src/nope' }, miss.opts), 'not_found', 'path component nope not found');
+  await rejects(listTree('http://fake/r.git', { path: 'src/nope' }, miss.opts), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: 'src' } });
+  await rejects(listTree('http://fake/r.git', { path: 'src/lib/nope' }, env(r).opts), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: 'src/lib' } });
   const last = miss.all('git.read.tree').at(-1).attrs;
   assert.deepEqual([last['git.read.tree.entry.found'], last['git.read.tree.entry.mode']], [false, '']);
   assert.equal(miss.span('git.ls_tree').attrs['git.ls_tree.outcome'], 'not_found');
@@ -1048,8 +1124,11 @@ test('readFile: the blob streamed and verified, its size first; directories and 
   const exe = await readFile('http://fake/r.git', { path: 'run.sh/' }, env(r).opts);
   assert.equal(exe.mode, '100755');
   await readAll(exe.stream);
-  await rejects(readFile('http://fake/r.git', { path: 'src' }, env(r).opts), 'not_found', 'src is a directory');
-  await rejects(readFile('http://fake/r.git', { path: 'sub' }, env(r).opts), 'not_found', `sub is a submodule (commit ${GITLINK})`);
+  await rejects(readFile('http://fake/r.git', { path: 'src' }, env(r).opts), 'not_found', 'src is a directory', { miss: { kind: 'is_directory', path: 'src', tree: GIT.src } });
+  await rejects(readFile('http://fake/r.git', { path: 'src/lib' }, env(r).opts), 'not_found', 'src/lib is a directory', { miss: { kind: 'is_directory', path: 'src/lib', tree: GIT.lib } });
+  await rejects(readFile('http://fake/r.git', { path: 'sub' }, env(r).opts), 'not_found', `sub is a submodule (commit ${GITLINK})`, { miss: { kind: 'submodule', path: 'sub', commit: GITLINK } });
+  const nested = remote(); nested.commit({ ...FILES(), 'nest/mod': { mode: '160000', oid: GITLINK } });
+  await rejects(readFile('http://fake/r.git', { path: 'nest/mod' }, env(nested).opts), 'not_found', `nest/mod is a submodule (commit ${GITLINK})`, { miss: { kind: 'submodule', path: 'nest/mod', commit: GITLINK } });
   for (const path of [undefined, '', '/']) await rejects(readFile('http://fake/r.git', { path }, env(r).opts), 'bad_request', undefined);
   await rejects(readFile('http://fake/r.git', {}, env(r).opts), 'bad_request');
 });
@@ -1067,10 +1146,10 @@ test('openBlob: every way a streamed blob can lie is pack_corrupt on the stream,
     const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
     const parent = tracer.start('p');
     const t = r.transport({ tracer });
-    return { open: () => openBlob(t, tracer, parent, want), spans: () => ex.lines.flatMap(flattenLine) };
+    return { open: () => openBlob(t, want, { follows: parent }), spans: () => ex.lines.flatMap(flattenLine) };
   };
   const good = await run(packFrames(await onePack(TYPE.BLOB, 5, 'hello'), 3));
-  const ok = await good.open();
+  const ok = streamOf(await good.open());
   assert.equal(ok.size, 5);
   assert.equal(await readAll(ok.stream), 'hello');
   const okSpan = good.spans().find(s => s.name === 'git.read.blob');
@@ -1084,30 +1163,32 @@ test('openBlob: every way a streamed blob can lie is pack_corrupt on the stream,
   ];
   for (const [label, pack, message] of cases) {
     const c = await run(packFrames(pack, 4));
-    const { stream } = await c.open();
+    const { stream } = streamOf(await c.open());
     await rejects(readAll(stream), 'pack_corrupt', message);
     const s = c.spans().find(x => x.name === 'git.read.blob');
     assert.equal(s.attrs['git.read.blob.outcome'], 'pack_corrupt', label);
     assert.equal(s.status.code, 2, label);
     assert.equal(s.status.message, message, label);
   }
-  // header-phase failures reject openBlob itself
+  // header-phase failures are the Result, and the spans still record them
   const tree = await run(packFrames(await onePack(TYPE.TREE, 0, '')));
-  await rejects(tree.open(), 'pack_corrupt', 'expected blob, got tree');
+  const treeErr = errOf(await tree.open());
+  assert.equal(treeErr.code, 'pack_corrupt'); assert.equal(treeErr.message, 'expected blob, got tree');
   assert.equal(tree.spans().find(x => x.name === 'git.read.blob').attrs['git.read.blob.outcome'], 'pack_corrupt');
   assert.equal(tree.spans().find(x => x.name === 'git.upload-pack fetch').status.code, 2);
   const commit = await run(packFrames(await onePack(TYPE.COMMIT, 0, '')));
-  await rejects(commit.open(), 'pack_corrupt', 'expected blob, got commit');
+  assert.equal(errOf(await commit.open()).message, 'expected blob, got commit');
   const empty = await run([dataFrame('packfile\n'), band(1, Uint8Array.of(0x50, 0x41)), { kind: 'flush' }]);
-  await rejects(empty.open(), 'pack_corrupt', 'pack ended before the object header');
+  assert.equal(errOf(await empty.open()).message, 'pack ended before the object header');
   const err = await run([dataFrame('ERR upload-pack: not our ref x')]);
-  await rejects(err.open(), 'remote_error', 'remote: upload-pack: not our ref x');
+  const remoteErr = errOf(await err.open());
+  assert.equal(remoteErr.code, 'remote_error'); assert.equal(remoteErr.message, 'remote: upload-pack: not our ref x');
   assert.equal(err.spans().find(x => x.name === 'git.read.blob').attrs['git.read.blob.outcome'], 'remote_error');
   // a failure after the header errors the stream typed, and still ends both spans with it (they used to be left open and never exported)
   const pack = await onePack(TYPE.BLOB, 5, 'hello'); pack[pack.length - 1] ^= 1;
   const midway = async (label, frames, code, message) => {
     const c = await run(frames);
-    await rejects(readAll((await c.open()).stream), code, message);
+    await rejects(readAll(streamOf(await c.open()).stream), code, message);
     await new Promise(resolve => setTimeout(resolve, 0));
     const [blob, fetch] = ['git.read.blob', 'git.upload-pack fetch'].map(n => c.spans().find(x => x.name === n));
     assert.ok(blob && fetch, `${label}: both spans exported`);
@@ -1148,7 +1229,7 @@ test('openBlob holds the last chunk until the hash and the trailer verify', asyn
     const r = remote({ hook: async () => wire });
     const ex = arrayExporter();
     const tracer = new Tracer({ exporter: ex });
-    const opened = await openBlob(r.transport({ tracer }), tracer, tracer.start('p'), want);
+    const opened = streamOf(await openBlob(r.transport({ tracer }), want, { follows: tracer.start('p') }));
     return { size: opened.size, ...(await pullChunks(opened.stream)), spans: () => ex.lines.flatMap(flattenLine) };
   };
   const good = await open(oid);
@@ -1191,6 +1272,88 @@ test('openBlob holds the last chunk until the hash and the trailer verify', asyn
   const trailerBytes = trailer.chunks.length ? concat(trailer.chunks) : new Uint8Array();
   assert.ok(trailerBytes.length < text.length);
   assert.equal(td.decode(trailerBytes), text.slice(0, trailerBytes.length));
+});
+
+test('openBlob: maxBytes is the declared size, and a cap does not pull the rest of the pack', async () => {
+  const text = 'hello world';
+  const oid = hashObject('blob', te.encode(text));
+  const pack = await onePack(TYPE.BLOB, text.length, text);
+  const frames = packFrames(pack, 8);
+  const serve = () => {
+    let pulls = 0;
+    const r = remote({ hook: async req => (req.command === 'fetch' ? (async function* () { for (const f of frames) { pulls += 1; yield f; } })() : undefined) });
+    const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
+    return { t: r.transport({ tracer }), tracer, pulls: () => pulls, spans: () => ex.lines.flatMap(flattenLine) };
+  };
+  const exact = serve();
+  const at = streamOf(await openBlob(exact.t, oid, { maxBytes: text.length, follows: exact.tracer.start('p') }));
+  assert.equal(await readAll(at.stream), text);
+  assert.equal(exact.spans().find(s => s.name === 'git.read.blob').attrs['git.read.blob.header_only'], undefined);
+  assert.equal(exact.pulls(), frames.length);
+  const over = serve();
+  const big = await openBlob(over.t, oid, { maxBytes: text.length - 1, follows: over.tracer.start('p') });
+  assert.equal(big.ok, true);
+  if (big.ok) assert.deepEqual(big.value, { kind: 'too_big', size: text.length });
+  const cap = over.spans().find(s => s.name === 'git.read.blob');
+  const capFetch = over.spans().find(s => s.name === 'git.upload-pack fetch');
+  assert.deepEqual([cap.attrs['git.read.blob.header_only'], cap.attrs['git.read.blob.outcome'], cap.attrs['git.read.blob.size']], [true, 'too_big', text.length]);
+  // the fetch span is ended (exported, status ok) when the header refuses the blob; dropping end() leaves it unexported
+  assert.equal(capFetch?.status.code, 1);
+  assert.ok(over.pulls() < frames.length, `the cap pulled ${over.pulls()} of ${frames.length} frames`);
+  const none = await openBlob(serve().t, oid, { maxBytes: 0 });
+  assert.equal(none.ok && none.value.kind, 'too_big');
+  const emptyOid = hashObject('blob', new Uint8Array(0));
+  const empty = streamOf(await openBlob(remote({ hook: async () => packFrames(await onePack(TYPE.BLOB, 0, ''), 8) }).transport({ tracer: new Tracer() }), emptyOid, { maxBytes: 0 }));
+  assert.equal(empty.size, 0);
+  assert.equal(await readAll(empty.stream), '');
+  for (const maxBytes of [-1, 1.5, NaN]) {
+    const bad = await openBlob(serve().t, oid, { maxBytes });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) {
+      assert.equal(bad.error.code, 'bad_request');
+      assert.equal(bad.error.message, 'maxBytes must be an integer >= 0');
+      assert.equal(bad.error.what, 'maxBytes');
+    }
+  }
+  // a thrown value that already carries a ply code, and is not an Error, is rethrown: it is not a Result
+  const bare = { code: 'network', message: 'reset' };
+  await assert.rejects(openBlob(remote({ hook: async () => { throw bare; } }).transport({ tracer: new Tracer() }), oid), e => e === bare);
+  const buffered = await readBlob(serve().t, oid, { maxBytes: text.length });
+  assert.equal(buffered.ok, true);
+  assert.equal(buffered.ok && buffered.value.kind, 'bytes');
+  if (buffered.ok && buffered.value.kind === 'bytes') assert.deepEqual(buffered.value.data, te.encode(text));
+  const capped = await readBlob(serve().t, oid, { maxBytes: 4 });
+  assert.equal(capped.ok && capped.value.kind, 'too_big');
+  if (capped.ok && capped.value.kind === 'too_big') assert.equal(capped.value.size, text.length);
+  // readBlob passes follows through both overloads, and a cap still wins when follows is set
+  const followed = serve();
+  const parent = followed.tracer.start('read');
+  const via = await readBlob(followed.t, oid, { follows: parent });
+  assert.equal(via.ok && via.value.kind, 'bytes');
+  if (via.ok && via.value.kind === 'bytes') assert.deepEqual(via.value.data, te.encode(text));
+  const viaSpan = followed.spans().find(s => s.name === 'git.read.blob');
+  assert.deepEqual(viaSpan.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']]), [[parent.traceId, parent.spanId, 'follows_from']]);
+  const followedCap = serve();
+  const parentCap = followedCap.tracer.start('read');
+  const viaCap = await readBlob(followedCap.t, oid, { maxBytes: 4, follows: parentCap });
+  assert.equal(viaCap.ok && viaCap.value.kind, 'too_big');
+  if (viaCap.ok && viaCap.value.kind === 'too_big') assert.equal(viaCap.value.size, text.length);
+  const capLink = followedCap.spans().find(s => s.name === 'git.read.blob');
+  assert.deepEqual(capLink.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']]), [[parentCap.traceId, parentCap.spanId, 'follows_from']]);
+  // a header refusal is the Result, not a throw from reading a value the Err does not have
+  const asCommit = await readBlob(remote({ hook: async () => packFrames(await onePack(TYPE.COMMIT, 0, '')) }).transport({ tracer: new Tracer() }), oid);
+  assert.equal(asCommit.ok, false);
+  if (!asCommit.ok) assert.equal(asCommit.error.message, 'expected blob, got commit');
+  const torn = new Uint8Array(pack); torn[torn.length - 1] ^= 1;
+  const lied = await readBlob(remote({ hook: async () => packFrames(torn, 8) }).transport({ tracer: new Tracer() }), oid);
+  assert.equal(lied.ok, false);
+  if (!lied.ok) { assert.equal(lied.error.code, 'pack_corrupt'); assert.equal(lied.value, undefined); }
+  // a body failure that is not an Error is rethrown; a ply Error from the stream is the Result
+  const cut = async function* () {
+    const all = packFrames(await onePack(TYPE.BLOB, text.length, text), 25);
+    yield all[0]; yield all[1]; throw bare;
+  };
+  await assert.rejects(readBlob(remote({ hook: async () => cut() }).transport({ tracer: new Tracer() }), oid), e => e === bare);
 });
 
 test('the details each operation stamps: prefixes, filters, nested paths, caller limits, error-code gates', async () => {
@@ -1244,4 +1407,81 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
   const blob = be.span('git.read.blob');
   const fetch = be.all('git.upload-pack fetch').find(s => s.parentSpanId === blob.spanId);
   assert.equal(fetch?.kind, 3);
+});
+
+test('resolveAbbrev: advertised oids and peeled targets; resolveCommit asks once and lets a ref name win', async () => {
+  const listed = rows => ({ refs: new Map(rows.map(r => [r.name, r])), head: null, unborn: null });
+  const row = (name, oid, peeled) => (peeled === undefined ? { oid, name } : { oid, name, peeled });
+  const abbrev = (prefix, rows) => {
+    const r = resolveAbbrev(prefix, listed(rows));
+    assert.equal(r.ok, true, r.ok ? '' : r.error.message);
+    if (!r.ok) throw new Error('expected a resolution');
+    return r.value;
+  };
+  const hit = `abcd${'1'.repeat(36)}`;
+  const other = `abcd${'2'.repeat(36)}`;
+  const first = `abcd${'0'.repeat(36)}`;
+  const later = `ffffabcd${'0'.repeat(32)}`;
+  const peeled = `abcd${'3'.repeat(36)}`;
+  const tagOid = `eeee${'4'.repeat(36)}`;
+  assert.deepEqual(abbrev('abcd', [row('refs/heads/z', later)]), { kind: 'none' });
+  assert.deepEqual(abbrev('abcd', [row('HEAD', hit), row('refs/heads/main', hit), row('refs/heads/z', later)]), { kind: 'unique_among_advertised', oid: hit, refs: ['HEAD', 'refs/heads/main'] });
+  assert.deepEqual(abbrev('abcd', [row('refs/tags/v', tagOid, peeled)]), { kind: 'unique_among_advertised', oid: peeled, refs: ['refs/tags/v'] });
+  assert.deepEqual(abbrev('abcd', [row('refs/tags/v', hit, hit)]), { kind: 'unique_among_advertised', oid: hit, refs: ['refs/tags/v'] });
+  assert.deepEqual(abbrev('abcd', [row('refs/heads/b', other), row('refs/heads/a', hit), row('refs/heads/c', first)]), { kind: 'ambiguous', oids: [first, hit, other] });
+  const oid39 = `${'a'.repeat(39)}b`;
+  assert.deepEqual(abbrev('a'.repeat(39), [row('refs/heads/a', oid39)]), { kind: 'unique_among_advertised', oid: oid39, refs: ['refs/heads/a'] });
+  assert.deepEqual(abbrev('abcd1', [row('refs/heads/a', hit)]), { kind: 'unique_among_advertised', oid: hit, refs: ['refs/heads/a'] });
+  for (const bad of ['abc', 'a'.repeat(40), 'ABCD', 'abcd!', '', 'gggg', `${'a'.repeat(39)}G`]) {
+    const r = resolveAbbrev(bad, listed([row('refs/heads/a', hit)]));
+    assert.equal(r.ok, false, bad);
+    if (!r.ok) {
+      assert.equal(r.error.code, 'bad_request', bad);
+      assert.equal(r.error.message, 'abbreviated oid must be 4..39 lowercase hex', bad);
+      assert.equal(r.error.what, 'ref', bad);
+    }
+  }
+
+  const open = (head = 'refs/heads/main') => { const r = remote({ head }); return { r, t: r.transport({ tracer: new Tracer() }) }; };
+  const prefixes = r => r.log.filter(x => x.command === 'ls-refs').map(x => x.prefixes);
+  // default off: a short hex string is a name, one narrow ls-refs, even when a tip starts with it
+  const off = open('refs/heads/hold');
+  off.r.refs.set('refs/heads/hold', hit);
+  await rejects(resolveCommit(off.t, 'abcd'), 'not_found', 'ref abcd not found');
+  assert.deepEqual(prefixes(off.r), [refCandidates('abcd')]);
+  // a full oid is not an abbreviation and does not ask
+  off.r.log.length = 0;
+  assert.deepEqual(await resolveCommit(off.t, hit, { abbrev: 'advertised' }), { name: hit, commit: hit });
+  assert.deepEqual(prefixes(off.r), []);
+  // advertised, and the name is not a prefix: still the name's own candidates
+  const named = open();
+  named.r.refs.set('refs/heads/main', hit);
+  assert.deepEqual(await resolveCommit(named.t, 'main', { abbrev: 'advertised' }), { name: 'refs/heads/main', commit: hit });
+  assert.deepEqual(prefixes(named.r), [refCandidates('main')]);
+  // uppercase is a name, not a prefix
+  named.r.log.length = 0;
+  await rejects(resolveCommit(named.t, 'ABCD', { abbrev: 'advertised' }), 'not_found', 'ref ABCD not found');
+  assert.deepEqual(prefixes(named.r), [refCandidates('ABCD')]);
+  await rejects(resolveCommit(named.t, 'main', { abbrev: 'yes' }), 'bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
+  // a ref whose name is the prefix wins over a tip that actually starts with it
+  const elsewhere = `1234${'0'.repeat(36)}`;
+  const win = open('refs/heads/hold');
+  win.r.refs.set('refs/heads/abcd', elsewhere);
+  win.r.refs.set('refs/heads/hold', hit);
+  assert.deepEqual(await resolveCommit(win.t, 'abcd', { abbrev: 'advertised' }), { name: 'refs/heads/abcd', commit: elsewhere });
+  assert.deepEqual(prefixes(win.r), [[...refCandidates('abcd'), 'HEAD', 'refs/heads/', 'refs/tags/']]);
+  assert.equal(win.r.log.filter(x => x.command === 'ls-refs').length, 1);
+  // no such name: the one advertised tip
+  const one = open('refs/heads/hold');
+  one.r.refs.set('refs/heads/hold', hit);
+  assert.deepEqual(await resolveCommit(one.t, 'abcd', { abbrev: 'advertised' }), { name: hit, commit: hit });
+  assert.equal(one.r.log.filter(x => x.command === 'ls-refs').length, 1);
+  // two tips, no ref by that name
+  const two = open('refs/heads/a');
+  two.r.refs.set('refs/heads/a', other);
+  two.r.refs.set('refs/heads/b', first);
+  await rejects(resolveCommit(two.t, 'abcd', { abbrev: 'advertised' }), 'bad_request', 'abbreviated oid abcd matches 2 advertised objects', { what: 'ref', got: [first, other] });
+  assert.equal(two.r.log.filter(x => x.command === 'ls-refs').length, 1);
+  // nothing advertised starts with it
+  await rejects(resolveCommit(two.t, 'ffff', { abbrev: 'advertised' }), 'not_found', 'ref ffff not found');
 });

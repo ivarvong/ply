@@ -136,12 +136,12 @@ function notOurRefReason(text: string): { readonly reason: 'not_our_ref' } | und
 }
 
 // A commit want whose object is a tree, blob, or tag is not_found, before pack_corrupt is built. Any other mismatch
-// (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt.
+// (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt. Top-level so its throw is this function's.
 function refuseNonCommit(expectType: number | null, type: number, oid: string): void {
   if (expectType !== TYPE.COMMIT) return;
   const name = nonCommitType(type);
   if (name === null) return;
-  throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'not_commit', oid, type: name } });
+  throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid, type: name } } });
 }
 
 export const v2Init = (limits: Limits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
@@ -417,7 +417,7 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
       // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
       // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
       let sp = spInit(); const zlibParts: Uint8Array[] = [];
-      // One size check, in `once`: a nested function that threw would rename this decision (the #2 claims-owed hole).
+      // One size check, in `once`: a nested function that threw would be a different fail site than this one.
       const feed = (chunk: Uint8Array): void => {
         const r = spStep(sp, chunk); sp = r.state;
         for (const z of r.zlib) zlibParts.push(z);
