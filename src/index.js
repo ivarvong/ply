@@ -75,7 +75,19 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
  */
 export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
 export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';
-export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
+/**
+ * A pack as `git verify-pack -v` prints it. `missingBases` are thin REF bases, first-seen in pack order.
+ * @typedef {import('./packresolve.js').PackLayout} PackLayout
+ */
+/**
+ * One object row of {@link PackLayout}.
+ * @typedef {import('./packresolve.js').PackLayoutObject} PackLayoutObject
+ */
+/**
+ * An OFS base (offset, and the base id once that object resolved) or a REF base (an id).
+ * @typedef {import('./packresolve.js').PackBase} PackBase
+ */
+export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, encodeTag, ident, TYPE, TYPE_NAME } from './objects.js';
