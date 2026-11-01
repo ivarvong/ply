@@ -1,8 +1,9 @@
 // Smart-HTTP transport: one POST per git command, body chunks yielded as they arrive, every request a CLIENT span.
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
-import type { Code, Detail, Extra } from './errors.js';
-import { fromNullable } from './absent.js';
+import type { Code, Detail, Extra, PlyError } from './errors.js';
+import type { Result } from './result.js';
+import { fromNullable, fromNullish } from './absent.js';
 import { assertNever } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
@@ -17,34 +18,14 @@ import { UA, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
-/** Statuses with their own code. Every other status stays the 5xx range or `http`. */
-export type NamedHttpStatus = 401 | 403 | 404 | 429;
-type StatusClass = { readonly tag: 'named'; readonly status: NamedHttpStatus } | { readonly tag: 'other' };
-const classifyStatus = (status: number): StatusClass => {
-  switch (status) {
-    case 401: case 403: case 404: case 429: return { tag: 'named', status };
-    default: return { tag: 'other' };
-  }
-};
-const namedCode = (status: NamedHttpStatus): HttpCode => {
-  switch (status) {
-    case 401:
-    case 403: return 'auth';
-    case 404: return 'not_found';
-    case 429: return 'rate_limited';
-  }
-  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-  return assertNever(status);
-};
 export const httpCode = (status: number): HttpCode => {
-  const classified = classifyStatus(status);
-  switch (classified.tag) {
-    case 'other': return status >= 500 ? 'upstream_5xx' : 'http';
-    case 'named': return namedCode(classified.status);
-  }
-  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-  return assertNever(classified);
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 404) return 'not_found';
+  if (status === 429) return 'rate_limited';
+  return status >= 500 ? 'upstream_5xx' : 'http';
 };
+// The named statuses (kept as a branded union for exhaustive type tests).
+export type NamedHttpStatus = 401 | 403 | 404 | 429;
 
 // An error page is quoted, not stored. Past this many bytes the rest cannot change the message and must not be buffered.
 const ERROR_PREVIEW = 4096;
@@ -156,13 +137,69 @@ function explicitAuth({ header, token, user, bearer }: HttpAuth): [string, Basic
   throw noCredential('no token, bearer or header; omit auth to send none');
 }
 
-// A 3xx is never followed (fetch `redirect: 'manual'`), same-origin or not. Following hands the Authorization header to
-// whatever the server names, under the runtime's own rules: undici strips it cross-origin, workerd 2026-10-23 forwards it
-// (measured, SAFETY I6c). A 301/302 also turns the POST into a GET, which surfaced as a content-type error. git follows
-// only on the initial info/refs and then rebases every request on the new URL; ply's first request is usually the v2
-// POST, so following on the GET alone would not make a moved repository work. A moved remote is a URL the caller
-// updates: the error names where the server pointed (origin and path only, scrubbed). Browsers answer `manual` with an
-// opaque redirect (status 0): same error.
+// A 3xx is never followed unless the caller opts in (fetch `redirect: 'manual'` either way). Following hands the
+// Authorization header to whatever the server names, under the runtime's own rules: undici strips it cross-origin,
+// workerd 2026-10-23 forwards it (measured, SAFETY I6c). The default stays that refusal. `followRedirects: 'initial'`
+// is git's `http.followRedirects=initial`: only the first GET info/refs is followed, and only when the Location keeps
+// the `/info/refs?service=<service>` suffix (http.c update_url_from_redirect). The base URL is then rewritten and every
+// later request, including a POST, uses it. A 3xx on a POST is still this error. A cross-origin rebase drops
+// Authorization; the caller does not get the Location's userinfo installed as a credential. Browsers answer `manual`
+// with an opaque redirect (status 0): same error. The error names where the server pointed (origin and path only, scrubbed).
+// maxRedirects defaults to 3, the hop cap ply-web used, and is refused above 16 (under curl's default of 50).
+export const DEFAULT_MAX_REDIRECTS = 3;
+export const MAX_REDIRECT_HOPS = 16;
+export type FollowRedirects = 'never' | 'initial';
+export type AllowUrl = (url: URL) => Result<URL, PlyError>;
+const shown = (v: unknown): string => (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v === null ? JSON.stringify(v) : typeof v);
+export function redirectPolicy(follow: unknown, max: unknown): { readonly follow: FollowRedirects; readonly max: number } {
+  const f = fromNullable(follow);
+  if (f.tag === 'some' && f.value !== 'never' && f.value !== 'initial') throw fail('bad_request', `followRedirects must be 'never' or 'initial', got ${shown(f.value)}`, { what: 'followRedirects' });
+  const m = fromNullable(max);
+  const raw = m.tag === 'none' ? DEFAULT_MAX_REDIRECTS : m.value;
+  const n = typeof raw === 'number' && Number.isSafeInteger(raw) ? raw : null;
+  if (n === null || n < 0 || n > MAX_REDIRECT_HOPS) throw fail('bad_request', `maxRedirects must be an integer from 0 to ${MAX_REDIRECT_HOPS}`, { what: 'maxRedirects' });
+  return { follow: f.tag === 'some' && f.value === 'initial' ? 'initial' : 'never', max: n };
+}
+// The new base is the Location with the asked URL's `/info/refs?service=` suffix removed. Anything else is not a
+// rebase git would accept (update_url_from_redirect dies), so the caller gets the redirect error instead.
+export function baseFromRedirect(asked: string, got: URL, service: string): string | null {
+  const tail = `/info/refs?service=${service}`;
+  if (!asked.endsWith(tail) || !got.href.endsWith(tail)) return null;
+  const next = got.href.slice(0, got.href.length - tail.length).replace(/\/$/, '');
+  try {
+    const b = new URL(next);
+    if (b.protocol !== 'http:' && b.protocol !== 'https:') return null;
+    b.username = ''; b.password = ''; b.hash = '';
+    return b.toString().replace(/\/$/, '');
+  } catch { return null; }
+}
+// A caller may not return a Result even though the type says so. `ok` is read off an unknown object so a
+// non-boolean still fails, which a boolean compare on the Result type cannot see.
+function isUrlResult(v: unknown): v is Result<URL, PlyError> {
+  if (v === null || typeof v !== 'object' || !('ok' in v)) return false;
+  return (v as { ok: unknown }).ok === true || (v as { ok: unknown }).ok === false;
+}
+function useAllowed(allow: AllowUrl | undefined, url: URL): URL {
+  if (!allow) return url;
+  const got: unknown = allow(url);
+  if (!isUrlResult(got)) throw fail('bad_request', 'allowUrl must return a Result', { what: 'allowUrl' });
+  if (!got.ok) throw got.error;
+  const next = got.value;
+  if (!(next instanceof URL) || (next.protocol !== 'http:' && next.protocol !== 'https:')) throw fail('bad_request', 'allowUrl must return an http(s) URL', { what: 'allowUrl' });
+  next.username = ''; next.password = ''; next.hash = '';
+  return next;
+}
+// The Location ply would rebase to, or null when it does not keep the info/refs suffix (the caller then reports the
+// redirect and does not request it). git's curl requests the Location first and update_url_from_redirect dies after;
+// refusing first is that die, without handing the next host a request. allowUrl sees the Location and its URL is the
+// one the suffix rule is applied to. Userinfo on the Location is removed and is never installed as a credential.
+function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | undefined): string | null {
+  if (location === null || location === '') return null;
+  let got: URL;
+  try { got = new URL(location, asked); } catch { return null; }
+  got.username = ''; got.password = ''; got.hash = '';
+  return baseFromRedirect(asked, useAllowed(allow, got), service);
+}
 const isRedirect = (res: Response): boolean => res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
 // A body a test double may not implement `cancel` on, and a real one whose `cancel()` rejects. The rejection is the
 // body's, not the caller's: it must be awaited, or it is an unhandled rejection the surrounding `try` cannot catch.
@@ -225,7 +262,10 @@ export type HttpOptions = HttpOptionsFields & Partial<RecordedHeaders>;
 export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
 
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
-export function createTransport(url: string | URL, { auth, tracer, parent = null, fetchImpl = globalThis.fetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {}, recordResponseHeaders }: HttpOptions = {}): HttpTransport {
+export function createTransport(url: string | URL, options: HttpOptions = {}): HttpTransport {
+  const { auth, tracer, parent = null, fetchImpl = globalThis.fetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {}, recordResponseHeaders } = options as HttpOptions;
+  const extra = options as unknown as { followRedirects?: FollowRedirects; allowUrl?: AllowUrl; maxRedirects?: number };
+  const policy = redirectPolicy(extra.followRedirects, extra.maxRedirects);
   headerField(userAgent, 'user agent');
   const recordNames = recordResponseHeaderNames(recordResponseHeaders);
   headerField(auth?.header, 'authorization');
@@ -240,8 +280,12 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
   // asks only once it is refused), a password alone `:password`, an empty userinfo `:`. Explicit `auth` wins. It never
   // appears again: not in requests, not in spans, not in error messages.
   const fromUrl = (auth === null || auth === undefined) && (u.username || u.password || emptyUserinfo(url)) ? { user: userinfo(u.username), pass: userinfo(u.password) } : null;
-  u.username = ''; u.password = '';
-  const base = u.toString().replace(/\/$/, '');
+  u.username = ''; u.password = ''; u.hash = '';
+  // allowUrl runs before any request, including the base. A different origin does not inherit this transport's credential.
+  const offeredOrigin = u.origin;
+  const approvedUrl = useAllowed(extra.allowUrl, u);
+  let base = approvedUrl.toString().replace(/\/$/, '');
+  const baseCrossOrigin = approvedUrl.origin !== offeredOrigin;
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
@@ -249,18 +293,46 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
   // oxlint-disable-next-line no-nested-ternary -- three forms, one pair
   const [authorization, given]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth !== null && auth !== undefined ? explicitAuth(auth) : [null, null];
+  // The credential sent from here on. A cross-origin rebase (or an allowUrl that moved the base) clears it; the
+  // scrubber above still redacts the original, so an echo of it cannot leak.
+  let liveAuth = baseCrossOrigin ? null : authorization;
+  let rebasedFrom: string | null = null;
+  let redirectCount = 0;
+  let initialSettled = false;
   // The Basic parts as a server would echo them (UTF-8 text). From a header they are decoded, as bytes and as UTF-8.
   const decoded = ((): Basic | null => { if (authorization === null || !/^Basic\s/i.test(authorization)) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return c < 0 ? { user: d, pass: '' } : { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
   const basic = given ?? (decoded && { user: utf8(decoded.user), pass: utf8(decoded.pass) });
-  const user = auth?.user ?? basic?.user;
+  const a = fromNullish(auth);
+  const userOpt = a.tag === 'some' ? fromNullish(a.value.user) : { tag: 'none' as const };
+  const user = userOpt.tag === 'some' ? userOpt.value : (basic ? basic.user : null);
   const userSecret = basic ? secretUser(basic.user, basic.pass !== '') : secretShaped(user);
   // Every string a server can send back (error bodies, ERR lines, band-2/3 text, ng reasons, hook output) passes through
   // `scrub` before it reaches an error or a span: the transport carries it (`t.scrub`) and otel.js applies it.
-  const scrub = scrubber([authorization, auth?.token, auth?.bearer, authorization?.replace(/^\S+\s+/, ''), basic?.pass, decoded?.pass, userSecret ? basic?.user ?? user : null, userSecret ? decoded?.user : null, secretShaped(user) ? user : null]);
+  const tokOpt = a.tag === 'some' ? fromNullable(a.value.token) : { tag: 'none' as const };
+  const bearOpt = a.tag === 'some' ? fromNullable(a.value.bearer) : { tag: 'none' as const };
+  const authHeaderScrub = authorization === null ? null : authorization.replace(/^\S+\s+/, '');
+  const basicPass = basic ? basic.pass : null;
+  const decodedPass = decoded ? decoded.pass : null;
+  const basicUser = userSecret ? (basic ? basic.user : user ?? null) : null;
+  const decodedUser = userSecret ? (decoded ? decoded.user : null) : null;
+  const scrub = scrubber([authorization, tokOpt.tag === 'some' ? tokOpt.value : null, bearOpt.tag === 'some' ? bearOpt.value : null, authHeaderScrub, basicPass, decodedPass, basicUser, decodedUser, secretShaped(user) ? (user ?? null) : null]);
+  const hostOf = (): string => new URL(base).host;
+  // Only once a redirect was actually followed, so a transport that never rebases keeps today's span shape.
+  const redirectAttrs = (): Attrs => {
+    if (redirectCount === 0 || rebasedFrom === null) return {};
+    const from = redactUrl(rebasedFrom);
+    return { 'http.redirect.count': redirectCount, 'git.remote.rebased_from': scrub ? scrub(from) : from };
+  };
+  const rebase = (next: string): void => {
+    if (new URL(next).origin !== new URL(base).origin) liveAuth = null;
+    if (rebasedFrom === null) rebasedFrom = base;
+    base = next;
+    redirectCount += 1;
+  };
   const headers = (service: string, extra: Record<string, string> = {}): Record<string, string> => {
     const h: Record<string, string> = { 'Content-Type': `application/x-${service}-request`, Accept: `application/x-${service}-result`, 'User-Agent': userAgent, ...extra };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- null and '' send no Authorization, as before
-    if (authorization) h['Authorization'] = authorization;
+    if (liveAuth) h['Authorization'] = liveAuth;
     return h;
   };
   // Not AbortSignal.any([AbortSignal.timeout(ms)]): the composite holds its sources weakly and the timeout signal is held
@@ -279,12 +351,76 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     return { signal: sig, cancel: () => { clearTimeout(timer); } };
   };
 
+  const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Response> => {
+    const t0 = Date.now();
+    let res: Response;
+    try { res = await f(asked, { headers: headers(service, { 'Git-Protocol': 'version=2', ...recordHint() }), signal: sig, redirect: 'manual' }); }
+    catch (e) { throw wrapNet(e, sig); }
+    span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
+    return res;
+  };
+  const advertisementBody = async (res: Response, service: string, span: Span): Promise<Uint8Array> => {
+    if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
+    if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
+    const maxPack = requireLimit(limits, 'maxPackBytes');
+    const declared = Number(res.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxPack) {
+      await cancelBody(res.body);
+      throw limitError('advertisement bytes', declared, maxPack);
+    }
+    if (missingBody(res.body)) throw fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
+    const buf = await readCapped(res.body, maxPack, { what: 'advertisement bytes' });
+    span.set({ 'git.response.bytes': buf.length, 'http.response.body.size': buf.length, ...redirectAttrs() });
+    return buf;
+  };
+  // A 3xx on the initial GET. Returns the next base, or null when `res` is not a redirect. A redirect that is not
+  // followed (the default, a hop past maxRedirects, a Location that fails the suffix rule) is the existing http error.
+  async function redirectHop(res: Response, asked: string, service: string, following: boolean): Promise<string | null> {
+    if (!isRedirect(res)) return null;
+    const room = following && redirectCount < policy.max;
+    if (!room) {
+      initialSettled = true;
+      throw await redirectError(res, asked, `${service} advertisement`, scrub);
+    }
+    let next: string | null = null;
+    try { next = locationBase(asked, res.headers.get('location'), service, extra.allowUrl); }
+    catch (e) { await cancelBody(res.body); throw e; }
+    if (next === null) {
+      initialSettled = true;
+      throw await redirectError(res, asked, `${service} advertisement`, scrub);
+    }
+    await cancelBody(res.body);
+    return next;
+  }
+  // GET info/refs?service=… . With followRedirects 'initial' and no settled exchange yet, a suffix-preserving 3xx
+  // rebases `base` (up to maxRedirects) and the GET is retried there. A network failure leaves the exchange unsettled
+  // so a retry continues from the base already reached.
+  async function advertise(service: string, span: Span): Promise<Uint8Array> {
+    const following = policy.follow === 'initial' && !initialSettled;
+    // Each hop's URL is the previous response's Location, so the next GET cannot start until this one has been read.
+    // oxlint-disable no-await-in-loop
+    for (;;) {
+      const asked = `${base}/info/refs?service=${service}`;
+      span.set({ 'git.transport': 'http', 'http.request.method': 'GET', 'url.full': redactUrl(asked), 'server.address': hostOf(), ...redirectAttrs() });
+      const sig = requestSignal();
+      try {
+        const res = await fetchAdvertisement(asked, service, span, sig.signal);
+        if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
+        const next = await redirectHop(res, asked, service, following);
+        if (next !== null) { rebase(next); continue; }
+        initialSettled = true;
+        return await advertisementBody(res, service, span);
+      } finally { sig.cancel(); }
+    }
+    // oxlint-enable no-await-in-loop
+  }
   // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk.
   async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Uint8Array, void, undefined> {
+    if (policy.follow === 'initial' && !initialSettled) await advertise(service, span);
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
     const extra = { 'Git-Protocol': 'version=2', ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
-    span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': u.host, 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': limits.requestTimeoutMs });
+    span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': limits.requestTimeoutMs, ...redirectAttrs() });
     const t0 = Date.now();
     const sig = requestSignal();
     let res: Response;
@@ -319,7 +455,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
     // A transport without a tracer fails on its first span, as it always has. A3: require it.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above
-    kind: 'http', url: base, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
+    kind: 'http', get url(): string { return base; }, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncGenerator<Frame, void, undefined> {
       let st: ReturnType<typeof pktStep>['state'] = pktInit();
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- pktline.js is untyped until its cluster converts; its frames are Frame
@@ -328,31 +464,6 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
       span.set(pktAttrs(st));
     },
     // GET info/refs?service=… (capability advertisements). Returns the whole body; advertisements are small.
-    async advertise(service: string, span: Span): Promise<Uint8Array> {
-      const target = `${base}/info/refs?service=${service}`;
-      span.set({ 'git.transport': 'http', 'http.request.method': 'GET', 'url.full': redactUrl(target), 'server.address': u.host });
-      const sig = requestSignal();
-      try {
-      const t0 = Date.now();
-      let res: Response;
-      try { res = await f(target, { headers: headers(service, { 'Git-Protocol': 'version=2', ...recordHint() }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
-      span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
-      if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
-      if (isRedirect(res)) throw await redirectError(res, target, `${service} advertisement`, scrub);
-      if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
-      if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
-      const maxPack = requireLimit(limits, 'maxPackBytes');
-      const declared = Number(res.headers.get('content-length'));
-      if (Number.isFinite(declared) && declared > maxPack) {
-        await cancelBody(res.body);
-        throw limitError('advertisement bytes', declared, maxPack);
-      }
-      if (missingBody(res.body)) throw fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
-      // Stream into the cap. arrayBuffer() would allocate the whole body before the check could run.
-      const buf = await readCapped(res.body, maxPack, { what: 'advertisement bytes' });
-      span.set({ 'git.response.bytes': buf.length, 'http.response.body.size': buf.length });
-      return buf;
-      } finally { sig.cancel(); }
-    },
+    advertise,
   };
 }

@@ -92,7 +92,7 @@ export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackE
 // The result carries `filter` (the one the answered request used) and `learned` (true only on the request that
 // discovered the refusal; a later call on the same quirks asks for blob:none directly and reports learned false).
 const commitsAndTags = (_oid: string, o: PackObject): boolean => o.type !== TYPE.TREE;
-export type Tree0Pack = FetchPackResult & { readonly filter: string | undefined; readonly learned: boolean };
+export type Tree0Pack = FetchPackResult & { readonly filter: string | null; readonly learned: boolean };
 export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tree0Pack> {
   const wide = async (learned: boolean): Promise<Tree0Pack> => {
     const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check: objects => skippedAttrs(checkWide(objects, commitsAndTags, t.limits)), attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
@@ -100,7 +100,12 @@ export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tre
     return { ...r, filter: 'blob:none', learned };
   };
   if (t.quirks?.treeFilter === 'blob:none') return wide(false);
-  try { return { ...await fetchPack(t, opts, { check: (objects): Attrs => { checkWide(objects, () => true, t.limits); return {}; } }), filter: opts.filter, learned: false }; } catch (e) {
+  try {
+    const base = await fetchPack(t, opts, { check: (objects): Attrs => { checkWide(objects, () => true, t.limits); return {}; } });
+    const f = fromNullable(opts.filter);
+    const filterVal = f.tag === 'some' ? f.value : null;
+    return { ...base, filter: filterVal, learned: false };
+  } catch (e) {
     if (!isFilterRejection(e)) throw e;
     if (t.quirks) t.quirks.treeFilter = 'blob:none';
     return wide(true);

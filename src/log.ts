@@ -41,7 +41,7 @@ import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import { thrownCode, thrownReason } from './boundary.js';
 
-type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
+type FetchedPack = FetchPackResult & { readonly filter: string | null };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
 
 export const DEFAULT_LOG_LIMIT = 20;
