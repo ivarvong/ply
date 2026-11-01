@@ -1548,9 +1548,10 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     fetchImpl: async () => new Response(page, { status: 404, headers: { 'content-type': 'text/plain' } }),
     tracer: tracerStub,
   });
-  const isRepoMiss = e => e.code === 'not_found' && e.miss?.kind === 'repository' && e.message.includes('yyyy') && !e.message.includes('y'.repeat(250));
-  await assert.rejects(missingRepo.advertise('git-upload-pack', spanStub), isRepoMiss);
-  await assert.rejects((async () => { for await (const frame of missingRepo.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), isRepoMiss);
+  // the advertisement names the status and the miss; it does not quote the body
+  await assert.rejects(missingRepo.advertise('git-upload-pack', spanStub), e => e.code === 'not_found' && e.message === 'HTTP 404 git-upload-pack advertisement' && e.miss?.kind === 'repository');
+  // the POST quotes a prefix of the page and stops: a dropped slice would keep the whole page
+  await assert.rejects((async () => { for await (const frame of missingRepo.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'not_found' && e.miss?.kind === 'repository' && e.message.includes('yyyy') && !e.message.includes('y'.repeat(250)));
 });
 
 test('encodeTree duplicate names and the pre-send push size refusal (issue #11)', async () => {
