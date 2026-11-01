@@ -15,7 +15,10 @@ if (!url || !dir) { console.error('usage: node examples/checkout-tree.mjs <remot
 const env = process.env;
 const auth = env.PLY_TOKEN ? { token: env.PLY_TOKEN, ...(env.PLY_USER && { user: env.PLY_USER }) } : env.PLY_BEARER ? { bearer: env.PLY_BEARER } : undefined;
 
-const r = await checkoutDir(url, { dir, ref: values.ref ?? null }, { auth, tracer: new Tracer() });
+const ref = typeof values.ref === 'string' ? values.ref : null;
+const checked = await checkoutDir(url, { dir, ref }, { auth, tracer: new Tracer() });
+if (!checked.ok) { console.error(checked.error.message); process.exit(1); }
+const r = checked.value;
 const w = r.written;
 console.log(`${r.ref} @ ${r.commit} -> ${dir}`);
 console.log(`  wrote ${w.files} files (${w.bytes} bytes), ${w.symlinks} symlinks, ${w.gitlinks} submodule dirs`);

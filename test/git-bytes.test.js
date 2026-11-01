@@ -157,7 +157,8 @@ const OPERATIONS = {
       // and onto a filesystem: the names on disk are git's bytes
       const dir = mkdtempSync(join(fx.bare, '..', 'co-'));
       try {
-        await writeFiles(dir, (await checkoutTree(url, { ref: fx.target }, O())).files);
+        const written = await writeFiles(dir, (await checkoutTree(url, { ref: fx.target }, O())).files);
+        if (!written.ok) throw written.error;
         const disk = readdirSync(dir, { encoding: 'buffer' }).map(n => n.toString('hex')).sort();
         assert.deepEqual(disk, files.map(f => f.path).sort(), 'names on disk');
       } finally { rmSync(dir, { recursive: true, force: true }); }
