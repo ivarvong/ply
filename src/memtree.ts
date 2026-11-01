@@ -2,6 +2,8 @@
 // a directory is expanded only when a change walks into it. Encoding writes the directories this call rebuilt;
 // a lazy node contributes its oid and no bytes. Empty directories are pruned; only the root may be empty.
 import { thrown as fail } from './errors.js';
+import type { ErrorOf } from './errors.js';
+import { ok, err } from './result.js';
 import { encodeTree, hashObject } from './objects.js';
 import { indexOfBytes } from './bytes.js';
 import { limitError, requireLimit } from './limits.js';
@@ -152,8 +154,8 @@ export function renameAt(root: Mem, from: readonly string[], to: readonly string
 }
 
 // Exactly one non-overlapping match. Zero or several is match_count; an empty find is bad_request.
-export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Array): Uint8Array {
-  if (find.length === 0) throw fail('bad_request', 'find must be non-empty');
+export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Array): import('./result.js').Result<Uint8Array, ErrorOf<'bad_request' | 'match_count'>> {
+  if (find.length === 0) return fail('bad_request', 'find must be non-empty');
   let count = 0;
   let at = 0;
   let from = 0;
@@ -164,12 +166,12 @@ export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Ar
     count += 1;
     from = i + find.length;
   }
-  if (count !== 1) throw fail('match_count', `expected exactly one match, found ${count}`, { matches: count });
+  if (count !== 1) return fail('match_count', `expected exactly one match, found ${count}`, { matches: count });
   const out = new Uint8Array(data.length - find.length + replace.length);
   out.set(data.subarray(0, at), 0);
   out.set(replace, at);
   out.set(data.subarray(at + find.length), at + replace.length);
-  return out;
+  return ok(out);
 }
 
 export type EncodedTree = { readonly oid: string; readonly data: Uint8Array };
