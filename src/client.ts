@@ -20,6 +20,8 @@ import type { PushResult as PushOk } from './push.js';
 import { receiveCaps, pushWithOptions } from './receivecaps.js';
 import type { CheckedPushOptions } from './receivecaps.js';
 import { discover } from './discover.js';
+import type { Input } from './absent.js';
+import { withDefaults } from './absent.js';
 
 // A3: the audit deletes the unused re-exports below; they are public API until then.
 export { createTransport, redactUrl } from './http.js';
@@ -36,13 +38,15 @@ export { discover, parseCapabilitiesV2, capLookup } from './discover.js';
 // lsRefs options. unborn: ask for the unborn HEAD (an empty repository's `HEAD -> refs/heads/main`), as git's clone does:
 // the argument is sent only when the server's advertisement lists `ls-refs=unborn` (connect.c: server_supports_feature),
 // so asking costs one advertisement round trip unless `info` (a discover() result already in hand) answers it. A server
-// that does not advertise it gets no argument, and `unborn` is null.
-export type LsRefsOptions = { readonly unborn?: boolean; readonly info?: Pick<DiscoverInfo, 'lsRefsUnborn'> };
+// that does not advertise it gets no argument, and `unborn` is null. `info: null` is no advertisement in hand.
+export type LsRefsConfig = { readonly unborn: boolean; readonly info: Pick<DiscoverInfo, 'lsRefsUnborn'> | null };
+export type LsRefsOptions = Input<LsRefsConfig>;
 
 // ls-refs over `t`. The edit and read paths call the wire exchange (lsrefs.ts) directly: they never ask for the unborn
 // HEAD, so the advertisement parser stays out of their bundles.
-export async function lsRefs(t: Transport, prefixes: readonly string[] = [], { unborn = false, info }: LsRefsOptions = {}): Promise<LsRefsResult> {
-  const ask = unborn && (info ?? await discover(t)).lsRefsUnborn;
+export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: LsRefsOptions = {}): Promise<LsRefsResult> {
+  const { unborn, info } = withDefaults<LsRefsConfig>(options, { unborn: false, info: null });
+  const ask = unborn && (info === null ? await discover(t) : info).lsRefsUnborn;
   return lsRefsWire(t, prefixes, ask ? { unborn: parseUnbornLine } : {});
 }
 
@@ -59,11 +63,12 @@ export class GitHttp {
   public get limits(): Limits { return this.t.limits; }
   public get tracer(): Tracer { return this.t.tracer; }
   public get parent(): Span | null { return this.t.parent; }
-  public lsRefs(prefixes?: readonly string[], opts?: LsRefsOptions): Promise<LsRefsResult> { return lsRefs(this.t, prefixes, opts); }
+  // Each omitted argument is the free function's own default.
+  public lsRefs(prefixes: readonly string[] = [], opts: LsRefsOptions = {}): Promise<LsRefsResult> { return lsRefs(this.t, prefixes, opts); }
   public packStream(opts: FetchOpts, span: Span): PackFetch { return packStream(this.t, opts, span); }
   public fetchObject(opts: ObjectWant): Promise<FetchedObject> { return fetchObject(this.t, opts); }
-  public fetchPack(opts: FetchOpts, extra?: FetchPackExtra): Promise<FetchPackResult> { return fetchPack(this.t, opts, extra); }
-  public negotiate(opts: NegotiateOpts, extra?: Pick<FetchPackExtra, 'external' | 'resolve'>): Promise<NegotiateResult> { return negotiate(this.t, opts, extra); }
+  public fetchPack(opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> { return fetchPack(this.t, opts, extra); }
+  public negotiate(opts: NegotiateOpts, extra: Pick<FetchPackExtra, 'external' | 'resolve'> = {}): Promise<NegotiateResult> { return negotiate(this.t, opts, extra); }
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
   public push(opts: PushOpts): PushResult { return pushWithOptions(this.t, opts); }
   public receiveCaps(): ReceiveCaps { return receiveCaps(this.t); }

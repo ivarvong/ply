@@ -1,7 +1,7 @@
 {
   "boundary": "src/absent.ts",
-  "undefined": 250,
-  "optional": 298,
-  "chain": 125,
-  "coalesce": 231
+  "undefined": 225,
+  "optional": 265,
+  "chain": 114,
+  "coalesce": 207
 }

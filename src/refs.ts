@@ -18,13 +18,17 @@
 import { encodeBytesResult } from './bytes.js';
 import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { err, ok } from './result.js';
+import { err, getOrElse, ok } from './result.js';
 import type { Result } from './result.js';
+import { fromNullish, withDefaults } from './absent.js';
+import type { Input } from './absent.js';
 
 /** `versionsort.suffix`, in the order git config lists them. `''` is the release, placed among the suffixes. */
-export type VersionRefnameOrder = {
-  readonly suffixes?: readonly string[];
+export type VersionRefnameOrderConfig = {
+  readonly suffixes: readonly string[];
 };
+/** What a caller passes: any of the config. A missing (or null) `suffixes` is none configured. */
+export type VersionRefnameOrder = Input<VersionRefnameOrderConfig>;
 
 // glibc strverscmp, as versioncmp.c carries it. The state is the row (normal, integral, fractional, leading zeros)
 // plus the class of the byte just read: not a digit, a non-zero digit, or '0'. Rows are 3 apart so the class fits
@@ -208,8 +212,9 @@ function asBytes(value: unknown, which: VersionRefnameWhich): Result<Uint8Array<
  * A non-string is `not_string`. A string that is not a byte sequence is `not_bytes`. Pure: no span of its own (I39);
  * a caller records `error.kind` from the `Err`.
  */
-export function compareVersionRefnames(a: unknown, b: unknown, order?: VersionRefnameOrder): Result<number, VersionRefnameError> {
-  const listed = order?.suffixes ?? [];
+export function compareVersionRefnames(a: unknown, b: unknown, order: VersionRefnameOrder | null = null): Result<number, VersionRefnameError> {
+  // A null `suffixes` is none, as the nullish read had it: withDefaults keeps a given null, fromNullish drops it.
+  const listed = getOrElse(fromNullish(withDefaults<VersionRefnameOrderConfig>(order, { suffixes: [] }).suffixes), []);
   const suffixes: Array<Uint8Array<ArrayBuffer>> = [];
   for (const suffix of listed) {
     const encoded = asBytes(suffix, 'suffix');

@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **503** (433 fail sites, 19 produced codes, 2 untyped throws, 25 exported parse/decode/classify/decide functions). Covered by a merged space 416, by a pending PR 32, excluded 25, unregistered 30. Fail sites no cell reaches: 30 of 433. Of the registered points, 208 are claimed by an enumerated space, 13 only by a random one and 227 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **504** (434 fail sites, 19 produced codes, 2 untyped throws, 25 exported parse/decode/classify/decide functions). Covered by a merged space 417, by a pending PR 32, excluded 25, unregistered 30. Fail sites no cell reaches: 30 of 434. Of the registered points, 208 are claimed by an enumerated space, 13 only by a random one and 228 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -62,7 +62,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 6 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) | — |
 | `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) | — |
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
-| `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
+| `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 19 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 23 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
