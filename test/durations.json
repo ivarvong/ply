@@ -2,6 +2,7 @@
   "test/adversarial.test.js": 181,
   "test/artifacts-compat.test.js": 2,
   "test/bundle.test.js": 0,
+  "test/changes.test.js": 8,
   "test/checkout-tree.test.js": 9,
   "test/compliance.test.js": 17,
   "test/concurrency.test.js": 4,

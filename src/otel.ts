@@ -5,6 +5,7 @@
 /* oxlint-disable max-classes-per-file -- Tracer and Span are one API: a Tracer starts Spans, a Span exports through its Tracer */
 import { scrubError } from './errors.js';
 import { thrownCode, thrownMessage, thrownName, thrownStack } from './boundary.js';
+import { errorKind } from './result.js';
 
 // OTLP AnyValue: exactly one of these fields. `in` on the field name discriminates.
 export type AnyValue =
@@ -171,7 +172,9 @@ export class Span {
     const code = thrownCode(e);
     const name = thrownName(e);
     this.status = { code: 2, message: asText(message ?? e) };
-    this.set({ 'error.type': type ?? code ?? name ?? 'Error' });
+    // error.type stays the taxonomy code (or the type the caller passed). error.kind is the closed discriminant
+    // callers switch on: miss.kind, then kind, then reason, then code (#157).
+    this.set({ 'error.type': type ?? code ?? name ?? 'Error', 'error.kind': errorKind(e) });
     this.event('exception', { 'exception.type': name ?? 'Error', 'exception.message': asText(message ?? e), 'exception.stacktrace': asText(thrownStack(e) ?? '') });
     return this;
   }
