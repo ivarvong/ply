@@ -16,6 +16,7 @@ function isBrandedPath(value: string, comps: readonly string[]): value is Path {
 
 export type ParsedPath = { readonly path: Path; readonly components: readonly string[] };
 
+// @decoder parsePath prefix=path
 export function parsePath(value: unknown, limits: Partial<Limits> | null | undefined): Result<ParsedPath, ErrorOf<'bad_request'>> {
   try {
     const comps = validatePath(value, limits);

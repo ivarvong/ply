@@ -97,6 +97,9 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], { u
   // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
   return coded('protocol', () => t.tracer.span('git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<LsRefsResult> => {
     const refs = new Map<string, LsRef>();
+    // Names other than HEAD. HEAD is listed beside the refs (git ls-remote) and does not consume maxRefs:
+    // a repository of exactly maxRefs branches also has a HEAD line. refs/heads/HEAD is a branch and counts.
+    let counted = 0;
     let head: string | null = null;
     let unbornHead: LsRefsUnborn | null = null;
     // gitprotocol-v2 ls-refs: output = *ref flush-pkt. git dies "expected flush after ref listing" (connect.c) when the
@@ -116,7 +119,10 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], { u
       if (rec === null) { if (unborn) unbornHead = unborn(line, unbornHead); continue; }
       // A name listed twice: git keeps both in its ref list and every lookup (find_ref_by_name) takes the first.
       if (refs.has(rec.name)) continue;
-      if (refs.size >= maxRefs) throw limitError('ls-refs lines', refs.size + 1, maxRefs);
+      if (rec.name !== 'HEAD') {
+        if (counted >= maxRefs) throw limitError('ls-refs lines', counted + 1, maxRefs);
+        counted += 1;
+      }
       refs.set(rec.name, rec);
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- an empty symref-target names no HEAD, as before
       if (rec.name === 'HEAD' && rec['symref-target']) head = rec['symref-target'];

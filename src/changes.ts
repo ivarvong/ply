@@ -396,6 +396,7 @@ function resultOf(ref: string, parent: Parent, built: Built): CommitChangesResul
 
 type StreamOpts = {
   readonly rest: EntryOptions;
+  readonly limits: Limits;
   readonly verify: boolean;
   readonly signer: Signer | null;
   readonly allowLfs: boolean;
@@ -413,7 +414,7 @@ type StreamJob = {
   readonly edit: Extract<Norm, { readonly kind: 'edit' }>;
   readonly opts: StreamOpts;
 };
-function parseEditInputs(targetRef: string, editPath: string, limits: Partial<Limits> | null | undefined): { ref: Refname; path: Path } {
+function parseEditInputs(targetRef: string, editPath: string, limits: Limits): { ref: Refname; path: Path } {
   const branded = parseRefname(targetRef);
   if (!branded.ok) throw branded.error;
   const parsedPath = parsePath(editPath, limits);
@@ -426,7 +427,7 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
   const strict = opts.pinned && !creating && parent.baseOid === null;
   root.set({ 'git.commit.stream': true });
   try {
-    const { ref, path } = parseEditInputs(target.ref, edit.path, opts.rest.limits);
+    const { ref, path } = parseEditInputs(target.ref, edit.path, opts.limits);
     const edited = await editFile(url, {
       ref, base: parent.baseOid ?? parent.baseRef ?? target.ref, path, find: edit.find, replace: edit.replace,
       author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
@@ -523,7 +524,7 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, { head
     'git.commit.ops': plan.changes.map(c => c.kind), 'git.commit.head': plan.head ?? '', 'git.commit.stream': false,
     'git.commit.creating': false, 'git.commit.attempt': 0,
   };
-  const opts: StreamOpts = { rest, verify, signer, allowLfs: allowLfsPointer, pinned };
+  const opts: StreamOpts = { rest, limits, verify, signer, allowLfs: allowLfsPointer, pinned };
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- tracer is optional on EntryOptions and required by operation(), as editFile
   const out = await operation('commit', url, { ...rest, limits, attrs } as OperationOpts, async ({ t, root, outcome }) => {
     const finish = (done: CommitChangesResult, objects: number): CommitChangesResult => outcome(done.outcome, done, {

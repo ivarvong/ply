@@ -26,6 +26,9 @@ import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
+import { parsePath } from '../src/path.js';
+import { parseRefname, parseBranchName, parseTagName } from '../src/refname.js';
+import { DEFAULT_LIMITS } from '../src/limits.js';
 
 const covered = new Set();
 const property = (id, name, fn) => { covered.add(id); test(name, fn); };
@@ -470,6 +473,32 @@ property('oid', 'a prefix of an object id is not an object id', () => {
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.error.code, 'bad_request');
   }
+});
+
+// A validator has no framing: a prefix of a valid name may itself be valid ("refs/heads/m" of "refs/heads/main").
+// Closure here is that every prefix is a value equal to that prefix or a typed bad_request, never a throw or another value.
+const closedUnderPrefix = (full, parse, valueOf) => {
+  const whole = parse(full);
+  assert.equal(whole.ok, true, full);
+  assert.equal(valueOf(whole.value), full);
+  for (let i = 0; i < full.length; i++) {
+    const cut = full.slice(0, i);
+    const r = parse(cut);
+    if (r.ok) assert.equal(valueOf(r.value), cut, `prefix ${JSON.stringify(cut)} parsed to another value`);
+    else assert.equal(r.error.code, 'bad_request', `prefix ${JSON.stringify(cut)}`);
+  }
+};
+
+property('path', 'a prefix of a path is that path or a bad_request', () => {
+  for (const full of ['a', 'src/index.ts', 'a/b/c/d.e', 'dir with space/f\u00e9.txt', '.github/workflows/ci.yml']) {
+    closedUnderPrefix(full, v => parsePath(v, DEFAULT_LIMITS), v => v.path);
+  }
+});
+
+property('refname', 'a prefix of a refname is that refname or a bad_request', () => {
+  for (const full of ['refs/heads/main', 'refs/heads/feature/x-1', 'refs/tags/v1.2.3', 'refs/notes/commits']) closedUnderPrefix(full, parseRefname, v => v);
+  for (const full of ['refs/heads/main', 'refs/heads/a/b']) closedUnderPrefix(full, parseBranchName, v => v);
+  for (const full of ['refs/tags/v1.2.3', 'refs/tags/release/2026']) closedUnderPrefix(full, parseTagName, v => v);
 });
 
 property('commit-id', 'a prefix of a commit id is not a commit id', () => {

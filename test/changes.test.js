@@ -301,10 +301,14 @@ test('memtree: every refusal, and the size boundaries git would still hash', () 
   renameAt(ren, ['dir', 'f'], ['kept']);
   assert.equal(ren.entries.has('dir'), false);
   assert.equal(ren.entries.get('kept').oid, OID);
-  assert.throws(() => replaceOnce(enc('ab'), enc(''), enc('x')), e => e.code === 'bad_request');
-  assert.throws(() => replaceOnce(enc('ab'), enc('z'), enc('x')), e => e.code === 'match_count' && e.matches === 0);
-  assert.throws(() => replaceOnce(enc('xx'), enc('x'), enc('y')), e => e.code === 'match_count' && e.matches === 2);
-  assert.equal(Buffer.from(replaceOnce(enc('v1\n'), enc('v1'), enc('v2'))).toString(), 'v2\n');
+  // replaceOnce returns a Result: the refusals are values, not throws
+  const refused = (r, check) => { assert.equal(r.ok, false); assert.ok(check(r.error), r.error?.message); };
+  refused(replaceOnce(enc('ab'), enc(''), enc('x')), e => e.code === 'bad_request');
+  refused(replaceOnce(enc('ab'), enc('z'), enc('x')), e => e.code === 'match_count' && e.matches === 0);
+  refused(replaceOnce(enc('xx'), enc('x'), enc('y')), e => e.code === 'match_count' && e.matches === 2);
+  const replaced = replaceOnce(enc('v1\n'), enc('v1'), enc('v2'));
+  assert.equal(replaced.ok, true);
+  assert.equal(Buffer.from(replaced.value).toString(), 'v2\n');
 });
 
 test('commitChanges rejects a bad list before any fetch', async () => {

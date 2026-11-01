@@ -3,8 +3,9 @@
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { Code, Detail, Extra, PlyError } from './errors.js';
 import type { Result } from './result.js';
-import { fromNullable, fromNullish } from './absent.js';
-import { assertNever } from './result.js';
+import { fromNullable, fromNullish, withDefaults } from './absent.js';
+import type { Input } from './absent.js';
+import { flatMapOption, getOrElse } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
@@ -177,10 +178,10 @@ export function baseFromRedirect(asked: string, got: URL, service: string): stri
 // non-boolean still fails, which a boolean compare on the Result type cannot see.
 function isUrlResult(v: unknown): v is Result<URL, PlyError> {
   if (v === null || typeof v !== 'object' || !('ok' in v)) return false;
-  return (v as { ok: unknown }).ok === true || (v as { ok: unknown }).ok === false;
+  return v.ok === true || v.ok === false;
 }
-function useAllowed(allow: AllowUrl | undefined, url: URL): URL {
-  if (!allow) return url;
+function useAllowed(allow: AllowUrl | null, url: URL): URL {
+  if (allow === null) return url;
   const got: unknown = allow(url);
   if (!isUrlResult(got)) throw fail('bad_request', 'allowUrl must return a Result', { what: 'allowUrl' });
   if (!got.ok) throw got.error;
@@ -193,7 +194,7 @@ function useAllowed(allow: AllowUrl | undefined, url: URL): URL {
 // redirect and does not request it). git's curl requests the Location first and update_url_from_redirect dies after;
 // refusing first is that die, without handing the next host a request. allowUrl sees the Location and its URL is the
 // one the suffix rule is applied to. Userinfo on the Location is removed and is never installed as a credential.
-function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | undefined): string | null {
+function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | null): string | null {
   if (location === null || location === '') return null;
   let got: URL;
   try { got = new URL(location, asked); } catch { return null; }
@@ -244,28 +245,44 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
   return concat(chunks);
 }
 
+// A non-2xx answer: a prefix of the body for the message (credential-scrubbed), the rest cancelled.
+async function statusError(res: Response, service: string, scrub: Scrub | null): Promise<Error> {
+  const preview = td.decode(await readCapped(res.body, ERROR_PREVIEW, { truncate: true }));
+  const quoted = (scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE);
+  const miss = res.status === 404 ? { miss: { kind: 'repository' as const } } : {};
+  return fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${quoted}`, { status: res.status, ...miss } as Detail['http'] & Extra);
+}
 // What the transport calls: the platform fetch, or a wrapper with its signature (packcache.ts cachingFetch).
 export type FetchLike = (url: string | URL, init: RequestInit) => Promise<Response>;
-type HttpOptionsFields = {
-  readonly auth?: HttpAuth | null | undefined;
-  readonly tracer?: Tracer | undefined;
-  readonly parent?: Span | null | undefined;
-  readonly fetchImpl?: FetchLike | undefined;
-  readonly userAgent?: string | undefined;
-  readonly limits?: Limits | undefined;
-  readonly signal?: AbortSignal | null | undefined;
-  readonly quirks?: Quirks | undefined;
+// The transport's configuration, total. `null` is "none given": no credential, no parent span, no abort signal, no
+// allowUrl hook. recordResponseHeaders names the response headers copied onto each exchange span (none by default, so
+// the span contract is unchanged).
+export type HttpConfig = {
+  readonly auth: HttpAuth | null;
+  readonly tracer: Tracer | null;
+  readonly parent: Span | null;
+  readonly fetchImpl: FetchLike;
+  readonly userAgent: string;
+  readonly limits: Limits;
+  readonly signal: AbortSignal | null;
+  readonly quirks: Quirks;
+  readonly followRedirects: FollowRedirects;
+  readonly allowUrl: AllowUrl | null;
+  readonly maxRedirects: number;
+  readonly recordResponseHeaders: readonly string[];
 };
-// Response header names to copy onto each exchange span. Omission records none (the span contract is unchanged).
-type RecordedHeaders = { readonly recordResponseHeaders: readonly string[] };
-export type HttpOptions = HttpOptionsFields & Partial<RecordedHeaders>;
+export type HttpOptions = Input<HttpConfig>;
+// Fresh per transport: quirks are learned per server and must not leak between transports.
+const httpDefaults = (): { -readonly [K in keyof HttpConfig]: HttpConfig[K] } => ({
+  auth: null, tracer: null, parent: null, fetchImpl: globalThis.fetch, userAgent: UA, limits: DEFAULT_LIMITS, signal: null,
+  quirks: {}, followRedirects: 'never', allowUrl: null, maxRedirects: DEFAULT_MAX_REDIRECTS, recordResponseHeaders: [],
+});
 export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
 
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
 export function createTransport(url: string | URL, options: HttpOptions = {}): HttpTransport {
-  const { auth, tracer, parent = null, fetchImpl = globalThis.fetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {}, recordResponseHeaders } = options as HttpOptions;
-  const extra = options as unknown as { followRedirects?: FollowRedirects; allowUrl?: AllowUrl; maxRedirects?: number };
-  const policy = redirectPolicy(extra.followRedirects, extra.maxRedirects);
+  const { auth, tracer, parent, fetchImpl, userAgent, limits, signal, quirks, recordResponseHeaders, followRedirects, allowUrl, maxRedirects } = withDefaults(options, httpDefaults());
+  const policy = redirectPolicy(followRedirects, maxRedirects);
   headerField(userAgent, 'user agent');
   const recordNames = recordResponseHeaderNames(recordResponseHeaders);
   headerField(auth?.header, 'authorization');
@@ -279,11 +296,11 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   // `user:` (a token given as the user, which GitHub and GitLab accept; git sends it without asking for a password and
   // asks only once it is refused), a password alone `:password`, an empty userinfo `:`. Explicit `auth` wins. It never
   // appears again: not in requests, not in spans, not in error messages.
-  const fromUrl = (auth === null || auth === undefined) && (u.username || u.password || emptyUserinfo(url)) ? { user: userinfo(u.username), pass: userinfo(u.password) } : null;
+  const fromUrl = auth === null && (u.username || u.password || emptyUserinfo(url)) ? { user: userinfo(u.username), pass: userinfo(u.password) } : null;
   u.username = ''; u.password = ''; u.hash = '';
   // allowUrl runs before any request, including the base. A different origin does not inherit this transport's credential.
   const offeredOrigin = u.origin;
-  const approvedUrl = useAllowed(extra.allowUrl, u);
+  const approvedUrl = useAllowed(allowUrl, u);
   let base = approvedUrl.toString().replace(/\/$/, '');
   const baseCrossOrigin = approvedUrl.origin !== offeredOrigin;
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
@@ -292,7 +309,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
   // oxlint-disable-next-line no-nested-ternary -- three forms, one pair
-  const [authorization, given]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth !== null && auth !== undefined ? explicitAuth(auth) : [null, null];
+  const [authorization, given]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth === null ? [null, null] : explicitAuth(auth);
   // The credential sent from here on. A cross-origin rebase (or an allowUrl that moved the base) clears it; the
   // scrubber above still redacts the original, so an echo of it cannot leak.
   let liveAuth = baseCrossOrigin ? null : authorization;
@@ -303,19 +320,22 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   const decoded = ((): Basic | null => { if (authorization === null || !/^Basic\s/i.test(authorization)) return null; try { const d = atob(authorization.replace(/^Basic\s+/i, '')); const c = d.indexOf(':'); return c < 0 ? { user: d, pass: '' } : { user: d.slice(0, c), pass: d.slice(c + 1) }; } catch { return null; } })();
   const basic = given ?? (decoded && { user: utf8(decoded.user), pass: utf8(decoded.pass) });
   const a = fromNullish(auth);
-  const userOpt = a.tag === 'some' ? fromNullish(a.value.user) : { tag: 'none' as const };
-  const user = userOpt.tag === 'some' ? userOpt.value : (basic ? basic.user : null);
+  const userOpt = flatMapOption(a, x => fromNullish(x.user));
+  const basicUserOrNull = basic ? basic.user : null;
+  const user = getOrElse<string | null>(userOpt, basicUserOrNull);
   const userSecret = basic ? secretUser(basic.user, basic.pass !== '') : secretShaped(user);
   // Every string a server can send back (error bodies, ERR lines, band-2/3 text, ng reasons, hook output) passes through
   // `scrub` before it reaches an error or a span: the transport carries it (`t.scrub`) and otel.js applies it.
-  const tokOpt = a.tag === 'some' ? fromNullable(a.value.token) : { tag: 'none' as const };
-  const bearOpt = a.tag === 'some' ? fromNullable(a.value.bearer) : { tag: 'none' as const };
+  const token = getOrElse<string | null>(flatMapOption(a, x => fromNullable(x.token)), null);
+  const bearer = getOrElse<string | null>(flatMapOption(a, x => fromNullable(x.bearer)), null);
   const authHeaderScrub = authorization === null ? null : authorization.replace(/^\S+\s+/, '');
   const basicPass = basic ? basic.pass : null;
   const decodedPass = decoded ? decoded.pass : null;
-  const basicUser = userSecret ? (basic ? basic.user : user ?? null) : null;
-  const decodedUser = userSecret ? (decoded ? decoded.user : null) : null;
-  const scrub = scrubber([authorization, tokOpt.tag === 'some' ? tokOpt.value : null, bearOpt.tag === 'some' ? bearOpt.value : null, authHeaderScrub, basicPass, decodedPass, basicUser, decodedUser, secretShaped(user) ? (user ?? null) : null]);
+  const echoedUser = basic ? basic.user : user;
+  const decodedUserOrNull = decoded ? decoded.user : null;
+  const basicUser = userSecret ? echoedUser : null;
+  const decodedUser = userSecret ? decodedUserOrNull : null;
+  const scrub = scrubber([authorization, token, bearer, authHeaderScrub, basicPass, decodedPass, basicUser, decodedUser, secretShaped(user) ? user : null]);
   const hostOf = (): string => new URL(base).host;
   // Only once a redirect was actually followed, so a transport that never rebases keeps today's span shape.
   const redirectAttrs = (): Attrs => {
@@ -325,7 +345,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   };
   const rebase = (next: string): void => {
     if (new URL(next).origin !== new URL(base).origin) liveAuth = null;
-    if (rebasedFrom === null) rebasedFrom = base;
+    rebasedFrom ??= base;
     base = next;
     redirectCount += 1;
   };
@@ -383,7 +403,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
       throw await redirectError(res, asked, `${service} advertisement`, scrub);
     }
     let next: string | null = null;
-    try { next = locationBase(asked, res.headers.get('location'), service, extra.allowUrl); }
+    try { next = locationBase(asked, res.headers.get('location'), service, allowUrl); }
     catch (e) { await cancelBody(res.body); throw e; }
     if (next === null) {
       initialSettled = true;
@@ -433,8 +453,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
     if (isRedirect(res)) throw await redirectError(res, target, service, scrub);
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
-      const preview = td.decode(await readCapped(res.body, ERROR_PREVIEW, { truncate: true }));
-      throw fail(httpCode(res.status), `HTTP ${res.status} ${service}: ${(scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE)}`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
+      throw await statusError(res, service, scrub);
     }
     let bytes = 0, chunks = 0, first: number | null = null, maxChunk = 0;
     const ct = res.headers.get('content-type') ?? '';

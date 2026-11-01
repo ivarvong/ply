@@ -139,10 +139,9 @@ function resolvedBase(base: string): { readonly base: string; readonly oid: bool
   if (!id.ok) throw id.error;
   return { base: id.value, oid: true };
 }
-import { parseRefname } from './refname.js';
+import { DEFAULT_REF } from './refname.js';
 export function validateSpec(spec: EditSpec, limits: Limits, head: string | null = null): EditPlan {
-  const fallbackRef = parseRefname('refs/heads/main');
-  const givenRef = spec.ref ?? (fallbackRef.ok ? fallbackRef.value : (() => { throw fail('bad_request', 'invalid default ref'); })());
+  const givenRef = spec.ref ?? DEFAULT_REF;
   const baseIn: string | Refname = (spec as { base?: string }).base ?? givenRef;
   const pathIn = spec.path;
   const findIn = spec.find;
