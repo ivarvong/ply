@@ -4,6 +4,11 @@ export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, loo
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
 /**
+ * An abbreviated oid among advertised tips. `unique_among_advertised` names the one oid and the refs that carried it;
+ * `ambiguous` names the oids; `none` matched nothing. Weaker than `git rev-parse` (interior objects are not candidates).
+ * @typedef {import('./read.js').AbbrevResolution} AbbrevResolution
+ */
+/**
  * Why a not_found missed. Switch on `kind`. A commit id is `{ kind: 'commit', miss }` (`absent`, or `not_commit`).
  * @typedef {import('./errors.js').Miss} Miss
  */
@@ -15,7 +20,7 @@ export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing i
  * A blob from the caller's transport. `kind: 'too_big'` is the pack object header's size above `maxBytes`; the fetch was cancelled.
  * @typedef {import('./read.js').OpenedBlob} OpenedBlob
  */
-export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
+export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbrev, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
@@ -24,6 +29,38 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
 /**
  * 40 lowercase hex characters. git also accepts abbreviations, ref names, and uppercase hex; this type does not.
  * @typedef {import('./oid.js').Oid} Oid
+ */
+/**
+ * The smart-HTTP transport every fetch and push takes.
+ * @typedef {import('./transport.js').Transport} Transport
+ */
+/**
+ * One OTLP/JSON line. A Tracer exporter is called with it.
+ * @typedef {import('./otel.js').ExportLine} ExportLine
+ */
+/**
+ * @typedef {import('./otel.js').Exporter} Exporter
+ */
+/**
+ * @typedef {import('./limits.js').Limits} Limits
+ */
+/**
+ * @typedef {import('./fetch.js').FetchOpts} FetchOpts
+ */
+/**
+ * The single-object pack cursor (`spInit` / `spStep` / `spFinish`).
+ * @typedef {import('./fetch.js').SpState} SpState
+ */
+/**
+ * What `operation` takes besides the url and the body.
+ * @typedef {import('./operation.js').OperationOpts} OperationOpts
+ */
+/**
+ * @typedef {import('./operation.js').Outcome} Outcome
+ */
+/**
+ * One object `push` sends. `data` accepts any `Uint8Array`.
+ * @typedef {import('./push.js').PackObject} PackObject
  */
 export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
 export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';
@@ -42,10 +79,10 @@ export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAn
  * @typedef {import('./capabilities.js').Storage} Storage
  */
 /**
- * tracer, fetch, clock and storage. Each is present after resolution: an omitted one is the typed default, never undefined.
+ * tracer, fetch, clock and storage. Every field is present. `defaultCapabilities` is the platform set.
  * @typedef {import('./capabilities.js').Capabilities} Capabilities
  */
-export { noopTracer, systemClock, platformFetch, freshStorage, resolveCapabilities } from './capabilities.js';
+export { noopTracer, systemClock, platformFetch, freshStorage, defaultCapabilities, adoptCapabilities } from './capabilities.js';
 export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';
 export { CODES, RETRY, thrown as fail, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';

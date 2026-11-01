@@ -7,9 +7,10 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { fileEntries, buildTree, selectObjects, validateTreeSpec, pushTree } from '../src/tree.js';
-import { editFile, lookupEntry, validateSpec } from '../src/edit.js';
+import { editFile, lookupEntry } from '../src/edit.js';
+import { commitTimeOf, commitUnix } from '../src/capabilities.js';
 import { canonMode, treeFiles, checkoutTree } from '../src/checkout.js';
-import { refCandidates, entryType, lsMode, resolveCommit, commitView, readCommit, listTree, readFile, openBlob, readBlob, fetchCommit, walkPath } from '../src/read.js';
+import { refCandidates, entryType, lsMode, resolveCommit, resolveAbbrev, commitView, readCommit, listTree, readFile, openBlob, readBlob, fetchCommit, walkPath } from '../src/read.js';
 import { hashObject, encodeTree, encodeCommit, encodeTag, parseTree, parseCommit, TYPE, TYPE_ID } from '../src/objects.js';
 import { buildPack, encodeObjHeader, zlibDeflate } from '../src/pack.js';
 import { parsePack, resolvePack, makeDelta } from '../src/packresolve.js';
@@ -318,8 +319,8 @@ test('validateTreeSpec: defaults, create, head, and each field checked before I/
   const now = validateTreeSpec({ files: {}, author: A, message: '' }, DEFAULT_LIMITS).author.time;
   assert.ok(now >= t0 && now <= t0 + 2, `${now} vs ${t0}`);
   const frozen = { now: () => 1_700_000_000_000, cpu: () => null };
-  assert.equal(validateTreeSpec({ files: {}, author: A, message: 'm' }, DEFAULT_LIMITS, null, frozen).author.time, 1700000000, 'an omitted time is the clock');
-  assert.equal(validateTreeSpec({ files: {}, author: A, message: 'm', time: 1600000000 }, DEFAULT_LIMITS, null, frozen).author.time, 1600000000, 'an explicit time wins over the clock');
+  assert.equal(commitUnix(frozen, commitTimeOf(null)), 1700000000, 'an omitted time is the clock');
+  assert.equal(commitUnix(frozen, commitTimeOf(1600000000)), 1600000000, 'an explicit time wins over the clock');
   const ok = { files: {}, author: A, message: 'm', time: T0 };
   throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, 'abc'), 'bad_request', 'head must be a 40-hex oid');
   throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, 'A'.repeat(40)), 'bad_request', 'head must be a 40-hex oid');
@@ -1412,9 +1413,91 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
   assert.equal(fetch?.kind, 3);
 });
 
-test('validateSpec: an omitted time is the clock, and an explicit time wins', () => {
+test('editFile: an omitted time is the capability clock', async () => {
+  const r = remote();
+  r.commit(FILES());
+  const e = env(r);
   const clock = { now: () => 1_700_000_000_000, cpu: () => null };
-  const spec = { path: 'a', find: 'x', replace: 'y', author: A, message: 'm' };
-  assert.equal(validateSpec(spec, DEFAULT_LIMITS, null, clock).time, 1700000000);
-  assert.equal(validateSpec({ ...spec, time: 1600000000 }, DEFAULT_LIMITS, null, clock).time, 1600000000);
+  await editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm' }, { ...e.opts, clock });
+  const tip = r.refs.get('refs/heads/main');
+  const commit = parseCommit(r.objects.get(tip).data);
+  assert.equal(commit.author.includes('1700000000'), true);
+  assert.equal(commit.committer.includes('1700000000'), true);
+});
+
+test('resolveAbbrev: advertised oids and peeled targets; resolveCommit asks once and lets a ref name win', async () => {
+  const listed = rows => ({ refs: new Map(rows.map(r => [r.name, r])), head: null, unborn: null });
+  const row = (name, oid, peeled) => (peeled === undefined ? { oid, name } : { oid, name, peeled });
+  const abbrev = (prefix, rows) => {
+    const r = resolveAbbrev(prefix, listed(rows));
+    assert.equal(r.ok, true, r.ok ? '' : r.error.message);
+    if (!r.ok) throw new Error('expected a resolution');
+    return r.value;
+  };
+  const hit = `abcd${'1'.repeat(36)}`;
+  const other = `abcd${'2'.repeat(36)}`;
+  const first = `abcd${'0'.repeat(36)}`;
+  const later = `ffffabcd${'0'.repeat(32)}`;
+  const peeled = `abcd${'3'.repeat(36)}`;
+  const tagOid = `eeee${'4'.repeat(36)}`;
+  assert.deepEqual(abbrev('abcd', [row('refs/heads/z', later)]), { kind: 'none' });
+  assert.deepEqual(abbrev('abcd', [row('HEAD', hit), row('refs/heads/main', hit), row('refs/heads/z', later)]), { kind: 'unique_among_advertised', oid: hit, refs: ['HEAD', 'refs/heads/main'] });
+  assert.deepEqual(abbrev('abcd', [row('refs/tags/v', tagOid, peeled)]), { kind: 'unique_among_advertised', oid: peeled, refs: ['refs/tags/v'] });
+  assert.deepEqual(abbrev('abcd', [row('refs/tags/v', hit, hit)]), { kind: 'unique_among_advertised', oid: hit, refs: ['refs/tags/v'] });
+  assert.deepEqual(abbrev('abcd', [row('refs/heads/b', other), row('refs/heads/a', hit), row('refs/heads/c', first)]), { kind: 'ambiguous', oids: [first, hit, other] });
+  const oid39 = `${'a'.repeat(39)}b`;
+  assert.deepEqual(abbrev('a'.repeat(39), [row('refs/heads/a', oid39)]), { kind: 'unique_among_advertised', oid: oid39, refs: ['refs/heads/a'] });
+  assert.deepEqual(abbrev('abcd1', [row('refs/heads/a', hit)]), { kind: 'unique_among_advertised', oid: hit, refs: ['refs/heads/a'] });
+  for (const bad of ['abc', 'a'.repeat(40), 'ABCD', 'abcd!', '', 'gggg', `${'a'.repeat(39)}G`]) {
+    const r = resolveAbbrev(bad, listed([row('refs/heads/a', hit)]));
+    assert.equal(r.ok, false, bad);
+    if (!r.ok) {
+      assert.equal(r.error.code, 'bad_request', bad);
+      assert.equal(r.error.message, 'abbreviated oid must be 4..39 lowercase hex', bad);
+      assert.equal(r.error.what, 'ref', bad);
+    }
+  }
+
+  const open = (head = 'refs/heads/main') => { const r = remote({ head }); return { r, t: r.transport({ tracer: new Tracer() }) }; };
+  const prefixes = r => r.log.filter(x => x.command === 'ls-refs').map(x => x.prefixes);
+  // default off: a short hex string is a name, one narrow ls-refs, even when a tip starts with it
+  const off = open('refs/heads/hold');
+  off.r.refs.set('refs/heads/hold', hit);
+  await rejects(resolveCommit(off.t, 'abcd'), 'not_found', 'ref abcd not found');
+  assert.deepEqual(prefixes(off.r), [refCandidates('abcd')]);
+  // a full oid is not an abbreviation and does not ask
+  off.r.log.length = 0;
+  assert.deepEqual(await resolveCommit(off.t, hit, { abbrev: 'advertised' }), { name: hit, commit: hit });
+  assert.deepEqual(prefixes(off.r), []);
+  // advertised, and the name is not a prefix: still the name's own candidates
+  const named = open();
+  named.r.refs.set('refs/heads/main', hit);
+  assert.deepEqual(await resolveCommit(named.t, 'main', { abbrev: 'advertised' }), { name: 'refs/heads/main', commit: hit });
+  assert.deepEqual(prefixes(named.r), [refCandidates('main')]);
+  // uppercase is a name, not a prefix
+  named.r.log.length = 0;
+  await rejects(resolveCommit(named.t, 'ABCD', { abbrev: 'advertised' }), 'not_found', 'ref ABCD not found');
+  assert.deepEqual(prefixes(named.r), [refCandidates('ABCD')]);
+  await rejects(resolveCommit(named.t, 'main', { abbrev: 'yes' }), 'bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
+  // a ref whose name is the prefix wins over a tip that actually starts with it
+  const elsewhere = `1234${'0'.repeat(36)}`;
+  const win = open('refs/heads/hold');
+  win.r.refs.set('refs/heads/abcd', elsewhere);
+  win.r.refs.set('refs/heads/hold', hit);
+  assert.deepEqual(await resolveCommit(win.t, 'abcd', { abbrev: 'advertised' }), { name: 'refs/heads/abcd', commit: elsewhere });
+  assert.deepEqual(prefixes(win.r), [[...refCandidates('abcd'), 'HEAD', 'refs/heads/', 'refs/tags/']]);
+  assert.equal(win.r.log.filter(x => x.command === 'ls-refs').length, 1);
+  // no such name: the one advertised tip
+  const one = open('refs/heads/hold');
+  one.r.refs.set('refs/heads/hold', hit);
+  assert.deepEqual(await resolveCommit(one.t, 'abcd', { abbrev: 'advertised' }), { name: hit, commit: hit });
+  assert.equal(one.r.log.filter(x => x.command === 'ls-refs').length, 1);
+  // two tips, no ref by that name
+  const two = open('refs/heads/a');
+  two.r.refs.set('refs/heads/a', other);
+  two.r.refs.set('refs/heads/b', first);
+  await rejects(resolveCommit(two.t, 'abcd', { abbrev: 'advertised' }), 'bad_request', 'abbreviated oid abcd matches 2 advertised objects', { what: 'ref', got: [first, other] });
+  assert.equal(two.r.log.filter(x => x.command === 'ls-refs').length, 1);
+  // nothing advertised starts with it
+  await rejects(resolveCommit(two.t, 'ffff', { abbrev: 'advertised' }), 'not_found', 'ref ffff not found');
 });

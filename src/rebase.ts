@@ -126,7 +126,7 @@ export type RebaseOutcome =
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
 /* oxlint-disable eslint/complexity -- one operation's steps in order; the A6 pass makes the replay a RebaseState machine */
 export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main', committer, author, time: timeIn, squash = false, message = null }: RebaseSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<RebaseOutcome> {
-  const time = operationTime(opts['clock'], timeIn);
+  const time = operationTime(opts, timeIn);
   validateAttributes(attributes); validatePushRef(ref, false); const ontoOid = givenOid(onto, 'onto');
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
@@ -249,7 +249,7 @@ export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep
 export function pickCommit(url: string, spec: PickSpec & { readonly empty?: 'stop' }, opts?: RebaseOptions): Promise<PickEmpty | PickOk>;
 export function pickCommit(url: string, spec: PickSpec, opts?: RebaseOptions): Promise<PickOutcome>;
 export async function pickCommit(url: string, { ref = 'refs/heads/main', commit, committer, author, time: timeIn, revert = false, message = null, empty: emptyGiven }: PickSpec, { cache = new Map(), signer = null, rediff = 'myers', attributes = null, ...opts }: RebaseOptions = {}): Promise<PickOutcome> {
-  const time = operationTime(opts['clock'], timeIn);
+  const time = operationTime(opts, timeIn);
   validateAttributes(attributes); validatePushRef(ref, false);
   const empty = emptyPolicy(emptyGiven);
   const committerPerson: ValidatedIdent = stamp(committer, time);

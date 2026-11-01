@@ -6,6 +6,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
 import type { Extra, Miss } from './errors.js';
+import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -15,7 +16,7 @@ import { parseCommit, parseTree, treeReplaceOid, hashObject, encodeCommit, ident
 import { fromHex, streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND } from './otel.js';
-import { commitUnix, systemClock } from './capabilities.js';
+import { adoptCapabilities, commitTimeOf, commitUnix } from './capabilities.js';
 import type { Clock } from './capabilities.js';
 import type { Attrs, Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
@@ -122,8 +123,7 @@ export type EditPlan = {
 // Pure: everything the caller controls, checked before any I/O. None of these strings can be escaped once inside git.
 // `base`: the ref whose head the commit is built on (default: `ref` itself). With base ≠ ref the push *creates* `ref`
 // (old oid = zeros), the way a pull-request branch is made; the CAS then means "the branch must not exist yet".
-export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, message, time: timeIn }: EditSpec, limits: Limits, head: string | null = null, clock: Clock = systemClock): EditPlan {
-  const time = commitUnix(clock, timeIn);
+export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
   validatePushRef(ref, false); validateRef(base);
   const person = validateIdent({ name: author?.name, email: author?.email, time, tz: author?.tz });
   validateMessage(message);
@@ -281,7 +281,7 @@ const LFS_MAGIC = te.encode('version https://git-lfs.github.com/spec/v1');
 export const isLfsPointerPrefix = (bytes: Uint8Array): boolean => { const n = Math.min(bytes.length, LFS_MAGIC.length); for (let i = 0; i < n; i++) if (bytes[i] !== LFS_MAGIC[i]) return false; return n === LFS_MAGIC.length; };
 
 // oxlint-disable-next-line require-await -- async, as before: a throw while starting the span is a rejection
-async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPointer = false, clock = systemClock }: {
+async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPointer = false, clock }: {
   readonly t: Transport;
   readonly tracer: Tracer;
   readonly root: Span;
@@ -289,7 +289,7 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
   readonly find: Uint8Array;
   readonly replace: Uint8Array;
   readonly allowLfsPointer?: boolean;
-  readonly clock?: Clock;
+  readonly clock: Clock;
 }): Promise<BlobEdit> {
   return tracer.span('git.edit.blob', { parent: root, attrs: { 'git.edit.blob.oid': blobOid } }, async span => {
     const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
@@ -366,15 +366,18 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
 // oxlint-disable-next-line require-await -- async: a synchronous throw (validateSpec) is a rejection, which editFile's .catch sees
 async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, Uint8Array>(), verify = false, allowLfsPointer = false, signer = null, fetchImpl, strictHead = false, ...opts }: Omit<EditOptions, 'head'> = {}, { head, attempt, linkTo, hintWas = null }: Attempt): Promise<EditResult> {
   const limits = opts.limits ?? DEFAULT_LIMITS;
-  const clock = opts.clock ?? systemClock;
-  const s = validateSpec(spec, limits, head, clock);
+  const caps = adoptCapabilities(opts);
+  const clock = caps.clock;
+  const stamped = { ...spec, time: commitUnix(clock, commitTimeOf(spec.time)) };
+  const s = validateSpec(stamped, limits, head);
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
   let streamed: { readonly scan: Held; readonly inflated: number } = { scan: { chunks: 0, maxChunk: 0 }, inflated: 0 };
   let hint = hintWas;
   const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head ?? '', 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
   const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint ?? '', ...memAttrs({ objects: held, ...streamed }), ...(fetchImpl?.attrs ? fetchImpl.attrs() : {}) });
-  return operation('edit', url, { ...opts, fetchImpl, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null }, async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('edit', url, ({ ...opts, fetchImpl, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
     const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };

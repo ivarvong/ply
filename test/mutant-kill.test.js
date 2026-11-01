@@ -28,7 +28,7 @@ import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
-import { clockOf, commitUnix, freshStorage, noopTracer, platformFetch, resolveCapabilities, systemClock } from '../src/capabilities.js';
+import { adoptCapabilities, commitTimeOf, commitUnix, defaultCapabilities, freshStorage, noopTracer, platformFetch, systemClock } from '../src/capabilities.js';
 import { createTransport } from '../src/http.js';
 import { operation, verifyRef } from '../src/operation.js';
 import { negotiate } from '../src/negotiate.js';
@@ -2169,9 +2169,9 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   assert.equal(isShortRead(Object.assign(new Error('short read: need 1 bytes at 12, have 13'), { code: 'pack_corrupt', reason: 'short_read' })), true);
 });
 
-test('capabilities: omitted is the typed default, never undefined, and a frozen clock zeroes HTTP durations', async () => {
-  const a = resolveCapabilities();
-  const b = resolveCapabilities();
+test('capabilities: omitted fields are the platform defaults, and a frozen clock zeroes HTTP durations', async () => {
+  const a = adoptCapabilities({});
+  const b = defaultCapabilities();
   assert.equal(a.tracer, noopTracer);
   assert.equal(b.tracer, noopTracer);
   assert.equal(a.clock, systemClock);
@@ -2180,18 +2180,20 @@ test('capabilities: omitted is the typed default, never undefined, and a frozen 
   const fetch = async () => new Response();
   const clock = { now: () => 5_000, cpu: () => 3 };
   const storage = freshStorage();
-  const chosen = resolveCapabilities({ fetch, fetchImpl: async () => { throw new Error('fetchImpl loses to fetch'); }, clock, storage, tracer: noopTracer });
+  const chosen = adoptCapabilities({ fetch, fetchImpl: async () => { throw new Error('fetchImpl loses to fetch'); }, clock, storage, tracer: noopTracer });
   assert.equal(chosen.fetch, fetch);
   assert.equal(chosen.clock, clock);
   assert.equal(chosen.storage, storage);
-  assert.equal(resolveCapabilities({ fetchImpl: fetch }).fetch, fetch);
-  assert.equal(resolveCapabilities({ tracer: undefined, fetch: undefined, fetchImpl: undefined, clock: undefined, storage: undefined }).tracer, noopTracer);
-  assert.equal(resolveCapabilities({ tracer: undefined, fetch: undefined, fetchImpl: undefined, clock: undefined, storage: undefined }).fetch, platformFetch);
-  assert.equal(clockOf(undefined), systemClock);
-  assert.equal(clockOf(null), systemClock);
-  assert.equal(clockOf(clock), clock);
-  assert.equal(commitUnix(clock, undefined), 5);
-  assert.equal(commitUnix(clock, 9), 9);
+  assert.equal(adoptCapabilities({ fetchImpl: fetch }).fetch, fetch);
+  assert.equal(adoptCapabilities({}).tracer, noopTracer);
+  assert.equal(adoptCapabilities({}).fetch, platformFetch);
+  assert.equal(commitUnix(systemClock, commitTimeOf(null)), Math.floor(systemClock.now() / 1000));
+  assert.equal(commitUnix(clock, commitTimeOf(null)), 5);
+  assert.equal(commitUnix(clock, commitTimeOf(9)), 9);
+  const nested = adoptCapabilities({ capabilities: { tracer: noopTracer, fetch, clock, storage } });
+  assert.equal(nested.fetch, fetch);
+  assert.equal(nested.clock, clock);
+  assert.equal(nested.storage, storage);
   const span = noopTracer.start('git.cap');
   const leaked = new Error('secret-token-value');
   span.scrub = s => s.replaceAll('secret-token-value', '[red]');

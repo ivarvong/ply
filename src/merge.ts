@@ -534,7 +534,7 @@ export type MergeOutcome =
 
 /* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
 export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time: timeIn, fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
-  const time = operationTime(opts['clock'], timeIn);
+  const time = operationTime(opts, timeIn);
   validatePushRef(ref, false); const fromOid = givenOid(from, 'from');
   const person: ValidatedIdent | null = author ? stamp(author, time) : null;
   const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;

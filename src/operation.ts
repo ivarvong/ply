@@ -14,19 +14,14 @@ import type { Attrs, Loose, Quirks, Transport } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
 import { withParent } from './transport.js';
-import { clockOf, commitUnix, resolveCapabilities } from './capabilities.js';
-import type { Clock, FetchFn, Storage } from './capabilities.js';
+import { adoptCapabilities, commitTimeOf, commitUnix } from './capabilities.js';
 import { lsRefs } from './lsrefs.js';
 import { thrown as fail } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 
 export type OperationOpts = {
   readonly auth?: HttpAuth | null | undefined;
-  // Absent means the typed default (resolveCapabilities). `undefined` is not a member: a missing tracer is the no-op.
-  readonly tracer?: Tracer;
-  readonly fetch?: FetchFn;
-  readonly clock?: Clock;
-  readonly storage?: Storage;
+  readonly tracer: Tracer;
   readonly parent?: Span | null | undefined;
   readonly fetchImpl?: FetchLike | undefined;
   readonly limits?: Limits | undefined;
@@ -38,14 +33,14 @@ export type OperationOpts = {
   readonly onFinish?: (() => Attrs) | null | undefined;
 };
 // Commit unix seconds for an operation that stamps a commit before its transport exists. An explicit time wins;
-// otherwise the clock (the system clock when the caller omitted one, including a loose options bag's missing field).
-export const operationTime = (clock: unknown, given: number | undefined): number => commitUnix(clockOf(clock), given);
+// otherwise the clock on the options bag (the system clock when the caller did not pass one).
+export const operationTime = (bag: object, given: unknown): number => commitUnix(adoptCapabilities(bag).clock, commitTimeOf(given));
 
 export type Outcome = <R>(kind: string, result: R, extra?: Attrs) => R;
 export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits }) => Promise<R>;
 
 export async function operation<R>(op: string, url: string | URL, input: OperationOpts, body: OperationBody<R>): Promise<R> {
-  const caps = resolveCapabilities(input);
+  const caps = adoptCapabilities(input);
   const { auth, parent = null, limits = DEFAULT_LIMITS, signal = null, quirks, transport = null, attrs = {}, link = null, onFinish = null } = input;
   const { tracer } = caps;
   const name = `git.${op}`;
@@ -57,7 +52,8 @@ export async function operation<R>(op: string, url: string | URL, input: Operati
   try {
     // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
     // error recorded, like any other failure, instead of leaving it open and missing from the trace.
-    const t = transport ? withParent(transport, root) : createTransport(url, { auth, tracer, parent: root, fetchImpl: caps.fetch, clock: caps.clock, storage: caps.storage, limits, signal, quirks });
+    const carried = { auth, tracer, parent: root, fetchImpl: caps.fetch, clock: caps.clock, storage: caps.storage, limits, signal, quirks };
+    const t = transport ? withParent(transport, root) : createTransport(url, carried);
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub) root.scrub = t.scrub;
     return await body({ t, root, outcome, limits });

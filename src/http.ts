@@ -12,8 +12,7 @@ import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
 import { UA, wrapNet } from './transport.js';
-import type { Clock, Storage } from './capabilities.js';
-import { freshStorage, noopTracer, platformFetch, systemClock } from './capabilities.js';
+import { adoptCapabilities } from './capabilities.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -141,10 +140,7 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
 export type FetchLike = (url: string | URL, init: RequestInit) => Promise<Response>;
 export type HttpOptions = {
   readonly auth?: HttpAuth | null | undefined;
-  // Absent means the typed default. `undefined` is not a member of tracer, clock, or storage.
-  readonly tracer?: Tracer;
-  readonly clock?: Clock;
-  readonly storage?: Storage;
+  readonly tracer?: Tracer | undefined;
   readonly parent?: Span | null | undefined;
   readonly fetchImpl?: FetchLike | undefined;
   readonly userAgent?: string | undefined;
@@ -155,7 +151,13 @@ export type HttpOptions = {
 export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
 
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
-export function createTransport(url: string | URL, { auth, tracer = noopTracer, parent = null, fetchImpl = platformFetch, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {}, clock = systemClock, storage = freshStorage() }: HttpOptions = {}): HttpTransport {
+export function createTransport(url: string | URL, options: HttpOptions = {}): HttpTransport {
+  const caps = adoptCapabilities(options);
+  const { auth, parent = null, userAgent = UA, limits = DEFAULT_LIMITS, signal = null, quirks = {} } = options;
+  const tracer = caps.tracer;
+  const fetchImpl = caps.fetch;
+  const clock = caps.clock;
+  const storage = caps.storage;
   headerField(userAgent, 'user agent');
   headerField(auth?.header, 'authorization');
   headerField(auth?.token, 'token');
@@ -219,7 +221,8 @@ export function createTransport(url: string | URL, { auth, tracer = noopTracer, 
     try { res = await f(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body), signal: sig.signal, redirect: 'manual' }); }
     catch (e) { throw wrapNet(e, sig.signal); }
     const cache = res.headers.get('x-ply-pack-cache') ?? '';
-    span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': res.headers.get('content-type') ?? '', 'http.response.ttfb_ms': clock.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
+    const postedType = res.headers.get('content-type');
+    span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': typeof postedType === 'string' ? postedType : '', 'http.response.ttfb_ms': clock.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
     if (isRedirect(res)) throw await redirectError(res, target, service, scrub);
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
@@ -231,11 +234,15 @@ export function createTransport(url: string | URL, { auth, tracer = noopTracer, 
     if (!ct.startsWith(`application/x-${service}-result`)) throw fail('not_git', `unexpected content-type ${JSON.stringify(ct)} from ${service}`);
     if (missingBody(res.body)) throw fail('protocol', `${service}: HTTP ${res.status} response has no body`);
     try { for await (const chunk of res.body) {
-      first ??= clock.now() - t0;
+      // oxlint-disable-next-line typescript/prefer-nullish-coalescing -- clock measurement, written as an explicit null check
+      if (first === null) first = clock.now() - t0;
       bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
       yield chunk;
     } } catch (e) { throw wrapNet(e, sig.signal); }
-    span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first ?? -1, 'git.response.duration_ms': clock.now() - t0, 'http.response.body.size': bytes, 'http.response.chunks': chunks, 'http.response.chunk.max': maxChunk, 'http.response.first_byte_ms': first ?? -1, 'http.response.duration_ms': clock.now() - t0 });
+    // oxlint-disable-next-line typescript/prefer-nullish-coalescing -- clock measurement, written as an explicit null check
+    const firstMs = first === null ? -1 : first;
+    const durationMs = clock.now() - t0;
+    span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': firstMs, 'git.response.duration_ms': durationMs, 'http.response.body.size': bytes, 'http.response.chunks': chunks, 'http.response.chunk.max': maxChunk, 'http.response.first_byte_ms': firstMs, 'http.response.duration_ms': durationMs });
     } finally { sig.cancel(); }
   }
 
@@ -243,7 +250,7 @@ export function createTransport(url: string | URL, { auth, tracer = noopTracer, 
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
-    // tracer, clock and storage are the capability defaults when the caller omits them (never undefined).
+    // tracer, clock and storage come from adoptCapabilities: a missing tracer is the no-op, a missing store is a fresh map.
     kind: 'http', url: base, tracer, parent, limits, signal, quirks, objects: storage, scrub,
     async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncGenerator<Frame, void, undefined> {
       let st: ReturnType<typeof pktStep>['state'] = pktInit();
@@ -261,7 +268,8 @@ export function createTransport(url: string | URL, { auth, tracer = noopTracer, 
       const t0 = clock.now();
       let res: Response;
       try { res = await f(target, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
-      span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': clock.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
+      const advertisedType = res.headers.get('content-type');
+      span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': clock.now() - t0, 'http.response.header.content-type': typeof advertisedType === 'string' ? advertisedType : '' });
       if (isRedirect(res)) throw await redirectError(res, target, `${service} advertisement`, scrub);
       if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
       if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);

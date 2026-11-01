@@ -1,7 +1,7 @@
 // What the entry modules (edit, read, log, checkout, tree) read that no converted module declares. The types go in the
 // A pass (A7), when the entries stop catching thrown values. The readers below are the runtime: one narrowing per
 // field, so a catch does not cast.
-import type { Attrs } from './otel.js';
+import type { Attrs, Tracer } from './otel.js';
 import type { OperationOpts } from './operation.js';
 import type { FetchLike } from './http.js';
 
@@ -25,10 +25,12 @@ export const thrownMessageMatches = (e: unknown, re: RegExp): boolean => {
   return typeof message === 'string' ? re.test(message) : re.test(String(message));
 };
 
-// operation.ts's options as the entries take them. tracer, fetch, clock and storage may be omitted; operation()
-// fills the typed defaults (a no-op tracer, the platform fetch, the system clock, a fresh object store), so none of
-// them is `undefined`. fetchImpl may be packcache's cachingFetch, whose attrs() the edit reports.
-export type EntryOptions = Omit<OperationOpts, 'fetchImpl' | 'attrs' | 'onFinish' | 'link'> & {
+// operation.ts's options as the entries take them. The entries default their options to {} as the JS did, so `tracer`
+// stays optional here though operation() needs it at run time (it starts the root span on it); each entry hands its
+// options to operation() through one assertion. fetchImpl may be packcache's cachingFetch, whose attrs() the edit
+// reports.
+export type EntryOptions = Omit<OperationOpts, 'tracer' | 'fetchImpl' | 'attrs' | 'onFinish' | 'link'> & {
+  readonly tracer?: Tracer | undefined;
   readonly fetchImpl?: (FetchLike & { readonly attrs?: () => Attrs }) | undefined;
 };
 

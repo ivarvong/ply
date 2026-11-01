@@ -1,29 +1,26 @@
-// An omitted capability is the typed default. `undefined` is not a value tracer, fetch, clock, or storage can take.
+// Capabilities is a total record: tracer, fetch, clock and storage are all required.
 import { readCommit } from '../../src/read.js';
 import { createTransport } from '../../src/http.js';
 import { editFile } from '../../src/edit.js';
+import {
+  adoptCapabilities, defaultCapabilities, freshStorage, noopTracer, platformFetch, systemClock,
+  type Capabilities, type Clock,
+} from '../../src/capabilities.js';
 
 const url = 'http://example.test/r.git';
 readCommit(url, {});
 createTransport(url);
-const author = { name: 'Cap', email: 'cap@x', tz: '+0000' };
+
+const caps: Capabilities = defaultCapabilities();
+const again: Capabilities = adoptCapabilities({});
+const custom: Capabilities = { tracer: noopTracer, fetch: platformFetch, clock: systemClock, storage: freshStorage() };
+const clock: Clock = { now: () => 0, cpu: () => null };
+const withClock = { tracer: noopTracer, clock, capabilities: custom };
+void readCommit(url, {}, withClock);
+void caps;
+void again;
 void editFile;
 
-// @ts-expect-error tracer is the no-op when omitted; undefined is not a tracer
-readCommit(url, {}, { tracer: undefined });
-// @ts-expect-error fetch is the platform fetch when omitted; undefined is not a fetch
-readCommit(url, {}, { fetch: undefined });
-// @ts-expect-error clock is the system clock when omitted; undefined is not a clock
-readCommit(url, {}, { clock: undefined });
-// @ts-expect-error storage is a fresh map when omitted; undefined is not a store
-readCommit(url, {}, { storage: undefined });
-// @ts-expect-error tracer is the no-op when omitted; undefined is not a tracer
-createTransport(url, { tracer: undefined });
-// @ts-expect-error clock is the system clock when omitted; undefined is not a clock
-createTransport(url, { clock: undefined });
-// @ts-expect-error storage is a fresh map when omitted; undefined is not a store
-createTransport(url, { storage: undefined });
-// fetchImpl is the legacy name and may still be explicitly undefined
-createTransport(url, { fetchImpl: undefined });
-// @ts-expect-error tracer is the no-op when omitted; undefined is not a tracer
-void editFile(url, { path: 'a', find: 'x', replace: 'y', author, message: 'm' }, { tracer: undefined });
+// @ts-expect-error every capability is required
+const missing: Capabilities = { tracer: noopTracer, fetch: platformFetch, clock: systemClock };
+void missing;

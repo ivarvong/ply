@@ -24,6 +24,7 @@
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail } from './errors.js';
 import type { Miss } from './errors.js';
+import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
@@ -100,7 +101,8 @@ export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions
   if (path !== undefined && path !== null) throw fail('bad_request', 'readLog: path filtering is not supported');
   const cap = requireLimit(opts.limits ?? DEFAULT_LIMITS, 'maxMergeDepth');
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap) throw fail('bad_request', `readLog: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' });
-  return operation('read_log', url, { ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
+  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
     const r = await fetchWindow(t, commit, limit);
     const parsed = new Map<string, Parents>();
