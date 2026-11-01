@@ -15,6 +15,7 @@ import { tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { readFile, listTree, readCommit } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
 import { writeFiles } from '../src/checkout-node.js';
+import { DEFAULT_LIMITS } from '../src/limits.js';
 import { editFile } from '../src/edit.js';
 import { mergeBranch } from '../src/merge.js';
 import { decodeBytes, encodeBytes } from '../src/bytes.js';
@@ -157,7 +158,7 @@ const OPERATIONS = {
       // and onto a filesystem: the names on disk are git's bytes
       const dir = mkdtempSync(join(fx.bare, '..', 'co-'));
       try {
-        const written = await writeFiles(dir, (await checkoutTree(url, { ref: fx.target }, O())).files);
+        const written = await writeFiles(dir, (await checkoutTree(url, { ref: fx.target }, O())).files, { limits: DEFAULT_LIMITS, platform: process.platform });
         if (!written.ok) throw written.error;
         const disk = readdirSync(dir, { encoding: 'buffer' }).map(n => n.toString('hex')).sort();
         assert.deepEqual(disk, files.map(f => f.path).sort(), 'names on disk');
