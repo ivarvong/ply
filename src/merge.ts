@@ -230,7 +230,9 @@ export async function mergeBase(t: Transport, a: string, b: string, { maxDepth }
     commits = new Map([...B, ...A]);
     s = searchStep(depth, top, commits, a, b);
   }
-  if (s.tag === 'capped') throw limitError('merge-base search depth', cap, cap);
+  // The window `s.depth` came back still truncated, so the next step is what did not fit: twice that window, or 1
+  // when the cap admits no commit (floor(cap) < 1, no search). `max` stays the cap the caller set (#143).
+  if (s.tag === 'capped') throw limitError('merge-base search depth', s.depth === 0 ? 1 : s.depth * 2, cap);
   return { base: s.tag === 'found' ? s.base : null, bases: s.bases, depth: s.depth, commits, verdict: s };
 }
 

@@ -38,6 +38,7 @@
   "test/space/fsck-tree.test.js": 11,
   "test/space/pack-cut.test.js": 19,
   "test/space/pkt-frame.test.js": 17,
+  "test/space/merge-depth.test.js": 2,
   "test/space/push-ng.test.js": 1,
   "test/space/push-outcome-boundary.test.js": 169,
   "test/space/push-outcome.test.js": 98,
