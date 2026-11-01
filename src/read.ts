@@ -101,12 +101,13 @@ export async function resolveCommit(t: Transport, ref: unknown): Promise<Resolve
   // The unborn question is a second ls-refs, and only after a miss: the advertisement is read then, and `unborn` is
   // sent only when the server lists ls-refs=unborn. A path miss never reaches here.
   const target = await unbornTarget(t);
+  // refCandidates threw on a non-string, and a HEAD miss does not read this. The false arm stays so the type is a string.
   const asked = typeof ref === 'string' ? ref : '';
   let miss: Miss;
   if (target !== null && sameBranch(ref, target)) miss = { kind: 'head_unborn', target };
   else if (first === 'HEAD') miss = { kind: 'head_absent' };
   else miss = { kind: 'ref', ref: asked, candidates: cands };
-  throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${typeof ref === 'string' ? ref : ''} not found`, { miss });
+  throw fail('not_found', first === 'HEAD' ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${asked} not found`, { miss });
 }
 
 export { fetchCommit, type FetchedCommit, type CommitMiss } from './commit.js';
