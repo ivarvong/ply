@@ -433,13 +433,17 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
 // once; the retry's root span links to the first attempt's.
 // `strictHead: true` turns the hint into a precondition: if `ref` is not at `head`, the edit is a `cas_conflict` before
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
+// An Error carries the attempt's tag (attempt, hint, the root span). A string or a plain object does not, and it is not
+// a result: resolving with it reported success for a failed first attempt.
+const isAttemptError = (e: unknown): e is Error & Tagged => e instanceof Error;
+
 export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, ...opts }: EditOptions = {}): Promise<EditResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
-  // an Error from the first attempt: editOnce tagged it (attempt, hint) and operation() gave it its root span; a value
-  // that is not an Error is editOnce's result (a thrown non-Error would land there too, as before)
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  const first = await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e as Error & Tagged);
-  if (!(first instanceof Error)) return first;
-  if (first.code !== 'cas_conflict' || first.attempt !== 0 || strictHead) throw first;
-  return editOnce(url, spec, opts, { head: null, attempt: 1, linkTo: first.span ?? null, hintWas: first.hint ?? null });
+  try {
+    return await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null });
+  } catch (e) {
+    // only a real Error is a cas_conflict that can be retried; anything else is the caller's throw, unchanged
+    if (!isAttemptError(e) || e.code !== 'cas_conflict' || e.attempt !== 0 || strictHead) throw e;
+    return editOnce(url, spec, opts, { head: null, attempt: 1, linkTo: e.span ?? null, hintWas: e.hint ?? null });
+  }
 }
