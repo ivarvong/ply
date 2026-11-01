@@ -2,7 +2,7 @@
 // wrappers. Exact values and boundaries, so a mutant of any comparison or field fails here (stryker: vitest.stryker).
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { ok, err, map, mapErr, andThen, match, matchKind, assertNever, errorKind, errorKindAttr } from '../src/result.js';
+import { ok, err, map, mapErr, andThen, match, matchKind, matchOption, assertNever, errorKind, errorKindAttr, some, none, isSome, isNone, resultToOption, optionToResult, transposeResultOption, transposeOptionResult } from '../src/result.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { fail, plyError, thrown, orThrow, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
 import { checkLimit, readLimit, limitExceeded, finiteLimit, requireLimit, limitError, DEFAULT_LIMITS } from '../src/limits.js';
@@ -44,6 +44,48 @@ test('errorKind is the span attribute: miss, then kind, then reason, then code',
   assert.equal(flat.attrs['error.kind'], 'head_absent');
   assert.equal(flat.attrs['error.type'], 'not_found');
   assert.equal(flat.name, 'git.result.kind');
+});
+
+test('Option is some or none, and it composes with Result', () => {
+  assert.deepEqual(some(1), { tag: 'some', value: 1 });
+  assert.deepEqual(none, { tag: 'none' });
+  assert.equal(isSome(some(1)), true);
+  assert.equal(isNone(none), true);
+  assert.equal(isSome(none), false);
+  assert.equal(matchOption(some(2), { some: n => n + 1, none: () => 0 }), 3);
+  assert.equal(matchOption(none, { some: () => 1, none: () => 2 }), 2);
+  assert.deepEqual(resultToOption(ok(3)), some(3));
+  assert.equal(resultToOption(err('e')), none);
+  assert.deepEqual(optionToResult(some(4), 'missing'), ok(4));
+  assert.deepEqual(optionToResult(none, 'missing'), err('missing'));
+  assert.deepEqual(transposeResultOption(ok(some(5))), some(ok(5)));
+  assert.equal(transposeResultOption(ok(none)), none);
+  assert.deepEqual(transposeResultOption(err('e')), some(err('e')));
+  assert.deepEqual(transposeOptionResult(some(ok(6))), ok(some(6)));
+  assert.deepEqual(transposeOptionResult(some(err('e'))), err('e'));
+  assert.deepEqual(transposeOptionResult(none), ok(none));
+});
+
+// Span.error writes error.kind itself. A caller who stamped a stale kind is overwritten, so the attribute is the value.
+test('Span.error records error.kind beside error.type', () => {
+  const cells = [
+    [{ code: 'not_found', miss: { kind: 'head_absent' }, kind: 'other', reason: 'short_read' }, 'not_found', 'head_absent'],
+    [{ code: 'bad_request', kind: 'not_string', reason: 'short_read' }, 'bad_request', 'not_string'],
+    [{ code: 'remote_error', reason: 'not_our_ref' }, 'remote_error', 'not_our_ref'],
+    [{ code: 'timeout' }, 'timeout', 'timeout'],
+    [{ miss: { kind: 1 }, code: 'not_found' }, 'not_found', 'not_found'],
+    ['plain', undefined, 'Error'],
+    [null, 'bad_request', 'Error'],
+  ];
+  for (const [value, type, kind] of cells) {
+    const ex = arrayExporter();
+    const span = new Tracer({ exporter: ex }).start('git.otel.kind');
+    span.set({ 'error.kind': 'stale' }).error(value, type).end();
+    const flat = flattenLine(ex.lines[0])[0];
+    assert.equal(flat.attrs['error.kind'], kind, kind);
+    assert.equal(flat.attrs['error.type'], type ?? 'Error');
+    assert.equal(flat.name, 'git.otel.kind');
+  }
 });
 
 test('PlyError: one constructor, an Error carrying its fields; fail wraps it; orThrow throws it as is', () => {

@@ -1,5 +1,6 @@
 // Git object encoding/decoding. All pure.
 import { thrown as fail } from './errors.js';
+import { assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
@@ -7,6 +8,7 @@ import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './va
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
+import type { ObjType, ObjectTypeName, PackKind } from './format.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
   MODE_S_IFREG, MODE_S_IFLNK, MODE_OWNER_EXEC, TREE_MAX_NAME_BYTES,
@@ -16,7 +18,8 @@ import {
   TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER,
 } from './format.js';
 
-export type ObjType = typeof OBJ_COMMIT | typeof OBJ_TREE | typeof OBJ_BLOB | typeof OBJ_TAG | typeof OBJ_OFS_DELTA | typeof OBJ_REF_DELTA;
+export type { ObjType };
+
 export const TYPE: {
   readonly COMMIT: typeof OBJ_COMMIT; readonly TREE: typeof OBJ_TREE; readonly BLOB: typeof OBJ_BLOB; readonly TAG: typeof OBJ_TAG;
   readonly OFS_DELTA: typeof OBJ_OFS_DELTA; readonly REF_DELTA: typeof OBJ_REF_DELTA;
@@ -29,12 +32,80 @@ export const TYPE_ID: {
   readonly commit: typeof OBJ_COMMIT; readonly tree: typeof OBJ_TREE; readonly blob: typeof OBJ_BLOB; readonly tag: typeof OBJ_TAG;
 } = Object.freeze({ commit: OBJ_COMMIT, tree: OBJ_TREE, blob: OBJ_BLOB, tag: OBJ_TAG });
 
-// A pack type that is an object and not a commit. A commit, a delta, or an unknown type id is null.
-export function nonCommitType(type: number): 'tree' | 'blob' | 'tag' | null {
-  if (type === TYPE.TREE) return 'tree';
-  if (type === TYPE.BLOB) return 'blob';
-  if (type === TYPE.TAG) return 'tag';
-  return null;
+export function nameOfTypeId(type: ObjType): PackKind {
+  switch (type) {
+    case OBJ_COMMIT: return 'commit';
+    case OBJ_TREE: return 'tree';
+    case OBJ_BLOB: return 'blob';
+    case OBJ_TAG: return 'tag';
+    case OBJ_OFS_DELTA: return 'ofs_delta';
+    case OBJ_REF_DELTA: return 'ref_delta';
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(type);
+}
+
+// A type id git writes, or invalid (0, 5, and anything else a pack header can carry).
+type WireType = { readonly tag: 'named'; readonly name: PackKind } | { readonly tag: 'invalid' };
+function wireTypeId(type: number): WireType {
+  switch (type) {
+    case OBJ_COMMIT:
+    case OBJ_TREE:
+    case OBJ_BLOB:
+    case OBJ_TAG:
+    case OBJ_OFS_DELTA:
+    case OBJ_REF_DELTA:
+      return { tag: 'named', name: nameOfTypeId(type) };
+    default:
+      return { tag: 'invalid' };
+  }
+}
+function wireTypeName(typeName: string): WireType {
+  switch (typeName) {
+    case 'commit':
+    case 'tree':
+    case 'blob':
+    case 'tag':
+    case 'ofs_delta':
+    case 'ref_delta':
+      return { tag: 'named', name: typeName };
+    default:
+      return { tag: 'invalid' };
+  }
+}
+
+/** What a wire type id is, for a caller that only stores a tree, blob, or tag as `not_commit`. */
+export type NonCommit =
+  | { readonly tag: 'notCommit'; readonly name: Exclude<ObjectTypeName, 'commit'> }
+  | { readonly tag: 'commit' }
+  | { readonly tag: 'delta'; readonly name: Exclude<PackKind, ObjectTypeName> }
+  | { readonly tag: 'invalid' };
+
+function nonCommitName(name: PackKind): NonCommit {
+  switch (name) {
+    case 'tree':
+    case 'blob':
+    case 'tag':
+      return { tag: 'notCommit', name };
+    case 'commit':
+      return { tag: 'commit' };
+    case 'ofs_delta':
+    case 'ref_delta':
+      return { tag: 'delta', name };
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(name);
+}
+
+// A pack type id. `notCommit` is a tree, blob, or tag. A commit, a delta, or an unknown id is its own variant.
+export function nonCommitType(type: number): NonCommit {
+  const found = wireTypeId(type);
+  switch (found.tag) {
+    case 'invalid': return { tag: 'invalid' };
+    case 'named': return nonCommitName(found.name);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(found);
 }
 
 export const objectHeader = (typeName: string, len: number): Uint8Array => te.encode(`${typeName} ${len}\0`);
@@ -413,11 +484,22 @@ export function parseTag(data: Uint8Array): Tag {
 // pack before any of it is returned or harvested). It is the same parser every reader calls, so a commit or tag no
 // reader would accept never reaches one.
 export function assertFetched(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): void {
-  if (typeName === 'blob' || typeName === 'ofs_delta' || typeName === 'ref_delta') return;
-  if (typeName === 'tree') { parseTree(data, limits); return; }
-  if (typeName === 'commit') { parseCommit(data, limits); return; }
-  if (typeName === 'tag') { parseTag(data); return; }
-  throw fail('pack_corrupt', `object: bad type ${typeName}`);
+  const found = wireTypeName(typeName);
+  switch (found.tag) {
+    case 'invalid': throw fail('pack_corrupt', `object: bad type ${typeName}`);
+    case 'named': {
+      switch (found.name) {
+        case 'blob': case 'ofs_delta': case 'ref_delta': return;
+        case 'tree': parseTree(data, limits); return;
+        case 'commit': parseCommit(data, limits); return;
+        case 'tag': parseTag(data); return;
+      }
+      // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(found.name);
+    }
+  }
+  // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+  assertNever(found);
 }
 
 // A header value is one line. LF or NUL, from any caller, would open a new header. The message is the body: LF is
