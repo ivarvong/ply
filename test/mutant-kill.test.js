@@ -16,7 +16,7 @@ import {
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody } from '../src/fetch.js';
-import { attributeTree, bestBases, mergeBase } from '../src/merge.js';
+import { attributeTree, bestBases, mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
 import { parseLsRefLine, parseUnbornLine, lsRefs, lsRefsBody } from '../src/lsrefs.js';
@@ -1930,8 +1930,17 @@ const chain = (name, n, below) => Object.fromEntries(Array.from({ length: n }, (
 test('a missing ref is not_found with a ref miss, for attributes and for rebase', async () => {
   const s = graphServer({ root: [] });
   const gone = { kind: 'ref', ref: 'refs/heads/gone', candidates: ['refs/heads/gone'] };
+  s.t.refs.set('refs/heads/main', s.oid('root'));
+  s.t.refs.set('refs/heads/feat', s.oid('root'));
+  assert.match(await attributeTree(s.t, 'refs/heads/main', {}), /^[0-9a-f]{40}$/);
+  const same = await mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+  assert.equal(same.outcome, 'up_to_date');
+  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/gone', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  s.t.refs.delete('refs/heads/main');
+  s.t.refs.delete('refs/heads/feat');
   await assert.rejects(attributeTree(s.t, 'refs/heads/gone', {}), e => e.code === 'not_found' && e.message === 'attributes ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === gone.ref && e.miss.candidates.length === 1 && e.miss.candidates[0] === gone.ref);
-  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/gone', from: 'refs/heads/main', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone' && e.miss.candidates[0] === 'refs/heads/gone');
+  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
   s.t.refs.set('refs/heads/feat', s.oid('root'));
   await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/main not found' && e.miss.ref === 'refs/heads/main' && e.miss.candidates[0] === 'refs/heads/main');
 });
