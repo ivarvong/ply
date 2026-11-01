@@ -325,6 +325,15 @@ test('validateTreeSpec: defaults, create, head, and each field checked before I/
   throws(() => validateTreeSpec({ ...ok, message: 'a\0' }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'message' });
   throws(() => validateTreeSpec({ ...ok, files: null }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'files' });
   throws(() => validateTreeSpec({ ...ok, files: { a: '1', 'a/b': '2' } }, DEFAULT_LIMITS), 'bad_request', 'a is both a file and a directory');
+  // the total is the sum of blob bytes. Exactly the cap is kept; the next byte is limit_exceeded before buildTree.
+  const cap = withLimits({ maxPushBytes: 4 });
+  assert.equal(validateTreeSpec({ ...ok, files: { a: 'ab', b: 'cd' } }, cap).built.root, buildTree(fileEntries({ a: 'ab', b: 'cd' }, cap)).root);
+  throws(() => validateTreeSpec({ ...ok, files: { a: 'abc', b: 'de' } }, cap), 'limit_exceeded', 'push bytes 5 exceeds limit 4', { what: 'push bytes', got: 5, max: 4 });
+  assert.equal(validateTreeSpec({ ...ok, files: { g: { mode: '160000', oid: GITLINK } } }, withLimits({ maxPushBytes: 0 })).files, 1);
+  throws(() => validateTreeSpec({ ...ok, files: { a: 'x' } }, withLimits({ maxPushBytes: 0 })), 'limit_exceeded', 'push bytes 1 exceeds limit 0', { what: 'push bytes', got: 1, max: 0 });
+  // a file over maxObjectSize is still that error, from fileEntries, not the total
+  throws(() => validateTreeSpec({ ...ok, files: { a: 'abcd' } }, withLimits({ maxObjectSize: 2, maxPushBytes: 1 })), 'limit_exceeded', 'object size 4 exceeds limit 2');
+  throws(() => validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: undefined }), 'bad_request', 'limits.maxPushBytes must be a finite non-negative number');
 });
 
 // ======================================================================================================================

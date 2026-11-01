@@ -28,6 +28,7 @@
   "test/props.test.js": 5,
   "test/protocol.test.js": 150,
   "test/pure.test.js": 1,
+  "test/push-budget.test.js": 15,
   "test/push-tree.test.js": 8,
   "test/push.test.js": 53,
   "test/read.test.js": 10,
