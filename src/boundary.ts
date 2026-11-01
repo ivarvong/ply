@@ -2,19 +2,19 @@
 // A pass (A7), when the entries stop catching thrown values. The readers below are the runtime: one narrowing per
 // field, so a catch does not cast.
 import type { Attrs, Tracer } from './otel.js';
-import type { OperationOpts } from './operation.js';
+import type { OperationConfig } from './operation.js';
 import type { FetchLike } from './http.js';
 import type { Option } from './result.js';
 import { getOrElse, none, some } from './result.js';
 import { isPlyCode } from './errors.js';
+import type { Input } from './absent.js';
 import { field } from './absent.js';
 
-// A thrown value, read loosely as the JS did (`e?.code`): any field may be missing, and a primitive has none. Errors
-// become values in the A pass; until then a `catch` reads them through the functions below, which are that read.
-export type Caught = { readonly code?: unknown; readonly message: string; readonly attrs?: Attrs } | null | undefined;
+// A thrown value is `unknown`: any field may be missing, and a primitive has none. Errors become values in the A pass;
+// until then a `catch` reads them through the functions below, each one Option-returning read of one field.
 
 // A field of a thrown value: None when the value is not an object, lacks the field, or holds null or the platform
-// missing value there (what `e?.field ?? …` collapsed). A primitive has none of these fields.
+// missing value there (what the JS's loose read collapsed). A primitive has none of these fields.
 const thrownField = field;
 export const thrownCode = (e: unknown): Option<unknown> => thrownField(e, 'code');
 export const thrownReason = (e: unknown): Option<unknown> => thrownField(e, 'reason');
@@ -39,14 +39,18 @@ export const thrownMessageMatches = (e: unknown, re: RegExp): boolean => {
   return typeof message.value === 'string' ? re.test(message.value) : re.test(String(message.value));
 };
 
-// operation.ts's options as the entries take them. The entries default their options to {} as the JS did, so `tracer`
-// stays optional here though operation() needs it at run time (it starts the root span on it); each entry hands its
-// options to operation() through one assertion. fetchImpl may be packcache's cachingFetch, whose attrs() the edit
-// reports.
-export type EntryOptions = Omit<OperationOpts, 'tracer' | 'fetchImpl' | 'attrs' | 'onFinish' | 'link'> & {
-  readonly tracer?: Tracer | undefined;
-  readonly fetchImpl?: (FetchLike & { readonly attrs?: () => Attrs }) | undefined;
+// What a cachingFetch adds to a fetch (packcache.ts): the attributes the edit reports. A plain fetch has none.
+export type EntryFetch = FetchLike & Input<{ readonly attrs: () => Attrs }>;
+// operation.ts's options as the entries take them, total. The entries parse their options as the JS did, so `tracer`
+// is a member a caller may leave out here though operation() needs it at run time (it starts the root span on it); each
+// entry hands its options to operation() through one assertion. fetchImpl may be packcache's cachingFetch.
+export type EntryConfig = Pick<OperationConfig, 'auth' | 'parent' | 'limits' | 'signal' | 'quirks' | 'transport'> & {
+  readonly tracer: Tracer;
+  readonly fetchImpl: EntryFetch;
 };
+// A public entry's option record (one of the two places Input is allowed): any of EntryConfig.
+export type EntryOptions = Input<EntryConfig>;
 
-// objects.ts TYPE_NAME, indexed by a type number read off the wire (any number: a lookup may miss).
-export type TypeNames = Readonly<Record<number, string | undefined>>;
+// objects.ts TYPE_NAME, indexed by a type number read off the wire. Total over the numbers it names; an index read of
+// any other number misses (noUncheckedIndexedAccess types that read), so a lookup still handles the miss.
+export type TypeNames = Readonly<Record<number, string>>;

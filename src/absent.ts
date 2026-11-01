@@ -50,6 +50,11 @@ export function field(value: unknown, key: string): Option<unknown> {
 // past that line the record is total and no code asks whether a field is there.
 export type Input<T> = { readonly [K in keyof T]?: T[K] | undefined };
 
+// Migration only: a value an unconverted call site still hands over as the platform missing value (fetch.ts passes
+// notOurRefReason's result as an error's context bag). Spelled here so no other file has to; delete it with the last
+// such call site.
+export type OrMissing<T> = T | undefined;
+
 // Fill every key the caller left out (or passed as the missing value) from `defaults`. Keys outside `defaults` are not
 // read: the config's type is the schema. `defaults` is the caller's fresh record (a mutable default such as a quirks
 // object must not be shared between two calls), so it is filled in place and returned.
