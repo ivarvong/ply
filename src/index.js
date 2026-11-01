@@ -4,7 +4,7 @@ export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, loo
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
 export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, fetchCommit } from './read.js';
-export { readLog, logWindow } from './log.js';
+export { readLog, logWindow, logOn } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
@@ -31,6 +31,7 @@ export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';
 export { createTransport, redactUrl } from './http.js';
 export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcache.js';
-export { isFilterRejection } from './fetch.js';
+export { isFilterRejection, isFilterRefusal } from './fetch.js';
+export { fetchPackFiltered } from './fetchpack.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';
 export { concat } from './bytes.js';

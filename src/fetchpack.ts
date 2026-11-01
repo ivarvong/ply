@@ -9,6 +9,10 @@ import { TYPE, TYPE_NAME } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs } from './fetch.js';
+import { plyError, isPlyError } from './errors.js';
+import type { PlyError } from './errors.js';
+import { ok, err } from './result.js';
+import type { Result } from './result.js';
 
 // packresolve.js is not converted yet: its shapes are whatever it declares.
 type Parsed = ReturnType<typeof parsePack>;
@@ -83,18 +87,53 @@ export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackE
 // so a malformed object fails the fetch (`pack_corrupt`) instead of reaching a caller or the harvest. On the tree:0
 // path all of it is what was asked for. On the blob:none path the trees are extras a tree:0 server would not have sent
 // (the walk reads commits only): checkWide drops one that is over a limit instead of failing the walk (#46; see there).
-// The result carries `filter`: the one the answered request used.
+// The result carries `filter` (the one the answered request used) and `learned` (true only on the request that
+// discovered the refusal; a later call on the same quirks asks for blob:none directly and reports learned false).
 const commitsAndTags = (_oid: string, o: PackObject): boolean => o.type !== TYPE.TREE;
-export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<FetchPackResult & { readonly filter: string | undefined }> {
-  const wide = async (learned: boolean): Promise<FetchPackResult & { readonly filter: string }> => {
+export type Tree0Pack = FetchPackResult & { readonly filter: string | undefined; readonly learned: boolean };
+export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tree0Pack> {
+  const wide = async (learned: boolean): Promise<Tree0Pack> => {
     const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check: objects => skippedAttrs(checkWide(objects, commitsAndTags, t.limits)), attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
     if (r.objects) harvest(t, r.objects);
-    return { ...r, filter: 'blob:none' };
+    return { ...r, filter: 'blob:none', learned };
   };
   if (t.quirks?.treeFilter === 'blob:none') return wide(false);
-  try { return { ...await fetchPack(t, opts, { check: (objects): Attrs => { checkWide(objects, () => true, t.limits); return {}; } }), filter: opts.filter }; } catch (e) {
+  try { return { ...await fetchPack(t, opts, { check: (objects): Attrs => { checkWide(objects, () => true, t.limits); return {}; } }), filter: opts.filter, learned: false }; } catch (e) {
     if (!isFilterRejection(e)) throw e;
     if (t.quirks) t.quirks.treeFilter = 'blob:none';
     return wide(true);
+  }
+}
+
+// The two filters a history walk asks for. Anything else is the caller's bug, refused before a request.
+export type PackFilter = 'tree:0' | 'blob:none';
+const isPackFilter = (f: unknown): f is PackFilter => f === 'tree:0' || f === 'blob:none';
+export type FilteredWant = { readonly wants: readonly string[]; readonly deepen?: number; readonly filter: PackFilter };
+export type FilteredPack = {
+  readonly objects: Map<string, PackObject> | null;
+  readonly shallow: readonly string[];
+  readonly filter: PackFilter;
+  readonly learned: boolean;
+};
+const shown = (v: unknown): string => {
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v === null) return JSON.stringify(v);
+  return v === undefined ? 'undefined' : typeof v;
+};
+// fetchPackTree0 as a Result, for a caller that already holds the transport (ply-web's loadPack / loadWindow).
+// `learned` is true only when this call is the one that found the server refuses tree:0.
+export async function fetchPackFiltered(t: Transport, opts: Partial<FilteredWant> | null | undefined): Promise<Result<FilteredPack, PlyError>> {
+  if (typeof opts !== 'object' || opts === null) return err(plyError('bad_request', 'fetchPackFiltered: expected { wants, filter, deepen }', { what: 'opts' }));
+  if (!isPackFilter(opts.filter)) return err(plyError('bad_request', `fetchPackFiltered: filter must be tree:0 or blob:none, got ${shown(opts.filter)}`, { what: 'filter' }));
+  const { wants } = opts;
+  if (!Array.isArray(wants)) return err(plyError('bad_request', 'fetchPackFiltered: wants must be a list of object ids', { what: 'wants' }));
+  if (wants.length === 0) return err(plyError('bad_request', 'fetchPackFiltered: wants must name at least one object', { what: 'wants' }));
+  try {
+    const r = await fetchPackTree0(t, { wants, filter: opts.filter, deepen: opts.deepen });
+    // Success echoes the filter we just checked, or the fallback's blob:none. Both are PackFilter.
+    const filter: PackFilter = r.filter === 'blob:none' ? 'blob:none' : opts.filter;
+    return ok({ objects: r.objects, shallow: r.shallow, filter, learned: r.learned });
+  } catch (e) {
+    if (isPlyError(e)) return err(e);
+    throw e;
   }
 }

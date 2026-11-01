@@ -322,8 +322,28 @@ export const spAttrs = (st: SpState, prefix = 'git.pack'): Attrs => ({ [`${prefi
 // computed hash, and the other commits and trees are harvested into `t.objects` (bounded by limits.maxHarvestBytes):
 // the next tree:0 fetch of any of them is answered locally. Spans: `git.fetch.filter.fallback`, `git.fetch.wide.*`.
 const OID_RE = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/no-base-to-string -- see Loose
-export const isFilterRejection = (e: unknown): boolean => (['http', 'remote_error', 'protocol'] as readonly unknown[]).includes((e as Loose)?.code) && /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i.test(String((e as Loose)?.message ?? ''));
+// The phrases a server uses when it refuses a fetch filter. Cloudflare Artifacts (observed 2026-10-23) is HTTP 400
+// plus the first one. One regex, shared: ply-web used to keep a copy of it next to the cache.
+const FILTER_REFUSAL = /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i;
+// oxlint-disable-next-line no-magic-numbers -- RFC 9110 Bad Request: Artifacts' refusal, and the only status this predicate accepts
+const FILTER_REFUSAL_STATUS = 400;
+// A raw upload-pack answer (the HTTP status and the body, or the text an error quoted from it). Status is part of the
+// answer: a 500 that happens to contain the phrase is not a filter refusal.
+export const isFilterRefusal = (status: number, text: string): boolean => status === FILTER_REFUSAL_STATUS && FILTER_REFUSAL.test(text);
+// A thrown value is not a PlyError until it is: message may be no string, and `status` is only on an http error.
+// oxlint-disable typescript/no-unsafe-type-assertion, typescript/no-base-to-string -- see Loose
+export const isFilterRejection = (e: unknown): boolean => {
+  const loose = e as Loose;
+  const code = loose?.code;
+  const text = String(loose?.message ?? '');
+  // remote_error and protocol have no HTTP status. The phrase in the message is the refusal, so the same predicate
+  // sees it as the 400 it is when the server says it over HTTP.
+  if (code === 'remote_error' || code === 'protocol') return isFilterRefusal(FILTER_REFUSAL_STATUS, text);
+  if (code !== 'http') return false;
+  const status = (e as { readonly status?: unknown } | null)?.status;
+  return typeof status === 'number' && isFilterRefusal(status, text);
+};
+// oxlint-enable typescript/no-unsafe-type-assertion, typescript/no-base-to-string
 
 // Check a wide (blob:none) pack's commits, trees and tags before any of it is returned or harvested (#18, #46).
 // `wanted(oid, o)` names what a tree:0 server would have sent — what the caller asked for. Those pass assertFetched

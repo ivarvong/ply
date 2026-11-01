@@ -1,6 +1,10 @@
 // Recent history of a ref in one fetch, without a clone (#56).
 //
 //   readLog(url, { ref, limit = 20 }, opts) → { ref, oid, commits: [{ oid, tree, parents, author, committer, message, signed }], truncated }
+//   logOn(transport, { commit, limit = 20 }) → Result<{ commits, truncated, cut, filter, window }>
+//
+// readLog resolves the ref, then logOn does the window on that transport. A caller that already holds the transport
+// (and a commit id) uses logOn and keeps the harvested trees.
 //
 // Order: first parent, newest first: exactly `git rev-list --first-parent -n <limit> <ref>` (and `git log
 // --first-parent`). That is the line a branch's history follows (one merge commit per landed branch, not the branch's own
@@ -22,7 +26,10 @@
 //
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
-import { thrown as fail } from './errors.js';
+import { thrown as fail, plyError, isPlyError, orThrow } from './errors.js';
+import type { PlyError } from './errors.js';
+import { ok, err } from './result.js';
+import type { Result } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
@@ -91,6 +98,42 @@ async function fetchWindow(t: Transport, commit: string, limit: number): Promise
 export type LogSpec = { readonly ref?: string | null; readonly limit?: number; readonly path?: unknown };
 export type LogCommit = CommitView & { readonly oid: string };
 export type LogResult = { readonly ref: string; readonly oid: string; readonly commits: readonly LogCommit[]; readonly truncated: boolean };
+// The window readLog returns, plus what the span already recorded: which filter answered, and how big the pack's
+// commit set was. `cut` is true when the chain stopped on a shallow commit before `limit` (a shallow server).
+export type LogOnValue = {
+  readonly commits: readonly LogCommit[];
+  readonly truncated: boolean;
+  readonly cut: boolean;
+  readonly filter: string | undefined;
+  readonly window: { readonly commits: number; readonly shallow: number };
+};
+export type LogOnSpec = { readonly commit?: unknown; readonly limit?: unknown };
+// Effect: one first-parent window of `commit` on the caller's transport. Trees of a blob:none answer are harvested
+// into `t.objects`. A bad limit is bad_request; a pack that breaks the deepen contract is pack_corrupt.
+export async function logOn(t: Transport, spec: LogOnSpec | null | undefined): Promise<Result<LogOnValue, PlyError>> {
+  if (!isObject(spec)) return err(plyError('bad_request', 'logOn: the second argument must be an object ({ commit, limit })', { what: 'spec' }));
+  if (typeof spec.commit !== 'string') return err(plyError('bad_request', 'logOn: commit must be a string', { what: 'commit' }));
+  // `??` would treat null as the default; a caller who passed null asked for null, which is not a limit.
+  const limit = spec.limit === undefined ? DEFAULT_LOG_LIMIT : spec.limit;
+  const commit = spec.commit;
+  try {
+    const cap = requireLimit(t.limits, 'maxMergeDepth');
+    // `undefined < 1` is false, so a rejected limit has to be its own comparison. null would pass `< 1` by coercion.
+    const depth = typeof limit === 'number' && Number.isSafeInteger(limit) ? limit : undefined;
+    if (depth === undefined || depth < 1 || depth > cap) return err(plyError('bad_request', `logOn: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' }));
+    const r = await fetchWindow(t, commit, depth);
+    const parsed = new Map<string, Parents>();
+    for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) parsed.set(oid, parseCommit(o.data, t.limits));
+    const w = logWindow(parsed, r.shallow ?? [], commit, depth);
+    // every oid in the chain is a commit the pack held (logWindow walked them), so the pack and the object are there
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
+    const commits = w.chain.map(oid => ({ oid, ...commitView(((r.objects as PackObjects).get(oid) as { readonly data: Uint8Array }).data, t.limits) }));
+    return ok({ commits, truncated: w.truncated, cut: w.cut, filter: r.filter, window: { commits: parsed.size, shallow: (r.shallow ?? []).length } });
+  } catch (e) {
+    if (isPlyError(e)) return err(e);
+    throw e;
+  }
+}
 // oxlint-disable-next-line require-await -- async so that a throw while checking arguments is a rejection, as before
 export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<LogResult> {
   if (!isObject(spec)) throw fail('bad_request', 'readLog: the second argument must be an object ({ ref, limit })');
@@ -102,16 +145,10 @@ export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
   return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = await resolveCommit(t, ref);
-    const r = await fetchWindow(t, commit, limit);
-    const parsed = new Map<string, Parents>();
-    for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) parsed.set(oid, parseCommit(o.data, t.limits));
-    const w = logWindow(parsed, r.shallow ?? [], commit, limit);
-    // every oid in the chain is a commit the pack held (logWindow walked them), so the pack and the object are there
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const commits = w.chain.map(oid => ({ oid, ...commitView(((r.objects as PackObjects).get(oid) as { readonly data: Uint8Array }).data, t.limits) }));
-    return outcome('ok', { ref: name, oid: commit, commits, truncated: w.truncated }, {
-      'git.read_log.oid': commit, 'git.read_log.commits': commits.length, 'git.read_log.truncated': w.truncated, 'git.read_log.cut': w.cut,
-      'git.read_log.window.commits': parsed.size, 'git.read_log.window.shallow': (r.shallow ?? []).length, 'git.read_log.filter': r.filter,
+    const got = orThrow(await logOn(t, { commit, limit }));
+    return outcome('ok', { ref: name, oid: commit, commits: got.commits, truncated: got.truncated }, {
+      'git.read_log.oid': commit, 'git.read_log.commits': got.commits.length, 'git.read_log.truncated': got.truncated, 'git.read_log.cut': got.cut,
+      'git.read_log.window.commits': got.window.commits, 'git.read_log.window.shallow': got.window.shallow, 'git.read_log.filter': got.filter,
     });
   });
 }
