@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **505** (435 fail sites, 19 produced codes, 2 untyped throws, 25 exported parse/decode/classify/decide functions). Covered by a merged space 418, by a pending PR 32, excluded 25, unregistered 30. Fail sites no cell reaches: 30 of 435. Of the registered points, 208 are claimed by an enumerated space, 13 only by a random one and 229 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **503** (433 fail sites, 19 produced codes, 2 untyped throws, 25 exported parse/decode/classify/decide functions). Covered by a merged space 416, by a pending PR 32, excluded 25, unregistered 30. Fail sites no cell reaches: 30 of 433. Of the registered points, 208 are claimed by an enumerated space, 13 only by a random one and 227 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -64,7 +64,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
-| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 25 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
+| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 23 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
 | `encode-tag` | main | curated | case | cases | — | git hash-object -t tag --stdin (fsck_tag_standalone: same oid, same refusals) and git tag -a byte-for-byte where porcelain can write the cell (#103) | 2 | 0 | ci (`test/encode-tag.test.js`) | — |
 | `redirects` | main | curated | case | cases | — | opt-in redirects (followRedirects: initial), per case against git http.followRedirects=initial: hop counts, the suffix rule, origin change drops the credential, Location userinfo refused (#150) | 4 | 0 | ci (`test/redirect.test.js`) | — |
@@ -183,9 +183,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
 | decisions | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
 | decisions | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
-| decisions | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
-| decisions | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
-| decisions | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
+| decisions | `src/validate.ts#validateMessageResult:bad_request:message` | src/validate.ts validateMessageResult() | bad_request: message |
+| decisions | `src/validate.ts#validatePathResult:bad_request:path#6` | src/validate.ts validatePathResult() | bad_request: path |
+| decisions | `src/validate.ts#validateRefResult:bad_request:ref#3` | src/validate.ts validateRefResult() | bad_request: ref |
 | failsites | `src/checkout-node.ts#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.ts checkoutDir() | bad_request: dir must be a non-empty string |
 | failsites | `src/checkout-node.ts#slurp:limit_exceeded:symlink target` | src/checkout-node.ts slurp() | limit_exceeded: symlink target |
 | failsites | `src/checkout-node.ts#writeFiles:bad_request:already exists` | src/checkout-node.ts writeFiles() | bad_request: already exists |
@@ -204,7 +204,7 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/transport.ts#coded:&lt;code>:&lt;String((e as Loose)?.message ?? e)>` | src/transport.ts coded() | &lt;code>: &lt;String((e as Loose)?.message ?? e)> |
 | failsites | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
 | failsites | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
-| failsites | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
-| failsites | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
-| failsites | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
+| failsites | `src/validate.ts#validateMessageResult:bad_request:message` | src/validate.ts validateMessageResult() | bad_request: message |
+| failsites | `src/validate.ts#validatePathResult:bad_request:path#6` | src/validate.ts validatePathResult() | bad_request: path |
+| failsites | `src/validate.ts#validateRefResult:bad_request:ref#3` | src/validate.ts validateRefResult() | bad_request: ref |
 
