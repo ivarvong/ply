@@ -6,7 +6,8 @@
 import type { ErrorOf } from './errors.js';
 import { fail, plyError, orThrow } from './errors.js';
 import type { Err, Result } from './result.js';
-import { ok, err, assertNever } from './result.js';
+import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
+import { at, atOr, fromNullable, fromNullish, mapGet, readKey, type Input } from './absent.js';
 import type { InflateStats } from './inflate.js';
 import { inflateResult } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
@@ -34,8 +35,9 @@ type Corrupt = ErrorOf<'pack_corrupt'>;
 export type PackError = Corrupt | ErrorOf<'limit_exceeded'> | ErrorOf<'bad_request'>;
 const corrupt = (msg: string): Err<Corrupt> => fail('pack_corrupt', msg);
 const short = (buf: Uint8Array, p: number): Err<Corrupt> => err(shortRead('pack_corrupt', p, 1, buf.length));
-// Indexed reads in range of a checked length say `as number` (free at runtime, unlike a `?? 0` per byte; not the `!`
-// src/ forbids). A read that may run past the end reads `buf[p]` and checks it against undefined: a short read.
+// Indexed reads in range of a checked length say `as number` (free at runtime, unlike a fallback per byte; not the `!`
+// src/ forbids). A read that may run past the end reads atOr(buf, p, NO_BYTE): NO_BYTE there is a short read.
+const NO_BYTE = -1;
 
 // The six pack object types git writes (pack.h OBJ_*): four objects and two deltas. 0 and 5 name nothing.
 type HeaderType = PackKind | 'invalid';
@@ -79,11 +81,11 @@ function readVarint(buf: Uint8Array, start: number, what: string, n0 = 0, shift0
   let p = start;
   let n = n0;
   let shift = shift0;
-  let c: number | undefined;
+  let c: number;
   do {
     if (shift > VARINT_MAX_SHIFT) return varintLong(what);
-    c = buf[p];
-    if (c === undefined) return short(buf, p);
+    c = atOr(buf, p, NO_BYTE);
+    if (c === NO_BYTE) return short(buf, p);
     p += 1;
     n += (c & OBJ_SIZE_NEXT_MASK) * varintScale(shift);
     shift += VARINT_BITS;
@@ -107,8 +109,8 @@ export type ObjHeader = { readonly type: number; readonly size: number; readonly
 // on that reason (fetch.ts spStep), and refuses anything else.
 // @decoder readObjHeaderResult prefix=obj-header
 export function readObjHeaderResult(buf: Uint8Array, start: number): Result<ObjHeader, Corrupt> {
-  const c = buf[start];
-  if (c === undefined) return short(buf, start);
+  const c = atOr(buf, start, NO_BYTE);
+  if (c === NO_BYTE) return short(buf, start);
   const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
   if (!(c & OBJ_CONTINUE)) return ok({ type, size: c & OBJ_SIZE_FIRST_MASK, next: start + 1 });
   const rest = readVarint(buf, start + 1, 'pack', c & OBJ_SIZE_FIRST_MASK, OBJ_TYPE_SHIFT);
@@ -124,15 +126,15 @@ export type OfsDelta = { readonly off: number; readonly next: number };
 // @decoder readOfsDeltaResult prefix=ofs-delta
 export function readOfsDeltaResult(buf: Uint8Array, start: number): Result<OfsDelta, Corrupt> {
   let p = start;
-  let c = buf[p];
-  if (c === undefined) return short(buf, p);
+  let c = atOr(buf, p, NO_BYTE);
+  if (c === NO_BYTE) return short(buf, p);
   p += 1;
   let off = c & OBJ_SIZE_NEXT_MASK;
   let shift = VARINT_BITS;
   while (c & OBJ_CONTINUE) {
     if (shift > VARINT_MAX_SHIFT) return corrupt(`pack: ofs delta offset longer than ${VARINT_MAX_SHIFT + 1} bits`);
-    c = buf[p];
-    if (c === undefined) return short(buf, p);
+    c = atOr(buf, p, NO_BYTE);
+    if (c === NO_BYTE) return short(buf, p);
     p += 1;
     off = ((off + 1) * OBJ_SIZE_NEXT_BASE) + (c & OBJ_SIZE_NEXT_MASK);
     shift += VARINT_BITS;
@@ -143,14 +145,15 @@ export function readOfsDeltaResult(buf: Uint8Array, start: number): Result<OfsDe
 export function readOfsDelta(buf: Uint8Array, start: number): OfsDelta { return orThrow(readOfsDeltaResult(buf, start)); }
 
 // ---- parse ----
-// Caps are required. A missing field used to become Infinity (`??`), which disabled the check; checkLimit rejects that.
+// Caps are required. A missing field used to become Infinity (a nullish fallback), which disabled the check; checkLimit rejects that.
 // Each key's cap is the caller's override at the same index when it gave one, else limits[key]; the first cap that
 // bounds nothing is the error. One cap per key, in order, so the result has keys.length entries.
 type Caps = readonly [number, number, number];
 function capsOf(limits: Limits, keys: readonly [LimitKey, LimitKey, LimitKey], given: readonly unknown[] = []): Result<Caps, ErrorOf<'bad_request'>> {
   const out: number[] = [];
   for (const [i, k] of keys.entries()) {
-    const r = given[i] === undefined ? readLimit(limits, k) : checkLimit(given[i], k);
+    const g = at(given, i);
+    const r = g.tag === 'some' ? checkLimit(g.value, k) : readLimit(limits, k);
     if (!r.ok) return r;
     out.push(r.value);
   }
@@ -158,16 +161,19 @@ function capsOf(limits: Limits, keys: readonly [LimitKey, LimitKey, LimitKey], g
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
   return ok(out as unknown as Caps);
 }
-export type PackParseOptions = {
-  readonly verify?: boolean | undefined;
-  readonly limits?: Limits | undefined;
-  readonly maxObjects?: number | undefined;
-  readonly maxInflatedTotal?: number | undefined;
+// verify: check the trailer's SHA-1 (anything but false verifies); limits: the caps (DEFAULT_LIMITS); maxObjects and
+// maxInflatedTotal: a cap that overrides the one in limits.
+export type PackParseConfig = {
+  readonly verify: boolean;
+  readonly limits: Limits;
+  readonly maxObjects: number;
+  readonly maxInflatedTotal: number;
 };
+export type PackParseOptions = Input<PackParseConfig>;
 export const packParseOpts = (limits: Limits = DEFAULT_LIMITS): { limits: Limits; maxObjects: number; maxInflatedTotal: number } => ({ limits, maxObjects: requireLimit(limits, 'maxPackObjects'), maxInflatedTotal: requireLimit(limits, 'maxInflatedTotal') });
 
-// One object as parsePack read it. A full object has neither base; an OFS_DELTA has baseOffset, a REF_DELTA baseOid.
-// resolvePack sets `oid` on full objects.
+// One object as parsePack read it. A full object has neither base (both null); an OFS_DELTA has baseOffset, a REF_DELTA
+// baseOid. A base is read by its type (hasOfsBase, hasRefBase), so a hand-built object that leaves a base out is a full one.
 export type PackObject = {
   readonly offset: number;
   readonly headerBytes: number;
@@ -175,11 +181,14 @@ export type PackObject = {
   readonly size: number;
   readonly compressed: number;
   readonly data: Uint8Array;
-  readonly baseOffset: number | undefined;
-  readonly baseOid: string | undefined;
+  readonly baseOffset: number | null;
+  readonly baseOid: string | null;
   readonly inflate: InflateStats;
-  oid?: string;
 };
+type Ofs = { readonly baseOffset: number };
+type Ref = { readonly baseOid: string };
+const hasOfsBase = <T extends { readonly baseOffset: number | null }>(o: T): o is T & Ofs => typeof o.baseOffset === 'number';
+const hasRefBase = <T extends { readonly baseOid: string | null }>(o: T): o is T & Ref => typeof o.baseOid === 'string';
 export type PackStats = {
   readonly version: number;
   readonly count: number;
@@ -194,10 +203,9 @@ export type PackStats = {
 export type ParsedPack = { readonly objects: PackObject[]; readonly stats: PackStats; readonly trailer: string; readonly bytes: number };
 
 // @decoder parsePackResult prefix=pack
-// oxlint-disable-next-line eslint/complexity -- one decoder loop (header, per-object header by exhaustive kind, body, trailer)
 export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): Result<ParsedPack, PackError> {
   const verify = opts.verify !== false;
-  const limits = opts.limits ?? DEFAULT_LIMITS;
+  const limits = getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS);
   const caps = capsOf(limits, ['maxPackObjects', 'maxInflatedTotal', 'maxObjectSize'], [opts.maxObjects, opts.maxInflatedTotal]);
   if (!caps.ok) return caps;
   const [maxObjects, maxInflatedTotal, maxObjectSize] = caps.value;
@@ -219,8 +227,8 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
     if (!header.ok) return header;
     const { type, size } = header.value;
     p = header.value.next;
-    let baseOffset: number | undefined;
-    let baseOid: string | undefined;
+    let baseOffset: number | null = null;
+    let baseOid: string | null = null;
     const kindResult = ((): Result<PackKind, PackError> => {
       const raw = headerType(type);
       switch (raw) {
@@ -259,7 +267,7 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
     const { out, consumed, stats: is } = z.value;
     stats.compressed += consumed; stats.inflated += size;
     stats.inflate.blocks += is.blocks; stats.inflate.stored += is.stored; stats.inflate.fixed += is.fixed; stats.inflate.dynamic += is.dynamic;
-    stats.byType[kind] = (stats.byType[kind] ?? 0) + 1;
+    stats.byType[kind] = getOrElse(readKey(stats.byType, kind), 0) + 1;
     objects.push({ offset, headerBytes: p - offset, type, size, compressed: consumed, data: out, baseOffset, baseOid, inflate: is });
     p += consumed;
   }
@@ -276,12 +284,15 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): ParsedP
 // ---- delta ----
 export type DeltaOps = { copy: number; insert: number; copyBytes: number; insertBytes: number };
 export type Patched = { out: Uint8Array; ops: DeltaOps };
+// maxResult: the cap on the result's size (limits.maxDeltaResult when left out).
+export type DeltaOptions = Input<{ readonly maxResult: number }>;
 // @decoder applyDeltaResult prefix=delta
 // oxlint-disable-next-line eslint/complexity -- one decoder: git's patch_delta, an opcode loop with seven optional bytes
-export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: { readonly maxResult?: number | undefined } = {}): Result<Patched, PackError> {
+export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: DeltaOptions = {}): Result<Patched, PackError> {
   let maxResult = DEFAULT_LIMITS.maxDeltaResult;
-  if (opts.maxResult !== undefined) {
-    const m = checkLimit(opts.maxResult, 'maxDeltaResult');
+  const given = fromNullable(opts.maxResult);
+  if (given.tag === 'some') {
+    const m = checkLimit(given.value, 'maxDeltaResult');
     if (!m.ok) return m;
     maxResult = m.value;
   }
@@ -301,7 +312,7 @@ export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: { re
   const ops: DeltaOps = { copy: 0, insert: 0, copyBytes: 0, insertBytes: 0 };
   // The byte at p, then past it. Past the end it reads 0 and p passes delta.length, which the opcode checks once it has
   // read its bytes: a delta cut inside an opcode is a typed short read at delta.length, with no allocation per byte.
-  const deltaByte = (): number => delta[p++] ?? 0;
+  const deltaByte = (): number => atOr(delta, p++, 0);
   while (p < delta.length) {
     const c = delta[p++] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- p < delta.length (the loop)
     if (c & DELTA_COPY) {
@@ -330,7 +341,7 @@ export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: { re
   return ok({ out, ops });
 }
 // @decoder applyDelta prefix=delta
-export function applyDelta(base: Uint8Array, delta: Uint8Array, opts: { readonly maxResult?: number | undefined } = {}): Patched { return orThrow(applyDeltaResult(base, delta, opts)); }
+export function applyDelta(base: Uint8Array, delta: Uint8Array, opts: DeltaOptions = {}): Patched { return orThrow(applyDeltaResult(base, delta, opts)); }
 
 // Common-prefix/suffix delta between two buffers.
 export function makeDelta(base: Uint8Array, target: Uint8Array): ReturnType<typeof spliceDelta> {
@@ -347,20 +358,26 @@ export function makeDelta(base: Uint8Array, target: Uint8Array): ReturnType<type
 // objects from parsePack; external(oid) -> {type, data} for thin bases. Returns Map oid -> resolved.
 // A base from outside the pack (a thin pack's), as the caller's `external` returns it.
 export type ExternalBase = { readonly type: number; readonly data: Uint8Array };
-export type ResolvedObject = {
+// The caller's lookup of a thin base by id. Anything falsy (null, or a JavaScript function's bare `return`) is "not
+// here"; `void` is how a function type admits that bare return.
+// oxlint-disable-next-line typescript/no-invalid-void-type -- a JavaScript caller's lookup may return nothing (see above)
+export type ExternalLookup = (oid: string) => ExternalBase | null | void;
+// A full object as resolvePack returns it; a delta's result also carries its delta's opcode counts.
+export type ResolvedFull = {
   readonly type: number;
   readonly data: Uint8Array;
   readonly chain: number;
-  readonly deltaOps?: DeltaOps;
   readonly oid: string;
   readonly offset: number;
   readonly size: number;
   readonly compressed: number;
-  readonly baseOffset: number | undefined;
-  readonly baseOid: string | undefined;
+  readonly baseOffset: number | null;
+  readonly baseOid: string | null;
 };
+export type ResolvedDelta = ResolvedFull & { readonly deltaOps: DeltaOps };
+export type ResolvedObject = ResolvedFull | ResolvedDelta;
 // What resolvePack reads of a parsed pack: parsePack's result, or a hand-built one (stats optional).
-export type PackToResolve = { readonly objects: readonly PackObject[]; readonly stats?: { readonly inflated?: number | undefined } | undefined };
+export type PackToResolve = { readonly objects: readonly PackObject[] } & Input<{ readonly stats: Input<{ readonly inflated: number }> }>;
 export type ResolvedPack = { readonly objects: Map<string, ResolvedObject>; readonly stats: { maxChain: number; externalBases: number; baseLookups: number } };
 type Base = { readonly type: number; readonly data: Uint8Array; readonly chain: number };
 
@@ -402,127 +419,101 @@ function externalBase(oid: string, ext: ExternalBase): Result<Base, Corrupt> {
   }
 }
 
-// `collectMissing` is describePack's path: a thin base is data, not an error. The default still refuses it
-// (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
-export function resolvePackResult(
-  parsed: PackToResolve,
-  external: (oid: string) => ExternalBase | null | undefined,
-  limits: Limits,
-  collectMissing: true,
-): Result<CollectedPack, PackError>;
-export function resolvePackResult(
-  parsed: PackToResolve,
-  external?: (oid: string) => ExternalBase | null | undefined,
-  limits?: Limits,
-  collectMissing?: false,
-): Result<ResolvedPack, PackError>;
-// oxlint-disable-next-line eslint/complexity -- one fixpoint over the pack's objects
-export function resolvePackResult(
-  parsed: PackToResolve,
-  external: (oid: string) => ExternalBase | null | undefined = () => null,
-  limits: Limits = DEFAULT_LIMITS,
-  collectMissing = false,
-): Result<ResolvedPack | CollectedPack, PackError> {
+// The fixpoint. `collectMissing` is describePack's path: a thin base is data, not an error. Without it a thin base the
+// lookup does not have is refused (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
+function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limits, collectMissing: boolean): Result<CollectedPack, PackError> {
   const caps = capsOf(limits, ['maxDeltaChain', 'maxDeltaResult', 'maxInflatedTotal']);
   if (!caps.ok) return caps;
   const [maxChain, maxDelta, inflatedCap] = caps.value;
   const byOffset = new Map(parsed.objects.map(o => [o.offset, o]));
   // REF_DELTA lookup is this map, not parsed.objects.find (that scan is O(n) per delta, O(passes·n²) on a pack of tiny
   // ref-deltas). Resolved deltas join the same map.
-  const byOid = new Map<string | undefined, PackObject>();
+  const byOid = new Map<string, PackObject>();
   const resolved = new Map<string, ResolvedObject>();
   const memo = new Map<number, ResolvedObject>();
   const stats = { maxChain: 0, externalBases: 0, baseLookups: 0 };
   // Bytes already held (inflated instructions and bases) plus each delta result, which is a new buffer.
-  // `?.` on data: a hand-built pack may leave it out (the parsed type says it is there)
-  let held = parsed.stats?.inflated ?? parsed.objects.reduce((n, o) => n + (o.data?.length ?? 0), 0);
+  // fromNullish on data: a hand-built pack may leave it out (the parsed type says it is there)
+  const given = flatMapOption(fromNullish(parsed.stats), s => fromNullish(s.inflated));
+  let held = given.tag === 'some' ? given.value : parsed.objects.reduce((n, o) => n + getOrElse(mapOption(fromNullish(o.data), d => d.length), 0), 0);
   let phase: Phase = 'in_pack';
   const failed = (error: PackError): Step => ({ tag: 'failed', error });
-  type BaseOrStep = { readonly tag: 'base'; readonly base: Base | undefined } | Step;
+  // The base: none (a full object), the object at baseOffset (OFS_DELTA), or the object named baseOid (REF_DELTA).
+  type BaseOrStep = { readonly tag: 'full' } | { readonly tag: 'base'; readonly base: Base } | Step;
   function findBase(obj: PackObject, depth: number, resolveFn: (o: PackObject, d: number) => Step): BaseOrStep {
-    // the base: none (a full object), the object at baseOffset (OFS_DELTA), or the object named baseOid (REF_DELTA)
-    if (obj.baseOffset !== undefined) {
-      const b = byOffset.get(obj.baseOffset);
-      if (!b) return failed(plyError('pack_corrupt', `pack: ofs delta base not at object boundary ${obj.baseOffset}`));
-      const s = resolveFn(b, depth + 1);
+    if (hasOfsBase(obj)) {
+      const b = mapGet(byOffset, obj.baseOffset);
+      if (b.tag === 'none') return failed(plyError('pack_corrupt', `pack: ofs delta base not at object boundary ${obj.baseOffset}`));
+      const s = resolveFn(b.value, depth + 1);
       if (s.tag !== 'resolved') return s;
       return { tag: 'base', base: s.r };
     }
-    if (obj.baseOid !== undefined) {
+    if (hasRefBase(obj)) {
       stats.baseLookups++;
-      const inPack = byOid.get(obj.baseOid);
-      if (inPack) {
-        const s = resolveFn(inPack, depth + 1);
+      const inPack = mapGet(byOid, obj.baseOid);
+      if (inPack.tag === 'some') {
+        const s = resolveFn(inPack.value, depth + 1);
         if (s.tag !== 'resolved') return s;
         return { tag: 'base', base: s.r };
       }
-      const ext = phase === 'external' ? external(obj.baseOid) : undefined;
+      if (phase !== 'external') return { tag: 'waiting', oid: obj.baseOid };
+      const ext = external(obj.baseOid);
       if (!ext) return { tag: 'waiting', oid: obj.baseOid };
       const checked = externalBase(obj.baseOid, ext);
       if (!checked.ok) return failed(checked.error);
       stats.externalBases++;
       return { tag: 'base', base: checked.value };
     }
-    return { tag: 'base', base: undefined };
+    return { tag: 'full' };
+  }
+  // The object's resolved form, from its own bytes (a full object) or its base's bytes patched by its delta.
+  function build(obj: PackObject, b: { readonly tag: 'full' } | { readonly tag: 'base'; readonly base: Base }): Result<ResolvedObject, PackError> {
+    const place = { offset: obj.offset, size: obj.size, compressed: obj.compressed, baseOffset: obj.baseOffset, baseOid: obj.baseOid };
+    if (b.tag === 'full') {
+      const hashed = objectName(obj.type);
+      if (!hashed.ok) return hashed;
+      return ok({ type: obj.type, data: obj.data, chain: 0, oid: hashObject(hashed.value, obj.data), ...place });
+    }
+    const base = b.base;
+    // Chain length, not recursion depth: a base resolved earlier comes back from memo, so depth alone let a chain
+    // emitted base-first grow without bound (#14). An external base is chain 0.
+    const chain = base.chain + 1;
+    if (chain > maxChain) return err(limitError('delta chain depth', chain, maxChain));
+    // The result buffer does not exist until applyDelta passes maxResult. Room is what the aggregate cap has left.
+    const room = inflatedCap - held;
+    if (room < 0) return err(limitError('pack inflated bytes', held, inflatedCap));
+    const patched = applyDeltaResult(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
+    if (!patched.ok) return patched;
+    held += patched.value.out.length;
+    const hashed = objectName(base.type);
+    if (!hashed.ok) return hashed;
+    return ok({ type: base.type, data: patched.value.out, chain, deltaOps: patched.value.ops, oid: hashObject(hashed.value, patched.value.out), ...place });
   }
   function resolveObj(obj: PackObject, depth = 0): Step {
-    const hit = memo.get(obj.offset);
-    if (hit) return { tag: 'resolved', r: hit };
+    const hit = mapGet(memo, obj.offset);
+    if (hit.tag === 'some') return { tag: 'resolved', r: hit.value };
     if (depth > maxChain) return failed(limitError('delta chain depth', depth, maxChain));
     const b = findBase(obj, depth, resolveObj);
-    if (b.tag !== 'base') return b;
-    const base = b.base;
-    let core: Base & { deltaOps?: DeltaOps };
-    let oid: string;
-    if (base === undefined) {
-      core = { type: obj.type, data: obj.data, chain: 0 };
-      // a full object was hashed once, where the loop below registered it
-      if (typeof obj.oid === 'string') oid = obj.oid;
-      else {
-        const hashed = objectName(core.type);
-        if (!hashed.ok) return failed(hashed.error);
-        oid = hashObject(hashed.value, core.data);
-      }
-    } else {
-      // Chain length, not recursion depth: a base resolved earlier comes back from memo, so depth alone let a chain
-      // emitted base-first grow without bound (#14). An external base is chain 0.
-      const chain = base.chain + 1;
-      if (chain > maxChain) return failed(limitError('delta chain depth', chain, maxChain));
-      // The result buffer does not exist until applyDelta passes maxResult. Room is what the aggregate cap has left.
-      const room = inflatedCap - held;
-      if (room < 0) return failed(limitError('pack inflated bytes', held, inflatedCap));
-      const patched = applyDeltaResult(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
-      if (!patched.ok) return failed(patched.error);
-      held += patched.value.out.length;
-      core = { type: base.type, data: patched.value.out, chain, deltaOps: patched.value.ops };
-      const hashed = objectName(core.type);
-      if (!hashed.ok) return failed(hashed.error);
-      oid = hashObject(hashed.value, core.data);
-    }
-    const r: ResolvedObject = Object.assign(core, {
-      oid, offset: obj.offset, size: obj.size, compressed: obj.compressed,
-      baseOffset: obj.baseOffset, baseOid: obj.baseOid,
-    });
+    if (b.tag !== 'base' && b.tag !== 'full') return b;
+    const built = build(obj, b);
+    if (!built.ok) return failed(built.error);
+    const r = built.value;
     if (r.chain > stats.maxChain) stats.maxChain = r.chain;
     memo.set(obj.offset, r);
     resolved.set(r.oid, r);
     byOid.set(r.oid, obj);
     return { tag: 'resolved', r };
   }
-  // Full objects first: each is hashed here, once, and registered, so a REF_DELTA finds it by id.
+  // Full objects first: each is hashed once (resolveObj) and registered, so a REF_DELTA finds it by id.
   for (const o of parsed.objects) {
-    if (o.baseOffset !== undefined || o.baseOid !== undefined) continue;
-    const hashed = objectName(o.type);
-    if (!hashed.ok) return err(hashed.error);
-    o.oid = hashObject(hashed.value, o.data);
-    byOid.set(o.oid, o);
+    if (hasOfsBase(o) || hasRefBase(o)) continue;
     const s = resolveObj(o);
     if (s.tag === 'failed') return err(s.error);
   }
   // Until nothing is pending: a pass either resolves something, or moves to the external phase once, or ends in an
   // error. A REF chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check
   // above (≤ 2 · maxDeltaChain + 2), not by a pass ceiling that used to return the tail unresolved without an error (#14).
-  let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
+  let pending: PackObject[] = parsed.objects.filter(o => hasOfsBase(o) || hasRefBase(o));
   while (pending.length > 0) {
     const next: PackObject[] = [];
     let missingOid = '';
@@ -552,13 +543,18 @@ export function resolvePackResult(
     }
     pending = next;
   }
-  return ok(collectMissing ? { objects: resolved, stats, unresolved: [] } : { objects: resolved, stats });
+  return ok({ objects: resolved, stats, unresolved: [] });
 }
-export function resolvePack(
-  parsed: PackToResolve,
-  external: (oid: string) => ExternalBase | null | undefined = () => null,
-  limits: Limits = DEFAULT_LIMITS,
-): ResolvedPack {
+
+// Stryker disable next-line ArrowFunction: null and a bare return both mean the base is not in the pack
+const noBase = (): null => null;
+
+// objects from parsePack; external(oid) -> {type, data} for thin bases. A thin base the lookup does not have is refused.
+export function resolvePackResult(parsed: PackToResolve, external: ExternalLookup = noBase, limits: Limits = DEFAULT_LIMITS): Result<ResolvedPack, PackError> {
+  const r = fixpoint(parsed, external, limits, false);
+  return r.ok ? ok({ objects: r.value.objects, stats: r.value.stats }) : r;
+}
+export function resolvePack(parsed: PackToResolve, external: ExternalLookup = noBase, limits: Limits = DEFAULT_LIMITS): ResolvedPack {
   return orThrow(resolvePackResult(parsed, external, limits));
 }
 
@@ -593,17 +589,17 @@ export type PackLayout = {
   readonly missingBases: readonly string[];
 };
 
-function wireOf(n: number): ObjType {
+function wireOf(n: number): Result<ObjType, Corrupt> {
   // parsePack refuses an id outside the six before layout. objectName is that same refusal, so a bad id is pack_corrupt.
   const named = objectName(n);
-  if (!named.ok) throw named.error;
+  if (!named.ok) return named;
   switch (named.value) {
-    case 'commit': return TYPE.COMMIT;
-    case 'tree': return TYPE.TREE;
-    case 'blob': return TYPE.BLOB;
-    case 'tag': return TYPE.TAG;
-    case 'ofs_delta': return TYPE.OFS_DELTA;
-    case 'ref_delta': return TYPE.REF_DELTA;
+    case 'commit': return ok(TYPE.COMMIT);
+    case 'tree': return ok(TYPE.TREE);
+    case 'blob': return ok(TYPE.BLOB);
+    case 'tag': return ok(TYPE.TAG);
+    case 'ofs_delta': return ok(TYPE.OFS_DELTA);
+    case 'ref_delta': return ok(TYPE.REF_DELTA);
   }
   // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(named.value);
@@ -620,11 +616,11 @@ function resolvedObjType(n: number): ResolvedObjType | null {
   }
 }
 function baseOf(obj: PackObject, memo: ReadonlyMap<number, ResolvedObject>): PackBase | null {
-  if (obj.baseOffset !== undefined) {
-    const base = memo.get(obj.baseOffset);
-    return { offset: obj.baseOffset, oid: base?.oid ?? null };
+  if (hasOfsBase(obj)) {
+    const base = mapGet(memo, obj.baseOffset);
+    return { offset: obj.baseOffset, oid: base.tag === 'some' ? base.value.oid : null };
   }
-  if (obj.baseOid !== undefined) return { oid: obj.baseOid };
+  if (hasRefBase(obj)) return { oid: obj.baseOid };
   return null;
 }
 // Depth of an object the fixpoint could not hash. That only happens when a REF base is outside the pack, and a
@@ -632,30 +628,34 @@ function baseOf(obj: PackObject, memo: ReadonlyMap<number, ResolvedObject>): Pac
 // is chain 0: a REF_DELTA on it is 1, and an OFS_DELTA on that object is one deeper. Same numbers verify-pack prints
 // once index-pack has appended the base.
 function chainDepth(obj: PackObject, byOffset: ReadonlyMap<number, PackObject>): number {
-  if (obj.baseOffset === undefined) return 1;
-  const base = byOffset.get(obj.baseOffset);
+  if (!hasOfsBase(obj)) return 1;
+  const base = mapGet(byOffset, obj.baseOffset);
   // Stryker disable next-line ConditionalExpression: an ofs offset that is not an object is pack_corrupt before layout
-  if (!base) return 0;
-  return chainDepth(base, byOffset) + 1;
+  if (base.tag === 'none') return 0;
+  return chainDepth(base.value, byOffset) + 1;
 }
-function packLayout(parsed: ParsedPack, resolved: CollectedPack): PackLayout {
+function packLayout(parsed: ParsedPack, resolved: CollectedPack): Result<PackLayout, Corrupt> {
   const memo = new Map<number, ResolvedObject>();
   for (const r of resolved.objects.values()) memo.set(r.offset, r);
   const byOffset = new Map(parsed.objects.map(o => [o.offset, o]));
-  const objects: PackLayoutObject[] = parsed.objects.map(obj => {
-    const r = memo.get(obj.offset);
-    return {
+  const objects: PackLayoutObject[] = [];
+  for (const obj of parsed.objects) {
+    const wireType = wireOf(obj.type);
+    if (!wireType.ok) return wireType;
+    const found = mapGet(memo, obj.offset);
+    const r = found.tag === 'some' ? found.value : null;
+    objects.push({
       offset: obj.offset,
       headerBytes: obj.headerBytes,
       compressed: obj.compressed,
       size: obj.size,
-      wireType: wireOf(obj.type),
+      wireType: wireType.value,
       type: r ? resolvedObjType(r.type) : null,
       oid: r ? r.oid : null,
       base: baseOf(obj, memo),
       depth: r ? r.chain : chainDepth(obj, byOffset),
-    };
-  });
+    });
+  }
   const missingBases: string[] = [];
   const seenOid = new Set<string>();
   for (const u of resolved.unresolved) {
@@ -663,18 +663,15 @@ function packLayout(parsed: ParsedPack, resolved: CollectedPack): PackLayout {
     seenOid.add(u.oid);
     missingBases.push(u.oid);
   }
-  return { version: PACK_VERSION, count: parsed.stats.count, trailer: parsed.trailer, objects, missingBases };
+  return ok({ version: PACK_VERSION, count: parsed.stats.count, trailer: parsed.trailer, objects, missingBases });
 }
-
-// Stryker disable next-line ArrowFunction: null and undefined both mean the base is not in the pack
-const noBase = (): null => null;
 
 // The pack's layout as `git verify-pack -v` prints it. A thin REF base is `missingBases`, not an error and not a
 // message to match. Limits are the same ones parse and resolve already enforce.
 export function describePack(buf: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<PackLayout, PackError> {
   const parsed = parsePackResult(buf, { limits });
   if (!parsed.ok) return parsed;
-  const resolved = resolvePackResult(parsed.value, noBase, limits, true);
+  const resolved = fixpoint(parsed.value, noBase, limits, true);
   if (!resolved.ok) return resolved;
-  return ok(packLayout(parsed.value, resolved.value));
+  return packLayout(parsed.value, resolved.value);
 }
