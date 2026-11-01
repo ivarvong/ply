@@ -10,18 +10,21 @@ import type { Limits } from './limits.js';
 declare const pathBrand: unique symbol;
 export type Path = string & { readonly [pathBrand]: typeof pathBrand };
 
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion
-const asPath = (v: string): Path => v as Path;
+function isBrandedPath(value: string, comps: readonly string[]): value is Path {
+  return value === comps.join('/');
+}
 
 export type ParsedPath = { readonly path: Path; readonly components: readonly string[] };
 
 export function parsePath(value: unknown, limits: Partial<Limits> | null | undefined): Result<ParsedPath, ErrorOf<'bad_request'>> {
   try {
     const comps = validatePath(value, limits);
-    return ok({ path: asPath(comps.join('/')), components: comps });
+    const joined = comps.join('/');
+    if (!isBrandedPath(joined, comps)) return fail('bad_request', 'invalid path', { what: 'path' });
+    return ok({ path: joined, components: comps });
   } catch (e) {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-    return fail('bad_request', (e as { message?: string }).message ?? 'invalid path', { what: 'path', cause: e });
+    const msg = e instanceof Error ? e.message : 'invalid path';
+    return fail('bad_request', msg, { what: 'path', cause: e });
   }
 }
 
