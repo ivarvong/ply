@@ -9,7 +9,7 @@ export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
   timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },
   aborted: { where: 'local', what: 'the caller\'s AbortSignal fired' },
-  http: { where: 'remote', what: 'an HTTP status we do not classify further, including any 3xx: redirects are not followed (status, location)' },
+  http: { where: 'remote', what: 'an HTTP status we do not classify further, including a 3xx ply is not following (the default; status, location). followRedirects initial rebases only the first info/refs GET' },
   auth: { where: 'remote', what: '401/403' },
   not_found: { where: 'remote', what: 'repository, ref or path does not exist; a commit id carries miss (absent or not_commit)' },
   rate_limited: { where: 'remote', what: 'HTTP 429; retry after a delay' },
