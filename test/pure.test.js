@@ -252,14 +252,15 @@ test('error taxonomy: runtime table and documentation agree; fail refuses unknow
   const amb = fail('ambiguous', 'y'); assert.equal(ambiguousAfterPush(amb), amb);
 });
 
-test('error taxonomy: every fail(\'code\') literal in src/ is in the table (static)', async () => {
+test('error taxonomy: every error-code literal in src/ is in the table (static)', async () => {
   const { readdirSync, readFileSync } = await import('node:fs');
   const { CODES } = await import('../src/errors.js');
   const used = new Set();
-  for (const f of readdirSync('src')) if (/\.[jt]s$/.test(f)) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/fail\('([a-z_0-9]+)'/g)) used.add(m[1]);
-  for (const c of used) assert.ok(CODES.includes(c), `fail('${c}') used but not in errors.js`);
+  for (const f of readdirSync('src')) if (/\.[jt]s$/.test(f)) for (const m of readFileSync(`src/${f}`, 'utf8').matchAll(/\b(?:fail|plyError|thrown)\('([a-z_0-9]+)'/g)) used.add(m[1]);
+  // the three constructors: fail (an Err), plyError (the error value), thrown (the throwing form, until the cut-over)
+  for (const c of used) assert.ok(CODES.includes(c), `code '${c}' constructed in src/ but not in errors.js`);
   // a floor so a broken regex cannot pass on nothing: 19 literal codes since the SSH transport (the only `fail('auth'` site) left, 2026-10-31
-  assert.ok(used.size >= 19, `only ${used.size} fail('code') literals found`);
+  assert.ok(used.size >= 19, `only ${used.size} error-code literals found`);
 });
 
 test('scrubError walks prototype-less maps (#16: merge reasons, report-status options) as it walks plain objects', () => {
