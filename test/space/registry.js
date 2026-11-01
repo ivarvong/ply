@@ -199,7 +199,7 @@ export const DECISIONS = [
   // hostile-server, whose runner never takes a 40-hex base off the tip. That cell is commit-changes.
   { match: 'src/edit.ts#resolve:bad_request:<s.ref>, <s.base>, <tip>', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/edit.ts#streamBlobEdit:internal:*', excluded: INTERNAL },
-  { match: 'src/rebase.ts#linearChain:internal:*', excluded: INTERNAL },
+  { match: 'src/rebase.ts#linearChainResult:internal:*', excluded: INTERNAL },
   { match: 'src/result.ts#assertNever:untyped:unreachable: *', excluded: 'exhaustiveness: the type checker proves the call unreachable (a value of type never); reaching it is a bug, never an outcome' },
   { match: 'src/linemerge.ts#broken:internal:*', excluded: 'an internal invariant of the diff compaction (code internal since #96: a bug, not an outcome); the linemerge and diffscript fuzzers against git hold it' },
   { match: 'src/http.ts#httpCode:*', space: 'hostile-server', axisTag: 'case' },
@@ -567,7 +567,7 @@ export const DECISIONS = [
   { match: "src/read.ts#openBlob:<rethrown or pack_corrupt>:<e>#2", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/read.ts#flush:<rethrown or pack_corrupt>:<e>", excluded: 'unreachable: pump.catch aborts the inflater, so the verify transform flush never runs on a pump rejection; await pump there only observes a pump that has already resolved' },
   { match: "src/read.ts#flush:pack_corrupt:inflated … != declared …", space: 'streamed-body', axisTag: 'shape' },
-  { match: "src/rebase.ts#linearChain:not_linear:… has … parents; only linear branches are rebased", space: 'merge', axisTag: 'case' },
+  { match: "src/rebase.ts#linearChainResult:not_linear:… has … parents; only linear branches are rebased", space: 'merge', axisTag: 'case' },
   { match: "src/rebase.ts#rebaseBranch:not_linear:… and … have … merge bases (criss-cross history); rebase…", space: 'merge', axisTag: 'case' },
   { match: "src/rebase.ts#rebaseBranch:merge_conflict:replaying … onto … conflicts: …", space: 'merge', axisTag: 'case' },
   { match: "src/rebase.ts#emptyPolicy:bad_request:empty must be 'stop' or 'keep'", space: 'merge', axisTag: 'case' },

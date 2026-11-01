@@ -50,9 +50,8 @@ export function carriedExtra(extra: readonly string[]): string[] {
 
 export type ChainCommit = Commit & { readonly oid: string };
 // Pure: the linear chain of commits from `base` (exclusive) to `tip`, oldest first; a merge commit in it is not_linear.
-// Defined as `linearChain` and exported as linearChainResult, so its refusals keep the ids the decision inventory knows
-// (linearChain#…, test/space/registry.js and ratchet.json); the throwing form is exported as linearChain.
-function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): Result<ChainCommit[], PlyError> {
+// The linear chain from base to tip, as a Result. linearChain is its throwing form for callers outside the cluster.
+export function linearChainResult(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): Result<ChainCommit[], PlyError> {
   const chain: ChainCommit[] = [];
   // a commit in the chain has exactly one parent: the '' never stands
   for (let c = tip; c !== base;) {
@@ -67,10 +66,9 @@ function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, base: st
   return ok(chain.toReversed());
 }
 // The throwing form (the package's linearChain).
-function linearChainOrThrow(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): ChainCommit[] {
-  return orThrow(linearChain(commits, tip, base, max));
+export function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): ChainCommit[] {
+  return orThrow(linearChainResult(commits, tip, base, max));
 }
-export { linearChain as linearChainResult, linearChainOrThrow as linearChain };
 
 // What one rebase or pick shares across its transplants: the trees fetched, the attribute tree of a fixed source (a ref
 // or an oid, resolved once), the line merger (built once), the files merged by content.
@@ -206,7 +204,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     }
     const maxCommits = readLimit(limits, 'maxRebaseCommits');
     if (!maxCommits.ok) return maxCommits;
-    const chained = linearChain(commits, tip, base, maxCommits.value);
+    const chained = linearChainResult(commits, tip, base, maxCommits.value);
     if (!chained.ok) return chained;
     const chain = chained.value;
     root.set({ 'git.rebase.commits': chain.length });

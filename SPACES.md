@@ -169,13 +169,13 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/checkout-node.ts#slurp:limit_exceeded:symlink target` | src/checkout-node.ts slurp() | limit_exceeded: symlink target |
 | decisions | `src/checkout-node.ts#writeFiles:bad_request:already exists` | src/checkout-node.ts writeFiles() | bad_request: already exists |
 | decisions | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| decisions | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts attributeTree() | not_found: attributes ref … not found |
+| decisions | `src/merge.ts#attributeTreeResult:not_found:attributes ref … not found` | src/merge.ts attributeTreeResult() | not_found: attributes ref … not found |
 | decisions | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
 | decisions | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts mergeBranch() | bad_request: author is required for a merge commit |
 | decisions | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts mergeBranch() | not_found: ref … not found |
 | decisions | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts mergeBranch() | not_found: ref … not found |
 | decisions | `src/negotiate.ts#negotiateCaps:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiateCaps() | bad_request: negotiate rounds must be an integer |
-| decisions | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
+| decisions | `src/rebase.ts#linearChainResult:limit_exceeded:rebase chain` | src/rebase.ts linearChainResult() | limit_exceeded: rebase chain |
 | decisions | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
 | decisions | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
 | decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
@@ -190,13 +190,13 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/checkout-node.ts#slurp:limit_exceeded:symlink target` | src/checkout-node.ts slurp() | limit_exceeded: symlink target |
 | failsites | `src/checkout-node.ts#writeFiles:bad_request:already exists` | src/checkout-node.ts writeFiles() | bad_request: already exists |
 | failsites | `src/fetch.ts#fetchObject:bad_request:fetchObject: oid must be 40-hex, got …` | src/fetch.ts fetchObject() | bad_request: fetchObject: oid must be 40-hex, got … |
-| failsites | `src/merge.ts#attributeTree:not_found:attributes ref … not found` | src/merge.ts attributeTree() | not_found: attributes ref … not found |
+| failsites | `src/merge.ts#attributeTreeResult:not_found:attributes ref … not found` | src/merge.ts attributeTreeResult() | not_found: attributes ref … not found |
 | failsites | `src/merge.ts#blobMerger:bad_request:rediff must be 'undecided', 'skip' or 'myers', not …` | src/merge.ts blobMerger() | bad_request: rediff must be 'undecided', 'skip' or 'myers', not … |
 | failsites | `src/merge.ts#mergeBranch:bad_request:author is required for a merge commit` | src/merge.ts mergeBranch() | bad_request: author is required for a merge commit |
 | failsites | `src/merge.ts#mergeBranch:not_found:ref … not found` | src/merge.ts mergeBranch() | not_found: ref … not found |
 | failsites | `src/merge.ts#mergeBranch:not_found:ref … not found#2` | src/merge.ts mergeBranch() | not_found: ref … not found |
 | failsites | `src/negotiate.ts#negotiateCaps:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiateCaps() | bad_request: negotiate rounds must be an integer |
-| failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
+| failsites | `src/rebase.ts#linearChainResult:limit_exceeded:rebase chain` | src/rebase.ts linearChainResult() | limit_exceeded: rebase chain |
 | failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
 | failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
 | failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |

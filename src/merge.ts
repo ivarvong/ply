@@ -573,9 +573,8 @@ export const NO_TREES: Trees = { base: null, ours: null, theirs: null };
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 // a ref's oid in an ls-refs answer
 export const refOid = (refs: LsRefsResult['refs'], ref: string): Option<string> => mapOption(mapGet(refs, ref), r => r.oid);
-// The Result form is defined as `attributeTree` and exported as attributeTreeResult, so its refusal keeps the id the
-// decision inventory knows (attributeTree#…, test/space/ratchet.json); the throwing form is exported as attributeTree.
-async function attributeTree(t: Transport, attributes: AttributeSource, trees: Trees): Promise<Result<string | null, ErrorOf<'not_found'>>> {
+// The tree whose .gitattributes apply, as a Result. attributeTree is its throwing form for callers outside the cluster.
+export async function attributeTreeResult(t: Transport, attributes: AttributeSource, trees: Trees): Promise<Result<string | null, ErrorOf<'not_found'>>> {
   if (attributes === null) return ok(null);
   if (attributes === 'ours' || attributes === 'theirs' || attributes === 'base') return ok(trees[attributes]);
   // validateAttributes ran first (mergeBranch, rebaseBranch, pickCommit): a ref name or an oid
@@ -589,10 +588,9 @@ async function attributeTree(t: Transport, attributes: AttributeSource, trees: T
   return ok((await commitAt(t, oid)).tree);
 }
 // The throwing form; a JS caller's missing tree is null.
-async function attributeTreeOrThrow(t: Transport, attributes: AttributeSource, trees: Input<Trees>): Promise<string | null> {
-  return orThrow(await attributeTree(t, attributes, withDefaults(trees, { ...NO_TREES })));
+export async function attributeTree(t: Transport, attributes: AttributeSource, trees: Input<Trees>): Promise<string | null> {
+  return orThrow(await attributeTreeResult(t, attributes, withDefaults(trees, { ...NO_TREES })));
 }
-export { attributeTree as attributeTreeResult, attributeTreeOrThrow as attributeTree };
 
 // Fast-forward `ref` to `to`, expecting it to be at `from` (CAS). Empty pack: the server already has the objects.
 export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: string; readonly from: string; readonly to: string }): Promise<PushResult> {
@@ -728,7 +726,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const merger = blobMerger(t, blobCap.value, rediff);
     if (!merger.ok) return merger;
     const mergeBlob = merger.value;
-    const attrTree = await attributeTree(t, attributes, trees);
+    const attrTree = await attributeTreeResult(t, attributes, trees);
     if (!attrTree.ok) return attrTree;
     root.set({ 'git.merge.attributes': attributes === null ? '' : attributes });
     const merged = await mergeTrees(t, cache, { ...trees, mergeBlob, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });

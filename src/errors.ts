@@ -9,7 +9,7 @@
 import type { ObjectTypeName } from './format.js';
 import type { Err, Result } from './result.js';
 import { err, getOrElse } from './result.js';
-import type { Input, OrMissing } from './absent.js';
+import type { Input } from './absent.js';
 import { field } from './absent.js';
 
 export type Retry = 'yes' | 'fresh' | 'no' | 'read';
@@ -106,9 +106,8 @@ export type PlyError = {
 }[Code];
 export type ErrorOf<C extends Code> = Extract<PlyError, { readonly code: C }>;
 
-// Payload fields required by the code are required here; a code without a payload takes Extra or nothing. (OrMissing:
-// fetch.ts still passes a bag that may be missing; the member narrows to `[extra: Extra]` when that call site converts.)
-type Payload<C extends Code> = unknown extends DetailOf<C> ? [] | [extra: OrMissing<Extra>] : [detail: DetailOf<C> & Extra];
+// Payload fields required by the code are required here; a code without a payload takes Extra or nothing.
+type Payload<C extends Code> = unknown extends DetailOf<C> ? [] | [extra: Extra] : [detail: DetailOf<C> & Extra];
 
 // `in`, as before: RETRY's keys are the codes (inherited names such as 'toString' also pass, as they always have).
 export const isPlyCode = (code: unknown): code is Code => typeof code === 'string' && code in RETRY;
@@ -126,9 +125,9 @@ export const isRetryable = (e: unknown): boolean => retryPolicy(e) === 'yes';
 // an Err. Unconverted JS calls the same function as `thrown` (below), untyped; the code check is for those callers.
 // An overload, not a cast: the implementation returns Error & { code }, which each member of the union refines.
 export function plyError<C extends Code>(code: C, message: string, ...detail: Payload<C>): ErrorOf<C>;
-export function plyError(code: string, message: string, ...extra: [] | [OrMissing<object>]): Thrown {
+export function plyError(code: string, message: string, ...extra: [] | [object]): Thrown {
   if (!isPlyCode(code)) throw new Error(`internal: unknown error code ${code}`);
-  // A JS caller may still pass a missing bag; spreading one adds nothing, as it did.
+  // No bag spreads nothing; a JS caller's missing bag spreads nothing too, as it did.
   return Object.assign(new Error(message), { code, ...extra[0] });
 }
 export const fail = <C extends Code>(code: C, message: string, ...detail: Payload<C>): Err<ErrorOf<C>> =>
