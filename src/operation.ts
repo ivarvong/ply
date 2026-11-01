@@ -7,7 +7,7 @@
 //
 // The body returns via `outcome(name, result, attrs)`, which stamps `git.<op>.outcome` and ends the span. Thrown errors
 // stamp the error's code as the outcome and are rethrown with `e.span = root` so a caller can link a retry to it.
-import type { Extra } from './errors.js';
+import type { ErrorOf, Extra } from './errors.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Attrs, Quirks, Transport, TransportInput } from './transport.js';
@@ -15,11 +15,12 @@ import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
 import { asTransport, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
-import { thrown as fail } from './errors.js';
+import { fail, orThrow } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Input } from './absent.js';
 import { mapGet, withDefaults } from './absent.js';
-import { getOrElse, mapOption } from './result.js';
+import type { Option, Result } from './result.js';
+import { getOrElse, mapOption, ok } from './result.js';
 import { thrownCode, thrownMessage } from './boundary.js';
 
 // Everything an operation takes besides the url and the body, total. `null` is "none": no credential, no parent span,
@@ -61,10 +62,13 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     if (t.scrub !== null) root.scrub = t.scrub;
     return await body({ t, root, outcome, limits });
   } catch (e) {
+    // The outcome and error.type are the thrown value's code, read before root.error scrubs it; with none, 'error' and
+    // whatever Span.error falls back to (the thrown value's name).
     const code = thrownCode(e);
-    finish({ [`${name}.outcome`]: getOrElse<unknown>(code, 'error') }).error(e, getOrElse<unknown>(code, null)).end();
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- any thrown object carries the root span, for a caller's retry link
-    if (Boolean(e) && typeof e === 'object') (e as { span?: Span }).span = root;
+    const type: [] | [unknown] = code.tag === 'some' ? [code.value] : [];
+    finish({ [`${name}.outcome`]: getOrElse<unknown>(code, 'error') }).error(e, ...type).end();
+    // Any thrown object carries the root span, for a caller's retry link (a frozen one refuses, as the assignment did).
+    if (typeof e === 'object' && e !== null) Object.assign(e, { span: root });
     throw e;
   }
 }
@@ -73,18 +77,22 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
 const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
 
 // After an acknowledged push: read `ref` back and require `expected`. A transport error here, or any other value, is
-// 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root`.
-export async function verifyRef(t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<string> {
-  let seen: string | null;
-  try { seen = getOrElse<string | null>(mapOption(mapGet((await lsRefs(t, [ref])).refs, ref), r => r.oid), null); }
+// 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root` (empty when the ref is absent).
+export async function verifyRefResult(t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<Result<string, ErrorOf<'ambiguous'>>> {
+  let seen: Option<string>;
+  try { seen = mapOption(mapGet((await lsRefs(t, [ref])).refs, ref), r => r.oid); }
   catch (e) {
     // A thrown null has no `.message`: any failure to read the ref back is `ambiguous` (I25), whatever was thrown.
-    const message = getOrElse<unknown>(thrownMessage(e), e);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- the thrown value renders as String() renders it; expected is Extra
-    throw fail('ambiguous', `push reported ok but the verification read-back failed: ${message}`, { cause: e, ...originalCode(e), expected } as Extra);
+    const message = String(getOrElse<unknown>(thrownMessage(e), e));
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- expected is an ad-hoc error field (errors.ts Extra); A3 moves it into Detail
+    return fail('ambiguous', `push reported ok but the verification read-back failed: ${message}`, { cause: e, ...originalCode(e), expected } as Extra);
   }
-  root.set({ [`${prefix}.verify.ref`]: seen === null ? '' : seen });
+  root.set({ [`${prefix}.verify.ref`]: getOrElse(seen, '') });
+  if (seen.tag === 'some' && seen.value === expected) return ok(seen.value);
+  // `seen` is null on the error when the ref is absent, as the wire says it.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ad-hoc error fields (errors.ts Extra); A3 moves them into Detail
-  if (seen !== expected) throw fail('ambiguous', `push reported ok but ${ref} is ${seen === null ? 'absent' : seen}, not ${expected}`, { seen, expected } as Extra);
-  return seen;
+  return fail('ambiguous', `push reported ok but ${ref} is ${getOrElse(seen, 'absent')}, not ${expected}`, { seen: getOrElse<string | null>(seen, null), expected } as Extra);
 }
+// The throwing form edit, tree, merge and changes call.
+export const verifyRef = async (t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<string> =>
+  orThrow(await verifyRefResult(t, root, prefix, ref, expected));

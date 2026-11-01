@@ -8,7 +8,9 @@
 //        'read'  — do not retry blindly: the server MAY have applied the change; read the ref back first
 import type { ObjectTypeName } from './format.js';
 import type { Err, Result } from './result.js';
-import { err } from './result.js';
+import { err, getOrElse } from './result.js';
+import type { Input, OrMissing } from './absent.js';
+import { field } from './absent.js';
 
 export type Retry = 'yes' | 'fresh' | 'no' | 'read';
 
@@ -66,31 +68,34 @@ export type Detail = {
 // `unknown` is the identity of `&`: a code without a payload adds nothing to its member.
 type DetailOf<C extends Code> = C extends keyof Detail ? Detail[C] : unknown;
 
-// Optional context any error may carry: what was checked, the offending path, the underlying cause (a platform
-// error, or another PlyError for `ambiguous`), and the code an `ambiguous` replaced. Unconverted modules attach
-// more ad-hoc fields to thrown errors; they are not part of the typed surface until their module converts.
-export type Extra = {
-  readonly what?: string;
-  readonly path?: string;
-  readonly got?: unknown;
-  readonly max?: number;
-  readonly cause?: unknown;
-  readonly original?: unknown;
+// Context any error may carry: what was checked, the offending path, the underlying cause (a platform error, or
+// another PlyError for `ambiguous`), and the code an `ambiguous` replaced. The fields are total here; Extra, the bag a
+// constructor takes, is Input<ExtraFields> (a caller attaches the ones it has). Unconverted modules attach more ad-hoc
+// fields to thrown errors; they are not part of the typed surface until their module converts.
+export type ExtraFields = {
+  readonly what: string;
+  readonly path: string;
+  readonly got: unknown;
+  readonly max: number;
+  readonly cause: unknown;
+  readonly original: unknown;
   // objects.ts: git fsck's message id on a refused commit, tag or duplicate header; the name a tree carries twice
-  readonly msgId?: string;
-  readonly entry?: string;
+  readonly msgId: string;
+  readonly entry: string;
   // edit.ts: the span attributes of a failed tree lookup (lookupEntry)
-  readonly attrs?: Readonly<Record<string, unknown>>;
+  readonly attrs: Readonly<Record<string, unknown>>;
   // push.ts: the receive-pack report as classified (null when it was not git's) and band 2 (hook stderr) as received
-  readonly report?: { readonly tag: string; readonly refs: ReadonlyArray<{ readonly ref: string; readonly ok: boolean; readonly reason: string }> } | null;
-  readonly hookOutput?: string;
+  readonly report: { readonly tag: string; readonly refs: ReadonlyArray<{ readonly ref: string; readonly ok: boolean; readonly reason: string }> } | null;
+  readonly hookOutput: string;
   // receivecaps.ts: the capabilities the server advertised, beside an `unsupported` push
-  readonly caps?: readonly string[];
+  readonly caps: readonly string[];
   // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
   // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts takeResult), so more bytes may complete it.
   // 'not_our_ref': upload-pack's ERR or band 3 said the wanted oid is not its ref (v2Step). Any other remote_error has none.
-  readonly reason?: Reason;
+  readonly reason: Reason;
 };
+// The error context bag: one of the two places Input is allowed (docs/STACK.md, Absence). Any subset of the fields.
+export type Extra = Input<ExtraFields>;
 export type Reason = 'short_read' | 'not_our_ref';
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
@@ -101,22 +106,19 @@ export type PlyError = {
 }[Code];
 export type ErrorOf<C extends Code> = Extract<PlyError, { readonly code: C }>;
 
-// Payload fields required by the code are required here; a code without a payload takes only Extra.
-type Payload<C extends Code> = unknown extends DetailOf<C> ? [extra?: Extra] : [detail: DetailOf<C> & Extra];
+// Payload fields required by the code are required here; a code without a payload takes Extra or nothing. (OrMissing:
+// fetch.ts still passes a bag that may be missing; the member narrows to `[extra: Extra]` when that call site converts.)
+type Payload<C extends Code> = unknown extends DetailOf<C> ? [] | [extra: OrMissing<Extra>] : [detail: DetailOf<C> & Extra];
 
 // `in`, as before: RETRY's keys are the codes (inherited names such as 'toString' also pass, as they always have).
 export const isPlyCode = (code: unknown): code is Code => typeof code === 'string' && code in RETRY;
 // A PlyError is the Error plyError builds. A thrown number, a string, or an Error with no code is not one.
 export const isPlyError = (e: unknown): e is PlyError => e instanceof Error && 'code' in e && isPlyCode(e.code);
-// A thrown value or a caller's object, read loosely: a missing field is undefined, and null/undefined read as nothing.
-type Loose = { readonly code?: unknown; readonly message?: unknown } | null | undefined;
-
-// Accepts a thrown value too (the public API throws until the Result cut-over; see docs/STACK.md).
+// Accepts a thrown value too (the public API throws until the Result cut-over; see docs/STACK.md). Any value is read
+// loosely, through absent.ts `field`: a primitive, null, or an object without a code has none, and that is 'no'.
 export const retryPolicy = (e: unknown): Retry => {
-  // A cast, not a guard: `?.` already makes the read safe for any value, and a guard costs bytes on every entry.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  const code = (e as Loose)?.code;
-  return isPlyCode(code) ? RETRY[code] : 'no';
+  const code = field(e, 'code');
+  return code.tag === 'some' && isPlyCode(code.value) ? RETRY[code.value] : 'no';
 };
 export const isRetryable = (e: unknown): boolean => retryPolicy(e) === 'yes';
 
@@ -124,9 +126,10 @@ export const isRetryable = (e: unknown): boolean => retryPolicy(e) === 'yes';
 // an Err. Unconverted JS calls the same function as `thrown` (below), untyped; the code check is for those callers.
 // An overload, not a cast: the implementation returns Error & { code }, which each member of the union refines.
 export function plyError<C extends Code>(code: C, message: string, ...detail: Payload<C>): ErrorOf<C>;
-export function plyError(code: string, message: string, extra?: object): Thrown {
+export function plyError(code: string, message: string, ...extra: [] | [OrMissing<object>]): Thrown {
   if (!isPlyCode(code)) throw new Error(`internal: unknown error code ${code}`);
-  return Object.assign(new Error(message), { code, ...extra });
+  // A JS caller may still pass a missing bag; spreading one adds nothing, as it did.
+  return Object.assign(new Error(message), { code, ...extra[0] });
 }
 export const fail = <C extends Code>(code: C, message: string, ...detail: Payload<C>): Err<ErrorOf<C>> =>
   err(plyError(code, message, ...detail));
@@ -147,17 +150,18 @@ export const orThrow = <T>(r: Result<T, PlyError>): T => {
 // After a push body is on the wire, any failure to obtain a trustworthy report means the ref MAY have moved.
 // That includes our own limits: a report too large to read says nothing about whether the ref moved.
 export const ambiguousAfterPush = (e: unknown, message = 'push outcome unknown'): unknown => {
-  if ((e as Loose)?.code === 'ambiguous') return e; // oxlint-disable-line typescript/no-unsafe-type-assertion -- a loose read, as in retryPolicy
-  // A thrown value of any type renders as String() renders it; the casts are the same loose read.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- see above
-  return plyError('ambiguous', `${message}: ${(e as Loose)?.message ?? e}`, { cause: e, original: (e as Loose)?.code });
+  const code = field(e, 'code');
+  if (code.tag === 'some' && code.value === 'ambiguous') return e;
+  // A thrown value of any type renders as String() renders it. `original` is the code it replaced; none, no key.
+  return plyError('ambiguous', `${message}: ${String(getOrElse(field(e, 'message'), e))}`, { cause: e, ...(code.tag === 'some' ? { original: code.value } : {}) });
 };
 
 // Rewrite every string an error carries through `scrub`, in place: message, stack, own fields, nested plain objects,
 // prototype-less maps (merge reasons, report options) and arrays (a push report, hook output) and the cause chain.
 // Anything else (a Span on `e.span`, bytes) is left alone. A prototype of null marks a map keyed by names the server
 // or repo chose. Mutation is the contract: the caller rethrows what this returns (`e` itself unless e is a string).
-export function scrubError(e: unknown, scrub?: ((s: string) => string) | null): unknown {
+// No scrubber (null, the default) leaves `e` as it is.
+export function scrubError(e: unknown, scrub: ((s: string) => string) | null = null): unknown {
   if (!scrub) return e;
   const seen = new Set<object>();
   const walk = (v: unknown): unknown => {

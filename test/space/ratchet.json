@@ -31,9 +31,9 @@
     "src/transport.ts#coded:<code>:<String((e as Loose)?.message ?? e)>",
     "src/tree-node.ts#keep:limit_exceeded:directory bytes",
     "src/tree-node.ts#keep:limit_exceeded:files",
-    "src/validate.ts#validateMessage:bad_request:message",
-    "src/validate.ts#validatePath:bad_request:path#6",
-    "src/validate.ts#validateRef:bad_request:ref#3"
+    "src/validate.ts#validateMessageResult:bad_request:message",
+    "src/validate.ts#validatePathResult:bad_request:path#6",
+    "src/validate.ts#validateRefResult:bad_request:ref#3"
    ]
   },
   "git": {
@@ -73,9 +73,9 @@
     "src/transport.ts#coded:<code>:<String((e as Loose)?.message ?? e)>",
     "src/tree-node.ts#keep:limit_exceeded:directory bytes",
     "src/tree-node.ts#keep:limit_exceeded:files",
-    "src/validate.ts#validateMessage:bad_request:message",
-    "src/validate.ts#validatePath:bad_request:path#6",
-    "src/validate.ts#validateRef:bad_request:ref#3"
+    "src/validate.ts#validateMessageResult:bad_request:message",
+    "src/validate.ts#validatePathResult:bad_request:path#6",
+    "src/validate.ts#validateRefResult:bad_request:ref#3"
    ]
   },
   "claims": {

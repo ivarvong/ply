@@ -1,10 +1,12 @@
 // Bounds on everything an untrusted server (or a careless caller) can size. Every allocation driven by
 // wire data checks one of these before the buffer exists. A missing or non-finite field is a hard error:
-// `undefined > n` is false in JS, so a forgotten default must not silently disable the check.
+// a missing value compared with `>` is false in JS, so a forgotten default must not silently disable the check.
 import type { ErrorOf } from './errors.js';
 import { plyError } from './errors.js';
 import type { Result } from './result.js';
-import { err, ok } from './result.js';
+import { err, getOrElse, ok } from './result.js';
+import type { Input, OrMissing } from './absent.js';
+import { fromNullish } from './absent.js';
 
 /* oxlint-disable no-magic-numbers -- these are the cap definitions; parsers import the names */
 
@@ -149,8 +151,12 @@ export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf
   typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
-export const readLimit = (limits: Partial<Limits> | null | undefined, key: LimitKey): Result<number, ErrorOf<'bad_request'>> =>
-  checkLimit(limits?.[key], key);
+// The caller's limits record (any subset), or none (null). A key it lacks is checked as the missing value it reads as,
+// so the refusal's `got` is what the caller passed. A JS caller's missing record reads as none, as the loose read did.
+const given = (limits: OrMissing<Input<Limits> | null>): Input<Limits> => getOrElse<Input<Limits>>(fromNullish(limits), {});
+// OrMissing: push.ts still passes a record that may be missing (cross-cluster; narrows to `Input<Limits> | null`).
+export const readLimit = (limits: OrMissing<Input<Limits> | null>, key: LimitKey): Result<number, ErrorOf<'bad_request'>> =>
+  checkLimit(given(limits)[key], key);
 
 // The value for `what` exceeding its bound: `got` against `max`.
 export const limitExceeded = (what: string, got: number, max: number): ErrorOf<'limit_exceeded'> =>
@@ -165,5 +171,5 @@ export const finiteLimit = (value: unknown, what: string): number => {
   }
   return value;
 };
-export const requireLimit = (limits: Partial<Limits> | null | undefined, key: LimitKey): number => finiteLimit(limits?.[key], key);
+export const requireLimit = (limits: Input<Limits> | null, key: LimitKey): number => finiteLimit(given(limits)[key], key);
 export { limitExceeded as limitError };
