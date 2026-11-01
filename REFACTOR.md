@@ -9,7 +9,7 @@ throwing wrappers STACK.md step 2 allows until the cut-over.
 | # | Property | Gate | Today → done |
 |---|---|---|---|
 | 1 | No platform absence outside `src/absent.ts`: no `undefined`, `?:`, `?.`, `??` | `scripts/absence-ratchet.mjs` (in `npm run typecheck`) | see the baseline → all four 0 |
-| 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, and the throwing wrappers of step 2 | a throw ratchet (to add) | 398 throw sites → wrappers only, then 0 after the cut-over |
+| 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, and the throwing wrappers of step 2 | `scripts/throw-ratchet.mjs` (in `npm run typecheck`) | 377 `throw` statements → wrappers only, then only `assertNever`/`internal` after the cut-over |
 | 3 | Every switch or tag chain over a closed union ends in `assertNever` | `scripts/exhaustive.mjs` (in `npm run lint`) | holds |
 | 4 | The public API returns `Result` (0.2.0), ply-web updated in the same window | the bundle and type tests on `dist/` | after 1 and 2 |
 | 5 | Every gate CI runs is green on every commit to main | `.github/workflows/ci.yml`, all 26 jobs | the rewrite left 23 red; fixed at b350b96 |
