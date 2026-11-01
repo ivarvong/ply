@@ -44,7 +44,8 @@ consumers get `dist/` (plain `.js` + `.d.ts`), so `engines.node` stays `>=20`.
 - No JSDoc types, ever. Types are TypeScript.
 
 `npm run typecheck` = `tsc -p tsconfig.check.json` (src + `test/types/*.typetest.ts`, the compile-time tests: every
-`@ts-expect-error` there must remain an error) + `tsc -p tsconfig.isolated.json` + the ratchet.
+`@ts-expect-error` there must remain an error) + `tsc -p tsconfig.isolated.json` + the TypeScript ratchet + the
+absence ratchet (`scripts/absence-ratchet.mjs`).
 
 Migration-only lint relaxation: `typescript/no-unsafe-{assignment,member-access,return,call,argument}` are off while
 `.js` remains, because a `.ts` file importing an unconverted `.js` module sees `any` (checkJs is off and there is no
@@ -59,8 +60,9 @@ by hand. The ratchet refuses to pass once `src/` has no `.js` and these are stil
   oxc, import, promise, node; categories correctness, suspicious, pedantic, perf **and restriction** at error (364
   rules on today's files), style off with picks. Turned off, each for a reason: `oxc/no-optional-chaining`,
   `oxc/no-rest-spread-properties`, `oxc/no-async-await` (ES5-compat restrictions; this is ES2022), `no-magic-numbers`
-  (on only for parser and bounds files, as before), `no-undefined`, `unicorn/no-null` (both are values the wire and
-  the API use), `no-plusplus`, `no-bitwise`, `no-continue` (parsers), `max-lines*`/`max-statements` (a parser is
+  (on only for parser and bounds files, as before), `no-undefined` (the absence ratchet is the gate: it also counts
+  `?:`, `?.`, and `??`, and it only moves down; see Absence), `unicorn/no-null` (null is a value the wire uses),
+  `no-plusplus`, `no-bitwise`, `no-continue` (parsers), `max-lines*`/`max-statements` (a parser is
   one function), `no-inline-comments` (`/* @__PURE__ */` annotations are inline by definition),
   `explicit-function-return-type` (isolatedDeclarations already requires it where it matters, at exports),
   `prefer-readonly-parameter-types` (fires on every `Uint8Array`). Style picks: `consistent-type-definitions: type`,
@@ -103,6 +105,28 @@ by hand. The ratchet refuses to pass once `src/` has no `.js` and these are stil
    (`checkLimit`/`readLimit` return `Result`) before a buffer exists.
 7. **Bundle budgets hold.** Types cost nothing; runtime helpers do. Prefer a type to a runtime check when the value
    is already trusted; mark unused-but-exported module-level calls `/* @__PURE__ */` so esbuild drops them.
+8. **Absence is a value.** See Absence below. Do not write the platform missing value, an optional member, optional
+   chaining, or nullish coalescing outside `src/absent.ts`.
+
+## Absence
+
+There is one `Option<T>`: `{ tag: 'some', value } | { tag: 'none' }` in `src/result.ts`, next to `Result`, so ply
+does not grow a second absence type. `Result` keeps its `ok` discriminant. Option uses `tag`. They compose through
+`resultToOption`, `optionToResult`, `transposeResultOption`, and `transposeOptionResult`: None carries no reason, so
+turning None into an Err requires the error the caller supplies. `matchOption` is exhaustive. `mapOption`,
+`flatMapOption`, and `getOrElse` are that match's two branches (`map` is already Result's name).
+
+The platform's missing value is spelled only in `src/absent.ts` and converted there (`fromNullable`, `fromNullish`,
+`at` / `atOr`, `mapGet`, `readKey`, `jsonDecode`, `byteInRange`, `asOption`, `unwrapOrAbsent`). `Oid` is
+`string & { brand }`. The same intersection on the platform missing value is `never` under TypeScript 7, so it
+cannot carry a phantom; the file is the brand, and what leaves it is `Option`. Null stays a wire value
+(`fromNullable` keeps it; `fromNullish` is the one collapse that `?.` and `??` used to do inline). The file is not
+under `src/core/` because mutation sharding refuses a subdirectory of `src/` (`scripts/mutate.mjs`).
+
+`scripts/absence-ratchet.mjs` (part of `npm run typecheck`) counts, outside that file, the identifier `undefined`,
+optional members and parameters (`?:`), optional chaining (`?.`), and nullish coalescing (`??`), and compares the
+four numbers to `scripts/absence-baseline.json`. A rise fails. A drop fails until the same change lowers the baseline
+(`node scripts/absence-ratchet.mjs --write`, which refuses a rise). New code cannot add any of the four.
 
 ## Public API policy
 

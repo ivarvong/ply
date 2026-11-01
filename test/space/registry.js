@@ -74,6 +74,9 @@ export const SPACES = [
   { name: 'stamps', status: 'pending', pending: '#106', kind: 'enumerated', runners: ['test/stamps.test.js'], run: 'ci',
     axes: [{ tag: 'pair', n: 3, doc: 'author/committer stamps: +0530/-0800, -1200/+1400, omitted/+0545' }, { tag: 'op', n: 7, doc: 'merge from a branch / a commit id, rebase onto a branch / a commit id, squash, cherry-pick, revert; plus the zero-oid and non-commit from/onto cases' }],
     cells: 21, observed: 21, derived: 0, oracle: 'git cat-file -p byte-equality with GIT_AUTHOR_* / GIT_COMMITTER_* (#103 item 4)' },
+  { name: 'commit-changes', status: 'pending', pending: '#147', kind: 'enumerated', runners: ['test/changes.test.js'], run: 'ci',
+    axes: [{ tag: 'start', n: 2, doc: 'an empty repository, or two commits with a side ref at the tip' }, { tag: 'place', n: 7, doc: 'the branch, a new branch, another ref, a commit id, an ancestor, another ref while the target exists, the zero id' }, { tag: 'op', n: 15, doc: 'create, create of an existing path, write, edit, zero matches, two matches, delete, delete missing, rename, rename onto, rename to itself, a sequence, executable, symlink, write the bytes already there' }],
+    cells: 210, observed: 210, derived: 0, oracle: 'git cat-file commit byte-equality and fsck --strict over http-backend (#103 item 2). Named disagreement: create of a path that exists (git add overwrites; ply bad_request). A new ref whose tree matches the parent is bad_request and stays absent' },
   { name: 'git-bytes', status: 'main', kind: 'enumerated', runners: ['test/git-bytes.test.js'], run: 'ci',
     axes: [{ tag: 'content', n: 8 }, { tag: 'field', n: 6 }, { tag: 'op', n: 6 }],
     osDependent: 'APFS cannot store a non-UTF-8 ref name as a loose ref file (EILSEQ): on macOS with the files backend those cells degrade to both-refuse; reftable fixtures since 716cd77',
@@ -136,9 +139,10 @@ export const SPACES = [
       { tag: 'end', n: 4, doc: 'tail: none, -rc1, -alpha, -gamma' },
       { tag: 'suffixes', n: 9, doc: 'versionsort.suffix lists from git t7004, including the empty release before, between, and after prereleases' },
       { tag: 'corpus', n: 2, doc: 'the pair product plus a unicode slice (é, U+E000, U+10000), and the 11,880-name rank product (8 prefixes × 9 lefts × 11 mids × 15 ends)' },
+      { tag: 'refusal', doc: 'not_string and not_bytes on the left name, the right name, and a suffix: git versioncmp is only defined on bytes, and the byte string next to each refusal sorts as git tag -l does' },
     ],
     cells: '173,664 (66,744 two-name pairs + 106,920 names in a full listing)', observed: 173664, derived: 0,
-    oracle: 'git tag -l --sort=version:refname on every unordered pair (two names are versioncmp, including where versionsort.suffix makes it cyclic). Seven suffix lists: the 11,880-name listing equals a sort by compareVersionRefnames. The release between prereleases, and the release before -rc, make versioncmp cyclic, so git qsort of the whole list differs; each disagreed pair is checked again as two names and matches versioncmp (#124)' },
+    oracle: 'git tag -l --sort=version:refname on every unordered pair (two names are versioncmp, including where versionsort.suffix makes it cyclic). Seven suffix lists: the 11,880-name listing equals a sort by compareVersionRefnames. The release between prereleases, and the release before -rc, make versioncmp cyclic, so git qsort of the whole list differs; each disagreed pair is checked again as two names and matches versioncmp (#124). A non-string or a non-byte string is a typed refusal; the byte strings beside those refusals match the same git listing' },
   curated('read', ['test/read.test.js', 'test/log.test.js', 'test/artifacts-compat.test.js'], 'git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56)'),
   { name: 'chunking', status: 'main', kind: 'random', runners: ['test/props.test.js'], run: 'ci',
     axes: [{ tag: 'input', doc: 'random valid and corrupt inputs' }, { tag: 'split', doc: 'random chunk boundaries' }],
@@ -172,6 +176,12 @@ export const SAMPLED = [
 const INTERNAL = 'an internal invariant (code internal): true by construction, no input reaches it; a mutation test holds the check in place';
 export const DECISIONS = [
   // manual
+  { match: 'src/memtree.ts#*:*', space: 'commit-changes', axisTag: 'op' },
+  { match: 'src/changes.ts#*:*', space: 'commit-changes', axisTag: 'op' },
+  { match: 'src/edit.ts#refuseRebase:*', space: 'commit-changes', axisTag: 'op' },
+  // refuseRebase is a wrapper, so the call inside resolve is its own site. The generated resolve:* glob would hand it to
+  // hostile-server, whose runner never takes a 40-hex base off the tip. That cell is commit-changes.
+  { match: 'src/edit.ts#resolve:bad_request:<s.ref>, <s.base>, <tip>', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/edit.ts#streamBlobEdit:internal:*', excluded: INTERNAL },
   { match: 'src/rebase.ts#linearChain:internal:*', excluded: INTERNAL },
   { match: 'src/result.ts#assertNever:untyped:unreachable: *', excluded: 'exhaustiveness: the type checker proves the call unreachable (a value of type never); reaching it is a bug, never an outcome' },
@@ -368,6 +378,7 @@ export const DECISIONS = [
   // generated, reviewed
   { match: "src/checkout-node.ts#collision:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#emptyDir:*", space: 'checkout-tree', axisTag: 'case' },
+  { match: "src/checkout-node.ts#filesystem:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#ensureDir:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#writeFiles:bad_request:already exists#2", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#writeFiles:unsupported:checkout: git refuses to check out … on …: …", space: 'checkout-tree', axisTag: 'case' },
@@ -486,6 +497,7 @@ export const DECISIONS = [
   { match: "src/objects.ts#parseTree:export", space: 'wide-limits', axisTag: 'wanted' },
   { match: "src/objects.ts#encodeTree:*", space: 'push-tree', axisTag: 'case' },
   { match: "src/objects.ts#encodeTag:*", space: 'encode-tag', axisTag: 'case' },
+  { match: 'src/refs.ts#notString:bad_request:… must be a string', space: 'version-refname', axisTag: 'refusal' },
   { match: "src/oid.ts#parseOid:bad_request:oid must be a string", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/oid.ts#parseOid:bad_request:oid must be … lowercase hex characters", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/oid.ts#parseOid:bad_request:oid must be lowercase hex", space: 'mutant-kill', axisTag: 'case' },

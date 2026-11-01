@@ -69,7 +69,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Types (tsc, isolated declarations, the TS ratchet against the PR base), lint, the dist build consumers import, and
+  # Types (tsc, isolated declarations, the TS ratchet against the PR base, the absence ratchet), lint, the dist build consumers import, and
   # three fuzzers. The fuzzers run src/*.ts under node's type stripping; --import ./test/ts-resolve.mjs maps the .js
   # specifiers to .ts (GitHub refuses NODE_OPTIONS through $GITHUB_ENV, so each command names the hook).
   lint-fuzz:
@@ -95,7 +95,7 @@ jobs:
       - name: git identity
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
-      - name: typecheck (tsc, isolated declarations, TS ratchet)
+      - name: typecheck (tsc, isolated declarations, TS ratchet, absence ratchet)
         env:
           RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: npm run typecheck
