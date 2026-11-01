@@ -37,6 +37,13 @@ test('errorKind is the span attribute: miss, then kind, then reason, then code',
   assert.equal(errorKind('x'), 'Error');
   const e = { code: 'not_found', miss: { kind: 'head_absent' } };
   assert.deepEqual(errorKindAttr(e), { 'error.kind': 'head_absent' });
+  const ex = arrayExporter();
+  const span = new Tracer({ exporter: ex }).start('git.result.kind');
+  span.set(errorKindAttr(e)).error(e, e.code).end();
+  const flat = flattenLine(ex.lines[0])[0];
+  assert.equal(flat.attrs['error.kind'], 'head_absent');
+  assert.equal(flat.attrs['error.type'], 'not_found');
+  assert.equal(flat.name, 'git.result.kind');
 });
 
 // Span.error writes error.kind itself. A caller who stamped a stale kind is overwritten, so the attribute is the value.
