@@ -136,12 +136,12 @@ function notOurRefReason(text: string): { readonly reason: 'not_our_ref' } | und
 }
 
 // A commit want whose object is a tree, blob, or tag is not_found, before pack_corrupt is built. Any other mismatch
-// (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt.
+// (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt. Top-level so its throw is this function's.
 function refuseNonCommit(expectType: number | null, type: number, oid: string): void {
   if (expectType !== TYPE.COMMIT) return;
   const name = nonCommitType(type);
   if (name === null) return;
-  throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'not_commit', oid, type: name } });
+  throw fail('not_found', `${oid} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid, type: name } } });
 }
 
 export const v2Init = (limits: Limits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
