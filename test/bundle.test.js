@@ -103,7 +103,8 @@ test('merge entry: the line merge rides with merge/rebase only, under its own bu
 test('log entry: readLog carries no push, merge, pack building or rebase code', async () => {
   const out = await bundle('src/log.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js', 'tree.js', 'checkout.js']) assert.ok(!files.includes(f), `${f} is in the log bundle`);
+  // discover.js: an unborn HEAD is classified from the advertisement, and only after a ref miss (read.js). client.js stays out.
+  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'tree.js', 'checkout.js']) assert.ok(!files.includes(f), `${f} is in the log bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the log bundle (${re})`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
@@ -126,7 +127,8 @@ test('full entry is the superset and still carries no node builtins', async () =
 test('read entry: readFile/listTree carry no push, merge, pack building or rebase code', async () => {
   const out = await bundle('src/read.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the read bundle`);
+  // discover.js: an unborn HEAD is classified from the advertisement, and only after a ref miss. client.js stays out.
+  for (const f of ['push.js', 'pack.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'edit.js', 'sign.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'client.js']) assert.ok(!files.includes(f), `${f} is in the read bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'line merge': /histogram|xdl_/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the read bundle (${re})`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;
@@ -202,7 +204,8 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
 test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {
   const out = await bundle('src/checkout.ts');
   const js = out.outputFiles[0].text, files = retained(out).map(([k]) => k);
-  for (const f of ['checkout-node.js', 'tree-node.js', 'tree.js', 'push.js', 'pack.js', 'edit.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js', 'discover.js']) assert.ok(!files.includes(f), `${f} is in the checkout bundle`);
+  // discover.js: checkout resolves refs through read.js, which classifies an unborn HEAD from the advertisement. client.js stays out.
+  for (const f of ['checkout-node.js', 'tree-node.js', 'tree.js', 'push.js', 'pack.js', 'edit.js', 'merge.js', 'linemerge.js', 'rebase.js', 'attributes.js', 'sign.js', 'negotiate.js', 'receivecaps.js', 'client.js']) assert.ok(!files.includes(f), `${f} is in the checkout bundle`);
   const ABSENT = { 'receive-pack': /git-receive-pack|report-status/, 'pack building': /buildPack|zlibDeflate|CompressionStream/, 'classes': /\bclass\s+\w+\s*(extends\s+[\w.]+\s*)?\{/, 'node builtins': /node:/ };
   for (const [what, re] of Object.entries(ABSENT)) assert.ok(!re.test(js), `${what} leaked into the checkout bundle (${re})`);
   const min = js.length, gz = gzipSync(js, { level: 9 }).length;

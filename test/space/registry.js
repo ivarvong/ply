@@ -492,7 +492,7 @@ export const DECISIONS = [
   { match: "src/read.ts#refCandidates:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#resolveCommit:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/commit.ts#fetchCommit:*", space: 'read', axisTag: 'case' },
-  { match: "src/read.ts#walk:*", space: 'read', axisTag: 'case' },
+  { match: "src/read.ts#walkPath:*", space: 'read', axisTag: 'case' },
   { match: "src/read.ts#listTree:*", space: 'wide-limits', axisTag: 'wanted' },
   { match: "src/read.ts#readFile:*", space: 'read', axisTag: 'case' },
   { match: "src/read.ts#failHere:*", space: 'checkout-tree', axisTag: 'case' },
