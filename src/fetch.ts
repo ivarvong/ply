@@ -247,8 +247,13 @@ export async function* packStream(t: Transport, opts: FetchOpts, span: Span): Pa
 
 // ---- single-object pack stream parser (pure step) ----
 // Emits the zlib bytes of the single object, withholding the trailing 20-byte trailer, verifying it at finish.
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
-const shortRead = (e: unknown): boolean => (e as Loose)?.code === 'pack_corrupt' && String((e as Loose)?.message).startsWith('short read:');
+// A bounded read that ran past the buffer (`reason: 'short_read'`, bytes.ts). spStep waits for more bytes on this reason,
+// never on the message (#76). A finished header readObjHeader refuses (a varint past 64 bits) is that error, rethrown.
+export const isShortRead = (e: unknown): boolean => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value, read loosely (transport.ts Loose)
+  const loose = e as Loose & { readonly reason?: unknown };
+  return loose?.code === 'pack_corrupt' && loose?.reason === 'short_read';
+};
 
 // The single-object parser's state: the pack header and the object header (`header`), then the zlib body with the
 // trailer withheld (`body`); `trailer` once spFinish has checked it.
@@ -275,8 +280,7 @@ export function spStep(st: SpState, chunk: Uint8Array): { readonly state: SpStat
     if (count !== 1) throw fail('pack_corrupt', `pack: expected 1 object, got ${count}`);
     let header;
     try { header = readObjHeader(head, PACK_HEADER_BYTES); }
-    // Stryker disable next-line ConditionalExpression: readObjHeader's only throw here is the short read take() raises
-    catch (e) { if (shortRead(e)) return { state: { ...s, head }, zlib: [] }; throw e; }
+    catch (e) { if (isShortRead(e)) return { state: { ...s, head }, zlib: [] }; throw e; }
     if (header.type === TYPE.OFS_DELTA || header.type === TYPE.REF_DELTA) throw fail('pack_corrupt', 'pack: single-object pack is a delta');
     const p: number = header.next;
     s = { ...s, phase: 'body', type: header.type, size: header.size, head: new Uint8Array(0), headerBytes: p };

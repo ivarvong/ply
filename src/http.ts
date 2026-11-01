@@ -92,14 +92,24 @@ function explicitAuth({ header, token, user, bearer }: HttpAuth): [string, Basic
 // updates: the error names where the server pointed (origin and path only, scrubbed). Browsers answer `manual` with an
 // opaque redirect (status 0): same error.
 const isRedirect = (res: Response): boolean => res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
-function redirectError(res: Response, url: string, what: string, scrub: Scrub | null): ReturnType<typeof fail<'http'>> {
+// A body a test double may not implement `cancel` on, and a real one whose `cancel()` rejects. The rejection is the
+// body's, not the caller's: it must be awaited, or it is an unhandled rejection the surrounding `try` cannot catch.
+type Cancelable = { readonly cancel?: (() => void | Promise<void>) | undefined };
+async function cancelBody(body: Cancelable | null | undefined): Promise<void> {
+  try { await body?.cancel?.(); } catch { /* unopened or already closed */ }
+}
+// A 2xx whose body is missing never reached the pkt-line parser. Iterating it threw TypeError, and wrapNet reported
+// `network`. There is no git message to parse: that is `protocol`.
+function missingBody(body: unknown): body is null | undefined {
+  return body === null || body === undefined;
+}
+async function redirectError(res: Response, url: string, what: string, scrub: Scrub | null): Promise<ReturnType<typeof fail<'http'>>> {
   let to = '';
   const loc = res.headers.get('location');
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- null and '' are no Location, as before
   if (loc) try { const x = new URL(loc, url); to = `${x.origin}${x.pathname}`; } catch { /* unparseable Location */ }
   if (scrub) to = scrub(to);
-  // oxlint-disable-next-line typescript/no-floating-promises, typescript/no-unnecessary-condition -- fire and forget, as before; a body without cancel (a test double) is skipped
-  try { res.body?.cancel?.(); } catch { /* unopened */ }
+  await cancelBody(res.body);
   return fail('http', `HTTP ${res.status} ${what}: redirected${to ? ` to ${to}` : ''}; ply does not follow redirects (update the remote URL)`, { status: res.status, location: to } as Detail['http'] & Extra);
 }
 
@@ -121,8 +131,7 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
       chunks.push(bytes);
       n += bytes.length;
     }
-  // oxlint-disable-next-line typescript/no-unnecessary-condition -- as above
-  } finally { try { await body.cancel?.(); } catch { /* already closed */ } }
+  } finally { await cancelBody(body); }
   return concat(chunks);
 }
 
@@ -206,7 +215,7 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     catch (e) { throw wrapNet(e, sig.signal); }
     const cache = res.headers.get('x-ply-pack-cache') ?? '';
     span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': res.headers.get('content-type') ?? '', 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
-    if (isRedirect(res)) throw redirectError(res, target, service, scrub);
+    if (isRedirect(res)) throw await redirectError(res, target, service, scrub);
     if (!res.ok) {
       // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
       const preview = td.decode(await readCapped(res.body, ERROR_PREVIEW, { truncate: true }));
@@ -215,8 +224,8 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
     let bytes = 0, chunks = 0, first: number | null = null, maxChunk = 0;
     const ct = res.headers.get('content-type') ?? '';
     if (!ct.startsWith(`application/x-${service}-result`)) throw fail('not_git', `unexpected content-type ${JSON.stringify(ct)} from ${service}`);
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- a 2xx body: iterating a null one throws a TypeError, wrapped below, as before
-    try { for await (const chunk of res.body as ReadableStream<Uint8Array>) {
+    if (missingBody(res.body)) throw fail('protocol', `${service}: HTTP ${res.status} response has no body`);
+    try { for await (const chunk of res.body) {
       first ??= Date.now() - t0;
       bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
       yield chunk;
@@ -249,16 +258,16 @@ export function createTransport(url: string | URL, { auth, tracer, parent = null
       let res: Response;
       try { res = await f(target, { headers: headers(service, { 'Git-Protocol': 'version=2' }), signal: sig.signal, redirect: 'manual' }); } catch (e) { throw wrapNet(e, sig.signal); }
       span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': res.headers.get('content-type') ?? '' });
-      if (isRedirect(res)) throw redirectError(res, target, `${service} advertisement`, scrub);
+      if (isRedirect(res)) throw await redirectError(res, target, `${service} advertisement`, scrub);
       if (!res.ok) throw fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status } as Detail['http'] & Extra);
       if (!(res.headers.get('content-type') ?? '').startsWith(`application/x-${service}-advertisement`)) throw fail('not_git', `unexpected content-type from ${service} advertisement`);
       const maxPack = requireLimit(limits, 'maxPackBytes');
       const declared = Number(res.headers.get('content-length'));
       if (Number.isFinite(declared) && declared > maxPack) {
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- a body without cancel (a test double) is skipped
-        try { await res.body?.cancel?.(); } catch { /* unopened */ }
+        await cancelBody(res.body);
         throw limitError('advertisement bytes', declared, maxPack);
       }
+      if (missingBody(res.body)) throw fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
       // Stream into the cap. arrayBuffer() would allocate the whole body before the check could run.
       const buf = await readCapped(res.body, maxPack, { what: 'advertisement bytes' });
       span.set({ 'git.response.bytes': buf.length, 'http.response.body.size': buf.length });

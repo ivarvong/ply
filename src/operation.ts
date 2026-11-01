@@ -62,8 +62,14 @@ export async function operation<R>(op: string, url: string | URL, { auth, tracer
 export async function verifyRef(t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<string> {
   let seen;
   try { seen = (await lsRefs(t, [ref])).refs.get(ref)?.oid; }
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- a thrown value read as the JS read it (not with ?.: a null throw stays a TypeError here, as before)
-  catch (e) { throw fail('ambiguous', `push reported ok but the verification read-back failed: ${(e as { message: unknown }).message}`, { cause: e, original: (e as { code: unknown }).code, expected } as Extra); }
+  catch (e) {
+    // A thrown null or undefined has no `.message`. Reading it threw TypeError and the acknowledged push escaped
+    // unclassified (I25: any failure to read the ref back is `ambiguous`). The same loose read as ambiguousAfterPush.
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a thrown value of any type
+    const loose = e as Loose;
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- message and cause are the thrown value; expected is Extra
+    throw fail('ambiguous', `push reported ok but the verification read-back failed: ${loose?.message ?? e}`, { cause: e, original: loose?.code, expected } as Extra);
+  }
   root.set({ [`${prefix}.verify.ref`]: seen ?? '' });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ad-hoc error fields (errors.ts Extra); A3 moves them into Detail
   if (seen !== expected) throw fail('ambiguous', `push reported ok but ${ref} is ${seen ?? 'absent'}, not ${expected}`, { seen: seen ?? null, expected } as Extra);
