@@ -1328,6 +1328,12 @@ test('aggregate caps fail closed before allocation', async () => {
   const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
   assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
   throws(() => parseTree(twoEntries, { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  // Longer than one minimum frame, one entry: the byte hint must not treat it as past the cap.
+  const longName = 'n'.repeat(40);
+  const wideTree = encodeTree([{ mode: '100644', name: longName, oid: oid(1) }]);
+  const underCap = parseTree(wideTree, { maxTreeEntries: 1 });
+  assert.equal(underCap.length, 1);
+  assert.equal(underCap[0].name, longName);
   throws(() => parseTree(twoEntries, {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
 
   const tree = oid(1);
@@ -1819,11 +1825,11 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: ZERO_OID }], {}), ['report-status', 'side-band-64k', 'delete-refs', 'agent=ply/0.1.0']);
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], { sideband: false, reportV2: true }, orThrow(checkPushCaps(caps('atomic', 'push-options'), { atomic: true, pushOptions: ['o'] }))), ['report-status-v2', 'atomic', 'push-options', 'agent=ply/0.1.0']);
   assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], {}, orThrow(checkPushCaps(caps(), {}))), ['report-status', 'side-band-64k', 'agent=ply/0.1.0']);
-  assert.equal(capsProblem(caps('atomic')), null);
+  assert.deepEqual(capsProblem(caps('atomic')), { tag: 'ok' });
   assert.deepEqual(capsProblem(caps('object-format=sha256', 'atomic'), { atomic: true }), { tag: 'objectFormat', format: 'sha256' });
   assert.deepEqual(capsProblem(caps('object-format=sha1'), { atomic: true }), { tag: 'noAtomic' });
   assert.deepEqual(capsProblem(caps('atomic'), { atomic: true, pushOptions: ['x'] }), { tag: 'noPushOptions' });
-  assert.equal(capsProblem(caps(), { pushOptions: [] }), null);
+  assert.deepEqual(capsProblem(caps(), { pushOptions: [] }), { tag: 'ok' });
   const unsup = checkPushCaps(caps('agent=x'), { pushOptions: ['x'] });
   assert.deepEqual([unsup.ok, unsup.error.code, unsup.error.message, unsup.error.caps], [false, 'unsupported', 'server does not advertise push-options', ['agent=x']]);
   assert.equal(checkPushCaps(caps('object-format=sha256')).error.message, 'server repository is object-format sha256');
@@ -2037,6 +2043,34 @@ test('parseOid is 40 lowercase hex; parseCommitId also refuses the zero oid', ()
   const kept = parseCommitId(leading);
   assert.equal(kept.ok, true);
   if (kept.ok) assert.equal(kept.value, leading);
+});
+
+test('recordResponseHeaders: a non-list, more than 8 names, or a name outside the telemetry alphabet is bad_request before any request', () => {
+  const refused = opts => { try { createTransport('http://127.0.0.1/r.git', opts); return null; } catch (e) { return e; } };
+  const names = n => Array.from({ length: n }, (_, i) => `h${i}`);
+  // 0 (omitted and empty), 1, limit-1, limit are accepted; limit+1 and far past are the same refusal.
+  for (const n of [undefined, 0, 1, 7, 8]) assert.equal(refused({ recordResponseHeaders: n === undefined ? undefined : names(n) }), null, `count ${n}`);
+  for (const n of [9, 10, 64]) {
+    const e = refused({ recordResponseHeaders: names(n) });
+    assert.equal(e.code, 'bad_request', `count ${n}`);
+    assert.equal(e.what, 'recordResponseHeaders');
+    assert.equal(e.message, 'recordResponseHeaders: at most 8 names');
+  }
+  const list = refused({ recordResponseHeaders: 'cf-ray' });
+  assert.equal(list.code, 'bad_request');
+  assert.equal(list.what, 'recordResponseHeaders');
+  assert.equal(list.message, 'recordResponseHeaders: expected a list of header names');
+  for (const name of ['', 'cf ray', 'cf-ray\n', 'cf/ray', 'x-foo!', 'Cf-Ray ']) {
+    const e = refused({ recordResponseHeaders: [name] });
+    assert.equal(e && e.code, 'bad_request', JSON.stringify(name));
+    assert.equal(e && e.message, `recordResponseHeaders: ${JSON.stringify(name)} is not a header name`);
+  }
+  const num = refused({ recordResponseHeaders: [1] });
+  assert.equal(num.message, 'recordResponseHeaders: not a string is not a header name');
+  let called = 0;
+  const bad = refused({ recordResponseHeaders: ['ok name'], fetchImpl: () => { called += 1; return Promise.reject(new Error('sent')); } });
+  assert.equal(bad.code, 'bad_request');
+  assert.equal(called, 0);
 });
 
 test('validatePushRef: receive-pack\'s funny refname (the cells test/space/refname.test.js observes from git)', () => {

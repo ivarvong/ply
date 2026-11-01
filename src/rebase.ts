@@ -12,6 +12,7 @@
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
 import { thrown as fail, type Extra, type Miss } from './errors.js';
+import { assertNever } from './result.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
@@ -20,6 +21,7 @@ import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
+// oxlint-disable-next-line import/max-dependencies -- assertNever is the exhaustiveness check; rebase already sat at the import cap
 import { limitError, requireLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
@@ -141,10 +143,15 @@ export async function rebaseBranch(url: string, { ref, onto = 'refs/heads/main',
     const { bases, commits, verdict } = await mergeBase(t, tip, target);
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
     // so its chain is not linear
-    if (verdict.tag === 'criss-cross') throw fail('not_linear', `${ref} and ${onto} have ${bases.length} merge bases (criss-cross history); rebase needs a linear branch`, { bases } as Extra & { readonly bases: readonly string[] });
-    if (verdict.tag === 'unrelated') throw fail('unrelated_histories', `${ref} and ${onto} share no common ancestor within the search depth`);
-    // only `found` is left: a verdict added without a base does not compile here
-    const { base } = verdict;
+    const base = ((): string => {
+      switch (verdict.tag) {
+        case 'criss-cross': throw fail('not_linear', `${ref} and ${onto} have ${bases.length} merge bases (criss-cross history); rebase needs a linear branch`, { bases } as Extra & { readonly bases: readonly string[] });
+        case 'unrelated': throw fail('unrelated_histories', `${ref} and ${onto} share no common ancestor within the search depth`);
+        case 'found': return verdict.base;
+      }
+      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(verdict);
+    })();
     root.set({ 'git.rebase.base': base });
     if (base === target) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 });
     if (base === tip) { // the branch is behind: rebasing nothing onto target makes the branch equal to target

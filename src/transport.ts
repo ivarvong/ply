@@ -16,6 +16,10 @@
 //   git.response.first_byte_ms, git.response.duration_ms
 //   git.response.cache       'HIT' | 'MISS' | 'BUST' | ''   (HTTP with packcache; '' otherwise)
 //   server.address, url.full
+//   http.response.header.<name>     opt-in (createTransport recordResponseHeaders): that response header, lowercased,
+//                                   scrubbed, length-capped. Absent when the response did not send it.
+//   http.response.headers.from_cache  true when that opt-in exchange was a pack-cache HIT (the header values are the
+//                                   cached response's). Omitted on a live response.
 // and may add transport-specific detail under http.*. Implementation: http.ts (an SSH one was removed 2026-10-31;
 // history on branch archive/ssh).
 import type { Code, ErrorOf } from './errors.js';
