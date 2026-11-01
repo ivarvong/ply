@@ -170,6 +170,9 @@ export const DECISIONS = [
   { match: 'src/memtree.ts#*:*', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/changes.ts#*:*', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/edit.ts#refuseRebase:*', space: 'commit-changes', axisTag: 'op' },
+  // refuseRebase is a wrapper, so the call inside resolve is its own site. The generated resolve:* glob would hand it to
+  // hostile-server, whose runner never takes a 40-hex base off the tip. That cell is commit-changes.
+  { match: 'src/edit.ts#resolve:bad_request:<s.ref>, <s.base>, <tip>', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/edit.ts#streamBlobEdit:internal:*', excluded: INTERNAL },
   { match: 'src/rebase.ts#linearChain:internal:*', excluded: INTERNAL },
   { match: 'src/result.ts#assertNever:untyped:unreachable: *', excluded: 'exhaustiveness: the type checker proves the call unreachable (a value of type never); reaching it is a bug, never an outcome' },
@@ -505,6 +508,7 @@ export const DECISIONS = [
   { match: "src/read.ts#listTree:*", space: 'wide-limits', axisTag: 'wanted' },
   { match: "src/read.ts#readFile:*", space: 'read', axisTag: 'case' },
   { match: "src/read.ts#failHere:*", space: 'checkout-tree', axisTag: 'case' },
+  { match: "src/read.ts#openBlob:bad_request:maxBytes must be an integer >= 0", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#openBlob:pack_corrupt:pack ended before the object header", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#openBlob:pack_corrupt:expected blob, got …", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/read.ts#openBlob:<rethrown or pack_corrupt>:<e>", space: 'claims-owed', axisTag: 'site' },
