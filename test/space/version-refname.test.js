@@ -133,7 +133,9 @@ async function gitPair(dir, suffixes, a, b) {
   return out.split('\n').filter(line => line.length > 0);
 }
 
-test('version:refname: two-name git tag -l is versioncmp, and a total listing matches it', { timeout: 180_000 }, async () => {
+// Isolated this file is about a minute (durations.json). A green shard spent 121s on the pairs while push-outcome
+// shared the runner, and two runs were stopped at 180s before the pairs finished.
+test('version:refname: two-name git tag -l is versioncmp, and a total listing matches it', { timeout: 600_000 }, async () => {
   const ranked = names();
   const paired = pairNames();
   const unicode = unicodeNames();
