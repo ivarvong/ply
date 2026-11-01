@@ -38,7 +38,7 @@ import { thrownCode } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
-import { buildCommitData } from './commit/build.js';
+import { buildCommitData } from './commit-build.js';
 import type { Path } from './path.js';
 import { parseRefname } from './refname.js';
 import { fromNullish } from './absent.js';

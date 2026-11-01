@@ -39,7 +39,7 @@ import type { Level as BuiltLevel, NewTree as BuiltNewTree } from './commit/buil
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 
 export { spInit, spStep, spFinish }; // the single-object pack parser lives in fetch.js; re-exported for callers of old paths
-export { buildCommitObjects, withCommitData } from './commit/build.js';
+export { buildCommitObjects, withCommitData } from './commit-build.js';
 
 // A caller's identity, before validateIdent. `time` overrides the spec's `time` for this person; omitted uses the spec's.
 export type Author = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number };

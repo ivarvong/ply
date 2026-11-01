@@ -1,7 +1,7 @@
 // Full entry point. Bundles that only edit should import 'ply/edit' (src/edit.js): it pulls in only the free
 // functions it uses. Everything here is tree-shakeable (no classes on the hot path, no module side effects).
 export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, lookupEntry, memFromScan, memAttrs, isLfsPointerPrefix } from './edit.js';
-export { buildCommitObjects, withCommitData } from './commit/build.js';
+export { buildCommitObjects, withCommitData } from './commit-build.js';
 /**
  * One path change in commitChanges: create, write, edit, delete, or rename.
  * @typedef {import('./changes.js').Change} Change

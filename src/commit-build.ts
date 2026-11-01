@@ -1,9 +1,9 @@
-import { ident, encodeCommit, hashObject, treeReplaceOid, TYPE } from '../objects.js';
-import type { TreeEntry } from '../objects.js';
-import { spliceDelta } from '../pack.js';
-import { fromHex } from '../sha1.js';
-import type { ValidatedIdent } from '../validate.js';
-import { validateIdent, isValidatedIdent } from '../validate.js';
+import { ident, encodeCommit, hashObject, treeReplaceOid, TYPE } from './objects.js';
+import type { TreeEntry } from './objects.js';
+import { spliceDelta } from './pack.js';
+import { fromHex } from './sha1.js';
+import type { ValidatedIdent } from './validate.js';
+import { validateIdent, isValidatedIdent } from './validate.js';
 
 export type AuthorLike = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number } | ValidatedIdent;
 
@@ -17,11 +17,11 @@ export type BlobEditLite = { readonly oldOid: string; readonly newOid: string; r
 
 export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
 export type Built = {
-  readonly trees: readonly NewTree[];
+  readonly trees: ReadonlyArray<NewTree>;
   readonly newTree: string;
   readonly commitData: Uint8Array;
   readonly newCommit: string;
-  readonly objects: readonly { readonly type: number; readonly data: Uint8Array; readonly baseOid?: string }[];
+  readonly objects: ReadonlyArray<{ readonly type: number; readonly data: Uint8Array; readonly baseOid?: string }>;
 };
 
 export function buildCommitObjects({ levels, blob, oldCommit, author, committer, time, message }: {
