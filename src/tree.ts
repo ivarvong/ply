@@ -287,10 +287,10 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     root.set({ 'git.push_tree.commit.old': parent ?? '', 'git.push_tree.tree.old': oldTree ?? '' });
     if (oldTree === s.built.root && !s.create) return outcome('noop', summarize({ s, parent, oldTree, hint, attempt, noop: true }));
 
-    // 2. what the server has: the parent's trees along every directory whose oid changed (cache by oid, immutable)
-    // the transport's tracer, as the JS used (a caller's transport carries its own)
+    // 2. what the server has: the parent's trees along every directory whose oid changed (cache by oid, immutable).
+    // The operation's tracer, the one the root span is on: a caller's transport may carry a different one.
     // oxlint-disable-next-line promise-function-async -- parentTrees' promise, as before
-    const known = await t.tracer.span('git.push_tree.diff', { parent: root }, span => parentTrees(t, cache, s.built, oldTree, limits).then(k => { span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size }); return k; }));
+    const known = await root.tracer.span('git.push_tree.diff', { parent: root }, span => parentTrees(t, cache, s.built, oldTree, limits).then(k => { span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size }); return k; }));
     const sel = selectObjects(s.built, known);
 
     // 3. the commit, then one push whose old oid is the CAS
@@ -316,14 +316,19 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
 // not read back is `ambiguous`. A retry rebuilds on the new head: the tree is still exactly `files` (that is the
 // contract — another writer's files are not merged in), its parent is whatever won the race.
 // The files are hashed once: the retry reuses the validated spec (same commit time, same trees).
+// An Error carries the attempt's tag (attempt, hint, the root span). A string or a plain object does not, and it is not
+// a result: resolving with it reported success for a failed first attempt.
+const isAttemptError = (e: unknown): e is Error & Tagged => e instanceof Error;
+
 export async function pushTree(url: string, spec: TreeSpec, { head = null, strictHead = false, ...opts }: PushTreeOptions = {}): Promise<PushTreeResult> {
   if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
   const s = validateTreeSpec(spec, opts.limits ?? DEFAULT_LIMITS, head);
-  // an Error from the first attempt: pushTreeOnce tagged it (attempt, hint) and operation() gave it its root span; a
-  // value that is not an Error is pushTreeOnce's result (a thrown non-Error would land there too, as before)
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  const first = await pushTreeOnce(url, s, { ...opts, strictHead }, { head, attempt: 0, linkTo: null }).catch((e: unknown) => e as Error & Tagged);
-  if (!(first instanceof Error)) return first;
-  if (first.code !== 'cas_conflict' || first.attempt !== 0 || strictHead) throw first;
-  return pushTreeOnce(url, s, opts, { head: null, attempt: 1, linkTo: first.span ?? null, hintWas: first.hint ?? null });
+  try {
+    return await pushTreeOnce(url, s, { ...opts, strictHead }, { head, attempt: 0, linkTo: null });
+  } catch (e) {
+    // only a real Error is a cas_conflict that can be retried; anything else is the caller's throw, unchanged.
+    // the retry is not inside this try, so a second cas_conflict propagates (attempt 0 is the only one caught)
+    if (!isAttemptError(e) || e.code !== 'cas_conflict' || strictHead) throw e;
+    return pushTreeOnce(url, s, opts, { head: null, attempt: 1, linkTo: e.span ?? null, hintWas: e.hint ?? null });
+  }
 }

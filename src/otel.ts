@@ -186,8 +186,8 @@ export class Span {
       startTimeUnixNano: this.start, endTimeUnixNano: now(),
       attributes: s ? scrubKvs(kvs(this.attrs), s) : kvs(this.attrs),
       events: s ? this.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : this.events,
-      // oxlint-disable-next-line typescript/strict-boolean-expressions -- as before: an empty status message is left unscrubbed
-      links: this.links, status: s && this.status.message ? { ...this.status, message: s(this.status.message) } : this.status,
+      // an empty message is still a string the scrubber must see; an unset one (ok) is not
+      links: this.links, status: s !== null && this.status.message !== undefined ? { ...this.status, message: s(this.status.message) } : this.status,
       droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: this.droppedLinks,
     });
     return this;
