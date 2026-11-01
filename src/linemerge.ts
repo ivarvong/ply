@@ -102,13 +102,14 @@ type Found = Lcs & { readonly tag: 'lcs' } | { readonly tag: 'none' } | { readon
 function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number): Found {
   const END1 = line1 + count1 - 1;
   const END2 = line2 + count2 - 1;
-  // Line numbers here are in range (1-based, within the region): the atOr fallbacks only satisfy the index type.
+  // Line numbers here are in range (1-based, within the region), so every read is defined. Number() only types an
+  // Int32Array read (an int32 is unchanged): this is the scan's hot path, where atOr's checks cost a third of a merge.
   const recs = new Map<number, Rec>(); // id → { ptr, cnt }  (scanA: ptr = first occurrence, NEXT_PTR chains forward)
   // oxlint-disable-next-line unicorn/no-new-array -- line_map, preallocated and filled top-down
   const lineMap = new Array<Rec>(count1);
   const next = new Int32Array(count1);
   for (let ptr = END1; ptr >= line1; ptr--) {
-    const id = atOr(a, ptr - 1, 0);
+    const id = Number(a[ptr - 1]);
     const rec = recs.get(id);
     if (rec) { next[ptr - line1] = rec.ptr; rec.ptr = ptr; rec.cnt = rec.cnt + 1; lineMap[ptr - line1] = rec; }
     else { const r = { ptr, cnt: 1 }; recs.set(id, r); lineMap[ptr - line1] = r; }
@@ -122,13 +123,13 @@ function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, li
     for (const id of recs.keys()) { const h = (id + Math.floor(id / 2 ** bits)) & mask; const l = getOrElse(mapGet(load, h), 0) + 1; if (l > MAX_CHAIN) return { tag: 'chain-limit' }; load.set(h, l); }
   }
   const CNT = (ptr: number): number => atOr(lineMap, ptr - line1, NO_REC).cnt;
-  const NEXT = (ptr: number): number => atOr(next, ptr - line1, 0);
+  const NEXT = (ptr: number): number => Number(next[ptr - line1]);
   const lcs = { tag: 'lcs' as const, begin1: 0, end1: 0, begin2: 0, end2: 0 };
   let cnt = MAX_CHAIN + 1;
   let hasCommon = false;
   for (let bPtr = line2; bPtr <= END2;) {
     let bNext = bPtr + 1;
-    const rec = recs.get(atOr(b, bPtr - 1, 0));
+    const rec = recs.get(Number(b[bPtr - 1]));
     if (rec) {
       if (rec.cnt > cnt) { hasCommon = true; }
       else {
