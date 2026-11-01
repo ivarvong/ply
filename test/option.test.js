@@ -106,7 +106,8 @@ test('boundary: platform absence becomes Option, null stays a value, indexes do 
 });
 
 test('absence ratchet holds, and a rise or a silent drop is rejected', () => {
-  execFileSync(process.execPath, ['scripts/absence-ratchet.mjs'], { stdio: 'pipe' });
+  // Stryker's dry run instruments src/, so the committed baseline does not match that tree.
+  if (process.env.MUTATION !== '1') execFileSync(process.execPath, ['scripts/absence-ratchet.mjs'], { stdio: 'pipe' });
   const base = { boundary: 'src/absent.ts', undefined: 3, optional: 2, chain: 1, coalesce: 1 };
   assert.deepEqual(compareCounts({ ...base }, base), []);
   assert.ok(compareCounts({ ...base, undefined: 4 }, base).some(line => line.includes('rose')));
