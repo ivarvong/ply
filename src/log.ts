@@ -23,18 +23,17 @@
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 import { thrown as fail } from './errors.js';
-import type { Miss } from './errors.js';
+import { assertNever } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
-import { parseCommit, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
+import { parseCommit, TYPE, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, requireLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import { thrownCode, thrownReason } from './boundary.js';
-import type { TypeNames } from './boundary.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | undefined };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
@@ -81,11 +80,19 @@ async function fetchWindow(t: Transport, commit: string, limit: number): Promise
   }
   const want = r.objects?.get(commit);
   if (want && want.type !== TYPE.COMMIT) {
-    const name = nonCommitType(want.type);
-    const shown = (TYPE_NAME as TypeNames)[want.type] ?? want.type;
-    // A resolved object is a tree, blob, or tag. Anything else still has to carry a miss; it is not a commit the server stored.
-    const miss: Miss = name === null ? { kind: 'commit', miss: { kind: 'absent', oid: commit } } : { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: name } };
-    throw fail('not_found', `${commit} is not a commit (${shown})`, { miss });
+    const found = nonCommitType(want.type);
+    switch (found.tag) {
+      case 'notCommit':
+        throw fail('not_found', `${commit} is not a commit (${found.name})`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: found.name } } });
+      case 'commit':
+        throw fail('not_found', `${commit} is not a commit (commit)`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+      case 'delta':
+        throw fail('not_found', `${commit} is not a commit (${found.name})`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+      case 'invalid':
+        throw fail('not_found', `${commit} is not a commit (${want.type})`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+    }
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(found);
   }
   return r;
 }

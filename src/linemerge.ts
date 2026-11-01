@@ -71,6 +71,28 @@ export function classifier(): Classify {
 }
 
 const undecided = (detail: string): Diffed<never> => err({ undecided: true, detail });
+// Unknown (a JS caller) reads as 'skip'. The typed members each have a case, so a new Rediff fails the build.
+function rediffMode(rediff: string): Rediff {
+  switch (rediff) {
+    case 'myers':
+    case 'skip':
+    case 'undecided':
+      return rediff;
+    default:
+      return 'skip';
+  }
+}
+// false: the compaction must stop as undecided. true: myers ran, or skip left the group where it is.
+function applyRediff(rediff: string, myers: () => void): boolean {
+  const mode = rediffMode(rediff);
+  switch (mode) {
+    case 'undecided': return false;
+    case 'myers': myers(); return true;
+    case 'skip': return true;
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(mode);
+}
 
 // ---- xhistogram.c ----
 type Rec = { ptr: number; cnt: number };
@@ -340,11 +362,14 @@ function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8
     if (!count1) { for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
     if (!count2) { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; continue; }
     const found = findLcs(a, b, line1, count1, line2, count2);
-    // each outcome in turn; what is left is the lcs (a new outcome without its fields does not compile below)
-    if (found.tag === 'chain-limit') return undecided('histogram hash chain limit (git fails this merge)');
-    if (found.tag === 'fallback') { classicDiff(a, b, line1, count1, line2, count2, ch1, ch2); continue; } // fall_back_to_classic_diff
-    if (found.tag === 'none') { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
-    stack.push([found.end1 + 1, line1 + count1 - 1 - found.end1, found.end2 + 1, line2 + count2 - 1 - found.end2], [line1, found.begin1 - line1, line2, found.begin2 - line2]);
+    switch (found.tag) {
+      case 'chain-limit': return undecided('histogram hash chain limit (git fails this merge)');
+      case 'fallback': classicDiff(a, b, line1, count1, line2, count2, ch1, ch2); continue; // fall_back_to_classic_diff
+      case 'none': for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue;
+      case 'lcs': stack.push([found.end1 + 1, line1 + count1 - 1 - found.end1, found.end2 + 1, line2 + count2 - 1 - found.end2], [line1, found.begin1 - line1, line2, found.begin2 - line2]); continue;
+    }
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(found);
   }
   return DONE;
 }
@@ -387,14 +412,9 @@ export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32A
       else if (endMatchingOther !== -1) {
         while (go.end === go.start) { if (!slideUp()) throw broken(); if (!prevG(go, CO)) throw broken(); }
       }
-      // histogram: a moved group facing a non-empty group on the other side is re-diffed with classic Myers in git
-      if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end)) {
-        if (rediff === 'undecided') return undecided('compaction needs the classic-diff fallback');
-        // newer git: re-diff the merged group against the facing one with Myers (xdl_fall_back_diff on the two ranges)
-        if (rediff === 'myers') classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1));
-        // 'skip' (older git): the shifted group stands. Not a switch with assertNever: a JS caller's unknown value reads
-        // as 'skip', as it always has (blobMerger refuses one).
-      }
+      // histogram: a moved group facing a non-empty group on the other side is re-diffed with classic Myers in git.
+      // A JS caller's unknown rediff reads as 'skip', as it always has (blobMerger refuses one before this).
+      if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end) && !applyRediff(rediff, () => { classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1)); })) return undecided('compaction needs the classic-diff fallback');
     }
     if (!nextG(g, C, n)) return DONE;
     if (!nextG(go, CO, nO)) throw broken();
@@ -557,13 +577,17 @@ function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[],
     switch (kind) {
       // a clean text merge holds no conflict; identical sides are ours, copied with the unchanged lines after them
       case 'conflict': case 'identical': continue;
-      case 'ours': case 'theirs': case 'both': break;
-      default: return assertNever(kind);
+      case 'ours':
+      case 'theirs':
+      case 'both':
+        copy(ours, i, m.i1 - i);
+        if (kind !== 'theirs') copy(ours, m.i1, m.chg1, crNeeded(base, ours, theirs, m), kind === 'both');
+        if (kind !== 'ours') copy(theirs, m.i2, m.chg2);
+        i = m.i1 + m.chg1;
+        continue;
     }
-    copy(ours, i, m.i1 - i);
-    if (kind !== 'theirs') copy(ours, m.i1, m.chg1, crNeeded(base, ours, theirs, m), kind === 'both');
-    if (kind !== 'ours') copy(theirs, m.i2, m.chg2);
-    i = m.i1 + m.chg1;
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(kind);
   }
   copy(ours, i, ours.n - i);
   const out = new Uint8Array(size); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
@@ -575,8 +599,7 @@ const declined = ({ detail }: Undecided): MergeLinesResult => ({ clean: false, r
 // driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
 // -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
 // driver, as in ll_xdl_merge.
-export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, { maxBytes = LIMIT_MERGE_BLOB, rediff = 'myers', driver = 'text' }: { readonly maxBytes?: number; readonly rediff?: Rediff; readonly driver?: Driver } = {}): MergeLinesResult {
-  if (driver === 'binary') return { clean: false, reason: 'binary (merge attribute)' };
+function mergeText({ driver, base, ours, theirs, maxBytes, rediff }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff }): MergeLinesResult {
   if (Math.max(base.length, ours.length, theirs.length) > maxBytes) return { clean: false, reason: 'too large to merge' };
   if ([base, ours, theirs].some(f => isBinary(f))) return { clean: false, reason: 'binary' };
   const cl = classifier();
@@ -591,6 +614,19 @@ export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Arra
   const r = refine(O, T, doMerge(B, O, T, s1.value, s2.value), rediff); if (!r.ok) return declined(r.error);
   const c = simplify(r.value);
   const conflicts = c.filter(m => m.kind === 'conflict').length;
-  if (conflicts && driver !== 'union') return { clean: false, reason: 'content', conflicts };
-  return { clean: true, data: fill(B, O, T, c, driver === 'union'), hunks, ...(conflicts ? { unioned: conflicts } : {}) };
+  switch (driver) {
+    case 'text': return conflicts ? { clean: false, reason: 'content', conflicts } : { clean: true, data: fill(B, O, T, c, false), hunks };
+    case 'union': return { clean: true, data: fill(B, O, T, c, true), hunks, ...(conflicts ? { unioned: conflicts } : {}) };
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(driver);
+}
+export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, { maxBytes = LIMIT_MERGE_BLOB, rediff = 'myers', driver = 'text' }: { readonly maxBytes?: number; readonly rediff?: Rediff; readonly driver?: Driver } = {}): MergeLinesResult {
+  switch (driver) {
+    case 'binary': return { clean: false, reason: 'binary (merge attribute)' };
+    case 'text':
+    case 'union': return mergeText({ driver, base, ours, theirs, maxBytes, rediff });
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(driver);
 }

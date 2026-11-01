@@ -8,7 +8,8 @@ export type Result<T, E> = Ok<T> | Err<E>;
 export const ok = <T>(value: T): Ok<T> => ({ ok: true, value });
 export const err = <E>(error: E): Err<E> => ({ ok: false, error });
 
-// The compile-time exhaustiveness check: a `default:` that receives anything but `never` is a type error.
+// The compile-time exhaustiveness check. A switch over a union lists every member and has no `default`;
+// the next statement is `assertNever(x)`. A new member leaves `x` short of `never`, so the call does not type-check.
 export function assertNever(x: never): never {
   throw new Error(`unreachable: ${String(x)}`);
 }

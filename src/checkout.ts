@@ -30,7 +30,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 import { thrown as fail, orThrow } from './errors.js';
-import type { Miss } from './errors.js';
+import { assertNever } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
@@ -108,9 +108,17 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   const c = objects.get(commit);
   if (!c) throw fail('pack_corrupt', `commit ${commit} not in the blob:none pack (${objects.size} objects)`);
   if (c.type !== TYPE.COMMIT) {
-    const name = nonCommitType(c.type);
-    const miss: Miss = name === null ? { kind: 'commit', miss: { kind: 'absent', oid: commit } } : { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: name } };
-    throw fail('not_found', `${commit} is not a commit`, { miss });
+    const found = nonCommitType(c.type);
+    switch (found.tag) {
+      case 'commit':
+      case 'delta':
+      case 'invalid':
+        throw fail('not_found', `${commit} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+      case 'notCommit':
+        throw fail('not_found', `${commit} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: found.name } } });
+    }
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(found);
   }
   const tree = (oid: string): readonly TreeEntry[] => {
     const o = objects.get(oid);

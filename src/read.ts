@@ -23,7 +23,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode, isPlyError, orThrow, plyError } from './errors.js';
 import type { Miss, PlyError } from './errors.js';
-import { err as resultErr, ok } from './result.js';
+import { assertNever, err as resultErr, ok } from './result.js';
 import type { Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
@@ -388,9 +388,15 @@ export async function readBlob(t: Transport, oid: string, { maxBytes, follows }:
     ? await openBlob(t, oid, follows === undefined ? undefined : { follows })
     : await openBlob(t, oid, follows === undefined ? { maxBytes } : { maxBytes, follows });
   if (!opened.ok) return opened;
-  if (opened.value.kind === 'too_big') return ok(opened.value);
-  const parts: Uint8Array[] = [];
-  try { for await (const chunk of opened.value.stream) parts.push(chunk); }
-  catch (e) { if (isPlyError(e)) return resultErr(e); throw e; }
-  return ok({ kind: 'bytes', data: concat(parts) });
+  switch (opened.value.kind) {
+    case 'too_big': return ok(opened.value);
+    case 'stream': {
+      const parts: Uint8Array[] = [];
+      try { for await (const chunk of opened.value.stream) parts.push(chunk); }
+      catch (e) { if (isPlyError(e)) return resultErr(e); throw e; }
+      return ok({ kind: 'bytes', data: concat(parts) });
+    }
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(opened.value);
 }

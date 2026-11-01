@@ -14,6 +14,7 @@
 import type { Attrs, Loose } from './transport.js';
 import type { FetchLike } from './http.js';
 import { te, td } from './bytes.js';
+import { cacheHeader } from './cachestatus.js';
 
 const CACHE_HEADER = 'x-ply-pack-cache';
 export const CACHE_CONTROL_HEADER = 'x-ply-cache';
@@ -67,13 +68,13 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, { waitUntil
       const hit = await cache.match(key).catch(() => undefined);
       if (hit) {
         stats.hit++;
-        const h = new Headers(hit.headers); h.set(CACHE_HEADER, 'HIT');
+        const h = new Headers(hit.headers); h.set(CACHE_HEADER, cacheHeader('HIT'));
         return new Response(hit.body, { status: 200, headers: h });
       }
     }
     const res = await inner(url, init);
     const ct = res.headers.get('content-type') ?? '';
-    const h = new Headers(res.headers); h.set(CACHE_HEADER, mode === 'bust' ? 'BUST' : 'MISS');
+    const h = new Headers(res.headers); h.set(CACHE_HEADER, cacheHeader(mode === 'bust' ? 'BUST' : 'MISS'));
     if (!res.ok || !ct.startsWith('application/x-git-upload-pack-result') || !res.body) return new Response(res.body, { status: res.status, headers: h });
     stats.miss++;
     const [toClient, toCache] = res.body.tee();

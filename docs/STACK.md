@@ -86,8 +86,9 @@ by hand. The ratchet refuses to pass once `src/` has no `.js` and these are stil
    the discriminated union over `code`; `Detail` holds the fields a code always carries (`http` → `status`,
    `limit_exceeded` → `what`/`got`/`max`, `cas_conflict` → `expected`/`actual`, `match_count` → `matches`,
    `merge_conflict` → `conflicts`), and `fail(code, message, detail)` requires exactly those. A `switch` over a
-   union ends in `default: return assertNever(x)`; `match(u, handlers)` demands one handler per tag. Adding a code
-   or a payload field re-checks every constructor and every match.
+   union lists every member and has no `default`; the next statement is `assertNever(x)`, so a new member is a type
+   error. An `if`/`else if` chain on the same tag ends in `assertNever`. `match(u, handlers)` demands one handler per
+   tag. Adding a code or a payload field re-checks every constructor and every match.
 3. **A PlyError value is an `Error` instance** with its fields (`Object.assign(new Error(message), {code, …})`):
    a stack for whoever logs it, and the exact shape thrown errors have today, so the migration boundary is the
    identity (`orThrow(r)` is `if (!r.ok) throw r.error`). Nothing reads it as a class; its type is the union.
@@ -123,7 +124,7 @@ Migration path:
 3. **Cut-over (one PR, after the ratchet list is empty).** Public entry points return `Result`; delete `thrown`,
    `orThrow`, and every throwing wrapper; `index` stops exporting `fail` as a constructor. Bump to 0.2.0. In ply-web,
    in the same window: bump the pin, replace `try { … } catch (e) { code = e.code }` with `if (!r.ok)` and a
-   `switch (r.error.code)` ending in `assertNever` (ply-web already maps codes to HTTP statuses; it becomes
+   `switch (r.error.code)` with no `default` and `assertNever` after it (ply-web already maps codes to HTTP statuses; it becomes
    exhaustive), delete `src/ply.d.ts` (ply ships its own types).
 
 ## Build and consumers
@@ -174,7 +175,7 @@ A (errors as values, ADTs, state machines) PR, after its T:
    return `Result`, handle every `Err` in the cluster (early return, `andThen`, `match`). A function still called from
    `.js` or from the public API keeps its old name as a throwing wrapper (`orThrow`) until the cut-over. A payload a
    code always carries goes in `Detail` in `errors.ts` (a shared file: one-line change, own commit).
-5. Switches over unions end in `default: return assertNever(x)`; stream parsers become tagged states with a transition
+5. Switches over unions list every member, have no `default`, and the next statement is `assertNever(x)`; stream parsers become tagged states with a transition
    function.
 
 Gate, all green before opening the PR (paste the numbers into the PR body):
