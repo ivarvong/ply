@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { Rng, splitRandom } from './prng.js';
-import { inflate } from '../../src/inflate.js';
+import { inflate, cappedBound, declaredBound, zlibWrap } from '../../src/inflatestream.js';
 import { Sha1 } from '../../src/sha1.js';
 import { applyDelta, spliceDelta, makeDelta, buildPack, parsePack, resolvePack } from '../../src/pack.js';
 import { pktInit, pktStep, pkt } from '../../src/pktline.js';
@@ -55,13 +55,13 @@ for (let i = 0; i < N; i++) {
       const buf = concat([pre, z, post]);
       if (z.length > zlibBound(d.length)) throw new Error(`zlib emitted ${z.length} B for ${d.length} B, over zlibBound ${zlibBound(d.length)} (level ${level}, strategy ${strategy}, memLevel ${memLevel}, windowBits ${windowBits})`);
       tick('inflate.under_zlib_bound');
-      const r = inflate(buf, pre.length, rng.bool() ? { expectedSize: d.length } : {});
+      const r = inflate(buf, pre.length, rng.bool() ? { bound: declaredBound(d.length), wrap: zlibWrap(true) } : { bound: cappedBound(), wrap: zlibWrap(true) });
       if (r.consumed !== z.length) throw new Error(`consumed ${r.consumed} != ${z.length}`);
       if (r.out.length !== d.length || !Buffer.from(r.out).equals(Buffer.from(d))) throw new Error('content mismatch');
       // truncation at a random point must throw (never return success, never hang)
-      if (z.length > 2 && rng.bool(0.3)) { const cut = rng.int(1, z.length - 1); let ok = false; try { inflate(z.subarray(0, cut)); ok = true; } catch { } if (ok) throw new Error(`truncated at ${cut}/${z.length} returned success`); tick('inflate.truncated'); }
+      if (z.length > 2 && rng.bool(0.3)) { const cut = rng.int(1, z.length - 1); let ok = false; try { inflate(z.subarray(0, cut), 0, { bound: cappedBound(), wrap: zlibWrap(true) }); ok = true; } catch { } if (ok) throw new Error(`truncated at ${cut}/${z.length} returned success`); tick('inflate.truncated'); }
       // single bit flip in the body must throw or produce a different output (adler catches) — never silently equal output with wrong consumed
-      if (z.length > 8 && rng.bool(0.2)) { const m = z.slice(); const at = rng.int(2, z.length - 5); m[at] ^= 1 << rng.int(0, 7); let r2 = null; try { r2 = inflate(m); } catch { tick('inflate.flip.rejected'); } if (r2 && Buffer.from(r2.out).equals(Buffer.from(d)) && r2.consumed === z.length) tick('inflate.flip.benign'); else if (r2) throw new Error('bit flip accepted with different output (adler should catch)'); }
+      if (z.length > 8 && rng.bool(0.2)) { const m = z.slice(); const at = rng.int(2, z.length - 5); m[at] ^= 1 << rng.int(0, 7); let r2 = null; try { r2 = inflate(m, 0, { bound: cappedBound(), wrap: zlibWrap(true) }); } catch { tick('inflate.flip.rejected'); } if (r2 && Buffer.from(r2.out).equals(Buffer.from(d)) && r2.consumed === z.length) tick('inflate.flip.benign'); else if (r2) throw new Error('bit flip accepted with different output (adler should catch)'); }
     } else if (which === 'sha1') {
       const d = gen(); const h = new Sha1(); for (const c of splitRandom(rng, d, { maxChunks: 50 })) h.update(c);
       if (h.hex() !== crypto.createHash('sha1').update(d).digest('hex')) throw new Error('sha1 mismatch');

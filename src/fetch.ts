@@ -11,7 +11,7 @@ import { pkts } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
-import { inflate } from './inflate.js';
+import { inflate, declaredBound, zlibWrap } from './inflatestream.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1)
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
@@ -445,7 +445,7 @@ async function fetchSingle(t: Transport, { oid, filter, deepen, expectType }: Si
       if (oversized) throw limitError('object size', sp.size, maxObject);
       sp = spFinish(sp);
       const zlib = concat(zlibParts);
-      const { out, consumed, stats } = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });
+      const { out, consumed, stats } = inflate(zlib, 0, { bound: declaredBound(sp.size, maxObject), wrap: zlibWrap(true) });
       if (consumed !== zlib.length) throw fail('pack_corrupt', `pack: ${zlib.length - consumed} trailing bytes after object`);
       const got = hashObject(String((TYPE_NAME as Names)[sp.type]), out);
       span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': String((TYPE_NAME as Names)[sp.type]) });

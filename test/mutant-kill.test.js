@@ -14,7 +14,8 @@ import {
   parsePack, applyDelta, makeDelta, readObjHeader, readOfsDelta, readUint32BE, packParseOpts, resolvePack,
 } from '../src/packresolve.js';
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
-import { inflate, huffBuild, adler32 } from '../src/inflate.js';
+import { huffBuild, adler32 } from '../src/inflate.js';
+import { inflate, cappedBound, declaredBound, zlibWrap, rawWrap } from '../src/inflatestream.js';
 import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, isShortRead } from '../src/fetch.js';
 import { bestBases, mergeBase } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
@@ -604,19 +605,19 @@ test('inflate stored, fixed, dynamic, and the header checks', () => {
     out.set(bytes, 5);
     return out;
   };
-  const two = inflate(concat([stored(Uint8Array.of(1, 2), false), stored(Uint8Array.of(3), true)]), 0, { raw: true });
+  const two = inflate(concat([stored(Uint8Array.of(1, 2), false), stored(Uint8Array.of(3), true)]), 0, { bound: cappedBound(), wrap: rawWrap() });
   assert.deepEqual([...two.out], [1, 2, 3]);
   assert.equal(two.stats.blocks, 2);
   assert.equal(two.stats.stored, 2);
-  throws(() => inflate(Uint8Array.of(1), 0, { raw: true }), 'pack_corrupt', 'inflate: truncated stored header');
+  throws(() => inflate(Uint8Array.of(1), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: truncated stored header');
   const badLen = stored(Uint8Array.of(1), true);
   badLen[3] ^= 1;
-  throws(() => inflate(badLen, 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
-  throws(() => inflate(Uint8Array.of(7), 0, { raw: true }), 'pack_corrupt', 'inflate: invalid block type');
-  throws(() => inflate(stored(Uint8Array.of(1, 2, 3), true).subarray(0, 6), 0, { raw: true }), 'pack_corrupt', 'inflate: truncated stored block');
+  throws(() => inflate(badLen, 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: stored length check failed');
+  throws(() => inflate(Uint8Array.of(7), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: invalid block type');
+  throws(() => inflate(stored(Uint8Array.of(1, 2, 3), true).subarray(0, 6), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: truncated stored block');
 
   const hello = te.encode('hello hello hello hello');
-  const fixed = inflate(new Uint8Array(zlib.deflateSync(hello)));
+  const fixed = inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.equal(fixed.stats.fixed, 1);
   assert.equal(fixed.stats.dynamic, 0);
   assert.equal(td.decode(fixed.out), td.decode(hello));
@@ -624,31 +625,31 @@ test('inflate stored, fixed, dynamic, and the header checks', () => {
   assert.equal(fixed.stats.matches, 1);
   assert.equal(fixed.stats.maxDist, 6);
   assert.equal(fixed.stats.maxLen, 16);
-  const level0 = inflate(new Uint8Array(zlib.deflateSync(hello, { level: 0 })));
+  const level0 = inflate(new Uint8Array(zlib.deflateSync(hello, { level: 0 })), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.equal(level0.stats.stored, 1);
   let varied = '';
   for (let i = 0; i < 4000; i++) varied += `word${i % 700} `;
-  const dynamic = inflate(new Uint8Array(zlib.deflateSync(Buffer.from(varied))));
+  const dynamic = inflate(new Uint8Array(zlib.deflateSync(Buffer.from(varied))), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.equal(dynamic.stats.dynamic, 1);
   assert.equal(td.decode(dynamic.out), varied);
 
-  const grown = inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(10000)))));
+  const grown = inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(10000)))), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.equal(grown.out.length, 10000);
-  throws(() => inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { expectedSize: 1 }), 'pack_corrupt', 'inflate: output exceeds expected 1');
-  assert.throws(() => inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { expectedSize: hello.length + 10, maxOutput: 4 }), e => e.code === 'limit_exceeded' && e.message === `inflate: expected size ${hello.length + 10} exceeds limit 4`);
-  throws(() => inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(1000)))), 0, { maxOutput: 100 }), 'limit_exceeded', 'inflate: output exceeds limit 100');
+  throws(() => inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { bound: declaredBound(1), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: output exceeds expected 1');
+  assert.throws(() => inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { bound: declaredBound(hello.length + 10, 4), wrap: zlibWrap(true) }), e => e.code === 'limit_exceeded' && e.message === `inflate: expected size ${hello.length + 10} exceeds limit 4`);
+  throws(() => inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(1000)))), 0, { bound: cappedBound(100), wrap: zlibWrap(true) }), 'limit_exceeded', 'inflate: output exceeds limit 100');
 
-  throws(() => inflate(Uint8Array.of(0x01, 0x00)), 'pack_corrupt', 'zlib: unsupported method 1');
-  throws(() => inflate(Uint8Array.of(0x78, 0x00)), 'pack_corrupt', 'zlib: bad header check');
-  throws(() => inflate(Uint8Array.of(0x78, 0x20)), 'pack_corrupt', 'zlib: preset dictionary not supported');
+  throws(() => inflate(Uint8Array.of(0x01, 0x00), 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'zlib: unsupported method 1');
+  throws(() => inflate(Uint8Array.of(0x78, 0x00), 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'zlib: bad header check');
+  throws(() => inflate(Uint8Array.of(0x78, 0x20), 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'zlib: preset dictionary not supported');
   const chopped = new Uint8Array(zlib.deflateSync(hello)).subarray(0, 8);
-  throws(() => inflate(chopped), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(chopped, 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: unexpected end of input');
   const mismatch = new Uint8Array(zlib.deflateSync(hello));
   mismatch[mismatch.length - 1] ^= 1;
-  throws(() => inflate(mismatch), 'pack_corrupt', 'inflate: adler32 mismatch');
-  assert.equal(inflate(mismatch, 0, { verifyAdler: false }).out.length, hello.length);
+  throws(() => inflate(mismatch, 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: adler32 mismatch');
+  assert.equal(inflate(mismatch, 0, { bound: cappedBound(), wrap: zlibWrap(false) }).out.length, hello.length);
   const rawCut = new Uint8Array(zlib.deflateRawSync(hello)).subarray(0, 1);
-  throws(() => inflate(rawCut, 0, { raw: true }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(rawCut, 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: unexpected end of input');
 });
 
 test('v2 sections, sideband, and the single-object pack stream', async () => {
@@ -1037,11 +1038,11 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 
   const hello = te.encode('hello hello hello hello');
-  const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)));
+  const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.ok(inflated.stats.matchBytes > 0);
   assert.equal(inflated.stats.matchBytes, 16);
   const repeated = te.encode('abcdefghijabcdefghijab');
-  const twice = inflate(new Uint8Array(zlib.deflateSync(repeated)));
+  const twice = inflate(new Uint8Array(zlib.deflateSync(repeated)), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.ok(twice.stats.maxLen >= 10);
   assert.ok(twice.stats.maxDist >= 10);
 
@@ -1064,7 +1065,7 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   let words = '';
   for (let i = 0; i < 400; i++) words += `word${i} `;
   const wordBytes = te.encode(words);
-  const wordInf = inflate(new Uint8Array(zlib.deflateSync(wordBytes)));
+  const wordInf = inflate(new Uint8Array(zlib.deflateSync(wordBytes)), 0, { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.equal(wordInf.stats.dynamic, 1);
   assert.equal(wordInf.stats.maxDist, 2819);
   assert.equal(wordInf.stats.maxLen, 9);
@@ -1116,15 +1117,15 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   put(0, 1);
   for (let i = 0; i < 16; i++) put(1, 1);
   const raw = Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
-  throws(() => inflate(raw, 0, { raw: true, maxOutput: 1024 }), 'pack_corrupt', 'inflate: invalid huffman code');
+  throws(() => inflate(raw, 0, { bound: cappedBound(1024), wrap: rawWrap() }), 'pack_corrupt', 'inflate: invalid huffman code');
 
   const helloZ = new Uint8Array(zlib.deflateSync(hello));
-  assert.equal(inflate(helloZ, 0, { expectedSize: hello.length, maxOutput: hello.length + 10 }).out.length, hello.length);
+  assert.equal(inflate(helloZ, 0, { bound: declaredBound(hello.length, hello.length + 10), wrap: zlibWrap(true) }).out.length, hello.length);
   const emptyStored = Uint8Array.of(1, 0, 0, 255, 255);
-  assert.equal(inflate(emptyStored, 0, { raw: true }).out.length, 0);
+  assert.equal(inflate(emptyStored, 0, { bound: cappedBound(), wrap: rawWrap() }).out.length, 0);
   const zhead = Uint8Array.of(0x78, 0x9c);
   const cut = concat([zhead, Uint8Array.of(1, 0, 0, 255, 255)]);
-  throws(() => inflate(cut), 'pack_corrupt', 'inflate: truncated adler32');
+  throws(() => inflate(cut, 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: truncated adler32');
 });
 
 test('parser edges a symmetric or unreachable fixture left alive', async () => {
@@ -1140,7 +1141,7 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
 
   const hello = te.encode('hello hello hello hello');
   const helloZ = new Uint8Array(zlib.deflateSync(hello));
-  throws(() => inflate(helloZ, 0, { expectedSize: hello.length + 10 }), 'pack_corrupt', `inflate: size ${hello.length} != expected ${hello.length + 10}`);
+  throws(() => inflate(helloZ, 0, { bound: declaredBound(hello.length + 10), wrap: zlibWrap(true) }), 'pack_corrupt', `inflate: size ${hello.length} != expected ${hello.length + 10}`);
 
   const { Sha1 } = await import('../src/sha1.js');
   const blob = te.encode('hello-hello-hello');
@@ -1175,23 +1176,23 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   };
 
   // 11 bits: final fixed block, one literal, no end-of-block. The padded high bits of the last byte are zeros.
-  throws(() => inflate(fixed({ lit: 97 }), 0, { raw: true }), 'pack_corrupt', 'inflate: unexpected end of input');
-  throws(() => inflate(fixed({ sym: 286, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 }), 'pack_corrupt', 'inflate: bad length symbol');
-  throws(() => inflate(fixed({ sym: 257, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 }), 'pack_corrupt', 'inflate: distance too far back');
-  const overlapped = inflate(fixed({ lit: 97 }, { sym: 257, len: true, dist: 0 }, {}), 0, { raw: true });
+  throws(() => inflate(fixed({ lit: 97 }), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(fixed({ sym: 286, len: true, dist: 0 }), 0, { bound: cappedBound(64), wrap: rawWrap() }), 'pack_corrupt', 'inflate: bad length symbol');
+  throws(() => inflate(fixed({ sym: 257, len: true, dist: 0 }), 0, { bound: cappedBound(64), wrap: rawWrap() }), 'pack_corrupt', 'inflate: distance too far back');
+  const overlapped = inflate(fixed({ lit: 97 }, { sym: 257, len: true, dist: 0 }, {}), 0, { bound: cappedBound(), wrap: rawWrap() });
   assert.deepEqual([...overlapped.out], [97, 97, 97, 97]);
   const distances = inflate(fixed(
     ...[...'abcdef'].map(ch => ({ lit: ch.charCodeAt(0) })),
     { sym: 257, len: true, dist: 4, distExtra: 1, distExtraBits: 1 },
     { sym: 257, len: true, dist: 0 },
     {},
-  ), 0, { raw: true });
+  ), 0, { bound: cappedBound(), wrap: rawWrap() });
   assert.equal(distances.stats.maxDist, 6);
   assert.equal(distances.out.length, 12);
 
   // One literal plus a 256-byte match is 257 bytes. The initial buffer is 256 and the limit is the exact size,
   // so growing onto the limit is legal and stopping one short of it is not.
-  const onto = inflate(fixed({ lit: 97 }, { sym: 284, len: true, extra: 29, extraBits: 5, dist: 0 }, {}), 0, { raw: true, maxOutput: 257 });
+  const onto = inflate(fixed({ lit: 97 }, { sym: 284, len: true, extra: 29, extraBits: 5, dist: 0 }, {}), 0, { bound: cappedBound(257), wrap: rawWrap() });
   assert.equal(onto.out.length, 257);
   // A second match asks for more than twice the current buffer, so the growth loop has to run.
   const grown = inflate(fixed(
@@ -1199,14 +1200,14 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     { sym: 284, len: true, extra: 27, extraBits: 5, dist: 0 },
     { sym: 285, len: true, dist: 0 },
     {},
-  ), 0, { raw: true });
+  ), 0, { bound: cappedBound(), wrap: rawWrap() });
   assert.equal(grown.out.length, 513);
 
   const stored = new Uint8Array(305);
   stored[0] = 1; stored[1] = 300 & 255; stored[2] = 300 >> 8;
   const nlen = (~300) & 0xffff; stored[3] = nlen & 255; stored[4] = nlen >> 8;
   stored.fill(7, 5);
-  throws(() => inflate(stored, 0, { raw: true, maxOutput: 100 }), 'limit_exceeded', 'inflate: output exceeds limit 100');
+  throws(() => inflate(stored, 0, { bound: cappedBound(100), wrap: rawWrap() }), 'limit_exceeded', 'inflate: output exceeds limit 100');
 
   const dyn = (hlit, hdist) => {
     const bits = [];
@@ -1214,8 +1215,8 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     put(1, 1); put(2, 2); put(hlit, 5); put(hdist, 5); put(0, 4);
     return packBits(bits);
   };
-  throws(() => inflate(dyn(30, 0), 0, { raw: true }), 'pack_corrupt', 'inflate: bad dynamic counts');
-  throws(() => inflate(dyn(0, 30), 0, { raw: true }), 'pack_corrupt', 'inflate: bad dynamic counts');
+  throws(() => inflate(dyn(30, 0), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: bad dynamic counts');
+  throws(() => inflate(dyn(0, 30), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: bad dynamic counts');
 
   // Code-length symbol 16 as the first length, and symbol 18 repeated past the 258 length slots.
   const repeat = extras => {
@@ -1226,9 +1227,9 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     for (const [v, n] of extras.body) put(v, n);
     return packBits(bits);
   };
-  throws(() => inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: repeat with no previous');
-  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: repeat overflow');
-  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: no end-of-block code');
+  throws(() => inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: repeat with no previous');
+  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: repeat overflow');
+  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: no end-of-block code');
 
   // 15 data bits end on the last bit of the buffer, so one more Huffman step has nothing to read.
   const hole = [];
@@ -1239,7 +1240,7 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   putHole(1, 1); putHole(0, 1);
   for (let i = 0; i < 15; i++) putHole(1, 1);
   assert.equal(hole.length % 8, 0);
-  throws(() => inflate(packBits(hole), 0, { raw: true, maxOutput: 32 }), 'pack_corrupt', 'inflate: invalid huffman code');
+  throws(() => inflate(packBits(hole), 0, { bound: cappedBound(32), wrap: rawWrap() }), 'pack_corrupt', 'inflate: invalid huffman code');
 });
 
 test('parsePack caps reject a hostile count and inflated total on the boundary', async () => {
@@ -1322,8 +1323,8 @@ test('aggregate caps fail closed before allocation', async () => {
 
   const hello = te.encode('hi');
   const zhello = new Uint8Array(zlib.deflateSync(hello));
-  throws(() => inflate(zhello, 0, { expectedSize: DEFAULT_LIMITS.maxObjectSize + 1 }), 'limit_exceeded', `inflate: expected size ${DEFAULT_LIMITS.maxObjectSize + 1} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
-  throws(() => inflate(zhello, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => inflate(zhello, 0, { bound: declaredBound(DEFAULT_LIMITS.maxObjectSize + 1), wrap: zlibWrap(true) }), 'limit_exceeded', `inflate: expected size ${DEFAULT_LIMITS.maxObjectSize + 1} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
+  throws(() => inflate(zhello, 0, { bound: cappedBound(Infinity), wrap: zlibWrap(true) }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
 
   const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
   assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
@@ -1624,16 +1625,16 @@ test('zlib stream length is bounded by the declared size: inflate (both checks),
   // inflate, end check: consumed > bound is pack_corrupt even though every block started inside the bound (at 2, 7, 12 ≤ 26).
   // `pos` is non-zero so the consumed count is measured from the stream's start, not the buffer's.
   const junk = new Uint8Array(7).fill(0xee);
-  const ok = inflate(concat([junk, exact]), junk.length, { expectedSize: 10 });
+  const ok = inflate(concat([junk, exact]), junk.length, { bound: declaredBound(10), wrap: zlibWrap(true) });
   assert.equal(ok.consumed, 26); assert.deepEqual([...ok.out], [...ten]);
-  throws(() => inflate(concat([junk, over]), junk.length, { expectedSize: 10 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 26 for 10 bytes)');
+  throws(() => inflate(concat([junk, over]), junk.length, { bound: declaredBound(10), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 26 for 10 bytes)');
   // without an expected size the output cap stands in for the declared size: zlibBound(14) = 30 < 31 = zlibBound(15)
-  throws(() => inflate(over, 0, { maxOutput: 14 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 30 for 14 bytes)');
-  assert.equal(inflate(over, 0, { maxOutput: 15 }).consumed, 31);
+  throws(() => inflate(over, 0, { bound: cappedBound(14), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 30 for 14 bytes)');
+  assert.equal(inflate(over, 0, { bound: cappedBound(15), wrap: zlibWrap(true) }).consumed, 31);
   // an expected size of 0 is a size, not an absent one: zlibBound(0) = 13 (zlib's own empty stream is 8 bytes; a stored one 11)
   const empty = new Uint8Array(0);
-  assert.equal(inflate(streamOf(empty, 0), 0, { expectedSize: 0 }).consumed, 11);
-  throws(() => inflate(streamOf(empty, 1), 0, { expectedSize: 0 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (16 > 13 for 0 bytes)');
+  assert.equal(inflate(streamOf(empty, 0), 0, { bound: declaredBound(0), wrap: zlibWrap(true) }).consumed, 11);
+  throws(() => inflate(streamOf(empty, 1), 0, { bound: declaredBound(0), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (16 > 13 for 0 bytes)');
 
   // inflate, block-start check (what ends an endless stream): zlibBound(2) = 17 and block boundaries fall at 2, 7, 12, 17, 22.
   // A stream cut at 17 is still "unexpected end" (17 is not past the bound); one cut at 22 is refused as too long before the
@@ -1641,13 +1642,13 @@ test('zlib stream length is bounded by the declared size: inflate (both checks),
   const two = te.encode('ab');
   assert.equal(zlibBound(2), 17);
   const blocks = k => concat([Uint8Array.of(0x78, 0x01), ...emptyBlocks(k)]);
-  throws(() => inflate(concat([junk, blocks(3)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: unexpected end of input');
-  throws(() => inflate(concat([junk, blocks(4)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
-  assert.equal(inflate(streamOf(two, 0), 0, { expectedSize: 2 }).consumed, 13);
-  throws(() => inflate(streamOf(two, 1), 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (18 > 17 for 2 bytes)');
+  throws(() => inflate(concat([junk, blocks(3)]), junk.length, { bound: declaredBound(2), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => inflate(concat([junk, blocks(4)]), junk.length, { bound: declaredBound(2), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  assert.equal(inflate(streamOf(two, 0), 0, { bound: declaredBound(2), wrap: zlibWrap(true) }).consumed, 13);
+  throws(() => inflate(streamOf(two, 1), 0, { bound: declaredBound(2), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (18 > 17 for 2 bytes)');
   const mib = new Uint8Array(1 << 20); mib.set([0x78, 0x01]); for (let i = 2; i + 5 <= mib.length; i += 5) mib.set([0, 0, 0, 0xff, 0xff], i);
   const t0 = performance.now();
-  throws(() => inflate(mib, 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  throws(() => inflate(mib, 0, { bound: declaredBound(2), wrap: zlibWrap(true) }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
   assert.ok(performance.now() - t0 < 100, 'the endless stream was walked, not refused');
   // parsePack (the buffered path) takes the same refusal through inflate for the first object
   const hostile = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), encodeObjHeader(TYPE.BLOB, 2), blocks(20), new Uint8Array(20)]);

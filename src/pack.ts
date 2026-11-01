@@ -72,9 +72,36 @@ export function spliceDelta({ baseLen, off, oldLen, insert }: Splice): SplicedDe
 
 // ---- build ----
 // Any Uint8Array in; a Blob takes only an ArrayBuffer-backed view, which bufferSource guarantees (bytes.ts).
+export type DeflatePull = { readonly kind: 'chunk'; readonly bytes: Uint8Array<ArrayBuffer> } | { readonly kind: 'end' };
+export type DeflateSession = { readonly reader: ReadableStreamDefaultReader<Uint8Array> };
+export function deflateOpen(bytes: Uint8Array): DeflateSession {
+  const stream = new Blob([bufferSource(bytes)]).stream().pipeThrough(new CompressionStream('deflate'));
+  return { reader: stream.getReader() };
+}
+export async function deflatePull(session: DeflateSession): Promise<DeflatePull> {
+  const step = await session.reader.read();
+  if (step.done) return { kind: 'end' };
+  return { kind: 'chunk', bytes: step.value.slice() };
+}
 export async function zlibDeflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
-  const ab = await new Response(new Blob([bufferSource(bytes)]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer();
-  return new Uint8Array(ab);
+  const session = deflateOpen(bytes);
+  const parts: Array<Uint8Array<ArrayBuffer>> = [];
+  let total = 0;
+  for (;;) {
+    // one reader: the next chunk does not exist until this read resolves
+    // oxlint-disable-next-line no-await-in-loop -- see above
+    const step = await deflatePull(session);
+    if (step.kind === 'end') break;
+    parts.push(step.bytes);
+    total += step.bytes.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
 }
 
 // objects: [{ type (1-4), data, baseOid? }] — baseOid makes it a REF_DELTA whose `data` is the delta.

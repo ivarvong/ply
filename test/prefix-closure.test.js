@@ -17,7 +17,7 @@ import {
 import { pkt, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.js';
 import { encodeObjHeader, buildPack, spliceDelta } from '../src/pack.js';
 import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packresolve.js';
-import { inflate } from '../src/inflate.js';
+import { inflate, cappedBound, zlibWrap } from '../src/inflatestream.js';
 import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
 import { parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
@@ -325,8 +325,8 @@ property('sp-header', 'a strict prefix of a single-object pack does not finish',
 
 property('inflate', 'every strict prefix of a zlib stream throws', () => {
   const z = zlib.deflateSync(Buffer.from('hello prefix'));
-  inflate(z);
-  for (let i = 1; i < z.length; i++) assert.throws(() => inflate(z.subarray(0, i)), e => e.code === 'pack_corrupt');
+  inflate(z, 0, { bound: cappedBound(), wrap: zlibWrap(true) });
+  for (let i = 1; i < z.length; i++) assert.throws(() => inflate(z.subarray(0, i), 0, { bound: cappedBound(), wrap: zlibWrap(true) }), e => e.code === 'pack_corrupt');
 });
 
 property('v2', 'a prefix of a v2 fetch response is a prefix of its sections and pack bytes', () => {

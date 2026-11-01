@@ -26,7 +26,7 @@ import { transport, outcome, outcomeSync, v2PackResponse, cat } from './wire.js'
 import { parsePack, resolvePack, packParseOpts, readObjHeader, readOfsDelta, readUint32BE } from '../../src/pack.js';
 import { fetchObject, spInit, spStep, spFinish } from '../../src/fetch.js';
 import { fetchPack } from '../../src/fetchpack.js';
-import { inflate } from '../../src/inflate.js';
+import { inflate, declaredBound, zlibWrap } from '../../src/inflatestream.js';
 import { hashObject, TYPE_NAME } from '../../src/objects.js';
 import { DEFAULT_LIMITS } from '../../src/limits.js';
 import { encodeObjHeader, encodeVarint } from '../../src/pack.js';
@@ -65,7 +65,7 @@ function viaSpStep(bytes, want, chunked) {
     if (chunked) for (let i = 0; i < bytes.length; i++) step(bytes.subarray(i, i + 1)); else step(bytes);
     sp = spFinish(sp);
     const z = cat(parts);
-    const { out, consumed } = inflate(z, 0, { expectedSize: sp.size, maxOutput: 1 << 26 });
+    const { out, consumed } = inflate(z, 0, { bound: declaredBound(sp.size, 1 << 26), wrap: zlibWrap(true) });
     if (consumed !== z.length) throw Object.assign(new Error('trailing'), { code: 'pack_corrupt' });
     if (hashObject(TYPE_NAME[sp.type], out) !== want) throw Object.assign(new Error('hash'), { code: 'pack_corrupt' });
     return out.length;

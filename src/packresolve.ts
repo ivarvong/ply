@@ -7,7 +7,7 @@ import { fail, plyError, orThrow } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever } from './result.js';
 import type { InflateStats } from './inflate.js';
-import { inflateResult } from './inflate.js';
+import { inflateResult, declaredBound, zlibWrap } from './inflatestream.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE_NAME, hashObject } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
@@ -219,7 +219,7 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
     if (size > maxObjectSize) return err(limitError('pack object size', size, maxObjectSize));
     // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
     if (stats.inflated + size > maxInflatedTotal) return err(limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal));
-    const z = inflateResult(buf, p, { expectedSize: size, maxOutput: maxObjectSize });
+    const z = inflateResult(buf, p, { bound: declaredBound(size, maxObjectSize), wrap: zlibWrap(true) });
     if (!z.ok) return z;
     const { out, consumed, stats: is } = z.value;
     stats.compressed += consumed; stats.inflated += size;

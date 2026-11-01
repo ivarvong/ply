@@ -6,7 +6,8 @@ import zlib from 'node:zlib';
 import { readFileSync } from 'node:fs';
 import { takeResult, take, shortRead, encodeBytesResult, encodeBytes, HEXV, te, concat, decodeBytes as decodeBytesOf, decodeChunk as decodeChunkOf } from '../src/bytes.js';
 import { pktResult, pktStepResult, pktFinishResult, pktInit, pktStep } from '../src/pktline.js';
-import { inflateResult, inflate, DEFLATE_TABLES } from '../src/inflate.js';
+import { DEFLATE_TABLES } from '../src/inflate.js';
+import { inflateResult, inflate, cappedBound, declaredBound, zlibWrap, rawWrap } from '../src/inflatestream.js';
 import {
   readObjHeaderResult, readOfsDeltaResult, readUint32BEResult, parsePackResult, applyDeltaResult, resolvePackResult, resolvePack, parsePack,
 } from '../src/packresolve.js';
@@ -46,7 +47,7 @@ test('#76 a short read carries reason short_read on every bounded reader, and no
   assert.deepEqual(readObjHeaderResult(h, 0), { ok: true, value: { type: TYPE.BLOB, size: 2 ** 20 + 3, next: h.length } });
   sr(readOfsDeltaResult(Uint8Array.of(OBJ_CONTINUE), 0), 'pack_corrupt', 'short read: need 1 bytes at 1, have 1');
   sr(readUint32BEResult(buf, 0), 'pack_corrupt', 'short read: need 4 bytes at 0, have 3');
-  sr(inflateResult(Uint8Array.of(0x78), 0), 'pack_corrupt', 'short read: need 2 bytes at 0, have 1');
+  sr(inflateResult(Uint8Array.of(0x78), 0, { bound: cappedBound(), wrap: zlibWrap(true) }), 'pack_corrupt', 'short read: need 2 bytes at 0, have 1');
   // a corrupt header is not a short read: no reason
   const long = new Uint8Array(12).fill(0x80);
   const e = errOf(readObjHeaderResult(long, 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
@@ -107,17 +108,17 @@ test('Result cores return Err for every refusal their wrappers throw', async () 
   assert.throws(() => encodeBytes(7), e => e.code === 'bad_request' && e.what === 'string');
 
   const z = zlib.deflateSync(te.encode('hello hello hello'));
-  errOf(inflateResult(z, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
-  const over = errOf(inflateResult(z, 0, { expectedSize: 17, maxOutput: 5 }), 'limit_exceeded', 'inflate: expected size 17 exceeds limit 5');
+  errOf(inflateResult(z, 0, { bound: cappedBound(Infinity), wrap: zlibWrap(true) }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  const over = errOf(inflateResult(z, 0, { bound: declaredBound(17, 5), wrap: zlibWrap(true) }), 'limit_exceeded', 'inflate: expected size 17 exceeds limit 5');
   assert.deepEqual([over.what, over.got, over.max], ['inflate expected size', 17, 5]);
-  const grow = errOf(inflateResult(z, 0, { maxOutput: 5 }), 'limit_exceeded', 'inflate: output exceeds limit 5');
+  const grow = errOf(inflateResult(z, 0, { bound: cappedBound(5), wrap: zlibWrap(true) }), 'limit_exceeded', 'inflate: output exceeds limit 5');
   assert.deepEqual([grow.what, grow.max], ['inflate output', 5]);
   assert.ok(grow.got > 5);
   // BTYPE 3 is reserved: the exhaustive block type has no member for it
-  errOf(inflateResult(Uint8Array.of(0b111), 0, { raw: true }), 'pack_corrupt', 'inflate: invalid block type');
-  assert.throws(() => inflate(Uint8Array.of(0b111), 0, { raw: true }), e => e.code === 'pack_corrupt' && e.message === 'inflate: invalid block type');
+  errOf(inflateResult(Uint8Array.of(0b111), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: invalid block type');
+  assert.throws(() => inflate(Uint8Array.of(0b111), 0, { bound: cappedBound(), wrap: rawWrap() }), e => e.code === 'pack_corrupt' && e.message === 'inflate: invalid block type');
   // a bug inside the decoder is not swallowed into an Err: only the STOP sentinel is converted
-  assert.throws(() => inflateResult(null, 0, { raw: true }), TypeError);
+  assert.throws(() => inflateResult(null, 0, { bound: cappedBound(), wrap: rawWrap() }), TypeError);
 
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('x') }]);
   errOf(parsePackResult(pack, { maxObjects: -1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
@@ -192,7 +193,7 @@ test('inflate: non-overlapping and overlapping matches, at every distance/length
       const seed = Uint8Array.from({ length: d }, (_, i) => (i * 37 + 11) & 0xff);
       const data = concat([seed, new Uint8Array(len).map((_, i) => seed[i % d])]);
       const z = zlib.deflateSync(data, { level: 9 });
-      const got = inflate(z, 0, { expectedSize: data.length }).out;
+      const got = inflate(z, 0, { bound: declaredBound(data.length), wrap: zlibWrap(true) }).out;
       assert.equal(Buffer.compare(Buffer.from(got), Buffer.from(data)), 0, `len ${len} distance ${d}`);
     }
   }
@@ -321,11 +322,19 @@ test('parsePackResult passes each part\'s Err through: object header, ofs offset
 });
 
 test('inflateResult converts only its own STOP: a bug inside the block loop propagates', () => {
-  // a plain array has no subarray: the stored block's copy throws a TypeError inside the loop, which is not an Err
-  assert.throws(() => inflateResult([0b001, 1, 0, 0xfe, 0xff, 0x41], 0, { raw: true }), TypeError);
+  // A byte read that throws is a bug in the caller, not a refusal. The pull must let it out.
+  const raw = new Proxy(new Uint8Array([0b001, 1, 0, 0xfe, 0xff, 0x41]), {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && prop !== 'length' && /^\d+$/.test(prop)) throw new TypeError('byte read');
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value === 'function') return value.bind(target);
+      return value;
+    },
+  });
+  assert.throws(() => inflateResult(raw, 0, { bound: cappedBound(), wrap: rawWrap() }), TypeError);
   // and a refusal is an Err, not a throw, from the same place
-  errOf(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xfe, 0x41), 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
-  assert.equal(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xff, 0x41), 0, { raw: true }).value.out[0], 0x41);
+  errOf(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xfe, 0x41), 0, { bound: cappedBound(), wrap: rawWrap() }), 'pack_corrupt', 'inflate: stored length check failed');
+  assert.equal(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xff, 0x41), 0, { bound: cappedBound(), wrap: rawWrap() }).value.out[0], 0x41);
 });
 
 test('readOfsDelta: an empty buffer is a short read, not offset 0', () => {
@@ -349,7 +358,7 @@ test('inflate: a stored block after a fixed one, at every leftover bit count, eq
     const head = Uint8Array.from({ length: bitsOut.length / 8 }, (_, i) => bitsOut.slice(i * 8, i * 8 + 8).reduce((a, b, j) => a | (b << j), 0));
     const raw = concat([head, Uint8Array.of(2, 0, 0xfd, 0xff, 0x5a, 0x59)]);
     const want = zlib.inflateRawSync(raw);
-    const got = inflateResult(raw, 0, { raw: true });
+    const got = inflateResult(raw, 0, { bound: cappedBound(), wrap: rawWrap() });
     assert.equal(got.ok, true, `k=${k}: ${got.error?.message}`);
     assert.equal(Buffer.compare(Buffer.from(got.value.out), want), 0, `k=${k}`);
     assert.equal(got.value.consumed, raw.length, `k=${k}`);

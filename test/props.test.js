@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { Rng, splitRandom } from './fuzz/prng.js';
 import { genBlob, genFind, genReplace, KNOBS, countOccurrences } from './fuzz/gen.js';
 import { pkt, pkts, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.js';
-import { inflate } from '../src/inflate.js';
+import { inflate, cappedBound, declaredBound, zlibWrap, rawWrap } from '../src/inflatestream.js';
 import { Sha1, toHex } from '../src/sha1.js';
 import { encodeObjHeader, applyDelta, spliceDelta, makeDelta, parsePack, resolvePack, buildPack } from '../src/pack.js';
 import { parseTree, encodeTree, treeSort, hashObject, parseCommit, encodeCommit } from '../src/objects.js';
@@ -32,18 +32,18 @@ forAll('inflate: consumed exact, content equal, any level, trailing junk ignored
   const z = zlib.deflateSync(d, { level, strategy: rng.pick([0, 0, 1, 2, 3, 4]) });
   const pre = rng.bytes(rng.int(0, 5)), junk = rng.bytes(rng.int(0, 40));
   const buf = concat([pre, z, junk]);
-  const r = inflate(buf, pre.length, rng.bool() ? { expectedSize: d.length } : {});
+  const r = inflate(buf, pre.length, rng.bool() ? { bound: declaredBound(d.length), wrap: zlibWrap(true) } : { bound: cappedBound(), wrap: zlibWrap(true) });
   assert.equal(r.consumed, z.length);
   assert.ok(Buffer.from(r.out).equals(d));
   if (level === 0 && d.length) assert.ok(r.stats.stored > 0);
   // truncation must throw, never hang
-  if (z.length > 3) assert.throws(() => inflate(buf.subarray(0, pre.length + z.length - rng.int(1, 3)), pre.length));
+  if (z.length > 3) assert.throws(() => inflate(buf.subarray(0, pre.length + z.length - rng.int(1, 3)), pre.length, { bound: cappedBound(), wrap: zlibWrap(true) }));
 });
 
 forAll('inflate: raw deflate', rng => {
   const d = rng.bytes(rng.int(0, 2000));
   const z = zlib.deflateRawSync(d);
-  const r = inflate(concat([z, rng.bytes(3)]), 0, { raw: true });
+  const r = inflate(concat([z, rng.bytes(3)]), 0, { bound: cappedBound(), wrap: rawWrap() });
   assert.equal(r.consumed, z.length); assertBytes(r.out, d);
 });
 
@@ -161,12 +161,12 @@ forAll('single-object pack stream: the zlib-length bound is chunking-invariant a
   const under = packOf(streamOf(room)), over = packOf(streamOf(room + 1));
   assert.ok(under.length - 32 - encodeObjHeader(3, data.length).length <= bound && over.length - 32 - encodeObjHeader(3, data.length).length > bound);
   const okRuns = splits(under).map(c => run(under, c));
-  for (const r of okRuns) { assert.equal(r.threw, null); assert.equal(r.size, data.length); assert.ok(r.zlibBytes <= bound); assertBytes(zlib.inflateSync(r.zlib), data); assertBytes(inflate(r.zlib, 0, { expectedSize: data.length }).out, data); }
+  for (const r of okRuns) { assert.equal(r.threw, null); assert.equal(r.size, data.length); assert.ok(r.zlibBytes <= bound); assertBytes(zlib.inflateSync(r.zlib), data); assertBytes(inflate(r.zlib, 0, { bound: declaredBound(data.length), wrap: zlibWrap(true) }).out, data); }
   const badRuns = splits(over).map(c => run(over, c));
   for (const r of badRuns) assert.equal(r.threw, `pack_corrupt: pack: zlib stream longer than its declared size allows (${data.length}-byte object, ${bound}-byte bound)`);
   // the buffered inflate agrees with the streamed parser on both sides of the bound
-  assert.equal(inflate(streamOf(room), 0, { expectedSize: data.length }).consumed, under.length - 32 - encodeObjHeader(3, data.length).length);
-  assert.throws(() => inflate(streamOf(room + 1), 0, { expectedSize: data.length }), e => e.code === 'pack_corrupt' && /zlib stream longer than its declared size allows/.test(e.message));
+  assert.equal(inflate(streamOf(room), 0, { bound: declaredBound(data.length), wrap: zlibWrap(true) }).consumed, under.length - 32 - encodeObjHeader(3, data.length).length);
+  assert.throws(() => inflate(streamOf(room + 1), 0, { bound: declaredBound(data.length), wrap: zlibWrap(true) }), e => e.code === 'pack_corrupt' && /zlib stream longer than its declared size allows/.test(e.message));
 }, Math.min(60, N));
 
 forAll('pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-delta + thin)', async rng => {

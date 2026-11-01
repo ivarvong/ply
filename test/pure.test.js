@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { Rng } from './fuzz/prng.js';
 import { validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, scanInit, scanStep, MATCH_OFFSETS_KEPT } from '../src/edit.js';
 import { zlibDeflate, spliceDelta } from '../src/pack.js';
-import { inflate } from '../src/inflate.js';
+import { inflate, cappedBound, declaredBound, zlibWrap, rawWrap } from '../src/inflatestream.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { thrown as fail, scrubError } from '../src/errors.js';
@@ -87,7 +87,7 @@ test('deflate only: a stored-block zlib stream never beats CompressionStream (th
     const data = rng.int(0, 1) ? rng.bytes(n) : new Uint8Array(n).fill(0x61);
     const zs = stored(data), zd = await zlibDeflate(data);
     assert.deepEqual(new Uint8Array(zlib.inflateSync(zs)), data);
-    assert.deepEqual(inflate(zs, 0, { expectedSize: n }).out, data, 'our inflate handles multi-block stored streams');
+    assert.deepEqual(inflate(zs, 0, { bound: declaredBound(n), wrap: zlibWrap(true) }).out, data, 'our inflate handles multi-block stored streams');
     // zlib's own stored blocks are ~16 KiB, ours 64 KiB: deflate can lose by ≤5 bytes per 16 KiB on incompressible input, nothing more
     assert.ok(zd.length <= zs.length + 5 * Math.ceil(n / 16384), `n=${n}: deflate ${zd.length} vs stored ${zs.length}`);
   }
@@ -170,7 +170,7 @@ test('inflate: an incomplete huffman table with a hole is rejected (invalid huff
   put(0, 1);                                              // the one distance symbol: length 0
   for (let i = 0; i < 16; i++) put(1, 1);                 // data: 1111…, which is not the EOB code (00000000)
   const raw = Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
-  assert.throws(() => inflate(raw, 0, { raw: true, maxOutput: 1024 }), e => e.code === 'pack_corrupt' && /invalid huffman code/.test(e.message));
+  assert.throws(() => inflate(raw, 0, { bound: cappedBound(1024), wrap: rawWrap() }), e => e.code === 'pack_corrupt' && /invalid huffman code/.test(e.message));
   assert.throws(() => zlib.inflateRawSync(raw), /invalid|incomplete|Z_DATA_ERROR/i, 'node zlib rejects it too');
 });
 

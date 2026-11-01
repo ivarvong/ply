@@ -142,6 +142,11 @@ export const SIDEBAND_PACK = 1;
 export const SIDEBAND_PROGRESS = 2;
 export const SIDEBAND_ERROR = 3;
 export const SIDEBAND_CHANNEL_BYTES = 1;
+/**
+ * Band-2 text retained across frames. The same tail `v2Step` keeps (`PROGRESS_KEEP`), so a progress line cut by a
+ * pkt-line is not decoded as two U+FFFD.
+ */
+export const SIDEBAND_PROGRESS_KEEP = 512;
 
 /** gitprotocol-v2(5): the client's `Git-Protocol: version=2` and the `version 2` advertisement line. */
 export const PROTOCOL_V2 = 2;
@@ -197,6 +202,10 @@ export const ZLIB_CM_DEFLATE = 8;
 export const ZLIB_CM_MASK = 0x0f;
 export const ZLIB_FDICT = 0x20;
 export const ZLIB_HEADER_MOD = 31;
+/** RFC 1950 CMF: CINFO is the high nibble. Window size is 2^(CINFO + 8); 7 is 32 KiB, the largest zlib allows. */
+export const ZLIB_CINFO_SHIFT = 4;
+export const ZLIB_CINFO_MAX = 7;
+export const ZLIB_WINDOW_EXPONENT = 8;
 export const ADLER_BYTES = 4;
 export const ADLER_MOD = 65_521;
 /** Adler-32 stores the sum `b` in the high 16 bits. RFC 1950 §2.2. */
@@ -209,7 +218,14 @@ export const DEFLATE_DYNAMIC = 2;
 export const DEFLATE_STORED_HEADER_BYTES = 4;
 /** One's complement of the stored-block length is 16 bits. RFC 1951 §3.2.4. */
 export const DEFLATE_STORED_LEN_MASK = 0xff_ff;
+/** Little-endian length, then its complement, inside a stored-block header. */
+export const DEFLATE_STORED_LEN_OFF = 0;
+export const DEFLATE_STORED_NLEN_OFF = 2;
 export const DEFLATE_MAX_BITS = 15;
+/** Deflate's largest window (CINFO 7, 2^15). A streaming inflater keeps this many output bytes and no more. */
+export const INFLATE_WINDOW: number = 1 << DEFLATE_MAX_BITS;
+/** Bytes one streaming inflate pull yields. Half a window, so a pull holds one chunk beside the window. */
+export const INFLATE_CHUNK: number = INFLATE_WINDOW / 2;
 export const DEFLATE_BIT_TABLE = 16;
 export const DEFLATE_LITERALS = 256;
 export const DEFLATE_EOB = 256;
