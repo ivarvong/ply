@@ -191,6 +191,16 @@ export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, a
   validateMessage(message);
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
   const entries = fileEntries(files, limits);
+  // Before buildTree retains the blobs. got is the running total, including the file that crossed the cap.
+  // Exactly the cap is allowed. A gitlink has no bytes. A single file over maxObjectSize already failed above.
+  const maxPush = requireLimit(limits, 'maxPushBytes');
+  let pushBytes = 0;
+  for (const e of entries) {
+    const bytes = e.data;
+    const next = pushBytes + (bytes ? bytes.length : 0);
+    if (next > maxPush) throw limitError('push bytes', next, maxPush);
+    pushBytes = next;
+  }
   const built = buildTree(entries, limits);
   return Object.freeze({ ref, base, create: base !== ref, built, files: entries.length, author: person, message, head });
 }
