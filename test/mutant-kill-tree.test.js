@@ -1287,7 +1287,7 @@ test('openBlob: maxBytes is the declared size, and a cap does not pull the rest 
     let pulls = 0;
     const r = remote({ hook: async req => (req.command === 'fetch' ? (async function* () { for (const f of frames) { pulls += 1; yield f; } })() : undefined) });
     const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
-    return { t: r.transport({ tracer }), capabilities: { ...defaultCapabilities(), tracer }, pulls: () => pulls, spans: () => ex.lines.flatMap(flattenLine) };
+    return { t: r.transport({ tracer }), tracer, capabilities: { ...defaultCapabilities(), tracer }, pulls: () => pulls, spans: () => ex.lines.flatMap(flattenLine) };
   };
   const exact = serve();
   const at = streamOf(await openBlob(exact.t, oid, { maxBytes: text.length, follows: exact.tracer.start('p') }));

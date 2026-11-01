@@ -22,6 +22,7 @@ import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { Tracer, arrayExporter, KIND } from '../src/otel.js';
 import { createTransport } from '../src/http.js';
 import { editFile } from '../src/edit.js';
+import { commitChanges } from '../src/changes.js';
 import { pushTree } from '../src/tree.js';
 import { checkoutTree } from '../src/checkout.js';
 import { readFile, listTree, readCommit } from '../src/read.js';
@@ -154,6 +155,12 @@ const traced = () => { const ex = arrayExporter(); return { capabilities: { ...d
 // one entry per public operation (and the wire layer): name → async ({ tracer }) => void, every stream drained
 const SCENARIOS = {
   editFile: async ({ tracer }) => { const r = seeded(); await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { capabilities: { ...defaultCapabilities(), tracer }, verify: true }); },
+  commitChanges: async ({ tracer }) => {
+    const r = seeded();
+    const capabilities = { ...defaultCapabilities(), tracer };
+    await commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: 'n\n' }], author, message: 'add', time: 1700000000 }, { capabilities, verify: true });
+    await commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'MARK', replace: 'DONE' }], author, message: 'edit', time: 1700000000 }, { capabilities, verify: true });
+  },
   pushTree: async ({ tracer }) => { const r = seeded(); await pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { capabilities: { ...defaultCapabilities(), tracer }, verify: true }); },
   checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, {}, { capabilities: { ...defaultCapabilities(), tracer } }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
   'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, { path: 'a' }, { capabilities: { ...defaultCapabilities(), tracer }, batch: 1 }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
@@ -221,7 +228,7 @@ test('span contract: every operation\'s span tree (names, kinds, structure, link
 test('span contract: the snapshot covers every public operation, and the wire spans', async () => {
   const want = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
   const names = new Set(flatten(Object.values(want).flat()).map(l => l.split(' [')[0].split(' · ')[0].split(/ (?:>|~>) /).at(-1)));
-  for (const s of ['git.edit', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert',
+  for (const s of ['git.edit', 'git.commit', 'git.commit.apply', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert',
     'git.upload-pack ls-refs', 'git.upload-pack fetch', 'git.upload-pack discover', 'git.receive-pack', 'git.receive-pack advertise']) assert.ok(names.has(s), `${s} is not in the contract`);
 });
 

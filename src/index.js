@@ -1,6 +1,17 @@
 // Full entry point. Bundles that only edit should import 'ply/edit' (src/edit.js): it pulls in only the free
 // functions it uses. Everything here is tree-shakeable (no classes on the hot path, no module side effects).
 export { editFile, scanInit, scanStep, scanFinish, validateSpec, decideHead, lookupEntry, buildCommitObjects, memFromScan, memAttrs, isLfsPointerPrefix, withCommitData } from './edit.js';
+/**
+ * One path change in commitChanges: create, write, edit, delete, or rename.
+ * @typedef {import('./changes.js').Change} Change
+ */
+/**
+ * @typedef {import('./changes.js').CommitChangesSpec} CommitChangesSpec
+ */
+/**
+ * @typedef {import('./changes.js').CommitChangesResult} CommitChangesResult
+ */
+export { commitChanges } from './changes.js';
 export { pushTree, fileEntries, buildTree, selectObjects, validateTreeSpec } from './tree.js'; // the Node directory walk is 'ply/tree-node'
 export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing into a directory is 'ply/checkout-node'
 /**
@@ -64,7 +75,19 @@ export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fet
  */
 export { parseOid, parseCommitId, ZERO_OID } from './oid.js';
 export { OID_HEX_CHARS, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES } from './format.js';
-export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
+/**
+ * A pack as `git verify-pack -v` prints it. `missingBases` are thin REF bases, first-seen in pack order.
+ * @typedef {import('./packresolve.js').PackLayout} PackLayout
+ */
+/**
+ * One object row of {@link PackLayout}.
+ * @typedef {import('./packresolve.js').PackLayoutObject} PackLayoutObject
+ */
+/**
+ * An OFS base (offset, and the base id once that object resolved) or a REF base (an id).
+ * @typedef {import('./packresolve.js').PackBase} PackBase
+ */
+export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, encodeTag, ident, TYPE, TYPE_NAME } from './objects.js';

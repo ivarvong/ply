@@ -35,7 +35,7 @@ import { startProxy } from './proxy.js';
 import { MERGE_LIES, mergeLie } from './fuzz/mergelies.js';
 import { oracleRediff } from './gitversion.js';
 import { mergeBase, mergeBranch } from '../src/merge.js';
-import { rebaseBranch } from '../src/rebase.js';
+import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { createTransport } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 import { Tracer } from '../src/otel.js';
@@ -200,4 +200,66 @@ test('merge-base outcome space: position × multiplicity × settled × server ×
   assert.equal(cells, expected);
   for (const s of SERVERS) if (s !== 'mb:honest') assert.ok(fired.get(s) > 0, `${s} fired in some cell`);
   assert.deepEqual(fails, []);
+});
+
+// Parent count of the commit pickCommit is asked to replay. 0 and 1 are what git cherry-pick / revert do; 2 and 3 are
+// merges, which git refuses without -m and ply refuses as not_linear before writing anything.
+test('pickCommit: parents 0–3 × cherry-pick/revert, against git', { timeout: 120_000 }, async () => {
+  const bare = makeBareRepo(root, 'picks');
+  const blob = text => out(bare, ['hash-object', '-w', '--stdin'], text);
+  const tree = entries => out(bare, ['mktree'], [...entries].sort((a, b) => (a[2] < b[2] ? -1 : 1)).map(([mode, oid, name]) => `${mode} blob ${oid}\t${name}\n`).join(''));
+  const commit = (tr, parents, msg) => out(bare, ['commit-tree', tr, ...parents.flatMap(p => ['-p', p]), '-m', msg]);
+  const g = blob('g\n'), aB = blob('b\n'), aS = blob('s\n'), sideBlob = blob('side\n'), z = blob('z\n');
+  const R = commit(tree([['100644', g, 'g.txt']]), [], 'root');
+  const Z = commit(tree([['100644', z, 'z.txt']]), [], 'other');
+  const B = commit(tree([['100644', aB, 'a.txt'], ['100644', g, 'g.txt']]), [R], 'base');
+  const S = commit(tree([['100644', aS, 'a.txt'], ['100644', g, 'g.txt']]), [B], 'single');
+  const side = commit(tree([['100644', aB, 'a.txt'], ['100644', g, 'g.txt'], ['100644', sideBlob, 'b.txt']]), [B], 'side');
+  const merged = tree([['100644', aS, 'a.txt'], ['100644', g, 'g.txt'], ['100644', sideBlob, 'b.txt']]);
+  const M = commit(merged, [S, side], 'merge');
+  const Three = commit(merged, [S, side, B], 'three');
+  const byParents = [R, S, M, Three];
+  sh(bare, ['update-ref', 'refs/heads/main', B]);
+  const work = mkdtempSync(join(tmpdir(), 'ply-pick-'));
+  sh(work, ['clone', '-q', bare, '.']);
+  const url = `${srv.url}/picks.git`;
+  const who = { name: 'p', email: 'p@x' };
+  const limits = withLimits({ requestTimeoutMs: 15_000 });
+  const tipFor = (n, op) => (n === 0 && op === 'cherry' ? Z : n === 1 && op === 'revert' ? S : B);
+  let cells = 0;
+  try {
+    for (const n of [0, 1, 2, 3]) for (const op of ['cherry', 'revert']) {
+      const commitOid = byParents[n];
+      const tip = tipFor(n, op);
+      sh(bare, ['update-ref', 'refs/heads/main', tip]);
+      sh(work, ['checkout', '-qf', tip]);
+      const gitArgs = op === 'cherry' ? ['cherry-pick', commitOid] : ['revert', '--no-edit', commitOid];
+      const gRes = spawnSync('git', ['-C', work, ...gitArgs], { encoding: 'utf8', env: ENV });
+      let ply = null, err = null;
+      try {
+        const spec = { ref: 'refs/heads/main', commit: commitOid, committer: who, time: 1700000000 };
+        ply = op === 'cherry'
+          ? await cherryPick(url, spec, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, limits, rediff })
+          : await revertCommit(url, spec, { capabilities: { ...defaultCapabilities(), tracer: new Tracer() }, limits, rediff });
+      } catch (e) { err = e; }
+      const where = `${op} parents=${n}`;
+      const head = out(bare, ['rev-parse', 'refs/heads/main']);
+      if (n >= 2) {
+        assert.equal(gRes.status, 128, `${where}: ${gRes.stderr}`);
+        assert.match(gRes.stderr, /is a merge but no -m option was given/u, where);
+        assert.equal(err?.code, 'not_linear', `${where}: ${err?.message}`);
+        assert.match(err.message, new RegExp(`${commitOid} has ${n} parents`), where);
+        assert.equal(head, tip, where);
+      } else {
+        assert.equal(gRes.status, 0, `${where}: ${gRes.stderr}`);
+        assert.equal(err, null, `${where}: ${err?.code} ${err?.message}`);
+        assert.equal(ply.outcome, 'ok', where);
+        assert.equal(ply.tree, out(work, ['rev-parse', 'HEAD^{tree}']), where);
+        assert.equal(head, ply.oid, where);
+        assert.deepEqual(fsckProblems(bare), [], where);
+      }
+      cells++;
+    }
+  } finally { rmSync(work, { recursive: true, force: true }); }
+  assert.equal(cells, 8);
 });
