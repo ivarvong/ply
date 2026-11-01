@@ -343,7 +343,9 @@ async function applyChange(walk: Walk, root: Dir, change: Norm, created: Map<str
     walk.have.add(node.oid);
     const blob = await fetchObject(walk.t, { oid: node.oid, filter: '', expectType: TYPE.BLOB });
     if (isLfsPointerPrefix(blob.data) && !walk.allowLfs) throw fail('lfs_pointer', `${node.oid} is a Git LFS pointer (${blob.data.length} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`);
-    const next = orThrow(replaceOnce(blob.data, change.find, change.replace));
+    const r = replaceOnce(blob.data, change.find, change.replace);
+    if (!r.ok) throw r.error;
+    const next = r.value;
     const leaf = fileLeaf(mode, next, walk.limits, change.path);
     putAt(root, change.comps, lazyNode(leaf.mode, leaf.oid), true, walk.limits);
     created.set(leaf.oid, leaf.data);
