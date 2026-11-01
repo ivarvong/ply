@@ -33,7 +33,7 @@ export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing i
  * @typedef {import('./read.js').OpenedBlob} OpenedBlob
  */
 export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbrev, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
-export { readLog, logWindow } from './log.js';
+export { readLog, logWindow, logOn } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
@@ -109,7 +109,8 @@ export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';
 export { createTransport, redactUrl } from './http.js';
 export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcache.js';
-export { isFilterRejection } from './fetch.js';
+export { isFilterRejection, isFilterRefusal } from './fetch.js';
+export { fetchPackFiltered } from './fetchpack.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';
 export { compareVersionRefnames } from './refs.js';
 export { concat } from './bytes.js';
