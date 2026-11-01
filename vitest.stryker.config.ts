@@ -25,6 +25,7 @@ const MUTATION_FILES = [
   'test/describe-pack.test.js',
   'test/space/push-outcome.test.js',
   'test/result.test.js',
+  'test/version-refname.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {
