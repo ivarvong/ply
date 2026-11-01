@@ -2,7 +2,8 @@
 // wrappers. Exact values and boundaries, so a mutant of any comparison or field fails here (stryker: vitest.stryker).
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { ok, err, map, mapErr, andThen, match, assertNever } from '../src/result.js';
+import { ok, err, map, mapErr, andThen, match, matchKind, assertNever, errorKind, errorKindAttr } from '../src/result.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { fail, plyError, thrown, orThrow, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
 import { checkLimit, readLimit, limitExceeded, finiteLimit, requireLimit, limitError, DEFAULT_LIMITS } from '../src/limits.js';
 
@@ -20,7 +21,29 @@ test('Result: ok/err shapes, map/mapErr/andThen short-circuit, match dispatches 
   assert.equal(andThen(e, () => assert.fail('continued past an Err')), e);
   assert.equal(match({ code: 'a', n: 4 }, { a: u => u.n + 1, b: () => 0 }), 5);
   assert.equal(match({ code: 'b' }, { a: () => 1, b: () => 2 }), 2);
+  assert.equal(matchKind({ kind: 'a', n: 4 }, { a: u => u.n + 1, b: () => 0 }), 5);
+  assert.equal(matchKind({ kind: 'b' }, { a: () => 1, b: () => 2 }), 2);
   assert.throws(() => assertNever('z'), { message: 'unreachable: z' });
+});
+
+test('errorKind is the span attribute: miss, then kind, then reason, then code', () => {
+  assert.equal(errorKind({ code: 'not_found', miss: { kind: 'path' }, kind: 'other', reason: 'short_read' }), 'path');
+  assert.equal(errorKind({ code: 'bad_request', kind: 'not_string', reason: 'short_read' }), 'not_string');
+  assert.equal(errorKind({ code: 'remote_error', reason: 'not_our_ref' }), 'not_our_ref');
+  assert.equal(errorKind({ code: 'timeout' }), 'timeout');
+  assert.equal(errorKind({ miss: { kind: 1 }, code: 'not_found' }), 'not_found');
+  assert.equal(errorKind({ code: 7 }), 'Error');
+  assert.equal(errorKind(null), 'Error');
+  assert.equal(errorKind('x'), 'Error');
+  const e = { code: 'not_found', miss: { kind: 'head_absent' } };
+  assert.deepEqual(errorKindAttr(e), { 'error.kind': 'head_absent' });
+  const ex = arrayExporter();
+  const span = new Tracer({ exporter: ex }).start('git.result.kind');
+  span.set(errorKindAttr(e)).error(e, e.code).end();
+  const flat = flattenLine(ex.lines[0])[0];
+  assert.equal(flat.attrs['error.kind'], 'head_absent');
+  assert.equal(flat.attrs['error.type'], 'not_found');
+  assert.equal(flat.name, 'git.result.kind');
 });
 
 test('PlyError: one constructor, an Error carrying its fields; fail wraps it; orThrow throws it as is', () => {
