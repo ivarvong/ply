@@ -196,7 +196,8 @@ export function validateTreeSpec({ ref = 'refs/heads/main', base = ref, files, a
   const maxPush = requireLimit(limits, 'maxPushBytes');
   let pushBytes = 0;
   for (const e of entries) {
-    const next = pushBytes + (e.data?.length ?? 0);
+    const bytes = e.data;
+    const next = pushBytes + (bytes ? bytes.length : 0);
     if (next > maxPush) throw limitError('push bytes', next, maxPush);
     pushBytes = next;
   }
