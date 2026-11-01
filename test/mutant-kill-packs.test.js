@@ -165,6 +165,12 @@ test('parsePack: the six pack types are accepted and 0 and 5 refused, by kind', 
   assert.deepEqual([r.value.stats.full, r.value.stats.refDelta, r.value.stats.ofsDelta], [4, 1, 0]);
 });
 
+test('resolvePack refuses a type id outside the six before hashing it', () => {
+  const data = te.encode('x');
+  const parsed = { objects: [{ offset: PACK_HEADER_BYTES, type: 5, size: data.length, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] };
+  errOf(resolvePackResult(parsed), 'pack_corrupt', 'pack: bad object type 5');
+});
+
 test('resolvePack hashes each full object once', async () => {
   const { pack } = await buildPack(Array.from({ length: 5 }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(`blob ${i}`) })));
   const parsed = parsePack(pack);

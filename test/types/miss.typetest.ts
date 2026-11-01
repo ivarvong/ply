@@ -21,16 +21,16 @@ const label = (m: Miss): string => {
     case 'submodule': return m.commit;
     case 'commit': return m.miss.kind === 'absent' ? m.miss.oid : m.miss.type;
     case 'repository': return 'repository';
-    default: return assertNever(m);
   }
+  return assertNever(m);
 };
 void label;
 const missingKind = (m: Miss): string => {
   switch (m.kind) {
     case 'ref': return m.ref;
-    // @ts-expect-error not exhaustive: m is not never here
-    default: return assertNever(m);
   }
+  // @ts-expect-error not exhaustive: m is not never here
+  return assertNever(m);
 };
 void missingKind;
 

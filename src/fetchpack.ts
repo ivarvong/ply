@@ -2,13 +2,14 @@
 // bytes arrive), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 import type { Span } from './otel.js';
-import type { Attrs, Loose, Transport } from './transport.js';
+import type { Attrs, Transport } from './transport.js';
 import type { FetchOpts, PackObject, V2State } from './fetch.js';
 import { concat } from './bytes.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs } from './fetch.js';
+import { corruptCacheHit } from './cachestatus.js';
 
 // packresolve.js is not converted yet: its shapes are whatever it declares.
 type Parsed = ReturnType<typeof parsePack>;
@@ -71,7 +72,7 @@ export async function fetchPackOnce(t: Transport, opts: FetchOpts, { external, r
 export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> {
   try { return await fetchPackOnce(t, opts, extra); } catch (e) {
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose (transport.ts)
-    if ((e as Loose)?.code !== 'pack_corrupt' || (e as { cacheStatus?: unknown } | null | undefined)?.cacheStatus !== 'HIT' || Boolean(opts.bypassCache)) throw e;
+    if (!corruptCacheHit(e) || Boolean(opts.bypassCache)) throw e;
     return fetchPackOnce(t, { ...opts, bypassCache: true }, extra);
   }
 }

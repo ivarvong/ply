@@ -10,7 +10,7 @@ import { ok, err, assertNever } from './result.js';
 import type { InflateStats } from './inflate.js';
 import { inflateResult } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
-import { TYPE, TYPE_NAME, hashObject } from './objects.js';
+import { TYPE, hashObject, nameOfTypeId } from './objects.js';
 import type { ObjType } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
 import { DEFAULT_LIMITS, limitError, requireLimit, checkLimit, readLimit } from './limits.js';
@@ -18,6 +18,7 @@ import { DEFAULT_LIMITS, limitError, requireLimit, checkLimit, readLimit } from 
 // oxlint-disable-next-line import/no-cycle -- see above
 import { spliceDelta } from './pack.js';
 import { takeResult, shortRead } from './bytes.js';
+import type { PackKind } from './format.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, OID_BYTES, UINT32_BYTES,
   DELTA_SIZE_MIN, DELTA_COPY, DELTA_COPY_MAX, DELTA_OFF4_FACTOR, DELTA_OFF_SHIFT,
@@ -27,18 +28,46 @@ import {
   OBJ_SIZE_NEXT_BASE, VARINT_BITS, VARINT_MAX_SHIFT, varintScale, BE32_SHIFTS,
 } from './format.js';
 
+export type { PackKind };
 type Corrupt = ErrorOf<'pack_corrupt'>;
 // Everything a buffered pack can be refused for: corrupt bytes, a limit, or a caller's limit that bounds nothing.
 export type PackError = Corrupt | ErrorOf<'limit_exceeded'> | ErrorOf<'bad_request'>;
 const corrupt = (msg: string): Err<Corrupt> => fail('pack_corrupt', msg);
 const short = (buf: Uint8Array, p: number): Err<Corrupt> => err(shortRead('pack_corrupt', p, 1, buf.length));
-// TYPE_NAME's keys are the type numbers; read by a type number, a name may be absent (a widening, so no runtime alias).
-type TypeNames = Readonly<Record<number, PackKind | undefined>>;
 // Indexed reads in range of a checked length say `as number` (free at runtime, unlike a `?? 0` per byte; not the `!`
 // src/ forbids). A read that may run past the end reads `buf[p]` and checks it against undefined: a short read.
 
 // The six pack object types git writes (pack.h OBJ_*): four objects and two deltas. 0 and 5 name nothing.
-export type PackKind = 'commit' | 'tree' | 'blob' | 'tag' | 'ofs_delta' | 'ref_delta';
+type HeaderType = PackKind | 'invalid';
+const headerType = (n: number): HeaderType => {
+  switch (n) {
+    case TYPE.COMMIT:
+    case TYPE.TREE:
+    case TYPE.BLOB:
+    case TYPE.TAG:
+    case TYPE.OFS_DELTA:
+    case TYPE.REF_DELTA:
+      return nameOfTypeId(n);
+    default:
+      return 'invalid';
+  }
+};
+// A type id this pack will hash. An id outside the six is corrupt, the same refusal as a bad header.
+const objectName = (type: number): Result<PackKind, Corrupt> => {
+  const kind = headerType(type);
+  switch (kind) {
+    case 'invalid': return corrupt(`pack: bad object type ${type}`);
+    case 'commit':
+    case 'tree':
+    case 'blob':
+    case 'tag':
+    case 'ofs_delta':
+    case 'ref_delta':
+      return ok(kind);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(kind);
+};
 
 // Past VARINT_MAX_SHIFT a group used to scale by Infinity, and 0 × Infinity is NaN: every `size > limit` check is false
 // on NaN, so the size reached callers (#13). Checked before the byte is read, so a hostile header costs ≤ 10 bytes.
@@ -192,32 +221,36 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
     p = header.value.next;
     let baseOffset: number | undefined;
     let baseOid: string | undefined;
-    const kind = (TYPE_NAME as TypeNames)[type];
-    switch (kind) {
-      case 'commit': case 'tree': case 'blob': case 'tag': stats.full++; break;
-      case 'ofs_delta': {
-        const ofs = readOfsDeltaResult(buf, p);
-        if (!ofs.ok) return ofs;
-        p = ofs.value.next;
-        baseOffset = offset - ofs.value.off;
-        // git index-pack: "delta base offset is out of bound" unless 0 < base < this object. An offset of 0 names the
-        // object itself, which used to recurse to the chain limit and come back limit_exceeded instead of corrupt.
-        if (ofs.value.off === 0) return corrupt(`pack: ofs delta at ${offset} is its own base`);
-        if (baseOffset < PACK_HEADER_BYTES) return corrupt(`pack: ofs delta base before pack start at ${offset}`);
-        stats.ofsDelta++;
-        break;
+    const kindResult = ((): Result<PackKind, PackError> => {
+      const raw = headerType(type);
+      switch (raw) {
+        case 'commit': case 'tree': case 'blob': case 'tag': stats.full++; return ok(raw);
+        case 'ofs_delta': {
+          const ofs = readOfsDeltaResult(buf, p);
+          if (!ofs.ok) return ofs;
+          p = ofs.value.next;
+          baseOffset = offset - ofs.value.off;
+          // git index-pack: "delta base offset is out of bound" unless 0 < base < this object. An offset of 0 names the
+          // object itself, which used to recurse to the chain limit and come back limit_exceeded instead of corrupt.
+          if (ofs.value.off === 0) return corrupt(`pack: ofs delta at ${offset} is its own base`);
+          if (baseOffset < PACK_HEADER_BYTES) return corrupt(`pack: ofs delta base before pack start at ${offset}`);
+          stats.ofsDelta++;
+          return ok(raw);
+        }
+        case 'ref_delta': {
+          // a view: the pack's 20-byte trailer is still ahead of p (buf holds minPack bytes, and every object header byte
+          // read so far came before the trailer), so OID_BYTES at p are inside buf; the trailer check below places them
+          baseOid = toHex(buf.subarray(p, p + OID_BYTES)); p += OID_BYTES;
+          stats.refDelta++;
+          return ok('ref_delta');
+        }
+        case 'invalid': return corrupt(`pack: bad object type ${type} at ${offset}`);
       }
-      case 'ref_delta': {
-        // a view: the pack's 20-byte trailer is still ahead of p (buf holds minPack bytes, and every object header byte
-        // read so far came before the trailer), so OID_BYTES at p are inside buf; the trailer check below places them
-        baseOid = toHex(buf.subarray(p, p + OID_BYTES)); p += OID_BYTES;
-        stats.refDelta++;
-        break;
-      }
-      case undefined: return corrupt(`pack: bad object type ${type} at ${offset}`);
       // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-      default: return assertNever(kind);
-    }
+      return assertNever(raw);
+    })();
+    if (!kindResult.ok) return kindResult;
+    const kind = kindResult.value;
     if (size > maxObjectSize) return err(limitError('pack object size', size, maxObjectSize));
     // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
     if (stats.inflated + size > maxInflatedTotal) return err(limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal));
@@ -415,7 +448,12 @@ export function resolvePackResult(
     if (base === undefined) {
       core = { type: obj.type, data: obj.data, chain: 0 };
       // a full object was hashed once, where the loop below registered it
-      oid = obj.oid ?? hashObject(String((TYPE_NAME as TypeNames)[core.type]), core.data);
+      if (typeof obj.oid === 'string') oid = obj.oid;
+      else {
+        const hashed = objectName(core.type);
+        if (!hashed.ok) return failed(hashed.error);
+        oid = hashObject(hashed.value, core.data);
+      }
     } else {
       // Chain length, not recursion depth: a base resolved earlier comes back from memo, so depth alone let a chain
       // emitted base-first grow without bound (#14). An external base is chain 0.
@@ -428,7 +466,9 @@ export function resolvePackResult(
       if (!patched.ok) return failed(patched.error);
       held += patched.value.out.length;
       core = { type: base.type, data: patched.value.out, chain, deltaOps: patched.value.ops };
-      oid = hashObject(String((TYPE_NAME as TypeNames)[core.type]), core.data);
+      const hashed = objectName(core.type);
+      if (!hashed.ok) return failed(hashed.error);
+      oid = hashObject(hashed.value, core.data);
     }
     const r: ResolvedObject = Object.assign(core, {
       oid, offset: obj.offset, size: obj.size, compressed: obj.compressed,
@@ -443,7 +483,9 @@ export function resolvePackResult(
   // Full objects first: each is hashed here, once, and registered, so a REF_DELTA finds it by id.
   for (const o of parsed.objects) {
     if (o.baseOffset !== undefined || o.baseOid !== undefined) continue;
-    o.oid = hashObject(String((TYPE_NAME as TypeNames)[o.type]), o.data);
+    const hashed = objectName(o.type);
+    if (!hashed.ok) return err(hashed.error);
+    o.oid = hashObject(hashed.value, o.data);
     byOid.set(o.oid, o);
     const s = resolveObj(o);
     if (s.tag === 'failed') return err(s.error);
@@ -454,23 +496,28 @@ export function resolvePackResult(
   let pending = parsed.objects.filter(o => o.baseOffset !== undefined || o.baseOid !== undefined);
   while (pending.length > 0) {
     const next: PackObject[] = [];
-    let missing: string | undefined;
+    let missingOid = '';
+    let haveMissing = false;
     const waited: UnresolvedBase[] = [];
     for (const o of pending) {
       const s = resolveObj(o);
       switch (s.tag) {
-        case 'resolved': break;
-        case 'waiting': next.push(o); waited.push({ object: o, oid: s.oid }); missing ??= s.oid; break;
         case 'failed': return err(s.error);
-        // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-        default: return assertNever(s);
+        case 'waiting':
+          next.push(o);
+          waited.push({ object: o, oid: s.oid });
+          if (!haveMissing) { missingOid = s.oid; haveMissing = true; }
+          continue;
+        case 'resolved': continue;
       }
+      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(s);
     }
     if (next.length === pending.length) {
       // no progress even with external bases: the first waiting object's base is missing from the pack and the caller
       if (phase === 'external') {
         if (collectMissing) return ok({ objects: resolved, stats, unresolved: waited });
-        return corrupt(`pack: ref delta base ${String(missing)} not found`);
+        return corrupt(`pack: ref delta base ${missingOid} not found`);
       }
       phase = 'external'; // every in-pack base is known now; the rest are thin bases
     }
@@ -518,17 +565,19 @@ export type PackLayout = {
 };
 
 function wireOf(n: number): ObjType {
-  switch (n) {
-    case TYPE.COMMIT:
-    case TYPE.TREE:
-    case TYPE.BLOB:
-    case TYPE.TAG:
-    case TYPE.OFS_DELTA:
-    case TYPE.REF_DELTA:
-      return n;
-    // Stryker disable next-line ConditionalExpression: parsePack never returns an object of any other type
-    default: return assertNever(n as never); // oxlint-disable-line typescript/no-unsafe-type-assertion -- parsePack only keeps the six types
+  // parsePack refuses an id outside the six before layout. objectName is that same refusal, so a bad id is pack_corrupt.
+  const named = objectName(n);
+  if (!named.ok) throw named.error;
+  switch (named.value) {
+    case 'commit': return TYPE.COMMIT;
+    case 'tree': return TYPE.TREE;
+    case 'blob': return TYPE.BLOB;
+    case 'tag': return TYPE.TAG;
+    case 'ofs_delta': return TYPE.OFS_DELTA;
+    case 'ref_delta': return TYPE.REF_DELTA;
   }
+  // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(named.value);
 }
 function resolvedObjType(n: number): ResolvedObjType | null {
   switch (n) {
