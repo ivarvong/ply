@@ -1420,7 +1420,7 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
 
 test('resolveAbbrev: advertised oids and peeled targets; resolveCommit asks once and lets a ref name win', async () => {
   const listed = rows => ({ refs: new Map(rows.map(r => [r.name, r])), head: null, unborn: null });
-  const row = (name, oid, peeled) => (peeled === undefined ? { oid, name } : { oid, name, peeled });
+  const row = (name, oid, peeled = null) => ({ oid, name, peeled, 'symref-target': null });
   const abbrev = (prefix, rows) => {
     const r = resolveAbbrev(prefix, listed(rows));
     assert.equal(r.ok, true, r.ok ? '' : r.error.message);

@@ -775,22 +775,22 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
 
 test('ls-refs lines and report-status', () => {
   const id = oid(4);
-  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main`), { oid: id, name: 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main`), { oid: id, name: 'refs/heads/main', peeled: null, 'symref-target': null });
   assert.deepEqual(parseLsRefLine(`${id} HEAD symref-target:refs/heads/main peeled:${id}`), {
     oid: id, name: 'HEAD', 'symref-target': 'refs/heads/main', peeled: id,
   });
-  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 bare`), { oid: id, name: 'refs/tags/v1' });
+  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 bare`), { oid: id, name: 'refs/tags/v1', peeled: null, 'symref-target': null });
   // #16: only symref-target and peeled are kept; a server attribute never overrides the parsed oid or name
-  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:junk name:refs/heads/other`), { oid: id, name: 'refs/heads/main' });
-  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:${oid(5)} name:HEAD __proto__:x constructor:y`), { oid: id, name: 'refs/heads/main' });
-  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled symref-target`), { oid: id, name: 'refs/heads/main' }, 'no colon: not the attribute (git skip_prefix)');
-  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled_ symref-target_`), { oid: id, name: 'refs/heads/main' }, 'no colon: never a key cut one char short');
-  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main  peeled:${id}  `), { oid: id, name: 'refs/heads/main', peeled: id }, 'doubled spaces');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:junk name:refs/heads/other`), { oid: id, name: 'refs/heads/main', peeled: null, 'symref-target': null });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main oid:${oid(5)} name:HEAD __proto__:x constructor:y`), { oid: id, name: 'refs/heads/main', peeled: null, 'symref-target': null });
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled symref-target`), { oid: id, name: 'refs/heads/main', peeled: null, 'symref-target': null }, 'no colon: not the attribute (git skip_prefix)');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main peeled_ symref-target_`), { oid: id, name: 'refs/heads/main', peeled: null, 'symref-target': null }, 'no colon: never a key cut one char short');
+  assert.deepEqual(parseLsRefLine(`${id} refs/heads/main  peeled:${id}  `), { oid: id, name: 'refs/heads/main', peeled: id, 'symref-target': null }, 'doubled spaces');
   // the name is never read as an attribute, with or without attributes after it
-  assert.deepEqual(parseLsRefLine(`${id} symref-target:refs/heads/x`), { oid: id, name: 'symref-target:refs/heads/x' });
-  assert.deepEqual(parseLsRefLine(`${id} peeled:junk symref-target:refs/heads/main`), { oid: id, name: 'peeled:junk', 'symref-target': 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${id} symref-target:refs/heads/x`), { oid: id, name: 'symref-target:refs/heads/x', peeled: null, 'symref-target': null });
+  assert.deepEqual(parseLsRefLine(`${id} peeled:junk symref-target:refs/heads/main`), { oid: id, name: 'peeled:junk', 'symref-target': 'refs/heads/main', peeled: null });
   // git reads an oid in either case (parse_oid_hex_algop: hexval); ply keeps it lower-case (the advertisement space, record=upperPeeled)
-  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 peeled:${'AB'.repeat(20)}`), { oid: id, name: 'refs/tags/v1', peeled: 'ab'.repeat(20) });
+  assert.deepEqual(parseLsRefLine(`${id} refs/tags/v1 peeled:${'AB'.repeat(20)}`), { oid: id, name: 'refs/tags/v1', peeled: 'ab'.repeat(20), 'symref-target': null });
   for (const bad of ['junk', 'GB'.repeat(20), `${oid(5)}0`, '']) {
     const line = `${id} refs/tags/v1 peeled:${bad}`;
     throws(() => parseLsRefLine(line), 'protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
@@ -798,14 +798,14 @@ test('ls-refs lines and report-status', () => {
   throws(() => parseLsRefLine('ERR no such ref'), 'remote_error', 'remote: no such ref');
   throws(() => parseLsRefLine('nope'), 'protocol', 'ls-refs: malformed line "nope"');
   // an empty second field is a ref named "" (process_ref_v2), and an `unborn` record is no ref (record=emptyName, unbornOther)
-  assert.deepEqual(parseLsRefLine(`${id} `), { oid: id, name: '' });
+  assert.deepEqual(parseLsRefLine(`${id} `), { oid: id, name: '', peeled: null, 'symref-target': null });
   assert.equal(parseLsRefLine('unborn HEAD symref-target:refs/heads/main'), null);
   assert.equal(parseLsRefLine('unborn '), null);
   throws(() => parseLsRefLine('unborn'), 'protocol', 'ls-refs: malformed line "unborn"');
   throws(() => parseLsRefLine(`${'zz'.repeat(20)} refs/heads/main`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${'zz'.repeat(20)} refs/heads/main`)}`);
   throws(() => parseLsRefLine(`${'ab'.repeat(32)} refs/heads/main`), 'unsupported', 'unsupported object-format: only sha1 repositories are supported');
   const upper = 'ab'.repeat(20).toUpperCase();
-  assert.deepEqual(parseLsRefLine(`${upper} refs/heads/main`), { oid: 'ab'.repeat(20), name: 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${upper} refs/heads/main`), { oid: 'ab'.repeat(20), name: 'refs/heads/main', peeled: null, 'symref-target': null });
   throws(() => parseLsRefLine(`${'AB'.repeat(32)} refs/heads/main`), 'unsupported', 'unsupported object-format: only sha1 repositories are supported');
   const long = 'not a ref line '.repeat(8);
   throws(() => parseLsRefLine(long), 'protocol', `ls-refs: malformed line ${JSON.stringify(long.slice(0, 60))}`);
@@ -1030,9 +1030,9 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(decideOutcome(classifyReport(['unpack ok\n', 'ng refs/heads/a no\n'].map(l => te.encode(l)), one)), { tag: 'rejected', code: 'push_rejected', refs: [{ ref: 'refs/heads/a', reason: 'no', cls: 'rejected' }] });
 
   const ref = `${oid(4)} refs/heads/a :val`;
-  assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a' });
+  assert.deepEqual(parseLsRefLine(ref), { oid: oid(4), name: 'refs/heads/a', peeled: null, 'symref-target': null });
   // a doubled space after the oid: an empty name, then `refs/heads/a` as an attribute token (process_ref_v2 splits on every space)
-  assert.deepEqual(parseLsRefLine(`${oid(4)}  refs/heads/a`), { oid: oid(4), name: '' });
+  assert.deepEqual(parseLsRefLine(`${oid(4)}  refs/heads/a`), { oid: oid(4), name: '', peeled: null, 'symref-target': null });
   const spaced = parseLsRefLine(`${oid(4)} refs/heads/a symref-target:b  peeled:${oid(5)}`);
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 

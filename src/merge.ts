@@ -27,7 +27,7 @@ import type { LsRefsResult } from './lsrefs.js';
 import type { OperationOpts, Outcome } from './operation.js';
 import { fail, orThrow } from './errors.js';
 import { assertNever, err, getOrElse, isNone, isSome, mapOption, none, ok, some } from './result.js';
-import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
+import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
@@ -664,7 +664,7 @@ export const operationOpts = (options: Readonly<Record<string, unknown>>, attrs:
 // an annotated tag's peeled commit, as ls-refs reports it
 const peeledOf = (refs: LsRefsResult['refs'], ref: string): Option<string> => {
   const r = mapGet(refs, ref);
-  return r.tag === 'none' ? none : readKey(r.value, 'peeled');
+  return r.tag === 'none' ? none : fromNullish(r.value.peeled);
 };
 
 // Effect: a landing that writes no merge commit: nothing to do, or the fast-forward push.

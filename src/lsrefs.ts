@@ -31,11 +31,11 @@ const OID_SHA256 = new RegExp(`^[0-9a-fA-F]{${SHA256_HEX_CHARS}}$`);
 const UNBORN = 'unborn';
 
 // One ls-refs line, as connect.c process_ref_v2 reads it: split on every space, so a doubled space is an empty field.
-// Returns { oid, name, peeled?, symref-target? }, or null for an `unborn <name> …` line (it is no ref: parseUnbornLine
+// Returns { oid, name, peeled, symref-target } (null where the line has no such attribute), or null for an `unborn <name> …` line (it is no ref: parseUnbornLine
 // reads it).
 // One listed ref. Only `peeled` and `symref-target` are kept from the attributes, and only when the line carries them
 // (a key that is present or not: the readers in changes, merge and read test for it).
-export type LsRef = { readonly oid: string; readonly name: string; readonly peeled?: string; readonly 'symref-target'?: string };
+export type LsRef = { readonly oid: string; readonly name: string; readonly peeled: string | null; readonly 'symref-target': string | null };
 // An unborn HEAD: a symref to a branch that has no commit yet (an empty `git init --bare -b main` is
 // `{ name: 'HEAD', target: 'refs/heads/main' }`). Only HEAD is ever reported, as git's client records only HEAD.
 export type LsRefsUnborn = { readonly name: 'HEAD'; readonly target: string };
@@ -62,7 +62,7 @@ export function parseLsRefLineResult(line: string): Result<LsRef | null, PlyErro
   if (!OID_SHA1.test(oid)) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
   // server attribute can never stand in for the parsed oid or name. A bad peeled oid is malformed (git: invalid ls-refs response).
-  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: oid.toLowerCase(), name };
+  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: oid.toLowerCase(), name, [PEELED]: null, [SYMREF_TARGET]: null };
   for (const a of attrs) {
     const colon = a.indexOf(':');
     // Stryker disable next-line EqualityOperator: a token starting with ':' has the empty key, which is neither kept attribute
