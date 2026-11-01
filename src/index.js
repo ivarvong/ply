@@ -11,7 +11,11 @@ export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing i
  * Why a commit id is not a commit the remote will serve. Nested under Miss when `kind` is `commit`.
  * @typedef {import('./errors.js').CommitMiss} CommitMiss
  */
-export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, walkPath, fetchCommit } from './read.js';
+/**
+ * A blob from the caller's transport. `kind: 'too_big'` is the pack object header's size above `maxBytes`; the fetch was cancelled.
+ * @typedef {import('./read.js').OpenedBlob} OpenedBlob
+ */
+export { readFile, listTree, readCommit, commitView, resolveCommit, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
 export { readLog, logWindow } from './log.js';
 export { mergeBranch, fastForward, deleteBranch, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';

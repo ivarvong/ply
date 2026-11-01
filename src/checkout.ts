@@ -29,7 +29,7 @@
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
-import { thrown as fail } from './errors.js';
+import { thrown as fail, orThrow } from './errors.js';
 import type { Miss } from './errors.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
@@ -187,15 +187,15 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
         for (const e of byOid.get(oid) as CheckoutEntry[]) {
           // a streamed blob is opened per path: one stream cannot be read twice, and tee() would hold the whole blob
-          const blob = data ? { size: data.length, stream: bytesStream(data) } : await openBlob(t, tracer, span, oid);
+          const opened = data ? { size: data.length, stream: bytesStream(data) } : orThrow(await openBlob(t, oid, { follows: span }));
           // oxlint-disable-next-line max-depth -- try, batch, group, paths of one blob: the iterator's shape, as before
           if (data) stat.buffered++; else stat.streamed++;
-          stat.bytes += blob.size;
+          stat.bytes += opened.size;
           // gitlinks were yielded above and are not in byOid. The arm is what makes `mode` discriminate CheckoutFile
           // (narrowing `e.mode` does not narrow the entry object, and a spread would not either).
           yield e.mode === MODE_COMMIT
             ? { path: e.path, oid: e.oid, mode: e.mode, size: 0, stream: null }
-            : { path: e.path, oid: e.oid, mode: e.mode, size: blob.size, stream: blob.stream };
+            : { path: e.path, oid: e.oid, mode: e.mode, size: opened.size, stream: opened.stream };
         }
       }
     }

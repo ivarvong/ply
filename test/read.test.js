@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
-import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit } from '../src/read.js';
+import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit, openBlob, readBlob } from '../src/read.js';
 import { createTransport } from '../src/http.js';
 import { fetchObject } from '../src/fetch.js';
 import { parseIdent, TYPE } from '../src/objects.js';
@@ -374,4 +374,47 @@ test('readCommit fetches the commit object only: one tree:0 deepen-1 fetch, no t
   assert.equal(fetches[0].attrs['git.object.type'], 'commit');
   assert.equal(fetches[0].attrs['git.fetch.filter'], 'tree:0'); assert.equal(fetches[0].attrs['git.fetch.deepen'], 1);
   assert.ok(!spans.some(s => s.name === 'git.read.tree'));
+});
+
+test('openBlob and readBlob match git cat-file; too_big is the object header', async () => {
+  // two near-copies, so git stores one as a delta. openBlob asks for one oid and sends no have, so upload-pack has no
+  // in-pack base and sends the object whole. The bytes are still cat-file's.
+  git(R.work, ['checkout', '-q', '-B', 'deltas', 'main']);
+  const base = Buffer.alloc(4000, 0x61);
+  const near = Buffer.from(base); near[20] = 0x62;
+  writeFileSync(join(R.work, 'delta-a.bin'), base);
+  writeFileSync(join(R.work, 'delta-b.bin'), near);
+  git(R.work, ['add', 'delta-a.bin', 'delta-b.bin']);
+  git(R.work, ['-c', 'user.name=seed', '-c', 'user.email=seed@x', 'commit', '-q', '-m', 'deltas']);
+  git(R.work, ['push', '-q', R.bare, 'HEAD:refs/heads/deltas']);
+  git(R.work, ['checkout', '-q', 'main']);
+  git(R.bare, ['repack', '-a', '-d', '-f']);
+  const packs = readdirSync(join(R.bare, 'objects', 'pack')).filter(n => n.endsWith('.pack'));
+  const listed = packs.map(n => git(R.bare, ['verify-pack', '-v', join(R.bare, 'objects', 'pack', n)])).join('\n');
+  const deltified = listed.split('\n').filter(l => /\sblob\s.*\s[0-9a-f]{40}$/.test(l)).map(l => l.slice(0, 40));
+  assert.ok(deltified.length >= 1, 'the fixture pack stores a blob as a delta');
+  const specs = ['empty.txt', 'README.md', 'run.sh', 'big.bin', 'deltas:delta-a.bin', 'deltas:delta-b.bin'];
+  for (const spec of specs) {
+    const oid = git(R.work, ['rev-parse', `${spec.includes(':') ? spec : `main:${spec}`}`]).trim();
+    const size = Number(git(R.work, ['cat-file', '-s', oid]));
+    const bytes = gitBuf(R.work, ['cat-file', 'blob', oid]);
+    assert.equal(bytes.length, size);
+    const ex = arrayExporter(); const tr = new Tracer({ exporter: ex });
+    const capped = await openBlob(createTransport(R.url, { tracer: tr }), oid, { maxBytes: Math.max(0, size - 1), follows: tr.start('cap') });
+    if (size === 0) {
+      assert.equal(capped.ok && capped.value.kind, 'stream', spec);
+      if (capped.ok && capped.value.kind === 'stream') assert.equal(capped.value.size, 0);
+    } else {
+      assert.equal(capped.ok, true, spec);
+      if (capped.ok) assert.deepEqual(capped.value, { kind: 'too_big', size });
+      const span = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.read.blob');
+      assert.equal(span.attrs['git.read.blob.header_only'], true, spec);
+      assert.equal(span.attrs['git.read.blob.bytes'], undefined, spec);
+    }
+    const got = await readBlob(createTransport(R.url, { tracer: tracer() }), oid, { maxBytes: size });
+    assert.equal(got.ok, true, spec);
+    if (got.ok && got.value.kind === 'bytes') assert.deepEqual(Buffer.from(got.value.data), bytes);
+    else assert.fail(`${spec} was ${got.ok ? got.value.kind : got.error.code}`);
+  }
+  assert.ok(specs.map(spec => git(R.work, ['rev-parse', `${spec.includes(':') ? spec : `main:${spec}`}`]).trim()).some(oid => deltified.includes(oid)));
 });
