@@ -13,7 +13,7 @@
 import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import { LIMIT_MERGE_BLOB } from './limits.js';
-import { ok, err, assertNever, getOrElse, none, some } from './result.js';
+import { ok, err, assertNever, getOrElse, isSome, none, some } from './result.js';
 import { plyError } from './errors.js';
 import { bytesToStr, popLast } from './attributes.js';
 import { atOr, mapGet, withDefaults } from './absent.js';
@@ -302,7 +302,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
             for (let k = 1; h1[i1 - k] === h2[i2 - k]; k++) if (k === SNAKE_CNT) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
-        if (spl.tag === 'some') return { ...spl.value, minLo: true, minHi: false };
+        if (isSome(spl)) return { ...spl.value, minLo: true, minHi: false };
         best = 0;
         for (let d = bmax; d >= bmin; d -= 2) {
           const dd = d > bmid ? d - bmid : bmid - d; i1 = kb(d); i2 = i1 - d;
@@ -311,7 +311,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
             for (let k = 0; h1[i1 + k] === h2[i2 + k]; k++) if (k === SNAKE_CNT - 1) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
-        if (spl.tag === 'some') return { ...spl.value, minLo: false, minHi: true };
+        if (isSome(spl)) return { ...spl.value, minLo: false, minHi: true };
       }
       if (ec >= mxcost) {
         let fbest = -1;
