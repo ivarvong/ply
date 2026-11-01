@@ -4,6 +4,7 @@
 import { fail, orThrow } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { ok, assertNever } from './result.js';
+import { decideObjectFormat } from './closed.js';
 import type { Result } from './result.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
@@ -95,29 +96,49 @@ export async function receiveCaps(t: CapsTransport): Promise<Set<string>> {
 // (builtin/receive-pack.c), so an unchecked atomic push lands ref by ref, and unchecked option lines are read as the
 // pack ("unpacker error"): push takes them only as the CheckedCaps this makes.
 export type PushWants = { readonly atomic?: boolean; readonly pushOptions?: readonly string[] };
-export type CapsProblem = { readonly tag: 'objectFormat'; readonly format: string } | { readonly tag: 'noAtomic' } | { readonly tag: 'noPushOptions' };
-// Pure: the first unmet need, or null.
-export function capsProblem(caps: ReadonlySet<string>, { atomic = false, pushOptions = [] }: PushWants = {}): CapsProblem | null {
-  const format = objectFormat(caps) ?? 'sha1';
-  if (format !== 'sha1') return { tag: 'objectFormat', format };
-  if (atomic && !caps.has('atomic')) return { tag: 'noAtomic' };
-  if (pushOptions.length > 0 && !caps.has('push-options')) return { tag: 'noPushOptions' };
-  return null;
+export type CapsProblem =
+  | { readonly tag: 'ok' }
+  | { readonly tag: 'objectFormat'; readonly format: string }
+  | { readonly tag: 'noAtomic' }
+  | { readonly tag: 'noPushOptions' };
+// Pure: ok, or the first unmet need. There is no null.
+export function capsProblem(caps: ReadonlySet<string>, { atomic = false, pushOptions = [] }: PushWants = {}): CapsProblem {
+  const advertised = objectFormat(caps);
+  const decision = decideObjectFormat(typeof advertised === 'string' ? advertised : 'sha1');
+  switch (decision.tag) {
+    case 'refused': return { tag: 'objectFormat', format: decision.format };
+    case 'ok': {
+      if (atomic && !caps.has('atomic')) return { tag: 'noAtomic' };
+      if (pushOptions.length > 0 && !caps.has('push-options')) return { tag: 'noPushOptions' };
+      return { tag: 'ok' };
+    }
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(decision);
 }
-const problemText = (p: CapsProblem): string => {
+const problemText = (p: Exclude<CapsProblem, { readonly tag: 'ok' }>): string => {
   switch (p.tag) {
     case 'objectFormat': return `server repository is object-format ${p.format}`;
     case 'noAtomic': return 'server does not advertise atomic';
     case 'noPushOptions': return 'server does not advertise push-options';
-    default: return assertNever(p);
   }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(p);
 };
 // Pure: the push's atomic and push options, checked against the advertisement.
 export function checkPushCaps(caps: ReadonlySet<string>, want: PushWants = {}): Result<CheckedCaps, ErrorOf<'unsupported'>> {
   const problem = capsProblem(caps, want);
-  if (problem !== null) return fail('unsupported', problemText(problem), { caps: [...caps] });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the one place a CheckedCaps is made: the brand is a type (push.ts)
-  return ok({ atomic: want.atomic ?? false, pushOptions: want.pushOptions ?? [] } as CheckedCaps);
+  switch (problem.tag) {
+    case 'objectFormat':
+    case 'noAtomic':
+    case 'noPushOptions':
+      return fail('unsupported', problemText(problem), { caps: [...caps] });
+    case 'ok':
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the one place a CheckedCaps is made: the brand is a type (push.ts)
+      return ok({ atomic: want.atomic ?? false, pushOptions: want.pushOptions ?? [] } as CheckedCaps);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(problem);
 }
 
 // push(), after reading the advertisement when the push needs a capability (atomic, push-options): one extra GET, only then.

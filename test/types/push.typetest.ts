@@ -24,16 +24,16 @@ const verdict = (o: Outcome): string => {
     case 'rejected': return `${o.code}: ${o.refs.map(r => `${r.ref} ${r.cls}`).join()}`;
     case 'partial': return o.landed.join();
     case 'ambiguous': return o.why;
-    default: return assertNever(o);
   }
+  return assertNever(o);
 };
 void verdict(decideOutcome({ tag: 'malformed', why: 'w' }));
 const incomplete = (o: Outcome): string => {
   switch (o.tag) {
     case 'landed': case 'rejected': case 'partial': return o.tag;
-    // @ts-expect-error 'ambiguous' is not handled
-    default: return assertNever(o);
   }
+  // @ts-expect-error 'ambiguous' is not handled
+  return assertNever(o);
 };
 void incomplete;
 
@@ -44,8 +44,8 @@ const handle = (e: PushError): string => {
     case 'cas_conflict': return `${e.expected} ${e.actual}`;
     case 'push_partial': return e.landed.join() + e.rejected.map(r => r.ref).join();
     case 'ambiguous': return String(e.original);
-    default: return assertNever(e);
   }
+  return assertNever(e);
 };
 const r = outcomeResult({ tag: 'landed' }, { report: null, hookOutput: '', remote: undefined, commands: [] });
 if (!r.ok) void handle(r.error);

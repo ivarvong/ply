@@ -1,5 +1,6 @@
 // Git object encoding/decoding. All pure.
 import { thrown as fail } from './errors.js';
+import { assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
@@ -7,16 +8,18 @@ import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './va
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import type { Limits } from './limits.js';
+import type { ObjType, ObjectTypeName, PackKind } from './format.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
   MODE_S_IFREG, MODE_S_IFLNK, MODE_OWNER_EXEC, TREE_MAX_NAME_BYTES,
-  MODE_S_IFMT, MODE_S_IFDIR, MODE_BITS, MODE_LOW_DIGITS, TREE_SORT_SLASH,
+  MODE_S_IFMT, MODE_S_IFDIR, MODE_BITS, MODE_LOW_DIGITS, TREE_SORT_SLASH, TREE_ENTRY_MIN,
   OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA,
   COMMIT_HEADER_TREE, COMMIT_HEADER_PARENT, COMMIT_HEADER_AUTHOR, COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING,
   TAG_HEADER_OBJECT, TAG_HEADER_TYPE, TAG_HEADER_TAG, TAG_HEADER_TAGGER,
 } from './format.js';
 
-export type ObjType = typeof OBJ_COMMIT | typeof OBJ_TREE | typeof OBJ_BLOB | typeof OBJ_TAG | typeof OBJ_OFS_DELTA | typeof OBJ_REF_DELTA;
+export type { ObjType };
+
 export const TYPE: {
   readonly COMMIT: typeof OBJ_COMMIT; readonly TREE: typeof OBJ_TREE; readonly BLOB: typeof OBJ_BLOB; readonly TAG: typeof OBJ_TAG;
   readonly OFS_DELTA: typeof OBJ_OFS_DELTA; readonly REF_DELTA: typeof OBJ_REF_DELTA;
@@ -29,12 +32,80 @@ export const TYPE_ID: {
   readonly commit: typeof OBJ_COMMIT; readonly tree: typeof OBJ_TREE; readonly blob: typeof OBJ_BLOB; readonly tag: typeof OBJ_TAG;
 } = Object.freeze({ commit: OBJ_COMMIT, tree: OBJ_TREE, blob: OBJ_BLOB, tag: OBJ_TAG });
 
-// A pack type that is an object and not a commit. A commit, a delta, or an unknown type id is null.
-export function nonCommitType(type: number): 'tree' | 'blob' | 'tag' | null {
-  if (type === TYPE.TREE) return 'tree';
-  if (type === TYPE.BLOB) return 'blob';
-  if (type === TYPE.TAG) return 'tag';
-  return null;
+export function nameOfTypeId(type: ObjType): PackKind {
+  switch (type) {
+    case OBJ_COMMIT: return 'commit';
+    case OBJ_TREE: return 'tree';
+    case OBJ_BLOB: return 'blob';
+    case OBJ_TAG: return 'tag';
+    case OBJ_OFS_DELTA: return 'ofs_delta';
+    case OBJ_REF_DELTA: return 'ref_delta';
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(type);
+}
+
+// A type id git writes, or invalid (0, 5, and anything else a pack header can carry).
+type WireType = { readonly tag: 'named'; readonly name: PackKind } | { readonly tag: 'invalid' };
+function wireTypeId(type: number): WireType {
+  switch (type) {
+    case OBJ_COMMIT:
+    case OBJ_TREE:
+    case OBJ_BLOB:
+    case OBJ_TAG:
+    case OBJ_OFS_DELTA:
+    case OBJ_REF_DELTA:
+      return { tag: 'named', name: nameOfTypeId(type) };
+    default:
+      return { tag: 'invalid' };
+  }
+}
+function wireTypeName(typeName: string): WireType {
+  switch (typeName) {
+    case 'commit':
+    case 'tree':
+    case 'blob':
+    case 'tag':
+    case 'ofs_delta':
+    case 'ref_delta':
+      return { tag: 'named', name: typeName };
+    default:
+      return { tag: 'invalid' };
+  }
+}
+
+/** What a wire type id is, for a caller that only stores a tree, blob, or tag as `not_commit`. */
+export type NonCommit =
+  | { readonly tag: 'notCommit'; readonly name: Exclude<ObjectTypeName, 'commit'> }
+  | { readonly tag: 'commit' }
+  | { readonly tag: 'delta'; readonly name: Exclude<PackKind, ObjectTypeName> }
+  | { readonly tag: 'invalid' };
+
+function nonCommitName(name: PackKind): NonCommit {
+  switch (name) {
+    case 'tree':
+    case 'blob':
+    case 'tag':
+      return { tag: 'notCommit', name };
+    case 'commit':
+      return { tag: 'commit' };
+    case 'ofs_delta':
+    case 'ref_delta':
+      return { tag: 'delta', name };
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(name);
+}
+
+// A pack type id. `notCommit` is a tree, blob, or tag. A commit, a delta, or an unknown id is its own variant.
+export function nonCommitType(type: number): NonCommit {
+  const found = wireTypeId(type);
+  switch (found.tag) {
+    case 'invalid': return { tag: 'invalid' };
+    case 'named': return nonCommitName(found.name);
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(found);
 }
 
 export const objectHeader = (typeName: string, len: number): Uint8Array => te.encode(`${typeName} ${len}\0`);
@@ -77,23 +148,70 @@ export type TreeEntryInput = { readonly mode: string; readonly name: string; rea
 // Every tree refusal is pack_corrupt with this prefix (one constructor: the code and prefix ship once).
 const badTree = (why: string): ErrorOf<'pack_corrupt'> => fail('pack_corrupt', `tree: ${why}`);
 
+// How many entries are fully framed (mode, space, name, NUL, OID_BYTES). A short tail is not an entry: the parser
+// reports that as pack_corrupt. Stops at one past the cap, so a huge tree is not scanned twice end to end.
+const completeTreeFrames = (data: Uint8Array, maxEntries: number): number => {
+  const stop = maxEntries + 1;
+  let p = 0;
+  let n = 0;
+  while (p < data.length && n < stop) {
+    const sp = data.indexOf(TREE_MODE_SEP, p);
+    if (sp < p) return n;
+    const nul = data.indexOf(TREE_NUL, sp + 1);
+    if (nul < sp + 1 || data.length - (nul + 1) < OID_BYTES) return n;
+    n += 1;
+    p = nul + 1 + OID_BYTES;
+  }
+  return n;
+};
+
+// The hex id is computed when a reader asks. Caching it on the entry would put a 40-character string beside every
+// name, which is what exhausted a 128 MiB heap at the cap. `bytes` is not enumerable, so equality and JSON see the
+// mode, the name, and the offsets.
+type TreeEntryState = { readonly bytes: Uint8Array; readonly oidOffset: number };
+const treeEntryProto: TreeEntry = Object.create(null);
+Object.defineProperty(treeEntryProto, 'oid', {
+  get(this: TreeEntryState): string {
+    return toHex(this.bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
+  },
+});
+// One prototype per tree carries the buffer. Entries are ordinary assigned objects: defineProperty on every
+// entry puts it in dictionary mode, and that is what exhausted a 128 MiB heap at the cap.
+const treeBytes = (bytes: Uint8Array): TreeEntry => {
+  const proto: TreeEntry = Object.create(treeEntryProto);
+  Object.defineProperty(proto, 'bytes', { value: bytes });
+  return proto;
+};
+const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number, entryOffset: number): TreeEntry =>
+  Object.assign(Object.create(proto), { mode, name, oidOffset, entryOffset });
+
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
 // Duplicates and order are git's rules (fsck duplicateEntries and treeNotSorted, both errors under --strict) on the
 // raw name bytes. A file `d` and a directory `d` need not be neighbours (`d` < `d.x` < `d/`), so the duplicate check is
 // over the whole tree, as fsck's verify_ordered does with its stack of file names a later directory could repeat. It
 // runs before the order check: by then every earlier pair was in order, and on a sorted prefix fsck's stack finds
 // exactly the duplicates this set finds, so the message is one fsck prints. Names decode losslessly (decodeBytes, #43):
-// distinct bytes are distinct names, so the raw-byte duplicate check is also the decoded-name one.
+// distinct bytes are distinct names, so the set holds that name and not a second hex copy of the bytes.
+// A tree that cannot fit in maxTreeEntries is counted before any entry object exists. The cap still fires as
+// `tree entries <max+1>`, and bytes past it are not validated: a bad mode there stays limit_exceeded.
 // @decoder parseTree prefix=tree
 // oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, inline: a helper costs bytes on every entry
 export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): TreeEntry[] {
   const maxEntries = requireLimit(limits, 'maxTreeEntries');
+  // Shorter than one minimum entry per allowed slot: the count cannot pass the cap, so skip the frame scan.
+  // A flipped comparison here still agrees with the frame count (max+1 minimum frames cannot fit in fewer bytes).
+  // Stryker disable next-line ConditionalExpression,EqualityOperator,ArithmeticOperator: byte length only skips the scan; the frame count decides the cap
+  const wide = data.length > maxEntries * TREE_ENTRY_MIN;
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: past the cap the loop throws either way; this flag only skips retaining entries the caller never sees
+  const over = wide && completeTreeFrames(data, maxEntries) > maxEntries;
   const entries: TreeEntry[] = [];
+  const shape = treeBytes(data);
   const seen = new Set<string>();
   let p = 0;
+  let count = 0;
   let prevKey: Uint8Array | null = null;
   while (p < data.length) {
-    if (entries.length >= maxEntries) throw limitError('tree entries', entries.length + 1, maxEntries);
+    if (count >= maxEntries) throw limitError('tree entries', count + 1, maxEntries);
     const sp = data.indexOf(TREE_MODE_SEP, p);
     // A negative fromIndex would wrap; indexOf returns -1 when the separator is absent.
     if (sp < p) throw badTree('malformed entry');
@@ -124,14 +242,17 @@ export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LI
       if (mode === MODE_TREE || mode === MODE_COMMIT) throw badTree('.gitmodules is not a blob');
     }
     if ((mode === MODE_TREE || mode === MODE_COMMIT) && isDotFileName(nameBytes, 'gitattributes')) throw badTree('.gitattributes is not a blob');
-    const rawName: string = toHex(nameBytes);
-    if (seen.has(rawName)) throw badTree(`duplicate entry ${JSON.stringify(name)}`);
-    seen.add(rawName);
+    if (seen.has(name)) throw badTree(`duplicate entry ${JSON.stringify(name)}`);
+    seen.add(name);
     const key: Uint8Array = isDirMode(raw) ? concat([nameBytes, SLASH]) : nameBytes;
     // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
     if (prevKey !== null && cmpBytes(prevKey, key) >= 0) throw badTree('not strictly sorted');
     prevKey = key;
-    entries.push({ mode, name, oid: toHex(oidBytes), oidOffset: nul + 1, entryOffset: p });
+    // Past the cap, keep the name set (a bad prefix is still pack_corrupt) and do not retain the entry.
+    // Always pushing still throws on the next entry, so the returned array is the same; never pushing is a length assertion.
+    // Stryker disable next-line ConditionalExpression: retaining the entries past the cap does not change the throw or the array a caller sees
+    if (!over) entries.push(treeEntry(shape, mode, name, nul + 1, p));
+    count += 1;
     p = nul + 1 + OID_BYTES;
   }
   return entries;
@@ -363,11 +484,22 @@ export function parseTag(data: Uint8Array): Tag {
 // pack before any of it is returned or harvested). It is the same parser every reader calls, so a commit or tag no
 // reader would accept never reaches one.
 export function assertFetched(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): void {
-  if (typeName === 'blob' || typeName === 'ofs_delta' || typeName === 'ref_delta') return;
-  if (typeName === 'tree') { parseTree(data, limits); return; }
-  if (typeName === 'commit') { parseCommit(data, limits); return; }
-  if (typeName === 'tag') { parseTag(data); return; }
-  throw fail('pack_corrupt', `object: bad type ${typeName}`);
+  const found = wireTypeName(typeName);
+  switch (found.tag) {
+    case 'invalid': throw fail('pack_corrupt', `object: bad type ${typeName}`);
+    case 'named': {
+      switch (found.name) {
+        case 'blob': case 'ofs_delta': case 'ref_delta': return;
+        case 'tree': parseTree(data, limits); return;
+        case 'commit': parseCommit(data, limits); return;
+        case 'tag': parseTag(data); return;
+      }
+      // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(found.name);
+    }
+  }
+  // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+  assertNever(found);
 }
 
 // A header value is one line. LF or NUL, from any caller, would open a new header. The message is the body: LF is
