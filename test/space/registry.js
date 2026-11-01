@@ -374,6 +374,7 @@ export const DECISIONS = [
   // generated, reviewed
   { match: "src/checkout-node.ts#collision:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#emptyDir:*", space: 'checkout-tree', axisTag: 'case' },
+  { match: "src/checkout-node.ts#filesystem:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#ensureDir:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#writeFiles:bad_request:already exists#2", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#writeFiles:unsupported:checkout: git refuses to check out … on …: …", space: 'checkout-tree', axisTag: 'case' },
