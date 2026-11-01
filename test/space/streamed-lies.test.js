@@ -148,9 +148,11 @@ test('a header that fails before the body: a raw reset, and a bad signature git 
     kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: {}, scrub: null,
     frames, advertise: async () => { throw new Error('unused'); },
   });
-  const reset = await openBlob(transport(async function* () { throw new Error('reset'); }), tracer, parent, oid).then(() => null, e => e);
-  assert.equal(reset?.code, 'pack_corrupt');
-  assert.equal(reset.message, 'blob stream: reset');
+  // openBlob returns the header failure (#145); it does not reject
+  const reset = await openBlob(transport(async function* () { throw new Error('reset'); }), oid, { follows: parent });
+  assert.equal(reset.ok, false);
+  assert.equal(reset.error.code, 'pack_corrupt');
+  assert.equal(reset.error.message, 'blob stream: reset');
   const bad = te.encode('NOPE not a pack!!!!');
   assert.notEqual(indexPack(bad), 0);
   const frames = async function* () {
@@ -158,9 +160,10 @@ test('a header that fails before the body: a raw reset, and a bad signature git 
     yield { kind: 'data', payload: concat([Uint8Array.of(1), bad]) };
     yield { kind: 'flush' };
   };
-  const sig = await openBlob(transport(frames), tracer, parent, oid).then(() => null, e => e);
-  assert.equal(sig?.code, 'pack_corrupt');
-  assert.equal(sig.message, 'pack: bad signature');
+  const sig = await openBlob(transport(frames), oid, { follows: parent });
+  assert.equal(sig.ok, false);
+  assert.equal(sig.error.code, 'pack_corrupt');
+  assert.equal(sig.error.message, 'pack: bad signature');
 });
 
 test('blob:none object cap: one under, at, and one past each size the pack meets', { timeout: 60_000 }, async () => {

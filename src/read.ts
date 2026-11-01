@@ -14,14 +14,20 @@
 // caller can send Content-Length. The stream errors (never ends cleanly) if the content does not hash to the blob's oid
 // or the server sends a different number of bytes than it declared, and the chunk that would have completed the body
 // stays held: a consumer that received every byte, or saw `done`, saw the right bytes.
+//   openBlob(transport, oid, { maxBytes, follows }) → Result<{ kind:'stream', size, stream } | { kind:'too_big', size }, PlyError>
+//   readBlob(transport, oid, { maxBytes, follows }) → Result<{ kind:'bytes', data } | { kind:'too_big', size }, PlyError>
+// `too_big` is decided from the pack object header. The fetch is cancelled and no body byte is delivered.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { thrown as fail, isPlyCode, orThrow } from './errors.js';
+import { thrown as fail, isPlyCode, isPlyError, orThrow, plyError } from './errors.js';
+import type { PlyError } from './errors.js';
+import { err as resultErr, ok } from './result.js';
+import type { Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
-import { bufferSource } from './bytes.js';
+import { bufferSource, concat } from './bytes.js';
 import { KIND } from './otel.js';
 import type { Span, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
@@ -197,26 +203,35 @@ export async function readFile(url: string, { ref = null, path }: { readonly ref
     if (entry.mode === '40000') throw fail('not_found', `${comps.join('/')} is a directory`);
     if (entry.mode === '160000') throw fail('not_found', `${comps.join('/')} is a submodule (commit ${entry.oid})`);
     // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
-    const blob = await openBlob(t, tracer, root, entry.oid);
-    return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: blob.size, stream: blob.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': blob.size, 'git.read.blob.mode': entry.mode });
+    const opened = orThrow(await openBlob(t, entry.oid, { follows: root }));
+    return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: opened.size, stream: opened.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': opened.size, 'git.read.blob.mode': entry.mode });
   });
 }
 
-export type OpenedBlob = { readonly size: number; readonly stream: ReadableStream<Uint8Array> };
+export type BlobStream = { readonly kind: 'stream'; readonly size: number; readonly stream: ReadableStream<Uint8Array> };
+export type BlobTooBig = { readonly kind: 'too_big'; readonly size: number };
+export type OpenedBlob = BlobStream | BlobTooBig;
+export type BlobOpts = { readonly maxBytes?: number; readonly follows?: Span };
 
 // The fail-site recorder (test/space/failsite-hook.mjs) installs this only when PLY_FAILSITES is set. A guard, not a
 // cast: under the hook the value is a function and the property is absent otherwise, so the call is a no-op in a bundle.
 const FAIL_SITE = Symbol.for('ply.failsite');
 const isFailSiteRecorder = (v: unknown): v is (holder: (e: unknown) => unknown) => void => typeof v === 'function';
-// Effect: one blob as a ReadableStream (also checkout.js's per-blob path). Reads the pack until the object header (→ size), then pipes the zlib bytes
-// through DecompressionStream and a verifying transform. The transform releases every chunk but the latest as it
-// arrives, and releases the latest only after the pack trailer and the object hash verify. A failure errors the
-// stream with that chunk still held, so the body never completes on unverified bytes. Back-pressure: the pump awaits
-// each write, so at most one network chunk and one inflate chunk are in flight beyond the chunk being held.
-// `opener` is the span the stream follows (the read root, or git.checkout.blobs): the consumer reads after it returns.
-export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: string): Promise<OpenedBlob> {
-  const span = tracer.start('git.read.blob', { follows: opener, attrs: { 'git.read.blob.oid': oid } });
-  const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
+// Effect: one blob on the caller's transport. Reads the pack until the object header (→ size). A declared size above
+// `maxBytes` is `{ kind: 'too_big' }`: the fetch is cancelled and no body byte is delivered (`git.read.blob.header_only`).
+// Otherwise the zlib bytes go through DecompressionStream and a verifying transform. The transform releases every chunk
+// but the latest as it arrives, and releases the latest only after the pack trailer and the object hash verify. A failure
+// errors the stream with that chunk still held, so the body never completes on unverified bytes. Back-pressure: the pump
+// awaits each write, so at most one network chunk and one inflate chunk are in flight beyond the chunk being held.
+// `follows` is the span the stream follows (the read root, or git.checkout.blobs): the consumer reads after it returns.
+// The tracer is the transport's. Header and cap failures are a Result; a bad `maxBytes` is too. Without `maxBytes` the
+// result is a stream (a cap is the only way the header refuses the blob).
+export function openBlob(t: Transport, oid: string, opts?: { readonly follows?: Span }): Promise<Result<BlobStream, PlyError>>;
+export function openBlob(t: Transport, oid: string, opts: { readonly maxBytes: number; readonly follows?: Span }): Promise<Result<OpenedBlob, PlyError>>;
+export async function openBlob(t: Transport, oid: string, { maxBytes, follows }: BlobOpts = {}): Promise<Result<OpenedBlob, PlyError>> {
+  if (maxBytes !== undefined && (!Number.isInteger(maxBytes) || maxBytes < 0)) return resultErr(plyError('bad_request', 'maxBytes must be an integer >= 0', { what: 'maxBytes' }));
+  const span = t.tracer.start('git.read.blob', { ...(follows ? { follows } : {}), attrs: { 'git.read.blob.oid': oid } });
+  const fetchSpan = t.tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   const it: AsyncIterator<Uint8Array> = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
   let sp: SpState = spInit();
   const early: Uint8Array[] = [];
@@ -245,9 +260,22 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
       early.push(...r.zlib);
     }
     if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got ${(TYPE_NAME as TypeNames)[sp.type] ?? sp.type}`);
-  } catch (e) { await it.return?.().catch(() => { /* the read already failed */ }); throw failHere(e); }
+  } catch (e) {
+    await it.return?.().catch(() => { /* the read already failed */ });
+    const err = failHere(e);
+    if (isPlyError(err)) return resultErr(err);
+    throw err;
+  }
   const size = sp.size;
   span.set({ 'git.read.blob.size': size });
+  // The cap is the declared size. Bytes already in the packet that completed the header stay unread by the consumer;
+  // the iterator is closed so nothing further is pulled.
+  if (maxBytes !== undefined && size > maxBytes) {
+    span.set({ 'git.read.blob.header_only': true, 'git.read.blob.outcome': 'too_big' }).end();
+    fetchSpan.end();
+    await it.return?.().catch(() => { /* the size cap ended the read */ });
+    return ok({ kind: 'too_big', size });
+  }
   const ds = new DecompressionStream('deflate');
   const writer = ds.writable.getWriter();
   const pump = (async () => {
@@ -308,5 +336,21 @@ export async function openBlob(t: Transport, tracer: Tracer, opener: Span, oid: 
       await it.return?.().catch(() => { /* cancelling: the outcome is recorded */ });
     },
   }, { highWaterMark: 0 });
-  return { size, stream };
+  return ok({ kind: 'stream', size, stream });
+}
+
+export type BlobData = { readonly kind: 'bytes'; readonly data: Uint8Array<ArrayBuffer> };
+// Effect: openBlob, then the whole verified stream. A stream that errors is that error; `too_big` is not read.
+export function readBlob(t: Transport, oid: string, opts?: { readonly follows?: Span }): Promise<Result<BlobData, PlyError>>;
+export function readBlob(t: Transport, oid: string, opts: { readonly maxBytes: number; readonly follows?: Span }): Promise<Result<BlobData | BlobTooBig, PlyError>>;
+export async function readBlob(t: Transport, oid: string, { maxBytes, follows }: BlobOpts = {}): Promise<Result<BlobData | BlobTooBig, PlyError>> {
+  const opened = maxBytes === undefined
+    ? await openBlob(t, oid, follows === undefined ? undefined : { follows })
+    : await openBlob(t, oid, follows === undefined ? { maxBytes } : { maxBytes, follows });
+  if (!opened.ok) return opened;
+  if (opened.value.kind === 'too_big') return ok(opened.value);
+  const parts: Uint8Array[] = [];
+  try { for await (const chunk of opened.value.stream) parts.push(chunk); }
+  catch (e) { if (isPlyError(e)) return resultErr(e); throw e; }
+  return ok({ kind: 'bytes', data: concat(parts) });
 }
