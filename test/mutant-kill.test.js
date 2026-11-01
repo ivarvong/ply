@@ -1855,7 +1855,9 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   // v2 answer (Artifacts): held to the v2 shape, no v0 caps; a v2 shape broken is parseCapabilitiesV2's typed error
   advOk([dat('version 2\n'), dat('agent=x\n'), FL], []);
   advOk([dat('version 2'), dat('agent=x\n'), FL], []);
-  assert.throws(() => parseReceiveAdvert([dat('version 2\n'), dat('agent=x\n')]), e => e.code === 'protocol');
+  const v2Cut = parseReceiveAdvert([dat('version 2\n'), dat('agent=x\n')]);
+  assert.equal(v2Cut.ok, false);
+  assert.equal(v2Cut.error.code, 'protocol');
   advErr([dat('\nversion 2'), FL], 'receive-pack advertisement: unexpected line "\\nversion 2"');
   advErr([dat(`${oid(1)} refs/heads/a\n`)], 'receive-pack advertisement: no flush after the refs');
   advErr([dat(`${oid(1)} refs/heads/a\n`), { kind: 'delim' }, FL], 'receive-pack advertisement: invalid packet (delim)');

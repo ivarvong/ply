@@ -23,12 +23,14 @@
 // and may add transport-specific detail under http.*. Implementation: http.ts (an SSH one was removed 2026-10-31;
 // history on branch archive/ssh).
 import type { Code, ErrorOf } from './errors.js';
-import { thrown as fail, isPlyCode } from './errors.js';
+import { thrown, fail } from './errors.js';
+import type { Err } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import { KIND } from './otel.js';
 import type { Input } from './absent.js';
-import { fillIn, readKey } from './absent.js';
+import { field, fillIn, readKey } from './absent.js';
+import { isPlyThrown, thrownText } from './boundary.js';
 
 // One pkt-line frame as pktline.js yields it.
 export type Frame =
@@ -86,12 +88,9 @@ export function asTransport(t: TransportInput): Transport {
   return Object.create(t, { quirks: { value: quirks, enumerable: true }, objects: { value: objects, enumerable: true }, scrub: { value: scrub, enumerable: true } }) as Transport;
 }
 
-// A thrown value read loosely, as the JS read it: `?.` makes the read safe for any value. TODO(A3): Results replace it.
-export type Loose = { readonly code?: unknown; readonly message?: unknown; readonly name?: unknown } | null | undefined;
-
 // We are not git and do not claim to be: servers that branch on the agent string get the truth.
 export const UA = 'ply/0.1.0';
-export const proto = (msg: string): ErrorOf<'protocol'> => fail('protocol', msg);
+export const proto = (msg: string): Err<ErrorOf<'protocol'>> => fail('protocol', msg);
 
 export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncIterable<Frame> => t.frames(service, body, span, hints);
 // oxlint-disable-next-line typescript/promise-function-async -- a pass-through: the transport's own promise, unwrapped (async adds a wrapper and bytes)
@@ -107,18 +106,29 @@ export type SpanOpts = { readonly parent: Span | null; readonly kind: number; re
 // It carries the transport's `scrub` (credential redaction, http.js), so even an unparented wire span exports none.
 export const clientSpan = (t: Transport, attrs: Attrs = {}): SpanOpts => ({ parent: t.parent, kind: KIND.CLIENT, attrs, scrub: t.scrub });
 
-// Give an untyped failure a default code (typed errors keep theirs). The assignment throws for a primitive, null or a
-// frozen value; that one is wrapped instead.
+// Set `code` on a thrown value. False for a primitive, null or a frozen value (Reflect.set answers false, or a setter
+// throws): that one is wrapped instead.
+const setCode = (e: unknown, code: Code): boolean => {
+  try { return (typeof e === 'object' || typeof e === 'function') && e !== null && Reflect.set(e, 'code', code); } catch { return false; }
+};
+// The I/O edge: an operation's promise, its rejection given a default code when it carries none (typed errors keep theirs).
 export async function coded<T>(code: Code, fn: () => Promise<T>): Promise<T> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, no-ex-assign -- see Loose; any thrown value is assigned to as the JS did, and replaced when it cannot be
-  try { return await fn(); } catch (e) { if (!isPlyCode((e as Loose)?.code)) { try { (e as { code: unknown }).code = code; } catch { e = fail(code, String((e as Loose)?.message ?? e), { cause: e }); } } throw e; }
+  try { return await fn(); } catch (e) {
+    if (isPlyThrown(e) || setCode(e, code)) throw e;
+    throw thrown(code, thrownText(e), { cause: e });
+  }
 }
 
-export function wrapNet(e: unknown, signal?: AbortSignal | null): unknown {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
-  if (isPlyCode((e as Loose)?.code)) return e;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- see Loose; a thrown value renders as String() renders it
-  if (Boolean(signal?.aborted) || (e as Loose)?.name === 'AbortError' || (e as Loose)?.name === 'TimeoutError') return fail((e as Loose)?.name === 'TimeoutError' || (signal?.reason as Loose)?.name === 'TimeoutError' ? 'timeout' : 'aborted', `request aborted: ${(e as Loose)?.message ?? e}`, { cause: e });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- as above
-  return fail('network', `network: ${(e as Loose)?.message ?? e}`, { cause: e });
+// A thrown value's `name` is `want` (an AbortError, a TimeoutError). Any value may be thrown: a primitive has no name.
+const nameIs = (e: unknown, want: string): boolean => { const n = field(e, 'name'); return n.tag === 'some' && n.value === want; };
+// A platform fetch failure → the PlyError it is: aborted or timeout when the signal fired or the error says so, else
+// network. A typed error passes through.
+export function wrapNet(e: unknown, signal: AbortSignal | null = null): unknown {
+  if (isPlyThrown(e)) return e;
+  const aborted = signal !== null && signal.aborted;
+  if (aborted || nameIs(e, 'AbortError') || nameIs(e, 'TimeoutError')) {
+    const timedOut = nameIs(e, 'TimeoutError') || (signal !== null && nameIs(signal.reason, 'TimeoutError'));
+    return thrown(timedOut ? 'timeout' : 'aborted', `request aborted: ${thrownText(e)}`, { cause: e });
+  }
+  return thrown('network', `network: ${thrownText(e)}`, { cause: e });
 }
