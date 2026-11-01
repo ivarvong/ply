@@ -4,6 +4,7 @@ import { fail, plyError, orThrow } from './errors.js';
 import type { Result } from './result.js';
 import { ok, err } from './result.js';
 import { BYTE_VALUES, PKT_HEX_BASE } from './format.js';
+import { byteInRange } from './absent.js';
 
 export const te: TextEncoder = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
@@ -33,18 +34,18 @@ const ESCAPE_HI = 0xdc_ff;
 const SUR_LO = 0xd8_00;
 const SUR_HI = 0xdf_ff;
 const HIGH_END = 0xdb_ff;
-// Stryker disable next-line ConditionalExpression: `undefined >= lo` is false, so dropping the undefined test changes no result (it is there for the type)
-const inRange = (b: number | undefined, lo: number, hi: number): boolean => b !== undefined && b >= lo && b <= hi;
+// A UTF-16 code unit in [lo, hi]. Past the end of a string charCodeAt is NaN, which is in no range.
+const inRange = (c: number, lo: number, hi: number): boolean => c >= lo && c <= hi;
 // Length of the well-formed UTF-8 sequence at i (Unicode Table 3-7), or 0. `i` is always < b.length (both callers).
 function wellFormedAt(b: Uint8Array, i: number): number {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range, see above
   const c = b[i] as number;
   if (c < ASCII_END) return 1;
   if (c < LEAD2) return 0;
-  if (c < LEAD3) return inRange(b[i + 1], CONT, CONT_END) ? 2 : 0;
+  if (c < LEAD3) return byteInRange(b, i + 1, CONT, CONT_END) ? 2 : 0;
   // E0 needs A0..BF (no overlong), ED needs 80..9F (no surrogate); F0 needs 90..BF (no overlong), F4 needs 80..8F (≤ U+10FFFF)
-  if (c < LEAD4) return inRange(b[i + 1], c === LEAD3 ? 0xa0 : CONT, c === 0xed ? 0x9f : CONT_END) && inRange(b[i + 2], CONT, CONT_END) ? 3 : 0;
-  if (c <= LEAD_END) return inRange(b[i + 1], c === LEAD4 ? 0x90 : CONT, c === LEAD_END ? 0x8f : CONT_END) && inRange(b[i + 2], CONT, CONT_END) && inRange(b[i + 3], CONT, CONT_END) ? 4 : 0;
+  if (c < LEAD4) return byteInRange(b, i + 1, c === LEAD3 ? 0xa0 : CONT, c === 0xed ? 0x9f : CONT_END) && byteInRange(b, i + 2, CONT, CONT_END) ? 3 : 0;
+  if (c <= LEAD_END) return byteInRange(b, i + 1, c === LEAD4 ? 0x90 : CONT, c === LEAD_END ? 0x8f : CONT_END) && byteInRange(b, i + 2, CONT, CONT_END) && byteInRange(b, i + 3, CONT, CONT_END) ? 4 : 0;
   return 0;
 }
 
@@ -102,7 +103,7 @@ export function encodeBytesResult(s: unknown, what = 'string'): Result<Uint8Arra
   return ok(bytes);
 }
 // The throwing form, for callers not yet on Result (docs/STACK.md, migration path step 2).
-export const encodeBytes = (s: unknown, what?: string): Uint8Array<ArrayBuffer> => orThrow(encodeBytesResult(s, what));
+export const encodeBytes = (s: unknown, what = 'string'): Uint8Array<ArrayBuffer> => orThrow(encodeBytesResult(s, what));
 
 // Text that arrives in pieces (sideband band 2): a sequence cut by a frame boundary waits in `carry` for its
 // tail instead of decoding as two U+FFFD. Pure: returns { text, carry }.
@@ -110,7 +111,7 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
   // Stryker disable next-line ConditionalExpression,EqualityOperator: concat of an empty carry is a copy of the chunk, the same bytes
   const buf = carry.length > 0 ? concat([carry, chunk]) : chunk;
   let cut = buf.length;
-  // Stryker disable next-line ConditionalExpression,LogicalOperator: past k = 3 a lead needs at most 4 ≤ k bytes (no cut), and past the start a read is undefined (neither branch)
+  // Stryker disable next-line ConditionalExpression,LogicalOperator: past k = 3 a lead needs at most 4 ≤ k bytes (no cut), and past the start a read is no byte (neither branch)
   for (let k = 1; k <= 3 && k <= buf.length; k++) {
     const c = buf[buf.length - k] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- k <= buf.length (the loop)
     if (c < ASCII_END) break;
@@ -126,7 +127,8 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
  * Bounded read. `subarray` / `slice` clamp a range that runs past the end and return a short view; parsers that
  * trusted that view accepted truncated fields (the tree-oid off-by-one). `takeResult` returns the typed short read
  * instead, so the length is the bound. The error carries `reason: 'short_read'`: a stream parser that may get more
- * bytes switches on that, never on the message (#76). An absent buffer is a short read of an empty one.
+ * bytes switches on that, never on the message (#76). No buffer (null, or a JavaScript caller's missing argument) is a
+ * short read of an empty one.
  */
 export type ShortReadCode = 'pack_corrupt' | 'protocol';
 const shortReadMessage = (off: number, n: number, have: number): string => `short read: need ${n} bytes at ${off}, have ${have}`;
@@ -134,19 +136,20 @@ const shortReadMessage = (off: number, n: number, have: number): string => `shor
 export const shortRead = <C extends ShortReadCode>(code: C, off: number, n: number, have: number): ErrorOf<C> =>
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- plyError's member for C; the compiler cannot resolve Payload<C> for a type parameter
   plyError<ShortReadCode>(code, shortReadMessage(off, n, have), { reason: 'short_read' }) as ErrorOf<C>;
-const inBounds = (buf: Uint8Array | null | undefined, off: number, n: number): buf is Uint8Array =>
-  buf !== null && buf !== undefined && Number.isInteger(off) && Number.isInteger(n) && off >= 0 && n >= 0 && off + n <= buf.length;
-export function takeResult<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null | undefined, off: number, n: number, code?: C): Result<Uint8Array, ErrorOf<C>> {
-  const have = buf?.length ?? 0;
-  // an omitted code is C's default, 'pack_corrupt'; the compiler cannot tie a default value to a type parameter
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  return inBounds(buf, off, n) ? ok(buf.subarray(off, off + n)) : err(shortRead(code ?? 'pack_corrupt' as C, off, n, have));
+// A buffer is an object. Null and a JavaScript caller's missing argument are not (typeof), so neither is read.
+const isBuffer = (buf: Uint8Array | null): buf is Uint8Array => typeof buf === 'object' && buf !== null;
+const haveOf = (buf: Uint8Array | null): number => (isBuffer(buf) ? buf.length : 0);
+const inBounds = (buf: Uint8Array | null, off: number, n: number): buf is Uint8Array =>
+  isBuffer(buf) && Number.isInteger(off) && Number.isInteger(n) && off >= 0 && n >= 0 && off + n <= buf.length;
+// an omitted code is C's default, 'pack_corrupt'; the compiler cannot tie a default value to a type parameter
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
+export function takeResult<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null, off: number, n: number, code: C = 'pack_corrupt' as C): Result<Uint8Array, ErrorOf<C>> {
+  return inBounds(buf, off, n) ? ok(buf.subarray(off, off + n)) : err(shortRead(code, off, n, haveOf(buf)));
 }
 // The throwing form (docs/STACK.md, migration path step 2). Its own plyError, with the code its caller picks, so the
 // decision-point inventory (scripts/decision-points.mjs) sees every take() call as a site, as before.
-export function take(buf: Uint8Array | null | undefined, off: number, n: number, code: ShortReadCode = 'pack_corrupt'): Uint8Array {
-  const have = buf?.length ?? 0;
-  if (!inBounds(buf, off, n)) throw plyError(code, shortReadMessage(off, n, have), { reason: 'short_read' });
+export function take(buf: Uint8Array | null, off: number, n: number, code: ShortReadCode = 'pack_corrupt'): Uint8Array {
+  if (!inBounds(buf, off, n)) throw plyError(code, shortReadMessage(off, n, haveOf(buf)), { reason: 'short_read' });
   return buf.subarray(off, off + n);
 }
 
@@ -163,7 +166,7 @@ export function indexOfBytes(hay: Uint8Array, needle: Uint8Array, from = 0): num
   const n = needle.length;
   if (n === 0) return from;
   const first = needle[0];
-  // Stryker disable next-line ArithmeticOperator: an end index past hay only reads undefined, which is never a needle byte
+  // Stryker disable next-line ArithmeticOperator: an end index past hay only reads past the end, which is never a needle byte
   const last = hay.length - n;
   outer: for (let i = from; i <= last; i++) {
     if (hay[i] !== first) continue;

@@ -2,6 +2,8 @@
 import { Sha1, fromHex } from './sha1.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { bufferSource, concat } from './bytes.js';
+import { fromNullish, readKey, type Input } from './absent.js';
+import { getOrElse } from './result.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, OID_BYTES, BYTE_MASK,
   OBJ_TYPE_SHIFT, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
@@ -78,10 +80,15 @@ export async function zlibDeflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBu
 }
 
 // objects: [{ type (1-4), data, baseOid? }] — baseOid makes it a REF_DELTA whose `data` is the delta.
-export type PackInput = { readonly type: number; readonly data: Uint8Array; readonly baseOid?: string | null | undefined };
+export type PackInput = { readonly type: number; readonly data: Uint8Array } & Input<{ readonly baseOid: string | null }>;
+// typeName: the type's name for the five types a pack holds (TYPE_NAME), null for any other id a caller passed.
 export type BuiltEntry = {
-  readonly type: number; readonly typeName: string | undefined; readonly size: number; readonly compressed: number;
+  readonly type: number; readonly typeName: string | null; readonly size: number; readonly compressed: number;
   readonly baseOid: string | null; readonly bytes: number;
+};
+const typeNameOf = (type: number): string | null => {
+  const named = readKey(TYPE_NAME as Readonly<Record<number, string>>, type);
+  return named.tag === 'some' ? named.value : null;
 };
 export type BuiltPack = { readonly pack: Uint8Array; readonly entries: BuiltEntry[] };
 // Measured (test/pure.test.js history): hand-rolled stored-block zlib never beats CompressionStream's output — zlib
@@ -95,7 +102,8 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
   parts.push(hdr);
   const entries: BuiltEntry[] = [];
   for (const o of objects) {
-    const baseOid = o.baseOid ?? ''; // truthiness, as before: an empty baseOid is no base
+    const given = getOrElse<string | null>(fromNullish(o.baseOid), null);
+    const baseOid = given === null ? '' : given; // truthiness, as before: an empty baseOid is no base
     const type: number = baseOid ? TYPE.REF_DELTA : o.type;
     // one at a time, in pack order: the pack is a sequence (parallel deflate is a perf change, not this one)
     // oxlint-disable-next-line no-await-in-loop -- see above
@@ -104,7 +112,7 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
     parts.push(h);
     if (baseOid) parts.push(fromHex(baseOid));
     parts.push(z);
-    entries.push({ type, typeName: (TYPE_NAME as Readonly<Record<number, string | undefined>>)[type], size: o.data.length, compressed: z.length, baseOid: o.baseOid ?? null, bytes: h.length + (baseOid ? OID_BYTES : 0) + z.length });
+    entries.push({ type, typeName: typeNameOf(type), size: o.data.length, compressed: z.length, baseOid: given, bytes: h.length + (baseOid ? OID_BYTES : 0) + z.length });
   }
   const body = concat(parts);
   const pack = concat([body, new Sha1().update(body).digest()]);

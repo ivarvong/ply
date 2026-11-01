@@ -4,6 +4,7 @@
 import type { ErrorOf } from './errors.js';
 import { fail, orThrow } from './errors.js';
 import type { Err, Result } from './result.js';
+import type { Input } from './absent.js';
 import { ok } from './result.js';
 import { te, concat, encodeBytesResult, HEXV } from './bytes.js';
 import {
@@ -35,9 +36,21 @@ export const pkt = (payload: string | Uint8Array): Uint8Array<ArrayBuffer> => or
 export const FLUSH: Uint8Array = te.encode('0000');
 export const DELIM: Uint8Array = te.encode('0001');
 
-export type PktsOptions = { readonly delimAfter?: number; readonly flush?: boolean };
-export const pkts = (lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Uint8Array<ArrayBuffer> =>
-  concat(lines.flatMap((l, i) => (i === delimAfter ? [pkt(l), DELIM] : [pkt(l)])).concat(flush ? [FLUSH] : []));
+// delimAfter: the index of the line a delim packet follows (-1: none); flush: end with a flush packet.
+export type PktsConfig = { readonly delimAfter: number; readonly flush: boolean };
+export type PktsOptions = Input<PktsConfig>;
+export function pktsResult(lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
+  const parts: Uint8Array[] = [];
+  for (const [i, l] of lines.entries()) {
+    const framed = pktResult(l);
+    if (!framed.ok) return framed;
+    parts.push(framed.value);
+    if (i === delimAfter) parts.push(DELIM);
+  }
+  if (flush) parts.push(FLUSH);
+  return ok(concat(parts));
+}
+export const pkts = (lines: ReadonlyArray<string | Uint8Array>, options: PktsOptions = {}): Uint8Array<ArrayBuffer> => orThrow(pktsResult(lines, options));
 
 export type PktState = {
   readonly carry: Uint8Array | null;
