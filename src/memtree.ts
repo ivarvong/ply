@@ -46,6 +46,13 @@ function joined(comps: readonly string[]): string {
   return comps.join('/');
 }
 
+// The missing component and the path that existed above it. Not a fail wrapper: the throw stays at the call.
+function pathMiss(path: string): { readonly kind: 'path'; readonly missing: string; readonly existingPath: string } {
+  const at = path.lastIndexOf('/');
+  if (at < 0) return { kind: 'path', missing: path, existingPath: '' };
+  return { kind: 'path', missing: path.slice(at + 1), existingPath: path.slice(0, at) };
+}
+
 export function insertChild(entries: Map<string, Mem>, name: string, node: Mem, limits: Limits): void {
   if (!entries.has(name)) {
     const max = requireLimit(limits, 'maxTreeEntries');
@@ -81,14 +88,14 @@ export function removeAt(root: Mem, comps: readonly string[]): void {
   for (const name of comps.slice(0, -1)) {
     walked = walked === '' ? name : `${walked}/${name}`;
     const child = entries.get(name);
-    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked });
-    if (child.kind !== 'dir') throw fail('not_found', `${walked} is not a directory`, { what: 'path', path: walked });
+    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked, miss: pathMiss(walked) });
+    if (child.kind !== 'dir') throw fail('not_found', `${walked} is not a directory`, { what: 'path', path: walked, miss: { kind: 'not_directory', path: walked, mode: child.mode } });
     stack.push({ entries, name });
     entries = child.entries;
   }
   const name = leafName(comps);
   const full = walked === '' ? name : `${walked}/${name}`;
-  if (!entries.has(name)) throw fail('not_found', `${full} not found`, { what: 'path', path: full });
+  if (!entries.has(name)) throw fail('not_found', `${full} not found`, { what: 'path', path: full, miss: pathMiss(full) });
   entries.delete(name);
   for (let i = stack.length - 1; i >= 0; i--) {
     const frame = stack[i];
@@ -112,21 +119,21 @@ export function renameAt(root: Mem, from: readonly string[], to: readonly string
   for (const name of from.slice(0, -1)) {
     walked = walked === '' ? name : `${walked}/${name}`;
     const child = srcEntries.get(name);
-    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked });
-    if (child.kind !== 'dir') throw fail('not_found', `${walked} is not a directory`, { what: 'path', path: walked });
+    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked, miss: pathMiss(walked) });
+    if (child.kind !== 'dir') throw fail('not_found', `${walked} is not a directory`, { what: 'path', path: walked, miss: { kind: 'not_directory', path: walked, mode: child.mode } });
     stack.push({ entries: srcEntries, name });
     srcEntries = child.entries;
   }
   const srcName = leafName(from);
   const node = srcEntries.get(srcName);
-  if (node === undefined) throw fail('not_found', `${fromPath} not found`, { what: 'path', path: fromPath });
+  if (node === undefined) throw fail('not_found', `${fromPath} not found`, { what: 'path', path: fromPath, miss: pathMiss(fromPath) });
   let destEntries = requireDir(root, '');
   let destWalked = '';
   for (const name of to.slice(0, -1)) {
     destWalked = destWalked === '' ? name : `${destWalked}/${name}`;
     const child = destEntries.get(name);
-    if (child === undefined) throw fail('not_found', `${destWalked} not found`, { what: 'path', path: destWalked });
-    if (child.kind !== 'dir') throw fail('not_found', `${destWalked} is not a directory`, { what: 'path', path: destWalked });
+    if (child === undefined) throw fail('not_found', `${destWalked} not found`, { what: 'path', path: destWalked, miss: pathMiss(destWalked) });
+    if (child.kind !== 'dir') throw fail('not_found', `${destWalked} is not a directory`, { what: 'path', path: destWalked, miss: { kind: 'not_directory', path: destWalked, mode: child.mode } });
     destEntries = child.entries;
   }
   const destName = leafName(to);

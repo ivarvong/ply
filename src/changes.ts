@@ -211,7 +211,7 @@ async function resolveTarget(t: Transport, ref: string | null): Promise<Tip> {
     if (listed.unborn) return { ref: validatePushRef(listed.unborn.target, false), oid: null };
     if (listed.head !== null && headLine) return { ref: listed.head, oid: headLine.oid };
     if (headLine) throw fail('bad_request', 'remote HEAD is detached; pass ref explicitly');
-    throw fail('not_found', 'remote HEAD is absent; pass ref explicitly');
+    throw fail('not_found', 'remote HEAD is absent; pass ref explicitly', { miss: { kind: 'head_absent' } });
   }
   const { refs } = await lsRefs(t, [ref]);
   return { ref, oid: refs.get(ref)?.oid ?? null };
@@ -228,7 +228,7 @@ async function resolveParent(t: Transport, target: Tip, base: BasePlan): Promise
     if (target.oid !== null) lost(target.ref, ZERO_OID, target.oid);
     const { refs } = await lsRefs(t, [base.ref]);
     const rec = refs.get(base.ref);
-    if (!rec) throw fail('not_found', `ref ${base.ref} not found`, { what: 'ref', path: base.ref });
+    if (!rec) throw fail('not_found', `ref ${base.ref} not found`, { what: 'ref', path: base.ref, miss: { kind: 'ref', ref: base.ref, candidates: [base.ref] } });
     const commit = await mustCommit(t, rec.peeled ?? rec.oid);
     return { oid: rec.peeled ?? rec.oid, tree: commit.tree, commitParent: commit.parent, creating: true, baseRef: base.ref, baseOid: null };
   }
@@ -272,7 +272,7 @@ async function descend(walk: Walk, root: Dir, names: readonly string[], create: 
     const full = walked === '' ? name : `${walked}/${name}`;
     const child = here.entries.get(name);
     if (child === undefined) {
-      if (!create) throw fail('not_found', `${full} not found`, { what: 'path', path: full });
+      if (!create) throw fail('not_found', `${full} not found`, { what: 'path', path: full, miss: { kind: 'path', missing: name, existingPath: walked } });
       const next = emptyDir();
       insertChild(here.entries, name, next, walk.limits);
       here = next;
@@ -292,9 +292,10 @@ function leafAt(root: Dir, comps: readonly string[]): Mem {
   let walked = '';
   for (const name of comps) {
     const entries = requireDir(here, walked === '' ? '.' : walked);
+    const parent = walked;
     walked = walked === '' ? name : `${walked}/${name}`;
     const child = entries.get(name);
-    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked });
+    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked, miss: { kind: 'path', missing: name, existingPath: parent } });
     here = child;
   }
   return here;
@@ -316,7 +317,10 @@ async function applyChange(walk: Walk, root: Dir, change: Norm, created: Map<str
     const mode = node.kind === 'lazy' && (node.mode === '100644' || node.mode === '100755') ? node.mode : null;
     if (node.kind !== 'lazy' || mode === null) {
       const shown = node.kind === 'dir' ? MODE_TREE : node.mode;
-      throw fail('not_found', `${change.path} is not a regular file (mode ${shown})`, { what: 'path', path: change.path });
+      const miss = node.kind === 'lazy' && node.mode === '160000'
+        ? { kind: 'submodule' as const, path: change.path, commit: node.oid }
+        : { kind: 'not_directory' as const, path: change.path, mode: shown };
+      throw fail('not_found', `${change.path} is not a regular file (mode ${shown})`, { what: 'path', path: change.path, miss });
     }
     walk.have.add(node.oid);
     const blob = await fetchObject(walk.t, { oid: node.oid, filter: '', expectType: TYPE.BLOB });

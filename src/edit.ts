@@ -5,7 +5,7 @@
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { thrown as fail, isPlyCode } from './errors.js';
-import type { Extra } from './errors.js';
+import type { Extra, Miss } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -171,9 +171,15 @@ export function lookupEntry(data: Uint8Array, name: string, last: boolean, limit
   const entries: readonly TreeEntry[] = parseTree(data, limits);
   const entry = entries.find(e => e.name === name);
   const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': !!entry, 'git.edit.tree.entry.mode': entry?.mode ?? '', 'git.edit.tree.entry.oid': entry?.oid ?? '', 'git.edit.tree.entry.oid_offset': entry?.oidOffset ?? -1 };
-  if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs });
-  if (!last && entry.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { attrs });
-  if (last && !(entry.mode === '100644' || entry.mode === '100755')) throw fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs });
+  if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs, miss: { kind: 'path', missing: name, existingPath: '' } });
+  if (!last && entry.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { attrs, miss: { kind: 'not_directory', path: name, mode: entry.mode } });
+  if (last && !(entry.mode === '100644' || entry.mode === '100755')) {
+    let miss: Miss;
+    if (entry.mode === '40000') miss = { kind: 'is_directory', path: name, tree: entry.oid };
+    else if (entry.mode === '160000') miss = { kind: 'submodule', path: name, commit: entry.oid };
+    else miss = { kind: 'not_directory', path: name, mode: entry.mode };
+    throw fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs, miss });
+  }
   return { entry, attrs };
 }
 
@@ -403,7 +409,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // A ref base keeps the original chain. A 40-hex base is that commit; the ref is listed, and a tip that is some
-    // other commit is refuseRebase (the ref is not moved off its tip).
+    // other commit is refuseRebase (the ref is not moved off its tip). A missing ref is not_found with miss.kind 'ref'.
     const resolve = async (): Promise<string> => {
       if (s.baseOid) {
         const { refs } = await lsRefs(t, [s.ref]);
@@ -414,7 +420,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
       }
       const { refs } = await lsRefs(t, [s.base]);
       const found = refs.get(s.base);
-      if (!found) throw fail('not_found', `ref ${s.base} not found`);
+      if (!found) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } });
       return found.oid;
     };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)

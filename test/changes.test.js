@@ -387,13 +387,15 @@ test('heads, bases, and a 40-hex editFile', async () => {
   const notCommit = copy(linearBare);
   const miss = await caught(commit(notCommit.url, { ref: 'refs/heads/topic', base: blob, changes: changesOf('create'), author: AUTHOR, message: 'c' }));
   assert.equal(miss.code, 'not_found');
-  assert.equal(miss.miss.kind, 'not_commit');
-  assert.equal(miss.miss.type, 'blob');
+  assert.equal(miss.miss.kind, 'commit');
+  assert.equal(miss.miss.miss.kind, 'not_commit');
+  assert.equal(miss.miss.miss.type, 'blob');
   assert.equal(refOid(notCommit.bare, 'refs/heads/topic'), null);
   const absent = copy(emptyBare);
   const gone = await caught(commit(absent.url, { ref: 'refs/heads/topic', base: 'b'.repeat(40), changes: changesOf('create'), author: AUTHOR, message: 'c' }));
   assert.equal(gone.code, 'not_found');
-  assert.equal(gone.miss.kind, 'absent');
+  assert.equal(gone.miss.kind, 'commit');
+  assert.equal(gone.miss.miss.kind, 'absent');
   const bytes = new Uint8Array([0x6e, 0x0a]);
   const raw = copy(emptyBare);
   const rawRes = await commit(raw.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: bytes }], author: AUTHOR, message: 'c' });
