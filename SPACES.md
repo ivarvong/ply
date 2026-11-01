@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **441** (377 fail sites, 18 produced codes, 2 untyped throws, 20 exported parse/decode/classify/decide functions). Covered by a merged space 378, by a pending PR 11, excluded 22, unregistered 30. Fail sites no cell reaches: 40 of 377. Of the registered points, 165 are claimed by an enumerated space, 13 only by a random one and 211 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **444** (380 fail sites, 18 produced codes, 2 untyped throws, 20 exported parse/decode/classify/decide functions). Covered by a merged space 381, by a pending PR 11, excluded 22, unregistered 30. Fail sites no cell reaches: 40 of 380. Of the registered points, 165 are claimed by an enumerated space, 13 only by a random one and 214 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -62,7 +62,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 13 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
 | `encode-tag` | main | curated | case | cases | — | git hash-object -t tag --stdin (fsck_tag_standalone: same oid, same refusals) and git tag -a byte-for-byte where porcelain can write the cell (#103) | 2 | 0 | ci (`test/encode-tag.test.js`) | — |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 61 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 64 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git cherry-pick, git revert | 11 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`, `test/pick-empty.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
 | `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
