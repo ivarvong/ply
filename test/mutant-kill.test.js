@@ -2045,6 +2045,34 @@ test('parseOid is 40 lowercase hex; parseCommitId also refuses the zero oid', ()
   if (kept.ok) assert.equal(kept.value, leading);
 });
 
+test('recordResponseHeaders: a non-list, more than 8 names, or a name outside the telemetry alphabet is bad_request before any request', () => {
+  const refused = opts => { try { createTransport('http://127.0.0.1/r.git', opts); return null; } catch (e) { return e; } };
+  const names = n => Array.from({ length: n }, (_, i) => `h${i}`);
+  // 0 (omitted and empty), 1, limit-1, limit are accepted; limit+1 and far past are the same refusal.
+  for (const n of [undefined, 0, 1, 7, 8]) assert.equal(refused({ recordResponseHeaders: n === undefined ? undefined : names(n) }), null, `count ${n}`);
+  for (const n of [9, 10, 64]) {
+    const e = refused({ recordResponseHeaders: names(n) });
+    assert.equal(e.code, 'bad_request', `count ${n}`);
+    assert.equal(e.what, 'recordResponseHeaders');
+    assert.equal(e.message, 'recordResponseHeaders: at most 8 names');
+  }
+  const list = refused({ recordResponseHeaders: 'cf-ray' });
+  assert.equal(list.code, 'bad_request');
+  assert.equal(list.what, 'recordResponseHeaders');
+  assert.equal(list.message, 'recordResponseHeaders: expected a list of header names');
+  for (const name of ['', 'cf ray', 'cf-ray\n', 'cf/ray', 'x-foo!', 'Cf-Ray ']) {
+    const e = refused({ recordResponseHeaders: [name] });
+    assert.equal(e && e.code, 'bad_request', JSON.stringify(name));
+    assert.equal(e && e.message, `recordResponseHeaders: ${JSON.stringify(name)} is not a header name`);
+  }
+  const num = refused({ recordResponseHeaders: [1] });
+  assert.equal(num.message, 'recordResponseHeaders: not a string is not a header name');
+  let called = 0;
+  const bad = refused({ recordResponseHeaders: ['ok name'], fetchImpl: () => { called += 1; return Promise.reject(new Error('sent')); } });
+  assert.equal(bad.code, 'bad_request');
+  assert.equal(called, 0);
+});
+
 test('validatePushRef: receive-pack\'s funny refname (the cells test/space/refname.test.js observes from git)', () => {
   const ok = (ref, del) => { try { return validatePushRef(ref, del) === ref; } catch (e) { assert.equal(e.code, 'bad_request'); assert.equal(e.what, 'ref'); return false; } };
   // [ref, create accepted, delete accepted]: git v2.50.0 receive-pack's answers (the space's cells; a..b and a name outside refs/ by receive-pack.c:1477)
