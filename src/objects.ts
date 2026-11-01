@@ -444,11 +444,11 @@ export function assertFetched(typeName: string, data: Uint8Array, limits: Partia
         case 'commit': parseCommit(data, limits); return;
         case 'tag': parseTag(data); return;
       }
-      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+      // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
       return assertNever(found.name);
     }
   }
-  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
   assertNever(found);
 }
 

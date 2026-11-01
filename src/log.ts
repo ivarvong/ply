@@ -22,7 +22,7 @@
 //
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
-import { thrown as fail } from './errors.js';
+import { thrown as fail, type CommitMiss } from './errors.js';
 import { assertNever } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
@@ -81,18 +81,21 @@ async function fetchWindow(t: Transport, commit: string, limit: number): Promise
   const want = r.objects?.get(commit);
   if (want && want.type !== TYPE.COMMIT) {
     const found = nonCommitType(want.type);
-    switch (found.tag) {
-      case 'notCommit':
-        throw fail('not_found', `${commit} is not a commit (${found.name})`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: commit, type: found.name } } });
-      case 'commit':
-        throw fail('not_found', `${commit} is not a commit (commit)`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
-      case 'delta':
-        throw fail('not_found', `${commit} is not a commit (${found.name})`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
-      case 'invalid':
-        throw fail('not_found', `${commit} is not a commit (${want.type})`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
-    }
-    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-    return assertNever(found);
+    const detail = ((): { readonly shown: string; readonly miss: CommitMiss } => {
+      switch (found.tag) {
+        case 'notCommit':
+          return { shown: found.name, miss: { kind: 'not_commit', oid: commit, type: found.name } };
+        case 'delta':
+          return { shown: found.name, miss: { kind: 'absent', oid: commit } };
+        case 'commit':
+          return { shown: 'commit', miss: { kind: 'absent', oid: commit } };
+        case 'invalid':
+          return { shown: String(want.type), miss: { kind: 'absent', oid: commit } };
+      }
+      // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+      return assertNever(found);
+    })();
+    throw fail('not_found', `${commit} is not a commit (${detail.shown})`, { miss: { kind: 'commit', miss: detail.miss } });
   }
   return r;
 }

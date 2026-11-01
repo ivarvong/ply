@@ -565,16 +565,19 @@ export type PackLayout = {
 };
 
 function wireOf(n: number): ObjType {
-  switch (n) {
-    case TYPE.COMMIT: return TYPE.COMMIT;
-    case TYPE.TREE: return TYPE.TREE;
-    case TYPE.BLOB: return TYPE.BLOB;
-    case TYPE.TAG: return TYPE.TAG;
-    case TYPE.OFS_DELTA: return TYPE.OFS_DELTA;
-    case TYPE.REF_DELTA: return TYPE.REF_DELTA;
-    // parsePack never returns an object of any other type
-    default: throw new Error(`unreachable: ${String(n)}`);
+  // parsePack refuses an id outside the six before layout. objectName is that same refusal, so a bad id is pack_corrupt.
+  const named = objectName(n);
+  if (!named.ok) throw named.error;
+  switch (named.value) {
+    case 'commit': return TYPE.COMMIT;
+    case 'tree': return TYPE.TREE;
+    case 'blob': return TYPE.BLOB;
+    case 'tag': return TYPE.TAG;
+    case 'ofs_delta': return TYPE.OFS_DELTA;
+    case 'ref_delta': return TYPE.REF_DELTA;
   }
+  // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(named.value);
 }
 function resolvedObjType(n: number): ResolvedObjType | null {
   switch (n) {
