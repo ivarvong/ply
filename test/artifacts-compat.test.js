@@ -133,7 +133,7 @@ test('git-default server: no fallback attributes, tree:0 throughout (the fallbac
   try {
     const ex = arrayExporter(); const quirks = {};
     await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: A, message: 'm' }, { tracer: new Tracer({ exporter: ex }), quirks });
-    assert.equal(quirks.treeFilter, undefined);
+    assert.equal(quirks.treeFilter, 'tree:0'); // the caller's record states what the server took
     for (const s of spansOf(ex).filter(s => s.name === 'git.upload-pack fetch')) assert.ok(!('git.fetch.filter.fallback' in s.attrs));
   } finally { await r.proxy.close(); }
 });

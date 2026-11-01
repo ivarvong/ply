@@ -142,7 +142,7 @@ test('otel: a follows span is the root of its own trace, linked both ways while 
   const ex = arrayExporter(); const t = new Tracer({ exporter: ex, maxEvents: 2 });
   const op = t.start('git.op', { scrub: s => s.replaceAll('SECRET', '[redacted]') });
   const f = t.start('git.op.stream', { follows: op, attrs: { 'git.op.stream.note': 'SECRET' } });
-  assert.notEqual(f.traceId, op.traceId); assert.equal(f.parentSpanId, undefined);
+  assert.notEqual(f.traceId, op.traceId); assert.equal(f.parentSpanId, null);
   op.end();
   const late = t.start('git.op.late', { follows: op }); late.end(); // op already exported: no link back
   t.start('x', { follows: f }); t.start('y', { follows: f }); // f has follows_from + 2 followed_by → the second is dropped

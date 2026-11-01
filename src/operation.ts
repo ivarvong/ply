@@ -10,10 +10,10 @@
 import type { Extra } from './errors.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
-import type { Attrs, Quirks, Transport } from './transport.js';
+import type { Attrs, Quirks, Transport, TransportInput } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
-import { withParent } from './transport.js';
+import { asTransport, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
 import { thrown as fail } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
@@ -31,7 +31,7 @@ export type OperationConfig = {
   readonly limits: Limits;
   readonly signal: AbortSignal | null;
   readonly quirks: Input<Quirks> | null;
-  readonly transport: Transport | null;
+  readonly transport: TransportInput | null;
   readonly attrs: Attrs;
   readonly link: { readonly span: Span; readonly kind: string } | null;
   readonly onFinish: (() => Attrs) | null;
@@ -56,7 +56,7 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   try {
     // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
     // error recorded, like any other failure, instead of leaving it open and missing from the trace.
-    const t = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits, signal, ...(quirks === null ? {} : { quirks }) }) : withParent(transport, root);
+    const t = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits, signal, ...(quirks === null ? {} : { quirks }) }) : withParent(asTransport(transport), root);
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub !== null) root.scrub = t.scrub;
     return await body({ t, root, outcome, limits });
@@ -69,6 +69,9 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   }
 }
 
+// The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
+const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
+
 // After an acknowledged push: read `ref` back and require `expected`. A transport error here, or any other value, is
 // 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root`.
 export async function verifyRef(t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<string> {
@@ -78,7 +81,7 @@ export async function verifyRef(t: Transport, root: Span, prefix: string, ref: s
     // A thrown null has no `.message`: any failure to read the ref back is `ambiguous` (I25), whatever was thrown.
     const message = getOrElse<unknown>(thrownMessage(e), e);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- the thrown value renders as String() renders it; expected is Extra
-    throw fail('ambiguous', `push reported ok but the verification read-back failed: ${message}`, { cause: e, original: getOrElse<unknown>(thrownCode(e), null), expected } as Extra);
+    throw fail('ambiguous', `push reported ok but the verification read-back failed: ${message}`, { cause: e, ...originalCode(e), expected } as Extra);
   }
   root.set({ [`${prefix}.verify.ref`]: seen === null ? '' : seen });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ad-hoc error fields (errors.ts Extra); A3 moves them into Detail

@@ -142,7 +142,7 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
     yield* packFrames(pack, chunk);
   }
   const transport = ({ tracer, limits = DEFAULT_LIMITS, quirks = {} }) => ({
-    kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks, scrub: null,
+    kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks, objects: new Map(), scrub: null,
     frames: (service, body) => serve(service, body),
     // A ref miss asks discover() before it classifies the miss. No `unborn` feature: no second ls-refs, HEAD stays head_absent.
     advertise: async () => pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n']),
@@ -725,7 +725,7 @@ test('checkoutTree: one blob:none fetch for the trees, blobs in batches, gitlink
   assert.deepEqual(r.fetches().slice(1).map(f => [f.wants.length, f.filter]), [[5, null]]);
   const blobs = e.span('git.checkout.blobs');
   // consumed after checkoutTree returns: a root of its own trace that follows the checkout root (README "Span lifetimes")
-  assert.deepEqual([blobs.parentSpanId, blobs.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[root.traceId, root.spanId, 'follows_from']]]);
+  assert.deepEqual([blobs.parentSpanId, blobs.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [null, [[root.traceId, root.spanId, 'follows_from']]]);
   assert.notEqual(blobs.traceId, root.traceId);
   assert.deepEqual(Object.fromEntries(Object.entries(blobs.attrs).filter(([k]) => k.startsWith('git.checkout.'))), {
     'git.checkout.blobs.unique': 5, 'git.checkout.blobs.paths': 6, 'git.checkout.blobs.fetches': 1, 'git.checkout.blobs.buffered': 5, 'git.checkout.blobs.streamed': 0,
@@ -821,7 +821,7 @@ test('checkoutTree: a batch over a cap splits in half; one left alone streams on
   assert.deepEqual([s['git.checkout.blobs.splits'], s['git.checkout.blobs.fetches'], s['git.checkout.blobs.buffered'], s['git.checkout.blobs.streamed'], s['git.checkout.blobs.bytes']], [2, 2, 4, 1, 5]);
   assert.equal(e.all('git.read.blob').length, 1);
   const [rb, cb] = [e.span('git.read.blob'), e.span('git.checkout.blobs')];
-  assert.deepEqual([rb.parentSpanId, rb.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[cb.traceId, cb.spanId, 'follows_from']]]);
+  assert.deepEqual([rb.parentSpanId, rb.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [null, [[cb.traceId, cb.spanId, 'follows_from']]]);
   assert.deepEqual(cb.links.filter(l => l.attrs['ply.link'] === 'followed_by').map(l => l.spanId), [rb.spanId], 'the blobs span, open when the stream starts, links back');
 });
 
@@ -853,7 +853,7 @@ test('checkoutTree: a host refusing many wants is asked one at a time from then 
     const bad = refusing(code); bad.commit({ a: '1', b: '2' });
     const be = env(bad);
     await rejects(drain((await checkoutTree('http://fake/r.git', {}, be.opts)).files), code, `${code} refused`);
-    assert.equal(be.transport.quirks.blobWants, undefined);
+    assert.equal(be.transport.quirks.blobWants, 'many'); // nothing learned: the filled default
     const s = be.span('git.checkout.blobs');
     assert.equal(s.attrs['git.checkout.blobs.outcome'], code);
     assert.equal(s.status.code, 2);
@@ -1122,7 +1122,7 @@ test('readFile: the blob streamed and verified, its size first; directories and 
   const blob = e.span('git.read.blob');
   assert.deepEqual([blob.attrs['git.read.blob.oid'], blob.attrs['git.read.blob.size'], blob.attrs['git.read.blob.bytes'], blob.attrs['git.read.blob.verified'], blob.attrs['git.read.blob.outcome']], [GIT.b, 2, 2, true, 'ok']);
   const readRoot = e.span('git.read');
-  assert.deepEqual([blob.parentSpanId, blob.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [undefined, [[readRoot.traceId, readRoot.spanId, 'follows_from']]]);
+  assert.deepEqual([blob.parentSpanId, blob.links.map(l => [l.traceId, l.spanId, l.attrs['ply.link']])], [null, [[readRoot.traceId, readRoot.spanId, 'follows_from']]]);
   assert.deepEqual(readRoot.links.map(l => [l.spanId, l.attrs['ply.link']]), [[blob.spanId, 'followed_by']]);
   // a big blob in 7-byte network chunks
   const big = await readFile('http://fake/r.git', { ref: 'main', path: 'big.txt' }, env(r).opts);

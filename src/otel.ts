@@ -5,7 +5,9 @@
 /* oxlint-disable max-classes-per-file -- Tracer and Span are one API: a Tracer starts Spans, a Span exports through its Tracer */
 import { scrubError } from './errors.js';
 import { thrownCode, thrownMessage, thrownName, thrownStack } from './boundary.js';
-import { errorKind } from './result.js';
+import { errorKind, getOrElse, none } from './result.js';
+import type { Input } from './absent.js';
+import { field, fromNullable, fromNullish, withDefaults } from './absent.js';
 
 // OTLP AnyValue: exactly one of these fields. `in` on the field name discriminates.
 export type AnyValue =
@@ -16,31 +18,33 @@ export type AnyValue =
   | { readonly bytesValue: string }
   | { readonly arrayValue: { readonly values: readonly AnyValue[] } };
 export type KeyValue = { readonly key: string; readonly value: AnyValue };
-// Span attributes as the caller writes them: scalars, bytes or arrays of them; undefined means "not set".
+// Span attributes as the caller writes them: scalars, bytes or arrays of them. A key holding the platform missing value
+// is not exported (a caller's `{ x: maybe }` sets nothing); null is exported as the empty string.
 export type Attrs = Readonly<Record<string, unknown>>;
 export type Scrub = (s: string) => string;
-// 0 unset, 1 ok, 2 error (OTLP StatusCode).
-export type Status = { readonly code: number; readonly message?: string };
+// OTLP StatusCode: 0 unset, 1 ok, 2 error. Only an error carries a message.
+export type Status = { readonly code: 0 } | { readonly code: 1 } | { readonly code: 2; readonly message: string };
 export type SpanEvent = { readonly name: string; readonly timeUnixNano: string; readonly attributes: readonly KeyValue[] };
 export type SpanLink = { readonly traceId: string; readonly spanId: string; readonly attributes: readonly KeyValue[] };
-export type OtlpSpan = {
+// A root span has no parentSpanId key at all (OTLP omits it); a child names its parent.
+export type OtlpRootSpan = {
   readonly traceId: string;
   readonly spanId: string;
-  readonly parentSpanId: string | undefined;
   readonly name: string;
   readonly kind: number;
   readonly startTimeUnixNano: string;
   readonly endTimeUnixNano: string;
   readonly attributes: readonly KeyValue[];
   readonly events: readonly SpanEvent[];
-  // optional on the reading side: a line from another producer may leave them out
-  readonly links?: readonly SpanLink[];
+  readonly links: readonly SpanLink[];
   readonly status: Status;
-  readonly droppedAttributesCount?: number;
-  readonly droppedEventsCount?: number;
-  readonly droppedLinksCount?: number;
+  readonly droppedAttributesCount: number;
+  readonly droppedEventsCount: number;
+  readonly droppedLinksCount: number;
 };
-export type Scope = { readonly name: string; readonly version?: string };
+export type OtlpChildSpan = OtlpRootSpan & { readonly parentSpanId: string };
+export type OtlpSpan = OtlpRootSpan | OtlpChildSpan;
+export type Scope = { readonly name: string; readonly version: string };
 export type ScopeSpans = { readonly scope: Scope; readonly spans: readonly OtlpSpan[] };
 export type ResourceSpans = { readonly resource: { readonly attributes: readonly KeyValue[] }; readonly scopeSpans: readonly ScopeSpans[] };
 export type ExportLine = { readonly resourceSpans: readonly ResourceSpans[] };
@@ -66,7 +70,7 @@ const rand = (n: number): string => { const b = new Uint8Array(n); crypto.getRan
 
 // OTLP AnyValue encoding (pure)
 export function anyValue(v: unknown): AnyValue {
-  if (v === null || v === undefined) return { stringValue: '' };
+  if (fromNullish(v).tag === 'none') return { stringValue: '' };
   if (typeof v === 'string') return { stringValue: v };
   if (typeof v === 'boolean') return { boolValue: v };
   if (typeof v === 'bigint') return { intValue: v.toString() };
@@ -80,7 +84,7 @@ export function anyValue(v: unknown): AnyValue {
   // oxlint-disable-next-line typescript/no-base-to-string -- a caller's object renders as String() renders it, as before
   return { stringValue: String(v) };
 }
-export const kvs = (obj: Attrs): KeyValue[] => Object.entries(obj).filter(([, v]) => v !== undefined).map(([key, value]) => ({ key, value: anyValue(value) }));
+export const kvs = (obj: Attrs): KeyValue[] => Object.entries(obj).filter(([, v]) => fromNullable(v).tag === 'some').map(([key, value]) => ({ key, value: anyValue(value) }));
 const scrubAny = (v: AnyValue, scrub: Scrub): AnyValue => {
   if ('stringValue' in v) return { stringValue: scrub(v.stringValue) };
   return 'arrayValue' in v ? { arrayValue: { values: v.arrayValue.values.map(x => scrubAny(x, scrub)) } } : v;
@@ -89,26 +93,17 @@ const scrubKvs = (list: readonly KeyValue[], scrub: Scrub): KeyValue[] => list.m
 
 export const KIND: Readonly<{ INTERNAL: 1; SERVER: 2; CLIENT: 3; PRODUCER: 4; CONSUMER: 5 }> = Object.freeze({ INTERNAL: 1, SERVER: 2, CLIENT: 3, PRODUCER: 4, CONSUMER: 5 });
 
-export type TracerOptions = {
-  readonly exporter?: Exporter;
-  readonly resource?: Attrs;
-  readonly scope?: Scope;
-  readonly maxEvents?: number;
-};
-export type StartOptions = {
-  readonly parent?: Span | null;
-  readonly follows?: Span | null;
-  readonly kind?: number;
-  readonly attrs?: Attrs;
-  readonly scrub?: Scrub | null;
-};
-type SpanInit = {
-  readonly name: string;
-  readonly kind: number;
-  readonly attrs: Attrs;
-  readonly parent: Span | null;
-  readonly follows?: Span | null;
-  readonly scrub?: Scrub | null;
+export type TracerConfig = { readonly exporter: Exporter; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
+export type TracerOptions = Input<TracerConfig>;
+// How a span starts: under `parent`, or following `follows` (never both), with the credential scrubber it inherits.
+export type StartConfig = { readonly parent: Span | null; readonly follows: Span | null; readonly kind: number; readonly attrs: Attrs; readonly scrub: Scrub | null };
+export type StartOptions = Input<StartConfig>;
+type SpanInit = StartConfig & { readonly name: string };
+// A span's scrubber: its own, else its parent's, else the span it follows.
+const inheritedScrub = ({ scrub, parent, follows }: StartConfig): Scrub | null => {
+  if (scrub !== null) return scrub;
+  if (parent !== null) return parent.scrub;
+  return follows === null ? null : follows.scrub;
 };
 // A thrown field rendered the way String() renders it (a stack, a message). A string is itself.
 const asText = (v: unknown): string => (typeof v === 'string' ? v : String(v));
@@ -121,7 +116,7 @@ export class Span {
   public declare tracer: Tracer;
   public declare traceId: string;
   public declare spanId: string;
-  public declare parentSpanId: string | undefined;
+  public declare parentSpanId: string | null;
   public declare name: string;
   public declare kind: number;
   public declare start: string;
@@ -133,12 +128,13 @@ export class Span {
   public declare status: Status;
   public declare ended: boolean;
   public declare scrub: Scrub | null;
-  public constructor(tracer: Tracer, { name, kind, attrs, parent, follows = null, scrub = null }: SpanInit) {
+  public constructor(tracer: Tracer, init: SpanInit) {
+    const { name, kind, attrs, parent, follows } = init;
     if (parent && follows) throw new TypeError('a span has a parent or follows one, not both');
     this.tracer = tracer;
     this.traceId = parent ? parent.traceId : rand(16);
     this.spanId = rand(8);
-    this.parentSpanId = parent ? parent.spanId : undefined;
+    this.parentSpanId = parent ? parent.spanId : null;
     this.name = name;
     this.kind = kind;
     this.start = now();
@@ -150,7 +146,7 @@ export class Span {
     this.droppedLinks = 0;
     this.status = { code: 0 };
     this.ended = false;
-    this.scrub = scrub ?? parent?.scrub ?? follows?.scrub ?? null;
+    this.scrub = inheritedScrub(init);
     if (follows) { this.link(follows, { 'ply.link': 'follows_from' }); if (!follows.ended) follows.link(this, { 'ply.link': 'followed_by' }); }
   }
   public set(attrs: Attrs): this { Object.assign(this.attrs, attrs); return this; }
@@ -165,17 +161,18 @@ export class Span {
     if (this.links.length >= this.tracer.maxEvents) { this.droppedLinks++; return this; }
     this.links.push({ traceId: span.traceId, spanId: span.spanId, attributes: kvs(attrs) }); return this;
   }
-  public error(e: unknown, type?: unknown): this {
+  // `type`: the error.type to record (a caller's code); without one, or with null, the thrown value's code or name.
+  public error(e: unknown, ...type: [] | [unknown]): this {
     scrubError(e, this.scrub);
-    // a thrown value of any type: the readers are the optional-chained reads, so a primitive or null reads as nothing
-    const message = thrownMessage(e);
-    const code = thrownCode(e);
-    const name = thrownName(e);
-    this.status = { code: 2, message: asText(message ?? e) };
+    // a thrown value of any type: a primitive or null has none of these fields
+    const message = asText(getOrElse(thrownMessage(e), e));
+    const name = getOrElse<unknown>(thrownName(e), 'Error');
+    const given = type.length === 0 ? none : fromNullish(type[0]);
+    this.status = { code: 2, message };
     // error.type stays the taxonomy code (or the type the caller passed). error.kind is the closed discriminant
     // callers switch on: miss.kind, then kind, then reason, then code (#157).
-    this.set({ 'error.type': type ?? code ?? name ?? 'Error', 'error.kind': errorKind(e) });
-    this.event('exception', { 'exception.type': name ?? 'Error', 'exception.message': asText(message ?? e), 'exception.stacktrace': asText(thrownStack(e) ?? '') });
+    this.set({ 'error.type': getOrElse(given, getOrElse(thrownCode(e), name)), 'error.kind': errorKind(e) });
+    this.event('exception', { 'exception.type': name, 'exception.message': message, 'exception.stacktrace': asText(getOrElse<unknown>(thrownStack(e), '')) });
     return this;
   }
   public ok(): this { if (this.status.code === 0) this.status = { code: 1 }; return this; }
@@ -184,13 +181,15 @@ export class Span {
     this.ended = true;
     this.ok();
     const s = this.scrub;
+    const status = this.status;
     this.tracer.export({
-      traceId: this.traceId, spanId: this.spanId, parentSpanId: this.parentSpanId, name: this.name, kind: this.kind,
+      ...(this.parentSpanId === null ? {} : { parentSpanId: this.parentSpanId }),
+      traceId: this.traceId, spanId: this.spanId, name: this.name, kind: this.kind,
       startTimeUnixNano: this.start, endTimeUnixNano: now(),
       attributes: s ? scrubKvs(kvs(this.attrs), s) : kvs(this.attrs),
       events: s ? this.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : this.events,
-      // an empty message is still a string the scrubber must see; an unset one (ok) is not
-      links: this.links, status: s !== null && this.status.message !== undefined ? { ...this.status, message: s(this.status.message) } : this.status,
+      // an error's message (even empty) is a string the scrubber must see; ok and unset carry none
+      links: this.links, status: s !== null && status.code === 2 ? { code: 2, message: s(status.message) } : status,
       droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: this.droppedLinks,
     });
     return this;
@@ -203,7 +202,8 @@ export class Tracer {
   public declare resource: { attributes: KeyValue[] };
   public declare scope: Scope;
   public declare count: number;
-  public constructor({ exporter = () => { /* spans are dropped */ }, resource = {}, scope = { name: 'ply', version: '0.1.0' }, maxEvents = 256 }: TracerOptions = {}) {
+  public constructor(options: TracerOptions = {}) {
+    const { exporter, resource, scope, maxEvents } = withDefaults(options, { exporter: () => { /* spans are dropped */ }, resource: {}, scope: { name: 'ply', version: '0.1.0' }, maxEvents: 256 });
     this.exporter = exporter;
     this.maxEvents = maxEvents;
     this.resource = { attributes: kvs({ 'service.name': 'ply', 'telemetry.sdk.name': 'ply-otel', 'telemetry.sdk.language': 'javascript', ...resource }) };
@@ -213,11 +213,11 @@ export class Tracer {
   // `follows`: start a span that measures work the caller drives after `follows` returns (a stream it reads, an iterator
   // it drains). It is the root of a trace of its own with a 'follows_from' link to `follows` (and, while `follows` is
   // still open, a 'followed_by' link back), so no child outlives its parent: README "Span lifetimes".
-  public start(name: string, { parent = null, follows = null, kind = KIND.INTERNAL, attrs = {}, scrub = null }: StartOptions = {}): Span {
-    return new Span(this, { name, kind, attrs, parent, follows, scrub });
+  public start(name: string, options: StartOptions = {}): Span {
+    return new Span(this, { name, ...withDefaults<StartConfig>(options, { parent: null, follows: null, kind: KIND.INTERNAL, attrs: {}, scrub: null }) });
   }
   // Run fn(span) with automatic end/status.
-  public async span<T>(name: string, opts: StartOptions | undefined, fn: (s: Span) => T | PromiseLike<T>): Promise<T> {
+  public async span<T>(name: string, opts: StartOptions, fn: (s: Span) => T | PromiseLike<T>): Promise<T> {
     const s = this.start(name, opts);
     try { const r = await fn(s); s.end(); return r; }
     catch (e) { s.error(e); s.end(); throw e; }
@@ -240,7 +240,7 @@ export type FlatAttrs = Record<string, FlatValue>;
 export type FlatSpan = {
   readonly traceId: string;
   readonly spanId: string;
-  readonly parentSpanId: string | undefined;
+  readonly parentSpanId: string | null;
   readonly name: string;
   readonly kind: number;
   readonly durationMs: number;
@@ -258,13 +258,18 @@ export function fromAny(v: AnyValue): FlatValue {
   if ('arrayValue' in v) return v.arrayValue.values.map(fromAny);
   return v.bytesValue;
 }
-export const flattenKvs = (list: readonly KeyValue[] | null | undefined): FlatAttrs => Object.fromEntries((list ?? []).map(({ key, value }) => [key, fromAny(value)]));
+export const flattenKvs = (list: readonly KeyValue[]): FlatAttrs => Object.fromEntries(list.map(({ key, value }) => [key, fromAny(value)]));
+// The reading side takes lines from any producer: parentSpanId, links and the dropped counts may be missing there.
+const foreignString = (s: OtlpSpan, key: string): string | null => { const v = field(s, key); return v.tag === 'some' && typeof v.value === 'string' ? v.value : null; };
+const foreignCount = (s: OtlpSpan, key: string): number => { const v = field(s, key); return v.tag === 'some' && typeof v.value === 'number' ? v.value : 0; };
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a foreign line's links, when it has a list there, are OTLP links
+const foreignLinks = (s: OtlpSpan): readonly SpanLink[] => { const v = field(s, 'links'); return v.tag === 'some' && Array.isArray(v.value) ? v.value as SpanLink[] : []; };
 export function flattenLine(line: ExportLine): FlatSpan[] {
   return line.resourceSpans.flatMap(rs => rs.scopeSpans.flatMap(ss => ss.spans.map(s => ({
-    traceId: s.traceId, spanId: s.spanId, parentSpanId: s.parentSpanId, name: s.name, kind: s.kind,
+    traceId: s.traceId, spanId: s.spanId, parentSpanId: foreignString(s, 'parentSpanId'), name: s.name, kind: s.kind,
     durationMs: Number(BigInt(s.endTimeUnixNano) - BigInt(s.startTimeUnixNano)) / 1e6,
-    status: s.status, attrs: flattenKvs(s.attributes), droppedEvents: s.droppedEventsCount ?? 0,
+    status: s.status, attrs: flattenKvs(s.attributes), droppedEvents: foreignCount(s, 'droppedEventsCount'),
     events: s.events.map(e => ({ name: e.name, attrs: flattenKvs(e.attributes) })),
-    links: (s.links ?? []).map(l => ({ traceId: l.traceId, spanId: l.spanId, attrs: flattenKvs(l.attributes) })),
+    links: foreignLinks(s).map(l => ({ traceId: l.traceId, spanId: l.spanId, attrs: flattenKvs(l.attributes) })),
   }))));
 }

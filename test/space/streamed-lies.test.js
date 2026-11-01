@@ -145,7 +145,7 @@ test('a header that fails before the body: a raw reset, and a bad signature git 
   const oid = 'a'.repeat(40);
   const limits = DEFAULT_LIMITS;
   const transport = frames => ({
-    kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: {}, scrub: null,
+    kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: {}, objects: new Map(), scrub: null,
     frames, advertise: async () => { throw new Error('unused'); },
   });
   // openBlob returns the header failure (#145); it does not reject
@@ -203,7 +203,7 @@ test('blob:none object cap: one under, at, and one past each size the pack meets
       yield { kind: 'flush' };
     };
     const t = {
-      kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: { treeFilter: 'blob:none' }, scrub: null, frames,
+      kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: { treeFilter: 'blob:none' }, objects: new Map(), scrub: null, frames,
       advertise: async () => { throw new Error('unused') },
     };
     const where = `base ${b.baseN} +${b.extraN} delta ${b.deltaN} result ${b.resultN} cap ${b.cap}`;
