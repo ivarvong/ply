@@ -14,7 +14,7 @@ import { buildPack } from './pack.js';
 import { frames, coded, clientSpan, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
-import { validatePushRef } from './validate.js';
+import { validatePushRef, validateWire } from './validate.js';
 import type { Refname } from './refname.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */

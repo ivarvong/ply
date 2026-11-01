@@ -40,6 +40,7 @@ import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
 import { buildCommitData } from './commit-build.js';
 import type { Path } from './path.js';
+import { parsePath } from './path.js';
 import { parseRefname } from './refname.js';
 import { fromNullish } from './absent.js';
 
@@ -411,16 +412,22 @@ type StreamJob = {
   readonly edit: Extract<Norm, { readonly kind: 'edit' }>;
   readonly opts: StreamOpts;
 };
+function parseEditInputs(targetRef: string, editPath: string, limits: Partial<Limits> | null | undefined): { ref: Refname; path: Path } {
+  const branded = parseRefname(targetRef);
+  if (!branded.ok) throw branded.error;
+  const parsedPath = parsePath(editPath, limits);
+  if (!parsedPath.ok) throw parsedPath.error;
+  return { ref: branded.value, path: parsedPath.value.path };
+}
 async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob): Promise<CommitChangesResult> {
   const { plan, target, parent, edit, opts } = job;
   const creating = parent.creating;
   const strict = opts.pinned && !creating && parent.baseOid === null;
   root.set({ 'git.commit.stream': true });
   try {
-    const branded = parseRefname(target.ref);
-    if (!branded.ok) throw branded.error;
+    const { ref, path } = parseEditInputs(target.ref, edit.path, opts.rest.limits);
     const edited = await editFile(url, {
-      ref: branded.value, base: parent.baseOid ?? parent.baseRef ?? target.ref, path: edit.path, find: edit.find, replace: edit.replace,
+      ref, base: parent.baseOid ?? parent.baseRef ?? target.ref, path, find: edit.find, replace: edit.replace,
       author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
     }, {
       ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,

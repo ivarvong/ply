@@ -381,6 +381,27 @@ type Phase = 'in_pack' | 'external';
 export type UnresolvedBase = { readonly object: PackObject; readonly oid: string };
 export type CollectedPack = ResolvedPack & { readonly unresolved: readonly UnresolvedBase[] };
 
+// A thin REF base must be exactly the object git stored under that oid: the four stored types only
+// (commit, tree, blob, tag), and the SHA-1 of "type SP size NUL" + bytes must equal the named oid.
+// Anything else is pack_corrupt before applyDelta.
+function externalBase(oid: string, ext: ExternalBase): Result<Base, Corrupt> {
+  switch (ext.type) {
+    case TYPE.COMMIT:
+    case TYPE.TREE:
+    case TYPE.BLOB:
+    case TYPE.TAG: {
+      const kind = nameOfTypeId(ext.type);
+      // kind is one of commit|tree|blob|tag here
+      const hashed = hashObject(kind, ext.data);
+      if (hashed !== oid) return corrupt(`pack: ref delta base ${oid} hashes to ${hashed}`);
+      return ok({ type: ext.type, data: ext.data, chain: 0 });
+    }
+    default:
+      // a delta type, 0, 5, or any other non-object id
+      return corrupt(`pack: ref delta base ${oid} has type ${ext.type}`);
+  }
+}
+
 // `collectMissing` is describePack's path: a thin base is data, not an error. The default still refuses it
 // (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
 export function resolvePackResult(
@@ -417,32 +438,40 @@ export function resolvePackResult(
   let held = parsed.stats?.inflated ?? parsed.objects.reduce((n, o) => n + (o.data?.length ?? 0), 0);
   let phase: Phase = 'in_pack';
   const failed = (error: PackError): Step => ({ tag: 'failed', error });
-  const resolveObj = (obj: PackObject, depth = 0): Step => {
-    const hit = memo.get(obj.offset);
-    if (hit) return { tag: 'resolved', r: hit };
-    if (depth > maxChain) return failed(limitError('delta chain depth', depth, maxChain));
+  type BaseOrStep = { readonly tag: 'base'; readonly base: Base | undefined } | Step;
+  function findBase(obj: PackObject, depth: number, resolveFn: (o: PackObject, d: number) => Step): BaseOrStep {
     // the base: none (a full object), the object at baseOffset (OFS_DELTA), or the object named baseOid (REF_DELTA)
-    let base: Base | undefined;
     if (obj.baseOffset !== undefined) {
       const b = byOffset.get(obj.baseOffset);
       if (!b) return failed(plyError('pack_corrupt', `pack: ofs delta base not at object boundary ${obj.baseOffset}`));
-      const s = resolveObj(b, depth + 1);
+      const s = resolveFn(b, depth + 1);
       if (s.tag !== 'resolved') return s;
-      base = s.r;
-    } else if (obj.baseOid !== undefined) {
+      return { tag: 'base', base: s.r };
+    }
+    if (obj.baseOid !== undefined) {
       stats.baseLookups++;
       const inPack = byOid.get(obj.baseOid);
       if (inPack) {
-        const s = resolveObj(inPack, depth + 1);
+        const s = resolveFn(inPack, depth + 1);
         if (s.tag !== 'resolved') return s;
-        base = s.r;
-      } else {
-        const ext = phase === 'external' ? external(obj.baseOid) : undefined;
-        if (!ext) return { tag: 'waiting', oid: obj.baseOid };
-        stats.externalBases++;
-        base = { type: ext.type, data: ext.data, chain: 0 };
+        return { tag: 'base', base: s.r };
       }
+      const ext = phase === 'external' ? external(obj.baseOid) : undefined;
+      if (!ext) return { tag: 'waiting', oid: obj.baseOid };
+      const checked = externalBase(obj.baseOid, ext);
+      if (!checked.ok) return failed(checked.error);
+      stats.externalBases++;
+      return { tag: 'base', base: checked.value };
     }
+    return { tag: 'base', base: undefined };
+  }
+  function resolveObj(obj: PackObject, depth = 0): Step {
+    const hit = memo.get(obj.offset);
+    if (hit) return { tag: 'resolved', r: hit };
+    if (depth > maxChain) return failed(limitError('delta chain depth', depth, maxChain));
+    const b = findBase(obj, depth, resolveObj);
+    if (b.tag !== 'base') return b;
+    const base = b.base;
     let core: Base & { deltaOps?: DeltaOps };
     let oid: string;
     if (base === undefined) {
@@ -479,7 +508,7 @@ export function resolvePackResult(
     resolved.set(r.oid, r);
     byOid.set(r.oid, obj);
     return { tag: 'resolved', r };
-  };
+  }
   // Full objects first: each is hashed here, once, and registered, so a REF_DELTA finds it by id.
   for (const o of parsed.objects) {
     if (o.baseOffset !== undefined || o.baseOid !== undefined) continue;
