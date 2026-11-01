@@ -1,7 +1,7 @@
 // An in-memory tree for one multi-path commit. A lazy node is an object the server already has (its oid only);
 // a directory is expanded only when a change walks into it. Encoding writes the directories this call rebuilt;
 // a lazy node contributes its oid and no bytes. Empty directories are pruned; only the root may be empty.
-import { thrown as fail } from './errors.js';
+import { thrown as failThrown, fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { ok, err } from './result.js';
 import { encodeTree, hashObject } from './objects.js';
@@ -24,7 +24,7 @@ export const isDir = (node: Mem): node is Extract<Mem, { readonly kind: 'dir' }>
 // The directory's entries, or bad_request when the node is not a directory. Exported so a cell can reach this
 // refusal on a lazy node; the live path expands trees before it edits them.
 export function requireDir(node: Mem, path: string): Map<string, Mem> {
-  if (node.kind !== 'dir') throw fail('bad_request', `${path || '.'} is not a directory`, { what: 'path', path });
+  if (node.kind !== 'dir') throw failThrown('bad_request', `${path || '.'} is not a directory`, { what: 'path', path });
   return node.entries;
 }
 
@@ -33,7 +33,7 @@ export type Leaf = { readonly mode: BlobMode; readonly oid: string; readonly dat
 export function fileLeaf(mode: BlobMode, data: Uint8Array, limits: Limits, path = 'blob'): Leaf {
   const max = requireLimit(limits, 'maxObjectSize');
   if (data.length > max) throw limitError('object size', data.length, max);
-  if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) throw fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
+  if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) throw failThrown('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
   return { mode, oid: hashObject('blob', data), data };
 }
 
@@ -71,16 +71,16 @@ export function putAt(root: Mem, comps: readonly string[], leaf: Mem, overwrite:
   for (const name of comps.slice(0, -1)) {
     walked = walked === '' ? name : `${walked}/${name}`;
     const child = entries.get(name);
-    if (child === undefined || child.kind !== 'dir') throw fail('bad_request', `${walked} is not a directory`, { what: 'path', path: walked });
+    if (child === undefined || child.kind !== 'dir') throw failThrown('bad_request', `${walked} is not a directory`, { what: 'path', path: walked });
     entries = child.entries;
   }
   const name = leafName(comps);
   const full = walked === '' ? name : `${walked}/${name}`;
   const existing = entries.get(name);
   if ((existing !== undefined && existing.kind === 'dir') || (existing !== undefined && existing.kind === 'lazy' && existing.mode === MODE_TREE)) {
-    throw fail('bad_request', `${full} is a directory`, { what: 'path', path: full });
+    throw failThrown('bad_request', `${full} is a directory`, { what: 'path', path: full });
   }
-  if (existing !== undefined && !overwrite) throw fail('bad_request', `${full} already exists`, { what: 'path', path: full });
+  if (existing !== undefined && !overwrite) throw failThrown('bad_request', `${full} already exists`, { what: 'path', path: full });
   insertChild(entries, name, leaf, limits);
 }
 
@@ -92,14 +92,14 @@ export function removeAt(root: Mem, comps: readonly string[]): void {
   for (const name of comps.slice(0, -1)) {
     walked = walked === '' ? name : `${walked}/${name}`;
     const child = entries.get(name);
-    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked, miss: pathMiss(walked) });
-    if (child.kind !== 'dir') throw fail('not_found', `${walked} is not a directory`, { what: 'path', path: walked, miss: { kind: 'not_directory', path: walked, mode: child.mode } });
+    if (child === undefined) throw failThrown('not_found', `${walked} not found`, { what: 'path', path: walked, miss: pathMiss(walked) });
+    if (child.kind !== 'dir') throw failThrown('not_found', `${walked} is not a directory`, { what: 'path', path: walked, miss: { kind: 'not_directory', path: walked, mode: child.mode } });
     stack.push({ entries, name });
     entries = child.entries;
   }
   const name = leafName(comps);
   const full = walked === '' ? name : `${walked}/${name}`;
-  if (!entries.has(name)) throw fail('not_found', `${full} not found`, { what: 'path', path: full, miss: pathMiss(full) });
+  if (!entries.has(name)) throw failThrown('not_found', `${full} not found`, { what: 'path', path: full, miss: pathMiss(full) });
   entries.delete(name);
   for (let i = stack.length - 1; i >= 0; i--) {
     const frame = stack[i];
@@ -115,16 +115,16 @@ export function removeAt(root: Mem, comps: readonly string[]): void {
 export function renameAt(root: Mem, from: readonly string[], to: readonly string[]): void {
   const fromPath = joined(from);
   const toPath = joined(to);
-  if (fromPath === toPath) throw fail('bad_request', `${fromPath} is already named ${toPath}`, { what: 'path', path: fromPath });
-  if (toPath.startsWith(`${fromPath}/`)) throw fail('bad_request', `cannot rename ${fromPath} into itself`, { what: 'path', path: fromPath });
+  if (fromPath === toPath) throw failThrown('bad_request', `${fromPath} is already named ${toPath}`, { what: 'path', path: fromPath });
+  if (toPath.startsWith(`${fromPath}/`)) throw failThrown('bad_request', `cannot rename ${fromPath} into itself`, { what: 'path', path: fromPath });
   let srcEntries = requireDir(root, '');
   let walked = '';
   const stack: Array<{ readonly entries: Map<string, Mem>; readonly name: string }> = [];
   for (const name of from.slice(0, -1)) {
     walked = walked === '' ? name : `${walked}/${name}`;
     const child = srcEntries.get(name);
-    if (child === undefined) throw fail('not_found', `${walked} not found`, { what: 'path', path: walked, miss: pathMiss(walked) });
-    if (child.kind !== 'dir') throw fail('not_found', `${walked} is not a directory`, { what: 'path', path: walked, miss: { kind: 'not_directory', path: walked, mode: child.mode } });
+    if (child === undefined) throw failThrown('not_found', `${walked} not found`, { what: 'path', path: walked, miss: pathMiss(walked) });
+    if (child.kind !== 'dir') throw failThrown('not_found', `${walked} is not a directory`, { what: 'path', path: walked, miss: { kind: 'not_directory', path: walked, mode: child.mode } });
     stack.push({ entries: srcEntries, name });
     srcEntries = child.entries;
   }
@@ -136,12 +136,12 @@ export function renameAt(root: Mem, from: readonly string[], to: readonly string
   for (const name of to.slice(0, -1)) {
     destWalked = destWalked === '' ? name : `${destWalked}/${name}`;
     const child = destEntries.get(name);
-    if (child === undefined) throw fail('not_found', `${destWalked} not found`, { what: 'path', path: destWalked, miss: pathMiss(destWalked) });
-    if (child.kind !== 'dir') throw fail('not_found', `${destWalked} is not a directory`, { what: 'path', path: destWalked, miss: { kind: 'not_directory', path: destWalked, mode: child.mode } });
+    if (child === undefined) throw failThrown('not_found', `${destWalked} not found`, { what: 'path', path: destWalked, miss: pathMiss(destWalked) });
+    if (child.kind !== 'dir') throw failThrown('not_found', `${destWalked} is not a directory`, { what: 'path', path: destWalked, miss: { kind: 'not_directory', path: destWalked, mode: child.mode } });
     destEntries = child.entries;
   }
   const destName = leafName(to);
-  if (destEntries.has(destName)) throw fail('bad_request', `${toPath} already exists`, { what: 'path', path: toPath });
+  if (destEntries.has(destName)) throw failThrown('bad_request', `${toPath} already exists`, { what: 'path', path: toPath });
   srcEntries.delete(srcName);
   destEntries.set(destName, node);
   for (let i = stack.length - 1; i >= 0; i--) {

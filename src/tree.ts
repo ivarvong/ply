@@ -18,6 +18,7 @@ import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
+import { parseRefname } from './refname.js';
 import { makeDelta } from './packresolve.js';
 import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
@@ -311,7 +312,8 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     const newCommit = hashObject('commit', commitData);
     const objects = [{ type: TYPE.COMMIT, data: commitData }, ...sel.trees, ...sel.blobs];
     root.set({ 'git.push_tree.commit.new': newCommit, 'git.push_tree.send.trees': sel.trees.length, 'git.push_tree.send.tree_deltas': sel.deltas, 'git.push_tree.send.blobs': sel.blobs.length });
-    const pushed = await push(t, { ref: s.ref, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
+    const bref = parseRefname(s.ref); if (!bref.ok) throw bref.error;
+    const pushed = await push(t, { ref: bref.value, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
     for (const tr of s.built.trees.values()) cache.set(tr.oid, tr.data);
     if (verify) await verifyRef(t, root, 'git.push_tree', s.ref, newCommit);
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt, newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });

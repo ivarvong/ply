@@ -39,6 +39,7 @@ import type { Level as BuiltLevel, NewTree as BuiltNewTree } from './commit/buil
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 
 export { spInit, spStep, spFinish }; // the single-object pack parser lives in fetch.js; re-exported for callers of old paths
+export { buildCommitObjects, withCommitData } from './commit/build.js';
 
 // A caller's identity, before validateIdent. `time` overrides the spec's `time` for this person; omitted uses the spec's.
 export type Author = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number };
@@ -113,7 +114,7 @@ export type EditSpec = {
   readonly time?: number;
 };
 export type EditPlan = {
-  readonly ref: string;
+  readonly ref: Refname;
   readonly base: string;
   readonly baseOid: boolean;
   readonly create: boolean;
@@ -138,16 +139,22 @@ function resolvedBase(base: string): { readonly base: string; readonly oid: bool
   if (!id.ok) throw id.error;
   return { base: id.value, oid: true };
 }
-export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: findIn, replace: replaceIn, author, committer = null, message, time = Math.floor(Date.now() / 1000) }: EditSpec, limits: Limits, head: string | null = null): EditPlan {
-  validatePushRef(ref, false);
-  const parsed = resolvedBase(base);
+import { parseRefname } from './refname.js';
+import { parsePath as parsePathBrand } from './path.js';
+export function validateSpec(spec: EditSpec, limits: Limits, head: string | null = null): EditPlan {
+  const fallbackRef = parseRefname('refs/heads/main');
+  const givenRef = spec.ref ?? (fallbackRef.ok ? fallbackRef.value : (() => { throw fail('bad_request', 'invalid default ref'); })());
+  const { base: baseIn = givenRef, path: pathIn, find: findIn, replace: replaceIn, author, committer = null, message, time = Math.floor(Date.now() / 1000) } = { ...spec, base: (spec as { base?: string }).base };
+  validatePushRef(givenRef, false);
+  const parsed = resolvedBase(baseIn as unknown as string);
   const resolved = parsed.base;
   const baseIsOid = parsed.oid;
   const atAuthorTime = fromNullish(author.time);
   const stamp = atAuthorTime.tag === 'some' ? atAuthorTime.value : time;
   // Build ident inputs without spelling platform undefined: include tz only when present.
   const authorBase = { name: author.name, email: author.email, time: stamp } as const;
-  const person = validateIdent(fromNullish(author.tz).tag === 'some' ? { ...authorBase, tz: fromNullish(author.tz).value as string } : authorBase);
+  const aTz = fromNullish(author.tz);
+  const person = validateIdent(aTz.tag === 'some' ? { ...authorBase, tz: aTz.value } : authorBase);
   const written = (() => {
     const maybe = fromNullish(committer);
     if (maybe.tag === 'none') return person;
@@ -159,12 +166,12 @@ export function validateSpec({ ref = 'refs/heads/main', base = ref, path, find: 
     return validateIdent(cTz.tag === 'some' ? { ...base, tz: cTz.value } : base);
   })();
   validateMessage(message);
-  const comps = validatePath(path, limits);
+  const comps = validatePath(pathIn as unknown as string, limits);
   const find: unknown = bytesOf(findIn), replace: unknown = bytesOf(replaceIn);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
   if (!find.length) throw fail('bad_request', 'find must be non-empty');
   if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
-  return Object.freeze({ ref, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== ref, path, comps, find, replace, author: person, committer: written, message, time: person.time, head });
+  return Object.freeze({ ref: givenRef, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== (givenRef as unknown as string), path: pathIn as unknown as string, comps, find, replace, author: person, committer: written, message, time: person.time, head });
 }
 
 // The ref exists and the caller named a commit that is not its tip. Committing there would move the ref off its

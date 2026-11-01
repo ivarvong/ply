@@ -44,8 +44,8 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer,
   }
   const who = identLine(author, time);
   const written = committer === undefined ? who : identLine(committer, time);
-  // trailing newline by caller
-  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message });
+  const body = message.endsWith('\n') ? message : `${message}\n`;
+  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message: body });
   const newCommit = hashObject('commit', commitData);
   const objects = [
     { type: TYPE.COMMIT, data: commitData },
@@ -65,7 +65,8 @@ export function buildCommitData({ tree, parents, author, committer, time, messag
 }): { readonly data: Uint8Array; readonly oid: string } {
   const who = identLine(author, time);
   const written = committer === undefined ? who : identLine(committer, time);
-  const commitData = encodeCommit({ tree, parents, author: who, committer: written, message });
+  const body = message.endsWith('\n') ? message : `${message}\n`;
+  const commitData = encodeCommit({ tree, parents, author: who, committer: written, message: body });
   return { data: commitData, oid: hashObject('commit', commitData) };
 }
 

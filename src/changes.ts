@@ -40,6 +40,7 @@ import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
 import { buildCommitData } from './commit/build.js';
 import type { Path } from './path.js';
+import { parseRefname } from './refname.js';
 import { fromNullish } from './absent.js';
 import { orThrow } from './errors.js';
 
@@ -415,8 +416,10 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
   const strict = opts.pinned && !creating && parent.baseOid === null;
   root.set({ 'git.commit.stream': true });
   try {
+    const branded = parseRefname(target.ref);
+    if (!branded.ok) throw branded.error;
     const edited = await editFile(url, {
-      ref: target.ref, base: parent.baseOid ?? parent.baseRef ?? target.ref, path: edit.path, find: edit.find, replace: edit.replace,
+      ref: branded.value, base: parent.baseOid ?? parent.baseRef ?? target.ref, path: edit.path as unknown as Path, find: edit.find, replace: edit.replace,
       author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
     }, {
       ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,
@@ -483,7 +486,8 @@ async function writeMem(job: MemJob): Promise<MemOutcome> {
   const objects: PackObject[] = [{ type: TYPE.COMMIT, data: commitData }, ...applied.objects];
   const oldOid = oldOidOf(parent);
   try {
-    const pushed = await push(t, { ref: target.ref, oldOid, newOid: oid, objects });
+    const branded = parseRefname(target.ref); if (!branded.ok) throw branded.error;
+    const pushed = await push(t, { ref: branded.value, oldOid, newOid: oid, objects });
     if (verify) await verifyRef(t, root, 'git.commit', target.ref, oid);
     return { retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.tree, oid, pushBytes: pushed.packBytes, outcome: 'commit' }) };
   } catch (e) {
