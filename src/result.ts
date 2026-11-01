@@ -56,3 +56,41 @@ export function errorKind(e: unknown): string {
   return FALLBACK_KIND;
 }
 export const errorKindAttr = (e: unknown): { readonly 'error.kind': string } => ({ 'error.kind': errorKind(e) });
+
+// Absence, in the same closed-tag style as a typed miss (t134u). A missing value is None.
+// Result keeps its `ok` discriminant (the 0.2.0 decision). Option uses `tag`. The helpers below are the composition.
+export type Some<T> = { readonly tag: 'some'; readonly value: T };
+export type None = { readonly tag: 'none' };
+export type Option<T> = Some<T> | None;
+
+export const some = <T>(value: T): Some<T> => ({ tag: 'some', value });
+export const none: None = { tag: 'none' };
+
+export const isSome = <T>(o: Option<T>): o is Some<T> => o.tag === 'some';
+export const isNone = <T>(o: Option<T>): o is None => o.tag === 'none';
+
+export type OptionHandlers<T, R> = { readonly some: (value: T) => R; readonly none: (absent: None) => R };
+export const matchOption = <T, R>(o: Option<T>, h: OptionHandlers<T, R>): R => {
+  if (o.tag === 'none') return h.none(o);
+  // Not a method call named `some`: that is Array#some to the linter.
+  const present = h.some;
+  return present(o.value);
+};
+
+// Ok becomes Some. Err becomes None; the error is dropped on purpose (None carries no reason).
+export const resultToOption = <T, E>(r: Result<T, E>): Option<T> => (r.ok ? some(r.value) : none);
+
+// Some becomes Ok. None becomes Err(error). The error is required: None has nothing to put there.
+export const optionToResult = <T, E>(o: Option<T>, error: E): Result<T, E> => (o.tag === 'some' ? ok(o.value) : err(error));
+
+// Ok(Some(v)) → Some(Ok(v)); Ok(None) → None; Err(e) → Some(Err(e)).
+export const transposeResultOption = <T, E>(r: Result<Option<T>, E>): Option<Result<T, E>> => {
+  if (!r.ok) return some(err(r.error));
+  return r.value.tag === 'some' ? some(ok(r.value.value)) : none;
+};
+
+// Some(Ok(v)) → Ok(Some(v)); Some(Err(e)) → Err(e); None → Ok(None).
+export const transposeOptionResult = <T, E>(o: Option<Result<T, E>>): Result<Option<T>, E> => {
+  if (o.tag === 'none') return ok(none);
+  return o.value.ok ? ok(some(o.value.value)) : err(o.value.error);
+};
