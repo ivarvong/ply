@@ -33,8 +33,28 @@ export const CODES: readonly Code[] = /* @__PURE__ */ Object.freeze(/* @__PURE__
 // Per-code payload: the fields a code always carries. A code not listed carries only code + message (+ Extra).
 // Adding detail to a code is one line here, and every constructor and match site is re-checked. These are the
 // fields today's call sites attach unconditionally (grep `fail('<code>'`); a converting module tightens its codes.
+// Why a commit id is not a commit the remote will serve (#112, nested under Miss). `absent`: upload-pack said the oid
+// is not its ref. `not_commit`: the object arrived and it is a tree, blob, or tag.
+export type CommitMiss =
+  | { readonly kind: 'absent'; readonly oid: string }
+  | { readonly kind: 'not_commit'; readonly oid: string; readonly type: 'tree' | 'blob' | 'tag' };
+
+// Why a not_found missed (#115). Callers switch on `kind`. A corrupt pack stays pack_corrupt and carries none of these.
+export type Miss =
+  | { readonly kind: 'ref'; readonly ref: string; readonly candidates: readonly string[] }
+  | { readonly kind: 'head_unborn'; readonly target: string }
+  | { readonly kind: 'head_absent' }
+  | { readonly kind: 'path'; readonly missing: string; readonly existingPath: string }
+  | { readonly kind: 'not_directory'; readonly path: string; readonly mode: string }
+  | { readonly kind: 'is_directory'; readonly path: string; readonly tree: string }
+  | { readonly kind: 'submodule'; readonly path: string; readonly commit: string }
+  | { readonly kind: 'commit'; readonly miss: CommitMiss }
+  | { readonly kind: 'repository' };
+
 export type Detail = {
   readonly http: { readonly status: number };
+  // read/resolve, and a 404: which thing was absent. Required, so a not_found cannot be told apart by its message.
+  readonly not_found: { readonly miss: Miss };
   readonly limit_exceeded: { readonly what: string; readonly got: number; readonly max: number };
   readonly cas_conflict: { readonly expected: string | null; readonly actual: string | null };
   readonly match_count: { readonly matches: number };
@@ -44,12 +64,6 @@ export type Detail = {
 };
 // `unknown` is the identity of `&`: a code without a payload adds nothing to its member.
 type DetailOf<C extends Code> = C extends keyof Detail ? Detail[C] : unknown;
-
-// Why a commit id is not_found (#112). `absent`: upload-pack said the oid is not its ref. `not_commit`: the object
-// arrived and it is a tree, blob, or tag. Every other failure keeps its own code (a corrupt pack stays pack_corrupt).
-export type CommitMiss =
-  | { readonly kind: 'absent'; readonly oid: string }
-  | { readonly kind: 'not_commit'; readonly oid: string; readonly type: 'tree' | 'blob' | 'tag' };
 
 // Optional context any error may carry: what was checked, the offending path, the underlying cause (a platform
 // error, or another PlyError for `ambiguous`), and the code an `ambiguous` replaced. Unconverted modules attach
@@ -71,8 +85,6 @@ export type Extra = {
   readonly hookOutput?: string;
   // receivecaps.ts: the capabilities the server advertised, beside an `unsupported` push
   readonly caps?: readonly string[];
-  // fetchCommit's not_found (#112). Absent on every other not_found (a missing ref, a missing path).
-  readonly miss?: CommitMiss;
   // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
   // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts takeResult), so more bytes may complete it.
   // 'not_our_ref': upload-pack's ERR or band 3 said the wanted oid is not its ref (v2Step). Any other remote_error has none.
