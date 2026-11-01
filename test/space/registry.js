@@ -74,7 +74,7 @@ export const SPACES = [
   { name: 'stamps', status: 'pending', pending: '#106', kind: 'enumerated', runners: ['test/stamps.test.js'], run: 'ci',
     axes: [{ tag: 'pair', n: 3, doc: 'author/committer stamps: +0530/-0800, -1200/+1400, omitted/+0545' }, { tag: 'op', n: 7, doc: 'merge from a branch / a commit id, rebase onto a branch / a commit id, squash, cherry-pick, revert; plus the zero-oid and non-commit from/onto cases' }],
     cells: 21, observed: 21, derived: 0, oracle: 'git cat-file -p byte-equality with GIT_AUTHOR_* / GIT_COMMITTER_* (#103 item 4)' },
-  { name: 'commit-changes', status: 'pending', pending: '#103', kind: 'enumerated', runners: ['test/changes.test.js'], run: 'ci',
+  { name: 'commit-changes', status: 'pending', pending: '#147', kind: 'enumerated', runners: ['test/changes.test.js'], run: 'ci',
     axes: [{ tag: 'start', n: 2, doc: 'an empty repository, or two commits with a side ref at the tip' }, { tag: 'place', n: 7, doc: 'the branch, a new branch, another ref, a commit id, an ancestor, another ref while the target exists, the zero id' }, { tag: 'op', n: 15, doc: 'create, create of an existing path, write, edit, zero matches, two matches, delete, delete missing, rename, rename onto, rename to itself, a sequence, executable, symlink, write the bytes already there' }],
     cells: 210, observed: 210, derived: 0, oracle: 'git cat-file commit byte-equality and fsck --strict over http-backend (#103 item 2). Named disagreement: create of a path that exists (git add overwrites; ply bad_request). A new ref whose tree matches the parent is bad_request and stays absent' },
   { name: 'git-bytes', status: 'main', kind: 'enumerated', runners: ['test/git-bytes.test.js'], run: 'ci',
