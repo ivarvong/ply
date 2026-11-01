@@ -499,6 +499,11 @@ property('refname', 'a prefix of a refname is that refname or a bad_request', ()
   for (const full of ['refs/heads/main', 'refs/heads/feature/x-1', 'refs/tags/v1.2.3', 'refs/notes/commits']) closedUnderPrefix(full, parseRefname, v => v);
   for (const full of ['refs/heads/main', 'refs/heads/a/b']) closedUnderPrefix(full, parseBranchName, v => v);
   for (const full of ['refs/tags/v1.2.3', 'refs/tags/release/2026']) closedUnderPrefix(full, parseTagName, v => v);
+  // a valid ref of the other kind is refused by name, not by syntax
+  const tagAsBranch = parseBranchName('refs/tags/v1.2.3');
+  assert.equal(tagAsBranch.ok, false);
+  if (!tagAsBranch.ok) assert.equal(tagAsBranch.error.code, 'bad_request');
+  assert.equal(parseTagName('refs/heads/main').ok, false);
 });
 
 property('commit-id', 'a prefix of a commit id is not a commit id', () => {
