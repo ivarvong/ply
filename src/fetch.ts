@@ -12,14 +12,15 @@ import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
 import { corruptCacheHit } from './cachestatus.js';
-import { assertNever } from './result.js';
+import { assertNever, none } from './result.js';
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1, cache)
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
+import { mapGet } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitError, requireLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { frames, coded, clientSpan, proto } from './transport.js';
+import { frames, coded, clientSpan, proto, harvestBytes } from './transport.js';
 
 /* oxlint-disable no-magic-numbers -- span tails are diagnostics, not wire-format facts */
 const PROGRESS_KEEP = 512;
@@ -397,12 +398,13 @@ export const skippedAttrs = (skipped: readonly Skipped[]): Attrs => ({ 'git.fetc
 // every caller has run checkWide over the pack first (what is left passed assertFetched under the transport's limits),
 // since fetchObject serves the harvest without another look.
 export function harvest(t: Transport, objects: ReadonlyMap<string, PackObject>, skip: string | null = null): { readonly kept: number; readonly bytes: number } {
-  const store = t.objects; if (!store) return { kept: 0, bytes: 0 };
-  let bytes = 0, kept = 0; store.bytes ??= 0;
+  const store = t.objects;
+  const cap = requireLimit(t.limits, 'maxHarvestBytes');
+  let bytes = 0, held = harvestBytes(store), kept = 0;
   for (const [oid, o] of objects) {
     if (oid === skip || store.has(oid) || (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE)) continue;
-    if (store.bytes + o.data.length > requireLimit(t.limits, 'maxHarvestBytes')) break;
-    store.set(oid, { type: o.type, data: o.data }); store.bytes += o.data.length; kept++; bytes += o.data.length;
+    if (held + o.data.length > cap) break;
+    store.set(oid, { type: o.type, data: o.data }); held += o.data.length; kept++; bytes += o.data.length;
   }
   return { kept, bytes };
 }
@@ -532,12 +534,12 @@ export async function fetchObject(t: Transport, { oid, filter = 'tree:0', deepen
   // oxlint-disable-next-line typescript/no-unnecessary-condition, typescript/no-unnecessary-type-conversion -- see above
   if (!OID_RE.test(oid ?? '')) throw fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`);
   const narrow = filter === 'tree:0';
-  const held = narrow ? t.objects?.get(oid) : undefined;
-  if (held && (expectType === null || held.type === expectType)) return { type: held.type, data: held.data, oid, size: held.data.length, bust: false, harvested: true };
-  if (narrow && t.quirks?.treeFilter === 'blob:none') return fetchWide(t, { oid, deepen, expectType });
+  const held = narrow ? mapGet(t.objects, oid) : none;
+  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return { type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true };
+  if (narrow && t.quirks.treeFilter === 'blob:none') return fetchWide(t, { oid, deepen, expectType });
   try { return await fetchSingle(t, { oid, filter, deepen, expectType }); } catch (e) {
     if (!narrow || !isFilterRejection(e)) throw e;
-    if (t.quirks) t.quirks.treeFilter = 'blob:none';
+    t.quirks.treeFilter = 'blob:none';
     return fetchWide(t, { oid, deepen, expectType, learned: true });
   }
 }

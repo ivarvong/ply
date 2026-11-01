@@ -99,7 +99,7 @@ export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tre
     if (r.objects) harvest(t, r.objects);
     return { ...r, filter: 'blob:none', learned };
   };
-  if (t.quirks?.treeFilter === 'blob:none') return wide(false);
+  if (t.quirks.treeFilter === 'blob:none') return wide(false);
   try {
     const base = await fetchPack(t, opts, { check: (objects): Attrs => { checkWide(objects, () => true, t.limits); return {}; } });
     const f = fromNullable(opts.filter);
@@ -107,7 +107,7 @@ export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tre
     return { ...base, filter: filterVal, learned: false };
   } catch (e) {
     if (!isFilterRejection(e)) throw e;
-    if (t.quirks) t.quirks.treeFilter = 'blob:none';
+    t.quirks.treeFilter = 'blob:none';
     return wide(true);
   }
 }

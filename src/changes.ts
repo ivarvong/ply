@@ -34,7 +34,7 @@ import {
 import type { BlobMode, Dir, Mem } from './memtree.js';
 import { MODE_TREE } from './format.js';
 import { assertNever } from './result.js';
-import { thrownCode } from './boundary.js';
+import { thrownCodeIs, thrownCodeOr } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
@@ -442,7 +442,7 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
     // editFile may have retried against a tip that moved. That commit's parent is the tip it won on.
     return resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' });
   } catch (e) {
-    const code = thrownCode(e);
+    const code = thrownCodeOr(e, null);
     const rebase = creating && code === 'bad_request' && fieldOf(e, 'what') === 'rebase';
     if (code !== 'cas_conflict' && !rebase) throw e;
     const known = actualOf(e);
@@ -501,7 +501,7 @@ async function writeMem(job: MemJob): Promise<MemOutcome> {
     if (verify) await verifyRef(t, root, 'git.commit', target.ref, oid);
     return { retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.tree, oid, pushBytes: pushed.packBytes, outcome: 'commit' }) };
   } catch (e) {
-    if (thrownCode(e) !== 'cas_conflict') throw e;
+    if (!thrownCodeIs(e, 'cas_conflict')) throw e;
     if (attempt === 0 && !pinned && !parent.creating) return { retry: true };
     return lost(target.ref, oldOid, await readTip(t, target.ref), e);
   }

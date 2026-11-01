@@ -4,7 +4,7 @@
 // memFromScan, summarize) is a function of its arguments; the effects (lsRefs, fetchObject, packStream, push) are free
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { thrown as fail, isPlyCode } from './errors.js';
+import { thrown as fail } from './errors.js';
 import type { Extra, Miss } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
@@ -27,7 +27,7 @@ import type { PackObject } from './push.js';
 import type { Signer } from './sign.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownAttrs, thrownCode, thrownMessage } from './boundary.js';
+import { isPlyThrown, thrownAttrs, thrownCodeOr, thrownText } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import { fromNullish } from './absent.js';
 import type { Refname } from './refname.js';
@@ -363,7 +363,7 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
     } catch (e) {
       await pump.catch(() => { /* the read side's error is the one reported */ });
       partial();
-      if (!isPlyCode(thrownCode(e))) throw fail('pack_corrupt', `blob stream: ${String(thrownMessage(e) ?? e)}`, { cause: e });
+      if (!isPlyThrown(e)) throw fail('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
       throw e;
     }
     if (sha === null) { try { sha = await begin(); } catch (e) { partial(); throw e; } } // empty blob
@@ -421,7 +421,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     hint = hintWas ?? decided.hint;
     const { oldCommit } = decided;
     if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${oldCommit}, not the expected head ${head}`, { expected: head, actual: oldCommit });
-    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': thrownCode(speculative) ?? 'error' });
+    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': thrownCodeOr(speculative, 'error') });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is getObject's value (the rejection branch is the Error above)
     const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await getObject(oldCommit, TYPE.COMMIT, 1);
     const commit: { readonly tree: string; readonly parents: readonly string[] } = parseCommit(commitObj.data, limits);
@@ -440,7 +440,7 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
         if (data) cacheHits++; else { data = (await getObject(treeOid, TYPE.TREE)).data; cache.set(treeOid, data); }
         span.set({ 'git.edit.tree.cache_hit': hit });
         try { const { entry, attrs: found } = lookupEntry(data, name, last, limits); span.set(found); return { treeOid, data, entry }; }
-        catch (e) { const found = thrownAttrs(e); if (found) span.set(found); throw e; }
+        catch (e) { const found = thrownAttrs(e); if (found.tag === 'some') span.set(found.value); throw e; }
       });
       levels.push(lvl);
       treeOid = lvl.entry.oid;

@@ -7,7 +7,7 @@ import type { Result } from './result.js';
 import { fetchObject } from './fetch.js';
 import { parseCommit, TYPE } from './objects.js';
 import type { Commit } from './objects.js';
-import { thrownCode, thrownReason } from './boundary.js';
+import { thrownCodeIs, thrownReasonIs } from './boundary.js';
 import type { Transport } from './transport.js';
 
 export type { CommitMiss };
@@ -22,7 +22,7 @@ export async function fetchCommit(t: Transport, oid: string): Promise<Result<Fet
     const c = await fetchObject(t, { oid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
     return ok({ oid, data: c.data, commit: parseCommit(c.data, t.limits) });
   } catch (e) {
-    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') return resultErr(thrown('not_found', `commit ${oid} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid } } }));
+    if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return resultErr(thrown('not_found', `commit ${oid} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid } } }));
     if (isPlyError(e)) return resultErr(e);
     throw e;
   }

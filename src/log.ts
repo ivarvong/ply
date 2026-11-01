@@ -39,7 +39,7 @@ import { DEFAULT_LIMITS, requireLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
-import { thrownCode, thrownReason } from './boundary.js';
+import { thrownCodeIs, thrownReasonIs } from './boundary.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | null };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
@@ -81,7 +81,7 @@ export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterab
 async function fetchWindow(t: Transport, commit: string, limit: number): Promise<FetchedPack> {
   let r: FetchedPack;
   try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
-    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+    if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     throw e;
   }
   const want = r.objects?.get(commit);

@@ -37,6 +37,13 @@ export function unwrapOrAbsent<T>(value: Option<T>): T | undefined {
   return value.value;
 }
 
+// A field of any value, as `value?.[key]` read it: None when the value is not an object, lacks the field, or holds
+// null or the platform missing value there. The one reader for thrown values and foreign records.
+export function field(value: unknown, key: string): Option<unknown> {
+  if (typeof value !== 'object' || value === null || !(key in value)) return none;
+  return fromNullish(Reflect.get(value, key));
+}
+
 // ---- the input edge ----
 // What a caller may leave out of a record: every key optional, and an explicit missing value means the same as
 // leaving the key out. Entry points declare their options as Input<Config> and parse them once with withDefaults;
@@ -55,6 +62,18 @@ export function withDefaults<T extends object>(input: Input<T> | null | undefine
     if (!isMissing(given)) defaults[key] = given as T[keyof T];
   }
   return defaults;
+}
+
+// A record the caller owns and shares between calls (a transport's learned quirks): fill the keys it lacks in place,
+// so the caller's object stays the one every later call sees, and return it as the total type.
+export function fillIn<T extends object>(target: Input<T>, defaults: T): T {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the keys of T, as Object.keys cannot type them
+  for (const key of Object.keys(defaults) as Array<keyof T>) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a writable view of the caller's record, filled key by key
+    if (isMissing(target[key])) (target as { [K in keyof T]: T[K] })[key] = defaults[key];
+  }
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- every key of T is now present
+  return target as T;
 }
 
 // Direct index read: a negative index is absent, not the element from the end (that is Array#at's other behaviour).

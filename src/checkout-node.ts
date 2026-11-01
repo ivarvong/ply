@@ -34,7 +34,7 @@ import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
 import { checkoutTree } from './checkout.js';
 import type { CheckoutFile, CheckoutResult } from './checkout.js';
 import type { ReadOptions } from './read.js';
-import { thrownCode } from './boundary.js';
+import { thrownCodeIs } from './boundary.js';
 import type { HttpAuth } from './http.js';
 import type { Tracer, Span } from './otel.js';
 import type { Quirks, Transport } from './transport.js';
@@ -55,7 +55,7 @@ export const CHECKOUT_BATCH = 1000;
 const fsPath = (dir: string, rel: string): string | Buffer => { const p = join(dir, rel); return p.isWellFormed() ? p : Buffer.from(encodeBytes(p, 'checkout path')); };
 // A wrapper: the call site is the decision point (`refused(path, e)`), so the body stays the `fail()` itself.
 const refused = (path: string, e: unknown) =>
-  (thrownCode(e) === 'EILSEQ' ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
+  (thrownCodeIs(e, 'EILSEQ') ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
 
 const collision = (path: string, why: string): Err<ErrorOf<'bad_request'>> => fail('bad_request', `checkout: ${path} ${why}`, { what: 'checkout path', path });
 
@@ -110,7 +110,7 @@ async function ensureDir(dir: string, rel: string, made: Set<string>): Promise<R
   try { target = fsPath(dir, rel); }
   catch (e) { return caught(e, rel); }
   const created = await mkdir(target).then(() => ok(true), (e: unknown): Result<true, WriteFilesError> => {
-    if (thrownCode(e) === 'EEXIST') return ok(true);
+    if (thrownCodeIs(e, 'EEXIST')) return ok(true);
     const bytes = nameBytes(refused(rel, e));
     if (bytes) return bytes;
     return filesystem(rel, e);
@@ -167,7 +167,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
       const target = await slurp(stream, maxObject);
       if (!target.ok) return stop(target);
       const linked = await symlink(Buffer.from(target.value.buffer, target.value.byteOffset, target.value.length), full).then(() => ok(true), (e: unknown): Result<true, WriteFilesError> => {
-        if (thrownCode(e) === 'EEXIST') return kinded(collision(f.path, 'already exists').error, 'collision');
+        if (thrownCodeIs(e, 'EEXIST')) return kinded(collision(f.path, 'already exists').error, 'collision');
         const bytes = nameBytes(refused(f.path, e));
         if (bytes) return bytes;
         return filesystem(f.path, e);
@@ -177,7 +177,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     }
     const opened = await open(full, 'wx', f.mode === MODE_EXEC ? EXEC_MODE : FILE_MODE).then(fh => ok(fh), async (e: unknown): Promise<Result<Awaited<ReturnType<typeof open>>, WriteFilesError>> => {
       await stream.cancel().catch(() => { /* failing: the stream is not read */ });
-      if (thrownCode(e) === 'EEXIST') return kinded(collision(f.path, 'already exists').error, 'collision');
+      if (thrownCodeIs(e, 'EEXIST')) return kinded(collision(f.path, 'already exists').error, 'collision');
       const bytes = nameBytes(refused(f.path, e));
       if (bytes) return bytes;
       return filesystem(f.path, e);

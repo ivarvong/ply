@@ -28,6 +28,7 @@
     "oxc/no-async-await": "off",
     "eslint/no-magic-numbers": "off",
     "eslint/no-undefined": "off",
+    "typescript/prefer-nullish-coalescing": "off",
     "eslint/no-plusplus": "off",
     "eslint/no-bitwise": "off",
     "eslint/no-continue": "off",

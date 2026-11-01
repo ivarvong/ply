@@ -34,7 +34,7 @@ import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCode } from './boundary.js';
+import { thrownCodeOr } from './boundary.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const BLOB_MODE_SET: ReadonlySet<string> = new Set(BLOB_MODES);
@@ -292,7 +292,7 @@ async function pushTreeOnce(url: string, s: TreePlan, { cache = new Map<string, 
     hint = hintWas ?? decided.hint;
     const parent = decided.oldCommit;
     if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${parent ?? 'nothing'}, not the expected head ${head}`, { expected: head, actual: parent });
-    if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': thrownCode(speculative) ?? 'error' });
+    if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': thrownCodeOr(speculative, 'error') });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is commitOf's value (the rejection branch is the Error above)
     const oldTree: string | null = parent === null ? null : parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits).tree;
     root.set({ 'git.push_tree.commit.old': parent ?? '', 'git.push_tree.tree.old': oldTree ?? '' });

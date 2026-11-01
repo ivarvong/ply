@@ -46,7 +46,7 @@ import type { Span, Tracer } from './otel.js';
 import type { FetchPackResult as FetchedPack } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCode, thrownReason } from './boundary.js';
+import { thrownCodeIs, thrownCodeOr, thrownReasonIs } from './boundary.js';
 import type { TypeNames } from './boundary.js';
 
 type PackObjects = NonNullable<FetchedPack['objects']>;
@@ -101,7 +101,7 @@ type Trees = { readonly root: string; readonly tree: (oid: string) => readonly T
 // parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Trees> {
   const r: FetchedPack = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }).catch((e: unknown) => {
-    if (thrownCode(e) === 'remote_error' && thrownReason(e) === 'not_our_ref') throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+    if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) throw fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     throw e;
   });
   const objects: PackObjects = r.objects ?? new Map();
@@ -158,7 +158,7 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<PackOb
 
 // A host that answers a many-wants fetch with an error status, ERR or broken framing is asked for one blob at a time
 // from then on (remembered on the transport's quirks). A lie (pack_corrupt) is never a reason to fall back.
-const isWantsRefusal = (e: unknown): boolean => { const code = thrownCode(e); return code === 'http' || code === 'remote_error' || code === 'protocol'; };
+const isWantsRefusal = (e: unknown): boolean => { const code = thrownCodeOr(e, null); return code === 'http' || code === 'remote_error' || code === 'protocol'; };
 
 const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
@@ -173,17 +173,17 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
   for (const e of entries) if (e.mode !== MODE_COMMIT) { const l = byOid.get(e.oid); if (l) l.push(e); else byOid.set(e.oid, [e]); }
   const stat = { fetches: 0, buffered: 0, streamed: 0, splits: 0, bytes: 0 };
   span.set({ 'git.checkout.blobs.unique': byOid.size, 'git.checkout.blobs.paths': entries.length });
-  let single = t.quirks?.blobWants === 'single';
+  let single = t.quirks.blobWants === 'single';
   // [oid, data | null] for each oid, in order; null means "stream it on its own"
   async function* group(oids: readonly string[]): AsyncGenerator<readonly [string, Uint8Array | null], void, undefined> {
     if (oids.length === 1 || single) { for (const oid of oids) yield [oid, null]; return; }
     let got: PackObjects;
     try { got = await fetchBlobs(t, oids); stat.fetches++; } catch (e) {
-      if (thrownCode(e) === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
+      if (thrownCodeIs(e, 'limit_exceeded')) { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
       if (!isWantsRefusal(e)) throw e;
       single = true;
-      if (t.quirks) t.quirks.blobWants = 'single';
-      span.set({ 'git.checkout.blobs.refused': thrownCode(e) });
+      t.quirks.blobWants = 'single';
+      span.set({ 'git.checkout.blobs.refused': thrownCodeOr(e, null) });
       yield* group(oids); return;
     }
     for (const oid of oids) yield [oid, got.get(oid)?.data ?? null];
@@ -212,8 +212,8 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
     }
     done = true;
   } catch (e) {
-    const code = thrownCode(e);
-    span.error(e, code).set({ 'git.checkout.blobs.outcome': code ?? 'error' });
+    const code = thrownCodeOr(e, null);
+    span.error(e, code).set({ 'git.checkout.blobs.outcome': code === null ? 'error' : code });
     throw e;
   } finally {
     span.set({ 'git.checkout.blobs.fetches': stat.fetches, 'git.checkout.blobs.buffered': stat.buffered, 'git.checkout.blobs.streamed': stat.streamed, 'git.checkout.blobs.splits': stat.splits, 'git.checkout.blobs.bytes': stat.bytes, 'git.checkout.blobs.single': single });

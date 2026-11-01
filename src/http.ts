@@ -3,7 +3,7 @@
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { Code, Detail, Extra, PlyError } from './errors.js';
 import type { Result } from './result.js';
-import { fromNullable, fromNullish, withDefaults } from './absent.js';
+import { fillIn, fromNullable, fromNullish, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 import { flatMapOption, getOrElse } from './result.js';
 import type { Limits } from './limits.js';
@@ -15,7 +15,7 @@ import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, requireLimit, limitError } from './limits.js';
 import { validateWire } from './validate.js';
-import { UA, wrapNet } from './transport.js';
+import { NO_HINTS, UA, freshQuirks, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -265,7 +265,7 @@ export type HttpConfig = {
   readonly userAgent: string;
   readonly limits: Limits;
   readonly signal: AbortSignal | null;
-  readonly quirks: Quirks;
+  readonly quirks: Input<Quirks>;
   readonly followRedirects: FollowRedirects;
   readonly allowUrl: AllowUrl | null;
   readonly maxRedirects: number;
@@ -275,14 +275,16 @@ export type HttpOptions = Input<HttpConfig>;
 // Fresh per transport: quirks are learned per server and must not leak between transports.
 const httpDefaults = (): { -readonly [K in keyof HttpConfig]: HttpConfig[K] } => ({
   auth: null, tracer: null, parent: null, fetchImpl: globalThis.fetch, userAgent: UA, limits: DEFAULT_LIMITS, signal: null,
-  quirks: {}, followRedirects: 'never', allowUrl: null, maxRedirects: DEFAULT_MAX_REDIRECTS, recordResponseHeaders: [],
+  quirks: freshQuirks(), followRedirects: 'never', allowUrl: null, maxRedirects: DEFAULT_MAX_REDIRECTS, recordResponseHeaders: [],
 });
-export type HttpTransport = Transport & { readonly kind: 'http'; readonly quirks: Quirks; readonly objects: NonNullable<Transport['objects']> };
+export type HttpTransport = Transport & { readonly kind: 'http' };
 
 // oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
 export function createTransport(url: string | URL, options: HttpOptions = {}): HttpTransport {
-  const { auth, tracer, parent, fetchImpl, userAgent, limits, signal, quirks, recordResponseHeaders, followRedirects, allowUrl, maxRedirects } = withDefaults(options, httpDefaults());
+  const { auth, tracer, parent, fetchImpl, userAgent, limits, signal, quirks: givenQuirks, recordResponseHeaders, followRedirects, allowUrl, maxRedirects } = withDefaults(options, httpDefaults());
   const policy = redirectPolicy(followRedirects, maxRedirects);
+  // the caller's record, filled in place: every later call that passes it sees what this transport learns
+  const quirks: Quirks = fillIn(givenQuirks, freshQuirks());
   headerField(userAgent, 'user agent');
   const recordNames = recordResponseHeaderNames(recordResponseHeaders);
   headerField(auth?.header, 'authorization');
@@ -475,7 +477,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
     // A transport without a tracer fails on its first span, as it always has. A3: require it.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above
     kind: 'http', get url(): string { return base; }, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
-    async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncGenerator<Frame, void, undefined> {
+    async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, undefined> {
       let st: ReturnType<typeof pktStep>['state'] = pktInit();
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- pktline.js is untyped until its cluster converts; its frames are Frame
       for await (const chunk of post(service, body, span, hints)) { const r = pktStep(st, chunk); st = r.state; yield* r.frames as Frame[]; }

@@ -34,14 +34,19 @@ export type Frame =
   | { readonly kind: 'flush' }
   | { readonly kind: 'delim' }
   | { readonly kind: 'end' };
-export type Hints = { readonly bypassCache?: boolean };
+export type Hints = { readonly bypassCache: boolean };
+export const NO_HINTS: Hints = Object.freeze({ bypassCache: false });
 export type Scrub = (s: string) => string;
 // What a server was found to need, learned at run time and shared by every view of the transport (mutable on purpose).
-// treeFilter: a host that refuses tree:0 (fetch). blobWants: a host that refuses a multi-blob want list (checkout).
-export type Quirks = { treeFilter?: 'blob:none'; blobWants?: 'single' };
+// treeFilter: 'blob:none' for a host that refuses tree:0 (fetch). blobWants: 'single' for a host that refuses a
+// multi-blob want list (checkout). A caller passes one record to every call on a server; ply fills it (absent.fillIn).
+export type Quirks = { treeFilter: 'tree:0' | 'blob:none'; blobWants: 'many' | 'single' };
+export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'many' });
 // Commits and trees harvested from over-wide packs (fetch.js), keyed by oid; `bytes` is their running total.
 export type HeldObject = { readonly type: number; readonly data: Uint8Array };
-export type Harvest = Map<string, HeldObject> & { bytes?: number };
+export type Harvest = Map<string, HeldObject>;
+// Bytes held: the store is bounded by limits.maxHarvestBytes, so a sum over it is a bounded scan.
+export const harvestBytes = (store: Harvest): number => { let n = 0; for (const o of store.values()) n += o.data.length; return n; };
 // Span attributes as otel.js records them.
 export type Attrs = Record<string, unknown>;
 
@@ -52,10 +57,10 @@ export type Transport = {
   readonly parent: Span | null;
   readonly limits: Limits;
   readonly signal: AbortSignal | null;
-  readonly quirks?: Quirks | null;
-  readonly objects?: Harvest | null;
+  readonly quirks: Quirks;
+  readonly objects: Harvest;
   readonly scrub: Scrub | null;
-  frames: (service: string, body: Uint8Array, span: Span, hints?: Hints) => AsyncIterable<Frame>;
+  frames: (service: string, body: Uint8Array, span: Span, hints: Hints) => AsyncIterable<Frame>;
   advertise: (service: string, span: Span) => Promise<Uint8Array>;
 };
 
@@ -66,7 +71,7 @@ export type Loose = { readonly code?: unknown; readonly message?: unknown; reado
 export const UA = 'ply/0.1.0';
 export const proto = (msg: string): ErrorOf<'protocol'> => fail('protocol', msg);
 
-export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncIterable<Frame> => t.frames(service, body, span, hints);
+export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncIterable<Frame> => t.frames(service, body, span, hints);
 // oxlint-disable-next-line typescript/promise-function-async -- a pass-through: the transport's own promise, unwrapped (async adds a wrapper and bytes)
 export const advertise = (t: Transport, service: string, span: Span): Promise<Uint8Array> => t.advertise(service, span);
 
@@ -78,7 +83,7 @@ export const withParent = <T extends Transport>(t: T, parent: Span): T => Object
 export type SpanOpts = { readonly parent: Span | null; readonly kind: number; readonly attrs: Attrs; readonly scrub: Scrub | null };
 // Span options for a wire round trip under this transport's parent.
 // It carries the transport's `scrub` (credential redaction, http.js), so even an unparented wire span exports none.
-export const clientSpan = (t: Transport, attrs: Attrs = {}): SpanOpts => ({ parent: t.parent, kind: KIND.CLIENT, attrs, scrub: t.scrub ?? null });
+export const clientSpan = (t: Transport, attrs: Attrs = {}): SpanOpts => ({ parent: t.parent, kind: KIND.CLIENT, attrs, scrub: t.scrub });
 
 // Give an untyped failure a default code (typed errors keep theirs). The assignment throws for a primitive, null or a
 // frozen value; that one is wrapped instead.

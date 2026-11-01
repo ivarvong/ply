@@ -44,7 +44,7 @@ import type { OperationOpts } from './operation.js';
 import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCode, thrownMessage } from './boundary.js';
+import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
 import { fetchCommit } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 
@@ -349,12 +349,12 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
     // (installed only under PLY_FAILSITES) would not see it. Absent the hook the property is undefined.
     const record: unknown = (globalThis as Record<symbol, unknown>)[FAIL_SITE];
     if (isFailSiteRecorder(record)) record(failHere);
-    const code = thrownCode(e);
+    const code = thrownCodeOr(e, null);
     if (isPlyCode(code)) {
       if (!span.ended) { fetchSpan.error(e).end(); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
       return e;
     }
-    const err = fail('pack_corrupt', `blob stream: ${String(thrownMessage(e) ?? e)}`, { cause: e });
+    const err = fail('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
     if (!span.ended) { fetchSpan.error(err).end(); span.error(err).set({ 'git.read.blob.outcome': err.code }).end(); }
     return err;
   };
@@ -434,7 +434,7 @@ export async function openBlob(t: Transport, oid: string, { maxBytes, follows }:
   const stream = new ReadableStream<Uint8Array>({
     async pull(c) {
       let r: ReadableStreamReadResult<Uint8Array>;
-      try { r = await inner.read(); } catch (e) { throw isPlyCode(thrownCode(e)) ? e : failHere(e); }
+      try { r = await inner.read(); } catch (e) { throw isPlyThrown(e) ? e : failHere(e); }
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {
