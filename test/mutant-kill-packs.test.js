@@ -533,4 +533,13 @@ test('parseRefname, parseBranchName, parseTagName, parsePath: the refusal names 
     assert.equal(x.cause.code, 'bad_request');
     assert.equal(x.cause.message, message);
   }
+  // a valid ref outside the namespace is the parser's own refusal, with no cause
+  for (const [r, what, message] of [
+    [parseBranchName('refs/tags/v1.2.3'), 'branch', 'must start with refs/heads/'],
+    [parseTagName('refs/heads/main'), 'tag', 'must start with refs/tags/'],
+  ]) {
+    const x = errOf(r, 'bad_request', message);
+    assert.equal(x.what, what, message);
+    assert.equal(x.cause, undefined);
+  }
 });
