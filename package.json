@@ -1,6 +1,6 @@
 {
   "name": "ply",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-dependency git smart-HTTP client: blobless partial fetch, streamed single-file edit, thin delta push. OTLP spans built in.",
   "type": "module",
   "main": "dist/index.js",
