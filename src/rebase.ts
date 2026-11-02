@@ -172,7 +172,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
   const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
   if (message !== null) orThrow(validateMessage(message));
   return operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<RebaseOutcome> => orThrow(await (async (): Promise<Result<RebaseOutcome, PlyError>> => {
-    const { refs } = await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]);
+    const { refs } = orThrow(await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]));
     const tipAt = refOid(refs, ref);
     const targetAt = ontoOid.tag === 'some' ? ontoOid : refOid(refs, onto);
     if (tipAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
@@ -324,7 +324,7 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   return operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<PickOutcome> => orThrow(await (async (): Promise<Result<PickOutcome, PlyError>> => {
-    const { refs } = await lsRefs(t, [ref]);
+    const { refs } = orThrow(await lsRefs(t, [ref]));
     const targetAt = refOid(refs, ref); if (targetAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const target = targetAt.value;
     const [cT, cC] = await Promise.all([commitBytesAt(t, target), commitBytesAt(t, commit)]);

@@ -3,17 +3,17 @@
 // (shallow, filter, wait-for-done, ref-in-want...). Run it as a canary so a server-side change shows up as an attr diff.
 // The advertisement is read as git's client reads it (connect.c); the space of advertisements and ply's answer to each
 // is test/space/advertisement.space.js.
-import type { ErrorOf, Extra } from './errors.js';
+import type { ErrorOf, Extra, PlyError } from './errors.js';
 import type { Span } from './otel.js';
 import type { Frame, Transport } from './transport.js';
 import type { Option, Result } from './result.js';
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import { assertNever, flatMapOption, getOrElse, mapOption, none, ok, some } from './result.js';
 import { at, atOr, fromNullable, fromNullish } from './absent.js';
 import { checkRequiredV2, decideObjectFormat, fetchFeatureFlags } from './closed.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
-import { coded, clientSpan, advertise, proto } from './transport.js';
+import { coded, clientSpan, advertise, proto, spanned } from './transport.js';
 
 const SERVICE = '# service=';
 const ERR = 'ERR ';
@@ -35,8 +35,8 @@ const text = (f: DataFrame): string => td.decode(f.payload).replace(/\n$/, '');
 const dataAt = (frames: readonly Frame[], i: number): Option<DataFrame> => flatMapOption(at(frames, i), (f): Option<DataFrame> => (f.kind === 'data' ? some(f) : none));
 // The kind of the frame at `i`, or 'end of stream' past the last one.
 const kindAt = (frames: readonly Frame[], i: number): string => getOrElse(mapOption(at(frames, i), f => f.kind), 'end of stream');
-// @decoder parseCapabilitiesV2Result prefix=caps
-export function parseCapabilitiesV2Result(frames: readonly Frame[]): Result<string[], CapsV2Error> {
+// @decoder parseCapabilitiesV2 prefix=caps
+export function parseCapabilitiesV2(frames: readonly Frame[]): Result<string[], CapsV2Error> {
   let i = 0;
   const preamble = dataAt(frames, 0);
   if (preamble.tag === 'some' && text(preamble.value).startsWith(SERVICE)) {
@@ -63,8 +63,6 @@ export function parseCapabilitiesV2Result(frames: readonly Frame[]): Result<stri
   if (i !== frames.length - 1) return proto(`advertisement: ${kindAt(frames, i + 1)} after the capabilities' flush`);
   return ok(lines);
 }
-// @decoder parseCapabilitiesV2 prefix=caps
-export const parseCapabilitiesV2 = (frames: readonly Frame[]): string[] => orThrow(parseCapabilitiesV2Result(frames));
 
 // Lookups with git's semantics over the lines (first match wins, as connect.c walks server_capabilities_v2 in order):
 //   has(key)       server_supports_v2: a line `key` or `key=…`
@@ -116,16 +114,21 @@ function serverFits(info: DiscoverInfo, has: (key: string) => boolean): Result<D
   return assertNever(required);
 }
 
-// The I/O edge: the advertisement's errors are thrown.
-// async: a synchronous failure is a rejection, as it always was
-// oxlint-disable-next-line require-await -- see above
-export async function discover(t: Transport): Promise<DiscoverInfo> {
-  // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
-  return coded('protocol', () => t.tracer.span('git.upload-pack discover', clientSpan(t, { 'git.command': 'discover', 'git.protocol.version': 2 }), async (span: Span): Promise<DiscoverInfo> => {
+// The exchange: the advertisement, read and held to what ply needs.
+// oxlint-disable-next-line require-await -- async: a synchronous failure (an unusable transport) is a rejection, as it always was
+export async function discover(t: Transport): Promise<Result<DiscoverInfo, PlyError>> {
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
+  return coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, { 'git.command': 'discover', 'git.protocol.version': 2 }), async (span: Span): Promise<Result<DiscoverInfo, PlyError>> => {
     const buf = await advertise(t, 'git-upload-pack', span);
-    const { frames, state } = orThrow(pktStep(pktInit(), buf));
-    orThrow(pktFinish(state));
-    const lines = orThrow(parseCapabilitiesV2Result(frames));
+    if (!buf.ok) return buf;
+    const stepped = pktStep(pktInit(), buf.value);
+    if (!stepped.ok) return stepped;
+    const { frames, state } = stepped.value;
+    const finished = pktFinish(state);
+    if (!finished.ok) return finished;
+    const parsed = parseCapabilitiesV2(frames);
+    if (!parsed.ok) return parsed;
+    const lines = parsed.value;
     const { has, value, features } = capLookup(lines);
     const caps = new Map<string, string>();
     for (const l of lines) { const eq = l.indexOf('='); const k = eq < 0 ? l : l.slice(0, eq); if (!caps.has(k)) caps.set(k, eq < 0 ? '' : l.slice(eq + 1)); }
@@ -137,6 +140,6 @@ export async function discover(t: Transport): Promise<DiscoverInfo> {
       lsRefs: has('ls-refs'), lsRefsUnborn: features('ls-refs').includes('unborn'), serverOption: has('server-option'), bundleUri: has('bundle-uri'), sessionId: getOrElse(fromNullish(value('session-id')), ''),
     };
     span.set({ ...pktAttrs(state), 'git.server.agent': info.agent, 'git.server.object_format': info.objectFormat, 'git.server.caps': [...caps.keys()], 'git.server.fetch': fetchFeatures, 'git.server.filter': info.filter, 'git.server.shallow': info.shallow, 'git.server.wait_for_done': info.waitForDone, 'git.server.ref_in_want': info.refInWant, 'git.server.ls_refs.unborn': info.lsRefsUnborn, 'git.server.server_option': info.serverOption, 'git.server.bundle_uri': info.bundleUri });
-    return orThrow(serverFits(info, has));
+    return serverFits(info, has);
   }));
 }

@@ -126,7 +126,7 @@ type Trees = { readonly root: string; readonly tree: TreeLookup; readonly object
 // parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Result<Trees, PlyError>> {
   let r: FetchedPack;
-  try { r = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }); } catch (e) {
+  try { r = orThrow(await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 })); } catch (e) {
     if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     return caughtErr(e);
   }
@@ -181,7 +181,7 @@ const subtree = (tree: TreeLookup, root: string, comps: readonly string[]): Resu
 async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<Result<PackObjects, PlyError>> {
   const want = new Set(oids);
   // oxlint-disable-next-line require-await -- async so that attempt() sees any failure as a rejection
-  const fetched = await attempt(async () => fetchPack(t, { wants: oids }));
+  const fetched = await attempt(async () => orThrow(await fetchPack(t, { wants: oids })));
   if (!fetched.ok) return fetched;
   const objects: PackObjects = fetched.value.objects === null ? new Map() : fetched.value.objects;
   for (const [oid, o] of objects) {

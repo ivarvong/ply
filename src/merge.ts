@@ -208,7 +208,7 @@ export function bestBases(commits: ReadonlyMap<string, Parents>, a: string, b: s
 // bestBases answer over a cut graph that looks whole (#18), so that is `pack_corrupt` here. git's upload-pack keeps the
 // contract (the boundary of the depth and of a shallow server repository are both reported).
 export async function ancestors(t: Transport, head: string, depth: number): Promise<Result<Map<string, Commit>, ErrorOf<'pack_corrupt'>>> {
-  const r = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
+  const r = orThrow(await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth }));
   const commits = new Map<string, Commit>();
   const objects = fromNullish(r.objects);
   if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) commits.set(oid, orThrow(parseCommit(o.data, t.limits)));
@@ -295,7 +295,7 @@ const NO_COUNT = (): void => { /* not counted */ };
 const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: () => void = NO_COUNT): Promise<TreeEntry[]> => {
   const held = mapGet(cache, oid);
   if (held.tag === 'some') return orThrow(parseTree(held.value, t.limits));
-  const { data } = await fetchObject(t, { oid, expectType: TYPE.TREE });
+  const { data } = orThrow(await fetchObject(t, { oid, expectType: TYPE.TREE }));
   cache.set(oid, data); onFetch();
   return orThrow(parseTree(data, t.limits));
 };
@@ -487,7 +487,7 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
     if (oid.tag === 'none') return none;
     const e = fromNullable((await cachedTree(t, cache, oid.value)).find(x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000'));
     if (e.tag === 'none') return none;
-    return some(bytesToStr((await fetchObject(t, { oid: e.value.oid, expectType: TYPE.BLOB })).data));
+    return some(bytesToStr(orThrow(await fetchObject(t, { oid: e.value.oid, expectType: TYPE.BLOB })).data));
   });
   return async path => {
     const dirs = ['']; for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) dirs.push(path.slice(0, i));
@@ -520,7 +520,7 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
-  const get = async (oid: string): Promise<Uint8Array> => { const held = mapGet(made, oid); return held.tag === 'some' ? held.value : (await fetchObject(bounded, { oid, expectType: TYPE.BLOB })).data; };
+  const get = async (oid: string): Promise<Uint8Array> => { const held = mapGet(made, oid); return held.tag === 'some' ? held.value : orThrow(await fetchObject(bounded, { oid, expectType: TYPE.BLOB })).data; };
   const f = async ({ base, ours, theirs, path, driverFor }: BlobSpec): Promise<BlobMerge> => {
     if (ours === theirs || theirs === base) return { kind: 'existing', oid: ours };
     if (ours === base) return { kind: 'existing', oid: theirs };
@@ -581,7 +581,7 @@ export async function attributeTreeResult(t: Transport, attributes: AttributeSou
   let oid = attributes;
   if (!isOid(attributes)) {
     orThrow(validateRef(attributes));
-    const found = refOid((await lsRefs(t, [attributes])).refs, attributes);
+    const found = refOid(orThrow(await lsRefs(t, [attributes])).refs, attributes);
     if (found.tag === 'none') return fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
     oid = found.value;
   }
@@ -694,7 +694,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
   if (message !== null && message !== '') orThrow(validateMessage(message));
   const attributes = orThrow(validateAttributes(attributesGiven));
   return operation('merge', url, operationOpts(options, { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward }), async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => orThrow(await (async (): Promise<Result<MergeOutcome, PlyError>> => {
-    const { refs } = await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]);
+    const { refs } = orThrow(await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]));
     const oursAt = refOid(refs, ref);
     const theirsAt = isSome(fromOid) ? fromOid : refOid(refs, from);
     if (oursAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });

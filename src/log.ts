@@ -88,7 +88,7 @@ export const logWindow = (commits: ReadonlyMap<string, Parents>, shallow: Iterab
 // Effect: the window's pack, with a want that is not a commit (or not on the server) as the caller's not_found.
 async function fetchWindow(t: Transport, commit: string, limit: number): Promise<Result<FetchedPack, PlyError>> {
   let r: FetchedPack;
-  try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
+  try { r = orThrow(await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit })); } catch (e) {
     if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     return caughtErr(e);
   }

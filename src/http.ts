@@ -1,7 +1,8 @@
 // Smart-HTTP transport: one POST per git command, body chunks yielded as they arrive, every request a CLIENT span.
 // Implements the contract in transport.js. `createTransport` is its constructor (the name every caller used first).
-// The checks (credential forms, redirect policy, header names, the Location rule, status and redirect errors, capped
-// reads) return Result; the transport's two methods and its constructor are the edge that throws.
+// The constructor, the checks (credential forms, redirect policy, header names, the Location rule, status and redirect
+// errors, capped reads) and `advertise` return Result. `frames` is a stream: it fails through the stream protocol (its
+// iterator rejects with the PlyError). The platform's fetch() and body reads are caught where they are made.
 /* oxlint-disable require-unicode-regexp -- URL, header and credential text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { Code, Detail, ErrorOf, Extra, PlyError } from './errors.js';
 import type { Result } from './result.js';
@@ -11,7 +12,7 @@ import { assertNever, err, ok } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
-import { fail, orThrow, thrown } from './errors.js';
+import { fail, plyError } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
@@ -84,8 +85,8 @@ function recordedHeaderAttrs(res: Response, names: readonly string[], scrub: Scr
   return attrs;
 }
 
-// A header field the caller gave (null: none given) is one line. validateWire (validate.ts) throws until its cluster converts.
-const headerField = (value: string | null, what: string): void => { if (value !== null) orThrow(validateWire(value, what)); };
+// A header field the caller gave (null: none given) is one line.
+const headerField = (value: string | null, what: string): Result<unknown, PlyError> => (value === null ? ok(null) : validateWire(value, what));
 
 // URL userinfo → the bytes git sends for it (git 2.50, measured against http-backend behind Basic auth), as a byte
 // string `btoa` takes as is: `%XX` is that byte (`%FF` → 0xFF, UTF-8 as its bytes), anything else as written (`%ZZ`
@@ -160,7 +161,7 @@ export type FollowRedirects = 'never' | 'initial';
 export type AllowUrl = (url: URL) => Result<URL, PlyError>;
 export type RedirectPolicy = { readonly follow: FollowRedirects; readonly max: number };
 const shown = (v: unknown): string => (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || v === null ? JSON.stringify(v) : typeof v);
-export function redirectPolicyResult(follow: unknown, max: unknown): Result<RedirectPolicy, BadRequest> {
+export function redirectPolicy(follow: unknown, max: unknown): Result<RedirectPolicy, BadRequest> {
   const f = fromNullable(follow);
   if (f.tag === 'some' && f.value !== 'never' && f.value !== 'initial') return fail('bad_request', `followRedirects must be 'never' or 'initial', got ${shown(f.value)}`, { what: 'followRedirects' });
   const m = fromNullable(max);
@@ -169,7 +170,6 @@ export function redirectPolicyResult(follow: unknown, max: unknown): Result<Redi
   if (n === null || n < 0 || n > MAX_REDIRECT_HOPS) return fail('bad_request', `maxRedirects must be an integer from 0 to ${MAX_REDIRECT_HOPS}`, { what: 'maxRedirects' });
   return ok({ follow: f.tag === 'some' && f.value === 'initial' ? 'initial' : 'never', max: n });
 }
-export const redirectPolicy = (follow: unknown, max: unknown): RedirectPolicy => orThrow(redirectPolicyResult(follow, max));
 // The new base is the Location with the asked URL's `/info/refs?service=` suffix removed. Anything else is not a
 // rebase git would accept (update_url_from_redirect dies), so the caller gets the redirect error instead.
 export function baseFromRedirect(asked: string, got: URL, service: string): string | null {
@@ -236,14 +236,14 @@ async function redirectError(res: Response, url: string, what: string, scrub: Sc
   if (loc) try { const x = new URL(loc, url); to = `${x.origin}${x.pathname}`; } catch { /* unparseable Location */ }
   if (scrub) to = scrub(to);
   await cancelBody(res.body);
-  return thrown('http', `HTTP ${res.status} ${what}: redirected${to ? ` to ${to}` : ''}; ply does not follow redirects (update the remote URL)`, { status: res.status, location: to } as Detail['http'] & Extra);
+  return plyError('http', `HTTP ${res.status} ${what}: redirected${to ? ` to ${to}` : ''}; ply does not follow redirects (update the remote URL)`, { status: res.status, location: to } as Detail['http'] & Extra);
 }
 
 // Read a body without ever holding more than `max` bytes. `truncate` keeps a prefix (error pages);
-// otherwise the first chunk that would pass the cap is the error and is not retained.
-type CapRead = { readonly what: string; readonly truncate: boolean };
-const PREVIEW_READ: CapRead = { what: 'response bytes', truncate: true };
-async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, { what, truncate }: CapRead): Promise<Result<Uint8Array, ErrorOf<'limit_exceeded'>>> {
+// otherwise the first chunk that would pass the cap is the error and is not retained. A body read is a platform edge:
+// its failure is the network error it is (wrapNet), as on a POST's body.
+type CapRead = { readonly what: string; readonly truncate: boolean; readonly signal: AbortSignal };
+async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, { what, truncate, signal }: CapRead): Promise<Result<Uint8Array, PlyError>> {
   // oxlint-disable-next-line typescript/no-unnecessary-condition -- a fetch double may hand back a body that is not async-iterable
   if (!body || typeof body[Symbol.asyncIterator] !== 'function') return ok(new Uint8Array(0));
   const chunks: Uint8Array[] = [];
@@ -259,18 +259,19 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
       chunks.push(bytes);
       n += bytes.length;
     }
-  } finally { await cancelBody(body); }
+  } catch (e) { return err(wrapNet(e, signal)); } finally { await cancelBody(body); }
   return ok(concat(chunks));
 }
 
-// A non-2xx answer: a prefix of the body for the message (credential-scrubbed), the rest cancelled.
-async function statusError(res: Response, service: string, scrub: Scrub | null): Promise<PlyError> {
-  const read = await readCapped(res.body, ERROR_PREVIEW, PREVIEW_READ);
-  // A truncating read keeps a prefix: it has no error to report.
-  const preview = td.decode(read.ok ? read.value : new Uint8Array(0));
+// A non-2xx answer: a prefix of the body for the message (credential-scrubbed), the rest cancelled. A truncating read
+// keeps a prefix: its only error is the body read failing, and that is the exchange's error.
+async function statusError(res: Response, service: string, scrub: Scrub | null, signal: AbortSignal): Promise<PlyError> {
+  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal });
+  if (!read.ok) return read.error;
+  const preview = td.decode(read.value);
   const quoted = (scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE);
   const miss = res.status === 404 ? { miss: { kind: 'repository' as const } } : {};
-  return thrown(httpCode(res.status), `HTTP ${res.status} ${service}: ${quoted}`, { status: res.status, ...miss } as Detail['http'] & Extra);
+  return plyError(httpCode(res.status), `HTTP ${res.status} ${service}: ${quoted}`, { status: res.status, ...miss } as Detail['http'] & Extra);
 }
 // What the transport calls: the platform fetch, or a wrapper with its signature (packcache.ts cachingFetch).
 export type FetchLike = (url: string | URL, init: RequestInit) => Promise<Response>;
@@ -323,32 +324,44 @@ const unref = (timer: unknown): void => {
   if (f.tag === 'some' && typeof f.value === 'function') Reflect.apply(f.value, timer, []);
 };
 
-// oxlint-disable-next-line complexity -- the constructor resolves every credential form in one place
-export function createTransport(url: string | URL, options: HttpOptions = {}): HttpTransport {
+// oxlint-disable-next-line complexity, max-lines-per-function -- the constructor resolves every credential form in one place
+export function createTransport(url: string | URL, options: HttpOptions = {}): Result<HttpTransport, PlyError> {
   const { auth, tracer, parent, fetchImpl, userAgent, limits, signal, quirks: givenQuirks, recordResponseHeaders, followRedirects, allowUrl, maxRedirects } = withDefaults(options, httpDefaults());
-  const policy = orThrow(redirectPolicyResult(followRedirects, maxRedirects));
+  const checkedPolicy = redirectPolicy(followRedirects, maxRedirects);
+  if (!checkedPolicy.ok) return checkedPolicy;
+  const policy = checkedPolicy.value;
   // the caller's record, filled in place: every later call that passes it sees what this transport learns
   const quirks: Quirks = fillIn(givenQuirks, freshQuirks());
-  headerField(userAgent, 'user agent');
-  const recordNames = orThrow(recordResponseHeaderNames(recordResponseHeaders));
+  const agentOk = headerField(userAgent, 'user agent');
+  if (!agentOk.ok) return agentOk;
+  const names = recordResponseHeaderNames(recordResponseHeaders);
+  if (!names.ok) return names;
+  const recordNames = names.value;
   // The explicit forms, total (all null without auth).
   const given = auth === null ? noAuth() : withDefaults(auth, noAuth());
-  headerField(given.header, 'authorization');
-  headerField(given.token, 'token');
-  headerField(given.bearer, 'bearer');
-  headerField(given.user, 'auth user');
+  for (const [value, what] of [[given.header, 'authorization'], [given.token, 'token'], [given.bearer, 'bearer'], [given.user, 'auth user']] as const) {
+    const fieldOk = headerField(value, what);
+    if (!fieldOk.ok) return fieldOk;
+  }
   // `new URL` puts what it was given on the TypeError (`input`): a credential in a malformed URL would ride out on it.
   let u: URL;
-  try { u = new URL(url); } catch { return orThrow(fail('bad_request', 'invalid url: not an absolute URL', { what: 'url' })); }
+  try { u = new URL(url); } catch { return fail('bad_request', 'invalid url: not an absolute URL', { what: 'url' }); }
   // userinfo in the URL becomes the Basic credential git sends for it, byte for byte: `user:password`; a user alone is
   // `user:` (a token given as the user, which GitHub and GitLab accept; git sends it without asking for a password and
   // asks only once it is refused), a password alone `:password`, an empty userinfo `:`. Explicit `auth` wins. It never
   // appears again: not in requests, not in spans, not in error messages.
-  const fromUrl = orThrow(urlCredential(auth, u, url));
+  const credential = urlCredential(auth, u, url);
+  if (!credential.ok) return credential;
+  const fromUrl = credential.value;
   u.username = ''; u.password = ''; u.hash = '';
   // allowUrl runs before any request, including the base. A different origin does not inherit this transport's credential.
   const offeredOrigin = u.origin;
-  const approvedUrl = orThrow(useAllowed(allowUrl, u));
+  const approved = useAllowed(allowUrl, u);
+  if (!approved.ok) return approved;
+  const approvedUrl = approved.value;
+  // The explicit credential, checked before anything is built from it.
+  const explicit = fromUrl !== null || auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
+  if (!explicit.ok) return explicit;
   let base = approvedUrl.toString().replace(/\/$/, '');
   const baseCrossOrigin = approvedUrl.origin !== offeredOrigin;
   // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
@@ -356,8 +369,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
   const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
-  // oxlint-disable-next-line no-nested-ternary -- three forms, one pair
-  const [authorization, explicitBasic]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : auth === null ? [null, null] : orThrow(explicitAuth(given));
+  const [authorization, explicitBasic]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : explicit.value;
   // The credential sent from here on. A cross-origin rebase (or an allowUrl that moved the base) clears it; the
   // scrubber above still redacts the original, so an echo of it cannot leak.
   let liveAuth = baseCrossOrigin ? null : authorization;
@@ -405,24 +417,28 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   // found by the calibration harness: `hang` fault + head hint). A controller owned by a live timer cannot be collected.
   // The timer is the strong owner of `ac`. It stays scheduled for the whole exchange (so a GC cannot drop it)
   // and is cleared when the exchange ends, so a finished request does not abort later.
-  const requestSignal = (): { readonly signal: AbortSignal; readonly cancel: () => void } => {
-    const ms = orThrow(readLimit(limits, 'requestTimeoutMs'));
+  const requestSignal = (): Result<{ readonly signal: AbortSignal; readonly cancel: () => void }, PlyError> => {
+    const limit = readLimit(limits, 'requestTimeoutMs');
+    if (!limit.ok) return limit;
+    const ms = limit.value;
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(new DOMException(`request exceeded ${ms} ms`, 'TimeoutError')); }, ms);
     unref(timer);
     const sig = signal ? AbortSignal.any([ac.signal, signal]) : ac.signal;
-    return { signal: sig, cancel: () => { clearTimeout(timer); } };
+    return ok({ signal: sig, cancel: () => { clearTimeout(timer); } });
+  };
+  // The platform's fetch(): its rejection is the network error it is (wrapNet). The one catch of each request.
+  const send = async (target: string, init: RequestInit, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
+    try { return ok(await f(target, { ...init, signal: sig, redirect: 'manual' })); } catch (e) { return err(wrapNet(e, sig)); }
   };
 
-  const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Response> => {
+  const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
     const t0 = Date.now();
-    let res: Response;
-    try { res = await f(asked, { headers: headers(service, { 'Git-Protocol': 'version=2', ...recordHint() }), signal: sig, redirect: 'manual' }); }
-    catch (e) { throw wrapNet(e, sig); }
-    span.set({ 'http.response.status_code': res.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': headerText(res, 'content-type') });
+    const res = await send(asked, { headers: headers(service, { 'Git-Protocol': 'version=2', ...recordHint() }) }, sig);
+    if (res.ok) span.set({ 'http.response.status_code': res.value.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': headerText(res.value, 'content-type') });
     return res;
   };
-  const advertisementBody = async (res: Response, service: string, span: Span): Promise<Result<Uint8Array, PlyError>> => {
+  const advertisementBody = async (res: Response, service: string, span: Span, sig: AbortSignal): Promise<Result<Uint8Array, PlyError>> => {
     if (!res.ok) return fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
     if (!headerText(res, 'content-type').startsWith(`application/x-${service}-advertisement`)) return fail('not_git', `unexpected content-type from ${service} advertisement`);
     const maxPack = readLimit(limits, 'maxPackBytes');
@@ -436,7 +452,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
       case 'body': {
-        const buf = await readCapped(body.stream, maxPack.value, { what: 'advertisement bytes', truncate: false });
+        const buf = await readCapped(body.stream, maxPack.value, { what: 'advertisement bytes', truncate: false, signal: sig });
         if (buf.ok) span.set({ 'git.response.bytes': buf.value.length, 'http.response.body.size': buf.value.length, ...redirectAttrs() });
         return buf;
       }
@@ -453,10 +469,10 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
       initialSettled = true;
       return err(await redirectError(res, asked, `${service} advertisement`, scrub));
     }
-    let next: Result<string | null, PlyError>;
+    let next: Result<string | null, PlyError> | null = null;
     // allowUrl is the caller's code: if it throws, the body is still released before that propagates.
     try { next = locationBase(asked, res.headers.get('location'), service, allowUrl); }
-    catch (e) { await cancelBody(res.body); throw e; }
+    finally { if (next === null) await cancelBody(res.body); }
     if (!next.ok) { await cancelBody(res.body); return next; }
     if (next.value === null) {
       initialSettled = true;
@@ -468,7 +484,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
   // GET info/refs?service=… . With followRedirects 'initial' and no settled exchange yet, a suffix-preserving 3xx
   // rebases `base` (up to maxRedirects) and the GET is retried there. A network failure leaves the exchange unsettled
   // so a retry continues from the base already reached.
-  async function advertise(service: string, span: Span): Promise<Uint8Array> {
+  async function advertise(service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
     const following = policy.follow === 'initial' && !initialSettled;
     // Each hop's URL is the previous response's Location, so the next GET cannot start until this one has been read.
     // oxlint-disable no-await-in-loop
@@ -476,22 +492,25 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
       const asked = `${base}/info/refs?service=${service}`;
       span.set({ 'git.transport': 'http', 'http.request.method': 'GET', 'url.full': redactUrl(asked), 'server.address': hostOf(), ...redirectAttrs() });
       const sig = requestSignal();
+      if (!sig.ok) return sig;
       try {
-        const res = await fetchAdvertisement(asked, service, span, sig.signal);
-        if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
-        const next = orThrow(await redirectHop(res, asked, service, following));
-        if (next !== null) { rebase(next); continue; }
+        const res = await fetchAdvertisement(asked, service, span, sig.value.signal);
+        if (!res.ok) return res;
+        if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
+        const next = await redirectHop(res.value, asked, service, following);
+        if (!next.ok) return next;
+        if (next.value !== null) { rebase(next.value); continue; }
         initialSettled = true;
-        return orThrow(await advertisementBody(res, service, span));
-      } finally { sig.cancel(); }
+        return await advertisementBody(res.value, service, span, sig.value.signal);
+      } finally { sig.value.cancel(); }
     }
     // oxlint-enable no-await-in-loop
   }
   // The POST's answer, checked before its body is read: a redirect, a non-2xx, a foreign content type, a missing body.
-  const postStream = async (res: Response, service: string, target: string): Promise<Result<ReadableStream<Uint8Array>, PlyError>> => {
+  const postStream = async (res: Response, service: string, target: string, sig: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>> => {
     if (isRedirect(res)) return err(await redirectError(res, target, service, scrub));
     // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
-    if (!res.ok) return err(await statusError(res, service, scrub));
+    if (!res.ok) return err(await statusError(res, service, scrub, sig));
     const ct = headerText(res, 'content-type');
     if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${JSON.stringify(ct)} from ${service}`);
     const body = bodyOf(res);
@@ -502,47 +521,59 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
     // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
     return assertNever(body);
   };
-  // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk.
-  async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Uint8Array, void, unknown> {
-    if (policy.follow === 'initial' && !initialSettled) await advertise(service, span);
+  // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk. A failure is
+  // yielded as its Err and ends the stream (frames raises it).
+  async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
+    if (policy.follow === 'initial' && !initialSettled) {
+      const ad = await advertise(service, span);
+      if (!ad.ok) { yield ad; return; }
+    }
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
     const extra = { 'Git-Protocol': 'version=2', ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
     span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': limits.requestTimeoutMs, ...redirectAttrs() });
     const t0 = Date.now();
     const sig = requestSignal();
-    let res: Response;
+    if (!sig.ok) { yield sig; return; }
     try {
-    try { res = await f(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body), signal: sig.signal, redirect: 'manual' }); }
-    catch (e) { throw wrapNet(e, sig.signal); }
-    const cache = headerText(res, PACK_CACHE_HEADER);
-    span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': headerText(res, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
-    if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
-    const stream = orThrow(await postStream(res, service, target));
-    let bytes = 0, chunks = 0, first = -1, maxChunk = 0;
-    try { for await (const chunk of stream) {
-      if (chunks === 0) first = Date.now() - t0;
-      bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
-      yield chunk;
-    } } catch (e) { throw wrapNet(e, sig.signal); }
-    span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first, 'git.response.duration_ms': Date.now() - t0, 'http.response.body.size': bytes, 'http.response.chunks': chunks, 'http.response.chunk.max': maxChunk, 'http.response.first_byte_ms': first, 'http.response.duration_ms': Date.now() - t0 });
-    } finally { sig.cancel(); }
+      const res = await send(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body) }, sig.value.signal);
+      if (!res.ok) { yield res; return; }
+      const cache = headerText(res.value, PACK_CACHE_HEADER);
+      span.set({ 'http.response.status_code': res.value.status, 'http.response.header.content-type': headerText(res.value, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
+      if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
+      const stream = await postStream(res.value, service, target, sig.value.signal);
+      if (!stream.ok) { yield stream; return; }
+      let bytes = 0, chunks = 0, first = -1, maxChunk = 0;
+      // The body read: a platform failure mid-stream is the network error it is.
+      try { for await (const chunk of stream.value) {
+        if (chunks === 0) first = Date.now() - t0;
+        bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
+        yield ok(chunk);
+      } } catch (e) { yield err(wrapNet(e, sig.value.signal)); return; }
+      span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first, 'git.response.duration_ms': Date.now() - t0, 'http.response.body.size': bytes, 'http.response.chunks': chunks, 'http.response.chunk.max': maxChunk, 'http.response.first_byte_ms': first, 'http.response.duration_ms': Date.now() - t0 });
+    } finally { sig.value.cancel(); }
   }
 
-  return {
+  return ok({
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
     // A transport without a tracer fails on its first span, as it always has. A3: require it.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above
     kind: 'http', get url(): string { return base; }, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
+    // The stream: a failure (the request's, a frame's) is raised through the iterator, as a stream signals one.
     async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
       let st: PktState = pktInit();
-      for await (const chunk of post(service, body, span, hints)) { const r = orThrow(pktStep(st, chunk)); st = r.state; yield* r.frames; }
-      orThrow(pktFinish(st));
+      for await (const chunk of post(service, body, span, hints)) {
+        const r = chunk.ok ? pktStep(st, chunk.value) : chunk;
+        if (!r.ok) throw r.error;
+        st = r.value.state; yield* r.value.frames;
+      }
+      const end = pktFinish(st);
+      if (!end.ok) throw end.error;
       span.set(pktAttrs(st));
     },
     // GET info/refs?service=… (capability advertisements). Returns the whole body; advertisements are small.
     advertise,
-  };
+  });
 }

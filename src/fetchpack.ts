@@ -1,7 +1,7 @@
 // Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes, enforced by v2Step as the band-1
 // bytes arrive), parsed and delta-resolved.
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
-// Reading the received pack is a Result (readPack); fetchPack and its fallbacks are the I/O edge, where errors are thrown.
+// Reading the received pack (readPack), fetchPack and its fallbacks return Result.
 import type { Span } from './otel.js';
 import type { Attrs, Transport } from './transport.js';
 import type { FetchOpts, PackObject, V2State } from './fetch.js';
@@ -10,12 +10,11 @@ import { concat } from './bytes.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import type { ParsedPack, ResolvedPack } from './packresolve.js';
-import { coded, clientSpan } from './transport.js';
-import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs, stampCacheStatus } from './fetch.js';
-import { fail, isPlyError, orThrow } from './errors.js';
+import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs, fetchExchange } from './fetch.js';
+import { fail } from './errors.js';
 import type { PlyError } from './errors.js';
 import { fromNullable, fromNullish, withDefaults } from './absent.js';
-import { ok, err, getOrElse } from './result.js';
+import { ok, getOrElse } from './result.js';
 import type { Result } from './result.js';
 // oxlint-disable-next-line import/max-dependencies -- the buffered fetch joins the stream, the pack parser and the cache's retry rule
 import { corruptCacheHit } from './cachestatus.js';
@@ -25,12 +24,13 @@ type Parsed = ParsedPack;
 type Resolved = ResolvedPack;
 // A thin pack's base by oid, or null when the caller does not hold it.
 export type ExternalLookup = (oid: string) => PackObject | null;
-// `external(oid)` supplies a thin pack's bases; `check(objects)` runs over the resolved objects inside the span.
+// `external(oid)` supplies a thin pack's bases; `check(objects)` runs over the resolved objects inside the span: its
+// attrs go on the span, its Err is the fetch's.
 export type FetchPackConfig = {
   readonly external: ExternalLookup;
   readonly resolve: boolean;
   readonly attrs: Attrs;
-  readonly check: ((objects: Map<string, PackObject>) => Attrs) | null;
+  readonly check: ((objects: Map<string, PackObject>) => Result<Attrs, PlyError>) | null;
 };
 export type FetchPackExtra = Input<FetchPackConfig>;
 const noExternal: ExternalLookup = () => null;
@@ -55,7 +55,9 @@ const typeAttr = (type: number): unknown => Reflect.get(TYPE_NAME, type);
 type Acks = Pick<FetchPackResult, 'acks' | 'nak' | 'ready' | 'shallow' | 'unshallow'>;
 // The received pack, parsed (one span event per object), resolved when asked, and checked.
 function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: FetchPackConfig, acks: Acks, span: Span): Result<FetchPackResult, PlyError> {
-  const read = parsePack(buf, orThrow(packParseOpts(t.limits)));
+  const opts = packParseOpts(t.limits);
+  if (!opts.ok) return opts;
+  const read = parsePack(buf, opts.value);
   if (!read.ok) return read;
   const parsed = read.value;
   for (const o of parsed.objects) span.event('git.pack.object', {
@@ -71,36 +73,37 @@ function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: F
     resolved = r.value;
   }
   span.set(packAttrs(parsed, resolved));
-  if (check && resolved) span.set(check(resolved.objects));
+  if (check && resolved) {
+    const checked = check(resolved.objects);
+    if (!checked.ok) return checked;
+    span.set(checked.value);
+  }
   return ok({ parsed, objects: resolved === null ? null : resolved.objects, resolved, ...acks });
 }
 
-// `check(objects)`, when given, runs over the resolved objects inside the span (it may drop some, or throw) and returns
+// `check(objects)`, when given, runs over the resolved objects inside the span (it may drop some, or fail) and returns
 // attrs for it.
-// async: a synchronous failure is a rejection, as it always was
-// oxlint-disable-next-line require-await -- see above
-export async function fetchPackOnce(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> {
+// oxlint-disable-next-line require-await -- async: a synchronous failure (an unusable transport) is a rejection, as it always was
+export async function fetchPackOnce(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<Result<FetchPackResult, PlyError>> {
   const cfg = withDefaults(extra, fetchPackDefaults());
-  // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
-  return coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': Boolean(opts.bypassCache), ...cfg.attrs }), async (span: Span): Promise<FetchPackResult> => { try {
+  return fetchExchange(t, { 'git.pack.cache.bust': Boolean(opts.bypassCache), ...cfg.attrs }, async (span: Span): Promise<Result<FetchPackResult, PlyError>> => {
     const parts: Uint8Array[] = []; let total = 0;
     const it = packStream(t, opts, span);
     let st: V2State;
     // oxlint-disable-next-line no-await-in-loop, typescript/strict-boolean-expressions -- the generator is drained in order; its return value (done) is the v2 state
     for (;;) { const { value, done } = await it.next(); if (done) { st = value; break; } total += value.length; parts.push(value); }
     const acks: Acks = { acks: st.acks.filter(a => a.startsWith('ACK ')).map(a => a.slice(4)), nak: st.acks.includes('NAK'), ready: st.ready, shallow: st.shallow, unshallow: st.unshallow };
-    if (st.phase !== 'pack') { span.set({ 'git.fetch.pack': false }); return { parsed: null, objects: null, resolved: null, ...acks }; }
-    return orThrow(readPack(t, concat(parts), cfg, acks, span));
-  } catch (e) { stampCacheStatus(e, span); throw e; } }));
+    if (st.phase !== 'pack') { span.set({ 'git.fetch.pack': false }); return ok({ parsed: null, objects: null, resolved: null, ...acks }); }
+    return readPack(t, concat(parts), cfg, acks, span);
+  });
 }
 
 // A pack that fails verification may be a poisoned cache entry (see packcache.js): retry once, bypassing the cache.
 // Only when the bad response was served from cache; a corrupt live response is reported as-is.
-export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> {
-  try { return await fetchPackOnce(t, opts, extra); } catch (e) {
-    if (!corruptCacheHit(e) || Boolean(opts.bypassCache)) throw e;
-    return fetchPackOnce(t, { ...opts, bypassCache: true }, extra);
-  }
+export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<Result<FetchPackResult, PlyError>> {
+  const first = await fetchPackOnce(t, opts, extra);
+  if (first.ok || !corruptCacheHit(first.error) || Boolean(opts.bypassCache)) return first;
+  return fetchPackOnce(t, { ...opts, bypassCache: true }, extra);
 }
 
 // fetchPack for a `filter tree:0` request (commit-only history walks) with the blob:none fallback of fetch.js: a server
@@ -114,23 +117,27 @@ export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackE
 // discovered the refusal; a later call on the same quirks asks for blob:none directly and reports learned false).
 const commitsAndTags = (_oid: string, o: PackObject): boolean => o.type !== TYPE.TREE;
 export type Tree0Pack = FetchPackResult & { readonly filter: string | null; readonly learned: boolean };
-export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Tree0Pack> {
-  const wide = async (learned: boolean): Promise<Tree0Pack> => {
-    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check: objects => skippedAttrs(checkWide(objects, commitsAndTags, t.limits)), attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
-    if (r.objects) harvest(t, r.objects);
-    return { ...r, filter: 'blob:none', learned };
+export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Result<Tree0Pack, PlyError>> {
+  const wide = async (learned: boolean): Promise<Result<Tree0Pack, PlyError>> => {
+    const check = (objects: Map<string, PackObject>): Result<Attrs, PlyError> => { const c = checkWide(objects, commitsAndTags, t.limits); return c.ok ? ok(skippedAttrs(c.value)) : c; };
+    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check, attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
+    if (!r.ok) return r;
+    if (r.value.objects) {
+      const h = harvest(t, r.value.objects);
+      if (!h.ok) return h;
+    }
+    return ok({ ...r.value, filter: 'blob:none', learned });
   };
   if (t.quirks.treeFilter === 'blob:none') return wide(false);
-  try {
-    const base = await fetchPack(t, opts, { check: (objects): Attrs => { checkWide(objects, () => true, t.limits); return {}; } });
+  const base = await fetchPack(t, opts, { check: (objects): Result<Attrs, PlyError> => { const c = checkWide(objects, () => true, t.limits); return c.ok ? ok({}) : c; } });
+  if (base.ok) {
     const f = fromNullable(opts.filter);
     const filterVal = f.tag === 'some' ? f.value : null;
-    return { ...base, filter: filterVal, learned: false };
-  } catch (e) {
-    if (!isFilterRejection(e)) throw e;
-    t.quirks.treeFilter = 'blob:none';
-    return wide(true);
+    return ok({ ...base.value, filter: filterVal, learned: false });
   }
+  if (!isFilterRejection(base.error)) return base;
+  t.quirks.treeFilter = 'blob:none';
+  return wide(true);
 }
 
 // The two filters a history walk asks for. Anything else is the caller's bug, refused before a request.
@@ -154,13 +161,9 @@ export async function fetchPackFiltered(t: Transport, opts: FilteredWant | null)
   if (!isPackFilter(filter)) return fail('bad_request', `fetchPackFiltered: filter must be tree:0 or blob:none, got ${shown(filter)}`, { what: 'filter' });
   if (!Array.isArray(wants)) return fail('bad_request', 'fetchPackFiltered: wants must be a list of object ids', { what: 'wants' });
   if (wants.length === 0) return fail('bad_request', 'fetchPackFiltered: wants must name at least one object', { what: 'wants' });
-  try {
-    const r = await fetchPackTree0(t, { wants, filter, deepen: opts.deepen });
-    // Success echoes the filter we just checked, or the fallback's blob:none. Both are PackFilter.
-    const echoed: PackFilter = r.filter === 'blob:none' ? 'blob:none' : filter;
-    return ok({ objects: r.objects, shallow: r.shallow, filter: echoed, learned: r.learned });
-  } catch (e) {
-    if (isPlyError(e)) return err(e);
-    throw e;
-  }
+  const r = await fetchPackTree0(t, { wants, filter, deepen: opts.deepen });
+  if (!r.ok) return r;
+  // Success echoes the filter we just checked, or the fallback's blob:none. Both are PackFilter.
+  const echoed: PackFilter = r.value.filter === 'blob:none' ? 'blob:none' : filter;
+  return ok({ objects: r.value.objects, shallow: r.value.shallow, filter: echoed, learned: r.value.learned });
 }

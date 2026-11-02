@@ -22,6 +22,7 @@ import type { CheckedPushOptions } from './receivecaps.js';
 import { discover } from './discover.js';
 import type { Input } from './absent.js';
 import { withDefaults } from './absent.js';
+import { orThrow } from './errors.js';
 
 // A3: the audit deletes the unused re-exports below; they are public API until then.
 export { createTransport, redactUrl } from './http.js';
@@ -46,19 +47,19 @@ export type LsRefsOptions = Input<LsRefsConfig>;
 // HEAD, so the advertisement parser stays out of their bundles.
 export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: LsRefsOptions = {}): Promise<LsRefsResult> {
   const { unborn, info } = withDefaults<LsRefsConfig>(options, { unborn: false, info: null });
-  const ask = unborn && (info === null ? await discover(t) : info).lsRefsUnborn;
-  return lsRefsWire(t, prefixes, ask ? { unborn: parseUnbornLine } : {});
+  const ask = unborn && (info === null ? orThrow(await discover(t)) : info).lsRefsUnborn;
+  return orThrow(await lsRefsWire(t, prefixes, ask ? { unborn: parseUnbornLine } : {}));
 }
 
 // push options as GitHttp.push takes them: atomic and push options are checked against the advertisement (receivecaps.ts).
 export type PushOpts = CheckedPushOptions;
 type PushResult = Promise<PushOk>;
-type ReceiveCaps = ReturnType<typeof receiveCaps>;
+type ReceiveCaps = Promise<Set<string>>;
 
 /* oxlint-disable typescript/promise-function-async -- pass-throughs: each returns the free function's own promise (an argument that throws synchronously still does) */
 export class GitHttp {
   declare public readonly t: Transport;
-  public constructor(url: string, opts: HttpOptions = {}) { this.t = createTransport(url, opts); }
+  public constructor(url: string, opts: HttpOptions = {}) { this.t = orThrow(createTransport(url, opts)); }
   public get url(): string { return this.t.url; }
   public get limits(): Limits { return this.t.limits; }
   public get tracer(): Tracer { return this.t.tracer; }
@@ -66,12 +67,12 @@ export class GitHttp {
   // Each omitted argument is the free function's own default.
   public lsRefs(prefixes: readonly string[] = [], opts: LsRefsOptions = {}): Promise<LsRefsResult> { return lsRefs(this.t, prefixes, opts); }
   public packStream(opts: FetchOpts, span: Span): PackFetch { return packStream(this.t, opts, span); }
-  public fetchObject(opts: ObjectWant): Promise<FetchedObject> { return fetchObject(this.t, opts); }
-  public fetchPack(opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> { return fetchPack(this.t, opts, extra); }
-  public negotiate(opts: NegotiateOpts, extra: Pick<FetchPackExtra, 'external' | 'resolve'> = {}): Promise<NegotiateResult> { return negotiate(this.t, opts, extra); }
+  public async fetchObject(opts: ObjectWant): Promise<FetchedObject> { return orThrow(await fetchObject(this.t, opts)); }
+  public async fetchPack(opts: FetchOpts, extra: FetchPackExtra = {}): Promise<FetchPackResult> { return orThrow(await fetchPack(this.t, opts, extra)); }
+  public async negotiate(opts: NegotiateOpts, extra: Pick<FetchPackExtra, 'external' | 'resolve'> = {}): Promise<NegotiateResult> { return orThrow(await negotiate(this.t, opts, extra)); }
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
-  public push(opts: PushOpts): PushResult { return pushWithOptions(this.t, opts); }
-  public receiveCaps(): ReceiveCaps { return receiveCaps(this.t); }
-  public discover(): Promise<DiscoverInfo> { return discover(this.t); }
+  public async push(opts: PushOpts): PushResult { return orThrow(await pushWithOptions(this.t, opts)); }
+  public async receiveCaps(): ReceiveCaps { return orThrow(await receiveCaps(this.t)); }
+  public async discover(): Promise<DiscoverInfo> { return orThrow(await discover(this.t)); }
 }
 /* oxlint-enable typescript/promise-function-async */

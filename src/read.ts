@@ -45,7 +45,7 @@ import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
 import type { OperationOpts } from './operation.js';
-import type { SpState } from './fetch.js';
+import type { SpState, SpStepped } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
@@ -93,10 +93,10 @@ const sameBranch = (requested: unknown, full: string): boolean => {
 // Effect: the unborn HEAD's target, or None when the server does not advertise ls-refs=unborn or lists no unborn line
 // (a deleted branch, a born HEAD). discover runs only on a ref miss; the happy path never asks.
 async function unbornTarget(t: Transport): Promise<Result<Option<string>, PlyError>> {
-  const info = await attempt(async () => discover(t));
+  const info = await attempt(async () => orThrow(await discover(t)));
   if (!info.ok) return info;
   if (!info.value.lsRefsUnborn) return ok(none);
-  const listed = await attempt(async () => lsRefs(t, ['HEAD'], { unborn: parseUnbornLine }));
+  const listed = await attempt(async () => orThrow(await lsRefs(t, ['HEAD'], { unborn: parseUnbornLine })));
   if (!listed.ok) return listed;
   const target = mapOption(fromNullish(listed.value.unborn), u => u.target);
   return ok(getOrElse(target, '') === '' ? none : target);
@@ -161,7 +161,7 @@ async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promis
   if (cands.length === 0 && typeof ref === 'string') return ok({ kind: 'hit', resolved: { name: ref, commit: ref } });
   // null: this call is a name. A string: the prefix, and the listing is wide enough to answer it.
   const prefix = abbrev === 'advertised' && typeof ref === 'string' && ABBREV.test(ref) ? ref : null;
-  const listing = await attempt(async () => lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']));
+  const listing = await attempt(async () => orThrow(await lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/'])));
   if (!listing.ok) return listing;
   const listed = listing.value;
   for (const name of cands) {
@@ -266,7 +266,7 @@ export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: R
 
 // Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
 async function fetchTree(t: Transport, cache: TreeCache, oid: string): Promise<Result<Uint8Array, PlyError>> {
-  const fetched = await attempt(async () => fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE }));
+  const fetched = await attempt(async () => orThrow(await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE })));
   if (!fetched.ok) return fetched;
   cache.set(oid, fetched.value.data);
   return ok(fetched.value.data);
@@ -416,9 +416,7 @@ type BodyState = Extract<SpState, { readonly phase: 'body' }>;
 const nextChunk = async (it: AsyncIterator<Uint8Array>): Promise<Result<IteratorResult<Uint8Array>, unknown>> => {
   try { return ok(await it.next()); } catch (e) { return err(e); }
 };
-const stepHeader = (sp: SpState, chunk: Uint8Array): Result<ReturnType<typeof spStep>, unknown> => {
-  try { return ok(spStep(sp, chunk)); } catch (e) { return err(e); }
-};
+const stepHeader = (sp: SpState, chunk: Uint8Array): ReturnType<typeof spStep> => spStep(sp, chunk);
 // Effect: pull until the object header is read (→ type and size). The zlib bytes after it go to `early`.
 async function blobHeader(it: AsyncIterator<Uint8Array>, early: Uint8Array[]): Promise<Result<BodyState, unknown>> {
   let sp: SpState = spInit();
@@ -499,10 +497,10 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       const { value, done } = await it.next();
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) break;
-      const r = spStep(sp, value); sp = r.state;
+      const r: SpStepped = orThrow(spStep(sp, value)); sp = r.state;
       for (const z of r.zlib) await writer.write(bufferSource(z));
     }
-    sp = spFinish(sp); // pack trailer checksum
+    sp = orThrow(spFinish(sp)); // pack trailer checksum
     fetchSpan.end();
     await writer.close();
   })();

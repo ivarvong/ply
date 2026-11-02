@@ -19,7 +19,7 @@ import { fromNullish } from './absent.js';
 // a branch name as git's messages print it
 export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 // Effect: one commit by oid (deepen 1: the commit alone), as bytes or parsed
-export const commitBytesAt = async (t: Transport, oid: string): Promise<{ readonly data: Uint8Array }> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
+export const commitBytesAt = async (t: Transport, oid: string): Promise<{ readonly data: Uint8Array }> => orThrow(await fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 }));
 export const commitAt = async (t: Transport, oid: string): Promise<Commit> => orThrow(parseCommit((await commitBytesAt(t, oid)).data, t.limits));
 
 export const isOid = (s: string): boolean => parseOid(s).ok;
