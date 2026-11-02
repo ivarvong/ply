@@ -210,6 +210,8 @@ export const DECISIONS = [
   { match: 'src/receivecaps.ts#parseReceiveAdvert:export', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#serviceHeaderEnd:protocol:*', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#serviceHeaderEnd:decode:*', excluded: 'protocol: the "# service=" keyword git defines' },
+  // the pkt-line framing refusal surfaces at receiveCaps's own finish now (its parser returns Result)
+  { match: 'src/receivecaps.ts#receiveCaps:protocol:<state>', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#receiveCaps:*', space: 'push-parity', axisTag: 'caps' },
   // the advertisement space (#65): discover, ls-refs parsing, the push capability check, the reader's line limit
   { match: 'src/discover.ts#parseCapabilitiesV2Result:unsupported:*', space: 'advertisement', axisTag: 'protocol' },
@@ -219,6 +221,7 @@ export const DECISIONS = [
   { match: 'src/discover.ts#parseCapabilitiesV2:export', space: 'advertisement', axisTag: 'malformed' },
   { match: 'src/discover.ts#serverFits:unsupported:server does not advertise …', space: 'advertisement', axisTag: 'lsRefs' },
   { match: 'src/discover.ts#serverFits:unsupported:unsupported object-format …', space: 'advertisement', axisTag: 'objectFormat' },
+  { match: 'src/discover.ts#discover:protocol:<state>', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/discover.ts#discover:*', space: 'advertisement', axisTag: 'malformed' },
   { match: 'src/http.ts#advertisementBody:not_git:unexpected content-type from … advertisement', space: 'advertisement', axisTag: 'protocol' },
   { match: 'src/attributes.ts#parseLine:export', space: 'attributes', axisTag: 'gitattributes' },
@@ -252,7 +255,8 @@ export const DECISIONS = [
   { match: 'src/validate.ts#validatePushRefResult:*', space: 'refname', axisTag: 'shape' },
   // release #71: fail sites added by train/1, #57 and #62, each given to the space whose runners reach it (recorded run, macOS)
   // sem/packs (A1, #99): the packs cluster's Result cores (`xResult`) and their wrappers; spaces as before the rename
-  { match: "src/bytes.ts#take:*", space: 'chunking', axisTag: 'input' },
+  // take() is the throwing wrapper the converted parsers left behind; its short read is reached through the parsers' tests
+  { match: "src/bytes.ts#take:*", space: 'unit', axisTag: 'case' },
   { match: "src/inflate.ts#ended:*", space: 'pack-cut', axisTag: 'cut' },
   { match: "src/inflate.ts#unread:*", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#corrupt:*", space: 'chunking', axisTag: 'input' },
@@ -455,7 +459,7 @@ export const DECISIONS = [
   { match: "src/fetch.ts#spHeader:pack_corrupt:pack: bad version", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/fetch.ts#spHeader:pack_corrupt:pack: expected 1 object, got …", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/fetch.ts#spHeader:pack_corrupt:pack: single-object pack is a delta", space: 'pack-cut', axisTag: 'corrupt' },
-  { match: "src/fetch.ts#spFinishResult:pack_corrupt:pack: truncated before object header", space: 'hostile-server', axisTag: 'case' },
+  { match: "src/fetch.ts#spFinishResult:pack_corrupt:pack: truncated before object header", space: 'pack-cut', axisTag: 'cut' },
   { match: "src/fetch.ts#spFinishResult:pack_corrupt:pack: missing trailer", space: 'unit', axisTag: 'case' },
   { match: "src/fetch.ts#spFinishResult:pack_corrupt:pack: trailer … != …", space: 'chunking', axisTag: 'input' },
   { match: "src/fetch.ts#once:limit_exceeded:object size", space: 'hostile-server', axisTag: 'case' },
