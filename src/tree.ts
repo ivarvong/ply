@@ -15,7 +15,6 @@
 // Decisions and the public functions (fileEntries, buildTree, validateTreeSpec, pushTree) return Result.
 import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -342,8 +341,8 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
   const limits = limitsOf(options);
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head === null ? '' : head, 'git.push_tree.attempt': attempt };
-  // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
-  return operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
+  // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
+  return operation('push_tree', url, { ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } }, async ({ t, root, outcome }) => {
     // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
     const commitOf = (oid: string): Promise<Result<Fetched, PlyError>> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.

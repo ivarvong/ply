@@ -5,6 +5,8 @@
 //   createBranch(url, { ref, from }, opts)                   → { ref, oid, pushBytes }
 //   deleteBranch(url, { ref, expected? }, opts)               → { ref, oid }            oid: the tip it had
 //   createTag(url, { name, target, message?, tagger? }, opts) → { ref, oid, commit, annotated, pushBytes }
+//   deleteTag(url, { name, expected? }, opts)                 → { ref, oid }            deleteBranch on refs/tags/<name>
+//   listRefs(url, { prefixes? }, opts)                        → { head, refs: [{ name, oid, peeled }] }
 //
 // A ref that already exists is `cas_conflict` with `expected` the zero id and `actual` its tip, as a create in
 // editFile and commitChanges reports it (the zero old id is the compare-and-swap "must not exist"), whether ply saw it
@@ -34,9 +36,8 @@ import { assertCommit, isOid, stamp } from './mergeio.js';
 // `verify` (read the ref back after the push; an acknowledged push that does not read back is `ambiguous`).
 export type RefOpOptions = ReadOptions & Input<{ readonly verify: boolean }>;
 
-// The entry options as operation() takes them, with the operation's attributes: the tracer is required at run time.
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-const opOpts = (options: RefOpOptions, attrs: Readonly<Record<string, unknown>>): OperationOpts => ({ ...options, attrs } as OperationOpts);
+// The entry options as operation() takes them, with the operation's attributes.
+const opOpts = (options: RefOpOptions, attrs: Readonly<Record<string, unknown>>): OperationOpts => ({ ...options, attrs });
 
 // A ref the remote already has: the create's compare-and-swap (old id zero) cannot hold.
 const exists = (ref: string, tip: string): Result<never, PlyError> =>
@@ -150,5 +151,33 @@ export async function createTag(url: string, spec: CreateTagSpec, options: RefOp
     const pushed = await createRef({ t, root }, { prefix: 'git.tag_create', ref, newOid: oid, objects, verify });
     if (!pushed.ok) return pushed;
     return outcome('created', { ref, oid, commit: commit.value, annotated, pushBytes: pushed.value });
+  });
+}
+
+// A tag is a ref like a branch: deleting one is deleteBranch on refs/tags/<name> (the same CAS and errors).
+export type DeleteTagSpec = { readonly name: string } & Input<DeleteBranchConfig>;
+export async function deleteTag(url: string, spec: DeleteTagSpec, options: ReadOptions = {}): Promise<Result<DeleteBranchResult, PlyError>> {
+  const { name } = spec;
+  if (typeof name !== 'string' || name === '') return fail('bad_request', 'name must be a tag name', { what: 'tag' });
+  const { expected } = withDefaults<DeleteBranchConfig>(spec, { expected: null });
+  return deleteBranch(url, { ref: name.startsWith('refs/tags/') ? name : `refs/tags/${name}`, expected }, options);
+}
+
+// The refs the remote advertises under `prefixes` (branches and tags by default), sorted by name, and the branch HEAD
+// names (null when HEAD is detached or absent). `peeled` is the commit an annotated tag points at, else null.
+export type ListRefsConfig = { readonly prefixes: readonly string[] };
+export type ListRefsSpec = Input<ListRefsConfig>;
+export type ListedRef = { readonly name: string; readonly oid: string; readonly peeled: string | null };
+export type ListRefsResult = { readonly head: string | null; readonly refs: readonly ListedRef[] };
+export async function listRefs(url: string, spec: ListRefsSpec = {}, options: ReadOptions = {}): Promise<Result<ListRefsResult, PlyError>> {
+  const { prefixes } = withDefaults<ListRefsConfig>(spec, { prefixes: ['refs/heads/', 'refs/tags/'] });
+  if (!Array.isArray(prefixes) || !prefixes.every(p => typeof p === 'string' && p !== '')) return fail('bad_request', 'prefixes must be non-empty strings', { what: 'prefixes' });
+  return operation('list_refs', url, opOpts(options, { 'git.list_refs.prefixes': prefixes.join(',') }), async ({ t, outcome }: OpContext): Promise<Result<ListRefsResult, PlyError>> => {
+    const listed = await lsRefs(t, [...prefixes, 'HEAD']); if (!listed.ok) return listed;
+    const refs: ListedRef[] = [];
+    for (const [name, r] of listed.value.refs) if (name !== 'HEAD' && prefixes.some(p => name.startsWith(p))) refs.push({ name, oid: r.oid, peeled: r.peeled });
+    // byte order, as git lists refs (names are unique, so never equal)
+    refs.sort((a, b) => (a.name < b.name ? -1 : 1));
+    return outcome('ok', { head: listed.value.head, refs }, { 'git.list_refs.count': refs.length });
   });
 }

@@ -26,8 +26,8 @@ import { join } from 'node:path';
 import { platform as processPlatform } from 'node:process';
 import { fail, isPlyError, plyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { err, getOrElse, ok } from './result.js';
-import type { Err, Result } from './result.js';
+import { err, getOrElse, mapOption, ok } from './result.js';
+import type { Err, Option, Result } from './result.js';
 import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePath, checkoutPathRefusal } from './validate.js';
@@ -41,7 +41,7 @@ import type { HttpAuth } from './http.js';
 import type { Tracer, Span } from './otel.js';
 import type { Quirks, Transport } from './transport.js';
 import type { Input } from './absent.js';
-import { withDefaults } from './absent.js';
+import { field, withDefaults } from './absent.js';
 
 /* oxlint-disable no-await-in-loop -- files are written one at a time, in order, each stream drained before the next */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -228,8 +228,9 @@ export type CheckoutDirOptionsConfig = {
   readonly batch: number;
   readonly platform: string;
 };
-export type CheckoutDirOptions = { readonly tracer: Tracer } & Input<CheckoutDirOptionsConfig>;
-type CheckoutDirOptionsTotal = { readonly tracer: Tracer } & CheckoutDirOptionsConfig;
+// `tracer` is optional, as on every entry: without one operation() drops the spans.
+export type CheckoutDirOptions = Input<{ readonly tracer: Tracer } & CheckoutDirOptionsConfig>;
+type CheckoutDirOptionsTotal = { readonly tracer: Option<Tracer> } & CheckoutDirOptionsConfig;
 const dirDefaults = (): CheckoutDirOptionsConfig => ({
   auth: null, parent: null, fetchImpl: null, limits: DEFAULT_LIMITS, signal: null, quirks: null, transport: null, batch: CHECKOUT_BATCH, platform: processPlatform,
 });
@@ -237,20 +238,21 @@ const dirDefaults = (): CheckoutDirOptionsConfig => ({
 function treeOpts(opts: CheckoutDirOptionsTotal): ReadOptions & { readonly batch: number } {
   const base = {
     auth: opts.auth,
-    tracer: opts.tracer,
     parent: opts.parent,
     limits: opts.limits,
     signal: opts.signal,
     transport: opts.transport,
     batch: opts.batch,
   };
-  const withFetch = opts.fetchImpl === null ? base : { ...base, fetchImpl: opts.fetchImpl };
+  const traced = opts.tracer.tag === 'some' ? { ...base, tracer: opts.tracer.value } : base;
+  const withFetch = opts.fetchImpl === null ? traced : { ...traced, fetchImpl: opts.fetchImpl };
   return opts.quirks === null ? withFetch : { ...withFetch, quirks: opts.quirks };
 }
-export async function checkoutDir(url: string, request: CheckoutDirRequest, options: CheckoutDirOptions): Promise<Result<CheckoutDirResult, CheckoutDirError>> {
+export async function checkoutDir(url: string, request: CheckoutDirRequest, options: CheckoutDirOptions = {}): Promise<Result<CheckoutDirResult, CheckoutDirError>> {
   const { dir } = request;
   const { ref, path } = withDefaults<CheckoutDirConfig>(request, { ref: null, path: '' });
-  const opts: CheckoutDirOptionsTotal = { ...withDefaults(options, dirDefaults()), tracer: options.tracer };
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a caller's tracer, if any: operation() checks it has start()
+  const opts: CheckoutDirOptionsTotal = { ...withDefaults(options, dirDefaults()), tracer: mapOption(field(options, 'tracer'), t => t as Tracer) };
   if (typeof dir !== 'string' || dir === '') return kinded(fail('bad_request', 'dir must be a non-empty string', { what: 'dir' }).error, 'dir');
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;

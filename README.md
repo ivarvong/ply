@@ -31,14 +31,12 @@ What ply does **not** do: create or delete repositories (that is the host's API,
 
 ## Quick start: a repo end to end
 
-Every call takes `(url, spec, opts)`, where `opts.tracer` is required (a `new Tracer()` with no exporter drops its spans), and returns a `Result`: `{ ok: true, value }` or `{ ok: false, error }`, never a throw. The blocks below run in order against one repository that starts empty (they are executed as written, against `git http-backend` with and without `uploadpack.allowFilter`, by `test/e2e-customer.test.js`, and type-checked as TypeScript by `test/types/readme.typetest.ts`). A ref that is written is a full name (`refs/heads/main`; a tag's `name` may be short); a ref that is only read (`readCommit`'s `ref`, `createBranch`'s `from`, `createTag`'s `target`) may also be a short name (`main`, `v1.3.0`) or a commit id.
+Every call takes `(url, spec, opts)` (`opts` is optional: `auth`, `limits`, `signal`, and `tracer`, a `new Tracer({ exporter })` to export spans; without one they are dropped), and returns a `Result`: `{ ok: true, value }` or `{ ok: false, error }`, never a throw. The blocks below run in order against one repository that starts empty (they are executed as written, against `git http-backend` with and without `uploadpack.allowFilter`, by `test/e2e-customer.test.js`, and type-checked as TypeScript by `test/types/readme.typetest.ts`). A ref that is written is a full name (`refs/heads/main`; a tag's `name` may be short); a ref that is only read (`readCommit`'s `ref`, `createBranch`'s `from`, `createTag`'s `target`) may also be a short name (`main`, `v1.3.0`) or a commit id.
 
 ```js
 // quick-start: setup
-import { Tracer } from 'ply';
-
 const url = 'https://git.example.com/acme/site.git';  // an existing repository, empty or not
-const opts = { auth: { token: process.env['GIT_TOKEN'] }, tracer: new Tracer() };  // Tracer({ exporter }) to export spans
+const opts = { auth: { token: process.env['GIT_TOKEN'] } };  // add tracer: new Tracer({ exporter }) to export spans
 const author = { name: 'Release Bot', email: 'bot@example.com' };  // time defaults to now, tz to +0000
 const outDir = './site-checkout';  // checkoutDir writes here; it must be absent or empty
 ```
@@ -213,11 +211,17 @@ console.log(written.value.written.files);  // files written under outDir
 **Delete a branch.** Without `expected` the tip ls-refs reports is the compare-and-swap; with `expected: '<oid>'` the delete happens only from that tip. The branch the remote's HEAD names is refused by the server (`push_rejected`).
 
 ```js
-// quick-start: delete-branch
-import { deleteBranch } from 'ply';
+// quick-start: refs
+import { listRefs, deleteBranch, deleteTag } from 'ply';
+
+const refs = await listRefs(url, {}, opts);  // branches and tags; { prefixes: ['refs/heads/'] } for branches only
+if (!refs.ok) throw refs.error;
+console.log(refs.value.head, refs.value.refs.map(r => r.name));  // 'refs/heads/main', [ 'refs/heads/feature', … ]
 
 const gone = await deleteBranch(url, { ref: 'refs/heads/feature', expected: work.value.oid }, opts);
 if (!gone.ok) throw gone.error;  // cas_conflict when feature moved off that commit; not_found when it is gone
+const untagged = await deleteTag(url, { name: 'v1.3.0-notes' }, opts);
+if (!untagged.ok) throw untagged.error;
 ```
 
 **Errors.** `error.code` is a closed union, so a `switch` with `assertNever` in `default` is checked exhaustive by TypeScript (a new code in ply fails your build, not your users). What to do with each:

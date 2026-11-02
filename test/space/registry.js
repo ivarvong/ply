@@ -345,7 +345,7 @@ export const DECISIONS = [
   { match: "src/log.ts#logOn:bad_request:logOn: limit must be an integer from 1 to … (limits.maxM…", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logOn:bad_request:logOn: the second argument must be an object ({ commit, …", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logArgs:bad_request:readLog: limit must be an integer from 1 to … (limits.ma…", space: 'read', axisTag: 'case' },
-  { match: "src/log.ts#logArgs:bad_request:readLog: opts.tracer is required", space: 'read', axisTag: 'case' },
+  { match: "src/log.ts#logArgs:bad_request:readLog: the third argument must be an object (options)", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logArgs:bad_request:readLog: path filtering is not supported", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logArgs:bad_request:readLog: the second argument must be an object ({ ref, l…", space: 'read', axisTag: 'case' },
   { match: "src/merge.ts#mergeBranch:unsupported:… is an annotated tag (git merge writes a mergetag heade…", space: 'git-bytes', axisTag: 'op' },

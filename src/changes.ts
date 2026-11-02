@@ -11,7 +11,6 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
 import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
@@ -608,8 +607,7 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
     'git.commit.creating': false, 'git.commit.attempt': 0,
   };
   const opts: StreamOpts = { rest: options, limits, verify, signer, allowLfs: allowLfsPointer, pinned };
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- tracer is optional on EntryOptions and required by operation(), as editFile
-  return operation('commit', url, { ...options, limits, attrs } as OperationOpts, async ({ t, root, outcome }) => {
+  return operation('commit', url, { ...options, limits, attrs }, async ({ t, root, outcome }) => {
     const finish = (done: CommitChangesResult, objects: number): Ok<CommitChangesResult> => outcome(done.outcome, done, {
       'git.commit.tree': done.tree, 'git.commit.oid': done.oid, 'git.commit.push.bytes': done.pushBytes, ...(objects > 0 ? { 'git.commit.objects': objects } : {}),
     });

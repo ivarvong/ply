@@ -174,7 +174,17 @@ const CHECKS = {
     assert.equal(diff.status, 0, `checkoutDir equals git clone: ${diff.stdout}${diff.stderr}`);
     assert.equal(s.written.value.written.files, files(bare).length);
   },
-  'delete-branch': (bare, s) => {
+  refs: (bare, s) => {
+    // listRefs ran before the two deletes: git's refs now, plus the two it deleted, in git's (byte) order
+    const now = git(bare, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/', 'refs/tags/']).trim().split('\n');
+    const want = [...now, `refs/heads/feature ${s.gone.value.oid}`, `refs/tags/v1.3.0-notes ${s.untagged.value.oid}`].sort((a, b) => (a < b ? -1 : 1));
+    assert.deepEqual(s.refs.value.refs.map(r => `${r.name} ${r.oid}`), want, 'listRefs is for-each-ref, before the deletes');
+    assert.equal(s.refs.value.head, git(bare, ['symbolic-ref', 'HEAD']).trim());
+    const notes = s.refs.value.refs.find(r => r.name === 'refs/tags/v1.3.0-notes');
+    assert.equal(notes.peeled, s.notes.value.commit, 'an annotated tag is peeled to its commit');
+    assert.equal(has(bare, 'refs/tags/v1.3.0-notes'), false);
+    assert.equal(s.untagged.value.ref, 'refs/tags/v1.3.0-notes');
+    assert.equal(has(bare, 'refs/tags/v1.3.0'), true);
     assert.equal(has(bare, 'refs/heads/feature'), false);
     assert.equal(s.gone.value.oid, s.work.value.oid);
     assert.equal(has(bare, 'refs/heads/topic'), true);
@@ -193,7 +203,7 @@ let root, cleanup, srv;
 let n = 0;
 const author = { name: 'Release Bot', email: 'bot@example.com' };
 // The setup block's names, bound to this server instead of the README's placeholders.
-const setupScope = name => ({ url: `${srv.url}/${name}.git`, opts: { tracer: new ply.Tracer() }, author, outDir: join(root, `${name}-out`), console: quietConsole() });
+const setupScope = name => ({ url: `${srv.url}/${name}.git`, opts: {}, author, outDir: join(root, `${name}-out`), console: quietConsole() });
 
 // A repository as the default fixture has it, or with upload-pack at git's defaults.
 const defaultRepo = name => makeBareRepo(root, name);
@@ -216,22 +226,28 @@ after(async () => { await srv?.close(); cleanup?.(); });
 
 describe('README quick start', () => {
   test('the blocks: setup names what the test binds, every import is a real export', () => {
-    assert.deepEqual(BLOCKS.map(b => b.step), ['setup', 'first-commit', 'read', 'edit', 'commit-changes', 'branch-merge', 'tag', 'rebase-pick-revert', 'history', 'checkout', 'delete-branch', 'errors']);
+    assert.deepEqual(BLOCKS.map(b => b.step), ['setup', 'first-commit', 'read', 'edit', 'commit-changes', 'branch-merge', 'tag', 'rebase-pick-revert', 'history', 'checkout', 'refs', 'errors']);
     assert.deepEqual(BLOCKS[0].declared, ['url', 'opts', 'author', 'outDir']);
     for (const b of BLOCKS) for (const { names, from } of b.imports) for (const name of names) assert.equal(typeof MODULES[from]?.[name], 'function', `${b.step}: ${name} from '${from}'`);
     for (const step of STEPS) assert.equal(typeof CHECKS[step], 'function', `a git check for ${step}`);
   });
-  test('an entry called without opts.tracer answers bad_request (an Err, not a TypeError)', async () => {
-    const author_ = { name: 'a', email: 'a@x' };
-    for (const call of [
-      () => ply.readCommit('http://127.0.0.1:9/none.git', { ref: 'main' }),
-      () => ply.editFile('http://127.0.0.1:9/none.git', { ref: 'refs/heads/main', path: 'a', find: 'a', replace: 'b', author: author_, message: 'm' }, {}),
-      () => ply.createBranch('http://127.0.0.1:9/none.git', { ref: 'refs/heads/x', from: 'main' }, { tracer: null }),
-    ]) {
-      const r = await call();
+  test('opts.tracer is optional: no tracer works (spans dropped); a value that is not a Tracer is bad_request', async () => {
+    defaultRepo('no-tracer');
+    const url = `${srv.url}/no-tracer.git`;
+    const first = await ply.pushTree(url, { ref: 'refs/heads/main', create: true, files: { 'a.txt': 'a\n' }, author, message: 'first' });
+    assert.equal(first.ok, true, first.ok ? '' : first.error.message);
+    const read = await ply.readCommit(url, { ref: 'main' });
+    assert.equal(read.ok && 'oid' in read.value ? read.value.oid : null, first.value.newCommit);
+    const listed = await ply.listRefs(url);
+    assert.deepEqual(listed.ok ? listed.value : listed.error.message, { head: 'refs/heads/main', refs: [{ name: 'refs/heads/main', oid: first.value.newCommit, peeled: null }] });
+    for (const r of [await ply.deleteTag(url, { name: '' }), await ply.listRefs(url, { prefixes: [''] }), await ply.listRefs(url, { prefixes: 'refs/' })]) {
+      assert.equal(r.ok ? 'ok' : r.error.code, 'bad_request');
+    }
+    for (const tracer of [{}, 7, 'x']) {
+      const r = await ply.readCommit(url, { ref: 'main' }, { tracer });
       assert.equal(r.ok, false);
       assert.equal(r.error.code, 'bad_request');
-      assert.match(r.error.message, /opts\.tracer is required/);
+      assert.match(r.error.message, /opts\.tracer must be a Tracer/);
     }
   });
   test('test/types/readme.typetest.ts is the README blocks (UPDATE_README_TYPETEST=1 regenerates it)', () => {

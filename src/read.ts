@@ -43,7 +43,6 @@ import type { Span } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
-import type { OperationOpts } from './operation.js';
 import type { SpState, SpStepped } from './fetch.js';
 import type { Transport } from './transport.js';
 import { raised } from './transport.js';
@@ -256,8 +255,7 @@ const unbornState = (r: Result<Resolved, PlyError>): Option<EmptyCommit> => {
 };
 export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: ReadOptions = {}): Promise<Result<CommitResult | EmptyCommit, PlyError>> {
   const { ref } = withDefaults<RefConfig>(spec, { ref: null });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation<EmptyCommit | CommitResult>('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } } as OperationOpts), async ({ t, outcome }) => {
+  return operation<EmptyCommit | CommitResult>('read_commit', url, { ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } }, async ({ t, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     const empty = unbornState(resolved);
     if (empty.tag === 'some') return outcome('ok', empty.value);
@@ -360,8 +358,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
   const checked = pathComps(path, limits, { allowRoot: true });
   if (!checked.ok) return checked;
   const comps = checked.value;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('ls_tree', url, ({ ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('ls_tree', url, { ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } }, async ({ t, root, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
@@ -405,8 +402,7 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
   const checked = pathComps(path, limits, { allowRoot: false });
   if (!checked.ok) return checked;
   const comps = checked.value;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read', url, ({ ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('read', url, { ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } }, async ({ t, root, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;

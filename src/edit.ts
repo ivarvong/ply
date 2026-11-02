@@ -24,7 +24,6 @@ import { validateIdent, validateRef, validatePushRef, validatePath, validateMess
 import type { IdentInput, ValidatedIdent } from './validate.js';
 import { parseCommitId } from './oid.js';
 import { signCommit } from './sign.js';
-import type { OperationOpts } from './operation.js';
 import type { FetchedObject as Fetched, SpState } from './fetch.js';
 import type { PackObject } from './push.js';
 import type { Signer } from './sign.js';
@@ -473,8 +472,7 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
   const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head === null ? '' : head, 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
   const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint === null ? '' : hint, ...memAttrs({ objects: held, ...streamed }), ...fetchCounters(options) });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('edit', url, ({ ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('edit', url, { ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } }, async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
     const getObject = async (oid: string, expectType: number, deepen: number): Promise<Result<Fetched, PlyError>> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); if (o.ok) held.push(o.value.size); return o; };

@@ -35,7 +35,7 @@ export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing i
 export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbrev, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
 export { readLog, logWindow, logOn } from './log.js';
 export { mergeBranch, fastForward, deleteRef, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
-export { createBranch, deleteBranch, createTag } from './refops.js';
+export { createBranch, deleteBranch, createTag, deleteTag, listRefs } from './refops.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
 export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody } from './client.js';

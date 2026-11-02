@@ -696,8 +696,7 @@ export type MergeOutcome =
 // The entry options as operation() takes them, with the operation's attributes. The tracer is the caller's, required at
 // run time (operation starts the root span on it), as for every entry (boundary.ts EntryOptions).
 export const operationOpts = (options: Readonly<Record<string, unknown>>, attrs: Readonly<Record<string, unknown>>): OperationOpts =>
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time (see above)
-  ({ ...options, attrs }) as OperationOpts;
+  ({ ...options, attrs });
 
 // an annotated tag's peeled commit, as ls-refs reports it
 const peeledOf = (refs: LsRefsResult['refs'], ref: string): Option<string> => {

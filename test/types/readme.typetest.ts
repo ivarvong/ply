@@ -3,10 +3,8 @@
 // it. tsconfig.isolated.json excludes it (it imports the JS entry, src/index.js).
 
 // ---- setup ----
-import { Tracer } from '../../src/index.js';
-
 const url = 'https://git.example.com/acme/site.git';  // an existing repository, empty or not
-const opts = { auth: { token: process.env['GIT_TOKEN'] }, tracer: new Tracer() };  // Tracer({ exporter }) to export spans
+const opts = { auth: { token: process.env['GIT_TOKEN'] } };  // add tracer: new Tracer({ exporter }) to export spans
 const author = { name: 'Release Bot', email: 'bot@example.com' };  // time defaults to now, tz to +0000
 const outDir = './site-checkout';  // checkoutDir writes here; it must be absent or empty
 
@@ -141,11 +139,17 @@ const written = await checkoutDir(url, { dir: outDir, ref: 'main' }, opts);
 if (!written.ok) throw written.error;
 console.log(written.value.written.files);  // files written under outDir
 
-// ---- delete-branch ----
-import { deleteBranch } from '../../src/index.js';
+// ---- refs ----
+import { listRefs, deleteBranch, deleteTag } from '../../src/index.js';
+
+const refs = await listRefs(url, {}, opts);  // branches and tags; { prefixes: ['refs/heads/'] } for branches only
+if (!refs.ok) throw refs.error;
+console.log(refs.value.head, refs.value.refs.map(r => r.name));  // 'refs/heads/main', [ 'refs/heads/feature', … ]
 
 const gone = await deleteBranch(url, { ref: 'refs/heads/feature', expected: work.value.oid }, opts);
 if (!gone.ok) throw gone.error;  // cas_conflict when feature moved off that commit; not_found when it is gone
+const untagged = await deleteTag(url, { name: 'v1.3.0-notes' }, opts);
+if (!untagged.ok) throw untagged.error;
 
 // ---- errors ----
 import { assertNever } from '../../src/index.js';

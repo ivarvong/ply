@@ -35,7 +35,6 @@
 import { fail, type CommitMiss, type PlyError } from './errors.js';
 import { assertNever, err, getOrElse, mapOption, ok } from './result.js';
 import type { Result } from './result.js';
-import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { filterUnadvertised, fallbackName, packName } from './fetch.js';
@@ -335,8 +334,7 @@ export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options
   const args = checkoutArgs(path, batch, limits);
   if (!args.ok) return args;
   const comps = args.value;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('checkout', url, ({ ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('checkout', url, { ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } }, async ({ t, root, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;

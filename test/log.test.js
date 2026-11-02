@@ -270,7 +270,9 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   assert.equal((await unwrapAsync(readLog(url, { limit: 1024 }, opts()))).commits.length, 3, 'the default cap itself');
   for (const bad of [null, 5, 'main']) await assert.rejects(unwrapAsync(readLog(url, bad, opts())), code('bad_request'), String(bad));
   await assert.rejects(unwrapAsync(readLog(url, {}, null)), code('bad_request'));
-  await assert.rejects(unwrapAsync(readLog(url, {}, {})), code('bad_request'), 'no tracer');
+  // no tracer is fine (operation() drops the spans); a tracer that is not one is bad_request
+  assert.equal((await readLog(url, {}, {})).ok, true, 'no tracer');
+  await assert.rejects(unwrapAsync(readLog(url, {}, { tracer: {} })), code('bad_request'), 'not a tracer');
   await assert.rejects(unwrapAsync(readLog(url, { path: 'f0.txt' }, opts())), code('bad_request'), 'path is not supported');
   await assert.rejects(unwrapAsync(readLog(url, { ref: 'a..b' }, opts())), code('bad_request'));
   await assert.rejects(unwrapAsync(readLog(url, { ref: 7 }, opts())), code('bad_request'));
