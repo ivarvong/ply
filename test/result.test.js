@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { ok, err, map, mapErr, andThen, match, matchKind, matchOption, assertNever, errorKind, errorKindAttr, some, none, isSome, isNone, resultToOption, optionToResult, transposeResultOption, transposeOptionResult } from '../src/result.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { fail, plyError, thrown, orThrow, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
-import { checkLimit, readLimit, limitExceeded, finiteLimit, requireLimit, limitError, DEFAULT_LIMITS } from '../src/limits.js';
+import { checkLimit, readLimit, limitExceeded, limitError, DEFAULT_LIMITS } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
 
 test('Result: ok/err shapes, map/mapErr/andThen short-circuit, match dispatches on code, assertNever throws', () => {
   assert.deepEqual(ok(1), { ok: true, value: 1 });
@@ -114,21 +115,21 @@ test('PlyError: one constructor, an Error carrying its fields; fail wraps it; or
   assert.equal(isRetryable({ code: 'ambiguous' }), false);
 });
 
-test('limits: checkLimit/readLimit accept exactly the finite non-negative numbers; throwing wrappers agree', () => {
+test('limits: checkLimit/readLimit accept exactly the finite non-negative numbers; the error is an Error with its fields', () => {
   const bad = (what, got) => ({ ok: false, error: { code: 'bad_request', message: `limits.${what} must be a finite non-negative number`, what, got } });
   const shape = r => (r.ok ? r : { ok: false, error: { code: r.error.code, message: r.error.message, what: r.error.what, got: r.error.got } });
   for (const v of [0, 1, 0.5, Number.MAX_SAFE_INTEGER]) {
     assert.deepEqual(checkLimit(v, 'k'), { ok: true, value: v });
-    assert.equal(finiteLimit(v, 'k'), v);
+    assert.equal(unwrap(checkLimit(v, 'k')), v);
   }
   for (const v of [-1, -0.5, Number.NaN, Infinity, -Infinity, '5', undefined, null]) {
     assert.deepEqual(shape(checkLimit(v, 'k')), bad('k', v));
-    assert.throws(() => finiteLimit(v, 'k'), x => x instanceof Error && x.code === 'bad_request' && x.what === 'k' && Object.is(x.got, v));
+    assert.throws(() => unwrap(checkLimit(v, 'k')), x => x instanceof Error && x.code === 'bad_request' && x.what === 'k' && Object.is(x.got, v));
   }
   assert.deepEqual(readLimit(DEFAULT_LIMITS, 'maxRefs'), { ok: true, value: DEFAULT_LIMITS.maxRefs });
   assert.deepEqual(shape(readLimit({}, 'maxRefs')), bad('maxRefs', undefined));
   assert.deepEqual(shape(readLimit(null, 'maxRefs')), bad('maxRefs', undefined));
-  assert.equal(requireLimit({ maxRefs: 3 }, 'maxRefs'), 3);
+  assert.equal(unwrap(readLimit({ maxRefs: 3 }, 'maxRefs')), 3);
   const x = limitExceeded('refs', 11, 10);
   assert.deepEqual({ code: x.code, message: x.message, what: x.what, got: x.got, max: x.max }, { code: 'limit_exceeded', message: 'refs 11 exceeds limit 10', what: 'refs', got: 11, max: 10 });
   assert.equal(limitError, limitExceeded);

@@ -50,7 +50,7 @@ import type { Input } from './absent.js';
 import { at, field, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 
 const HEX40 = /^[0-9a-fA-F]{40}$/u;
-const EMPTY_TREE = hashObject('tree', encodeTree([]));
+const EMPTY_TREE = hashObject('tree', orThrow(encodeTree([])));
 
 export type { BlobMode };
 // `mode` left out is a regular file (100644).
@@ -129,7 +129,7 @@ function fields(raw: object): Record<string, unknown> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a change is an untyped object; each field is checked below
   return raw as Record<string, unknown>;
 }
-const pathOf = (raw: unknown, limits: Limits): Result<string[], PlyError> => validated(() => validatePath(raw, limits));
+const pathOf = (raw: unknown, limits: Limits): Result<string[], PlyError> => validated(() => orThrow(validatePath(raw, limits)).components);
 function normalize(raw: unknown, limits: Limits): Result<Norm, PlyError> {
   if (raw === null || typeof raw !== 'object') return fail('bad_request', 'change must be an object with a kind', { what: 'change' });
   const rec = fields(raw);
@@ -178,7 +178,7 @@ function validateBase(base: string | null): Result<BasePlan, PlyError> {
     const id = parseCommitId(base);
     return id.ok ? ok({ kind: 'oid', oid: id.value }) : id;
   }
-  const ref = validated(() => validateRef(base));
+  const ref = validated(() => orThrow(validateRef(base)));
   return ref.ok ? ok({ kind: 'ref', ref: ref.value }) : ref;
 }
 function validateHead(head: string | null): Result<string | null, PlyError> {
@@ -201,7 +201,7 @@ function identInput(who: Option<Author>, time: number): IdentInput {
 function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | null): Result<Plan, PlyError> {
   const given = withDefaults(spec, specDefaults());
   const refIn = given.ref;
-  const ref = refIn === null ? ok(null) : validated(() => validatePushRef(refIn, false));
+  const ref = refIn === null ? ok(null) : validated(() => orThrow(validatePushRef(refIn, false)));
   if (!ref.ok) return ref;
   const base = validateBase(given.base);
   if (!base.ok) return base;
@@ -220,14 +220,14 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
   const authorTime = mapOption(author, a => fromNullish(a.time));
   let time = getOrElse(fromNullish(given.time), Math.floor(Date.now() / 1000));
   if (authorTime.tag === 'some' && authorTime.value.tag === 'some') time = authorTime.value.value;
-  const authorIdent = validated(() => validateIdent(identInput(author, time)));
+  const authorIdent = validated(() => orThrow(validateIdent(identInput(author, time))));
   if (!authorIdent.ok) return authorIdent;
   const committer = fromNullish(given.committer);
   const written = committer.tag === 'none'
     ? authorIdent
-    : validated(() => validateIdent(identInput(committer, getOrElse(fromNullish(committer.value.time), time))));
+    : validated(() => orThrow(validateIdent(identInput(committer, getOrElse(fromNullish(committer.value.time), time)))));
   if (!written.ok) return written;
-  const message = validated(() => validateMessage(spec.message));
+  const message = validated(() => orThrow(validateMessage(spec.message)));
   if (!message.ok) return message;
   const pinned = validateHead(head);
   if (!pinned.ok) return pinned;
@@ -258,7 +258,7 @@ async function resolveTarget(t: Transport, ref: string | null): Promise<Result<T
     const headLine = mapGet(listed.refs, 'HEAD');
     const unborn = listed.unborn;
     if (unborn !== null) {
-      const target = validated(() => validatePushRef(unborn.target, false));
+      const target = validated(() => orThrow(validatePushRef(unborn.target, false)));
 
       return target.ok ? ok({ ref: target.value, oid: null }) : target;
     }
@@ -312,7 +312,7 @@ async function loadTree(walk: Walk, oid: string): Promise<Dir> {
   if (hit.tag === 'some') return hit.value;
   const obj = await fetchObject(walk.t, { oid, filter: 'tree:0', expectType: TYPE.TREE });
   const dir = emptyDir();
-  for (const entry of parseTree(obj.data, walk.limits)) {
+  for (const entry of orThrow(parseTree(obj.data, walk.limits))) {
     dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
     walk.have.add(entry.oid);
   }

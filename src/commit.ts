@@ -2,7 +2,7 @@
 // It lives here so merge and rebase can use it without pulling read's blob stream (openBlob) into their bundle.
 // The read path's edge to modules not yet converted to Result (caughtErr, attempt, attemptSync) lives here for that reason:
 // read, log and checkout all import this file.
-import { fail, isPlyError } from './errors.js';
+import { fail, isPlyError, orThrow } from './errors.js';
 import type { CommitMiss, PlyError } from './errors.js';
 import { ok, err } from './result.js';
 import type { Err, Result } from './result.js';
@@ -38,7 +38,7 @@ export type FetchedCommit = { readonly oid: string; readonly data: Uint8Array; r
 export async function fetchCommit(t: Transport, oid: string): Promise<Result<FetchedCommit, PlyError>> {
   try {
     const c = await fetchObject(t, { oid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
-    return ok({ oid, data: c.data, commit: parseCommit(c.data, t.limits) });
+    return ok({ oid, data: c.data, commit: orThrow(parseCommit(c.data, t.limits)) });
   } catch (e) {
     if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return fail('not_found', `commit ${oid} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid } } });
     return caughtErr(e);

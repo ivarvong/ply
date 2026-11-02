@@ -118,7 +118,7 @@ async function transplant(t: Transport, cache: TreeCache, trees: Trees, { parent
   out.fetched += m.fetched;
   if (m.conflicts.length > 0) return ok({ kind: 'conflict', conflicts: m.conflicts, reasons: m.reasons });
   const treeOid: string = m.oid === null ? hashObject('tree', new Uint8Array(0)) : m.oid;
-  let data = encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
+  let data = orThrow(encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra }));
   if (signer) data = await signCommit(data, signer);
   const oid: string = hashObject('commit', data);
   out.contentMerged += m.contentMerged;
@@ -167,10 +167,10 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
   const { onto, committer, author, time, squash, message } = withDefaults(spec, rebaseSpecDefaults());
   const { ref } = spec;
   const { cache, signer, rediff, attributes: attributesGiven } = withDefaults(options, rebaseDefaults());
-  const attributes = orThrow(validateAttributes(attributesGiven)); validatePushRef(ref, false); const ontoOid = orThrow(givenOid(onto, 'onto'));
+  const attributes = orThrow(validateAttributes(attributesGiven)); orThrow(validatePushRef(ref, false)); const ontoOid = orThrow(givenOid(onto, 'onto'));
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
-  if (message !== null) validateMessage(message);
+  if (message !== null) orThrow(validateMessage(message));
   return operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<RebaseOutcome> => orThrow(await (async (): Promise<Result<RebaseOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]);
     const tipAt = refOid(refs, ref);
@@ -212,7 +212,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     // no more than that; #41). Its tree is the first replay's base, so fetch it; every chain commit is above it and in hand.
     if (!commits.has(base)) commits.set(base, await commitAt(t, base));
     const targetTree: string = (await commitAt(t, target)).tree;
-    const who: string = ident(committerPerson);
+    const who: string = orThrow(ident(committerPerson));
     // a commit's tree by oid, among those in hand; a chain commit's one parent is in hand (linearChain)
     const treeOf = (oid: string): string | null => getOrElse(mapOption(mapGet(commits, oid), c => c.tree), null);
     const parentTree = (c: Commit): string | null => treeOf(getOrElse(at(c.parents, 0), ''));
@@ -221,7 +221,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const first = at(chain, 0);
     const last = at(chain, chain.length - 1);
     if (squash && first.tag === 'some' && last.tag === 'some') {
-      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorPerson ? ident(authorPerson) : first.value.author, committer: who, message: message === null ? `${chain.map(c => (c.message === null ? '' : c.message).replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n` : message, encoding: null, extra: [] }, signer, out);
+      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorPerson ? orThrow(ident(authorPerson)) : first.value.author, committer: who, message: message === null ? `${chain.map(c => (c.message === null ? '' : c.message).replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n` : message, encoding: null, extra: [] }, signer, out);
       if (!r.ok) return r;
       const w = r.value;
       if (w.kind === 'conflict') return fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);
@@ -315,11 +315,11 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
   const { ref, committer, author, time, revert, message, empty: emptyGiven } = withDefaults(spec, pickSpecDefaults());
   const { commit } = spec;
   const { cache, signer, rediff, attributes: attributesGiven } = withDefaults(options, rebaseDefaults());
-  const attributes = orThrow(validateAttributes(attributesGiven)); validatePushRef(ref, false);
+  const attributes = orThrow(validateAttributes(attributesGiven)); orThrow(validatePushRef(ref, false));
   const empty = orThrow(emptyPolicy(emptyGiven));
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const revertAuthor: ValidatedIdent = author ? stamp(author, time) : committerPerson;
-  if (message !== null) validateMessage(message);
+  if (message !== null) orThrow(validateMessage(message));
   orThrow(isOid(commit) ? ok(commit) : fail('bad_request', 'commit must be a 40-hex oid'));
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
@@ -328,18 +328,18 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
     const targetAt = refOid(refs, ref); if (targetAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const target = targetAt.value;
     const [cT, cC] = await Promise.all([commitBytesAt(t, target), commitBytesAt(t, commit)]);
-    const tInfo: Commit = parseCommit(cT.data, t.limits);
-    const c: Commit = parseCommit(cC.data, t.limits);
+    const tInfo: Commit = orThrow(parseCommit(cT.data, t.limits));
+    const c: Commit = orThrow(parseCommit(cC.data, t.limits));
     if (c.parents.length > 1) return fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
     const parentTree = await parentTreeAt(t, c.parents);
-    const who: string = ident(committerPerson);
+    const who: string = orThrow(ident(committerPerson));
     const out = replay(rediff, attributes);
     const subject = getOrElse(at((c.message === null ? '' : c.message).split('\n'), 0), '');
     // the message git writes when none is given: revert's, or the picked commit's own
     const ownMessage = revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message;
     const r = await transplant(t, cache,
       revert ? { base: c.tree, ours: tInfo.tree, theirs: parentTree } : { base: parentTree, ours: tInfo.tree, theirs: c.tree },
-      { parent: target, author: revert ? ident(revertAuthor) : c.author, committer: who, message: message === null ? ownMessage : message, encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
+      { parent: target, author: revert ? orThrow(ident(revertAuthor)) : c.author, committer: who, message: message === null ? ownMessage : message, encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
     if (!r.ok) return r;
     const w = r.value;
     if (w.kind === 'conflict') return fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);

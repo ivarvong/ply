@@ -8,6 +8,7 @@ import type { PackInput } from './pack.js';
 import { fromHex } from './sha1.js';
 import type { ValidatedIdent } from './validate.js';
 import { validateIdent, isValidatedIdent } from './validate.js';
+import { orThrow } from './errors.js';
 import type { Input } from './absent.js';
 import { fromNullable, fromNullish } from './absent.js';
 import { getOrElse, matchOption } from './result.js';
@@ -17,11 +18,11 @@ export type Author = { readonly name: string; readonly email: string } & Input<{
 export type AuthorLike = Author | ValidatedIdent;
 
 function identLine(person: AuthorLike, time: number): string {
-  if (isValidatedIdent(person)) return ident(person);
+  if (isValidatedIdent(person)) return orThrow(ident(person));
   const when = getOrElse(fromNullish(person.time), time);
   // tz: only the missing value means UTC (validateIdent's default); a null tz is the caller's, and refused there
   const tz = fromNullable(person.tz);
-  return ident(validateIdent(tz.tag === 'some' ? { name: person.name, email: person.email, time: when, tz: tz.value } : { name: person.name, email: person.email, time: when }));
+  return orThrow(ident(orThrow(validateIdent(tz.tag === 'some' ? { name: person.name, email: person.email, time: when, tz: tz.value } : { name: person.name, email: person.email, time: when }))));
 }
 // The committer line: the author's when none is given.
 const committerLine = (committer: AuthorLike | null, who: string, time: number): string =>
@@ -58,7 +59,7 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer 
   const who = identLine(author, time);
   const written = committerLine(committer, who, time);
   const body = message.endsWith('\n') ? message : `${message}\n`;
-  const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message: body });
+  const commitData = orThrow(encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message: body }));
   const newCommit = hashObject('commit', commitData);
   const objects: PackInput[] = [
     { type: TYPE.COMMIT, data: commitData },
@@ -77,6 +78,6 @@ export function buildCommitData({ tree, parents, author, committer = null, time,
   const who = identLine(author, time);
   const written = committerLine(committer, who, time);
   const body = message.endsWith('\n') ? message : `${message}\n`;
-  const commitData = encodeCommit({ tree, parents, author: who, committer: written, message: body });
+  const commitData = orThrow(encodeCommit({ tree, parents, author: who, committer: written, message: body }));
   return { data: commitData, oid: hashObject('commit', commitData) };
 }

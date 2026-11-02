@@ -20,6 +20,7 @@ import { ZERO_OID } from '../src/push.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { thrown as fail } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap } from './unwrap.js';
 
 const GITLINK = 'c0ffee'.padEnd(40, '0');
 const A = { name: 'A', email: 'a@x' };
@@ -84,35 +85,35 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
     for (const tr of built.trees.values()) objects.set(tr.oid, { type: TYPE.TREE, data: tr.data });
     for (const [oid, data] of built.blobs) objects.set(oid, { type: TYPE.BLOB, data });
     const who = `A <a@x> ${time} +0000`;
-    const oid = put('commit', encodeCommit({ tree: built.root, parents, author: who, committer: who, message }));
+    const oid = put('commit', unwrap(encodeCommit({ tree: built.root, parents, author: who, committer: who, message })));
     if (ref) refs.set(ref, oid);
     return oid;
   };
   const trees = (oid, out) => {
     if (out.has(oid)) return out; out.add(oid);
-    for (const e of parseTree(objects.get(oid).data)) if (e.mode === '40000') trees(e.oid, out);
+    for (const e of unwrap(parseTree(objects.get(oid).data))) if (e.mode === '40000') trees(e.oid, out);
     return out;
   };
   const select = (want, filter) => {
     const o = objects.get(want);
     if (filter !== 'blob:none' || o.type === TYPE.BLOB) return [want];
-    return [...trees(o.type === TYPE.COMMIT ? parseCommit(o.data).tree : want, new Set(o.type === TYPE.COMMIT ? [want] : []))];
+    return [...trees(o.type === TYPE.COMMIT ? unwrap(parseCommit(o.data)).tree : want, new Set(o.type === TYPE.COMMIT ? [want] : []))];
   };
   async function* serve(service, body) {
     if (service === 'git-receive-pack') {
       const { lines, rest } = requestLines(body, { stopAtFlush: true });
       const commands = lines.map(l => { const [old, nu, ref] = l.split('\0')[0].split(' '); return { old, new: nu, ref }; });
-      const req = { service, commands, pack: rest.length ? parsePack(rest) : null };
+      const req = { service, commands, pack: rest.length ? unwrap(parsePack(rest)) : null };
       log.push(req);
       if (hook) { const r = await hook(req); if (r) { yield* r; return; } }
-      if (req.pack) for (const [oid, o] of resolvePack(req.pack, b => objects.get(b)).objects) objects.set(oid, { type: o.type, data: o.data });
+      if (req.pack) for (const [oid, o] of unwrap(resolvePack(req.pack, b => objects.get(b))).objects) objects.set(oid, { type: o.type, data: o.data });
       const report = ['unpack ok'];
       for (const c of commands) {
         if ((refs.get(c.ref) ?? ZERO_OID) !== c.old) { report.push(`ng ${c.ref} fetch first`); continue; }
         if (c.new === ZERO_OID) refs.delete(c.ref); else refs.set(c.ref, c.new);
         report.push(`ok ${c.ref}`);
       }
-      yield band(1, pkts(report.map(l => l + '\n')));
+      yield band(1, unwrap(pkts(report.map(l => l + '\n'))));
       yield { kind: 'flush' };
       return;
     }
@@ -145,7 +146,7 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
     kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks, objects: new Map(), scrub: null,
     frames: (service, body) => serve(service, body),
     // A ref miss asks discover() before it classifies the miss. No `unborn` feature: no second ls-refs, HEAD stays head_absent.
-    advertise: async () => pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n']),
+    advertise: async () => unwrap(pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n'])),
   });
   return { objects, refs, log, put, commit, transport, fetches: () => log.filter(r => r.command === 'fetch'), pushes: () => log.filter(r => r.service === 'git-receive-pack') };
 }
@@ -236,7 +237,7 @@ test('buildTree: git\'s tree oids, every directory, blobs by oid', () => {
   // deep before shallow: a four-level chain still encodes
   const deep = buildTree(fileEntries({ 'a/b/c/d': 'x', 'a/y': 'z' }));
   assert.equal(deep.trees.size, 4);
-  assert.equal(parseTree(deep.trees.get('a/b').data)[0].oid, deep.trees.get('a/b/c').oid);
+  assert.equal(unwrap(parseTree(deep.trees.get('a/b').data))[0].oid, deep.trees.get('a/b/c').oid);
 });
 
 test('buildTree: file/directory clashes, duplicates and maxTreeEntries', () => {
@@ -416,7 +417,7 @@ test('pushTree: parent trees are read only where both sides are directories with
   const res = await pushTree('http://fake/r.git', { files: { 'd/y': '2', e: '3', 'g/h': '2', 'same/x': 's' }, author: A, message: 'm', time: T0 }, env(r).opts);
   assert.equal(res.treesRead, 2, 'the root and g');
   assert.deepEqual(r.fetches().slice(1).map(f => f.wants[0]).length, 2);
-  const parsed = parseTree(r.objects.get(parseCommit(r.objects.get(res.newCommit).data).tree).data);
+  const parsed = unwrap(parseTree(r.objects.get(unwrap(parseCommit(r.objects.get(res.newCommit).data)).tree).data));
   assert.deepEqual(parsed.map(x => [x.name, x.mode]), [['d', '40000'], ['e', '100644'], ['g', '40000'], ['same', '40000']]);
   // the pushed tree resolves on the server (every delta base and blob it needs is there)
   assert.equal(r.refs.get('refs/heads/main'), res.newCommit);
@@ -445,7 +446,7 @@ test('pushTree: a lost race is retried once from a fresh ls-refs, linked to the 
   const e = env(r);
   const res = await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, e.opts);
   assert.equal(res.attempt, 1);
-  const raced = parseCommit(r.objects.get(r.refs.get('refs/heads/main')).data);
+  const raced = unwrap(parseCommit(r.objects.get(r.refs.get('refs/heads/main')).data));
   assert.equal(raced.tree, GIT.root2);
   assert.deepEqual(raced.parents, [res.oldCommit]);
   assert.notEqual(res.oldCommit, GIT.commit);
@@ -467,9 +468,9 @@ test('editFile: a lost race is retried once from a fresh ls-refs', async () => {
   const r = remote({ hook: async req => {
     if (req.service !== 'git-receive-pack' || moves-- <= 0) return;
     const cur = r.refs.get('refs/heads/main');
-    const tree = parseCommit(r.objects.get(cur).data).tree;
+    const tree = unwrap(parseCommit(r.objects.get(cur).data)).tree;
     const who = `A <a@x> ${T0} +0000`;
-    r.refs.set('refs/heads/main', r.put('commit', encodeCommit({ tree, parents: [cur], author: who, committer: who, message: 'raced\n' })));
+    r.refs.set('refs/heads/main', r.put('commit', unwrap(encodeCommit({ tree, parents: [cur], author: who, committer: who, message: 'raced\n' }))));
   } });
   r.commit(FILES());
   const e = env(r);
@@ -491,13 +492,13 @@ test('editFile: a lost race is retried once from a fresh ls-refs', async () => {
 });
 
 test('lookupEntry: a missing name, a file along the way, and a last component that is not a regular file', () => {
-  const tree = encodeTree([
+  const tree = unwrap(encodeTree([
     { name: 'README', mode: '100644', oid: GIT.readme },
     { name: 'src', mode: '40000', oid: GIT.src },
     { name: 'sub', mode: '160000', oid: GITLINK },
     { name: 'link', mode: '120000', oid: GIT.link },
     { name: 'run.sh', mode: '100755', oid: GIT.run },
-  ]);
+  ]));
   throws(() => lookupEntry(tree, 'nope', true, DEFAULT_LIMITS), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: '' } });
   throws(() => lookupEntry(tree, 'README', false, DEFAULT_LIMITS), 'not_found', 'README is not a directory', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
   assert.equal(lookupEntry(tree, 'src', false, DEFAULT_LIMITS).entry.oid, GIT.src);
@@ -635,7 +636,7 @@ test('pushTree: a signer\'s signature is in the pushed commit and on the span', 
   const sig = '-----BEGIN SSH SIGNATURE-----\nU0lH\n-----END SSH SIGNATURE-----\n';
   const signer = { kind: 'ssh', publicKeyLine: 'ssh-ed25519 AAAA', sign: async () => sig };
   const res = await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e.opts, signer });
-  const c = parseCommit(r.objects.get(res.newCommit).data);
+  const c = unwrap(parseCommit(r.objects.get(res.newCommit).data));
   assert.equal(c.tree, GIT.root);
   assert.ok(c.extra.some(l => l.startsWith('gpgsig -----BEGIN SSH SIGNATURE-----')));
   assert.notEqual(res.newCommit, GIT.commit);
@@ -875,7 +876,7 @@ test('checkoutTree: a batch pack with an unwanted object or a non-blob is pack_c
   // a wanted oid whose object is a tree (the server lies about a blob entry)
   const t2 = remote(); const treeOid = t2.put('tree', new Uint8Array(0));
   const blobOid = t2.put('blob', 'x');
-  t2.refs.set('refs/heads/main', t2.put('commit', encodeCommit({ tree: t2.put('tree', encodeTree([{ mode: '100644', name: 'f', oid: treeOid }, { mode: '100644', name: 'g', oid: blobOid }])), author: 'A <a@x> 1 +0000', message: 'm\n' })));
+  t2.refs.set('refs/heads/main', t2.put('commit', unwrap(encodeCommit({ tree: t2.put('tree', unwrap(encodeTree([{ mode: '100644', name: 'f', oid: treeOid }, { mode: '100644', name: 'g', oid: blobOid }]))), author: 'A <a@x> 1 +0000', message: 'm\n' }))));
   await rejects(drain((await checkoutTree('http://fake/r.git', {}, env(t2).opts)).files), 'pack_corrupt', `expected blob ${treeOid}, got tree`);
   // a wanted blob the pack leaves out is streamed on its own
   const short = copy(serve([r.objects.get(a)]));
@@ -934,7 +935,7 @@ test('refCandidates, entryType and lsMode', () => {
 test('resolveCommit: HEAD\'s symref, a detached HEAD, tags over branches, peeled tags, the not-found messages', async () => {
   const r = remote(); const c = r.commit({ a: '1' });
   const c2 = r.commit({ a: '2' }, { ref: 'refs/heads/v1' });
-  const tag = r.put('tag', encodeTag({ object: c, type: 'commit', tag: 'v1', tagger: 'A <a@x> 1 +0000', message: 'r\n' }));
+  const tag = r.put('tag', unwrap(encodeTag({ object: c, type: 'commit', tag: 'v1', tagger: 'A <a@x> 1 +0000', message: 'r\n' })));
   r.refs.set('refs/tags/v1', tag);
   const t = r.transport({ tracer: new Tracer() });
   assert.deepEqual(await resolveCommit(t, null), { name: 'refs/heads/main', commit: c });
@@ -955,7 +956,7 @@ test('resolveCommit: HEAD\'s symref, a detached HEAD, tags over branches, peeled
 
 test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwise', async () => {
   const target = 'refs/heads/main';
-  const advertise = async () => pkts(['version 2\n', 'ls-refs=unborn\n', 'fetch\n', 'object-format=sha1\n']);
+  const advertise = async () => unwrap(pkts(['version 2\n', 'ls-refs=unborn\n', 'fetch\n', 'object-format=sha1\n']));
   const unbornLine = (text) => [dataFrame(text), { kind: 'flush' }];
   const server = (text) => {
     // an unborn answer that is not prefixed HEAD is the server's ordinary listing: the second ls-refs must ask for HEAD
@@ -996,7 +997,7 @@ test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwis
 
 test('commitView: idents for JSON, signed, parents and message', () => {
   const tree = GIT.root;
-  const view = commitView(encodeCommit({ tree, parents: [GIT.commit, GIT.commit2], author: 'Ada L <ada@x> 1700000000 +0530', committer: 'Bob <b@y> 0 -0100', message: 'subject\n\nbody\n' }));
+  const view = commitView(unwrap(encodeCommit({ tree, parents: [GIT.commit, GIT.commit2], author: 'Ada L <ada@x> 1700000000 +0530', committer: 'Bob <b@y> 0 -0100', message: 'subject\n\nbody\n' })));
   assert.deepEqual(view, {
     tree, parents: [GIT.commit, GIT.commit2],
     author: { name: 'Ada L', email: 'ada@x', time: '2023-11-14T22:13:20Z', epoch: 1700000000, tz: '+0530' },
@@ -1004,8 +1005,8 @@ test('commitView: idents for JSON, signed, parents and message', () => {
     message: 'subject\n\nbody\n', signed: false,
   });
   // milliseconds are never part of the time: whole seconds only
-  assert.equal(commitView(encodeCommit({ tree, author: 'A <a@x> 1 +0000' })).author.time, '1970-01-01T00:00:01Z');
-  assert.equal(commitView(encodeCommit({ tree, author: 'A <a@x> 1 +0000' })).message, '');
+  assert.equal(commitView(unwrap(encodeCommit({ tree, author: 'A <a@x> 1 +0000' }))).author.time, '1970-01-01T00:00:01Z');
+  assert.equal(commitView(unwrap(encodeCommit({ tree, author: 'A <a@x> 1 +0000' }))).message, '');
   const sig = '-----BEGIN SSH SIGNATURE-----\nU0lH\n-----END SSH SIGNATURE-----';
   const raw = (header) => te.encode(`tree ${tree}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000\n${header}\n\nm\n`);
   assert.equal(commitView(raw(`gpgsig ${sig.replace(/\n/g, '\n ')}`)).signed, true);
@@ -1042,7 +1043,7 @@ test('readCommit: the commit alone (tree:0, deepen 1), its view and span; a non-
   await rejects(readCommit('http://fake/r.git', { ref: GIT.root }, env(r).opts), 'not_found', `${GIT.root} is not a commit`, { miss: { kind: 'commit', miss: { kind: 'not_commit', oid: GIT.root, type: 'tree' } } });
   const absentId = 'f'.repeat(40);
   await rejects(readCommit('http://fake/r.git', { ref: absentId }, env(r).opts), 'not_found', `commit ${absentId} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: absentId } } });
-  const tagData = encodeTag({ object: c, type: 'commit', tag: 'v1', tagger: 'A <a@x> 1 +0000', message: 't\n' });
+  const tagData = unwrap(encodeTag({ object: c, type: 'commit', tag: 'v1', tagger: 'A <a@x> 1 +0000', message: 't\n' }));
   const tagOid = hashObject('tag', tagData);
   r.objects.set(tagOid, { type: TYPE.TAG, data: tagData });
   const tagged = await fetchCommit(r.transport({ tracer: new Tracer() }), tagOid);

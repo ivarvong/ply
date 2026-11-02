@@ -2,7 +2,7 @@
  "note": "Holes per category (test/space/holes.js). Only ever lowered: npm run spaces -- --ratchet. A category at 0 is enforced.",
  "categories": {
   "decisions": {
-   "count": 30,
+   "count": 28,
    "ids": [
     "src/checkout-node.ts#checkoutDir:bad_request:dir must be a non-empty string",
     "src/checkout-node.ts#slurp:limit_exceeded:symlink target",
@@ -18,8 +18,6 @@
     "src/merge.ts#mergeBranch:not_found:ref … not found",
     "src/merge.ts#mergeBranch:not_found:ref … not found#2",
     "src/negotiate.ts#negotiateCaps:bad_request:negotiate rounds must be an integer",
-    "src/objects.ts#parseTree:pack_corrupt:<data>, <p>, <sp - p>",
-    "src/objects.ts#parseTree:pack_corrupt:<data>, <sp><1>, <nul - (sp + 1)>",
     "src/read.ts#flush:pack_corrupt:blob content hashes to …, not …",
     "src/rebase.ts#linearChainResult:limit_exceeded:rebase chain",
     "src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid",
@@ -31,9 +29,9 @@
     "src/transport.ts#coded:<code>:<thrownText(e)>",
     "src/tree-node.ts#keep:limit_exceeded:directory bytes",
     "src/tree-node.ts#keep:limit_exceeded:files",
-    "src/validate.ts#validateMessageResult:bad_request:message",
-    "src/validate.ts#validatePathResult:bad_request:path#6",
-    "src/validate.ts#validateRefResult:bad_request:ref#3"
+    "src/validate.ts#validateMessage:bad_request:message",
+    "src/validate.ts#validatePath:bad_request:path#6",
+    "src/validate.ts#validateRef:bad_request:ref#3"
    ]
   },
   "git": {
@@ -73,9 +71,9 @@
     "src/transport.ts#coded:<code>:<thrownText(e)>",
     "src/tree-node.ts#keep:limit_exceeded:directory bytes",
     "src/tree-node.ts#keep:limit_exceeded:files",
-    "src/validate.ts#validateMessageResult:bad_request:message",
-    "src/validate.ts#validatePathResult:bad_request:path#6",
-    "src/validate.ts#validateRefResult:bad_request:ref#3"
+    "src/validate.ts#validateMessage:bad_request:message",
+    "src/validate.ts#validatePath:bad_request:path#6",
+    "src/validate.ts#validateRef:bad_request:ref#3"
    ]
   },
   "claims": {

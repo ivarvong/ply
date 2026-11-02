@@ -2,9 +2,9 @@
 // Branch and tag names are stricter subsets. Parsing uses the validate.ts rules, which grant the Refname brand.
 import { ok, mapErr } from './result.js';
 import type { Result } from './result.js';
-import { fail, plyError, thrown } from './errors.js';
+import { fail, plyError } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { validateRefResult, validatePushRefResult } from './validate.js';
+import { validateRef, validatePushRef } from './validate.js';
 
 declare const refBrand: unique symbol;
 declare const branchBrand: unique symbol;
@@ -22,13 +22,13 @@ type Bad = ErrorOf<'bad_request'>;
 
 // @decoder parseRefname prefix=refname
 export function parseRefname(value: unknown): Result<Refname, Bad> {
-  return mapErr(validateRefResult(value), e => plyError('bad_request', e.message, { what: 'ref', cause: e }));
+  return mapErr(validateRef(value), e => plyError('bad_request', e.message, { what: 'ref', cause: e }));
 }
 
 // A pushable branch name (refs/heads/* with at least two levels after refs/).
 // @decoder parseBranchName prefix=refname
 export function parseBranchName(value: unknown): Result<BranchName, Bad> {
-  const ref = mapErr(validatePushRefResult(String(value), false), e => plyError('bad_request', e.message, { what: 'branch', cause: e }));
+  const ref = mapErr(validatePushRef(String(value), false), e => plyError('bad_request', e.message, { what: 'branch', cause: e }));
   if (!ref.ok) return ref;
   if (!isBranchName(ref.value)) return fail('bad_request', 'must start with refs/heads/', { what: 'branch' });
   return ok(ref.value);
@@ -37,7 +37,7 @@ export function parseBranchName(value: unknown): Result<BranchName, Bad> {
 // A refname the source spells, checked once when the module loads. A bad literal is a programmer error.
 function constantRefname(value: string): Refname {
   const r = parseRefname(value);
-  if (!r.ok) throw thrown('internal', `${value} is not a refname`);
+  if (!r.ok) throw plyError('internal', `${value} is not a refname`);
   return r.value;
 }
 // The branch an edit targets when the caller names none.
@@ -45,7 +45,7 @@ export const DEFAULT_REF: Refname = constantRefname('refs/heads/main');
 
 // @decoder parseTagName prefix=refname
 export function parseTagName(value: unknown): Result<TagName, Bad> {
-  const ref = mapErr(validateRefResult(value), e => plyError('bad_request', e.message, { what: 'tag', cause: e }));
+  const ref = mapErr(validateRef(value), e => plyError('bad_request', e.message, { what: 'tag', cause: e }));
   if (!ref.ok) return ref;
   if (!isTagName(ref.value)) return fail('bad_request', 'must start with refs/tags/', { what: 'tag' });
   return ok(ref.value);

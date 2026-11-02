@@ -1,14 +1,14 @@
 // Caller-supplied strings that reach a git object header or a protocol command line are validated here.
 // Anything that could terminate a header line or a pkt-line field is rejected rather than escaped: git has no escaping.
-// Each check returns a Result (`…Result`); the name without the suffix is its throwing form, for callers that still throw.
-import { fail, orThrow } from './errors.js';
+// Each check returns a Result.
+import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { readLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { encodeBytes, encodeBytesResult, te } from './bytes.js';
+import { encodeBytes, te } from './bytes.js';
 import { MODE_LINK, IDENT_TZ_DIGITS, IDENT_TZ_HOUR_MIN, IDENT_TZ_HOUR_MAX, IDENT_TZ_MINUTE_MAX } from './format.js';
 import type { Err, Option, Result } from './result.js';
-import { getOrElse, none, ok, some } from './result.js';
+import { none, ok, some } from './result.js';
 import type { Input } from './absent.js';
 import { atOr, withDefaults } from './absent.js';
 import type { Refname } from './refname.js';
@@ -31,7 +31,7 @@ const TZ_TEXT = new RegExp(`^[+-][0-9]{${IDENT_TZ_DIGITS}}$`, 'u');
 // omitted zone means UTC (a null one is refused, as before).
 const identDefaults = (): IdentFields => ({ name: null, email: null, time: null, tz: '+0000' });
 
-export function validateIdentResult(input: IdentInput = {}): Result<ValidatedIdent, Bad> {
+export function validateIdent(input: IdentInput = {}): Result<ValidatedIdent, Bad> {
   const { name, email, time, tz } = withDefaults(input, identDefaults());
   // Exactly fsck.c fsck_ident(): name is everything before " <" and may not contain '<', '>', NUL or newline;
   // email is between '<' and '>' and may not contain '<', '>', NUL or newline. Anything else — punctuation,
@@ -56,20 +56,18 @@ export function validateIdentResult(input: IdentInput = {}): Result<ValidatedIde
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the loop above checked name and email, defineProperty added the brand; neither narrows the type
   return ok(Object.freeze(person) as ValidatedIdent);
 }
-export const validateIdent = (input: IdentInput = {}): ValidatedIdent => orThrow(validateIdentResult(input));
 
 // A pkt-line field. CR, LF, or NUL ends the line or the command the way a header injection does.
-export function validateWireResult(value: unknown, what: string): Result<string, Bad> {
+export function validateWire(value: unknown, what: string): Result<string, Bad> {
   if (typeof value !== 'string' || /[\0\r\n]/u.test(value)) return bad(what, 'must be a string without NUL, CR, or LF');
   return ok(value);
 }
-export const validateWire = (value: unknown, what: string): string => orThrow(validateWireResult(value, what));
 
-// The first check of validateRefResult, and the brand it grants: a value leaves validateRefResult as a Refname only
+// The first check of validateRef, and the brand it grants: a value leaves validateRef as a Refname only
 // after every check below it, so the brand is the whole check (refname.ts reads the brand; no second test).
 const isFullRef = (ref: unknown): ref is Refname => typeof ref === 'string' && ref.startsWith('refs/');
 
-export function validateRefResult(ref: unknown): Result<Refname, Bad> {
+export function validateRef(ref: unknown): Result<Refname, Bad> {
   if (!isFullRef(ref)) return bad('ref', 'must be a full ref name starting with refs/');
   // git check-ref-format rules that matter for injection and server acceptance
   // (NUL, CR, LF and the other controls are one class: check-ref-format refuses all of them)
@@ -77,11 +75,10 @@ export function validateRefResult(ref: unknown): Result<Refname, Bad> {
   if (/[\0-\u001F\u007F ~^:?*[\\]|\.\.|@\{|\/\/|\/$|\.$|\.lock(\/|$)|^\/|\/\.|^\./u.test(ref)) return bad('ref', 'fails check-ref-format');
   if (ref.length > 1024) return bad('ref', 'too long');
   // a lone surrogate would be written as U+FFFD (TextEncoder); only an escaped byte from a read maps back (#43)
-  const bytes = encodeBytesResult(ref, 'ref');
+  const bytes = encodeBytes(ref, 'ref');
   if (!bytes.ok) return bytes;
   return ok(ref);
 }
-export const validateRef = (ref: unknown): Refname => orThrow(validateRefResult(ref));
 
 // A ref a push may name: git v2.50.0 receive-pack.c update() refuses anything else as "funny refname", checking the name
 // after "refs/" with check_refname_format(name + 5, deleting ? REFNAME_ALLOW_ONELEVEL : 0). validateRef already holds the
@@ -89,14 +86,13 @@ export const validateRef = (ref: unknown): Refname => orThrow(validateRefResult(
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
 // The ref is typed string (push.js's callers pass one); validateRef still refuses a non-string at run time.
-export function validatePushRefResult(ref: string, deleting: boolean): Result<Refname, Bad> {
-  const full = validateRefResult(ref);
+export function validatePushRef(ref: string, deleting: boolean): Result<Refname, Bad> {
+  const full = validateRef(ref);
   if (!full.ok) return full;
   const name = full.value.slice('refs/'.length);
   if (name === '@' || (!deleting && !name.includes('/'))) return bad('ref', 'receive-pack refuses it (funny refname)');
   return full;
 }
-export const validatePushRef = (ref: string, deleting: boolean): Refname => orThrow(validatePushRefResult(ref, deleting));
 
 // ---- git's spellings of .git and its dotfiles (git v2.50.0 utf8.c is_hfs_dot*, path.c is_ntfs_dot*), on name bytes ----
 // Ported line by line, because the edges are where a name gets through: `git~1` but not `git~2`; `.git:x` (an NTFS
@@ -193,8 +189,6 @@ export const isDotFileName = (b: Uint8Array, file: DotFile): boolean => {
   const [name, prefix] = DOTFILES[file];
   return isHfsDot(b, name) || isNtfsDot(b, 0, name, prefix) || (file === 'gitmodules' && backslashTails(b).some(o => isNtfsDot(b, o, name, prefix)));
 };
-// A component of a caller path: refused where fsck refuses the tree entry name (throws on a string with no bytes)
-export const isDotGit = (c: string): boolean => isDotGitName(encodeBytes(c, 'path'));
 
 // read-cache.c verify_path for the checkout of one path (`/`-separated tree names) of `mode` (canonical) on `platform`
 // (process.platform), with git's defaults: core.protectNTFS on everywhere, core.protectHFS on macOS. Returns the reason
@@ -204,10 +198,10 @@ export const isDotGit = (c: string): boolean => isDotGitName(encodeBytes(c, 'pat
 // compat/mingw.c is_valid_win32_path refuses the characters `: < > " | ? *` and controls, a component ending in a space or
 // a period, and the reserved device names (AUX, CON, NUL, PRN, COM1-9, LPT0-9, CONIN$, CONOUT$, whatever follows them
 // after spaces, a period or a colon). A component with no byte form (a lone surrogate) is a bad_request.
-export function checkoutPathRefusalResult(path: string, mode: string, platform: string): Result<Option<string>, Bad> {
+export function checkoutPathRefusal(path: string, mode: string, platform: string): Result<Option<string>, Bad> {
   const comps = path.split('/');
   for (const [k, c] of comps.entries()) {
-    const encoded = encodeBytesResult(c, 'checkout path');
+    const encoded = encodeBytes(c, 'checkout path');
     if (!encoded.ok) return encoded;
     const b = encoded.value;
     if (c === '' || c === '.' || c === '..') return ok(some('an empty, `.` or `..` component'));
@@ -227,18 +221,15 @@ export function checkoutPathRefusalResult(path: string, mode: string, platform: 
   }
   return ok(none);
 }
-// The throwing form for checkout-node.ts: the reason, or null when git accepts the path.
-export const checkoutPathRefusal = (path: string, mode: string, platform: string): string | null =>
-  getOrElse<string | null>(orThrow(checkoutPathRefusalResult(path, mode, platform)), null);
 
-// The first check of validatePathResult, and the brand it grants: the value leaves as a Path only after every check
+// The first check of validatePath, and the brand it grants: the value leaves as a Path only after every check
 // below it (path.ts reads the brand; no second test).
 const isPathText = (path: unknown): path is Path => typeof path === 'string' && path.length > 0;
 // A validated path and its components (the path is their `/` join: split and join are inverses).
 export type ValidPath = { readonly path: Path; readonly components: string[] };
 
 // `limits`: the caller's record (any subset; null, the default, is none), read for maxPathDepth and maxPathComponent.
-export function validatePathResult(path: unknown, limits: Input<Limits> | null = null): Result<ValidPath, Bad> {
+export function validatePath(path: unknown, limits: Input<Limits> | null = null): Result<ValidPath, Bad> {
   if (!isPathText(path)) return bad('path', 'must be a non-empty string');
   const maxDepth = readLimit(limits, 'maxPathDepth');
   if (!maxDepth.ok) return maxDepth;
@@ -249,7 +240,7 @@ export function validatePathResult(path: unknown, limits: Input<Limits> | null =
   for (const c of comps) {
     if (c === '' ) return bad('path', 'empty component (leading, trailing or doubled slash)');
     // Every component is encoded, so the whole path is too (a `/` cannot complete a surrogate pair).
-    const bytes = encodeBytesResult(c, 'path');
+    const bytes = encodeBytes(c, 'path');
     if (!bytes.ok) return bytes;
     if (c === '.' || c === '..' || isDotGitName(bytes.value)) return bad('path', `component ${JSON.stringify(c)} not allowed (git fsck hasDotgit)`);
     if (c.includes('\0')) return bad('path', 'NUL in component');
@@ -257,13 +248,11 @@ export function validatePathResult(path: unknown, limits: Input<Limits> | null =
   }
   return ok({ path, components: comps });
 }
-export const validatePath = (path: unknown, limits: Input<Limits> | null = null): string[] => orThrow(validatePathResult(path, limits)).components;
 
-export function validateMessageResult(message: unknown): Result<string, Bad> {
+export function validateMessage(message: unknown): Result<string, Bad> {
   if (typeof message !== 'string') return bad('message', 'must be a string');
   if (message.includes('\0')) return bad('message', 'NUL not allowed');
-  const bytes = encodeBytesResult(message, 'message');
+  const bytes = encodeBytes(message, 'message');
   if (!bytes.ok) return bytes;
   return ok(message);
 }
-export const validateMessage = (message: unknown): string => orThrow(validateMessageResult(message));

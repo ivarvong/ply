@@ -15,7 +15,7 @@
 // Two names are versioncmp, which is the order `git tag -l --sort=version:refname` prints for those two names.
 // A longer listing is git's qsort of that relation, and a cyclic relation has no listing that keeps every pair,
 // so a whole tag list sorted here follows versioncmp.
-import { encodeBytesResult } from './bytes.js';
+import { encodeBytes } from './bytes.js';
 import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { err, getOrElse, ok } from './result.js';
@@ -200,7 +200,7 @@ function notString(which: VersionRefnameWhich): Result<never, VersionRefnameErro
 
 function asBytes(value: unknown, which: VersionRefnameWhich): Result<Uint8Array<ArrayBuffer>, VersionRefnameError> {
   if (typeof value !== 'string') return notString(which);
-  const encoded = encodeBytesResult(value, nameOf(which));
+  const encoded = encodeBytes(value, nameOf(which));
   if (encoded.ok) return encoded;
   return err(Object.assign(encoded.error, { kind: 'not_bytes' as const, which }));
 }

@@ -4,21 +4,21 @@
 // makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
 // pack.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
 import type { ErrorOf } from './errors.js';
-import { fail, plyError, orThrow } from './errors.js';
+import { fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
 import { at, atOr, fromNullable, fromNullish, mapGet, readKey, type Input } from './absent.js';
 import type { InflateStats } from './inflate.js';
-import { inflateResult } from './inflate.js';
+import { inflate } from './inflate.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, hashObject, nameOfTypeId } from './objects.js';
 import type { ObjType } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
-import { DEFAULT_LIMITS, limitError, requireLimit, checkLimit, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, limitError, checkLimit, readLimit } from './limits.js';
 // pack.js re-exports this module's parsers: a cycle of a re-export and one function, which ES modules resolve
 // oxlint-disable-next-line import/no-cycle -- see above
 import { spliceDelta } from './pack.js';
-import { takeResult, shortRead } from './bytes.js';
+import { take, shortRead } from './bytes.js';
 import type { PackKind } from './format.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, OID_BYTES, UINT32_BYTES,
@@ -98,17 +98,16 @@ const be32 = (b: Uint8Array, off: number): number =>
   // b holds four bytes at off and BE32_SHIFTS (format.js) has four entries: in range, see above
   /* oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, no-magic-numbers -- see above; off + 1 and off + 2 are the middle bytes */
   (((b[off] as number) << (BE32_SHIFTS[0] as number)) | ((b[off + 1] as number) << (BE32_SHIFTS[1] as number)) | ((b[off + 2] as number) << (BE32_SHIFTS[2] as number)) | (b[off + BE32_SHIFTS.length - 1] as number)) >>> 0;
-export function readUint32BEResult(buf: Uint8Array, off: number): Result<number, Corrupt> {
-  const r = takeResult(buf, off, BE32_SHIFTS.length);
+export function readUint32BE(buf: Uint8Array, off: number): Result<number, Corrupt> {
+  const r = take(buf, off, BE32_SHIFTS.length);
   return r.ok ? ok(be32(buf, off)) : r;
 }
-export const readUint32BE = (buf: Uint8Array, off: number): number => orThrow(readUint32BEResult(buf, off));
 
 export type ObjHeader = { readonly type: number; readonly size: number; readonly next: number };
 // A header cut by the end of the buffer is a short read (`reason: 'short_read'`): a stream parser waits for more bytes
 // on that reason (fetch.ts spStep), and refuses anything else.
-// @decoder readObjHeaderResult prefix=obj-header
-export function readObjHeaderResult(buf: Uint8Array, start: number): Result<ObjHeader, Corrupt> {
+// @decoder readObjHeader prefix=obj-header
+export function readObjHeader(buf: Uint8Array, start: number): Result<ObjHeader, Corrupt> {
   const c = atOr(buf, start, NO_BYTE);
   if (c === NO_BYTE) return short(buf, start);
   const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
@@ -117,14 +116,12 @@ export function readObjHeaderResult(buf: Uint8Array, start: number): Result<ObjH
   if (!rest.ok) return rest;
   return ok({ type, size: rest.value[0], next: rest.value[1] });
 }
-// @decoder readObjHeader prefix=obj-header
-export function readObjHeader(buf: Uint8Array, start: number): ObjHeader { return orThrow(readObjHeaderResult(buf, start)); }
 
 export type OfsDelta = { readonly off: number; readonly next: number };
 // The same ten-byte cap as the size varints (readObjHeader): git's index-pack refuses an offset that overflows
 // ("offset value overflow for delta base object"); past it the offset could only name a base before the pack start.
-// @decoder readOfsDeltaResult prefix=ofs-delta
-export function readOfsDeltaResult(buf: Uint8Array, start: number): Result<OfsDelta, Corrupt> {
+// @decoder readOfsDelta prefix=ofs-delta
+export function readOfsDelta(buf: Uint8Array, start: number): Result<OfsDelta, Corrupt> {
   let p = start;
   let c = atOr(buf, p, NO_BYTE);
   if (c === NO_BYTE) return short(buf, p);
@@ -141,8 +138,6 @@ export function readOfsDeltaResult(buf: Uint8Array, start: number): Result<OfsDe
   }
   return ok({ off, next: p });
 }
-// @decoder readOfsDelta prefix=ofs-delta
-export function readOfsDelta(buf: Uint8Array, start: number): OfsDelta { return orThrow(readOfsDeltaResult(buf, start)); }
 
 // ---- parse ----
 // Caps are required. A missing field used to become Infinity (a nullish fallback), which disabled the check; checkLimit rejects that.
@@ -170,7 +165,15 @@ export type PackParseConfig = {
   readonly maxInflatedTotal: number;
 };
 export type PackParseOptions = Input<PackParseConfig>;
-export const packParseOpts = (limits: Limits = DEFAULT_LIMITS): { limits: Limits; maxObjects: number; maxInflatedTotal: number } => ({ limits, maxObjects: requireLimit(limits, 'maxPackObjects'), maxInflatedTotal: requireLimit(limits, 'maxInflatedTotal') });
+// parsePack's options for `limits`: the two pack caps read out of it, checked (the first that bounds nothing is the error).
+export type PackParseOpts = { readonly limits: Limits; readonly maxObjects: number; readonly maxInflatedTotal: number };
+export function packParseOpts(limits: Limits = DEFAULT_LIMITS): Result<PackParseOpts, ErrorOf<'bad_request'>> {
+  const maxObjects = readLimit(limits, 'maxPackObjects');
+  if (!maxObjects.ok) return maxObjects;
+  const maxInflatedTotal = readLimit(limits, 'maxInflatedTotal');
+  if (!maxInflatedTotal.ok) return maxInflatedTotal;
+  return ok({ limits, maxObjects: maxObjects.value, maxInflatedTotal: maxInflatedTotal.value });
+}
 
 // One object as parsePack read it. A full object has neither base (both null); an OFS_DELTA has baseOffset, a REF_DELTA
 // baseOid. A base is read by its type (hasOfsBase, hasRefBase), so a hand-built object that leaves a base out is a full one.
@@ -202,8 +205,8 @@ export type PackStats = {
 };
 export type ParsedPack = { readonly objects: PackObject[]; readonly stats: PackStats; readonly trailer: string; readonly bytes: number };
 
-// @decoder parsePackResult prefix=pack
-export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): Result<ParsedPack, PackError> {
+// @decoder parsePack prefix=pack
+export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<ParsedPack, PackError> {
   const verify = opts.verify !== false;
   const limits = getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS);
   const caps = capsOf(limits, ['maxPackObjects', 'maxInflatedTotal', 'maxObjectSize'], [opts.maxObjects, opts.maxInflatedTotal]);
@@ -223,7 +226,7 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
   let p = PACK_HEADER_BYTES;
   for (let i = 0; i < count; i++) {
     const offset = p;
-    const header = readObjHeaderResult(buf, p);
+    const header = readObjHeader(buf, p);
     if (!header.ok) return header;
     const { type, size } = header.value;
     p = header.value.next;
@@ -234,7 +237,7 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
       switch (raw) {
         case 'commit': case 'tree': case 'blob': case 'tag': stats.full++; return ok(raw);
         case 'ofs_delta': {
-          const ofs = readOfsDeltaResult(buf, p);
+          const ofs = readOfsDelta(buf, p);
           if (!ofs.ok) return ofs;
           p = ofs.value.next;
           baseOffset = offset - ofs.value.off;
@@ -262,7 +265,7 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
     if (size > maxObjectSize) return err(limitError('pack object size', size, maxObjectSize));
     // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
     if (stats.inflated + size > maxInflatedTotal) return err(limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal));
-    const z = inflateResult(buf, p, { expectedSize: size, maxOutput: maxObjectSize });
+    const z = inflate(buf, p, { expectedSize: size, maxOutput: maxObjectSize });
     if (!z.ok) return z;
     const { out, consumed, stats: is } = z.value;
     stats.compressed += consumed; stats.inflated += size;
@@ -278,17 +281,15 @@ export function parsePackResult(buf: Uint8Array, opts: PackParseOptions = {}): R
   if (verify && computed !== trailer) return corrupt(`pack: trailer sha mismatch ${trailer} != ${computed}`);
   return ok({ objects, stats, trailer, bytes: buf.length });
 }
-// @decoder parsePack prefix=pack
-export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): ParsedPack { return orThrow(parsePackResult(buf, opts)); }
 
 // ---- delta ----
 export type DeltaOps = { copy: number; insert: number; copyBytes: number; insertBytes: number };
 export type Patched = { out: Uint8Array; ops: DeltaOps };
 // maxResult: the cap on the result's size (limits.maxDeltaResult when left out).
 export type DeltaOptions = Input<{ readonly maxResult: number }>;
-// @decoder applyDeltaResult prefix=delta
+// @decoder applyDelta prefix=delta
 // oxlint-disable-next-line eslint/complexity -- one decoder: git's patch_delta, an opcode loop with seven optional bytes
-export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: DeltaOptions = {}): Result<Patched, PackError> {
+export function applyDelta(base: Uint8Array, delta: Uint8Array, opts: DeltaOptions = {}): Result<Patched, PackError> {
   let maxResult = DEFAULT_LIMITS.maxDeltaResult;
   const given = fromNullable(opts.maxResult);
   if (given.tag === 'some') {
@@ -340,8 +341,6 @@ export function applyDeltaResult(base: Uint8Array, delta: Uint8Array, opts: Delt
   if (o !== resultSize) return corrupt(`delta: produced ${o} != ${resultSize}`);
   return ok({ out, ops });
 }
-// @decoder applyDelta prefix=delta
-export function applyDelta(base: Uint8Array, delta: Uint8Array, opts: DeltaOptions = {}): Patched { return orThrow(applyDeltaResult(base, delta, opts)); }
 
 // Common-prefix/suffix delta between two buffers.
 export function makeDelta(base: Uint8Array, target: Uint8Array): ReturnType<typeof spliceDelta> {
@@ -482,7 +481,7 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limit
     // The result buffer does not exist until applyDelta passes maxResult. Room is what the aggregate cap has left.
     const room = inflatedCap - held;
     if (room < 0) return err(limitError('pack inflated bytes', held, inflatedCap));
-    const patched = applyDeltaResult(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
+    const patched = applyDelta(base.data, obj.data, { maxResult: Math.min(maxDelta, room) });
     if (!patched.ok) return patched;
     held += patched.value.out.length;
     const hashed = objectName(base.type);
@@ -550,12 +549,9 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limit
 const noBase = (): null => null;
 
 // objects from parsePack; external(oid) -> {type, data} for thin bases. A thin base the lookup does not have is refused.
-export function resolvePackResult(parsed: PackToResolve, external: ExternalLookup = noBase, limits: Limits = DEFAULT_LIMITS): Result<ResolvedPack, PackError> {
+export function resolvePack(parsed: PackToResolve, external: ExternalLookup = noBase, limits: Limits = DEFAULT_LIMITS): Result<ResolvedPack, PackError> {
   const r = fixpoint(parsed, external, limits, false);
   return r.ok ? ok({ objects: r.value.objects, stats: r.value.stats }) : r;
-}
-export function resolvePack(parsed: PackToResolve, external: ExternalLookup = noBase, limits: Limits = DEFAULT_LIMITS): ResolvedPack {
-  return orThrow(resolvePackResult(parsed, external, limits));
 }
 
 // ---- layout (git verify-pack -v) ----
@@ -669,7 +665,7 @@ function packLayout(parsed: ParsedPack, resolved: CollectedPack): Result<PackLay
 // The pack's layout as `git verify-pack -v` prints it. A thin REF base is `missingBases`, not an error and not a
 // message to match. Limits are the same ones parse and resolve already enforce.
 export function describePack(buf: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<PackLayout, PackError> {
-  const parsed = parsePackResult(buf, { limits });
+  const parsed = parsePack(buf, { limits });
   if (!parsed.ok) return parsed;
   const resolved = fixpoint(parsed.value, noBase, limits, true);
   if (!resolved.ok) return resolved;

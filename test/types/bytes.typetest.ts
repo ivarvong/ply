@@ -53,7 +53,7 @@ void consumerInputs;
 const allocated: Array<Uint8Array<ArrayBuffer>> = [
   concat([anyBytes, shared]),
   spliceDelta({ baseLen: 1, off: 0, oldLen: 0, insert: anyBytes }).delta,
-  encodeCommit({ tree: '0'.repeat(40), author: 'a <a@b> 0 +0000' }),
+  ((): Uint8Array<ArrayBuffer> => { const r = encodeCommit({ tree: '0'.repeat(40), author: 'a <a@b> 0 +0000' }); if (!r.ok) throw r.error; return r.value; })(),
   withGpgsig(anyBytes, 'sig'),
   bufferSource(shared),
 ];

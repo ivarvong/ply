@@ -14,10 +14,11 @@
 // Verified against `git check-attr --source` (test/fuzz/attributes.mjs).
 
 /* oxlint-disable unicorn/prefer-code-point -- byte strings (above): charCodeAt/fromCharCode are the byte <-> char map; codePointAt would pair surrogates */
-import type { Option } from './result.js';
+import type { Option, Result } from './result.js';
+import type { ErrorOf } from './errors.js';
 import type { Input } from './absent.js';
 import { encodeBytes } from './bytes.js';
-import { none, some, getOrElse } from './result.js';
+import { none, some, getOrElse, map } from './result.js';
 import { fromNullable, mapGet, withDefaults } from './absent.js';
 
 // The last element of a stack, taken off it; None when the stack is empty.
@@ -49,8 +50,9 @@ const MAX_FILE = 100 * 1024 * 1024;
 const BUILTIN = '[attr]binary -diff -merge -text';
 
 export const bytesToStr = (bytes: Uint8Array): string => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192)); return s; };
-// encodeBytes: a path whose tree name held escaped bytes (#43) is matched on those bytes, as check-attr matches them
-export const utf8ToStr = (s: string): string => bytesToStr(encodeBytes(s, 'path'));
+// encodeBytes: a path whose tree name held escaped bytes (#43) is matched on those bytes, as check-attr matches them.
+// A string with no byte form (a lone surrogate) is refused.
+export const utf8ToStr = (s: string): Result<string, ErrorOf<'bad_request'>> => map(encodeBytes(s, 'path'), bytesToStr);
 
 // ---- git's sane_ctype (ASCII only) ----
 type Ctype = (c: number) => boolean;

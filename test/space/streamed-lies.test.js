@@ -19,6 +19,7 @@ import { hashObject, TYPE } from '../../src/objects.js';
 import { Sha1 } from '../../src/sha1.js';
 import { concat, te } from '../../src/bytes.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
+import { unwrap } from '../unwrap.js';
 
 const FIND = 'M';
 const AUTHOR = { name: 'adv', email: 'adv@x' };
@@ -63,8 +64,8 @@ function intercept(oid, pack) {
   return async (url, init) => {
     const req = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
     if (!req.includes('command=fetch\n') || req.includes('filter ') || !req.includes(`want ${oid}\n`)) return fetch(url, init);
-    const frames = [pkt(te.encode('packfile\n'))];
-    for (let i = 0; i < pack.length; i += FRAME) frames.push(pkt(concat([Uint8Array.of(1), pack.subarray(i, i + FRAME)])));
+    const frames = [unwrap(pkt(te.encode('packfile\n')))];
+    for (let i = 0; i < pack.length; i += FRAME) frames.push(unwrap(pkt(concat([Uint8Array.of(1), pack.subarray(i, i + FRAME)]))));
     frames.push(FLUSH);
     let i = 0;
     const stream = new ReadableStream({

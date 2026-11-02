@@ -211,7 +211,7 @@ export async function ancestors(t: Transport, head: string, depth: number): Prom
   const r = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
   const commits = new Map<string, Commit>();
   const objects = fromNullish(r.objects);
-  if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) commits.set(oid, parseCommit(o.data, t.limits));
+  if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) commits.set(oid, orThrow(parseCommit(o.data, t.limits)));
   if (!commits.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
   const seen = new Set([head]);
   // seen grows while it is walked: every commit reachable from head through the pack
@@ -294,10 +294,10 @@ const NO_COUNT = (): void => { /* not counted */ };
 // oxlint-disable-next-line eslint/max-params -- the transport, the cache, the oid and the counter
 const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: () => void = NO_COUNT): Promise<TreeEntry[]> => {
   const held = mapGet(cache, oid);
-  if (held.tag === 'some') return parseTree(held.value, t.limits);
+  if (held.tag === 'some') return orThrow(parseTree(held.value, t.limits));
   const { data } = await fetchObject(t, { oid, expectType: TYPE.TREE });
   cache.set(oid, data); onFetch();
-  return parseTree(data, t.limits);
+  return orThrow(parseTree(data, t.limits));
 };
 const subtree = (e: Entry): string | null => (e.tag === 'some' && isTreeEntry(e.value) ? e.value.oid : null);
 // a tree by oid; null is the empty tree
@@ -426,7 +426,7 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
     if (sub.oid !== null) entries.push({ mode: '40000', name, oid: sub.oid }); // an empty merged subtree drops the directory, as git does
   }
   if (top) for (const p of out.dirAdds) if (!(p in out.reasons)) conflict(p, 'possible directory rename (added inside a directory the other side removed)');
-  const data: Uint8Array = encodeTree(entries);
+  const data: Uint8Array = orThrow(encodeTree(entries));
   const oid: string = hashObject('tree', data);
   // deletedOne is set only beside a conflict
   if (top && (out.deletedBoth.length > 0 || out.deletedOne)) {
@@ -493,8 +493,8 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
     const dirs = ['']; for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) dirs.push(path.slice(0, i));
     const texts = await Promise.all(dirs.map(d => fileOf(d)));
     const byDir = new Map<string, string>();
-    for (const [i, d] of dirs.entries()) { const text = at(texts, i); if (text.tag === 'some' && text.value.tag === 'some') byDir.set(utf8ToStr(d), text.value.value); }
-    const v = attributeOf(attributesFor(utf8ToStr(path), byDir), 'merge');
+    for (const [i, d] of dirs.entries()) { const text = at(texts, i); if (text.tag === 'some' && text.value.tag === 'some') byDir.set(orThrow(utf8ToStr(d)), text.value.value); }
+    const v = attributeOf(attributesFor(orThrow(utf8ToStr(path)), byDir), 'merge');
     if (v.tag === 'none') return 'text';
     if (v.value === false) return 'binary';
     if (v.value === 'binary' || v.value === 'union') return v.value;
@@ -564,7 +564,7 @@ export const validateAttributes = (a: unknown): Result<AttributeSource, ErrorOf<
   const v = given.value;
   if (typeof v !== 'string') return fail('bad_request', 'attributes must be null, ours, theirs, base, a ref or a commit oid');
   if (v === 'ours' || v === 'theirs' || v === 'base' || isOid(v)) return ok(v);
-  validateRef(v);
+  orThrow(validateRef(v));
   return ok(v);
 };
 // The three sides' trees (null: the empty tree, or a side not in play).
@@ -580,7 +580,7 @@ export async function attributeTreeResult(t: Transport, attributes: AttributeSou
   // validateAttributes ran first (mergeBranch, rebaseBranch, pickCommit): a ref name or an oid
   let oid = attributes;
   if (!isOid(attributes)) {
-    validateRef(attributes);
+    orThrow(validateRef(attributes));
     const found = refOid((await lsRefs(t, [attributes])).refs, attributes);
     if (found.tag === 'none') return fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
     oid = found.value;
@@ -688,10 +688,10 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
   const { ref, author, committer, message, time, fastForwardOnly, noFastForward } = withDefaults(spec, mergeSpecDefaults());
   const { from } = spec;
   const { cache, signer, verify, rediff, attributes: attributesGiven } = withDefaults(options, mergeDefaults());
-  validatePushRef(ref, false); const fromOid = orThrow(givenOid(from, 'from'));
+  orThrow(validatePushRef(ref, false)); const fromOid = orThrow(givenOid(from, 'from'));
   const person: ValidatedIdent | null = author ? stamp(author, time) : null;
   const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;
-  if (message !== null && message !== '') validateMessage(message);
+  if (message !== null && message !== '') orThrow(validateMessage(message));
   const attributes = orThrow(validateAttributes(attributesGiven));
   return operation('merge', url, operationOpts(options, { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward }), async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => orThrow(await (async (): Promise<Result<MergeOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]);
@@ -719,7 +719,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const { base } = land;
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     const [cB, cO, cT] = await Promise.all([commitBytesAt(t, base), commitBytesAt(t, ours), commitBytesAt(t, theirs)]);
-    const tree = (c: { readonly data: Uint8Array }): string => parseCommit(c.data, t.limits).tree;
+    const tree = (c: { readonly data: Uint8Array }): string => orThrow(parseCommit(c.data, t.limits)).tree;
     const trees: Trees = { base: tree(cB), ours: tree(cO), theirs: tree(cT) };
     const blobCap = readLimit(t.limits, 'maxMergeBlobBytes');
     if (!blobCap.ok) return blobCap;
@@ -733,12 +733,12 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const newTrees = merged.objects.filter(o => o.type === TYPE.TREE).length;
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': newTrees, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
     if (merged.conflicts.length > 0) return fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
-    const treeOid: string = merged.oid === null ? hashObject('tree', encodeTree([])) : merged.oid;
+    const treeOid: string = merged.oid === null ? hashObject('tree', orThrow(encodeTree([]))) : merged.oid;
     if (!person || !committerPerson) return fail('bad_request', 'author is required for a merge commit');
-    let commitData = encodeCommit({ tree: treeOid, parents: [ours, theirs], author: ident(person), committer: ident(committerPerson), message: (message === null ? `Merge ${short(from)} into ${short(ref)}` : message).replace(/\n?$/u, '\n') });
+    let commitData = orThrow(encodeCommit({ tree: treeOid, parents: [ours, theirs], author: orThrow(ident(person)), committer: orThrow(ident(committerPerson)), message: (message === null ? `Merge ${short(from)} into ${short(ref)}` : message).replace(/\n?$/u, '\n') }));
     if (signer) commitData = await signCommit(commitData, signer);
     const oid: string = hashObject('commit', commitData);
-    const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: encodeTree([]), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
+    const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: orThrow(encodeTree([])), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
     const r = await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects });
     if (verify) await verifyRef(t, root, 'git.merge', ref, oid);

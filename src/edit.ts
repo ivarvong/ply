@@ -21,7 +21,7 @@ import type { Attrs, Span, StartOptions, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
-import type { IdentInput } from './validate.js';
+import type { IdentInput, ValidatedIdent } from './validate.js';
 import { parseCommitId } from './oid.js';
 import { signCommitResult } from './sign.js';
 import type { OperationOpts } from './operation.js';
@@ -51,7 +51,7 @@ export { buildCommitObjects, withCommitData } from './commit-build.js';
 // A caller's identity, before validateIdent. `time` overrides the spec's `time` for this person; omitted uses the spec's.
 export type { Author };
 // A validated identity (validate.js validateIdent): frozen, branded, the only input ident() accepts.
-export type Ident = ReturnType<typeof validateIdent>;
+export type Ident = ValidatedIdent;
 
 // ---- streaming find/replace scanner (pure step) ----
 // Emits transformed bytes; counts matches and records the first MATCH_OFFSETS_KEPT offsets. Carry ≤ |find|-1 bytes.
@@ -142,7 +142,7 @@ const HEX40 = /^[0-9a-fA-F]{40}$/u;
 // and when it exists the id must be its tip (refuseRebase). The zero id is not a commit (parseCommitId, before any I/O).
 function resolvedBase(base: string): Result<{ readonly base: string; readonly oid: boolean }, PlyError> {
   if (!HEX40.test(base)) {
-    const ref = validated(() => validateRef(base));
+    const ref = validated(() => orThrow(validateRef(base)));
     return ref.ok ? ok({ base: ref.value, oid: false }) : ref;
   }
   const id = parseCommitId(base);
@@ -162,21 +162,21 @@ export function validateSpecResult(spec: EditSpec, limits: Limits, head: string 
   const message = spec.message;
   const atAuthorTime = fromNullish(author.time);
   const stamp = atAuthorTime.tag === 'some' ? atAuthorTime.value : getOrElse(fromNullish(given.time), Math.floor(Date.now() / 1000));
-  const pushRef = validated(() => validatePushRef(givenRef, false));
+  const pushRef = validated(() => orThrow(validatePushRef(givenRef, false)));
   if (!pushRef.ok) return pushRef;
   // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- a JS caller's base may be any value; String() as before
   const parsed = resolvedBase(String(baseIn));
   if (!parsed.ok) return parsed;
   const resolved = parsed.value.base;
   const baseIsOid = parsed.value.oid;
-  const person = validated(() => validateIdent(identInput(author, stamp)));
+  const person = validated(() => orThrow(validateIdent(identInput(author, stamp))));
   if (!person.ok) return person;
   const committer = fromNullish(given.committer);
-  const written = committer.tag === 'none' ? person : validated(() => validateIdent(identInput(committer.value, getOrElse(fromNullish(committer.value.time), stamp))));
+  const written = committer.tag === 'none' ? person : validated(() => orThrow(validateIdent(identInput(committer.value, getOrElse(fromNullish(committer.value.time), stamp)))));
   if (!written.ok) return written;
-  const checkedMessage = validated(() => validateMessage(message));
+  const checkedMessage = validated(() => orThrow(validateMessage(message)));
   if (!checkedMessage.ok) return checkedMessage;
-  const comps = validated(() => validatePath(spec.path, limits));
+  const comps = validated(() => orThrow(validatePath(spec.path, limits)).components);
   if (!comps.ok) return comps;
   const find: unknown = bytesOf(spec.find), replace: unknown = bytesOf(spec.replace);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) return fail('bad_request', 'find/replace must be string or Uint8Array');
@@ -216,7 +216,7 @@ export function needsHead(strictHead: boolean, head: string | null): Result<null
 // Pure: one path component against one tree's entries.
 export type Found = { readonly entry: TreeEntry; readonly attrs: Attrs };
 export function lookupEntryResult(data: Uint8Array, name: string, last: boolean, limits: Limits): Result<Found, PlyError> {
-  const parsed = validated(() => parseTree(data, limits));
+  const parsed = validated(() => orThrow(parseTree(data, limits)));
   if (!parsed.ok) return parsed;
   const entries: readonly TreeEntry[] = parsed.value;
   const found = fromNullish(entries.find(e => e.name === name));
@@ -500,7 +500,7 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
     if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': thrownCodeOr(speculative, 'error') });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is getObject's value (the rejection branch is the Error above)
     const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await getObject(oldCommit, TYPE.COMMIT, 1);
-    const commit: { readonly tree: string; readonly parents: readonly string[] } = parseCommit(commitObj.data, limits);
+    const commit: { readonly tree: string; readonly parents: readonly string[] } = orThrow(parseCommit(commitObj.data, limits));
     root.set({ 'git.edit.commit.old': oldCommit, 'git.edit.tree.root': commit.tree, 'git.edit.commit.old.parents': commit.parents.length });
 
     // 3. trees, one per level. Effect: fetch on cache miss; decision: lookupEntry.

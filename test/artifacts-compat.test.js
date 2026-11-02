@@ -17,6 +17,7 @@ import { classifyReport, decideOutcome } from '../src/push.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap } from './unwrap.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const filterOf = body => /filter ([^\n]+)\n/.exec(Buffer.from(body).toString('latin1'))?.[1] ?? null;
@@ -52,8 +53,8 @@ test('editFile: a stale-ref rejection on the first push is retried from a fresh 
   let pushes = 0;
   const staleOnce = ctx => {
     if (ctx.stage !== 'receive-pack' || ctx.phase !== 'request' || pushes++ > 0) return null;
-    const report = concat([pkt('unpack ok\n'), pkt('ng refs/heads/main stale ref\n'), FLUSH]);
-    return { type: 'bytes', noForward: true, name: 'stale-ref', bytes: concat([pkt(concat([new Uint8Array([1]), report])), FLUSH]) };
+    const report = concat([unwrap(pkt('unpack ok\n')), unwrap(pkt('ng refs/heads/main stale ref\n')), FLUSH]);
+    return { type: 'bytes', noForward: true, name: 'stale-ref', bytes: concat([unwrap(pkt(concat([new Uint8Array([1]), report]))), FLUSH]) };
   };
   const r = await repo({ 'f.txt': 'MARK\n' }, artifactsFault(staleOnce));
   try {

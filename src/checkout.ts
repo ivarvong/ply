@@ -154,10 +154,10 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
     const o = mapGet(objects, oid);
     if (o.tag === 'none' || o.value.type !== TYPE.TREE) return fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
     const data = o.value.data;
-    return attemptSync(() => parseTree(data, limits));
+    return attemptSync(() => orThrow(parseTree(data, limits)));
   };
   let trees = 0; for (const o of objects.values()) if (o.type === TYPE.TREE) trees++;
-  const parsed = attemptSync(() => parseCommit(c.data, limits));
+  const parsed = attemptSync(() => orThrow(parseCommit(c.data, limits)));
   if (!parsed.ok) return parsed;
   return ok({ root: parsed.value.tree, tree, objects: objects.size, trees });
 }

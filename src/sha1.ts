@@ -1,7 +1,7 @@
 // Streaming SHA-1. Needed because crypto.subtle.digest is whole-buffer only,
 // and pack trailers / object ids must be computed over data we never hold at once.
 
-import { encodeBytes, HEXV } from './bytes.js';
+import { HEXV } from './bytes.js';
 import { atOr, field } from './absent.js';
 import { flatMapOption } from './result.js';
 
@@ -38,8 +38,8 @@ export class Sha1 {
   private len = 0;
   private readonly w = new Uint32Array(80);
 
-  public update(data: string | Uint8Array): this {
-    const bytes = typeof data === 'string' ? encodeBytes(data) : data;
+  // Bytes only: a string has no bytes until a caller encodes it (bytes.ts encodeBytes, a Result).
+  public update(bytes: Uint8Array): this {
     this.len += bytes.length;
     let i = 0;
     if (this.bufLen) {

@@ -75,8 +75,9 @@ const consumer = async (): Promise<void> => {
   const pieces: readonly Uint8Array[] = stepped.zlib;
   void cursor; void pieces;
   const inflated = inflate(anyBytes, 0, { expectedSize: 1, maxOutput: 8 });
+  if (!inflated.ok) return;
   // `out` is a subarray of the growable buffer, so the published type is `Uint8Array` (any backing).
-  const out: Uint8Array = inflated.out;
+  const out: Uint8Array = inflated.value.out;
   void out;
   const rejected: boolean = isFilterRejection(new Error('no'));
   const known: boolean = isPlyCode('pack_corrupt');

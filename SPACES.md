@@ -15,14 +15,14 @@ The procedure is enforced, not remembered:
 
 | category | holes (ratchet) | mode |
 |---|---:|---|
-| decisions | 30 | REPORT |
+| decisions | 28 | REPORT |
 | git | 2 | REPORT |
 | failsites | 30 | REPORT |
 | claims | 0 | ENFORCE |
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **516** (440 fail sites, 19 produced codes, 2 untyped throws, 31 exported parse/decode/classify/decide functions). Covered by a merged space 420, by a pending PR 43, excluded 25, unregistered 28. Fail sites no cell reaches: 30 of 440. Of the registered points, 223 are claimed by an enumerated space, 10 only by a random one and 230 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **508** (437 fail sites, 18 produced codes, 2 untyped throws, 27 exported parse/decode/classify/decide functions). Covered by a merged space 412, by a pending PR 43, excluded 25, unregistered 28. Fail sites no cell reaches: 30 of 437. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 224 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -37,7 +37,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `tree-encoding` | main | enumerated | pair(600) × modes(5) × order(2) | 6,000 | 6,000 / 0 | git mktree / write-tree | 0 | 5 | ci (`test/compliance.test.js`) | — |
 | `push-parity` | main | enumerated | config(6) × hook(4) × command(8) × caps(4) | 768 | 1 in 8 per day (seeded); 768 with PUSH_MATRIX=full / 0 | `git push` on a twin repo: same refs, same accept/reject | 1 | 5 | ci (`test/push.test.js`) | — |
 | `credential-cells` | main | enumerated | source(3) × user(6) × password(4) | 72 | 67 / 5 | git 2.50 behind a Basic-auth gate (what it sends), stated outcome elsewhere (#40, #48) | 1 | 0 | ci (`test/adversarial.test.js`) | — |
-| `wide-limits` | main | enumerated | server(2) × wanted(3) × sibling(4) × op(5) | 120 | 120 / 0 | git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47) | 6 | 0 | ci (`test/wide-limits.test.js`) | — |
+| `wide-limits` | main | enumerated | server(2) × wanted(3) × sibling(4) × op(5) | 120 | 120 / 0 | git cat-file / ls-tree / merge-tree; tree:0 and blob:none agree oid for oid (#46, #47) | 5 | 0 | ci (`test/wide-limits.test.js`) | — |
 | `limits-sweep` | main | enumerated | param × value × heap(2) | CI: bytes ≤ 16 MiB and entries ≤ 65536, both heaps; nightly: the rest of the matrix | — | git http-backend over a per-cell fixture (cat-file, ls-tree, rev-list --first-parent, ls-remote, merge-base, verify-pack, fsck). A divergence from the desired status fails unless test/sweep/ratchet.json names that cell and heap; a ratchet line whose cell now matches is itself a failure | 0 | 0 | ci-step (`test/sweep/run.mjs`) | — |
 | `push-outcome` | main | enumerated | event(14) × framing(2) × delivery(13) × refs(3) × commands(2) × atomic(2) × format(4) × unpack(6) × status(10) × spread(31) | 4.3M (412,008 wrong on main) + 36 command-oid pairs | scenarios from git 2.50 (push-outcome.observed.js); 36 oid pairs against receive-pack / the rest, from git source | expected() derived rule by rule from git v2.50.0 receive-pack/send-pack, checked against observed git. Command oids: every pair of {lower, upper, len39, len41, nonhex, empty} against receive-pack; ply requires lowercase 40-hex, so an uppercase oid git accepts is a typed bad_request | 8 | 33 | ci (`test/space/push-outcome.test.js`, `test/space/push-outcome-boundary.test.js`, `test/space/push-oid.test.js`) | — |
 | `advertisement` | main | enumerated | protocol(8) × agent(3) × objectFormat(6) × fetch(33) × lsRefs(3) × serverOption(2) × sessionId(2) × malformed(9) × record(18) × eol(2) × framing(6) × request(4) × atomic(2) × options(2) × format(2) × flag(5) × server(2) | 64,417 | 317 / 64,100 | git ls-remote / git fetch / git push / git clone against a synthetic smart-HTTP server (advertisement and ls-refs rendered per cell, fetch forwarded to git http-backend) and receive-pack configured per cell; git's request lines and upload-pack's pack-objects invocation for the request cells; six real http-backend configurations render exactly | 21 | 15 | ci (`test/space/advertisement.test.js`) | — |
@@ -55,20 +55,20 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `thin-base` | main | enumerated | base(4) × claim(8) × bytes(2) | 64 | 64 / 0 | git index-pack --stdin --strict --fix-thin and git cat-file for an honest base; git hash-object -t &lt;claim> (or its refusal) shows a dishonest buffer is not that oid (#143) | 2 | 0 | ci (`test/space/thin-base.test.js`) | — |
 | `pack-cut` | main | enumerated | pack(9) × cut × path(6) × corrupt(176) × cap | 29,293 ply cells (9,609 cuts × paths, 352 corruptions, caps) | 9,609 cuts by git index-pack --strict nightly (PACK_SPACE=full); 1,373 per PR / 0 | git index-pack --strict on the same bytes: every cut refused, a corruption refused exactly where git refuses it; ply typed pack_corrupt (limit_exceeded where a cap decides), never ok, never untyped (#5) | 37 | 0 | ci (`test/space/pack-cut.test.js`) | — |
 | `describe-pack` | main | enumerated | content(5) × compression(2) × ofs(2) × depth(3) × thin(2) × cap | 132 (120 packs + 12 limit probes) | 132 / 0 | git verify-pack -v (oid, resolved type, header size, size-in-pack, offset, depth, base oid) and git index-pack --fix-thin (the appended bases are missingBases); a thin object with no resolved id has a null oid and type (#121) | 0 | 0 | ci (`test/space/describe-pack.test.js`) | — |
-| `pkt-frame` | main | enumerated | length(64) × relation(7) × position(8) × writer(18) | 444 framing + 3,562 position + 18 writer | 444 / positions: from the reader model and the consumer rules of connect.c/sideband.c | git upload-pack --stateless-rpc with GIT_TRACE_PACKET (packet_read_with_status) on every framing cell, a port of it as the model for the rest; format_packet for the writer (#6, #14) | 21 | 15 | ci (`test/space/pkt-frame.test.js`) | — |
+| `pkt-frame` | main | enumerated | length(64) × relation(7) × position(8) × writer(18) | 444 framing + 3,562 position + 18 writer | 444 / positions: from the reader model and the consumer rules of connect.c/sideband.c | git upload-pack --stateless-rpc with GIT_TRACE_PACKET (packet_read_with_status) on every framing cell, a port of it as the model for the rest; format_packet for the writer (#6, #14) | 20 | 15 | ci (`test/space/pkt-frame.test.js`) | — |
 | `fsck-oracle` | main | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) | — |
 | `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 45 | 6 | ci (`test/adversarial.test.js`) | — |
-| `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 4 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
+| `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 2 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
 | `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 7 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) | — |
 | `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) | — |
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 19 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
-| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 26 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
+| `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 23 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
 | `encode-tag` | main | curated | case | cases | — | git hash-object -t tag --stdin (fsck_tag_standalone: same oid, same refusals) and git tag -a byte-for-byte where porcelain can write the cell (#103) | 2 | 0 | ci (`test/encode-tag.test.js`) | — |
 | `redirects` | main | curated | case | cases | — | opt-in redirects (followRedirects: initial), per case against git http.followRedirects=initial: hop counts, the suffix rule, origin change drops the credential, Location userinfo refused (#150) | 4 | 0 | ci (`test/redirect.test.js`) | — |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 66 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 65 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git cherry-pick, git revert | 11 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`, `test/pick-empty.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
 | `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
@@ -105,7 +105,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
 | `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
 | `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
-| `src/bytes.ts` encodeBytesResult() | lossless | decodeBytes | `git-bytes` / content |
+| `src/bytes.ts` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
 | `src/bytes.ts` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
 | `src/discover.ts` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
 | `src/fetch.ts` v2StepResult() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
@@ -113,10 +113,10 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/http.ts` utf8() | replacement | td | **HOLE (data path)** |
 | `src/http.ts` statusError() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
 | `src/lsrefs.ts` lsRefsStep() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts` parseTreeResult() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
-| `src/objects.ts` parseTreeResult() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts` parseCommitResult() | lossless | decodeBytes | `git-bytes` / field |
-| `src/objects.ts` parseTagResult() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts` parseTree() | replacement | td | excluded: the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git's mode parse |
+| `src/objects.ts` parseTree() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
+| `src/objects.ts` parseTag() | lossless | decodeBytes | `git-bytes` / field |
 | `src/packcache.ts` isCacheableFetch() | replacement | td | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
 | `src/push.ts` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
 | `src/push.ts` reportStep() | lossless | decodeBytes | `git-bytes` / field |
@@ -179,9 +179,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/transport.ts#coded:&lt;code>:&lt;thrownText(e)>` | src/transport.ts coded() | &lt;code>: &lt;thrownText(e)> |
 | decisions | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
 | decisions | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
-| decisions | `src/validate.ts#validateMessageResult:bad_request:message` | src/validate.ts validateMessageResult() | bad_request: message |
-| decisions | `src/validate.ts#validatePathResult:bad_request:path#6` | src/validate.ts validatePathResult() | bad_request: path |
-| decisions | `src/validate.ts#validateRefResult:bad_request:ref#3` | src/validate.ts validateRefResult() | bad_request: ref |
+| decisions | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
+| decisions | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
+| decisions | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
 | failsites | `src/checkout-node.ts#checkoutDir:bad_request:dir must be a non-empty string` | src/checkout-node.ts checkoutDir() | bad_request: dir must be a non-empty string |
 | failsites | `src/checkout-node.ts#slurp:limit_exceeded:symlink target` | src/checkout-node.ts slurp() | limit_exceeded: symlink target |
 | failsites | `src/checkout-node.ts#writeFiles:bad_request:already exists` | src/checkout-node.ts writeFiles() | bad_request: already exists |
@@ -200,7 +200,7 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/transport.ts#coded:&lt;code>:&lt;thrownText(e)>` | src/transport.ts coded() | &lt;code>: &lt;thrownText(e)> |
 | failsites | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
 | failsites | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
-| failsites | `src/validate.ts#validateMessageResult:bad_request:message` | src/validate.ts validateMessageResult() | bad_request: message |
-| failsites | `src/validate.ts#validatePathResult:bad_request:path#6` | src/validate.ts validatePathResult() | bad_request: path |
-| failsites | `src/validate.ts#validateRefResult:bad_request:ref#3` | src/validate.ts validateRefResult() | bad_request: ref |
+| failsites | `src/validate.ts#validateMessage:bad_request:message` | src/validate.ts validateMessage() | bad_request: message |
+| failsites | `src/validate.ts#validatePath:bad_request:path#6` | src/validate.ts validatePath() | bad_request: path |
+| failsites | `src/validate.ts#validateRef:bad_request:ref#3` | src/validate.ts validateRef() | bad_request: ref |
 

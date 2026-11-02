@@ -7,7 +7,7 @@ import { ok, assertNever, getOrElse, mapOption } from './result.js';
 import { decideObjectFormat } from './closed.js';
 import type { Option, Result } from './result.js';
 import { td } from './bytes.js';
-import { pktInit, pktStepResult, pktFinishResult } from './pktline.js';
+import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { parseCapabilitiesV2Result } from './discover.js';
 import type { CapsV2Error } from './discover.js';
 import { coded, clientSpan, advertise } from './transport.js';
@@ -98,8 +98,8 @@ export function parseReceiveAdvert(frames: readonly Frame[]): Result<Set<string>
 export async function receiveCaps(t: CapsTransport): Promise<Set<string>> {
   // oxlint-disable-next-line typescript/promise-function-async -- coded awaits it; async adds a wrapper and bytes
   return coded('protocol', () => t.tracer.span('git.receive-pack advertise', clientSpan(t, { 'git.command': 'advertise', 'git.protocol.version': 0 }), async (span: Span): Promise<Set<string>> => {
-    const { frames, state } = orThrow(pktStepResult(pktInit(), await advertise(t, 'git-receive-pack', span)));
-    orThrow(pktFinishResult(state));
+    const { frames, state } = orThrow(pktStep(pktInit(), await advertise(t, 'git-receive-pack', span)));
+    orThrow(pktFinish(state));
     const caps = orThrow(parseReceiveAdvert(frames));
     span.set({ 'git.receive.caps': [...caps] });
     return caps;

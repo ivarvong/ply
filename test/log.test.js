@@ -26,6 +26,7 @@ import { DEFAULT_LIMITS } from '../src/limits.js';
 import { pkt } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap } from './unwrap.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const N = 5, BIG = 64;
@@ -132,7 +133,7 @@ function omitShallow(bytes) {
 async function withForeign(url, reqBody, foreign) {
   const s = Buffer.from(reqBody).toString('latin1'); const at = s.indexOf('want ');
   const cut = at - 4 + parseInt(s.slice(at - 4, at), 16);
-  const body = concat([reqBody.subarray(0, cut), pkt(`want ${foreign}\n`), reqBody.subarray(cut)]);
+  const body = concat([reqBody.subarray(0, cut), unwrap(pkt(`want ${foreign}\n`)), reqBody.subarray(cut)]);
   const res = await fetch(`${url}/git-upload-pack`, { method: 'POST', body, headers: { 'content-type': 'application/x-git-upload-pack-request', 'git-protocol': 'version=2' } });
   return new Uint8Array(await res.arrayBuffer());
 }

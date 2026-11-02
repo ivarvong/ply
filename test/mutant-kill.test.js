@@ -26,7 +26,7 @@ import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions } from 
 import { orThrow } from '../src/errors.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits, DEFAULT_LIMITS, requireLimit, finiteLimit } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, readLimit, checkLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport } from '../src/http.js';
 import { verifyRef } from '../src/operation.js';
@@ -37,6 +37,7 @@ import {
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
+import { unwrap } from './unwrap.js';
 
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
 const oidBytes = n => Uint8Array.from({ length: OID_BYTES }, () => n);
@@ -49,14 +50,14 @@ const data = (...parts) => concat(parts.map(p => typeof p === 'string' ? te.enco
 
 test('take, indexOfBytes, and bytesOf reject every out-of-range shape', () => {
   const buf = Uint8Array.of(1, 2, 3, 4);
-  assert.deepEqual([...take(buf, 1, 2)], [2, 3]);
-  assert.equal(take(buf, 4, 0).length, 0);
-  assert.equal(take(buf, 0, 1, 'protocol')[0], 1);
+  assert.deepEqual([...unwrap(take(buf, 1, 2))], [2, 3]);
+  assert.equal(unwrap(take(buf, 4, 0)).length, 0);
+  assert.equal(unwrap(take(buf, 0, 1, 'protocol'))[0], 1);
   for (const [off, n] of [[1.5, 1], [0, 1.5], [NaN, 1], [0, NaN], [-1, 1], [0, -1], [3, 2], [5, 0]]) {
-    throws(() => take(buf, off, n), 'pack_corrupt', `short read: need ${n} bytes at ${off}, have 4`);
+    throws(() => unwrap(take(buf, off, n)), 'pack_corrupt', `short read: need ${n} bytes at ${off}, have 4`);
   }
-  throws(() => take(undefined, 0, 1), 'pack_corrupt', 'short read: need 1 bytes at 0, have 0');
-  throws(() => take(null, 0, 1, 'protocol'), 'protocol', 'short read: need 1 bytes at 0, have 0');
+  throws(() => unwrap(take(undefined, 0, 1)), 'pack_corrupt', 'short read: need 1 bytes at 0, have 0');
+  throws(() => unwrap(take(null, 0, 1, 'protocol')), 'protocol', 'short read: need 1 bytes at 0, have 0');
 
   const hay = Uint8Array.of(1, 2, 1, 2, 3);
   assert.equal(indexOfBytes(hay, new Uint8Array(), 3), 3);
@@ -98,68 +99,68 @@ test('parseTree error strings and the boundaries next to them', () => {
     ['160000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
     ['40000 .gitattributes\0', 'tree: .gitattributes is not a blob'],
   ];
-  for (const [text, message] of bad) throws(() => parseTree(raw(text)), 'pack_corrupt', message);
-  throws(() => parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
-  throws(() => parseTree(data(raw('100644 b\0'), raw('100644 a\0'))), 'pack_corrupt', 'tree: not strictly sorted');
-  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5)))), 'pack_corrupt', 'tree: duplicate entry "a"');
-  assert.equal(parseTree(new Uint8Array(0)).length, 0);
+  for (const [text, message] of bad) throws(() => unwrap(parseTree(raw(text))), 'pack_corrupt', message);
+  throws(() => unwrap(parseTree(raw('100644 a\0', id.subarray(0, OID_BYTES - 1)))), 'pack_corrupt', `short read: need ${OID_BYTES} bytes at ${'100644 a\0'.length}, have ${'100644 a\0'.length + OID_BYTES - 1}`);
+  throws(() => unwrap(parseTree(data(raw('100644 b\0'), raw('100644 a\0')))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => unwrap(parseTree(data(raw('100644 a\0'), raw('100644 a\0', oidBytes(5))))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  assert.equal(unwrap(parseTree(new Uint8Array(0))).length, 0);
   // canon_mode, as git ls-tree prints it; a 4096-byte name is the longest fsck allows
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100644');
-  assert.equal(parseTree(raw(`100644 ${'l'.repeat(4096)}\0`))[0].name.length, 4096);
-  throws(() => parseTree(raw('100644 a\0', new Uint8Array(OID_BYTES))), 'pack_corrupt', 'tree: null sha1');
-  assert.equal(parseTree(raw('100644 a\0', Uint8Array.of(...new Uint8Array(OID_BYTES - 1), 1)))[0].name, 'a');
-  for (const ok of ['120000 .gitattributes', '120000 .gitignore', '120000 .mailmap', '100644 .gitmodules', '100644 git~2', '40000 a\\.gitattributes']) assert.equal(parseTree(raw(`${ok}\0`)).length, 1, ok);
+  assert.equal(unwrap(parseTree(raw('100664 a\0')))[0].mode, '100644');
+  assert.equal(unwrap(parseTree(raw(`100644 ${'l'.repeat(4096)}\0`)))[0].name.length, 4096);
+  throws(() => unwrap(parseTree(raw('100644 a\0', new Uint8Array(OID_BYTES)))), 'pack_corrupt', 'tree: null sha1');
+  assert.equal(unwrap(parseTree(raw('100644 a\0', Uint8Array.of(...new Uint8Array(OID_BYTES - 1), 1))))[0].name, 'a');
+  for (const ok of ['120000 .gitattributes', '120000 .gitignore', '120000 .mailmap', '100644 .gitmodules', '100644 git~2', '40000 a\\.gitattributes']) assert.equal(unwrap(parseTree(raw(`${ok}\0`))).length, 1, ok);
   // issue #34: one name twice is git fsck duplicateEntries whatever the modes, next to each other or not. A file and a
   // directory of one name sort apart ('d' < 'd.x' < 'd/'), so the old neighbour-only check passed them. encodeTree
   // refuses to write such a tree, so the bytes are built by hand.
   const e = (mode, name, n = 1) => raw(`${mode} ${name}\0`, oidBytes(n));
-  throws(() => parseTree(data(e('100644', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
-  throws(() => parseTree(data(e('100644', 'd', 2), e('100644', 'd.x'), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
-  throws(() => parseTree(data(e('120000', 'd', 2), e('100644', 'd-'), e('100644', 'd.x'), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
-  throws(() => parseTree(data(e('160000', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
-  throws(() => parseTree(data(e('40000', 'd', 2), e('40000', 'd'))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => unwrap(parseTree(data(e('100644', 'd', 2), e('40000', 'd')))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => unwrap(parseTree(data(e('100644', 'd', 2), e('100644', 'd.x'), e('40000', 'd')))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => unwrap(parseTree(data(e('120000', 'd', 2), e('100644', 'd-'), e('100644', 'd.x'), e('40000', 'd')))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => unwrap(parseTree(data(e('160000', 'd', 2), e('40000', 'd')))), 'pack_corrupt', 'tree: duplicate entry "d"');
+  throws(() => unwrap(parseTree(data(e('40000', 'd', 2), e('40000', 'd')))), 'pack_corrupt', 'tree: duplicate entry "d"');
   // the same name in a later, unrelated position is still the duplicate, reported before the order it also breaks
-  throws(() => parseTree(data(e('100644', 'a'), e('100644', 'b'), e('100644', 'a'))), 'pack_corrupt', 'tree: duplicate entry "a"');
+  throws(() => unwrap(parseTree(data(e('100644', 'a'), e('100644', 'b'), e('100644', 'a')))), 'pack_corrupt', 'tree: duplicate entry "a"');
   // order: a directory sorts as name + '/'. S_ISDIR of the mode decides, as in fsck: `40755` is a directory, a gitlink
   // is not. Either way round, one of the two lists is out of order.
-  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40000', 'd'))).map(x => x.name), ['d.x', 'd']);
-  throws(() => parseTree(data(e('40000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
-  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('40755', 'd'))).map(x => x.mode), ['100644', '40000'], 'canon_mode: 40755 reads as a tree');
-  throws(() => parseTree(data(e('40755', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'd.x'), e('40000', 'd')))).map(x => x.name), ['d.x', 'd']);
+  throws(() => unwrap(parseTree(data(e('40000', 'd'), e('100644', 'd.x')))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'd.x'), e('40755', 'd')))).map(x => x.mode), ['100644', '40000'], 'canon_mode: 40755 reads as a tree');
+  throws(() => unwrap(parseTree(data(e('40755', 'd'), e('100644', 'd.x')))), 'pack_corrupt', 'tree: not strictly sorted');
   // fsck keeps the mode in an unsigned short: `1040000` is a directory there, `140000` (S_IFSOCK) is not
-  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('1040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'only the low 16 bits of a mode count');
-  throws(() => parseTree(data(e('1040000', 'd'), e('100644', 'd.x'))), 'pack_corrupt', 'tree: not strictly sorted');
-  assert.deepEqual(parseTree(data(e('140000', 'd'), e('100644', 'd.x'))).map(x => x.name), ['d', 'd.x']);
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'd.x'), e('1040000', 'd')))).map(x => x.name), ['d.x', 'd'], 'only the low 16 bits of a mode count');
+  throws(() => unwrap(parseTree(data(e('1040000', 'd'), e('100644', 'd.x')))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(e('140000', 'd'), e('100644', 'd.x')))).map(x => x.name), ['d', 'd.x']);
   // past 2^53 a whole-string parse loses the low bits; the last six digits keep them
-  assert.deepEqual(parseTree(data(e('100644', 'd.x'), e('777777777777777777777777040000', 'd'))).map(x => x.name), ['d.x', 'd'], 'a long mode is read from its last six digits');
-  assert.deepEqual(parseTree(data(e('100644', 'd'), e('160000', 'd.x'))).map(x => x.mode), ['100644', '160000']);
-  throws(() => parseTree(data(e('100644', 'd.x'), e('160000', 'd'))), 'pack_corrupt', 'tree: not strictly sorted');
-  assert.deepEqual(parseTree(data(e('40000', 'd'), e('100644', 'd0'))).map(x => x.name), ['d', 'd0'], "'/' sorts below '0'");
-  throws(() => parseTree(data(e('100644', 'd0'), e('40000', 'd'))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'd.x'), e('777777777777777777777777040000', 'd')))).map(x => x.name), ['d.x', 'd'], 'a long mode is read from its last six digits');
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'd'), e('160000', 'd.x')))).map(x => x.mode), ['100644', '160000']);
+  throws(() => unwrap(parseTree(data(e('100644', 'd.x'), e('160000', 'd')))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(e('40000', 'd'), e('100644', 'd0')))).map(x => x.name), ['d', 'd0'], "'/' sorts below '0'");
+  throws(() => unwrap(parseTree(data(e('100644', 'd0'), e('40000', 'd')))), 'pack_corrupt', 'tree: not strictly sorted');
   // case-only and NFC/NFD twins are two names to git and to ply
-  assert.deepEqual(parseTree(data(e('100644', 'D'), e('100644', 'd'))).map(x => x.name), ['D', 'd']);
-  assert.deepEqual(parseTree(data(e('100644', 'e\u0301'), e('100644', '\u00e9'))).map(x => x.name), ['e\u0301', '\u00e9']);
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'D'), e('100644', 'd')))).map(x => x.name), ['D', 'd']);
+  assert.deepEqual(unwrap(parseTree(data(e('100644', 'e\u0301'), e('100644', '\u00e9')))).map(x => x.name), ['e\u0301', '\u00e9']);
   // order is on the raw bytes; byte-distinct names stay distinct (decodeBytes is lossless, #43), so the decode-twin refusal
   // #34 had (U+FFFD twins, a dropped leading BOM) cannot arise and is gone: these parse as two names, as in git
   const rawE = (mode, bytes) => data(te.encode(`${mode} `), Uint8Array.from(bytes), Uint8Array.of(0), oidBytes(1));
-  throws(() => parseTree(data(rawE('100644', [0x64, 0xff]), rawE('100644', [0x64, 0xfe]))), 'pack_corrupt', 'tree: not strictly sorted');
-  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xfe]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\udcfe', 'd\udcff']);
-  assert.deepEqual(parseTree(data(rawE('100644', [0x61]), rawE('100644', [0xef, 0xbb, 0xbf, 0x61]))).map(x => x.name), ['a', '\ufeffa']);
-  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xc3, 0xa9]), rawE('100644', [0x64, 0xff]))).map(x => x.name), ['d\u00e9', 'd\udcff'], 'raw bytes: 0xc3 < 0xff (0xff decodes to its escape U+DCFF, #43)');
-  assert.deepEqual(parseTree(data(rawE('100644', [0x64, 0xef, 0xbf, 0xbe]), rawE('100644', [0x64, 0xf0]))).map(x => x.name.length), [2, 2]);
-  throws(() => parseTree(data(rawE('100644', [0x64, 0xf0]), rawE('100644', [0x64, 0xef, 0xbf, 0xbe]))), 'pack_corrupt', 'tree: not strictly sorted');
+  throws(() => unwrap(parseTree(data(rawE('100644', [0x64, 0xff]), rawE('100644', [0x64, 0xfe])))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(rawE('100644', [0x64, 0xfe]), rawE('100644', [0x64, 0xff])))).map(x => x.name), ['d\udcfe', 'd\udcff']);
+  assert.deepEqual(unwrap(parseTree(data(rawE('100644', [0x61]), rawE('100644', [0xef, 0xbb, 0xbf, 0x61])))).map(x => x.name), ['a', '\ufeffa']);
+  assert.deepEqual(unwrap(parseTree(data(rawE('100644', [0x64, 0xc3, 0xa9]), rawE('100644', [0x64, 0xff])))).map(x => x.name), ['d\u00e9', 'd\udcff'], 'raw bytes: 0xc3 < 0xff (0xff decodes to its escape U+DCFF, #43)');
+  assert.deepEqual(unwrap(parseTree(data(rawE('100644', [0x64, 0xef, 0xbf, 0xbe]), rawE('100644', [0x64, 0xf0])))).map(x => x.name.length), [2, 2]);
+  throws(() => unwrap(parseTree(data(rawE('100644', [0x64, 0xf0]), rawE('100644', [0x64, 0xef, 0xbf, 0xbe])))), 'pack_corrupt', 'tree: not strictly sorted');
   // a leading U+FEFF is a byte of the name to git; the default TextDecoder would drop it and `README` would be found (#43)
-  assert.equal(parseTree(raw('100644 \ufeffREADME\0'))[0].name, '\ufeffREADME');
+  assert.equal(unwrap(parseTree(raw('100644 \ufeffREADME\0')))[0].name, '\ufeffREADME');
   assert.equal(td.decode(te.encode('\ufeffX')), '\ufeffX');
   // and a mode is not a name: `\ufeff100644` is malformed, as git's ls-tree says
-  throws(() => parseTree(raw('\ufeff100644 a\0')), 'pack_corrupt', 'tree: malformed mode');
+  throws(() => unwrap(parseTree(raw('\ufeff100644 a\0'))), 'pack_corrupt', 'tree: malformed mode');
   // ill-formed UTF-8 names are escaped byte by byte, sort and re-encode as their bytes
   const latin = data(Uint8Array.from([...te.encode('100644 caf'), 0xe9, 0]), oidBytes(1), Uint8Array.from([...te.encode('100644 caf'), 0xe9, 0x41, 0]), oidBytes(2));
-  assert.deepEqual(parseTree(latin).map(e => e.name), ['caf\udce9', 'caf\udce9A']);
-  assert.deepEqual(encodeTree(parseTree(latin)), latin);
+  assert.deepEqual(unwrap(parseTree(latin)).map(e => e.name), ['caf\udce9', 'caf\udce9A']);
+  assert.deepEqual(unwrap(encodeTree(unwrap(parseTree(latin)))), latin);
   // a directory sorts as name + '/' on the raw bytes: `a\xff` (file) after `a/`-keyed dir `a`
-  assert.deepEqual(parseTree(data(raw('40000 a\0', oidBytes(1)), Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2))).map(e => e.name), ['a', 'a\udcff']);
-  throws(() => parseTree(data(Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2), raw('40000 a\0', oidBytes(1)))), 'pack_corrupt', 'tree: not strictly sorted');
+  assert.deepEqual(unwrap(parseTree(data(raw('40000 a\0', oidBytes(1)), Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2)))).map(e => e.name), ['a', 'a\udcff']);
+  throws(() => unwrap(parseTree(data(Uint8Array.from([...te.encode('100644 a'), 0xff, 0]), oidBytes(2), raw('40000 a\0', oidBytes(1))))), 'pack_corrupt', 'tree: not strictly sorted');
 });
 
 test('decodeBytes / encodeBytes: a bijection on bytes; decodeChunk holds a cut sequence (#43)', () => {
@@ -168,13 +169,13 @@ test('decodeBytes / encodeBytes: a bijection on bytes; decodeChunk holds a cut s
   cases.forEach((c, i) => {
     const b = Uint8Array.from(c);
     assert.equal(decodeBytes(b), want[i], c.join(' '));
-    assert.deepEqual(encodeBytes(want[i]), b, c.join(' '));
+    assert.deepEqual(unwrap(encodeBytes(want[i])), b, c.join(' '));
   });
-  for (const [s, msg] of [['\ud800', 'x: lone surrogate U+D800 is no byte sequence'], ['a\udfff', 'x: lone surrogate U+DFFF is no byte sequence'], ['\udc7f', 'x: lone surrogate U+DC7F is no byte sequence'], ['\udcc3\udca9', 'x: escaped bytes spell well-formed UTF-8; pass the characters']]) throws(() => encodeBytes(s, 'x'), 'bad_request', msg);
-  throws(() => encodeBytes(1, 'x'), 'bad_request', 'x must be a string');
-  assert.deepEqual(encodeBytes('\u{1f680}\udcff'), Uint8Array.from([0xf0, 0x9f, 0x9a, 0x80, 0xff]));
+  for (const [s, msg] of [['\ud800', 'x: lone surrogate U+D800 is no byte sequence'], ['a\udfff', 'x: lone surrogate U+DFFF is no byte sequence'], ['\udc7f', 'x: lone surrogate U+DC7F is no byte sequence'], ['\udcc3\udca9', 'x: escaped bytes spell well-formed UTF-8; pass the characters']]) throws(() => unwrap(encodeBytes(s, 'x')), 'bad_request', msg);
+  throws(() => unwrap(encodeBytes(1, 'x')), 'bad_request', 'x must be a string');
+  assert.deepEqual(unwrap(encodeBytes('\u{1f680}\udcff')), Uint8Array.from([0xf0, 0x9f, 0x9a, 0x80, 0xff]));
   // a well-formed string takes the TextEncoder path; a lone escape at either end is still found
-  assert.deepEqual(encodeBytes('\udcffa'), Uint8Array.from([0xff, 0x61]));
+  assert.deepEqual(unwrap(encodeBytes('\udcffa')), Uint8Array.from([0xff, 0x61]));
   let d = decodeChunk(new Uint8Array(0), Uint8Array.from([0x61, 0xf0, 0x9f]));
   assert.deepEqual([d.text, [...d.carry]], ['a', [0xf0, 0x9f]]);
   d = decodeChunk(d.carry, Uint8Array.from([0x9a, 0x80, 0xe2]));
@@ -220,86 +221,86 @@ test('commit and tag headers, idents, and assertFetched', () => {
   const tree = oid(1);
   const C = 'commit: ', T = 'tag: ';
   // verify_headers: a NUL before the blank line, and a header that does not end in a newline
-  throws(() => parseCommit(te.encode('tree')), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
-  throws(() => parseCommit(new Uint8Array(0)), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\0\n\n`)), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 45`);
-  throws(() => parseCommit(te.encode('\0')), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 0`);
-  throws(() => parseCommit(te.encode('nospace\n')), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
-  throws(() => parseCommit(te.encode('\n\nbody')), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
-  throws(() => parseCommit(te.encode(`tree\n${tree}\n`)), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\n`)), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\n parent-sig\n\n`)), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\n`)), 'pack_corrupt', `${C}missingCommitter: invalid format - expected 'committer' line`);
+  throws(() => unwrap(parseCommit(te.encode('tree'))), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
+  throws(() => unwrap(parseCommit(new Uint8Array(0))), 'pack_corrupt', `${C}unterminatedHeader: unterminated header`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\0\n\n`))), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 45`);
+  throws(() => unwrap(parseCommit(te.encode('\0'))), 'pack_corrupt', `${C}nulInHeader: unterminated header: NUL at offset 0`);
+  throws(() => unwrap(parseCommit(te.encode('nospace\n'))), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => unwrap(parseCommit(te.encode('\n\nbody'))), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => unwrap(parseCommit(te.encode(`tree\n${tree}\n`))), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\n`))), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\n parent-sig\n\n`))), 'pack_corrupt', `${C}missingAuthor: invalid format - expected 'author' line`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\n`))), 'pack_corrupt', `${C}missingCommitter: invalid format - expected 'committer' line`);
   // the tree and parent ids: 40 hex digits of either case, then the newline; git prints the id lowercase
-  throws(() => parseCommit(te.encode(`tree zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
-  throws(() => parseCommit(te.encode(`tree ${tree.slice(1)}g\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
-  throws(() => parseCommit(te.encode(`tree ${tree} \nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
-  throws(() => parseCommit(te.encode(`tree ${tree.slice(1)}\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nparent zz\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nparent ${oid(2)}x\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
-  const upper = parseCommit(te.encode(`tree ${'AB'.repeat(20)}\nparent ${'Cd'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n\n`));
+  throws(() => unwrap(parseCommit(te.encode(`tree zz\nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree.slice(1)}g\nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree} \nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree.slice(1)}\nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}badTreeSha1: invalid 'tree' line format - bad sha1`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nparent zz\nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nparent ${oid(2)}x\nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}badParentSha1: invalid 'parent' line format - bad sha1`);
+  const upper = unwrap(parseCommit(te.encode(`tree ${'AB'.repeat(20)}\nparent ${'Cd'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n\n`)));
   assert.equal(upper.tree, 'ab'.repeat(20));
   assert.deepEqual(upper.parents, ['cd'.repeat(20)]);
-  assert.equal(parseCommit(te.encode(`tree ${'9f'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n`)).tree, '9f'.repeat(20));
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\nauthor ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}multipleAuthors: invalid format - multiple 'author' lines`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor Ada\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingEmail: invalid author line - missing email`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', `${C}missingEmail: invalid committer line - missing email`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor Ada <ada@ex>\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingSpaceBeforeDate: invalid author line - missing space before date`);
+  assert.equal(unwrap(parseCommit(te.encode(`tree ${'9f'.repeat(20)}\nauthor ${author}\ncommitter ${author}\n`))).tree, '9f'.repeat(20));
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\nauthor ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}multipleAuthors: invalid format - multiple 'author' lines`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor Ada\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}missingEmail: invalid author line - missing email`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`))), 'pack_corrupt', `${C}missingEmail: invalid committer line - missing email`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor Ada <ada@ex>\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}missingSpaceBeforeDate: invalid author line - missing space before date`);
   // the body: no NUL anywhere in a commit (nulInCommit is WARN, an error under --strict)
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\nsub\0ject\n`)), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
-  throws(() => parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\0`)), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
-  const cont = parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n parent-sig\n\n`));
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\nsub\0ject\n`))), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
+  throws(() => unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\0`))), 'pack_corrupt', `${C}nulInCommit: NUL byte in the commit object body`);
+  const cont = unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n parent-sig\n\n`)));
   assert.deepEqual(cont.extra, [' parent-sig']);
   assert.equal(cont.encoding, null);
   assert.equal(cont.message, '');
-  const noBody = parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\nsubject\n`));
+  const noBody = unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\nsubject\n`)));
   assert.deepEqual(noBody.extra, ['subject']);
   assert.equal(noBody.message, null);
-  assert.deepEqual(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n`)).extra, []);
-  assert.equal(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\nm`)).message, '\nm');
+  assert.deepEqual(unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n`))).extra, []);
+  assert.equal(unwrap(parseCommit(te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n\nm`))).message, '\nm');
   // a leading BOM is a byte before `tree`, as git reads it
-  throws(() => parseCommit(concat([Uint8Array.of(0xef, 0xbb, 0xbf), te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n`)])), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  throws(() => unwrap(parseCommit(concat([Uint8Array.of(0xef, 0xbb, 0xbf), te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n`)]))), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
 
-  const commit = encodeCommit({ tree, parents: [oid(2)], author, message: 'hi\n' });
-  assert.equal(parseCommit(commit).tree, tree);
-  assert.deepEqual(parseCommit(commit).parents, [oid(2)]);
-  assertFetched('commit', commit);
-  throws(() => assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`)), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
-  assert.equal(assertFetched('blob', te.encode('x')), undefined);
-  assert.equal(assertFetched('ofs_delta', te.encode('x')), undefined);
-  assert.equal(assertFetched('ref_delta', te.encode('x')), undefined);
-  throws(() => assertFetched('submodule', te.encode('x')), 'pack_corrupt', 'object: bad type submodule');
-  throws(() => assertFetched('tree', data(' a\0', oidBytes(1))), 'pack_corrupt', 'tree: empty mode');
-  throws(() => assertFetched('tag', te.encode('x')), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
+  const commit = unwrap(encodeCommit({ tree, parents: [oid(2)], author, message: 'hi\n' }));
+  assert.equal(unwrap(parseCommit(commit)).tree, tree);
+  assert.deepEqual(unwrap(parseCommit(commit)).parents, [oid(2)]);
+  unwrap(assertFetched('commit', commit));
+  throws(() => unwrap(assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
+  assert.deepEqual(assertFetched('blob', te.encode('x')), { ok: true, value: null });
+  assert.deepEqual(assertFetched('ofs_delta', te.encode('x')), { ok: true, value: null });
+  assert.deepEqual(assertFetched('ref_delta', te.encode('x')), { ok: true, value: null });
+  throws(() => unwrap(assertFetched('submodule', te.encode('x'))), 'pack_corrupt', 'object: bad type submodule');
+  throws(() => unwrap(assertFetched('tree', data(' a\0', oidBytes(1)))), 'pack_corrupt', 'tree: empty mode');
+  throws(() => unwrap(assertFetched('tag', te.encode('x'))), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
 
   const tagger = author;
-  const tag = encodeTag({ object: oid(3), type: 'commit', tag: 'v1', tagger, message: 'rel\n' });
-  assert.equal(parseTag(tag).tag, 'v1');
-  assertFetched('tag', tag);
-  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\0\n`)), 'pack_corrupt', `${T}nulInHeader: unterminated header: NUL at offset 47`);
-  throws(() => parseTag(te.encode('\n\n')), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
-  throws(() => parseTag(te.encode(`type commit\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
-  throws(() => parseTag(te.encode(`object ${oid(3).slice(2)}\ntype commit\n\n`)), 'pack_corrupt', `${T}badObjectSha1: invalid 'object' line format - bad sha1`);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\n\n`)), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
+  const tag = unwrap(encodeTag({ object: oid(3), type: 'commit', tag: 'v1', tagger, message: 'rel\n' }));
+  assert.equal(unwrap(parseTag(tag)).tag, 'v1');
+  unwrap(assertFetched('tag', tag));
+  throws(() => unwrap(parseTag(te.encode('tag'))), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\0\n`))), 'pack_corrupt', `${T}nulInHeader: unterminated header: NUL at offset 47`);
+  throws(() => unwrap(parseTag(te.encode('\n\n'))), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
+  throws(() => unwrap(parseTag(te.encode(`type commit\ntag v1\ntagger ${tagger}\n\n`))), 'pack_corrupt', `${T}missingObject: invalid format - expected 'object' line`);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3).slice(2)}\ntype commit\n\n`))), 'pack_corrupt', `${T}badObjectSha1: invalid 'object' line format - bad sha1`);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\n\n`))), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\ntag v1\ntagger ${tagger}\n\n`))), 'pack_corrupt', `${T}missingTypeEntry: invalid format - expected 'type' line`);
   for (const bad of ['commi', '', 'commit ', 'Commit', 'ofs_delta', 'constructor', 'toString'])
-    throws(() => parseTag(te.encode(`object ${oid(3)}\ntype ${bad}\ntag v1\n\n`)), 'pack_corrupt', `${T}badType: invalid 'type' value`);
-  for (const type of ['commit', 'tree', 'blob', 'tag']) assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype ${type}\ntag v1\n`)).type, type);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\n\n`)), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntagger ${tagger}\n\n`)), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger Ada\n\n`)), 'pack_corrupt', `${T}missingEmail: invalid tagger line - missing email`);
+    throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\ntype ${bad}\ntag v1\n\n`))), 'pack_corrupt', `${T}badType: invalid 'type' value`);
+  for (const type of ['commit', 'tree', 'blob', 'tag']) assert.equal(unwrap(parseTag(te.encode(`object ${oid(3)}\ntype ${type}\ntag v1\n`))).type, type);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\n\n`))), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntagger ${tagger}\n\n`))), 'pack_corrupt', `${T}missingTagEntry: invalid format - expected 'tag' line`);
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger Ada\n\n`))), 'pack_corrupt', `${T}missingEmail: invalid tagger line - missing email`);
   // INFO under --strict, so accepted: no tagger (missingTaggerEntry) and a name that is not a refname (badTagName)
-  const old = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v0.99\n\nold\n`));
+  const old = unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v0.99\n\nold\n`)));
   assert.equal(old.tagger, null);
   assert.equal(old.message, 'old\n');
   assert.deepEqual(old.extra, []);
-  assert.deepEqual(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\nfoo bar\n\n`)).extra, ['foo bar']);
-  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag \ntagger ${tagger}\n\n`)).tag, '');
-  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1..2\ntagger ${tagger}\n\n`)).tag, 'v1..2');
+  assert.deepEqual(unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\nfoo bar\n\n`))).extra, ['foo bar']);
+  assert.equal(unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag \ntagger ${tagger}\n\n`))).tag, '');
+  assert.equal(unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1..2\ntagger ${tagger}\n\n`))).tag, 'v1..2');
   // fsck never reads a tag's body: a NUL there is accepted, unlike in a commit
-  assert.equal(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${tagger}\n\nr\0l\n`)).message, 'r\0l\n');
-  assert.equal(parseTag(te.encode(`object ${'AB'.repeat(20)}\ntype commit\ntag v1\n`)).object, 'ab'.repeat(20));
+  assert.equal(unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${tagger}\n\nr\0l\n`))).message, 'r\0l\n');
+  assert.equal(unwrap(parseTag(te.encode(`object ${'AB'.repeat(20)}\ntype commit\ntag v1\n`))).object, 'ab'.repeat(20));
 
   assert.equal(parseIdent(1), null);
   assert.deepEqual(parseIdent('  bare name  '), { name: 'bare name', email: '', time: null, tz: '' });
@@ -316,7 +317,7 @@ test('headers after the committer and the tagger are kept, not judged, except a 
   const tree2 = oid(2);
   const committer = author;
   const body = (lines) => te.encode(`${lines.join('\n')}\n\nmsg\n`);
-  const ok = parseCommit(body([`tree ${tree}`, `parent ${oid(3)}`, `parent ${oid(4)}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', 'gpgsig -----BEGIN', ' signature', 'mergetag object x']));
+  const ok = unwrap(parseCommit(body([`tree ${tree}`, `parent ${oid(3)}`, `parent ${oid(4)}`, `author ${author}`, `committer ${committer}`, 'encoding UTF-8', 'gpgsig -----BEGIN', ' signature', 'mergetag object x'])));
   assert.equal(ok.tree, tree);
   assert.deepEqual(ok.parents, [oid(3), oid(4)]);
   assert.equal(ok.author, author);
@@ -324,30 +325,30 @@ test('headers after the committer and the tagger are kept, not judged, except a 
   assert.equal(ok.encoding, 'UTF-8');
   assert.deepEqual(ok.extra, ['gpgsig -----BEGIN', ' signature', 'mergetag object x']);
   assert.equal(ok.message, 'msg\n');
-  const again = parseCommit(encodeCommit(ok));
+  const again = unwrap(parseCommit(unwrap(encodeCommit(ok))));
   assert.equal(again.encoding, 'UTF-8');
   assert.deepEqual(again.extra, ok.extra);
-  const bare = encodeCommit({ tree, parents: [oid(2)], author, message: 'hi\n' });
+  const bare = unwrap(encodeCommit({ tree, parents: [oid(2)], author, message: 'hi\n' }));
   assert.equal(td.decode(bare).includes('\nencoding '), false);
-  assert.equal(parseCommit(bare).encoding, null);
-  const enc = encodeCommit({ tree, author, encoding: 'ISO-8859-1', message: 'hi\n' });
-  assert.equal(parseCommit(enc).encoding, 'ISO-8859-1');
-  assert.deepEqual([...encodeCommit(parseCommit(enc))], [...enc]);
+  assert.equal(unwrap(parseCommit(bare)).encoding, null);
+  const enc = unwrap(encodeCommit({ tree, author, encoding: 'ISO-8859-1', message: 'hi\n' }));
+  assert.equal(unwrap(parseCommit(enc)).encoding, 'ISO-8859-1');
+  assert.deepEqual([...unwrap(encodeCommit(unwrap(parseCommit(enc))))], [...enc]);
   const signed = withGpgsig(enc, '-----BEGIN SSH SIGNATURE-----\nAAA\n-----END SSH SIGNATURE-----\n');
-  const parsedSig = parseCommit(signed);
+  const parsedSig = unwrap(parseCommit(signed));
   assert.equal(parsedSig.encoding, 'ISO-8859-1');
   assert.equal(parsedSig.extra[0].startsWith('gpgsig '), true);
-  assert.equal(parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x'])).extra[0], 'gpgsig x');
-  const plain = encodeCommit({ tree, author, message: 'hi\n', extra: ['x-custom v'] });
+  assert.equal(unwrap(parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x']))).extra[0], 'gpgsig x');
+  const plain = unwrap(encodeCommit({ tree, author, message: 'hi\n', extra: ['x-custom v'] }));
   const signedPlain = td.decode(withGpgsig(plain, 'SIG\n'));
   const plainHeaders = signedPlain.split('\n\n')[0].split('\n');
   const ci = plainHeaders.findIndex(l => l.startsWith('committer '));
   assert.equal(plainHeaders[ci + 1].startsWith('gpgsig '), true);
   assert.equal(plainHeaders[ci + 2], 'x-custom v');
-  assert.equal(parseCommit(withGpgsig(bare, 'SIG\n')).extra[0].startsWith('gpgsig '), true);
+  assert.equal(unwrap(parseCommit(withGpgsig(bare, 'SIG\n'))).extra[0].startsWith('gpgsig '), true);
   // after the committer fsck reads nothing, but a second tree, parent, author, committer or encoding is a copy git's
   // views disagree on (pretty's %an/%cn read the last, %T and the date the first): refused, typed (PR #7)
-  const after = (...lines) => parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, ...lines]));
+  const after = (...lines) => unwrap(parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, ...lines])));
   const dup = (label, lines) => assert.throws(() => after(...lines), e => e.code === 'pack_corrupt' && e.message === label && e.msgId === 'duplicateHeader');
   dup('commit: duplicate tree', [`tree ${tree2}`]);
   dup('commit: duplicate tree', ['gpgsig x', `tree ${tree2}`]);
@@ -364,7 +365,7 @@ test('headers after the committer and the tagger are kept, not judged, except a 
   assert.equal(after(' encoding ISO-8859-1').encoding, null);
   assert.equal(after('encodingISO').encoding, null);
   // before the committer, the order is fsck's: tree, parents, one author, committer
-  const bad = (lines, msgId, why) => throws(() => parseCommit(body(lines)), 'pack_corrupt', `commit: ${msgId}: ${why}`);
+  const bad = (lines, msgId, why) => throws(() => unwrap(parseCommit(body(lines))), 'pack_corrupt', `commit: ${msgId}: ${why}`);
   const noAuthor = ['missingAuthor', "invalid format - expected 'author' line"];
   const noCommitter = ['missingCommitter', "invalid format - expected 'committer' line"];
   bad([`parent ${oid(3)}`, `tree ${tree}`, `author ${author}`, `committer ${committer}`], 'missingTree', "invalid format - expected 'tree' line");
@@ -377,37 +378,37 @@ test('headers after the committer and the tagger are kept, not judged, except a 
   bad([`tree ${tree}`, `committer ${committer}`, `author ${author}`], ...noAuthor);
   bad([`tree ${tree}`, `author ${author}`, 'encoding UTF-8', `committer ${committer}`], ...noCommitter);
   bad([`tree ${tree}`, `author ${author}`, `parent ${oid(3)}`, `committer ${committer}`], ...noCommitter);
-  const twoParents = parseCommit(body([`tree ${tree}`, `parent ${oid(3)}`, `parent ${oid(3)}`, `author ${author}`, `committer ${committer}`]));
+  const twoParents = unwrap(parseCommit(body([`tree ${tree}`, `parent ${oid(3)}`, `parent ${oid(3)}`, `author ${author}`, `committer ${committer}`])));
   assert.deepEqual(twoParents.parents, [oid(3), oid(3)]);
 
-  const tags = parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc']));
+  const tags = unwrap(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc'])));
   assert.equal(tags.object, oid(5));
   assert.equal(tags.type, 'commit');
   assert.equal(tags.tag, 'v1');
   assert.equal(tags.tagger, author);
   assert.deepEqual(tags.extra, ['gpgsig abc']);
   assert.equal(tags.message, 'msg\n');
-  assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc', ' more'])).extra, ['gpgsig abc', ' more']);
+  assert.deepEqual(unwrap(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, 'gpgsig abc', ' more']))).extra, ['gpgsig abc', ' more']);
   // after the tagger fsck reads nothing (extraHeaderEntry is IGNORE), but a second object, type, tag or tagger is
   // refused like a second author (PR #7)
-  const tagAfter = (...lines) => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, ...lines]));
+  const tagAfter = (...lines) => unwrap(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`, ...lines])));
   assert.throws(() => tagAfter(`tagger ${other}`), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger' && e.msgId === 'duplicateHeader');
   assert.throws(() => tagAfter('gpgsig x', `tagger ${other}`), e => e.message === 'tag: duplicate tagger');
   assert.throws(() => tagAfter(`object ${oid(6)}`), e => e.message === 'tag: duplicate object' && e.msgId === 'duplicateHeader');
   assert.throws(() => tagAfter('type blob'), e => e.message === 'tag: duplicate type');
   assert.throws(() => tagAfter('gpgsig x', 'tag v2'), e => e.message === 'tag: duplicate tag');
   assert.deepEqual(tagAfter('objection x', 'typed y', 'tagline z').extra, ['objection x', 'typed y', 'tagline z']);
-  const tagBad = (lines, msgId, why) => throws(() => parseTag(body(lines)), 'pack_corrupt', `tag: ${msgId}: ${why}`);
+  const tagBad = (lines, msgId, why) => throws(() => unwrap(parseTag(body(lines))), 'pack_corrupt', `tag: ${msgId}: ${why}`);
   tagBad([`object ${oid(5)}`, `object ${oid(6)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingTypeEntry', "invalid format - expected 'type' line");
   tagBad([`object ${oid(5)}`, 'type commit', 'type blob', 'tag v1', `tagger ${author}`], 'missingTagEntry', "invalid format - expected 'tag' line");
   tagBad(['type commit', `object ${oid(5)}`, 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
   tagBad(['gpgsig x', `object ${oid(5)}`, 'type commit', 'tag v1', `tagger ${author}`], 'missingObject', "invalid format - expected 'object' line");
   // a tag line followed by anything but a tagger: missingTaggerEntry (INFO), so the rest is extra, but a second copy
   // of a tag header further down (a tagger git's %(tagger) would show while fsck saw none) is refused
-  assert.deepEqual(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y'])).extra, ['x y']);
-  assert.throws(() => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`])), e => e.message === 'tag: duplicate tag');
-  assert.throws(() => parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y', `tagger ${author}`])), e => e.message === 'tag: duplicate tagger');
-  assert.equal(parseTag(te.encode(`object ${oid(5)}\ntype commit\ntag \n`)).tag, '');
+  assert.deepEqual(unwrap(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y']))).extra, ['x y']);
+  assert.throws(() => unwrap(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'tag v2', `tagger ${author}`]))), e => e.message === 'tag: duplicate tag');
+  assert.throws(() => unwrap(parseTag(body([`object ${oid(5)}`, 'type commit', 'tag v1', 'x y', `tagger ${author}`]))), e => e.message === 'tag: duplicate tagger');
+  assert.equal(unwrap(parseTag(te.encode(`object ${oid(5)}\ntype commit\ntag \n`))).tag, '');
 });
 
 test('fsck_ident: every rule, in git\'s order, on every role', () => {
@@ -416,11 +417,11 @@ test('fsck_ident: every rule, in git\'s order, on every role', () => {
   const commit = (author, committer = who('+0000')) => te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${committer}\n\nm\n`);
   const tag = tagger => te.encode(`object ${tree}\ntype commit\ntag v1\ntagger ${tagger}\n\n`);
   const all = (ident, msgId, why) => {
-    throws(() => assertFetched('commit', commit(ident)), 'pack_corrupt', `commit: ${msgId}: invalid author line - ${why}`);
-    throws(() => assertFetched('commit', commit(who('+0000'), ident)), 'pack_corrupt', `commit: ${msgId}: invalid committer line - ${why}`);
-    throws(() => assertFetched('tag', tag(ident)), 'pack_corrupt', `tag: ${msgId}: invalid tagger line - ${why}`);
+    throws(() => unwrap(assertFetched('commit', commit(ident))), 'pack_corrupt', `commit: ${msgId}: invalid author line - ${why}`);
+    throws(() => unwrap(assertFetched('commit', commit(who('+0000'), ident))), 'pack_corrupt', `commit: ${msgId}: invalid committer line - ${why}`);
+    throws(() => unwrap(assertFetched('tag', tag(ident))), 'pack_corrupt', `tag: ${msgId}: invalid tagger line - ${why}`);
   };
-  const fine = ident => { assertFetched('commit', commit(ident)); assertFetched('commit', commit(who('+0000'), ident)); assertFetched('tag', tag(ident)); };
+  const fine = ident => { unwrap(assertFetched('commit', commit(ident))); unwrap(assertFetched('commit', commit(who('+0000'), ident))); unwrap(assertFetched('tag', tag(ident))); };
   for (const tz of ['+0000', '-0000', '+0530', '-1200', '+1400', '+9999', '+1560', '+2400', '+0059']) fine(who(tz));
   // fsck skips spaces and tabs before the timestamp; a timestamp of 0 is not zero-padded; any name and email bytes
   fine('A <a@b.c>  1700000000 +0000');
@@ -465,23 +466,23 @@ test('fsck_ident: every rule, in git\'s order, on every role', () => {
     Uint8Array.of(0x9e),
     te.encode('<a@b.c> 1700000000 +0000\n\nm\n'),
   ]);
-  throws(() => assertFetched('commit', glued), 'pack_corrupt', 'commit: missingSpaceBeforeEmail: invalid committer line - missing space before email');
+  throws(() => unwrap(assertFetched('commit', glued)), 'pack_corrupt', 'commit: missingSpaceBeforeEmail: invalid committer line - missing space before email');
   // commit#1000022: 0xC1 inserted into the author zone, Latin-1 "+00Á00"
   const poison = concat([
     te.encode(`tree ${tree}\nauthor A <a@b.c> 1700000000 +00`),
     Uint8Array.of(0xc1),
     te.encode('00\ncommitter A <a@b.c> 1700000000 +0000\n\nm\n'),
   ]);
-  throws(() => assertFetched('commit', poison), 'pack_corrupt', 'commit: badTimezone: invalid author line - bad time zone');
+  throws(() => unwrap(assertFetched('commit', poison)), 'pack_corrupt', 'commit: badTimezone: invalid author line - bad time zone');
   // a non-UTF-8 name is bytes git accepts
-  assertFetched('commit', concat([te.encode(`tree ${tree}\nauthor J`), Uint8Array.of(0xf6), te.encode(`rg <j@b.c> 1 +0000\ncommitter ${who('+0000')}\n\n`)]));
+  unwrap(assertFetched('commit', concat([te.encode(`tree ${tree}\nauthor J`), Uint8Array.of(0xf6), te.encode(`rg <j@b.c> 1 +0000\ncommitter ${who('+0000')}\n\n`)])));
 });
 
 test('pkt-line kinds, counters, and length errors', () => {
-  const step = chunk => pktStep(pktInit(), chunk);
+  const step = chunk => unwrap(pktStep(pktInit(), chunk));
   throws(() => step(te.encode('zzzz')), 'protocol', 'bad pkt-line length at byte 0');
   throws(() => step(te.encode('0003')), 'protocol', 'invalid pkt-line length 3');
-  const one = step(concat([te.encode('0002'), FLUSH, DELIM, pkt('ab')]));
+  const one = step(concat([te.encode('0002'), FLUSH, DELIM, unwrap(pkt('ab'))]));
   assert.deepEqual(one.frames.map(f => f.kind), ['end', 'flush', 'delim', 'data']);
   assert.equal(td.decode(one.frames[3].payload), 'ab');
   assert.equal(one.state.end, 1);
@@ -489,11 +490,11 @@ test('pkt-line kinds, counters, and length errors', () => {
   assert.equal(one.state.delim, 1);
   assert.equal(one.state.data, 1);
   assert.equal(one.state.maxPayload, 2);
-  const partial = pktStep(pktInit(), te.encode('000'));
+  const partial = unwrap(pktStep(pktInit(), te.encode('000')));
   assert.equal(partial.frames.length, 0);
-  throws(() => pktFinish(partial.state), 'protocol', 'trailing 3 bytes after last pkt-line');
-  assert.equal(pktFinish(one.state).frames, 4);
-  const longer = pktStep(one.state, pkt('abcd'));
+  throws(() => unwrap(pktFinish(partial.state)), 'protocol', 'trailing 3 bytes after last pkt-line');
+  assert.equal(unwrap(pktFinish(one.state)).frames, 4);
+  const longer = unwrap(pktStep(one.state, unwrap(pkt('abcd'))));
   assert.equal(longer.state.maxPayload, 4);
   assert.equal(longer.state.data, 2);
 });
@@ -501,7 +502,7 @@ test('pkt-line kinds, counters, and length errors', () => {
 test('pack header, ofs base, delta opcodes, and trailer', async () => {
   const blob = te.encode('hello');
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: blob }]);
-  const parsed = parsePack(pack);
+  const parsed = unwrap(parsePack(pack));
   assert.equal(parsed.stats.version, PACK_VERSION);
   assert.equal(parsed.stats.count, 1);
   assert.equal(parsed.stats.full, 1);
@@ -513,11 +514,11 @@ test('pack header, ofs base, delta opcodes, and trailer', async () => {
 
   const badSig = pack.slice();
   badSig.set(PACK_SIGNATURE.map((b, i) => (i === 0 ? b : 0)));
-  throws(() => parsePack(badSig), 'pack_corrupt', 'pack: bad signature');
+  throws(() => unwrap(parsePack(badSig)), 'pack_corrupt', 'pack: bad signature');
   const badVer = pack.slice();
   badVer[7] = 3;
-  throws(() => parsePack(badVer), 'pack_corrupt', 'pack: unsupported version 3');
-  throws(() => parsePack(pack.subarray(0, 4)), 'pack_corrupt', 'pack: bad signature');
+  throws(() => unwrap(parsePack(badVer)), 'pack_corrupt', 'pack: unsupported version 3');
+  throws(() => unwrap(parsePack(pack.subarray(0, 4))), 'pack_corrupt', 'pack: bad signature');
 
   const za = await zlibDeflate(blob);
   const ha = encodeObjHeader(TYPE.BLOB, blob.length);
@@ -534,7 +535,7 @@ test('pack header, ofs base, delta opcodes, and trailer', async () => {
   ]);
   const { Sha1 } = await import('../src/sha1.js');
   const ofsPack = concat([body, new Sha1().update(body).digest()]);
-  const ofsParsed = parsePack(ofsPack);
+  const ofsParsed = unwrap(parsePack(ofsPack));
   assert.equal(ofsParsed.stats.full, 1);
   assert.equal(ofsParsed.stats.ofsDelta, 1);
   assert.equal(ofsParsed.objects[1].baseOffset, PACK_HEADER_BYTES);
@@ -543,31 +544,31 @@ test('pack header, ofs base, delta opcodes, and trailer', async () => {
     Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1),
     hd, Uint8Array.of(1), zd,
   ]);
-  throws(() => parsePack(concat([early, new Sha1().update(early).digest()])), 'pack_corrupt', `pack: ofs delta base before pack start at ${PACK_HEADER_BYTES}`);
+  throws(() => unwrap(parsePack(concat([early, new Sha1().update(early).digest()]))), 'pack_corrupt', `pack: ofs delta base before pack start at ${PACK_HEADER_BYTES}`);
 
   const t5 = encodeObjHeader(5, blob.length);
   const badTypeBody = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), t5, za]);
-  throws(() => parsePack(concat([badTypeBody, new Sha1().update(badTypeBody).digest()])), 'pack_corrupt', `pack: bad object type 5 at ${PACK_HEADER_BYTES}`);
-  throws(() => parsePack(pack, { limits: withLimits({ maxObjectSize: blob.length - 1 }) }), 'limit_exceeded', `pack object size ${blob.length} exceeds limit ${blob.length - 1}`);
+  throws(() => unwrap(parsePack(concat([badTypeBody, new Sha1().update(badTypeBody).digest()]))), 'pack_corrupt', `pack: bad object type 5 at ${PACK_HEADER_BYTES}`);
+  throws(() => unwrap(parsePack(pack, { limits: withLimits({ maxObjectSize: blob.length - 1 }) })), 'limit_exceeded', `pack object size ${blob.length} exceeds limit ${blob.length - 1}`);
   const flipped = ofsPack.slice();
   flipped[flipped.length - 1] ^= 1;
-  assert.throws(() => parsePack(flipped), e => e.code === 'pack_corrupt' && /^pack: trailer sha mismatch [0-9a-f]{40} != [0-9a-f]{40}$/.test(e.message));
-  assert.equal(parsePack(flipped, { verify: false }).objects.length, 2);
+  assert.throws(() => unwrap(parsePack(flipped)), e => e.code === 'pack_corrupt' && /^pack: trailer sha mismatch [0-9a-f]{40} != [0-9a-f]{40}$/.test(e.message));
+  assert.equal(unwrap(parsePack(flipped, { verify: false })).objects.length, 2);
   const extra = concat([pack, Uint8Array.of(0)]);
-  assert.throws(() => parsePack(extra), /expected trailer at/);
+  assert.throws(() => unwrap(parsePack(extra)), /expected trailer at/);
 
-  assert.equal(readUint32BE(Uint8Array.of(0, 0, 1, 2), 0), 258);
-  const hdr = readObjHeader(encodeObjHeader(TYPE.BLOB, 300), 0);
+  assert.equal(unwrap(readUint32BE(Uint8Array.of(0, 0, 1, 2), 0)), 258);
+  const hdr = unwrap(readObjHeader(encodeObjHeader(TYPE.BLOB, 300), 0));
   assert.equal(hdr.type, TYPE.BLOB);
   assert.equal(hdr.size, 300);
-  const ofsHdr = readOfsDelta(Uint8Array.of(0x81, 2), 0);
+  const ofsHdr = unwrap(readOfsDelta(Uint8Array.of(0x81, 2), 0));
   assert.equal(ofsHdr.off, 258);
 
-  throws(() => applyDelta(blob, new Uint8Array(DELTA_SIZE_MIN - 1)), 'pack_corrupt', 'delta: shorter than DELTA_SIZE_MIN');
+  throws(() => unwrap(applyDelta(blob, new Uint8Array(DELTA_SIZE_MIN - 1))), 'pack_corrupt', 'delta: shorter than DELTA_SIZE_MIN');
   const four = new Uint8Array(DELTA_SIZE_MIN);
-  throws(() => applyDelta(new Uint8Array(0), four), 'pack_corrupt', 'delta: reserved opcode 0');
-  throws(() => applyDelta(te.encode('no'), delta), 'pack_corrupt', `delta: base size ${blob.length} != 2`);
-  const applied = applyDelta(blob, makeDelta(blob, other).delta);
+  throws(() => unwrap(applyDelta(new Uint8Array(0), four)), 'pack_corrupt', 'delta: reserved opcode 0');
+  throws(() => unwrap(applyDelta(te.encode('no'), delta)), 'pack_corrupt', `delta: base size ${blob.length} != 2`);
+  const applied = unwrap(applyDelta(blob, makeDelta(blob, other).delta));
   assert.deepEqual(applied.out, other);
   assert.equal(applied.ops.insert + applied.ops.copy >= 1, true);
 
@@ -577,14 +578,14 @@ test('pack header, ofs base, delta opcodes, and trailer', async () => {
     1, 0, 0, 0, 2, 0, 0,
   );
   const copyDelta = concat([encodeVarint(base.length), encodeVarint(2), op]);
-  const copied = applyDelta(base, copyDelta);
+  const copied = unwrap(applyDelta(base, copyDelta));
   assert.deepEqual([...copied.out], [8, 7]);
   assert.equal(copied.ops.copy, 1);
   assert.equal(copied.ops.copyBytes, 2);
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 5, 1)])), 'pack_corrupt', 'delta: copy out of range');
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(2, 9)])), 'pack_corrupt', 'delta: insert out of range');
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(2), Uint8Array.of(1, 1)])), 'pack_corrupt', 'delta: produced 1 != 2');
-  throws(() => applyDelta(base, makeDelta(base, base).delta, { maxResult: 0 }), 'limit_exceeded', `delta result size ${base.length} exceeds limit 0`);
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 5, 1)]))), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(2, 9)]))), 'pack_corrupt', 'delta: insert out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(2), Uint8Array.of(1, 1)]))), 'pack_corrupt', 'delta: produced 1 != 2');
+  throws(() => unwrap(applyDelta(base, makeDelta(base, base).delta, { maxResult: 0 })), 'limit_exceeded', `delta result size ${base.length} exceeds limit 0`);
   assert.ok(copyOp(1, 1)[0] & DELTA_COPY);
 });
 
@@ -604,19 +605,19 @@ test('inflate stored, fixed, dynamic, and the header checks', () => {
     out.set(bytes, 5);
     return out;
   };
-  const two = inflate(concat([stored(Uint8Array.of(1, 2), false), stored(Uint8Array.of(3), true)]), 0, { raw: true });
+  const two = unwrap(inflate(concat([stored(Uint8Array.of(1, 2), false), stored(Uint8Array.of(3), true)]), 0, { raw: true }));
   assert.deepEqual([...two.out], [1, 2, 3]);
   assert.equal(two.stats.blocks, 2);
   assert.equal(two.stats.stored, 2);
-  throws(() => inflate(Uint8Array.of(1), 0, { raw: true }), 'pack_corrupt', 'inflate: truncated stored header');
+  throws(() => unwrap(inflate(Uint8Array.of(1), 0, { raw: true })), 'pack_corrupt', 'inflate: truncated stored header');
   const badLen = stored(Uint8Array.of(1), true);
   badLen[3] ^= 1;
-  throws(() => inflate(badLen, 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
-  throws(() => inflate(Uint8Array.of(7), 0, { raw: true }), 'pack_corrupt', 'inflate: invalid block type');
-  throws(() => inflate(stored(Uint8Array.of(1, 2, 3), true).subarray(0, 6), 0, { raw: true }), 'pack_corrupt', 'inflate: truncated stored block');
+  throws(() => unwrap(inflate(badLen, 0, { raw: true })), 'pack_corrupt', 'inflate: stored length check failed');
+  throws(() => unwrap(inflate(Uint8Array.of(7), 0, { raw: true })), 'pack_corrupt', 'inflate: invalid block type');
+  throws(() => unwrap(inflate(stored(Uint8Array.of(1, 2, 3), true).subarray(0, 6), 0, { raw: true })), 'pack_corrupt', 'inflate: truncated stored block');
 
   const hello = te.encode('hello hello hello hello');
-  const fixed = inflate(new Uint8Array(zlib.deflateSync(hello)));
+  const fixed = unwrap(inflate(new Uint8Array(zlib.deflateSync(hello))));
   assert.equal(fixed.stats.fixed, 1);
   assert.equal(fixed.stats.dynamic, 0);
   assert.equal(td.decode(fixed.out), td.decode(hello));
@@ -624,31 +625,31 @@ test('inflate stored, fixed, dynamic, and the header checks', () => {
   assert.equal(fixed.stats.matches, 1);
   assert.equal(fixed.stats.maxDist, 6);
   assert.equal(fixed.stats.maxLen, 16);
-  const level0 = inflate(new Uint8Array(zlib.deflateSync(hello, { level: 0 })));
+  const level0 = unwrap(inflate(new Uint8Array(zlib.deflateSync(hello, { level: 0 }))));
   assert.equal(level0.stats.stored, 1);
   let varied = '';
   for (let i = 0; i < 4000; i++) varied += `word${i % 700} `;
-  const dynamic = inflate(new Uint8Array(zlib.deflateSync(Buffer.from(varied))));
+  const dynamic = unwrap(inflate(new Uint8Array(zlib.deflateSync(Buffer.from(varied)))));
   assert.equal(dynamic.stats.dynamic, 1);
   assert.equal(td.decode(dynamic.out), varied);
 
-  const grown = inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(10000)))));
+  const grown = unwrap(inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(10000))))));
   assert.equal(grown.out.length, 10000);
-  throws(() => inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { expectedSize: 1 }), 'pack_corrupt', 'inflate: output exceeds expected 1');
-  assert.throws(() => inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { expectedSize: hello.length + 10, maxOutput: 4 }), e => e.code === 'limit_exceeded' && e.message === `inflate: expected size ${hello.length + 10} exceeds limit 4`);
-  throws(() => inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(1000)))), 0, { maxOutput: 100 }), 'limit_exceeded', 'inflate: output exceeds limit 100');
+  throws(() => unwrap(inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { expectedSize: 1 })), 'pack_corrupt', 'inflate: output exceeds expected 1');
+  assert.throws(() => unwrap(inflate(new Uint8Array(zlib.deflateSync(hello)), 0, { expectedSize: hello.length + 10, maxOutput: 4 })), e => e.code === 'limit_exceeded' && e.message === `inflate: expected size ${hello.length + 10} exceeds limit 4`);
+  throws(() => unwrap(inflate(new Uint8Array(zlib.deflateSync(Buffer.from('a'.repeat(1000)))), 0, { maxOutput: 100 })), 'limit_exceeded', 'inflate: output exceeds limit 100');
 
-  throws(() => inflate(Uint8Array.of(0x01, 0x00)), 'pack_corrupt', 'zlib: unsupported method 1');
-  throws(() => inflate(Uint8Array.of(0x78, 0x00)), 'pack_corrupt', 'zlib: bad header check');
-  throws(() => inflate(Uint8Array.of(0x78, 0x20)), 'pack_corrupt', 'zlib: preset dictionary not supported');
+  throws(() => unwrap(inflate(Uint8Array.of(0x01, 0x00))), 'pack_corrupt', 'zlib: unsupported method 1');
+  throws(() => unwrap(inflate(Uint8Array.of(0x78, 0x00))), 'pack_corrupt', 'zlib: bad header check');
+  throws(() => unwrap(inflate(Uint8Array.of(0x78, 0x20))), 'pack_corrupt', 'zlib: preset dictionary not supported');
   const chopped = new Uint8Array(zlib.deflateSync(hello)).subarray(0, 8);
-  throws(() => inflate(chopped), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => unwrap(inflate(chopped)), 'pack_corrupt', 'inflate: unexpected end of input');
   const mismatch = new Uint8Array(zlib.deflateSync(hello));
   mismatch[mismatch.length - 1] ^= 1;
-  throws(() => inflate(mismatch), 'pack_corrupt', 'inflate: adler32 mismatch');
-  assert.equal(inflate(mismatch, 0, { verifyAdler: false }).out.length, hello.length);
+  throws(() => unwrap(inflate(mismatch)), 'pack_corrupt', 'inflate: adler32 mismatch');
+  assert.equal(unwrap(inflate(mismatch, 0, { verifyAdler: false })).out.length, hello.length);
   const rawCut = new Uint8Array(zlib.deflateRawSync(hello)).subarray(0, 1);
-  throws(() => inflate(rawCut, 0, { raw: true }), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => unwrap(inflate(rawCut, 0, { raw: true })), 'pack_corrupt', 'inflate: unexpected end of input');
 });
 
 test('v2 sections, sideband, and the single-object pack stream', async () => {
@@ -858,17 +859,17 @@ test('gitattributes lines', () => {
 test('boundaries between a thrown error and its neighbour', async () => {
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badEmail: invalid author line - bad email');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: missingNameBeforeEmail: invalid author line - missing space before email');
-  assertFetched('commit', te.encode(`tree ${tree}\nauthor  <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`));
-  throws(() => parseTree(data('100644 a', oidBytes(4))), 'pack_corrupt', 'tree: malformed entry');
-  throws(() => parseTree(data('g7 a\0', oidBytes(4))), 'pack_corrupt', 'tree: malformed mode');
-  throws(() => parseTag(te.encode('tag')), 'pack_corrupt', 'tag: unterminatedHeader: unterminated header');
-  const extra = parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\nfoo bar\n\n`));
+  throws(() => unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada >x 1 +0000\ncommitter ${author}\n\n`))), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor Ada <ada@ex 1 +0000\ncommitter ${author}\n\n`))), 'pack_corrupt', 'commit: badEmail: invalid author line - bad email');
+  throws(() => unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`))), 'pack_corrupt', 'commit: missingNameBeforeEmail: invalid author line - missing space before email');
+  unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor  <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)));
+  throws(() => unwrap(parseTree(data('100644 a', oidBytes(4)))), 'pack_corrupt', 'tree: malformed entry');
+  throws(() => unwrap(parseTree(data('g7 a\0', oidBytes(4)))), 'pack_corrupt', 'tree: malformed mode');
+  throws(() => unwrap(parseTag(te.encode('tag'))), 'pack_corrupt', 'tag: unterminatedHeader: unterminated header');
+  const extra = unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\nfoo bar\n\n`)));
   assert.equal(extra.tagger, author);
   assert.deepEqual(extra.extra, ['foo bar']);
-  throws(() => parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\ntagger second <s@ex> 1 +0000\n\n`)), 'pack_corrupt', 'tag: duplicate tagger');
+  throws(() => unwrap(parseTag(te.encode(`object ${oid(3)}\ntype commit\ntag v1\ntagger ${author}\ntagger second <s@ex> 1 +0000\n\n`))), 'pack_corrupt', 'tag: duplicate tagger');
   assert.deepEqual(parseIdent('>a <b@c> 1 +0000'), { name: '>a', email: 'b@c', time: '1', tz: '+0000' });
   assert.deepEqual(parseIdent('Ada <a@b>'), { name: 'Ada', email: 'a@b', time: null, tz: '' });
   assert.deepEqual(parseIdent('Ada <a@b> 1  +0100'), { name: 'Ada', email: 'a@b', time: '1', tz: '+0100' });
@@ -878,12 +879,12 @@ test('boundaries between a thrown error and its neighbour', async () => {
 
   const blob = te.encode('hello');
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: blob }]);
-  assert.equal(parsePack(pack, { limits: withLimits({ maxObjectSize: blob.length }) }).objects.length, 1);
+  assert.equal(unwrap(parsePack(pack, { limits: withLimits({ maxObjectSize: blob.length }) })).objects.length, 1);
   const emptyBody = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 0);
   const { Sha1 } = await import('../src/sha1.js');
   const emptyPack = concat([emptyBody, new Sha1().update(emptyBody).digest()]);
   assert.equal(emptyPack.length, PACK_HEADER_BYTES + OID_BYTES);
-  assert.equal(parsePack(emptyPack).stats.count, 0);
+  assert.equal(unwrap(parsePack(emptyPack)).stats.count, 0);
   const commitBytes = te.encode(`tree ${tree}\nauthor ${author}\ncommitter ${author}\n\n`);
   const tagBytes = te.encode(`object ${oid(3)}\ntype commit\ntag v\ntagger ${author}\n\n`);
   for (const [type, bytes] of [[TYPE.COMMIT, commitBytes], [TYPE.TAG, tagBytes], [0, blob]]) {
@@ -891,18 +892,18 @@ test('boundaries between a thrown error and its neighbour', async () => {
     const h = encodeObjHeader(type, bytes.length);
     const body = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), h, z]);
     const built = concat([body, new Sha1().update(body).digest()]);
-    if (type === 0) throws(() => parsePack(built), 'pack_corrupt', `pack: bad object type 0 at ${PACK_HEADER_BYTES}`);
-    else assert.equal(parsePack(built).stats.full, 1);
+    if (type === 0) throws(() => unwrap(parsePack(built)), 'pack_corrupt', `pack: bad object type 0 at ${PACK_HEADER_BYTES}`);
+    else assert.equal(unwrap(parsePack(built)).stats.full, 1);
   }
-  const parsed = parsePack(pack);
+  const parsed = unwrap(parsePack(pack));
   assert.ok(parsed.objects[0].headerBytes > 0 && parsed.objects[0].headerBytes < 16);
   assert.equal(parsed.stats.compressed > 0, true);
   assert.equal(parsed.stats.inflate.blocks > 0, true);
 
   const base = Uint8Array.of(1, 2, 3, 4);
   const exact = makeDelta(base, base).delta;
-  assert.deepEqual(applyDelta(base, exact, { maxResult: base.length }).out, base);
-  const inserted = applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(1, 9)]));
+  assert.deepEqual(unwrap(applyDelta(base, exact, { maxResult: base.length })).out, base);
+  const inserted = unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(1, 9)])));
   assert.equal(inserted.ops.insertBytes, 1);
 
   let sp = spInit();
@@ -964,39 +965,39 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.equal(parseFile('*.c text').length, 1);
   assert.equal(parseFile('\n*.c text')[0].pat.pattern, '*.c');
 
-  throws(() => parseTree(Uint8Array.of(0x20)), 'pack_corrupt', 'tree: malformed entry');
+  throws(() => unwrap(parseTree(Uint8Array.of(0x20))), 'pack_corrupt', 'tree: malformed entry');
   assert.deepEqual(parseIdent('a><b@c> 1 +0000'), { name: 'a>', email: 'b@c', time: '1', tz: '+0000' });
   const author = 'Ada <ada@ex> 1700000000 +0000';
   const tree = oid(1);
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`)), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
-  throws(() => assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`)), 'pack_corrupt', 'commit: missingEmail: invalid committer line - missing email');
+  throws(() => unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor ><ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`))), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor >a <ada@ex> 1700000000 +0000\ncommitter ${author}\n\n`))), 'pack_corrupt', 'commit: badName: invalid author line - bad name');
+  throws(() => unwrap(assertFetched('commit', te.encode(`tree ${tree}\nauthor ${author}\ncommitter Ada\n\n`))), 'pack_corrupt', 'commit: missingEmail: invalid committer line - missing email');
   const id = oid(3);
   const tagger = author;
-  throws(() => parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingObject: invalid format - expected 'object' line");
-  throws(() => parseTag(te.encode(`object ${id}\ntag v1\ntype blob\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingTypeEntry: invalid format - expected 'type' line");
+  throws(() => unwrap(parseTag(te.encode(`type commit\nobject ${id}\ntag v1\ntagger ${tagger}\n\n`))), 'pack_corrupt', "tag: missingObject: invalid format - expected 'object' line");
+  throws(() => unwrap(parseTag(te.encode(`object ${id}\ntag v1\ntype blob\ntagger ${tagger}\n\n`))), 'pack_corrupt', "tag: missingTypeEntry: invalid format - expected 'type' line");
 
-  const onlyDelim = pktStep(pktInit(), DELIM);
+  const onlyDelim = unwrap(pktStep(pktInit(), DELIM));
   assert.equal(onlyDelim.state.delim, 1);
   assert.equal(onlyDelim.state.end, 0);
   assert.equal(onlyDelim.state.flush, 0);
-  const onlyEnd = pktStep(pktInit(), te.encode('0002'));
+  const onlyEnd = unwrap(pktStep(pktInit(), te.encode('0002')));
   assert.equal(onlyEnd.state.end, 1);
   assert.equal(onlyEnd.state.delim, 0);
-  const first = pkt('ab');
-  throws(() => pktStep(pktStep(pktInit(), first).state, te.encode('zzzz')), 'protocol', `bad pkt-line length at byte ${first.length}`);
-  const long = pkt('abcd');
-  const afterLong = pktStep(pktInit(), long).state;
-  const shorter = pktStep(afterLong, pkt('z'));
+  const first = unwrap(pkt('ab'));
+  throws(() => unwrap(pktStep(unwrap(pktStep(pktInit(), first)).state, te.encode('zzzz'))), 'protocol', `bad pkt-line length at byte ${first.length}`);
+  const long = unwrap(pkt('abcd'));
+  const afterLong = unwrap(pktStep(pktInit(), long)).state;
+  const shorter = unwrap(pktStep(afterLong, unwrap(pkt('z'))));
   assert.equal(shorter.state.maxPayload, 4);
-  assert.equal(pktStep(pktInit(), pkt('a')).state.carry, null);
+  assert.equal(unwrap(pktStep(pktInit(), unwrap(pkt('a')))).state.carry, null);
   const partial = te.encode('000');
-  const carried = pktStep(pktInit(), partial);
+  const carried = unwrap(pktStep(pktInit(), partial));
   partial[0] = 0x31;
   assert.equal(carried.state.carry[0], 0x30);
   assert.equal(carried.state.carryMax, 3);
   const rest = te.encode('6abZ');
-  const finished = pktStep(carried.state, rest);
+  const finished = unwrap(pktStep(carried.state, rest));
   assert.equal(finished.state.carry.length, 1);
   assert.equal(finished.state.carryMax, 3);
 
@@ -1020,9 +1021,9 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
     DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_OFF4 | DELTA_COPY_LEN1,
     1, 1, 1,
   );
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), off4])), 'pack_corrupt', 'delta: copy out of range');
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(2), Uint8Array.of(DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 2, 2)])), 'pack_corrupt', 'delta: copy out of range');
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(2, 9, 9)])), 'pack_corrupt', 'delta: insert out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), off4]))), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(2), Uint8Array.of(DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 2, 2)]))), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(2, 9, 9)]))), 'pack_corrupt', 'delta: insert out of range');
 
   const one = [{ ref: 'refs/heads/a' }];
   assert.deepEqual(classifyReport([], one), { tag: 'malformed', why: 'no git unpack line first' });
@@ -1037,11 +1038,11 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   assert.deepEqual(spaced, { oid: oid(4), name: 'refs/heads/a', 'symref-target': 'b', peeled: oid(5) });
 
   const hello = te.encode('hello hello hello hello');
-  const inflated = inflate(new Uint8Array(zlib.deflateSync(hello)));
+  const inflated = unwrap(inflate(new Uint8Array(zlib.deflateSync(hello))));
   assert.ok(inflated.stats.matchBytes > 0);
   assert.equal(inflated.stats.matchBytes, 16);
   const repeated = te.encode('abcdefghijabcdefghijab');
-  const twice = inflate(new Uint8Array(zlib.deflateSync(repeated)));
+  const twice = unwrap(inflate(new Uint8Array(zlib.deflateSync(repeated))));
   assert.ok(twice.stats.maxLen >= 10);
   assert.ok(twice.stats.maxDist >= 10);
 
@@ -1049,22 +1050,22 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: blob }]);
   const shrunk = pack.slice();
   shrunk[PACK_HEADER_BYTES] = (shrunk[PACK_HEADER_BYTES] & 0xf0) | 1;
-  throws(() => parsePack(shrunk), 'pack_corrupt', 'inflate: output exceeds expected 1');
+  throws(() => unwrap(parsePack(shrunk)), 'pack_corrupt', 'inflate: output exceeds expected 1');
   const stored = new Uint8Array(zlib.deflateSync(blob, { level: 0 }));
   const header = encodeObjHeader(TYPE.BLOB, blob.length);
   const body = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), header, stored]);
   const { Sha1 } = await import('../src/sha1.js');
   const storedPack = concat([body, new Sha1().update(body).digest()]);
-  const parsed = parsePack(storedPack);
+  const parsed = unwrap(parsePack(storedPack));
   assert.equal(parsed.stats.inflate.stored, 1);
   assert.equal(parsed.stats.inflate.fixed, 0);
   assert.equal(parsed.stats.inflate.dynamic, 0);
-  const fixed = parsePack(pack);
+  const fixed = unwrap(parsePack(pack));
   assert.equal(fixed.stats.inflate.stored + fixed.stats.inflate.fixed + fixed.stats.inflate.dynamic, fixed.stats.inflate.blocks);
   let words = '';
   for (let i = 0; i < 400; i++) words += `word${i} `;
   const wordBytes = te.encode(words);
-  const wordInf = inflate(new Uint8Array(zlib.deflateSync(wordBytes)));
+  const wordInf = unwrap(inflate(new Uint8Array(zlib.deflateSync(wordBytes))));
   assert.equal(wordInf.stats.dynamic, 1);
   assert.equal(wordInf.stats.maxDist, 2819);
   assert.equal(wordInf.stats.maxLen, 9);
@@ -1073,14 +1074,14 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   const variedHeader = encodeObjHeader(TYPE.BLOB, wordBytes.length);
   const variedBody = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), variedHeader, variedZ]);
   const variedPack = concat([variedBody, new Sha1().update(variedBody).digest()]);
-  assert.equal(parsePack(variedPack).stats.inflate.dynamic, 1);
+  assert.equal(unwrap(parsePack(variedPack)).stats.inflate.dynamic, 1);
 
   assert.equal(parseLine('a text', no).pat.endsWith, false);
   assert.deepEqual(parseLine('*.c text=', no).states, [['text', '']]);
   assert.deepEqual(parseIdent('  Ada <ada@ex'), { name: 'Ada <ada@ex', email: '', time: null, tz: '' });
-  throws(() => parseTag(te.encode(`object ${id}\ntype commit\ntype blob\ntag v1\ntagger ${tagger}\n\n`)), 'pack_corrupt', "tag: missingTagEntry: invalid format - expected 'tag' line");
+  throws(() => unwrap(parseTag(te.encode(`object ${id}\ntype commit\ntype blob\ntag v1\ntagger ${tagger}\n\n`))), 'pack_corrupt', "tag: missingTagEntry: invalid format - expected 'tag' line");
 
-  throws(() => pktStep(pktInit(), te.encode('0000zzzz')), 'protocol', 'bad pkt-line length at byte 4');
+  throws(() => unwrap(pktStep(pktInit(), te.encode('0000zzzz'))), 'protocol', 'bad pkt-line length at byte 4');
   const line = s => ({ kind: 'data', payload: te.encode(s) });
   const endOnly = v2Step(v2Init(), { kind: 'end' });
   assert.equal(endOnly.state.done, false);
@@ -1101,8 +1102,8 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   const streamed = spStep(opened.state, whole.subarray(PACK_HEADER_BYTES + 1));
   assert.equal(spFinish(streamed.state).trailer.length, 40);
 
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(DELTA_COPY | DELTA_COPY_LEN1, 2)])), 'pack_corrupt', 'delta: copy out of range');
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(5), Uint8Array.of(3, 1)])), 'pack_corrupt', 'delta: insert out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(1), Uint8Array.of(DELTA_COPY | DELTA_COPY_LEN1, 2)]))), 'pack_corrupt', 'delta: copy out of range');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(5), Uint8Array.of(3, 1)]))), 'pack_corrupt', 'delta: insert out of range');
 
   throws(() => parseLsRefLine('x'.repeat(80)), 'protocol', `ls-refs: malformed line ${JSON.stringify('x'.repeat(60))}`);
   throws(() => parseLsRefLine(`${'ab'.repeat(20)}c`), 'protocol', `ls-refs: malformed line ${JSON.stringify(`${'ab'.repeat(20)}c`)}`);
@@ -1116,15 +1117,15 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
   put(0, 1);
   for (let i = 0; i < 16; i++) put(1, 1);
   const raw = Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
-  throws(() => inflate(raw, 0, { raw: true, maxOutput: 1024 }), 'pack_corrupt', 'inflate: invalid huffman code');
+  throws(() => unwrap(inflate(raw, 0, { raw: true, maxOutput: 1024 })), 'pack_corrupt', 'inflate: invalid huffman code');
 
   const helloZ = new Uint8Array(zlib.deflateSync(hello));
-  assert.equal(inflate(helloZ, 0, { expectedSize: hello.length, maxOutput: hello.length + 10 }).out.length, hello.length);
+  assert.equal(unwrap(inflate(helloZ, 0, { expectedSize: hello.length, maxOutput: hello.length + 10 })).out.length, hello.length);
   const emptyStored = Uint8Array.of(1, 0, 0, 255, 255);
-  assert.equal(inflate(emptyStored, 0, { raw: true }).out.length, 0);
+  assert.equal(unwrap(inflate(emptyStored, 0, { raw: true })).out.length, 0);
   const zhead = Uint8Array.of(0x78, 0x9c);
   const cut = concat([zhead, Uint8Array.of(1, 0, 0, 255, 255)]);
-  throws(() => inflate(cut), 'pack_corrupt', 'inflate: truncated adler32');
+  throws(() => unwrap(inflate(cut)), 'pack_corrupt', 'inflate: truncated adler32');
 });
 
 test('parser edges a symmetric or unreachable fixture left alive', async () => {
@@ -1135,12 +1136,12 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   assert.equal(parseFile('*.c text')[0].states[0][0], 'text');
   assert.equal(parseFile('\n*.c text\n*.h text').length, 2);
 
-  const carriedHex = pktStep(pktInit(), te.encode('00')).state;
-  throws(() => pktStep(carriedHex, te.encode('00zzzz')), 'protocol', 'bad pkt-line length at byte 4');
+  const carriedHex = unwrap(pktStep(pktInit(), te.encode('00'))).state;
+  throws(() => unwrap(pktStep(carriedHex, te.encode('00zzzz'))), 'protocol', 'bad pkt-line length at byte 4');
 
   const hello = te.encode('hello hello hello hello');
   const helloZ = new Uint8Array(zlib.deflateSync(hello));
-  throws(() => inflate(helloZ, 0, { expectedSize: hello.length + 10 }), 'pack_corrupt', `inflate: size ${hello.length} != expected ${hello.length + 10}`);
+  throws(() => unwrap(inflate(helloZ, 0, { expectedSize: hello.length + 10 })), 'pack_corrupt', `inflate: size ${hello.length} != expected ${hello.length + 10}`);
 
   const { Sha1 } = await import('../src/sha1.js');
   const blob = te.encode('hello-hello-hello');
@@ -1175,38 +1176,38 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   };
 
   // 11 bits: final fixed block, one literal, no end-of-block. The padded high bits of the last byte are zeros.
-  throws(() => inflate(fixed({ lit: 97 }), 0, { raw: true }), 'pack_corrupt', 'inflate: unexpected end of input');
-  throws(() => inflate(fixed({ sym: 286, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 }), 'pack_corrupt', 'inflate: bad length symbol');
-  throws(() => inflate(fixed({ sym: 257, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 }), 'pack_corrupt', 'inflate: distance too far back');
-  const overlapped = inflate(fixed({ lit: 97 }, { sym: 257, len: true, dist: 0 }, {}), 0, { raw: true });
+  throws(() => unwrap(inflate(fixed({ lit: 97 }), 0, { raw: true })), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => unwrap(inflate(fixed({ sym: 286, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 })), 'pack_corrupt', 'inflate: bad length symbol');
+  throws(() => unwrap(inflate(fixed({ sym: 257, len: true, dist: 0 }), 0, { raw: true, maxOutput: 64 })), 'pack_corrupt', 'inflate: distance too far back');
+  const overlapped = unwrap(inflate(fixed({ lit: 97 }, { sym: 257, len: true, dist: 0 }, {}), 0, { raw: true }));
   assert.deepEqual([...overlapped.out], [97, 97, 97, 97]);
-  const distances = inflate(fixed(
+  const distances = unwrap(inflate(fixed(
     ...[...'abcdef'].map(ch => ({ lit: ch.charCodeAt(0) })),
     { sym: 257, len: true, dist: 4, distExtra: 1, distExtraBits: 1 },
     { sym: 257, len: true, dist: 0 },
     {},
-  ), 0, { raw: true });
+  ), 0, { raw: true }));
   assert.equal(distances.stats.maxDist, 6);
   assert.equal(distances.out.length, 12);
 
   // One literal plus a 256-byte match is 257 bytes. The initial buffer is 256 and the limit is the exact size,
   // so growing onto the limit is legal and stopping one short of it is not.
-  const onto = inflate(fixed({ lit: 97 }, { sym: 284, len: true, extra: 29, extraBits: 5, dist: 0 }, {}), 0, { raw: true, maxOutput: 257 });
+  const onto = unwrap(inflate(fixed({ lit: 97 }, { sym: 284, len: true, extra: 29, extraBits: 5, dist: 0 }, {}), 0, { raw: true, maxOutput: 257 }));
   assert.equal(onto.out.length, 257);
   // A second match asks for more than twice the current buffer, so the growth loop has to run.
-  const grown = inflate(fixed(
+  const grown = unwrap(inflate(fixed(
     { lit: 97 },
     { sym: 284, len: true, extra: 27, extraBits: 5, dist: 0 },
     { sym: 285, len: true, dist: 0 },
     {},
-  ), 0, { raw: true });
+  ), 0, { raw: true }));
   assert.equal(grown.out.length, 513);
 
   const stored = new Uint8Array(305);
   stored[0] = 1; stored[1] = 300 & 255; stored[2] = 300 >> 8;
   const nlen = (~300) & 0xffff; stored[3] = nlen & 255; stored[4] = nlen >> 8;
   stored.fill(7, 5);
-  throws(() => inflate(stored, 0, { raw: true, maxOutput: 100 }), 'limit_exceeded', 'inflate: output exceeds limit 100');
+  throws(() => unwrap(inflate(stored, 0, { raw: true, maxOutput: 100 })), 'limit_exceeded', 'inflate: output exceeds limit 100');
 
   const dyn = (hlit, hdist) => {
     const bits = [];
@@ -1214,8 +1215,8 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     put(1, 1); put(2, 2); put(hlit, 5); put(hdist, 5); put(0, 4);
     return packBits(bits);
   };
-  throws(() => inflate(dyn(30, 0), 0, { raw: true }), 'pack_corrupt', 'inflate: bad dynamic counts');
-  throws(() => inflate(dyn(0, 30), 0, { raw: true }), 'pack_corrupt', 'inflate: bad dynamic counts');
+  throws(() => unwrap(inflate(dyn(30, 0), 0, { raw: true })), 'pack_corrupt', 'inflate: bad dynamic counts');
+  throws(() => unwrap(inflate(dyn(0, 30), 0, { raw: true })), 'pack_corrupt', 'inflate: bad dynamic counts');
 
   // Code-length symbol 16 as the first length, and symbol 18 repeated past the 258 length slots.
   const repeat = extras => {
@@ -1226,9 +1227,9 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     for (const [v, n] of extras.body) put(v, n);
     return packBits(bits);
   };
-  throws(() => inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: repeat with no previous');
-  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: repeat overflow');
-  throws(() => inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { raw: true }), 'pack_corrupt', 'inflate: no end-of-block code');
+  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat with no previous');
+  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat overflow');
+  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: no end-of-block code');
 
   // 15 data bits end on the last bit of the buffer, so one more Huffman step has nothing to read.
   const hole = [];
@@ -1239,7 +1240,7 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
   putHole(1, 1); putHole(0, 1);
   for (let i = 0; i < 15; i++) putHole(1, 1);
   assert.equal(hole.length % 8, 0);
-  throws(() => inflate(packBits(hole), 0, { raw: true, maxOutput: 32 }), 'pack_corrupt', 'inflate: invalid huffman code');
+  throws(() => unwrap(inflate(packBits(hole), 0, { raw: true, maxOutput: 32 })), 'pack_corrupt', 'inflate: invalid huffman code');
 });
 
 test('parsePack caps reject a hostile count and inflated total on the boundary', async () => {
@@ -1252,33 +1253,33 @@ test('parsePack caps reject a hostile count and inflated total on the boundary',
   const emptyPack = concat([emptyBody, new Sha1().update(emptyBody).digest()]);
   const total = blob.length + other.length;
 
-  assert.equal(parsePack(pack, { maxObjects: 1, maxInflatedTotal: blob.length }).objects.length, 1);
-  assert.equal(parsePack(emptyPack, { maxObjects: 0, maxInflatedTotal: 0 }).stats.count, 0);
-  assert.equal(parsePack(two, { maxObjects: 2, maxInflatedTotal: total }).objects.length, 2);
-  throws(() => parsePack(pack, { maxObjects: 0 }), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
-  throws(() => parsePack(two, { maxObjects: 1 }), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
-  throws(() => parsePack(pack, { maxInflatedTotal: blob.length - 1 }), 'limit_exceeded', `pack inflated bytes ${blob.length} exceeds limit ${blob.length - 1}`);
-  throws(() => parsePack(two, { maxInflatedTotal: total - 1 }), 'limit_exceeded', `pack inflated bytes ${total} exceeds limit ${total - 1}`);
+  assert.equal(unwrap(parsePack(pack, { maxObjects: 1, maxInflatedTotal: blob.length })).objects.length, 1);
+  assert.equal(unwrap(parsePack(emptyPack, { maxObjects: 0, maxInflatedTotal: 0 })).stats.count, 0);
+  assert.equal(unwrap(parsePack(two, { maxObjects: 2, maxInflatedTotal: total })).objects.length, 2);
+  throws(() => unwrap(parsePack(pack, { maxObjects: 0 })), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
+  throws(() => unwrap(parsePack(two, { maxObjects: 1 })), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
+  throws(() => unwrap(parsePack(pack, { maxInflatedTotal: blob.length - 1 })), 'limit_exceeded', `pack inflated bytes ${blob.length} exceeds limit ${blob.length - 1}`);
+  throws(() => unwrap(parsePack(two, { maxInflatedTotal: total - 1 })), 'limit_exceeded', `pack inflated bytes ${total} exceeds limit ${total - 1}`);
 
-  const zero = packParseOpts(withLimits({ maxPackObjects: 0, maxInflatedTotal: 0 }));
+  const zero = unwrap(packParseOpts(withLimits({ maxPackObjects: 0, maxInflatedTotal: 0 })));
   assert.equal(zero.maxObjects, 0);
   assert.equal(zero.maxInflatedTotal, 0);
   assert.equal(zero.limits.maxObjectSize, withLimits({}).maxObjectSize);
-  throws(() => parsePack(pack, zero), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
+  throws(() => unwrap(parsePack(pack, zero)), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
 
-  const positive = packParseOpts({ maxPackObjects: 1, maxInflatedTotal: blob.length, maxObjectSize: blob.length + blob.length });
+  const positive = unwrap(packParseOpts({ maxPackObjects: 1, maxInflatedTotal: blob.length, maxObjectSize: blob.length + blob.length }));
   assert.equal(positive.maxObjects, 1);
   assert.equal(positive.maxInflatedTotal, blob.length);
   assert.equal(positive.limits.maxObjectSize, blob.length + blob.length);
-  assert.equal(parsePack(pack, positive).objects.length, 1);
+  assert.equal(unwrap(parsePack(pack, positive)).objects.length, 1);
 
-  const open = packParseOpts();
+  const open = unwrap(packParseOpts());
   assert.equal(open.maxObjects, DEFAULT_LIMITS.maxPackObjects);
   assert.equal(open.maxInflatedTotal, DEFAULT_LIMITS.maxInflatedTotal);
-  assert.equal(parsePack(pack, open).stats.inflated, blob.length);
-  throws(() => packParseOpts({ maxObjectSize: 1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
-  throws(() => parsePack(two, { limits: withLimits({ maxPackObjects: 1 }) }), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
-  throws(() => parsePack(pack, { maxObjects: Infinity, maxInflatedTotal: blob.length }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  assert.equal(unwrap(parsePack(pack, open)).stats.inflated, blob.length);
+  throws(() => unwrap(packParseOpts({ maxObjectSize: 1 })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => unwrap(parsePack(two, { limits: withLimits({ maxPackObjects: 1 }) })), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
+  throws(() => unwrap(parsePack(pack, { maxObjects: Infinity, maxInflatedTotal: blob.length })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
 });
 
 function huffCodes(h) {
@@ -1307,10 +1308,10 @@ test('every DEFAULT_LIMITS key is read outside limits.js', () => {
   assert.equal(DEFAULT_LIMITS.maxReportLines, DEFAULT_LIMITS.maxRefs);
   assert.equal(DEFAULT_LIMITS.maxCommitParents, DEFAULT_LIMITS.maxRefs);
   assert.equal(DEFAULT_LIMITS.maxRebaseCommits, DEFAULT_LIMITS.maxRefs);
-  throws(() => finiteLimit(Infinity, 'maxObjectSize'), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
-  throws(() => finiteLimit(-1, 'maxObjectSize'), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
-  throws(() => requireLimit({}, 'maxInflatedTotal'), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
-  assert.equal(requireLimit({ maxObjectSize: 0 }, 'maxObjectSize'), 0);
+  throws(() => unwrap(checkLimit(Infinity, 'maxObjectSize')), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => unwrap(checkLimit(-1, 'maxObjectSize')), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => unwrap(readLimit({}, 'maxInflatedTotal')), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  assert.equal(unwrap(readLimit({ maxObjectSize: 0 }, 'maxObjectSize')), 0);
 });
 
 test('aggregate caps fail closed before allocation', async () => {
@@ -1318,31 +1319,31 @@ test('aggregate caps fail closed before allocation', async () => {
   hostile.set(PACK_SIGNATURE);
   new DataView(hostile.buffer).setUint32(4, PACK_VERSION);
   new DataView(hostile.buffer).setUint32(8, DEFAULT_LIMITS.maxPackObjects + 1);
-  throws(() => parsePack(hostile), 'limit_exceeded', `pack objects ${DEFAULT_LIMITS.maxPackObjects + 1} exceeds limit ${DEFAULT_LIMITS.maxPackObjects}`);
+  throws(() => unwrap(parsePack(hostile)), 'limit_exceeded', `pack objects ${DEFAULT_LIMITS.maxPackObjects + 1} exceeds limit ${DEFAULT_LIMITS.maxPackObjects}`);
 
   const hello = te.encode('hi');
   const zhello = new Uint8Array(zlib.deflateSync(hello));
-  throws(() => inflate(zhello, 0, { expectedSize: DEFAULT_LIMITS.maxObjectSize + 1 }), 'limit_exceeded', `inflate: expected size ${DEFAULT_LIMITS.maxObjectSize + 1} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
-  throws(() => inflate(zhello, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => unwrap(inflate(zhello, 0, { expectedSize: DEFAULT_LIMITS.maxObjectSize + 1 })), 'limit_exceeded', `inflate: expected size ${DEFAULT_LIMITS.maxObjectSize + 1} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
+  throws(() => unwrap(inflate(zhello, 0, { maxOutput: Infinity })), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
 
-  const twoEntries = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]);
-  assert.equal(parseTree(twoEntries, { maxTreeEntries: 2 }).length, 2);
-  throws(() => parseTree(twoEntries, { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  const twoEntries = unwrap(encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }, { mode: '100644', name: 'b', oid: oid(2) }]));
+  assert.equal(unwrap(parseTree(twoEntries, { maxTreeEntries: 2 })).length, 2);
+  throws(() => unwrap(parseTree(twoEntries, { maxTreeEntries: 1 })), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
   // Longer than one minimum frame, one entry: the byte hint must not treat it as past the cap.
   const longName = 'n'.repeat(40);
-  const wideTree = encodeTree([{ mode: '100644', name: longName, oid: oid(1) }]);
-  const underCap = parseTree(wideTree, { maxTreeEntries: 1 });
+  const wideTree = unwrap(encodeTree([{ mode: '100644', name: longName, oid: oid(1) }]));
+  const underCap = unwrap(parseTree(wideTree, { maxTreeEntries: 1 }));
   assert.equal(underCap.length, 1);
   assert.equal(underCap[0].name, longName);
-  throws(() => parseTree(twoEntries, {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  throws(() => unwrap(parseTree(twoEntries, {})), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
 
   const tree = oid(1);
   const who = 'A <a@b.c> 1 +0000';
   const parents = [oid(2), oid(3)];
   const commit = te.encode(`tree ${tree}\n${parents.map(p => `parent ${p}`).join('\n')}\nauthor ${who}\ncommitter ${who}\n\nm\n`);
-  assert.equal(parseCommit(commit, { maxCommitParents: 2 }).parents.length, 2);
-  throws(() => parseCommit(commit, { maxCommitParents: 1 }), 'limit_exceeded', 'commit parents 2 exceeds limit 1');
-  throws(() => parseCommit(commit, {}), 'bad_request', 'limits.maxCommitParents must be a finite non-negative number');
+  assert.equal(unwrap(parseCommit(commit, { maxCommitParents: 2 })).parents.length, 2);
+  throws(() => unwrap(parseCommit(commit, { maxCommitParents: 1 })), 'limit_exceeded', 'commit parents 2 exceeds limit 1');
+  throws(() => unwrap(parseCommit(commit, {})), 'bad_request', 'limits.maxCommitParents must be a finite non-negative number');
 
   const line = s => ({ kind: 'data', payload: te.encode(s) });
   throws(() => v2Step({ ...v2Init(), limits: {} }, line('packfile')), 'bad_request', 'limits.maxSectionLines must be a finite non-negative number');
@@ -1374,35 +1375,35 @@ test('aggregate caps fail closed before allocation', async () => {
     { type: TYPE.BLOB, data: delta, baseOid },
     { type: TYPE.BLOB, data: base },
   ]);
-  const parsed = parsePack(pack);
-  assert.equal(resolvePack(parsed).stats.baseLookups, 3);
-  assert.throws(() => resolvePack(parsed, undefined, withLimits({ maxInflatedTotal: parsed.stats.inflated + te.encode('abXY').length })), e => e.code === 'limit_exceeded');
-  throws(() => applyDelta(base, makeDelta(base, base).delta, { maxResult: Infinity }), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
+  const parsed = unwrap(parsePack(pack));
+  assert.equal(unwrap(resolvePack(parsed)).stats.baseLookups, 3);
+  assert.throws(() => unwrap(resolvePack(parsed, undefined, withLimits({ maxInflatedTotal: parsed.stats.inflated + te.encode('abXY').length }))), e => e.code === 'limit_exceeded');
+  throws(() => unwrap(applyDelta(base, makeDelta(base, base).delta, { maxResult: Infinity })), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
 });
 
 test('idents are branded, wire fields reject breaks, atomic split is ambiguous, ls-refs needs a flush', async () => {
-  const person = validateIdent({ name: 'A', email: 'a@b.c', time: 1 });
+  const person = unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 1 }));
   assert.equal(isValidatedIdent(person), true);
   assert.equal(person.tz, '+0000');
-  assert.equal(ident(person), 'A <a@b.c> 1 +0000');
-  throws(() => ident({ name: 'A', email: 'a@b.c', time: 1, tz: '+0000' }), 'bad_request', 'ident: unvalidated identity');
-  throws(() => ident({ ...person }), 'bad_request', 'ident: unvalidated identity');
-  for (const tz of ['+0000', '-0000', '+0530', '-0530', '+0059', '+1400', '-1200']) validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz });
+  assert.equal(unwrap(ident(person)), 'A <a@b.c> 1 +0000');
+  throws(() => unwrap(ident({ name: 'A', email: 'a@b.c', time: 1, tz: '+0000' })), 'bad_request', 'ident: unvalidated identity');
+  throws(() => unwrap(ident({ ...person })), 'bad_request', 'ident: unvalidated identity');
+  for (const tz of ['+0000', '-0000', '+0530', '-0530', '+0059', '+1400', '-1200']) unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz }));
   for (const tz of ['+1401', '-1230', '+9999', '+1560', '+2400', '0000', '+000', '+00000']) {
-    assert.throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz }), e => e.code === 'bad_request' && e.what === 'tz', tz);
+    assert.throws(() => unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz })), e => e.code === 'bad_request' && e.what === 'tz', tz);
   }
-  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: -1 }), 'bad_request', 'invalid time: must be a non-negative safe integer');
-  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: 1.5 }), 'bad_request', 'invalid time: must be a non-negative safe integer');
-  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: '1700000000' }), 'bad_request', 'invalid time: must be a non-negative safe integer');
-  throws(() => validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz: '+0000\nparent x' }), 'bad_request', 'invalid tz: must be a sign and four digits');
+  throws(() => unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: -1 })), 'bad_request', 'invalid time: must be a non-negative safe integer');
+  throws(() => unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 1.5 })), 'bad_request', 'invalid time: must be a non-negative safe integer');
+  throws(() => unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: '1700000000' })), 'bad_request', 'invalid time: must be a non-negative safe integer');
+  throws(() => unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 0, tz: '+0000\nparent x' })), 'bad_request', 'invalid tz: must be a sign and four digits');
 
   const tree = oid(1);
-  throws(() => encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', committer: 'y\nparent x <a@b.c> 1 +0000' }), 'bad_request', 'committer must not contain NUL or newline');
-  throws(() => encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\0b' }), 'bad_request', 'message must not contain NUL');
-  assert.ok(encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\nb\n' }).byteLength > 0);
-  throws(() => encodeTag({ object: tree, type: 'commit', tag: 'v\n1', tagger: 'A <a@b.c> 1 +0000' }), 'bad_request', 'tag must not contain NUL or newline');
+  throws(() => unwrap(encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', committer: 'y\nparent x <a@b.c> 1 +0000' })), 'bad_request', 'committer must not contain NUL or newline');
+  throws(() => unwrap(encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\0b' })), 'bad_request', 'message must not contain NUL');
+  assert.ok(unwrap(encodeCommit({ tree, author: 'A <a@b.c> 1 +0000', message: 'a\nb\n' })).byteLength > 0);
+  throws(() => unwrap(encodeTag({ object: tree, type: 'commit', tag: 'v\n1', tagger: 'A <a@b.c> 1 +0000' })), 'bad_request', 'tag must not contain NUL or newline');
   // encodeTag refuses what git hash-object -t tag refuses (fsck_tag_standalone), as a bad request (issue #103)
-  const tagOf = f => encodeTag({ object: tree, type: 'commit', tag: 'v1', tagger: 'A <a@b.c> 1 +0000', message: 'm\n', ...f });
+  const tagOf = f => unwrap(encodeTag({ object: tree, type: 'commit', tag: 'v1', tagger: 'A <a@b.c> 1 +0000', message: 'm\n', ...f }));
   assert.equal(td.decode(tagOf({})), `object ${tree}\ntype commit\ntag v1\ntagger A <a@b.c> 1 +0000\n\nm\n`);
   assert.equal(td.decode(tagOf({ tag: 'release/v1', message: null, extra: ['x y'] })), `object ${tree}\ntype commit\ntag release/v1\ntagger A <a@b.c> 1 +0000\nx y\n`);
   for (const tag of ['', 'v 1', 'a..b', 'v1.lock', 'v1/', 'v*']) throws(() => tagOf({ tag }), 'bad_request', "tag: badTagName: invalid 'tag' name");
@@ -1440,7 +1441,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const odd = [te.encode(`${oid(1)} refs/heads/x\ufeff\n`), te.encode(`${oid(2)} refs/heads/y\u00a0\n`), Uint8Array.from([...te.encode(`${oid(3)} refs/heads/`), 0xe9, 0x0a]), Uint8Array.from([...te.encode(`${oid(5)} refs/heads/`), 0xe8, 0x0a]), te.encode(`${oid(6)} refs/heads/cr\r\n`)];
   const oddRefs = (await lsRefs(framesOf([...odd.map(payload => ({ kind: 'data', payload })), { kind: 'flush' }]))).refs;
   assert.deepEqual([...oddRefs.keys()], ['refs/heads/x\ufeff', 'refs/heads/y\u00a0', 'refs/heads/\udce9', 'refs/heads/\udce8', 'refs/heads/cr\r']);
-  assert.deepEqual(pkt('refs/heads/\udce9'), Uint8Array.from([...te.encode('0010refs/heads/'), 0xe9]));
+  assert.deepEqual(unwrap(pkt('refs/heads/\udce9')), Uint8Array.from([...te.encode('0010refs/heads/'), 0xe9]));
   await assert.rejects(lsRefs(framesOf([]), ['refs/heads/a\nb']), e => e.code === 'bad_request' && e.what === 'ref prefix');
   const payload = te.encode(refLine);
   await assert.rejects(lsRefs({ ...framesOf([{ kind: 'data', payload }, { kind: 'flush' }]), limits: withLimits({ maxLsRefsBytes: payload.length - 1 }) }), e => e.code === 'limit_exceeded' && e.what === 'ls-refs bytes');
@@ -1478,7 +1479,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   assert.equal((await lsRefs(noReader.t)).unborn, null);
   assert.doesNotMatch(noReader.sent[0], /unborn/);
   // the public lsRefs: unborn is sent only when the advertisement lists ls-refs=unborn (and only when asked)
-  const adv = feature => concat([pkt('version 2\n'), pkt('agent=git/2.50.0\n'), pkt(`ls-refs${feature}\n`), pkt('fetch=filter\n'), pkt('object-format=sha1\n'), FLUSH]);
+  const adv = feature => concat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=git/2.50.0\n')), unwrap(pkt(`ls-refs${feature}\n`)), unwrap(pkt('fetch=filter\n')), unwrap(pkt('object-format=sha1\n')), FLUSH]);
   for (const [feature, asked, sends] of [['=unborn', true, true], ['', true, false], ['=other', true, false], ['=unborn', false, false]]) {
     const r = recording(listing, adv(feature));
     const res = await lsRefsAsked(r.t, [], asked ? { unborn: true } : {});
@@ -1563,9 +1564,9 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
 
 test('encodeTree duplicate names and the pre-send push size refusal (issue #11)', async () => {
   const blob = oid(1), dir = oid(2);
-  throws(() => encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a', oid: blob }]), 'bad_request', 'tree: duplicate entry "a"');
-  throws(() => encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a.b', oid: blob }, { mode: '40000', name: 'a', oid: dir }]), 'bad_request', 'tree: duplicate entry "a"');
-  assert.equal(encodeTree([{ mode: '100644', name: 'README', oid: blob }, { mode: '100644', name: 'readme', oid: blob }]).length, 2 * (OID_BYTES + 'README'.length + '100644 \0'.length), 'case-only twins are two names');
+  throws(() => unwrap(encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a', oid: blob }])), 'bad_request', 'tree: duplicate entry "a"');
+  throws(() => unwrap(encodeTree([{ mode: '100644', name: 'a', oid: blob }, { mode: '100644', name: 'a.b', oid: blob }, { mode: '40000', name: 'a', oid: dir }])), 'bad_request', 'tree: duplicate entry "a"');
+  assert.equal(unwrap(encodeTree([{ mode: '100644', name: 'README', oid: blob }, { mode: '100644', name: 'readme', oid: blob }])).length, 2 * (OID_BYTES + 'README'.length + '100644 \0'.length), 'case-only twins are two names');
   let sent = 0;
   const t = { limits: withLimits({ maxPackBytes: 40 }), tracer: tracerStub, parent: null, async *frames() { sent++; for (const f of []) yield f; } };
   const objects = [{ type: TYPE.BLOB, data: te.encode('x'.repeat(64)) }];
@@ -1579,20 +1580,20 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
 test('size varints stop at 64 bits: a header that never ends is pack_corrupt at its 11th byte, never a NaN size (#13)', () => {
   const ones = n => new Uint8Array(n).fill(0x80);
   // ten bytes is the longest legal object header (4 + 9 × 7 bits), and every size it can carry is finite
-  assert.deepEqual(readObjHeader(concat([Uint8Array.of(0xb0), ones(8), Uint8Array.of(0)]), 0), { type: TYPE.BLOB, size: 0, next: 10 });
-  assert.ok(Number.isFinite(readObjHeader(concat([Uint8Array.of(0xbf), new Uint8Array(8).fill(0xff), Uint8Array.of(0x7f)]), 0).size));
-  throws(() => readObjHeader(concat([Uint8Array.of(0xb0), ones(9), Uint8Array.of(0)]), 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  assert.deepEqual(unwrap(readObjHeader(concat([Uint8Array.of(0xb0), ones(8), Uint8Array.of(0)]), 0)), { type: TYPE.BLOB, size: 0, next: 10 });
+  assert.ok(Number.isFinite(unwrap(readObjHeader(concat([Uint8Array.of(0xbf), new Uint8Array(8).fill(0xff), Uint8Array.of(0x7f)]), 0)).size));
+  throws(() => unwrap(readObjHeader(concat([Uint8Array.of(0xb0), ones(9), Uint8Array.of(0)]), 0)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   // the probe: 200 continuation bytes used to decode to NaN, which every `size > limit` check lets through
-  throws(() => readObjHeader(concat([Uint8Array.of(0xb0), ones(200), Uint8Array.of(0)]), 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
-  throws(() => parsePack(concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0), ones(200), new Uint8Array(40)])), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  throws(() => unwrap(readObjHeader(concat([Uint8Array.of(0xb0), ones(200), Uint8Array.of(0)]), 0)), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  throws(() => unwrap(parsePack(concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0), ones(200), new Uint8Array(40)]))), 'pack_corrupt', 'pack: size varint longer than 64 bits');
 
   // a delta size may take ten groups (bits 0..69); the tenth starts at bit 63, the eleventh is refused
-  assert.deepEqual([...applyDelta(new Uint8Array(0), concat([ones(9), Uint8Array.of(0, 1, 1, 0x41)])).out], [0x41]);
-  assert.throws(() => applyDelta(new Uint8Array(0), concat([Uint8Array.of(0), new Uint8Array(9).fill(0xff), Uint8Array.of(1, 1, 0x41)])), e => e.code === 'limit_exceeded' && /^delta result size \d+ exceeds limit/.test(e.message));
-  throws(() => applyDelta(new Uint8Array(0), concat([ones(10), Uint8Array.of(0, 1, 1, 0x41)])), 'pack_corrupt', 'delta: size varint longer than 64 bits');
+  assert.deepEqual([...unwrap(applyDelta(new Uint8Array(0), concat([ones(9), Uint8Array.of(0, 1, 1, 0x41)]))).out], [0x41]);
+  assert.throws(() => unwrap(applyDelta(new Uint8Array(0), concat([Uint8Array.of(0), new Uint8Array(9).fill(0xff), Uint8Array.of(1, 1, 0x41)]))), e => e.code === 'limit_exceeded' && /^delta result size \d+ exceeds limit/.test(e.message));
+  throws(() => unwrap(applyDelta(new Uint8Array(0), concat([ones(10), Uint8Array.of(0, 1, 1, 0x41)]))), 'pack_corrupt', 'delta: size varint longer than 64 bits');
   // the probe: an over-long result size was NaN; NaN passed the limit, and the copy ended in an untyped RangeError
   const base = Uint8Array.of(9, 8, 7);
-  throws(() => applyDelta(base, concat([encodeVarint(base.length), ones(200), Uint8Array.of(0, DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 0, 3)])), 'pack_corrupt', 'delta: size varint longer than 64 bits');
+  throws(() => unwrap(applyDelta(base, concat([encodeVarint(base.length), ones(200), Uint8Array.of(0, DELTA_COPY | DELTA_COPY_OFF1 | DELTA_COPY_LEN1, 0, 3)]))), 'pack_corrupt', 'delta: size varint longer than 64 bits');
 
   // the streamed single-object parser: its header phase holds ≤ 21 bytes, for every caller (fetchSingle, edit, read, checkout)
   const packHead = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1, 0xb0);
@@ -1639,16 +1640,16 @@ test('zlib stream length is bounded by the declared size: inflate (both checks),
   // inflate, end check: consumed > bound is pack_corrupt even though every block started inside the bound (at 2, 7, 12 ≤ 26).
   // `pos` is non-zero so the consumed count is measured from the stream's start, not the buffer's.
   const junk = new Uint8Array(7).fill(0xee);
-  const ok = inflate(concat([junk, exact]), junk.length, { expectedSize: 10 });
+  const ok = unwrap(inflate(concat([junk, exact]), junk.length, { expectedSize: 10 }));
   assert.equal(ok.consumed, 26); assert.deepEqual([...ok.out], [...ten]);
-  throws(() => inflate(concat([junk, over]), junk.length, { expectedSize: 10 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 26 for 10 bytes)');
+  throws(() => unwrap(inflate(concat([junk, over]), junk.length, { expectedSize: 10 })), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 26 for 10 bytes)');
   // without an expected size the output cap stands in for the declared size: zlibBound(14) = 30 < 31 = zlibBound(15)
-  throws(() => inflate(over, 0, { maxOutput: 14 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 30 for 14 bytes)');
-  assert.equal(inflate(over, 0, { maxOutput: 15 }).consumed, 31);
+  throws(() => unwrap(inflate(over, 0, { maxOutput: 14 })), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (31 > 30 for 14 bytes)');
+  assert.equal(unwrap(inflate(over, 0, { maxOutput: 15 })).consumed, 31);
   // an expected size of 0 is a size, not an absent one: zlibBound(0) = 13 (zlib's own empty stream is 8 bytes; a stored one 11)
   const empty = new Uint8Array(0);
-  assert.equal(inflate(streamOf(empty, 0), 0, { expectedSize: 0 }).consumed, 11);
-  throws(() => inflate(streamOf(empty, 1), 0, { expectedSize: 0 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (16 > 13 for 0 bytes)');
+  assert.equal(unwrap(inflate(streamOf(empty, 0), 0, { expectedSize: 0 })).consumed, 11);
+  throws(() => unwrap(inflate(streamOf(empty, 1), 0, { expectedSize: 0 })), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (16 > 13 for 0 bytes)');
 
   // inflate, block-start check (what ends an endless stream): zlibBound(2) = 17 and block boundaries fall at 2, 7, 12, 17, 22.
   // A stream cut at 17 is still "unexpected end" (17 is not past the bound); one cut at 22 is refused as too long before the
@@ -1656,17 +1657,17 @@ test('zlib stream length is bounded by the declared size: inflate (both checks),
   const two = te.encode('ab');
   assert.equal(zlibBound(2), 17);
   const blocks = k => concat([Uint8Array.of(0x78, 0x01), ...emptyBlocks(k)]);
-  throws(() => inflate(concat([junk, blocks(3)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: unexpected end of input');
-  throws(() => inflate(concat([junk, blocks(4)]), junk.length, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
-  assert.equal(inflate(streamOf(two, 0), 0, { expectedSize: 2 }).consumed, 13);
-  throws(() => inflate(streamOf(two, 1), 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (18 > 17 for 2 bytes)');
+  throws(() => unwrap(inflate(concat([junk, blocks(3)]), junk.length, { expectedSize: 2 })), 'pack_corrupt', 'inflate: unexpected end of input');
+  throws(() => unwrap(inflate(concat([junk, blocks(4)]), junk.length, { expectedSize: 2 })), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  assert.equal(unwrap(inflate(streamOf(two, 0), 0, { expectedSize: 2 })).consumed, 13);
+  throws(() => unwrap(inflate(streamOf(two, 1), 0, { expectedSize: 2 })), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (18 > 17 for 2 bytes)');
   const mib = new Uint8Array(1 << 20); mib.set([0x78, 0x01]); for (let i = 2; i + 5 <= mib.length; i += 5) mib.set([0, 0, 0, 0xff, 0xff], i);
   const t0 = performance.now();
-  throws(() => inflate(mib, 0, { expectedSize: 2 }), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  throws(() => unwrap(inflate(mib, 0, { expectedSize: 2 })), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
   assert.ok(performance.now() - t0 < 100, 'the endless stream was walked, not refused');
   // parsePack (the buffered path) takes the same refusal through inflate for the first object
   const hostile = concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), encodeObjHeader(TYPE.BLOB, 2), blocks(20), new Uint8Array(20)]);
-  throws(() => parsePack(hostile), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
+  throws(() => unwrap(parsePack(hostile)), 'pack_corrupt', 'inflate: zlib stream longer than its declared size allows (22 > 17 for 2 bytes)');
 
   // spStep: the streamed body is refused on the byte that takes the zlib bytes (the body minus the 20-byte trailer lag) past
   // the bound. The message carries no byte count, so it is the same whatever the chunking (I10, props.test.js).
@@ -1715,7 +1716,7 @@ test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of pack
 test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const band = sidebandFrame;
   const del = [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }];
-  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), pkt('unpack ok\n'), pkt('ok refs/heads/a\n'), FLUSH]) };
+  const report = { kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), unwrap(pkt('unpack ok\n')), unwrap(pkt('ok refs/heads/a\n')), FLUSH]) };
   const fl = [band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }];
   const total = fl.reduce((n, f) => n + (f.payload?.length ?? 0), 0);
   const pushT = (frames, max) => ({ limits: withLimits({ maxPackBytes: max }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
@@ -1838,7 +1839,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
   let adverts = 0;
   const advertised = advertCaps => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async advertise() { adverts++; return concat([pkt(`${oid(1)} refs/heads/a\0${advertCaps}\n`), FLUSH]); },
+    async advertise() { adverts++; return concat([unwrap(pkt(`${oid(1)} refs/heads/a\0${advertCaps}\n`)), FLUSH]); },
     async *frames() { yield { kind: 'data', payload: te.encode('unpack ok\n') }; yield { kind: 'data', payload: te.encode('ok refs/heads/a\n') }; yield { kind: 'flush' }; } });
   const del1 = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: false };
   assert.equal((await pushWithOptions(advertised('report-status'), del1)).report.tag, 'statuses'); assert.equal(adverts, 0);
@@ -1884,7 +1885,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   // through push(): the error a caller sees
   const sb = (...frames) => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null, async *frames() { for (const f of frames) yield f === null ? { kind: 'flush' } : { kind: 'data', payload: f }; } });
   const band = (b, ...parts) => data(Uint8Array.of(b), ...parts);
-  const report = (...lines) => band(1, ...lines.map(l => pkt(l)), FLUSH);
+  const report = (...lines) => band(1, ...lines.map(l => unwrap(pkt(l))), FLUSH);
   const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
   await assert.rejects(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
   await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
@@ -1904,10 +1905,10 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
 // want of the empty tree answers it; ls-refs from `t.refs`; receive-pack answers every command `ok` and moves the ref
 // (the pack is not inspected) — enough for mergeBase and rebaseBranch. Ported from research/18 (7b21380).
 function graphServer(edges) {
-  const author = ident(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }));
+  const author = unwrap(ident(unwrap(validateIdent({ name: 'g', email: 'g@x', time: 1700000000 }))));
   const tree = hashObject('tree', new Uint8Array(0));
   const oids = new Map(), datas = new Map();
-  const build = name => { if (oids.has(name)) return oids.get(name); const d = encodeCommit({ tree, parents: edges[name].map(build), author, committer: author, message: `${name}\n` }); const o = hashObject('commit', d); oids.set(name, o); datas.set(o, d); return o; };
+  const build = name => { if (oids.has(name)) return oids.get(name); const d = unwrap(encodeCommit({ tree, parents: edges[name].map(build), author, committer: author, message: `${name}\n` })); const o = hashObject('commit', d); oids.set(name, o); datas.set(o, d); return o; };
   for (const name of Object.keys(edges)) build(name);
   const parentsOf = new Map([...oids].map(([name, o]) => [o, edges[name].map(n => oids.get(n))]));
   const requests = [];
@@ -1917,7 +1918,7 @@ function graphServer(edges) {
     async *frames(service, body) {
       // the pkt-lines up to the first flush (a receive-pack body carries the raw pack after it)
       const lines = []; for (let p = 0; p + 4 <= body.length;) { const n = parseInt(td.decode(body.subarray(p, p + 4)), 16); if (n === 0) break; if (n > 1) lines.push(td.decode(body.subarray(p + 4, p + n)).replace(/\n$/, '')); p += Math.max(n, 4); }
-      if (service === 'git-receive-pack') { yield sideband(pkt('unpack ok\n')); for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield sideband(pkt(`ok ${m[2]}\n`)); } } yield sideband(FLUSH); yield { kind: 'flush' }; return; } // git's shape: the report's flush inside band 1, then the outer flush (I36)
+      if (service === 'git-receive-pack') { yield sideband(unwrap(pkt('unpack ok\n'))); for (const l of lines) { const m = /^[0-9a-f]{40} ([0-9a-f]{40}) ([^\0 ]+)/.exec(l); if (m) { t.refs.set(m[2], m[1]); yield sideband(unwrap(pkt(`ok ${m[2]}\n`))); } } yield sideband(FLUSH); yield { kind: 'flush' }; return; } // git's shape: the report's flush inside band 1, then the outer flush (I36)
       if (lines[0] === 'command=ls-refs') { const prefixes = lines.filter(l => l.startsWith('ref-prefix ')).map(l => l.slice(11)); for (const [ref, o] of t.refs) if (prefixes.some(p => ref.startsWith(p))) yield line(`${o} ${ref}\n`); yield { kind: 'flush' }; return; }
       const want = lines.find(l => l.startsWith('want '))?.slice(5), deepen = +(lines.find(l => l.startsWith('deepen '))?.slice(7) ?? 0);
       const filter = lines.find(l => l.startsWith('filter '))?.slice(7) ?? null;
@@ -2076,7 +2077,7 @@ test('recordResponseHeaders: a non-list, more than 8 names, or a name outside th
 });
 
 test('validatePushRef: receive-pack\'s funny refname (the cells test/space/refname.test.js observes from git)', () => {
-  const ok = (ref, del) => { try { return validatePushRef(ref, del) === ref; } catch (e) { assert.equal(e.code, 'bad_request'); assert.equal(e.what, 'ref'); return false; } };
+  const ok = (ref, del) => { try { return unwrap(validatePushRef(ref, del)) === ref; } catch (e) { assert.equal(e.code, 'bad_request'); assert.equal(e.what, 'ref'); return false; } };
   // [ref, create accepted, delete accepted]: git v2.50.0 receive-pack's answers (the space's cells; a..b and a name outside refs/ by receive-pack.c:1477)
   for (const [ref, create, del] of [['refs/a', false, true], ['refs/@', false, false], ['refs/@a', false, true], ['refs/-a', false, true],
     ['refs/a/b', true, true], ['refs/@/a', true, true], ['refs/a/@', true, true], ['refs/heads/x', true, true], ['refs/a/b/c', true, true], ['refs/a..b/c', false, false], ['heads/a/b', false, false]]) {

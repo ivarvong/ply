@@ -8,7 +8,7 @@ import type { FetchOpts, PackObject, V2State } from './fetch.js';
 import type { Input } from './absent.js';
 import { concat } from './bytes.js';
 import { TYPE, TYPE_NAME } from './objects.js';
-import { parsePackResult, resolvePackResult, packParseOpts } from './packresolve.js';
+import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import type { ParsedPack, ResolvedPack } from './packresolve.js';
 import { coded, clientSpan } from './transport.js';
 import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs, stampCacheStatus } from './fetch.js';
@@ -55,7 +55,7 @@ const typeAttr = (type: number): unknown => Reflect.get(TYPE_NAME, type);
 type Acks = Pick<FetchPackResult, 'acks' | 'nak' | 'ready' | 'shallow' | 'unshallow'>;
 // The received pack, parsed (one span event per object), resolved when asked, and checked.
 function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: FetchPackConfig, acks: Acks, span: Span): Result<FetchPackResult, PlyError> {
-  const read = parsePackResult(buf, packParseOpts(t.limits));
+  const read = parsePack(buf, orThrow(packParseOpts(t.limits)));
   if (!read.ok) return read;
   const parsed = read.value;
   for (const o of parsed.objects) span.event('git.pack.object', {
@@ -66,7 +66,7 @@ function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: F
   });
   let resolved: Resolved | null = null;
   if (resolve) {
-    const r = resolvePackResult(parsed, external, t.limits);
+    const r = resolvePack(parsed, external, t.limits);
     if (!r.ok) return r;
     resolved = r.value;
   }

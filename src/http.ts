@@ -12,7 +12,7 @@ import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
 import { fail, orThrow, thrown } from './errors.js';
-import { pktInit, pktStepResult, pktFinishResult, pktAttrs } from './pktline.js';
+import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
@@ -85,7 +85,7 @@ function recordedHeaderAttrs(res: Response, names: readonly string[], scrub: Scr
 }
 
 // A header field the caller gave (null: none given) is one line. validateWire (validate.ts) throws until its cluster converts.
-const headerField = (value: string | null, what: string): void => { if (value !== null) validateWire(value, what); };
+const headerField = (value: string | null, what: string): void => { if (value !== null) orThrow(validateWire(value, what)); };
 
 // URL userinfo → the bytes git sends for it (git 2.50, measured against http-backend behind Basic auth), as a byte
 // string `btoa` takes as is: `%XX` is that byte (`%FF` → 0xFF, UTF-8 as its bytes), anything else as written (`%ZZ`
@@ -538,8 +538,8 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): H
     kind: 'http', get url(): string { return base; }, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
       let st: PktState = pktInit();
-      for await (const chunk of post(service, body, span, hints)) { const r = orThrow(pktStepResult(st, chunk)); st = r.state; yield* r.frames; }
-      orThrow(pktFinishResult(st));
+      for await (const chunk of post(service, body, span, hints)) { const r = orThrow(pktStep(st, chunk)); st = r.state; yield* r.frames; }
+      orThrow(pktFinish(st));
       span.set(pktAttrs(st));
     },
     // GET info/refs?service=… (capability advertisements). Returns the whole body; advertisements are small.

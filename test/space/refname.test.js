@@ -14,6 +14,7 @@ import { pkt, FLUSH } from '../../src/pktline.js';
 import { concat, te } from '../../src/bytes.js';
 import { runPush } from './harness.js';
 import { createHash } from 'node:crypto';
+import { unwrap } from '../unwrap.js';
 
 const ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000' };
 const ZERO = '0'.repeat(40);
@@ -34,7 +35,7 @@ async function checkRefFormat(names) {
 // One real `git receive-pack --stateless-rpc` answering one command per name, as a client sends them: true where git
 // answered "ng <name> funny refname". Every other answer (ok, a D/F conflict between two cells' names) is not funny.
 function receivePackFunny(dir, names, { oldOid, newOid }) {
-  const lines = names.map((n, i) => pkt(concat([te.encode(`${oldOid} ${newOid} `), te.encode(n), te.encode(i === 0 ? '\0report-status delete-refs\n' : '\n')])));
+  const lines = names.map((n, i) => unwrap(pkt(concat([te.encode(`${oldOid} ${newOid} `), te.encode(n), te.encode(i === 0 ? '\0report-status delete-refs\n' : '\n')]))));
   const head = new Uint8Array(12); head.set(te.encode('PACK')); head[7] = 2; // version 2, 0 objects
   const pack = newOid === ZERO ? [] : [head, createHash('sha1').update(head).digest()];
   const r = spawnSync('git', ['receive-pack', '--stateless-rpc', dir], { env: ENV, input: concat([...lines, FLUSH, ...pack]), maxBuffer: 1 << 26 });
@@ -76,7 +77,7 @@ test('ref names: ply agrees with git check-ref-format and receive-pack on every 
     for (let i = 0; i < all.length; i++) {
       const n = names[i], id = `${all[i].id} ${JSON.stringify(n)}`;
       const git = { format: format[i], create: !createFunny[i], delete: !deleteFunny[i] };
-      const ply = { format: accepts(() => validateRef(n)), create: accepts(() => validatePushRef(n, false)), delete: accepts(() => validatePushRef(n, true)) };
+      const ply = { format: accepts(() => unwrap(validateRef(n))), create: accepts(() => unwrap(validatePushRef(n, false))), delete: accepts(() => unwrap(validatePushRef(n, true))) };
       for (const k of Object.keys(git)) {
         if (git[k]) tally[k]++;
         if (git[k] !== ply[k]) wrong.push(`${id} ${k}: git ${git[k] ? 'accepts' : 'refuses'}, ply ${ply[k] ? 'accepts' : 'refuses'}`);

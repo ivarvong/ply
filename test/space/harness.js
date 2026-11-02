@@ -10,6 +10,7 @@ const { checkPushCaps } = await import(`${SRC}/receivecaps.js`);
 import { pktInit, pktStep, pktFinish } from '../../src/pktline.js';
 import { withLimits } from '../../src/limits.js';
 import { thrown as fail } from '../../src/errors.js';
+import { unwrap } from '../unwrap.js';
 
 const spanStub = { set() {}, event() {} };
 const tracer = { span: async (_name, _opts, fn) => fn(spanStub) };
@@ -21,10 +22,10 @@ export function fakeTransport(response, limits) {
       t.sent++;
       if (service !== 'git-receive-pack' || !(body instanceof Uint8Array)) throw new Error('harness: bad request');
       if (response.drop) throw fail('network', `connection reset ${response.drop}`);
-      const r = pktStep(pktInit(), response.bytes);
+      const r = unwrap(pktStep(pktInit(), response.bytes));
       yield* r.frames;
       if (response.end === 'throw') throw fail('network', 'connection reset after the response');
-      pktFinish(r.state);
+      unwrap(pktFinish(r.state));
     },
   };
   return t;

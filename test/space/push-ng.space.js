@@ -12,6 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { pkt, FLUSH } from '../../src/pktline.js';
 import { concat, te } from '../../src/bytes.js';
+import { unwrap } from '../unwrap.js';
 
 const MANIFEST = JSON.parse(readFileSync(new URL('./git-manifest.json', import.meta.url), 'utf8'));
 export const GIT_SOURCE = MANIFEST.git;
@@ -278,7 +279,7 @@ export function gitReport(c) {
 }
 export const reportLines = rep => [`unpack ${rep.unpack}\n`, ...rep.refs.map(x => (x.ok ? `ok ${x.ref}\n` : `ng ${x.ref} ${x.reason}\n`))];
 // report-status without side-band: receive-pack's report() — one pkt per line, then a flush
-export const reportBytes = rep => concat([...reportLines(rep).map(l => pkt(te.encode(l))), FLUSH]);
+export const reportBytes = rep => concat([...reportLines(rep).map(l => unwrap(pkt(te.encode(l)))), FLUSH]);
 
 // ---- the expected outcome: from the class table only ----
 // { tag: 'landed', refs } | { tag: 'rejected', code } | { tag: 'partial', landed, rejected } | { tag: 'ambiguous' }

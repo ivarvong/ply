@@ -12,14 +12,14 @@ import type { Result } from './result.js';
 import type { Attrs, Frame, Transport } from './transport.js';
 import { fail, orThrow, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
-import { td, concat, takeResult, decodeChunk } from './bytes.js';
+import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1, cache)
 import { corruptCacheHit } from './cachestatus.js';
 import { assertNever, err, getOrElse, none, ok } from './result.js';
-import { inflateResult } from './inflate.js';
-import { parsePackResult, resolvePackResult, readObjHeaderResult, readUint32BEResult, packParseOpts } from './packresolve.js';
+import { inflate } from './inflate.js';
+import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 import { atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
@@ -43,7 +43,7 @@ export type PackObject = { readonly type: number; readonly data: Uint8Array };
 type BadRequest = ErrorOf<'bad_request'>;
 const UNIT: Result<null, never> = ok(null);
 // validateWire (validate.ts) throws until its cluster converts.
-const wireField = (value: string, what: string): unknown => validateWire(value, what);
+const wireField = (value: string, what: string): unknown => orThrow(validateWire(value, what));
 const countField = (value: number, what: string): Result<null, BadRequest> => {
   if (!Number.isSafeInteger(value) || value < 0) return fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
   return UNIT;
@@ -105,7 +105,7 @@ export function fetchBodyResult(opts: FetchOpts): Result<Uint8Array<ArrayBuffer>
     ...(noProgress ? ['no-progress\n'] : []),
     ...(done ? ['done\n'] : []),
   ];
-  return ok(pkts(['command=fetch\n', ...args], { delimAfter: 0 }));
+  return ok(orThrow(pkts(['command=fetch\n', ...args], { delimAfter: 0 })));
 }
 export const fetchBody = (opts: FetchOpts): Uint8Array<ArrayBuffer> => orThrow(fetchBodyResult(opts));
 
@@ -115,8 +115,8 @@ export type Sideband = { readonly band: number; readonly body: Uint8Array };
 // @decoder parseSidebandResult prefix=sideband
 export function parseSidebandResult(payload: Uint8Array): Result<Sideband, ErrorOf<'protocol'>> {
   // an empty payload (0004) has no band byte: git's demultiplex_sideband "missing sideband designator"
-  // takeResult returns exactly SIDEBAND_CHANNEL_BYTES bytes or the short read, so the fallback never applies
-  const head = takeResult(payload, 0, SIDEBAND_CHANNEL_BYTES, 'protocol');
+  // take returns exactly SIDEBAND_CHANNEL_BYTES bytes or the short read, so the fallback never applies
+  const head = take(payload, 0, SIDEBAND_CHANNEL_BYTES, 'protocol');
   if (!head.ok) return head;
   const band: number = atOr(head.value, 0, 0);
   const body = payload.subarray(SIDEBAND_CHANNEL_BYTES);
@@ -329,14 +329,14 @@ function spHeader(s: SpHeader, head: Uint8Array): Result<{ readonly body: SpBody
   // need the pack header plus the first object-header byte; a short read means the chunk has not arrived.
   if (head.length < PACK_HEADER_BYTES + 1) return ok(null);
   if (!hasSignature(head)) return fail('pack_corrupt', 'pack: bad signature');
-  const version = readUint32BEResult(head, PACK_SIGNATURE.length);
+  const version = readUint32BE(head, PACK_SIGNATURE.length);
   if (!version.ok) return version;
   if (version.value !== PACK_VERSION) return fail('pack_corrupt', 'pack: bad version');
-  const counted = readUint32BEResult(head, PACK_SIGNATURE.length + UINT32_BYTES);
+  const counted = readUint32BE(head, PACK_SIGNATURE.length + UINT32_BYTES);
   if (!counted.ok) return counted;
   const count = counted.value;
   if (count !== 1) return fail('pack_corrupt', `pack: expected 1 object, got ${count}`);
-  const header = readObjHeaderResult(head, PACK_HEADER_BYTES);
+  const header = readObjHeader(head, PACK_HEADER_BYTES);
   if (!header.ok) return isShortRead(header.error) ? ok(null) : header;
   if (header.value.type === TYPE.OFS_DELTA || header.value.type === TYPE.REF_DELTA) return fail('pack_corrupt', 'pack: single-object pack is a delta');
   const p: number = header.value.next;
@@ -456,7 +456,7 @@ export function checkWide(objects: Map<string, PackObject>, wanted: (oid: string
   const skipped: Skipped[] = [];
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE && o.type !== TYPE.TAG) continue;
-    try { assertFetched(typeText(o.type), o.data, limits); } catch (e) {
+    try { orThrow(assertFetched(typeText(o.type), o.data, limits)); } catch (e) {
       if (!thrownCodeIs(e, 'limit_exceeded') || wanted(oid, o)) throw e;
       // a limit_exceeded error carries `what` (limits.ts)
       skipped.push({ oid, what: getOrElse(field(e, 'what'), ''), bytes: o.data.length });
@@ -503,9 +503,9 @@ type Single = { readonly oid: string; readonly filter: string; readonly deepen: 
 function declaredPackCount(pack: Uint8Array): number | null {
   if (pack.length < PACK_HEADER_BYTES) return null;
   if (!hasSignature(pack)) return null;
-  const version = readUint32BEResult(pack, PACK_SIGNATURE.length);
+  const version = readUint32BE(pack, PACK_SIGNATURE.length);
   if (!version.ok || version.value !== PACK_VERSION) return null;
-  const count = readUint32BEResult(pack, PACK_SIGNATURE.length + UINT32_BYTES);
+  const count = readUint32BE(pack, PACK_SIGNATURE.length + UINT32_BYTES);
   return count.ok ? count.value : null;
 }
 // A multi-object answer to a commit want: the wanted object, once its type is a commit. A tree, blob, or tag is
@@ -514,9 +514,9 @@ function declaredPackCount(pack: Uint8Array): number | null {
 function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
   const count = declaredPackCount(pack);
   if (count === null || count === 1) return ok(null);
-  const parsed = parsePackResult(pack, packParseOpts(t.limits));
+  const parsed = parsePack(pack, orThrow(packParseOpts(t.limits)));
   if (!parsed.ok) return parsed;
-  const resolved = resolvePackResult(parsed.value, () => null, t.limits);
+  const resolved = resolvePack(parsed.value, () => null, t.limits);
   if (!resolved.ok) return resolved;
   const objects: Map<string, PackObject> = resolved.value.objects;
   const found = mapGet(objects, oid);
@@ -526,21 +526,21 @@ function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span,
   const refused = refuseNonCommit(TYPE.COMMIT, want.type, oid);
   if (!refused.ok) return refused;
   if (want.type !== TYPE.COMMIT) return ok(null);
-  assertFetched('commit', want.data, t.limits);
+  orThrow(assertFetched('commit', want.data, t.limits));
   return ok({ type: want.type, data: want.data, oid, size: want.data.length, bust });
 }
 // The single object's zlib bytes, read: inflated within maxObject, hashed against the want, its type checked.
 type Received = { readonly sp: SpFinished; readonly zlib: Uint8Array; readonly want: Single; readonly span: Span; readonly bust: boolean; readonly maxObject: number };
 function singleObject(t: Transport, { sp, zlib, want, span, bust, maxObject }: Received): Result<FetchedObject, PlyError> {
   const { oid, expectType } = want;
-  const inflated = inflateResult(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });
+  const inflated = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });
   if (!inflated.ok) return inflated;
   const { out, consumed, stats } = inflated.value;
   if (consumed !== zlib.length) return fail('pack_corrupt', `pack: ${zlib.length - consumed} trailing bytes after object`);
   const got = hashObject(typeText(sp.type), out);
   span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': typeText(sp.type) });
   if (got !== oid) return fail('pack_corrupt', `object ${got} served for want ${oid}`);
-  assertFetched(typeText(sp.type), out, t.limits);
+  orThrow(assertFetched(typeText(sp.type), out, t.limits));
   const refused = refuseNonCommit(expectType, sp.type, oid);
   if (!refused.ok) return refused;
   if (expectType !== null && sp.type !== expectType) return fail('pack_corrupt', `expected ${typeText(expectType)}, got ${typeText(sp.type)}`);
@@ -599,9 +599,9 @@ function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust
   const { oid, expectType } = want;
   const maxObject = readLimit(t.limits, 'maxObjectSize');
   if (!maxObject.ok) return maxObject;
-  const parsed = parsePackResult(pack, packParseOpts(t.limits));
+  const parsed = parsePack(pack, orThrow(packParseOpts(t.limits)));
   if (!parsed.ok) return parsed;
-  const resolved = resolvePackResult(parsed.value, () => null, t.limits);
+  const resolved = resolvePack(parsed.value, () => null, t.limits);
   if (!resolved.ok) return resolved;
   const objects: Map<string, PackObject> = resolved.value.objects;
   const skipped = checkWide(objects, k => k === oid, t.limits);

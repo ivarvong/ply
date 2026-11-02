@@ -30,6 +30,7 @@ import { inflate } from '../../src/inflate.js';
 import { hashObject, TYPE_NAME } from '../../src/objects.js';
 import { DEFAULT_LIMITS } from '../../src/limits.js';
 import { encodeObjHeader, encodeVarint } from '../../src/pack.js';
+import { unwrap } from '../unwrap.js';
 
 const FULL = process.env.PACK_SPACE === 'full';
 const F = buildPacks();
@@ -44,7 +45,7 @@ function header(count, version = 2) { const h = new Uint8Array(12); h.set([0x50,
 function packOf(objs) { return withTrailer(cat([header(objs.length), ...objs.map(o => cat([encodeObjHeader(o.type, o.data.length), deflateSync(o.data)]))])); }
 // git's pack as records: { offset, raw: the object's bytes in the pack (header + base ref + zlib) }
 function records(bytes) {
-  const p = parsePack(bytes, packParseOpts());
+  const p = unwrap(parsePack(bytes, unwrap(packParseOpts())));
   return p.objects.map((o, i) => ({ ...o, end: i + 1 < p.objects.length ? p.objects[i + 1].offset : bytes.length - 20 }));
 }
 const restamp = body => withTrailer(body.subarray(0, body.length - 20));
@@ -55,7 +56,7 @@ const typedPackError = o => o.tag === 'typed' && (o.code === 'pack_corrupt' || o
 const external = oid => { const b = F.bases.get(oid); return b && { type: { commit: 1, tree: 2, blob: 3, tag: 4 }[b.type], data: b.data }; };
 
 function viaParsePack(bytes, thin) {
-  return outcomeSync(() => { const parsed = parsePack(bytes, packParseOpts()); return resolvePack(parsed, thin ? external : undefined).objects.size; });
+  return outcomeSync(() => { const parsed = unwrap(parsePack(bytes, unwrap(packParseOpts()))); return unwrap(resolvePack(parsed, thin ? external : undefined)).objects.size; });
 }
 // the streamed single-object path exactly as fetchSingle runs it (spStep chunks, spFinish, inflate, trailing, hash)
 function viaSpStep(bytes, want, chunked) {
@@ -65,7 +66,7 @@ function viaSpStep(bytes, want, chunked) {
     if (chunked) for (let i = 0; i < bytes.length; i++) step(bytes.subarray(i, i + 1)); else step(bytes);
     sp = spFinish(sp);
     const z = cat(parts);
-    const { out, consumed } = inflate(z, 0, { expectedSize: sp.size, maxOutput: 1 << 26 });
+    const { out, consumed } = unwrap(inflate(z, 0, { expectedSize: sp.size, maxOutput: 1 << 26 }));
     if (consumed !== z.length) throw Object.assign(new Error('trailing'), { code: 'pack_corrupt' });
     if (hashObject(TYPE_NAME[sp.type], out) !== want) throw Object.assign(new Error('hash'), { code: 'pack_corrupt' });
     return out.length;
@@ -268,20 +269,20 @@ test('caps: maxObjectSize, maxInflatedTotal, maxDeltaChain at, and one under, wh
   const wrong = [];
   const check = (id, o, ok) => { tally('caps', o); if (ok ? o.tag !== 'ok' : !(o.tag === 'typed' && o.code === 'limit_exceeded')) wrong.push(`${id}: ${JSON.stringify(o).slice(0, 160)}`); };
   for (const p of MULTI) {
-    const parsed = parsePack(p.bytes, packParseOpts());
+    const parsed = unwrap(parsePack(p.bytes, unwrap(packParseOpts())));
     const big = Math.max(...parsed.objects.map(o => o.size)), total = parsed.stats.inflated;
     const res = p.external ? external : undefined;
     for (const [d, ok] of [[0, true], [1, false]]) {
-      check(`${p.name} maxObjectSize=${big - d}`, outcomeSync(() => parsePack(p.bytes, { ...packParseOpts({ ...DEFAULT_LIMITS, maxObjectSize: big - d }) })), ok);
-      check(`${p.name} parse maxInflatedTotal=${total - d}`, outcomeSync(() => parsePack(p.bytes, packParseOpts({ ...DEFAULT_LIMITS, maxInflatedTotal: total - d }))), ok);
+      check(`${p.name} maxObjectSize=${big - d}`, outcomeSync(() => unwrap(parsePack(p.bytes, { ...unwrap(packParseOpts({ ...DEFAULT_LIMITS, maxObjectSize: big - d })) }))), ok);
+      check(`${p.name} parse maxInflatedTotal=${total - d}`, outcomeSync(() => unwrap(parsePack(p.bytes, unwrap(packParseOpts({ ...DEFAULT_LIMITS, maxInflatedTotal: total - d }))))), ok);
     }
     const deltas = parsed.objects.filter(o => o.type >= 6).length;
     if (!deltas) continue;
     // resolve under a tighter aggregate than the parse: what is held already is over it
-    check(`${p.name} resolve maxInflatedTotal=${total - 1}`, outcomeSync(() => resolvePack(parsePack(p.bytes, packParseOpts()), res, { ...DEFAULT_LIMITS, maxInflatedTotal: total - 1 })), false);
+    check(`${p.name} resolve maxInflatedTotal=${total - 1}`, outcomeSync(() => unwrap(resolvePack(unwrap(parsePack(p.bytes, unwrap(packParseOpts()))), res, { ...DEFAULT_LIMITS, maxInflatedTotal: total - 1 }))), false);
     // the deepest chain the pack holds, from a resolve with no limit on it
-    const depth = Math.max(...[...resolvePack(parsePack(p.bytes, packParseOpts()), res).objects.values()].map(o => o.chain));
-    for (const [d, ok] of [[0, true], [1, false]]) check(`${p.name} maxDeltaChain=${depth - d}`, outcomeSync(() => resolvePack(parsePack(p.bytes, packParseOpts()), res, { ...DEFAULT_LIMITS, maxDeltaChain: depth - d })), ok);
+    const depth = Math.max(...[...unwrap(resolvePack(unwrap(parsePack(p.bytes, unwrap(packParseOpts()))), res)).objects.values()].map(o => o.chain));
+    for (const [d, ok] of [[0, true], [1, false]]) check(`${p.name} maxDeltaChain=${depth - d}`, outcomeSync(() => unwrap(resolvePack(unwrap(parsePack(p.bytes, unwrap(packParseOpts()))), res, { ...DEFAULT_LIMITS, maxDeltaChain: depth - d }))), ok);
   }
   assert.deepEqual(wrong, []);
 });
@@ -292,17 +293,17 @@ test('the exported readers: every offset of every short buffer is a typed short 
     const rs = records(p.bytes);
     for (const r of rs) for (let k = r.offset; k < r.offset + r.headerBytes; k++) {
       const cut = p.bytes.subarray(0, k);
-      const o = outcomeSync(() => readObjHeader(cut, r.offset));
+      const o = outcomeSync(() => unwrap(readObjHeader(cut, r.offset)));
       if (!(k < r.offset + encodeObjHeader(r.type, r.size).length ? typedPackError(o) : o.tag === 'ok')) wrong.push(`${p.name} readObjHeader cut@${k}: ${JSON.stringify(o)}`);
       if (r.type === 6) {
         const at = r.offset + encodeObjHeader(6, r.size).length;
         if (k <= at || k >= r.offset + r.headerBytes) continue;
-        const q = outcomeSync(() => readOfsDelta(cut, at));
+        const q = outcomeSync(() => unwrap(readOfsDelta(cut, at)));
         if (!typedPackError(q)) wrong.push(`${p.name} readOfsDelta cut@${k}: ${JSON.stringify(q)}`);
       }
     }
     for (let k = 0; k < 12; k++) for (const off of [4, 8]) {
-      const o = outcomeSync(() => readUint32BE(p.bytes.subarray(0, k), off));
+      const o = outcomeSync(() => unwrap(readUint32BE(p.bytes.subarray(0, k), off)));
       if (k >= off + 4 ? o.tag !== 'ok' : !typedPackError(o)) wrong.push(`${p.name} readUint32BE(${off}) cut@${k}: ${JSON.stringify(o)}`);
     }
   }
@@ -313,7 +314,7 @@ test('the exported readers: every offset of every short buffer is a typed short 
 // object the parser never emits, and refuses that id the same way, before the bytes are hashed.
 test('resolve refuses a type id parse never emits, before hashing', () => {
   const data = Uint8Array.of(1);
-  const o = outcomeSync(() => resolvePack({ objects: [{ offset: 12, type: 5, size: 1, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] }));
+  const o = outcomeSync(() => unwrap(resolvePack({ objects: [{ offset: 12, type: 5, size: 1, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] })));
   assert.equal(o.tag, 'typed', JSON.stringify(o));
   assert.equal(o.code, 'pack_corrupt');
   assert.equal(o.message, 'pack: bad object type 5');

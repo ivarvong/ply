@@ -12,6 +12,7 @@ import { parseTree, treeReplaceOid, hashObject, encodeCommit, TYPE } from '../..
 import { spliceDelta, buildPack, makeDelta } from '../../src/pack.js';
 import { fromHex } from '../../src/sha1.js';
 import { concat, te } from '../../src/bytes.js';
+import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
@@ -46,13 +47,13 @@ try {
     git(work, ['reset', '-q', '--hard', oldCommit]);
     // our objects: walk trees from the old commit (what editFile holds), splice, build thin pack
     const levels = []; let treeOid = git(work, ['rev-parse', `${oldCommit}^{tree}`]).trim();
-    for (const name of comps) { const data = new Uint8Array(gitBuf(work, ['cat-file', 'tree', treeOid])); const entry = parseTree(data).find(e => e.name === name); levels.push({ treeOid, data, entry }); treeOid = entry.oid; }
+    for (const name of comps) { const data = new Uint8Array(gitBuf(work, ['cat-file', 'tree', treeOid])); const entry = unwrap(parseTree(data)).find(e => e.name === name); levels.push({ treeOid, data, entry }); treeOid = entry.oid; }
     const oldBlob = treeOid;
     const newBlob = hashObject('blob', new Uint8Array(target));
     const blobDelta = spliceDelta({ baseLen: base.length, off, oldLen, insert: new Uint8Array(insert) }).delta;
     const treeObjs = []; let child = newBlob;
     for (let l = levels.length - 1; l >= 0; l--) { const { treeOid: oldT, data, entry } = levels[l]; const nd = treeReplaceOid(data, entry, child); const nid = hashObject('tree', nd); treeObjs.unshift({ data: spliceDelta({ baseLen: data.length, off: entry.oidOffset, oldLen: 20, insert: fromHex(child) }).delta, full: nd, baseOid: oldT, newOid: nid }); child = nid; }
-    const commitData = encodeCommit({ tree: child, parents: [oldCommit], author: 'p <p@x> 1700000000 +0000', committer: 'p <p@x> 1700000000 +0000', message: 'edit\n' });
+    const commitData = unwrap(encodeCommit({ tree: child, parents: [oldCommit], author: 'p <p@x> 1700000000 +0000', committer: 'p <p@x> 1700000000 +0000', message: 'edit\n' }));
     const newCommit = hashObject('commit', commitData);
     const problems = [];
     if (newBlob !== refBlob) problems.push(`blob oid ${newBlob.slice(0, 8)} != git ${refBlob.slice(0, 8)}`);

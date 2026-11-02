@@ -91,7 +91,7 @@ export function fileEntriesResult(files: unknown, limits: Limits = DEFAULT_LIMIT
   for (const f of list) {
     if (out.length >= maxFiles.value) return err(limitExceeded('files', out.length + 1, maxFiles.value));
     const spec = specOf(f);
-    const comps = validated(() => validatePath(spec.path, limits));
+    const comps = validated(() => orThrow(validatePath(spec.path, limits)).components);
     if (!comps.ok) return comps;
     const path = comps.value.join('/');
     // a mode left out is a file's; any other value (null included) is the caller's, and checked
@@ -153,7 +153,7 @@ export function buildTreeResult(entries: readonly FileEntry[], limits: Limits = 
   const depth = (dir: string): number => (dir === '' ? 0 : dir.split('/').length);
   for (const dir of [...dirs.keys()].toSorted((a, b) => depth(b) - depth(a))) {
     const list = [...(dirs.get(dir) as Map<string, DirEntry | null>)].map(([name, e]) => (e === null ? { mode: MODE_TREE, name, oid: (trees.get(dir ? `${dir}/${name}` : name) as BuiltDir).oid } : e));
-    const data = encodeTree(list);
+    const data = orThrow(encodeTree(list));
     trees.set(dir, { oid: hashObject('tree', data), data, entries: list });
   }
   return ok({ root: (trees.get('') as BuiltDir).oid, trees, blobs });
@@ -219,16 +219,16 @@ const authorInput = (author: Author | null, time: number): Parameters<typeof val
 export function validateTreeSpecResult(spec: TreeSpec, limits: Limits, head: string | null = null): Result<TreePlan, PlyError> {
   const { ref, time } = withDefaults(spec, { ref: 'refs/heads/main', time: Math.floor(Date.now() / 1000) });
   const { files, author, message } = spec;
-  const pushRef = validated(() => validatePushRef(ref, false));
+  const pushRef = validated(() => orThrow(validatePushRef(ref, false)));
   if (!pushRef.ok) return pushRef;
   // a base left out is `ref`; any other value (null included) is the caller's, and checked
-  const baseRef = validated(() => validateRef(getOrElse<unknown>(fromNullable(spec.base), ref)));
+  const baseRef = validated(() => orThrow(validateRef(getOrElse<unknown>(fromNullable(spec.base), ref))));
   if (!baseRef.ok) return baseRef;
   const base = baseRef.value;
 
-  const person = validated(() => validateIdent(authorInput(author, time)));
+  const person = validated(() => orThrow(validateIdent(authorInput(author, time))));
   if (!person.ok) return person;
-  const checkedMessage = validated(() => validateMessage(message));
+  const checkedMessage = validated(() => orThrow(validateMessage(message)));
   if (!checkedMessage.ok) return checkedMessage;
   if (head !== null && !OID.test(head)) return fail('bad_request', 'head must be a 40-hex oid');
   const entries = fileEntriesResult(files, limits);
@@ -305,7 +305,7 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
   const visit = async (dir: string, oid: string): Promise<void> => {
     const data = await read(oid);
     old.set(dir, { oid, data });
-    const before = new Map<string, TreeEntry>(parseTree(data, limits).map((e: TreeEntry) => [e.name, e]));
+    const before = new Map<string, TreeEntry>(orThrow(parseTree(data, limits)).map((e: TreeEntry) => [e.name, e]));
     for (const e of before.values()) have.add(e.oid);
     const next: Array<Promise<void>> = [];
     // dir is a key of built.trees: the root, or a tree entry of a directory visited before it
@@ -354,7 +354,7 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     orThrow(strictParent(strictHead, decided, s.base, head));
     if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': thrownCodeOr(speculative, 'error') });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is commitOf's value (the rejection branch is the Error above)
-    const oldTree: string | null = parent === null ? null : parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits).tree;
+    const oldTree: string | null = parent === null ? null : orThrow(parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits)).tree;
     root.set({ 'git.push_tree.commit.old': parent === null ? '' : parent, 'git.push_tree.tree.old': oldTree === null ? '' : oldTree });
     if (oldTree === s.built.root && !s.create) return outcome('noop', summarize({ s, parent, oldTree, hint, attempt }, null));
 
@@ -368,9 +368,9 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     const sel = selectObjects(s.built, known);
 
     // 3. the commit, then one push whose old oid is the CAS
-    const who = ident(s.author);
+    const who = orThrow(ident(s.author));
     // oxlint-disable-next-line typescript/strict-boolean-expressions, prefer-template -- bundle budget: the JS's own truthy test and concatenation, byte for byte
-    let commitData = encodeCommit({ tree: s.built.root, parents: parent ? [parent] : [], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
+    let commitData = orThrow(encodeCommit({ tree: s.built.root, parents: parent ? [parent] : [], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : s.message + '\n' }));
     if (signer !== null) { commitData = orThrow(await signCommitResult(commitData, signer)); root.set({ 'git.push_tree.commit.signed': signer.kind, 'git.push_tree.commit.signer': getOrElse(fromNullish(signer.publicKeyLine), '') }); }
     const newCommit = hashObject('commit', commitData);
     const objects = [{ type: TYPE.COMMIT, data: commitData }, ...sel.trees, ...sel.blobs];

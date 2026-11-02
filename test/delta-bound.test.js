@@ -12,6 +12,7 @@ import {
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1, fromHex } from '../src/sha1.js';
 import { concat, te } from '../src/bytes.js';
+import { unwrap } from './unwrap.js';
 
 const MAX = DEFAULT_LIMITS.maxDeltaResult;
 
@@ -26,13 +27,13 @@ test('the densest in-limit delta expands a 64 KiB base to maxDeltaResult and no 
   const delta = concat([header, ops]);
   assert.equal(header.length, 7);
   assert.equal(delta.length, 1031);
-  const { out } = applyDelta(base, delta);
+  const { out } = unwrap(applyDelta(base, delta));
   assert.equal(out.length, MAX);
   assert.equal(out[0], 7);
   assert.equal(out[DELTA_COPY_MAX], 7);
   assert.equal(Math.floor(MAX / delta.length), 65091);
   assert.throws(
-    () => applyDelta(base, concat([encodeVarint(base.length), encodeVarint(MAX + 1), Uint8Array.of(DELTA_COPY)])),
+    () => unwrap(applyDelta(base, concat([encodeVarint(base.length), encodeVarint(MAX + 1), Uint8Array.of(DELTA_COPY)]))),
     e => e.code === 'limit_exceeded' && e.got === MAX + 1 && e.max === MAX,
   );
 });
@@ -66,7 +67,7 @@ async function packOf(entries) {
     parts.push(entry); at += entry.length;
   }
   const body = concat(parts);
-  return parsePack(concat([body, new Sha1().update(body).digest()]));
+  return unwrap(parsePack(concat([body, new Sha1().update(body).digest()])));
 }
 
 // n REF_DELTAs, each naming the previous version. childFirst puts the full object last and the tip first.
@@ -94,7 +95,7 @@ const tooLong = (n, max = CHAIN) => e => {
 };
 
 function resolvesWhole(parsed, v, n, external) {
-  const r = resolvePack(parsed, external);
+  const r = unwrap(resolvePack(parsed, external));
   assert.equal(r.objects.size, external ? n : n + 1);
   assert.equal(r.stats.maxChain, n);
   const tip = r.objects.get(hashObject('blob', v[n]));
@@ -116,25 +117,25 @@ test('maxDeltaChain + 1 deltas are limit_exceeded in every order', async () => {
   for (const childFirst of [false, true]) {
     const { entries } = refChain(CHAIN + 1, childFirst);
     const parsed = await packOf(entries);
-    assert.throws(() => resolvePack(parsed), tooLong(CHAIN + 1));
+    assert.throws(() => unwrap(resolvePack(parsed)), tooLong(CHAIN + 1));
   }
   const parsed = await packOf(ofsChain(CHAIN + 1).entries);
-  assert.throws(() => resolvePack(parsed), tooLong(CHAIN + 1));
+  assert.throws(() => unwrap(resolvePack(parsed)), tooLong(CHAIN + 1));
 });
 
 // Issue #14's probes. Base-first, a memoised base came back at depth 0, so 500 links resolved (stats.maxChain = 500).
 // Child-first, the fixpoint stopped after maxDeltaChain passes and returned 65 of 101 objects with no error.
 test('#14 a 500-delta chain emitted base-first is limit_exceeded (REF and OFS)', async () => {
   const ref = await packOf(refChain(500, false).entries);
-  assert.throws(() => resolvePack(ref), tooLong(500));
+  assert.throws(() => unwrap(resolvePack(ref)), tooLong(500));
   const ofs = await packOf(ofsChain(500).entries);
-  assert.throws(() => resolvePack(ofs), tooLong(500));
+  assert.throws(() => unwrap(resolvePack(ofs)), tooLong(500));
 });
 
 test('#14 a 101-object chain emitted child-first is limit_exceeded, not 65 objects', async () => {
   const parsed = await packOf(refChain(100, true).entries);
   assert.equal(parsed.objects.length, 101);
-  assert.throws(() => resolvePack(parsed), tooLong(100));
+  assert.throws(() => unwrap(resolvePack(parsed)), tooLong(100));
 });
 
 // An OFS chain standing on a thin REF_DELTA: until external bases are allowed, every OFS link recurses through all the
@@ -150,9 +151,9 @@ test('an OFS chain over a thin REF root is bounded by recursion depth', async ()
   const ok = await ofsOverThin(CHAIN);
   resolvesWhole(ok.parsed, ok.v, CHAIN, ok.external);
   const over = await ofsOverThin(CHAIN + 1);
-  assert.throws(() => resolvePack(over.parsed, over.external), tooLong(CHAIN + 1));
+  assert.throws(() => unwrap(resolvePack(over.parsed, over.external)), tooLong(CHAIN + 1));
   const deep = await ofsOverThin(20_000); // without the depth check: RangeError (call stack), outside the taxonomy
-  assert.throws(() => resolvePack(deep.parsed, deep.external), tooLong(20_000));
+  assert.throws(() => unwrap(resolvePack(deep.parsed, deep.external)), tooLong(20_000));
 });
 
 // Thin packs: a missing base is pack_corrupt (the pack is incomplete), a long chain is limit_exceeded (the pack is too
@@ -167,10 +168,10 @@ test('thin chains: external base is link 0, a missing base is pack_corrupt, too 
   for (const childFirst of [false, true]) {
     const ok = await thin(CHAIN, childFirst);
     resolvesWhole(ok.parsed, ok.v, CHAIN, ok.external);
-    assert.equal(resolvePack(ok.parsed, ok.external).stats.externalBases, 1);
-    assert.throws(() => resolvePack(ok.parsed), e => e.code === 'pack_corrupt' && /ref delta base [0-9a-f]{40} not found/.test(e.message));
+    assert.equal(unwrap(resolvePack(ok.parsed, ok.external)).stats.externalBases, 1);
+    assert.throws(() => unwrap(resolvePack(ok.parsed)), e => e.code === 'pack_corrupt' && /ref delta base [0-9a-f]{40} not found/.test(e.message));
     const long = await thin(CHAIN + 1, childFirst);
-    assert.throws(() => resolvePack(long.parsed, long.external), tooLong(CHAIN + 1));
+    assert.throws(() => unwrap(resolvePack(long.parsed, long.external)), tooLong(CHAIN + 1));
   }
 });
 
@@ -178,8 +179,8 @@ test('maxDeltaChain is the bound as configured, not a constant', async () => {
   for (const childFirst of [false, true]) {
     const { v, entries } = refChain(3, childFirst);
     const parsed = await packOf(entries);
-    assert.equal(resolvePack(parsed, undefined, withLimits({ maxDeltaChain: 3 })).stats.maxChain, 3);
-    assert.throws(() => resolvePack(parsed, undefined, withLimits({ maxDeltaChain: 2 })), tooLong(3, 2));
+    assert.equal(unwrap(resolvePack(parsed, undefined, withLimits({ maxDeltaChain: 3 }))).stats.maxChain, 3);
+    assert.throws(() => unwrap(resolvePack(parsed, undefined, withLimits({ maxDeltaChain: 2 }))), tooLong(3, 2));
     assert.equal(v.length, 4);
   }
 });

@@ -8,6 +8,7 @@ import { genDag, readModel } from './dag.js';
 import { Rng } from './prng.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { TYPE_NAME } from '../../src/objects.js';
+import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '60', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
@@ -35,9 +36,9 @@ try {
     const problems = [];
     let parsed, r;
     try {
-      parsed = parsePack(pack);
+      parsed = unwrap(parsePack(pack));
       const external = oid => (truth.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[truth.get(oid).type], data: new Uint8Array(gitBuf(work, ['cat-file', truth.get(oid).type, oid])) } : undefined);
-      r = resolvePack(parsed, external);
+      r = unwrap(resolvePack(parsed, external));
       for (const [oid, o] of r.objects) {
         const t = truth.get(oid);
         if (!t) { problems.push(`unknown object ${oid}`); break; }

@@ -12,7 +12,7 @@ import { assertNever, flatMapOption, getOrElse, mapOption, none, ok, some } from
 import { at, atOr, fromNullable, fromNullish } from './absent.js';
 import { checkRequiredV2, decideObjectFormat, fetchFeatureFlags } from './closed.js';
 import { td } from './bytes.js';
-import { pktInit, pktStepResult, pktFinishResult, pktAttrs } from './pktline.js';
+import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { coded, clientSpan, advertise, proto } from './transport.js';
 
 const SERVICE = '# service=';
@@ -123,8 +123,8 @@ export async function discover(t: Transport): Promise<DiscoverInfo> {
   // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
   return coded('protocol', () => t.tracer.span('git.upload-pack discover', clientSpan(t, { 'git.command': 'discover', 'git.protocol.version': 2 }), async (span: Span): Promise<DiscoverInfo> => {
     const buf = await advertise(t, 'git-upload-pack', span);
-    const { frames, state } = orThrow(pktStepResult(pktInit(), buf));
-    orThrow(pktFinishResult(state));
+    const { frames, state } = orThrow(pktStep(pktInit(), buf));
+    orThrow(pktFinish(state));
     const lines = orThrow(parseCapabilitiesV2Result(frames));
     const { has, value, features } = capLookup(lines);
     const caps = new Map<string, string>();
