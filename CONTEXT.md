@@ -86,6 +86,12 @@ Key operation modules:
   script, `xdl_do_merge`, conflict refinement and simplification, fill (clean and `merge=union`).
 - `attributes.js` — `.gitattributes` as git reads them: parse, wildmatch, precedence, macros.
 - `rebase.js` — `rebaseBranch` (per-commit or squash), `cherryPick`, `revertCommit` on the same merge primitive.
+- `repo-node.ts` — `pushRepo(dir, url, { refspecs, all, tags, force, dryRun, thin }, opts)`: `git push` of a local
+  repository with its history, no git binary (`ply/repo-node`, Node only). Reads `.git` itself (packs resolved in
+  memory, loose objects hash-checked, packed and loose refs), one ls-refs, one receive-pack for every command; the pack is
+  `rev-list --objects <new> --not <remote refs>`, delta-compressed by `delta.ts` (`planDeltas`: OFS_DELTA against the
+  previous version of the same path, `encodeDelta` in the shape of git's diff-delta.c; thin REF_DELTA opt-in). A
+  non-fast-forward is `not_fast_forward` before sending. Judged in `test/push-repo.test.js`. Issue #186.
 - `refops.ts` — `createBranch`, `deleteBranch`, `createTag` by URL: one receive-pack command each (an annotated tag carries
   its tag object); an existing ref is `cas_conflict` (expected zero, actual its tip). Judged in `test/e2e-customer.test.js`,
   which also runs README.md's quick start as written against a default and a stock `git http-backend`.

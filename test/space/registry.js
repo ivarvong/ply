@@ -134,6 +134,7 @@ export const SPACES = [
   curated('edges', ['test/edges.test.js', 'test/oracle.test.js', 'test/concurrency.test.js'], 'git state after each edit (ref, blob, fsck), concurrency convergence'),
   curated('parity', ['test/parity.test.js'], 'git clone/fetch over file:// vs ply over HTTP against the same upload-pack'),
   curated('push-tree', ['test/push-tree.test.js'], 'git write-tree, ls-tree, rev-list, fsck --strict, clone', { osDependent: 'filesFromDir reads the local filesystem (exec bits, symlinks, case): what exists to push differs by OS' }),
+  curated('push-repo', ['test/push-repo.test.js'], 'a local repository built by git (loose and packed objects, packed and loose refs, an annotated tag, a gitlink) pushed to git http-backend (default and stock): git rev-list --objects is the object set git push would send, git index-pack --strict on the captured pack, git fsck --strict and for-each-ref on the remote, git clone --mirror; git pack-objects for the pack size; git itself for the refusals (shallow, alternates, sha256, a non-fast-forward)'),
   curated('checkout-tree', ['test/checkout-tree.test.js'], 'git clone + diff -r', { osDependent: 'writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart' }),
   curated('packcache', ['test/packcache.test.js'], 'the outcome with and without the cache'),
   curated('unit', ['test/pure.test.js', 'test/result.test.js', 'test/format-facts.test.js', 'test/prefix-closure.test.js', 'test/delta-bound.test.js', 'test/bundle.test.js'], 'stated values (format facts from git source, delta bounds)'),
@@ -197,6 +198,9 @@ export const DECISIONS = [
   { match: 'src/memtree.ts#*:*', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/changes.ts#*:*', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/refops.ts#*:*', space: 'customer-e2e', axisTag: 'case' },
+  { match: 'src/repo-node.ts#*:*', space: 'push-repo', axisTag: 'case' },
+  { match: 'src/repo-node.ts#get:decode:*', excluded: 'protocol: a loose object header is "<type> <size>" in ASCII, which the regex after the decode checks; a non-ASCII byte fails that check as it fails git (and the object hash is checked too)' },
+  { match: 'src/push.ts#checkBaseIndexes:*', space: 'push-repo', axisTag: 'case' },
   { match: 'src/operation.ts#operation:*', space: 'customer-e2e', axisTag: 'case' },
   { match: 'src/edit.ts#refuseRebase:*', space: 'commit-changes', axisTag: 'op' },
   // refuseRebase is a wrapper, so the call inside resolve is its own site. The generated resolve:* glob would hand it to
