@@ -8,11 +8,11 @@ throwing wrappers STACK.md step 2 allows until the cut-over.
 
 | # | Property | Gate | Today → done |
 |---|---|---|---|
-| 1 | No platform absence outside `src/absent.ts`: no `undefined`, `?:`, `?.`, `??` | `scripts/absence-ratchet.mjs` (in `npm run typecheck`) | see the baseline → all four 0 |
-| 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, and the throwing wrappers of step 2 | `scripts/throw-ratchet.mjs` (in `npm run typecheck`) | 377 `throw` statements → wrappers only, then only `assertNever`/`internal` after the cut-over |
+| 1 | No platform absence outside `src/absent.ts`: no `undefined`, `?:`, `?.`, `??` | `scripts/absence-ratchet.mjs` (in `npm run typecheck`) | **met** (a7982c0): 308/375/146/260 → 0/0/0/0 |
+| 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, and the throwing wrappers of step 2 | `scripts/throw-ratchet.mjs` (in `npm run typecheck`) | 377 → 50 (wrappers and stream edges); the cut-over takes it to `assertNever`/`internal` only |
 | 3 | Every switch or tag chain over a closed union ends in `assertNever` | `scripts/exhaustive.mjs` (in `npm run lint`) | holds |
 | 4 | The public API returns `Result` (0.2.0), ply-web updated in the same window | the bundle and type tests on `dist/` | after 1 and 2 |
-| 5 | Every gate CI runs is green on every commit to main | `.github/workflows/ci.yml`, all 26 jobs | the rewrite left 23 red; fixed at b350b96 |
+| 5 | Every gate CI runs is green on every commit to main | `.github/workflows/ci.yml`, all 26 jobs | the rewrite left 23 red. Locally on ef29502 every gate passes but `push-ng` (local git 2.43; fails identically on the untouched pre-rewrite tag; CI runs 2.56) |
 
 ## The one edge
 
@@ -38,11 +38,13 @@ tagged unions.
 2. **Wave 1: total shared types** (97802db, b2020be). Transport, OperationOpts, the thrown-value readers, otel: the
    types every cluster reads, so clusters convert without touching each other's files.
 3. **Wave 2: clusters, in parallel** (STACK.md "Converting a module"): packs, wire, write, merge, read, core. Each
-   drives its files to zero absence, returns `Result` internally, and keeps a throwing wrapper for what another
-   cluster or the public API still calls.
-4. **Leftovers**: exported types a cluster could not change without editing another cluster's file.
-5. **Cut-over** (STACK.md step 3): public entries return `Result`; delete `thrown`, `orThrow` and every wrapper; 0.2.0;
-   ply-web switches `catch` for an exhaustive `switch (r.error.code)`.
+   drove its files to zero absence, returns `Result` internally, and kept a throwing wrapper for what another
+   cluster or the public API still calls. Done: a7982c0.
+4. **Leftovers**: LsRef total, OrMissing deleted, honest Result/wrapper names (ec02ad6, 3814e4a). Done.
+5. **Cut-over** (STACK.md step 3), bottom-up so a function's callers convert after it: round A codecs and validation;
+   round B protocol, transport and `operation()`; round C the entries (write, read, merge in parallel); round D
+   delete `thrown`/`orThrow`, 0.2.0, docs. Tests keep their assertions through `test/unwrap.js`. ply-web switches
+   `catch` for an exhaustive `switch (r.error.code)` before this lands on main.
 
 ## Visible changes so far (callers can observe these)
 
@@ -51,6 +53,11 @@ tagged unions.
 - A root `Span`'s `parentSpanId` is `null` (the exported OTLP line still omits the key).
 - Span `status` is a tagged union: only `code: 2` carries `message`.
 - `memtree.replaceOnce` returns a `Result`.
+- A listed ref (`LsRef`) always has `peeled` and `symref-target`, `null` when the line carries none.
+- `parsePack` objects carry `baseOffset`/`baseOid` as `null` for a full object; `resolvePack` no longer writes `.oid`
+  onto the caller's parsed objects.
+- `mergeBase` with `maxDepth: null`, and `inflate` with `expectedSize: null`, mean "not given" (the configured limit,
+  no expected size) instead of `bad_request`.
 
 ## Not carried forward
 
