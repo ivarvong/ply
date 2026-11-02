@@ -13,9 +13,9 @@ const hook = `--import=${fileURLToPath(new URL('./test/ts-resolve.mjs', import.m
 if (!(process.env['NODE_OPTIONS'] ?? '').includes(hook)) process.env['NODE_OPTIONS'] = [process.env['NODE_OPTIONS'], hook].filter(Boolean).join(' ');
 
 // `--shard i/N` by measured duration, not vitest's count-based split: longest-processing-time first over
-// test/durations.json (seconds per file on a CI runner, from ci/fast #72). A file with no entry weighs as the heaviest
-// known file until it is measured. The plan is a pure function of the file list and the weights, so the N shards of one
-// commit cover every file exactly once. Within a shard, files start heaviest first.
+// test/durations.json (seconds per file on a CI runner: the shard logs of run 41493029207, #155). A file with no entry
+// weighs as the heaviest known file until it is measured. The plan is a pure function of the file list and the weights,
+// so the N shards of one commit cover every file exactly once. Within a shard, files start heaviest first.
 const WEIGHTS = 'test/durations.json';
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const weights = (): Readonly<Record<string, number>> => (existsSync(WEIGHTS) ? JSON.parse(readFileSync(WEIGHTS, 'utf8')) : {});
