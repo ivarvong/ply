@@ -28,6 +28,7 @@ import { checkoutTree } from '../src/checkout.js';
 import { readFile, listTree, readCommit } from '../src/read.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
+import { createBranch, deleteBranch, createTag } from '../src/refops.js';
 import { lsRefs as lsRefsR } from '../src/lsrefs.js';
 import { fetchPack as fetchPackR } from '../src/fetchpack.js';
 import { discover as discoverR } from '../src/discover.js';
@@ -188,6 +189,9 @@ const SCENARIOS = {
     const r = seeded(); const bad = commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'oops'); commitOn(r, 'main', { 'f.txt': 'f\n' }, 'later');
     await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { tracer }));
   },
+  createBranch: async ({ tracer }) => { const r = seeded(); await unwrapAsync(createBranch(r.url, { ref: 'refs/heads/b', from: 'main' }, { tracer, verify: true })); },
+  deleteBranch: async ({ tracer }) => { const r = seeded(); commitOn(r, 'gone', { 'g.txt': 'g\n' }, 'gone', 'main'); await unwrapAsync(deleteBranch(r.url, { ref: 'refs/heads/gone' }, { tracer })); },
+  createTag: async ({ tracer }) => { const r = seeded(); await unwrapAsync(createTag(r.url, { name: 'v1', target: r.base, message: 'v1', tagger: author }, { tracer, verify: true })); },
   // the wire spans on their own, under a harness span that is not part of the contract
   wire: async ({ tracer }) => {
     const r = seeded(); const holder = tracer.start('contract.harness');
@@ -233,7 +237,7 @@ test('span contract: every operation\'s span tree (names, kinds, structure, link
 test('span contract: the snapshot covers every public operation, and the wire spans', async () => {
   const want = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
   const names = new Set(flatten(Object.values(want).flat()).map(l => l.split(' [')[0].split(' · ')[0].split(/ (?:>|~>) /).at(-1)));
-  for (const s of ['git.edit', 'git.commit', 'git.commit.apply', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert',
+  for (const s of ['git.edit', 'git.commit', 'git.commit.apply', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert', 'git.branch_create', 'git.branch_delete', 'git.tag_create',
     'git.upload-pack ls-refs', 'git.upload-pack fetch', 'git.upload-pack discover', 'git.receive-pack', 'git.receive-pack advertise']) assert.ok(names.has(s), `${s} is not in the contract`);
 });
 

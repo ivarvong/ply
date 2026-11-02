@@ -20,9 +20,9 @@ import type { LsRefsResult } from './lsrefs.js';
 import { fail, isPlyError } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Input } from './absent.js';
-import { mapGet, withDefaults } from './absent.js';
+import { field, mapGet, withDefaults } from './absent.js';
 import type { Ok, Option, Result } from './result.js';
-import { err, getOrElse, mapOption, ok } from './result.js';
+import { err, flatMapOption, getOrElse, mapOption, ok } from './result.js';
 import { thrownCode, thrownMessage } from './boundary.js';
 
 // Everything an operation takes besides the url and the body, total. `null` is "none": no credential, no parent span,
@@ -49,6 +49,10 @@ export type Outcome = <R>(kind: string, result: R, ...extra: [] | [Attrs]) => Ok
 export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits }) => Promise<Result<R, PlyError>>;
 
 export async function operation<R>(op: string, url: string | URL, opts: OperationOpts, body: OperationBody<R>): Promise<Result<R, PlyError>> {
+  // The entries type `tracer` as optional (boundary.ts EntryOptions); the root span needs one. A caller who left it out
+  // gets an Err naming it, not a TypeError from inside.
+  const start = flatMapOption(field(opts, 'tracer'), tracer => field(tracer, 'start'));
+  if (typeof getOrElse(start, null) !== 'function') return fail('bad_request', `git.${op}: opts.tracer is required (new Tracer() from ply; with no exporter its spans are dropped)`, { what: 'tracer' });
   const { tracer } = opts;
   const { auth, parent, fetchImpl, limits, signal, quirks, transport, attrs, link, onFinish } = withDefaults(opts, operationDefaults());
   const name = `git.${op}`;

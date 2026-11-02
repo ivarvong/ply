@@ -92,11 +92,13 @@ export type ExtraFields = {
   // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
   // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts take), so more bytes may complete it.
   // 'not_our_ref': upload-pack's ERR or band 3 said the wanted oid is not its ref (v2Step). Any other remote_error has none.
+  // 'empty_response': a fetch response with no section in it, not even its flush (v2End): what git's upload-pack sends
+  // when it dies on an argument it did not advertise (fetch.ts filterAdvertised).
   readonly reason: Reason;
 };
 // The error context bag: one of the two places Input is allowed (docs/STACK.md, Absence). Any subset of the fields.
 export type Extra = Input<ExtraFields>;
-export type Reason = 'short_read' | 'not_our_ref';
+export type Reason = 'short_read' | 'not_our_ref' | 'empty_response';
 
 // A PlyError is a value: returned in an Err, matched on `code`, never thrown by converted code. At run time it is an
 // Error instance carrying its fields (a stack for whoever logs it, and the exact shape today's thrown errors have, so

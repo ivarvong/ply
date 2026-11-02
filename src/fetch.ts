@@ -11,7 +11,7 @@ import type { Input } from './absent.js';
 import type { Result } from './result.js';
 import type { Attrs, Frame, Transport } from './transport.js';
 import { fail, scrubError } from './errors.js';
-import { pkts } from './pktline.js';
+import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
@@ -24,7 +24,8 @@ import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { frames, coded, clientSpan, proto, harvestBytes, spanned } from './transport.js';
+import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, spanned } from './transport.js';
+import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
 
 /* oxlint-disable no-magic-numbers -- span tails are diagnostics, not wire-format facts */
@@ -262,8 +263,10 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   return assertNever(st.phase);
 }
 // The response is over: it ended with its flush, and it had a packfile section or (negotiation) acknowledgments.
+// A response with no section at all, not even its flush, carries reason 'empty_response': the answer git's upload-pack
+// gives when it dies on an argument (fetch.ts filterUnadvertised reads it).
 export function v2End(st: V2State): Result<V2State, ErrorOf<'protocol'>> {
-  if (!st.done) return proto('v2: response ended without flush');
+  if (!st.done) return fail('protocol', 'v2: response ended without flush', st.sections.length === 0 ? { reason: 'empty_response' } : {});
   if (st.phase !== 'pack' && !st.sections.includes('acknowledgments')) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
   return ok(st);
 }
@@ -435,6 +438,41 @@ export const isFilterRejection = (e: unknown): boolean => {
   const status: unknown = Reflect.get(e, 'status');
   return typeof status === 'number' && isFilterRefusal(status, text);
 };
+
+// The no-filter fallback. git's upload-pack takes a `filter` argument only with uploadpack.allowFilter set, which is not
+// git's default: a stock `git http-backend` does not list `filter` on its `fetch=` line, and on a request that sends one
+// it dies without a word (upload-pack.c process_args: "unexpected line"), no ERR, no flush, an empty body. That answer
+// to a filtered request (v2End's reason 'empty_response'), and only that one, sends ply to the advertisement, the one
+// place the server says what `fetch` takes (GET info/refs, read as discover reads it). No `filter` there: the transport's
+// quirks.treeFilter becomes 'none' (learnFilter), true is returned, and the caller asks again without a filter, taking
+// the wider pack (a commit want with deepen 1 is its whole snapshot, a tree want its whole subtree; held to every pack
+// limit like any other). `filter` advertised, or an advertisement that cannot be read: false, and the empty response
+// stays the protocol error it is. An advertisement already in hand (discover) sets the quirk before any filtered fetch.
+// Spans: this one is `git.upload-pack discover` with git.server.fetch/filter; the fetch that follows carries
+// `git.fetch.filter.fallback: 'none'`.
+export const isEmptyResponse = (e: unknown): boolean => thrownCodeIs(e, 'protocol') && thrownReasonIs(e, 'empty_response');
+export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boolean> {
+  if (!isEmptyResponse(e)) return false;
+  const attrs = { 'git.command': 'discover', 'git.protocol.version': PROTOCOL_V2 };
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
+  const read = await coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, attrs), async (span: Span): Promise<Result<boolean, PlyError>> => {
+    const buf = await advertise(t, 'git-upload-pack', span);
+    if (!buf.ok) return buf;
+    const framed = pktStep(pktInit(), buf.value);
+    if (!framed.ok) return framed;
+    const finished = pktFinish(framed.value.state);
+    if (!finished.ok) return finished;
+    const lines = parseCapabilitiesV2(framed.value.frames);
+    if (!lines.ok) return lines;
+    const features = capLookup(lines.value).features('fetch');
+    const filter = features.includes('filter');
+    span.set({ ...pktAttrs(finished.value), 'git.server.fetch': features, 'git.server.filter': filter });
+    return ok(filter);
+  }));
+  if (!read.ok) return false;
+  learnFilter(t, read.value);
+  return !read.value;
+}
 
 // Check a wide (blob:none) pack's commits, trees and tags before any of it is returned or harvested (#18, #46).
 // `wanted(oid, o)` names what a tree:0 server would have sent — what the caller asked for. Those pass assertFetched
@@ -620,8 +658,13 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
   return onceMore(once);
 }
 
-// The blob:none form of a tree:0 single-object fetch (see fetchObject). Bounded by limits.maxPackBytes (v2Step).
-type Wide = { readonly oid: string; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean };
+// The wide form of a filtered single-object fetch (see fetchObject): blob:none for a host that refuses tree:0, no filter
+// ('') for one that does not take `filter` at all. Bounded by limits.maxPackBytes (v2Step) and the pack parser's limits.
+export type WideFilter = 'blob:none' | '';
+// The filter a wide fetch sent, as spans and messages name it.
+export const packName = (filter: WideFilter): string => (filter === '' ? 'unfiltered' : filter);
+export const fallbackName = (filter: WideFilter): string => (filter === '' ? 'none' : filter);
+type Wide = { readonly oid: string; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean; readonly filter: WideFilter; readonly requested: string };
 // The wanted object out of the wide pack, its extras checked (checkWide) and harvested.
 function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust: boolean): Result<FetchedObject, PlyError> {
   const { oid, expectType } = want;
@@ -638,7 +681,7 @@ function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust
   if (!checked.ok) return checked;
   const skipped = checked.value;
   const found = mapGet(objects, oid);
-  if (found.tag === 'none') return fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
+  if (found.tag === 'none') return fail('pack_corrupt', `object ${oid} not in the ${packName(want.filter)} pack (${objects.size} objects)`);
   const wanted = found.value;
   if (wanted.data.length > maxObject.value) return err(limitExceeded('object size', wanted.data.length, maxObject.value));
   const refused = refuseNonCommit(expectType, wanted.type, oid);
@@ -653,13 +696,13 @@ function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust
 }
 // oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
 function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyError>> {
-  const { oid, deepen, learned } = want;
+  const { oid, deepen, learned, filter, requested } = want;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
-  const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': 'tree:0', 'git.fetch.filter.learned': learned }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
+  const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': requested, 'git.fetch.filter.learned': learned }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
     const limit = readLimit(t.limits, 'maxObjectSize');
     if (!limit.ok) return limit;
     const parts: Uint8Array[] = [];
-    for await (const chunk of packStream(t, { wants: [oid], filter: 'blob:none', deepen, bypassCache: bust }, span)) parts.push(chunk);
+    for await (const chunk of packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span)) parts.push(chunk);
     return wideObject(t, concat(parts), want, span, bust);
   });
   return onceMore(once);
@@ -675,9 +718,16 @@ export async function fetchObject(t: Transport, want: ObjectWant): Promise<Resul
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
   if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true });
-  if (narrow && t.quirks.treeFilter === 'blob:none') return fetchWide(t, { oid, deepen, expectType, learned: false });
+  // oxlint-disable-next-line typescript/promise-function-async -- fetchWide's promise, passed through
+  const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter });
+  const filtered = filter !== '';
+  if (filtered && t.quirks.treeFilter === 'none') return wide('', false);
+  if (narrow && t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
   const single = await fetchSingle(t, { oid, filter, deepen, expectType });
-  if (single.ok || !narrow || !isFilterRejection(single.error)) return single;
-  t.quirks.treeFilter = 'blob:none';
-  return fetchWide(t, { oid, deepen, expectType, learned: true });
+  if (single.ok || !filtered) return single;
+  if (narrow && isFilterRejection(single.error)) {
+    t.quirks.treeFilter = 'blob:none';
+    return wide('blob:none', true);
+  }
+  return (await filterUnadvertised(t, single.error)) ? wide('', true) : single;
 }

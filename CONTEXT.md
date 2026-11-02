@@ -78,7 +78,7 @@ Key operation modules:
   `deepen <limit>` fetch through `fetchPackTree0` (`tree:0`, else `blob:none` with the trees harvested). `logWindow` (pure)
   holds the window to the #37 deepen contract (the want present; every commit an ancestor; a missing parent only under a
   `shallow` line, else `pack_corrupt`) and sets `truncated` from the last commit's parents. No `path` filter. Issue #56.
-- `merge.js` — `mergeBranch`, `fastForward`, `deleteBranch`, `mergeTrees` (trivial-merge rules per directory, only differing
+- `merge.js` — `mergeBranch`, `fastForward`, `deleteRef`, `mergeTrees` (trivial-merge rules per directory, only differing
   subtrees fetched), `bestBases` (git's `merge-base --all` with a completeness check), rename guards, `blobMerger`,
   `attributeDrivers`/`attributeTree`.
 - `linemerge.js` — port of git's xdiff as merge-ort drives it: histogram diff (+ hash-chain limit), classic Myers fallback
@@ -86,6 +86,9 @@ Key operation modules:
   script, `xdl_do_merge`, conflict refinement and simplification, fill (clean and `merge=union`).
 - `attributes.js` — `.gitattributes` as git reads them: parse, wildmatch, precedence, macros.
 - `rebase.js` — `rebaseBranch` (per-commit or squash), `cherryPick`, `revertCommit` on the same merge primitive.
+- `refops.ts` — `createBranch`, `deleteBranch`, `createTag` by URL: one receive-pack command each (an annotated tag carries
+  its tag object); an existing ref is `cas_conflict` (expected zero, actual its tip). Judged in `test/e2e-customer.test.js`,
+  which also runs README.md's quick start as written against a default and a stock `git http-backend`.
 
 ## 3. How the work was done (the process)
 
