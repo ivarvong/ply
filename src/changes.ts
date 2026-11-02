@@ -6,10 +6,10 @@
 // Choices, where git's commands disagree: `create` of a path that exists is bad_request (git add overwrites; `write`
 // is that). A result tree equal to the parent does not create an empty commit, and does not create a new ref
 // (that is createRef). A 40-hex base that is not the tip of an existing target is bad_request, not a silent rebase.
-// Every decision returns a Result; commitChanges throws until the 0.2.0 Result cut-over, as editFile and pushTree do,
-// and inside the operation the Err meets operation()'s span at one `orThrow`.
+// Every decision returns a Result, and so does commitChanges, as editFile and pushTree do; inside the operation an Err
+// is the operation's, which operation() records on its span.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
@@ -17,10 +17,10 @@ import { lsRefs, parseUnbornLine } from './lsrefs.js';
 import { discover } from './discover.js';
 import { fetchObject } from './fetch.js';
 import { fetchCommit } from './commit.js';
-import { push, validated, ZERO_OID } from './push.js';
+import { push, ZERO_OID } from './push.js';
 import type { PackObject } from './push.js';
 import { parseOid, parseCommitId } from './oid.js';
-import { parseTree, encodeTree, hashObject, TYPE } from './objects.js';
+import { parseTree, hashObject, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
@@ -28,16 +28,15 @@ import { validateIdent, validateRef, validatePushRef, validatePath, validateMess
 import type { IdentInput, ValidatedIdent } from './validate.js';
 import { editFile, inSpan, isLfsPointerPrefix, limitsOf, refuseRebase } from './edit.js';
 import type { Author } from './edit.js';
-import { signCommitResult } from './sign.js';
+import { signCommit } from './sign.js';
 import type { Signer } from './sign.js';
 import {
   emptyDir, lazyNode, fileLeaf, putAt, removeAt, renameAt, replaceOnce, encodeMem, insertChild, blobOids, requireDir,
 } from './memtree.js';
 import type { BlobMode, Dir, Mem } from './memtree.js';
 import { MODE_TREE } from './format.js';
-import { assertNever, err, getOrElse, mapOption, none, ok, some } from './result.js';
+import { assertNever, err, getOrElse, map, mapOption, none, ok, some } from './result.js';
 import type { Err, Ok, Option, Result } from './result.js';
-import { thrownCodeIs, thrownCodeOr } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import type { Transport } from './transport.js';
 import type { Span } from './otel.js';
@@ -50,7 +49,8 @@ import type { Input } from './absent.js';
 import { at, field, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 
 const HEX40 = /^[0-9a-fA-F]{40}$/u;
-const EMPTY_TREE = hashObject('tree', orThrow(encodeTree([])));
+// git's empty tree (hash of no entries)
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export type { BlobMode };
 // `mode` left out is a regular file (100644).
@@ -129,7 +129,7 @@ function fields(raw: object): Record<string, unknown> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a change is an untyped object; each field is checked below
   return raw as Record<string, unknown>;
 }
-const pathOf = (raw: unknown, limits: Limits): Result<string[], PlyError> => validated(() => orThrow(validatePath(raw, limits)).components);
+const pathOf = (raw: unknown, limits: Limits): Result<string[], PlyError> => map(validatePath(raw, limits), p => p.components);
 function normalize(raw: unknown, limits: Limits): Result<Norm, PlyError> {
   if (raw === null || typeof raw !== 'object') return fail('bad_request', 'change must be an object with a kind', { what: 'change' });
   const rec = fields(raw);
@@ -178,7 +178,7 @@ function validateBase(base: string | null): Result<BasePlan, PlyError> {
     const id = parseCommitId(base);
     return id.ok ? ok({ kind: 'oid', oid: id.value }) : id;
   }
-  const ref = validated(() => orThrow(validateRef(base)));
+  const ref = validateRef(base);
   return ref.ok ? ok({ kind: 'ref', ref: ref.value }) : ref;
 }
 function validateHead(head: string | null): Result<string | null, PlyError> {
@@ -201,7 +201,7 @@ function identInput(who: Option<Author>, time: number): IdentInput {
 function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | null): Result<Plan, PlyError> {
   const given = withDefaults(spec, specDefaults());
   const refIn = given.ref;
-  const ref = refIn === null ? ok(null) : validated(() => orThrow(validatePushRef(refIn, false)));
+  const ref = refIn === null ? ok(null) : validatePushRef(refIn, false);
   if (!ref.ok) return ref;
   const base = validateBase(given.base);
   if (!base.ok) return base;
@@ -220,14 +220,14 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
   const authorTime = mapOption(author, a => fromNullish(a.time));
   let time = getOrElse(fromNullish(given.time), Math.floor(Date.now() / 1000));
   if (authorTime.tag === 'some' && authorTime.value.tag === 'some') time = authorTime.value.value;
-  const authorIdent = validated(() => orThrow(validateIdent(identInput(author, time))));
+  const authorIdent = validateIdent(identInput(author, time));
   if (!authorIdent.ok) return authorIdent;
   const committer = fromNullish(given.committer);
   const written = committer.tag === 'none'
     ? authorIdent
-    : validated(() => orThrow(validateIdent(identInput(committer, getOrElse(fromNullish(committer.value.time), time)))));
+    : validateIdent(identInput(committer, getOrElse(fromNullish(committer.value.time), time)));
   if (!written.ok) return written;
-  const message = validated(() => orThrow(validateMessage(spec.message)));
+  const message = validateMessage(spec.message);
   if (!message.ok) return message;
   const pinned = validateHead(head);
   if (!pinned.ok) return pinned;
@@ -258,7 +258,7 @@ async function resolveTarget(t: Transport, ref: string | null): Promise<Result<T
     const headLine = mapGet(listed.refs, 'HEAD');
     const unborn = listed.unborn;
     if (unborn !== null) {
-      const target = validated(() => orThrow(validatePushRef(unborn.target, false)));
+      const target = validatePushRef(unborn.target, false);
 
       return target.ok ? ok({ ref: target.value, oid: null }) : target;
     }
@@ -307,18 +307,20 @@ type Walk = {
   readonly allowLfs: boolean;
 };
 
-async function loadTree(walk: Walk, oid: string): Promise<Dir> {
+async function loadTree(walk: Walk, oid: string): Promise<Result<Dir, PlyError>> {
   const hit = mapGet(walk.cache, oid);
-  if (hit.tag === 'some') return hit.value;
+  if (hit.tag === 'some') return ok(hit.value);
   const obj = await fetchObject(walk.t, { oid, filter: 'tree:0', expectType: TYPE.TREE });
   const dir = emptyDir();
-  for (const entry of orThrow(parseTree(obj.data, walk.limits))) {
+  const parsed = parseTree(obj.data, walk.limits);
+  if (!parsed.ok) return parsed;
+  for (const entry of parsed.value) {
     dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
     walk.have.add(entry.oid);
   }
   walk.have.add(oid);
   walk.cache.set(oid, dir);
-  return dir;
+  return ok(dir);
 }
 
 // A missing directory is fetched before the next component is named, so the walk is ordered.
@@ -338,8 +340,9 @@ async function descend(walk: Walk, root: Dir, names: readonly string[], create: 
     else if (child.value.mode === MODE_TREE) {
       // oxlint-disable-next-line no-await-in-loop -- the next component is inside this directory
       const loaded = await loadTree(walk, child.value.oid);
-      here.entries.set(name, loaded);
-      here = loaded;
+      if (!loaded.ok) return loaded;
+      here.entries.set(name, loaded.value);
+      here = loaded.value;
     } else return fail('bad_request', `${full} is not a directory`, { what: 'path', path: full });
     walked = full;
   }
@@ -478,8 +481,8 @@ function parseEditInputs(targetRef: string, editPath: string, limits: Limits): R
   if (!parsedPath.ok) return parsedPath;
   return ok({ ref: branded.value, path: parsedPath.value.path });
 }
-// The single edit of an existing file, streamed by editFile (which throws: a public entry). What it throws is read
-// here: a lost race (or a rebase refusal on a new ref) is this commit's cas_conflict; anything else passes on as thrown.
+// The single edit of an existing file, streamed by editFile. Its Err is read here: a lost race (or a rebase refusal on a
+// new ref) is this commit's cas_conflict; any other Err is the commit's as it is.
 async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob): Promise<Result<CommitChangesResult, PlyError>> {
   const { plan, target, parent, edit, opts } = job;
   const creating = parent.creating;
@@ -488,27 +491,27 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
   const inputs = parseEditInputs(target.ref, edit.path, opts.limits);
   if (!inputs.ok) return inputs;
   const { ref, path } = inputs.value;
-  try {
-    const edited = await editFile(url, {
-      ref, base: getOrElse(fromNullish(parent.baseOid), getOrElse(fromNullish(parent.baseRef), target.ref)), path, find: edit.find, replace: edit.replace,
-      author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
-    }, {
-      ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,
-      verify: opts.verify, allowLfsPointer: opts.allowLfs, ...(opts.signer === null ? {} : { signer: opts.signer }),
-    });
-    if (edited.noop) {
-      if (creating) return nothing();
-      return ok(resultOf(target.ref, parent, { tree: edited.oldTree, oid: edited.oldCommit, pushBytes: 0, outcome: 'noop' }));
-    }
-    // editFile may have retried against a tip that moved. That commit's parent is the tip it won on.
-    return ok(resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' }));
-  } catch (e) {
-    const code = thrownCodeOr(e, null);
-    const rebase = creating && code === 'bad_request' && whatIs(e, 'rebase');
-    if (code !== 'cas_conflict' && !rebase) throw e;
-    if (code === 'cas_conflict' && !creating && actualKnown(e)) throw e;
+  const result = await editFile(url, {
+    ref, base: getOrElse(fromNullish(parent.baseOid), getOrElse(fromNullish(parent.baseRef), target.ref)), path, find: edit.find, replace: edit.replace,
+    author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
+  }, {
+    ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,
+    verify: opts.verify, allowLfsPointer: opts.allowLfs, ...(opts.signer === null ? {} : { signer: opts.signer }),
+  });
+  if (!result.ok) {
+    const e = result.error;
+    const rebase = creating && e.code === 'bad_request' && whatIs(e, 'rebase');
+    if (e.code !== 'cas_conflict' && !rebase) return result;
+    if (e.code === 'cas_conflict' && !creating && actualKnown(e)) return result;
     return lost(target.ref, creating ? ZERO_OID : parent.oid, await readTip(t, target.ref), e);
   }
+  const edited = result.value;
+  if (edited.noop) {
+    if (creating) return nothing();
+    return ok(resultOf(target.ref, parent, { tree: edited.oldTree, oid: edited.oldCommit, pushBytes: 0, outcome: 'noop' }));
+  }
+  // editFile may have retried against a tip that moved. That commit's parent is the tip it won on.
+  return ok(resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' }));
 }
 
 function treeDecision(parent: Parent, tree: string): 'noop' | 'empty' | 'commit' {
@@ -539,7 +542,9 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
   const { t, root, plan, target, parent, limits, verify, signer, allowLfs, pinned, attempt } = job;
   root.set({ 'git.commit.stream': false });
   const walk: Walk = { t, limits, have: new Set(), cache: new Map(), allowLfs };
-  const mem = parent.tree === null ? emptyDir() : await loadTree(walk, parent.tree);
+  const loaded = parent.tree === null ? ok(emptyDir()) : await loadTree(walk, parent.tree);
+  if (!loaded.ok) return loaded;
+  const mem = loaded.value;
   const applied = await inSpan(root.tracer, 'git.commit.apply', { parent: root, attrs: { 'git.commit.applied': plan.changes.length } }, async () => { const r = await apply(walk, mem, plan.changes); return r; });
 
   if (!applied.ok) return applied;
@@ -548,9 +553,11 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
   if (decision === 'noop') return ok({ retry: false, objects: 0, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid: parent.oid === null ? applied.value.tree : parent.oid, pushBytes: 0, outcome: 'noop' }) });
   const message = plan.message.endsWith('\n') ? plan.message : `${plan.message}\n`;
   const parents = parent.oid === null ? [] : [parent.oid];
-  let built = buildCommitData({ tree: applied.value.tree, parents, author: plan.author, committer: plan.committer, time: plan.author.time, message });
+  const encoded = buildCommitData({ tree: applied.value.tree, parents, author: plan.author, committer: plan.committer, time: plan.author.time, message });
+  if (!encoded.ok) return encoded;
+  let built = encoded.value;
   if (signer !== null) {
-    const signed = await signCommitResult(built.data, signer);
+    const signed = await signCommit(built.data, signer);
     if (!signed.ok) return signed;
     built = { data: signed.value, oid: hashObject('commit', signed.value) };
   }
@@ -560,16 +567,16 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
   const oldOid = oldOidOf(parent);
   const branded = parseRefname(target.ref);
   if (!branded.ok) return branded;
-  try {
-    const pushed = await push(t, { ref: branded.value, oldOid, newOid: oid, objects });
-    if (verify) orThrow(await verifyRef(t, root, 'git.commit', target.ref, oid));
-    return ok({ retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid, pushBytes: pushed.packBytes, outcome: 'commit' }) });
-  } catch (e) {
-    // the push (or its read-back) throws: a lost race is redone once, or reported against a fresh read; the rest passes on
-    if (!thrownCodeIs(e, 'cas_conflict')) throw e;
+  const pushed = await push(t, { ref: branded.value, oldOid, newOid: oid, objects });
+  if (!pushed.ok) {
+    // a lost race is redone once, or reported against a fresh read; any other Err is the commit's
+    if (pushed.error.code !== 'cas_conflict') return pushed;
     if (attempt === 0 && !pinned && !parent.creating) return ok({ retry: true });
-    return lost(target.ref, oldOid, await readTip(t, target.ref), e);
+    return lost(target.ref, oldOid, await readTip(t, target.ref), pushed.error);
   }
+  // the read-back's Err (ambiguous) is the commit's
+  if (verify) { const seen = await verifyRef(t, root, 'git.commit', target.ref, oid); if (!seen.ok) return seen; }
+  return ok({ retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid, pushBytes: pushed.value.packBytes, outcome: 'commit' }) });
 }
 type StreamTry = { readonly plan: Plan; readonly target: Tip; readonly parent: Parent; readonly opts: StreamOpts };
 // One edit of a file that exists on a parent that exists: streamed (Some). Anything else is the in-memory tree (None).
@@ -581,10 +588,13 @@ async function streamIfEdit(url: string, t: Transport, root: Span, job: StreamTr
   return edited.ok ? ok(some(edited.value)) : edited;
 }
 
-export async function commitChanges(url: string, spec: CommitChangesSpec, options: CommitChangesOptions = {}): Promise<CommitChangesResult> {
+// oxlint-disable-next-line require-await -- async, as before: the spec's refusal is an Err the promise resolves with
+export async function commitChanges(url: string, spec: CommitChangesSpec, options: CommitChangesOptions = {}): Promise<Result<CommitChangesResult, PlyError>> {
   const { head, verify, signer, allowLfsPointer } = withDefaults(options, optionDefaults());
   const limits = limitsOf(options);
-  const plan = orThrow(validatePlan(spec, limits, head));
+  const planned = validatePlan(spec, limits, head);
+  if (!planned.ok) return planned;
+  const plan = planned.value;
   const pinned = plan.head !== null;
   const attrs = {
     'git.commit.ref': plan.ref === null ? '' : plan.ref, 'git.commit.base': plan.baseText, 'git.commit.changes': plan.changes.length,
@@ -593,7 +603,7 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
   };
   const opts: StreamOpts = { rest: options, limits, verify, signer, allowLfs: allowLfsPointer, pinned };
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- tracer is optional on EntryOptions and required by operation(), as editFile
-  const out = await operation('commit', url, { ...options, limits, attrs } as OperationOpts, async ({ t, root, outcome }) => {
+  return operation('commit', url, { ...options, limits, attrs } as OperationOpts, async ({ t, root, outcome }) => {
     const finish = (done: CommitChangesResult, objects: number): Ok<CommitChangesResult> => outcome(done.outcome, done, {
       'git.commit.tree': done.tree, 'git.commit.oid': done.oid, 'git.commit.push.bytes': done.pushBytes, ...(objects > 0 ? { 'git.commit.objects': objects } : {}),
     });
@@ -618,5 +628,4 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
     const done = await run(0);
     return done;
   });
-  return orThrow(out);
 }

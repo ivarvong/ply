@@ -36,7 +36,7 @@ import { limitError, readLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 
 // push.ts takes a branded Refname; the ref here is validated (validatePushRef) as a plain string (see merge.ts).
-type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<Result<PushResult, PlyError>>;
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons, commit and replayed are extras.
 type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
@@ -119,7 +119,7 @@ async function transplant(t: Transport, cache: TreeCache, trees: Trees, { parent
   if (m.conflicts.length > 0) return ok({ kind: 'conflict', conflicts: m.conflicts, reasons: m.reasons });
   const treeOid: string = m.oid === null ? hashObject('tree', new Uint8Array(0)) : m.oid;
   let data = orThrow(encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra }));
-  if (signer) data = await signCommit(data, signer);
+  if (signer) data = orThrow(await signCommit(data, signer));
   const oid: string = hashObject('commit', data);
   out.contentMerged += m.contentMerged;
   return ok({ kind: 'written', oid, data, treeOid, objects: [...(m.oid === null ? [{ type: TYPE.TREE, data: new Uint8Array(0), oid: treeOid }] : []), ...m.objects, { type: TYPE.COMMIT, data, oid }] });
@@ -199,7 +199,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     if (base === target) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 });
     if (base === tip) { // the branch is behind: rebasing nothing onto target makes the branch equal to target
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-      await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: target, objects: [] });
+      orThrow(await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: target, objects: [] }));
       return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 });
     }
     const maxCommits = readLimit(limits, 'maxRebaseCommits');
@@ -240,7 +240,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     }
     root.set({ 'git.rebase.trees.fetched': out.fetched, 'git.rebase.objects': objects.length, 'git.rebase.dropped': dropped.length });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-    const pushed = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
+    const pushed = orThrow(await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) })); // non-fast-forward: the old tip is the CAS
     return outcome(squash ? 'squash' : 'rebase', { outcome: squash ? 'squash' : 'rebase', ref, oid: cur, oldTip: tip, onto: target, base, commits: chain.length, replayed, dropped, pushBytes: pushed.packBytes }, { 'git.rebase.new_tip': cur, 'git.rebase.push.bytes': pushed.packBytes });
   })()));
 }
@@ -346,7 +346,7 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
     const kind = writtenKind(w.treeOid === tInfo.tree, empty);
     if (kind === 'empty') return outcome('empty', { outcome: 'empty', ref, oid: target });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-    const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: w.oid, objects: uniqueObjects(w.objects) });
+    const pushed = orThrow(await (push as unknown as Push)(t, { ref, oldOid: target, newOid: w.oid, objects: uniqueObjects(w.objects) }));
     return outcome(kind, { outcome: kind, ref, oid: w.oid, tree: w.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: w.oid, [`${name}.tree`]: w.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
   })()));
 }

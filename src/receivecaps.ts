@@ -165,6 +165,6 @@ export type CheckedPushOptions = Omit<PushOptions, 'checked'> & PushWants;
 export async function pushWithOptions(t: CapsTransport, options: CheckedPushOptions): Promise<PushResult> {
   const { atomic: _atomic, pushOptions: _pushOptions, ...opts } = options;
   const { atomic, pushOptions } = withDefaults(options, noWants());
-  if (!atomic && pushOptions.length === 0) return push(t, opts);
-  return push(t, { ...opts, checked: orThrow(checkPushCaps(await receiveCaps(t), { atomic, pushOptions })) });
+  if (!atomic && pushOptions.length === 0) return orThrow(await push(t, opts));
+  return orThrow(await push(t, { ...opts, checked: orThrow(checkPushCaps(await receiveCaps(t), { atomic, pushOptions })) }));
 }

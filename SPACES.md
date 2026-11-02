@@ -125,7 +125,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/receivecaps.ts` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
-| `src/sign.ts` gpgsigSplice() | lossless | decodeBytes | `sign` / case |
+| `src/sign.ts` withGpgsig() | lossless | decodeBytes | `sign` / case |
 
 ## Holes (58)
 

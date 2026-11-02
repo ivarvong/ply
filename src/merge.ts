@@ -78,7 +78,7 @@ export type PushObject = { readonly type: number; readonly data: Uint8Array };
 
 // push.ts takes a branded Refname; the ref here is validated (validatePushRef) as a plain string. Each call casts to
 // this signature (a type-only cast: an alias `const f = g as F` would cost bundle bytes).
-type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<Result<PushResult, PlyError>>;
 
 const EMPTY: readonly TreeEntry[] = [];
 const NO_PARENTS: readonly string[] = [];
@@ -595,12 +595,12 @@ export async function attributeTree(t: Transport, attributes: AttributeSource, t
 // Fast-forward `ref` to `to`, expecting it to be at `from` (CAS). Empty pack: the server already has the objects.
 export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: string; readonly from: string; readonly to: string }): Promise<PushResult> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-  return (push as unknown as Push)(t, { ref, oldOid: from, newOid: to, objects: [] });
+  return orThrow(await (push as unknown as Push)(t, { ref, oldOid: from, newOid: to, objects: [] }));
 }
 
 export async function deleteBranch(t: Transport, { ref, oid }: { readonly ref: string; readonly oid: string }): Promise<PushResult> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-  return (push as unknown as Push)(t, { ref, oldOid: oid, newOid: ZERO_OID, objects: [] });
+  return orThrow(await (push as unknown as Push)(t, { ref, oldOid: oid, newOid: ZERO_OID, objects: [] }));
 }
 
 // What a merge-base verdict means for landing `theirs` on `ours`, before any tree is read: nothing to do, a
@@ -736,11 +736,11 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const treeOid: string = merged.oid === null ? hashObject('tree', orThrow(encodeTree([]))) : merged.oid;
     if (!person || !committerPerson) return fail('bad_request', 'author is required for a merge commit');
     let commitData = orThrow(encodeCommit({ tree: treeOid, parents: [ours, theirs], author: orThrow(ident(person)), committer: orThrow(ident(committerPerson)), message: (message === null ? `Merge ${short(from)} into ${short(ref)}` : message).replace(/\n?$/u, '\n') }));
-    if (signer) commitData = await signCommit(commitData, signer);
+    if (signer) commitData = orThrow(await signCommit(commitData, signer));
     const oid: string = hashObject('commit', commitData);
     const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: orThrow(encodeTree([])), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-    const r = await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects });
+    const r = orThrow(await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects }));
     if (verify) { const seen = await verifyRef(t, root, 'git.merge', ref, oid); if (!seen.ok) return seen; }
     return outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes });
   })()));
