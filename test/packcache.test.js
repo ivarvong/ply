@@ -10,7 +10,7 @@ import { editFile } from '../src/edit.js';
 import { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from '../src/packcache.js';
 import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 // Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
 const fetchBody = (...a) => unwrap(fetchBodyR(...a));
@@ -57,7 +57,7 @@ test('pack cache: second edit at the same tree serves commit+trees from cache; s
   const f = cachingFetch(globalThis.fetch, cache);
   const run = async (find, replace, treeCache = new Map()) => {
     const ex = arrayExporter(); const before = counts();
-    const r = await editFile(url, { path: 'a/b/c/file.txt', find, replace, author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), fetchImpl: f, cache: treeCache });
+    const r = await unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find, replace, author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), fetchImpl: f, cache: treeCache }));
     return { r, d: delta(before, counts()), spans: spansOf(ex) };
   };
   const a = await run('MARK', 'MARK1');
@@ -95,7 +95,7 @@ test('pack cache: a corrupt live response is not retried (bust only follows a HI
   let n = 0;
   const bad = async (u, init) => { const res = await fetch(u, init); if (String(u).endsWith('git-upload-pack') && isCacheableFetch(init.body) && n++ === 0) { const b = new Uint8Array(await res.arrayBuffer()); b[b.length - 30] ^= 0xff; return new Response(b, { status: 200, headers: res.headers }); } return res; };
   const before = counts();
-  await assert.rejects(editFile(url, { path: 'a/b/c/file.txt', find: 'MARK', replace: 'x', author, message: 'm' }, { tracer: new Tracer(), fetchImpl: cachingFetch(bad, memoryCache()) }), e => e.code === 'pack_corrupt');
+  await assert.rejects(unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find: 'MARK', replace: 'x', author, message: 'm' }, { tracer: new Tracer(), fetchImpl: cachingFetch(bad, memoryCache()) })), e => e.code === 'pack_corrupt');
   assert.deepEqual(delta(before, counts()), { 'ls-refs': 1, fetch: 1, 'receive-pack': 0 });
 });
 
@@ -103,7 +103,7 @@ test('head hint (parallel, default): ls-refs overlaps the speculative commit fet
   const base = headOf();
   const run = async (head, find, replace, extra = {}) => {
     const ex = arrayExporter(); const before = counts();
-    const r = await editFile(url, { path: 'a/b/c/file.txt', find, replace, author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), head, ...extra });
+    const r = await unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find, replace, author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), head, ...extra }));
     return { r, d: delta(before, counts()), spans: spansOf(ex) };
   };
   const a = await run(base, 'MARK', 'H1');
@@ -133,7 +133,7 @@ test('head hint (parallel, default): ls-refs overlaps the speculative commit fet
   assert.ok(c.spans.find(s => s.name === 'git.edit').attrs['git.edit.head.speculative_error']);
   assert.equal(c.r.newCommit, headOf());
   assert.deepEqual(fsckProblems(bare), []);
-  await assert.rejects(editFile(url, { path: 'a/b/c/file.txt', find: 'H3', replace: 'x', author, message: 'm' }, { tracer: new Tracer(), head: 'nope' }), e => e.code === 'bad_request');
+  await assert.rejects(unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find: 'H3', replace: 'x', author, message: 'm' }, { tracer: new Tracer(), head: 'nope' })), e => e.code === 'bad_request');
 });
 
 test('push: sideband on by default; hook stderr lands in git.push.remote.messages', async () => {
@@ -141,7 +141,7 @@ test('push: sideband on by default; hook stderr lands in git.push.remote.message
   const hook = join(hooks, 'pre-receive'); writeFileSync(hook, '#!/bin/sh\necho "policy says hi" >&2\necho "second line" >&2\nexit 0\n'); chmodSync(hook, 0o755);
   try {
     const ex = arrayExporter();
-    const r = await editFile(url, { path: 'a/b/c/file.txt', find: 'H3', replace: 'SB', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }) });
+    const r = await unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find: 'H3', replace: 'SB', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }) }));
     assert.equal(r.newCommit, headOf());
     const push = spansOf(ex).find(s => s.name === 'git.receive-pack');
     assert.ok(push.attrs['git.push.caps'].includes('side-band-64k'));
@@ -149,7 +149,7 @@ test('push: sideband on by default; hook stderr lands in git.push.remote.message
     // and a rejecting hook: the reason is the server's words, the code is push_rejected (not cas)
     writeFileSync(hook, '#!/bin/sh\necho "GH006-style: protected branch, nope" >&2\nexit 1\n');
     const ex2 = arrayExporter();
-    await assert.rejects(editFile(url, { path: 'a/b/c/file.txt', find: 'SB', replace: 'SC', author, message: 'm' }, { tracer: new Tracer({ exporter: ex2 }) }), e => e.code === 'push_rejected' && /protected branch/.test(e.hookOutput));
+    await assert.rejects(unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find: 'SB', replace: 'SC', author, message: 'm' }, { tracer: new Tracer({ exporter: ex2 }) })), e => e.code === 'push_rejected' && /protected branch/.test(e.hookOutput));
     assert.deepEqual(spansOf(ex2).find(s => s.name === 'git.receive-pack').attrs['git.push.remote.messages'], ['GH006-style: protected branch, nope']);
   } finally { rmSync(hook, { force: true }); }
 });
@@ -180,7 +180,7 @@ test('tracer: isolate invocation attrs, event cap, cache put stats surface on th
   const broken = { ...memoryCache(), put: async () => { throw new Error('cache full'); } };
   const f = cachingFetch(globalThis.fetch, broken);
   const ex2 = arrayExporter();
-  await editFile(url, { path: 'a/b/c/file.txt', find: 'SB', replace: 'SD', author, message: 'm' }, { tracer: new Tracer({ exporter: ex2 }), fetchImpl: f });
+  await unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find: 'SB', replace: 'SD', author, message: 'm' }, { tracer: new Tracer({ exporter: ex2 }), fetchImpl: f }));
   const root = spansOf(ex2).find(x => x.name === 'git.edit');
   assert.equal(root.attrs['git.pack.cache.put.failed'], 5); assert.equal(root.attrs['git.pack.cache.put.error'], 'cache full'); assert.equal(root.attrs['git.pack.cache.miss'], 5);
   assert.equal(typeof root.attrs['mem.alloc.inflate_chunk.max_single'], 'number');
@@ -190,7 +190,7 @@ test('tracer: isolate invocation attrs, event cap, cache put stats surface on th
 
 test('verify: the post-push ls-refs must show our commit; a lying answer is ambiguous, not success', async () => {
   const ex = arrayExporter();
-  const ok = await editFile(url, { path: 'a/b/c/file.txt', find: 'SD', replace: 'V1', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), verify: true });
+  const ok = await unwrapAsync(editFile(url, { path: 'a/b/c/file.txt', find: 'SD', replace: 'V1', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }), verify: true }));
   assert.equal(ok.newCommit, headOf());
   assert.equal(spansOf(ex).find(s => s.name === 'git.edit').attrs['git.edit.verify.ref'], ok.newCommit);
   // a proxy that answers the second ls-refs (post-push) with the pre-push ref state
@@ -202,7 +202,7 @@ test('verify: the post-push ls-refs must show our commit; a lying answer is ambi
   });
   try {
     const ex2 = arrayExporter();
-    await assert.rejects(editFile(`${lying.url}/pc.git`, { path: 'a/b/c/file.txt', find: 'V1', replace: 'V2', author, message: 'm' }, { tracer: new Tracer({ exporter: ex2 }), verify: true }), e => e.code === 'ambiguous' && /push reported ok but/.test(e.message));
+    await assert.rejects(unwrapAsync(editFile(`${lying.url}/pc.git`, { path: 'a/b/c/file.txt', find: 'V1', replace: 'V2', author, message: 'm' }, { tracer: new Tracer({ exporter: ex2 }), verify: true })), e => e.code === 'ambiguous' && /push reported ok but/.test(e.message));
     const root = spansOf(ex2).find(s => s.name === 'git.edit');
     assert.equal(root.attrs['git.edit.outcome'], 'ambiguous'); assert.equal(root.attrs['git.edit.verify.ref'], ok.newCommit, 'the lie is recorded verbatim');
     assert.equal(git(bare, ['cat-file', '-p', 'main:a/b/c/file.txt']), 'hello V2 world\n', 'the push itself landed; only the receipt was untrustworthy');
@@ -248,16 +248,16 @@ test('LFS pointer: refused by default (the content is not in git), editable only
   const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:' + 'ab'.repeat(32) + '\nsize 12345\n';
   otherWriter({ 'model.bin': pointer, 'notlfs.txt': 'version https://git-lfs.github.com/spec/v2 MARK\n' }, 'lfs pointer');
   const ex = arrayExporter();
-  await assert.rejects(editFile(url, { path: 'model.bin', find: 'size 12345', replace: 'size 1', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }) }), e => e.code === 'lfs_pointer' && e.size === pointer.length && /LFS pointer/.test(e.message));
+  await assert.rejects(unwrapAsync(editFile(url, { path: 'model.bin', find: 'size 12345', replace: 'size 1', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }) })), e => e.code === 'lfs_pointer' && e.size === pointer.length && /LFS pointer/.test(e.message));
   const blob = spansOf(ex).find(s => s.name === 'git.edit.blob');
   assert.equal(blob.attrs['git.edit.blob.lfs_pointer'], true);
   assert.equal(git(bare, ['cat-file', '-p', 'main:model.bin']), pointer, 'untouched');
   assert.equal(spansOf(ex).filter(s => s.name === 'git.receive-pack').length, 0, 'nothing pushed');
   // the guard matches the exact v1 magic, not any file mentioning git-lfs
-  const r = await editFile(url, { path: 'notlfs.txt', find: 'MARK', replace: 'OK', author, message: 'm' }, { tracer: new Tracer() });
+  const r = await unwrapAsync(editFile(url, { path: 'notlfs.txt', find: 'MARK', replace: 'OK', author, message: 'm' }, { tracer: new Tracer() }));
   assert.equal(r.newCommit, headOf());
   // opt in: editing the pointer itself (e.g. retargeting an LFS object) is allowed and ordinary
-  const r2 = await editFile(url, { path: 'model.bin', find: 'size 12345', replace: 'size 54321', author, message: 'm' }, { tracer: new Tracer(), allowLfsPointer: true });
+  const r2 = await unwrapAsync(editFile(url, { path: 'model.bin', find: 'size 12345', replace: 'size 54321', author, message: 'm' }, { tracer: new Tracer(), allowLfsPointer: true }));
   assert.equal(r2.newCommit, headOf());
   assert.equal(git(bare, ['cat-file', '-p', 'main:model.bin']), pointer.replace('12345', '54321'));
 });
@@ -266,7 +266,7 @@ test('agent: we identify as ply, not git', async () => {
   const { UA } = await import('../src/transport.js');
   assert.match(UA, /^ply\//);
   const ex = arrayExporter();
-  await editFile(url, { path: 'notlfs.txt', find: 'OK', replace: 'OK2', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }) });
+  await unwrapAsync(editFile(url, { path: 'notlfs.txt', find: 'OK', replace: 'OK2', author, message: 'm' }, { tracer: new Tracer({ exporter: ex }) }));
   const caps = spansOf(ex).find(s => s.name === 'git.receive-pack').attrs['git.push.caps'];
   assert.ok(caps.includes(`agent=${UA}`), caps.join(' '));
 });

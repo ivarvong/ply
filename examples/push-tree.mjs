@@ -18,7 +18,10 @@ const auth = env.PLY_TOKEN ? { token: env.PLY_TOKEN, ...(env.PLY_USER && { user:
 const ref = values.ref.startsWith('refs/') ? values.ref : `refs/heads/${values.ref}`;
 const author = { name: env.GIT_AUTHOR_NAME ?? 'ply', email: env.GIT_AUTHOR_EMAIL ?? 'ply@localhost' };
 
-const r = await pushDir(url, { dir, ref, author, message: values.message ?? `push ${dir}` }, { auth, tracer: new Tracer() });
+const result = await pushDir(url, { dir, ref, author, message: values.message ?? `push ${dir}` }, { auth, tracer: new Tracer() });
+// pushDir returns a Result: an Err is a PlyError, whose code says what to do next (README "Errors")
+if (!result.ok) { console.error(`${result.error.code}: ${result.error.message}`); process.exit(1); }
+const r = result.value;
 const { files, trees, sent, sentBlobs, sentTrees } = r.objects;
 console.log(r.noop
   ? `noop: ${ref} already has this tree (${r.newTree}); nothing sent`

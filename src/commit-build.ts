@@ -1,6 +1,6 @@
 // Pure: the objects one edit commit is made of (new trees along the path, the commit, the blob as a delta), and a
-// commit's bytes from its tree and parents. A caller's identity is validated here (validateIdent throws a PlyError for
-// a bad one: these are public entries, which stay throwing until the Result cut-over); a validated one is used as it is.
+// commit's bytes from its tree and parents. A caller's identity is validated here (a bad one is the Err validateIdent
+// returns); a validated one is used as it is.
 import { ident, encodeCommit, hashObject, treeReplaceOid, TYPE } from './objects.js';
 import type { TreeEntry } from './objects.js';
 import { spliceDelta } from './pack.js';
@@ -8,25 +8,34 @@ import type { PackInput } from './pack.js';
 import { fromHex } from './sha1.js';
 import type { ValidatedIdent } from './validate.js';
 import { validateIdent, isValidatedIdent } from './validate.js';
-import { orThrow } from './errors.js';
+import type { ErrorOf } from './errors.js';
 import type { Input } from './absent.js';
 import { fromNullable, fromNullish } from './absent.js';
-import { getOrElse, matchOption } from './result.js';
+import { andThen, getOrElse, matchOption, ok } from './result.js';
+import type { Result } from './result.js';
 
 // A caller's identity, before validateIdent. `time` overrides the commit's time for this person; `tz` defaults to UTC.
 export type Author = { readonly name: string; readonly email: string } & Input<{ readonly tz: string; readonly time: number }>;
 export type AuthorLike = Author | ValidatedIdent;
+type BadRequest = ErrorOf<'bad_request'>;
 
-function identLine(person: AuthorLike, time: number): string {
-  if (isValidatedIdent(person)) return orThrow(ident(person));
+function identLine(person: AuthorLike, time: number): Result<string, BadRequest> {
+  if (isValidatedIdent(person)) return ident(person);
   const when = getOrElse(fromNullish(person.time), time);
   // tz: only the missing value means UTC (validateIdent's default); a null tz is the caller's, and refused there
   const tz = fromNullable(person.tz);
-  return orThrow(ident(orThrow(validateIdent(tz.tag === 'some' ? { name: person.name, email: person.email, time: when, tz: tz.value } : { name: person.name, email: person.email, time: when }))));
+  return andThen(validateIdent(tz.tag === 'some' ? { name: person.name, email: person.email, time: when, tz: tz.value } : { name: person.name, email: person.email, time: when }), ident);
 }
 // The committer line: the author's when none is given.
-const committerLine = (committer: AuthorLike | null, who: string, time: number): string =>
-  matchOption(fromNullish(committer), { some: c => identLine(c, time), none: () => who });
+const committerLine = (committer: AuthorLike | null, who: string, time: number): Result<string, BadRequest> =>
+  matchOption(fromNullish(committer), { some: c => identLine(c, time), none: () => ok(who) });
+// The author and committer lines, the author's first (its refusal wins).
+function people(author: AuthorLike, committer: AuthorLike | null, time: number): Result<{ readonly who: string; readonly written: string }, BadRequest> {
+  const who = identLine(author, time);
+  if (!who.ok) return who;
+  const written = committerLine(committer, who.value, time);
+  return written.ok ? ok({ who: who.value, written: written.value }) : written;
+}
 
 export type Level = { readonly treeOid: string; readonly data: Uint8Array; readonly entry: TreeEntry };
 export type BlobEditLite = { readonly oldOid: string; readonly newOid: string; readonly newLen: number; readonly delta: Uint8Array };
@@ -46,7 +55,7 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer 
   readonly levels: readonly Level[];
   readonly blob: Pick<BlobEditLite, 'oldOid' | 'newOid' | 'delta' | 'newLen'>;
   readonly oldCommit: string;
-}): Built {
+}): Result<Built, BadRequest> {
   const trees: NewTree[] = [];
   let child = blob.newOid;
   for (const { treeOid: oldOid, data, entry } of levels.toReversed()) {
@@ -56,17 +65,19 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer 
     trees.unshift({ type: TYPE.TREE, data: delta, baseOid: oldOid, newOid, newData });
     child = newOid;
   }
-  const who = identLine(author, time);
-  const written = committerLine(committer, who, time);
+  const lines = people(author, committer, time);
+  if (!lines.ok) return lines;
   const body = message.endsWith('\n') ? message : `${message}\n`;
-  const commitData = orThrow(encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: written, message: body }));
+  const encoded = encodeCommit({ tree: child, parents: [oldCommit], author: lines.value.who, committer: lines.value.written, message: body });
+  if (!encoded.ok) return encoded;
+  const commitData = encoded.value;
   const newCommit = hashObject('commit', commitData);
   const objects: PackInput[] = [
     { type: TYPE.COMMIT, data: commitData },
     ...trees.map(t => ({ type: t.type, data: t.data, baseOid: t.baseOid })),
     blob.delta.length >= 4 ? { type: TYPE.BLOB, data: blob.delta, baseOid: blob.oldOid } : { type: TYPE.BLOB, data: new Uint8Array(blob.newLen) },
   ];
-  return { trees, newTree: child, commitData, newCommit, objects };
+  return ok({ trees, newTree: child, commitData, newCommit, objects });
 }
 
 export function withCommitData(built: Built, commitData: Uint8Array): Built {
@@ -74,10 +85,11 @@ export function withCommitData(built: Built, commitData: Uint8Array): Built {
   return { ...built, commitData, newCommit, objects: [{ type: TYPE.COMMIT, data: commitData }, ...built.objects.slice(1)] };
 }
 
-export function buildCommitData({ tree, parents, author, committer = null, time, message }: Stamp & { readonly tree: string; readonly parents: readonly string[] }): { readonly data: Uint8Array; readonly oid: string } {
-  const who = identLine(author, time);
-  const written = committerLine(committer, who, time);
+export function buildCommitData({ tree, parents, author, committer = null, time, message }: Stamp & { readonly tree: string; readonly parents: readonly string[] }): Result<{ readonly data: Uint8Array; readonly oid: string }, BadRequest> {
+  const lines = people(author, committer, time);
+  if (!lines.ok) return lines;
   const body = message.endsWith('\n') ? message : `${message}\n`;
-  const commitData = orThrow(encodeCommit({ tree, parents, author: who, committer: written, message: body }));
-  return { data: commitData, oid: hashObject('commit', commitData) };
+  const encoded = encodeCommit({ tree, parents, author: lines.value.who, committer: lines.value.written, message: body });
+  if (!encoded.ok) return encoded;
+  return ok({ data: encoded.value, oid: hashObject('commit', encoded.value) });
 }

@@ -113,7 +113,7 @@ async function runOp(op, url, wanted, opts) {
     return { answer: `tree ${r.tree} ${sha(JSON.stringify(r.entries))}`, check: bare => assert.deepEqual(r.entries.map(e => `${e.mode} ${e.type} ${e.oid}\t${e.name}`), git(bare, ['ls-tree', `main:${T.dir}`]).trim().split('\n')) };
   }
   if (op === 'editFile') {
-    const r = await editFile(url, { path: T.file, find: T.find, replace: `${T.find}X`, author: A, message: 'edit', time: TIME }, opts);
+    const r = await unwrapAsync(editFile(url, { path: T.file, find: T.find, replace: `${T.find}X`, author: A, message: 'edit', time: TIME }, opts));
     return { answer: `commit ${r.newCommit}`, check: bare => { assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.newCommit); assert.ok(gitBuf(bare, ['show', `main:${T.file}`]).toString().startsWith(`${T.find}X`)); } };
   }
   if (op === 'checkoutTree') {

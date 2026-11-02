@@ -2,7 +2,7 @@
 // a directory is expanded only when a change walks into it. Encoding writes the directories this call rebuilt;
 // a lazy node contributes its oid and no bytes. Empty directories are pruned; only the root may be empty.
 // Every refusal is a value (Result): the commit path (changes.ts) returns it, and nothing here throws.
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { err, ok } from './result.js';
 import type { Result } from './result.js';
@@ -192,7 +192,7 @@ export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Ar
 
 export type EncodedTree = { readonly oid: string; readonly data: Uint8Array };
 export type Encoded = { readonly oid: string; readonly trees: readonly EncodedTree[] };
-function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<string, ErrorOf<'limit_exceeded'>> {
+function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<string, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   if (node.kind === 'lazy') return ok(node.oid);
   if (node.entries.size > max) return err(limitExceeded('tree entries', node.entries.size, max));
   const entries: Array<{ readonly mode: string; readonly name: string; readonly oid: string }> = [];
@@ -203,7 +203,9 @@ function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<string
       entries.push({ mode: MODE_TREE, name, oid: sub.value });
     } else entries.push({ mode: child.mode, name, oid: child.oid });
   }
-  const data = orThrow(encodeTree(entries));
+  const encoded = encodeTree(entries);
+  if (!encoded.ok) return encoded;
+  const data = encoded.value;
   const oid = hashObject('tree', data);
   trees.push({ oid, data });
   return ok(oid);

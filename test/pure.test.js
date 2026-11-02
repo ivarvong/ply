@@ -26,24 +26,24 @@ test('decideHead: every branch', () => {
 });
 
 test('validateSpec: rejects before any I/O, freezes the plan', () => {
-  const ok = validateSpec({ path: 'a/b.txt', find: 'x', replace: 'y', author: { name: 'n', email: 'e@x' }, message: 'm', time: 1 }, DEFAULT_LIMITS, A);
+  const ok = unwrap(validateSpec({ path: 'a/b.txt', find: 'x', replace: 'y', author: { name: 'n', email: 'e@x' }, message: 'm', time: 1 }, DEFAULT_LIMITS, A));
   assert.ok(Object.isFrozen(ok)); assert.deepEqual(ok.comps, ['a', 'b.txt']); assert.equal(ok.head, A);
   const base = { path: 'a', find: 'x', replace: 'y', author: { name: 'n', email: 'e@x' }, message: 'm' };
   for (const [bad, code] of [[{ ...base, find: '' }, 'bad_request'], [{ ...base, time: -1 }, 'bad_request'], [{ ...base, time: 1.5 }, 'bad_request'], [{ ...base, find: 42 }, 'bad_request'], [{ ...base, path: '.git/config' }, 'bad_request'], [{ ...base, ref: 'refs/heads/a..b' }, 'bad_request'], [{ ...base, author: { name: 'n<', email: 'e' } }, 'bad_request']]) {
-    assert.throws(() => validateSpec(bad, DEFAULT_LIMITS), e => e.code === code || e.code === 'bad_request', JSON.stringify(bad));
+    assert.throws(() => unwrap(validateSpec(bad, DEFAULT_LIMITS)), e => e.code === code || e.code === 'bad_request', JSON.stringify(bad));
   }
-  assert.throws(() => validateSpec(base, DEFAULT_LIMITS, 'short'), e => e.code === 'bad_request');
+  assert.throws(() => unwrap(validateSpec(base, DEFAULT_LIMITS, 'short')), e => e.code === 'bad_request');
 });
 
 test('lookupEntry: found/dir/file/mode rules and the entries limit, with attrs on every outcome', () => {
   const tree = unwrap(encodeTree([{ mode: '40000', name: 'dir', oid: A }, { mode: '100644', name: 'f', oid: B }, { mode: '120000', name: 'link', oid: A }, { mode: '160000', name: 'sub', oid: B }, { mode: '100755', name: 'x', oid: A }]));
-  assert.equal(lookupEntry(tree, 'dir', false, DEFAULT_LIMITS).entry.oid, A);
-  assert.equal(lookupEntry(tree, 'f', true, DEFAULT_LIMITS).entry.oid, B);
-  assert.equal(lookupEntry(tree, 'x', true, DEFAULT_LIMITS).entry.mode, '100755');
+  assert.equal(unwrap(lookupEntry(tree, 'dir', false, DEFAULT_LIMITS)).entry.oid, A);
+  assert.equal(unwrap(lookupEntry(tree, 'f', true, DEFAULT_LIMITS)).entry.oid, B);
+  assert.equal(unwrap(lookupEntry(tree, 'x', true, DEFAULT_LIMITS)).entry.mode, '100755');
   for (const [name, last, re] of [['nope', true, /not found/], ['f', false, /not a directory/], ['dir', true, /not a regular file/], ['link', true, /not a regular file/], ['sub', true, /not a regular file/], ['sub', false, /not a directory/]]) {
-    assert.throws(() => lookupEntry(tree, name, last, DEFAULT_LIMITS), e => e.code === 'not_found' && re.test(e.message) && typeof e.attrs['git.edit.tree.entries'] === 'number', `${name}/${last}`);
+    assert.throws(() => unwrap(lookupEntry(tree, name, last, DEFAULT_LIMITS)), e => e.code === 'not_found' && re.test(e.message) && typeof e.attrs['git.edit.tree.entries'] === 'number', `${name}/${last}`);
   }
-  assert.throws(() => lookupEntry(tree, 'f', true, withLimits({ maxTreeEntries: 4 })), e => e.code === 'limit_exceeded');
+  assert.throws(() => unwrap(lookupEntry(tree, 'f', true, withLimits({ maxTreeEntries: 4 }))), e => e.code === 'limit_exceeded');
 });
 
 test('buildCommitObjects ≡ git: trees and commit hash to what git computes, delta list is thin and minimal', () => {
@@ -58,11 +58,11 @@ test('buildCommitObjects ≡ git: trees and commit hash to what git computes, de
     assert.equal(hashObject('tree', leafData), leafOid);
     const rootData = unwrap(encodeTree([{ mode: '40000', name: 'd', oid: leafOid }]));
     const rootOid = git(['mktree'], `040000 tree ${leafOid}\td\n`);
-    const levels = [{ treeOid: rootOid, data: rootData, entry: lookupEntry(rootData, 'd', false, DEFAULT_LIMITS).entry }, { treeOid: leafOid, data: leafData, entry: lookupEntry(leafData, 'file.txt', true, DEFAULT_LIMITS).entry }];
+    const levels = [{ treeOid: rootOid, data: rootData, entry: unwrap(lookupEntry(rootData, 'd', false, DEFAULT_LIMITS)).entry }, { treeOid: leafOid, data: leafData, entry: unwrap(lookupEntry(leafData, 'file.txt', true, DEFAULT_LIMITS)).entry }];
     const base = 'hello MARK\n';
     const { delta } = spliceDelta({ baseLen: base.length, off: 6, oldLen: 4, insert: new TextEncoder().encode('DONE') });
     const parent = git(['commit-tree', rootOid, '-m', 'p'], undefined);
-    const built = buildCommitObjects({ levels, blob: { oldOid: oldBlob, newOid: newBlob, delta, newLen: base.length }, oldCommit: parent, author: { name: 'n', email: 'e@x' }, time: 1700000000, message: 'm' });
+    const built = unwrap(buildCommitObjects({ levels, blob: { oldOid: oldBlob, newOid: newBlob, delta, newLen: base.length }, oldCommit: parent, author: { name: 'n', email: 'e@x' }, time: 1700000000, message: 'm' }));
     // git's answer for the same edit
     const gitLeaf = git(['mktree'], `100644 blob ${newBlob}\tfile.txt\n100644 blob ${other}\tz\n`), gitRoot = git(['mktree'], `040000 tree ${gitLeaf}\td\n`);
     assert.deepEqual(built.trees.map(t => t.newOid), [gitRoot, gitLeaf]);
@@ -74,7 +74,7 @@ test('buildCommitObjects ≡ git: trees and commit hash to what git computes, de
     assert.deepEqual(built.objects.map(o => [o.type, !!o.baseOid]), [[TYPE.COMMIT, false], [TYPE.TREE, true], [TYPE.TREE, true], [TYPE.BLOB, true]]);
     assert.deepEqual(built.objects.slice(1).map(o => o.baseOid), [rootOid, leafOid, oldBlob]);
     // a < 4-byte delta becomes a full blob (git's DELTA_SIZE_MIN)
-    const tiny = buildCommitObjects({ levels, blob: { oldOid: oldBlob, newOid: newBlob, delta: new Uint8Array(3), newLen: 0 }, oldCommit: parent, author: { name: 'n', email: 'e@x' }, time: 1, message: 'm' });
+    const tiny = unwrap(buildCommitObjects({ levels, blob: { oldOid: oldBlob, newOid: newBlob, delta: new Uint8Array(3), newLen: 0 }, oldCommit: parent, author: { name: 'n', email: 'e@x' }, time: 1, message: 'm' }));
     assert.equal(tiny.objects.at(-1).baseOid, undefined); assert.equal(tiny.objects.at(-1).data.length, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

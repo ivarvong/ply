@@ -441,7 +441,7 @@ property('stream', 'a proper prefix of a git response stream is never a report',
     sideband: { sideband: true, frames: [{ kind: 'data', payload: concat([Uint8Array.of(2), te.encode('hook\n')]) }, { kind: 'data', payload: concat([Uint8Array.of(1), inner]) }, { kind: 'data', payload: Uint8Array.of(1) }, { kind: 'flush' }] },
   };
   for (const [name, { sideband, frames }] of Object.entries(shapes)) {
-    const run = fs => { let st = streamInit(sideband); for (const f of fs) st = streamStep(st, f); return streamFinish(st); };
+    const run = fs => { let st = streamInit(sideband); for (const f of fs) st = unwrap(streamStep(st, f)); return streamFinish(st); };
     assert.equal(run(frames).tag, 'report', name);
     assert.equal(run(frames).lines.length, 2, name);
     for (let i = 0; i < frames.length; i++) assert.equal(run(frames.slice(0, i)).tag, 'broken', `${name}: ${i} frames`);

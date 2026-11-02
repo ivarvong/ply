@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **504** (438 fail sites, 16 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 408, by a pending PR 43, excluded 25, unregistered 28. Fail sites no cell reaches: 30 of 438. Of the registered points, 219 are claimed by an enumerated space, 10 only by a random one and 222 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **505** (439 fail sites, 16 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 408, by a pending PR 44, excluded 25, unregistered 28. Fail sites no cell reaches: 30 of 439. Of the registered points, 220 are claimed by an enumerated space, 10 only by a random one and 222 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -47,7 +47,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `merge-depth` | main | enumerated | relation(3) × length(5) × cap(8) | 120 | 120 / 0 | git merge-base --all at the same positions; when capped, report the attempted window size (got) and the cap (max) separately | 0 | 0 | ci (`test/space/merge-depth.test.js`) | — |
 | `cherry-pick-rename` | pending #106 | enumerated | rename(6) × content(4) × mode(3) | 72 | 72 / 0 | git cherry-pick in a clone: outcome class (clean / empty / conflict) and tree oid (#103 item 3); one named disagreement (same/same/ours) | 0 | 0 | ci (`test/cherrypick-rename.test.js`) | — |
 | `stamps` | pending #106 | enumerated | pair(3) × op(7) | 21 | 21 / 0 | git cat-file -p byte-equality with GIT_AUTHOR_* / GIT_COMMITTER_* (#103 item 4) | 2 | 0 | ci (`test/stamps.test.js`) | — |
-| `commit-changes` | pending #147 | enumerated | start(2) × place(7) × op(15) | 210 | 210 / 0 | git cat-file commit byte-equality and fsck --strict over http-backend (#103 item 2). Named disagreement: create of a path that exists (git add overwrites; ply bad_request). A new ref whose tree matches the parent is bad_request and stays absent | 41 | 0 | ci (`test/changes.test.js`) | — |
+| `commit-changes` | pending #147 | enumerated | start(2) × place(7) × op(15) | 210 | 210 / 0 | git cat-file commit byte-equality and fsck --strict over http-backend (#103 item 2). Named disagreement: create of a path that exists (git add overwrites; ply bad_request). A new ref whose tree matches the parent is bad_request and stays absent | 42 | 0 | ci (`test/changes.test.js`) | — |
 | `git-bytes` | main | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 10 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
 | `streamed-body` | main | enumerated | path(6) × shape(7) × size(5) × rel(3) | 680 (630 matrix + 50 lie and cap cells) | 680 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36). Declared size against the inflated length (through and one past), a header that fails before the body, and the blob:none cap one under, at, and one past the base header, the delta header, and the resolved length: git index-pack and cat-file on the same bytes | 13 | 0 | ci (`test/adversarial.test.js`, `test/space/streamed-lies.test.js`) | — |
 | `tree-dups` | main | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) | — |
@@ -125,7 +125,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/receivecaps.ts` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
-| `src/sign.ts` gpgsigSplice() | lossless | decodeBytes | `sign` / case |
+| `src/sign.ts` withGpgsig() | lossless | decodeBytes | `sign` / case |
 
 ## Holes (58)
 
@@ -173,9 +173,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | decisions | `src/negotiate.ts#negotiateCaps:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiateCaps() | bad_request: negotiate rounds must be an integer |
 | decisions | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
 | decisions | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
-| decisions | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
 | decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
 | decisions | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
+| decisions | `src/rebase.ts#refTip:not_found:ref … not found` | src/rebase.ts refTip() | not_found: ref … not found |
 | decisions | `src/transport.ts#raised:&lt;code>:&lt;thrownText(e)>` | src/transport.ts raised() | &lt;code>: &lt;thrownText(e)> |
 | decisions | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
 | decisions | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |
@@ -194,9 +194,9 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 | failsites | `src/negotiate.ts#negotiateCaps:bad_request:negotiate rounds must be an integer` | src/negotiate.ts negotiateCaps() | bad_request: negotiate rounds must be an integer |
 | failsites | `src/rebase.ts#linearChain:limit_exceeded:rebase chain` | src/rebase.ts linearChain() | limit_exceeded: rebase chain |
 | failsites | `src/rebase.ts#pickCommit:bad_request:commit must be a 40-hex oid` | src/rebase.ts pickCommit() | bad_request: commit must be a 40-hex oid |
-| failsites | `src/rebase.ts#pickCommit:not_found:ref … not found` | src/rebase.ts pickCommit() | not_found: ref … not found |
 | failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
 | failsites | `src/rebase.ts#rebaseBranch:not_found:ref … not found#2` | src/rebase.ts rebaseBranch() | not_found: ref … not found |
+| failsites | `src/rebase.ts#refTip:not_found:ref … not found` | src/rebase.ts refTip() | not_found: ref … not found |
 | failsites | `src/transport.ts#raised:&lt;code>:&lt;thrownText(e)>` | src/transport.ts raised() | &lt;code>: &lt;thrownText(e)> |
 | failsites | `src/tree-node.ts#keep:limit_exceeded:directory bytes` | src/tree-node.ts keep() | limit_exceeded: directory bytes |
 | failsites | `src/tree-node.ts#keep:limit_exceeded:files` | src/tree-node.ts keep() | limit_exceeded: files |

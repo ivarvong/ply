@@ -36,7 +36,7 @@ import { limitError, readLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 
 // push.ts takes a branded Refname; the ref here is validated (validatePushRef) as a plain string (see merge.ts).
-type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
+type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<Result<PushResult, PlyError>>;
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons, commit and replayed are extras.
 type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
@@ -118,7 +118,7 @@ async function transplant(t: Transport, cache: TreeCache, trees: Trees, { parent
   const encoded = encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
   if (!encoded.ok) return encoded;
   let data = encoded.value;
-  if (signer) data = await signCommit(data, signer);
+  if (signer) { const signed = await signCommit(data, signer); if (!signed.ok) return signed; data = signed.value; }
   const oid: string = hashObject('commit', data);
   out.contentMerged += m.contentMerged;
   return ok({ kind: 'written', oid, data, treeOid, objects: [...(m.oid === null ? [{ type: TYPE.TREE, data: new Uint8Array(0), oid: treeOid }] : []), ...m.objects, { type: TYPE.COMMIT, data, oid }] });
@@ -205,7 +205,8 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     if (base === target) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 });
     if (base === tip) { // the branch is behind: rebasing nothing onto target makes the branch equal to target
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-      await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: target, objects: [] });
+      const pushed = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: target, objects: [] });
+      if (!pushed.ok) return pushed;
       return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 });
     }
     const maxCommits = readLimit(limits, 'maxRebaseCommits');
@@ -249,7 +250,9 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     }
     root.set({ 'git.rebase.trees.fetched': out.fetched, 'git.rebase.objects': objects.length, 'git.rebase.dropped': dropped.length });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-    const pushed = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
+    const pushedR = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
+    if (!pushedR.ok) return pushedR;
+    const pushed = pushedR.value;
     return outcome(squash ? 'squash' : 'rebase', { outcome: squash ? 'squash' : 'rebase', ref, oid: cur, oldTip: tip, onto: target, base, commits: chain.length, replayed, dropped, pushBytes: pushed.packBytes }, { 'git.rebase.new_tip': cur, 'git.rebase.push.bytes': pushed.packBytes });
   });
 }
@@ -300,6 +303,12 @@ function emptyPolicy(value: unknown): Result<EmptyPolicy, ErrorOf<'bad_request'>
 }
 
 // A root's missing parent is the empty tree (mergeTrees' null). git's first parent of a parentless commit.
+// The commit `ref` points at, or not_found.
+async function refTip(t: Transport, ref: string): Promise<Result<string, PlyError>> {
+  const listed = await lsRefs(t, [ref]); if (!listed.ok) return listed;
+  const tip = refOid(listed.value.refs, ref);
+  return tip.tag === 'some' ? ok(tip.value) : fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
+}
 async function parentTreeAt(t: Transport, parents: readonly string[]): Promise<Result<string | null, PlyError>> {
   const parentOid = at(parents, 0);
   if (parentOid.tag === 'none') return ok(null);
@@ -338,10 +347,8 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   return operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<Result<PickOutcome, PlyError>> => {
-    const listed = await lsRefs(t, [ref]); if (!listed.ok) return listed;
-    const { refs } = listed.value;
-    const targetAt = refOid(refs, ref); if (targetAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
-    const target = targetAt.value;
+    const tipNow = await refTip(t, ref); if (!tipNow.ok) return tipNow;
+    const target = tipNow.value;
     const [targetCommit, picked] = await Promise.all([commitAt(t, target), commitAt(t, commit)]);
     if (!targetCommit.ok) return targetCommit;
     if (!picked.ok) return picked;
@@ -366,7 +373,9 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
     const kind = writtenKind(w.treeOid === tInfo.tree, empty);
     if (kind === 'empty') return outcome('empty', { outcome: 'empty', ref, oid: target });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
-    const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: w.oid, objects: uniqueObjects(w.objects) });
+    const pushedR = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: w.oid, objects: uniqueObjects(w.objects) });
+    if (!pushedR.ok) return pushedR;
+    const pushed = pushedR.value;
     return outcome(kind, { outcome: kind, ref, oid: w.oid, tree: w.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: w.oid, [`${name}.tree`]: w.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
   });
 }

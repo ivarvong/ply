@@ -338,22 +338,22 @@ test('.gitattributes [:class:] names that are Object.prototype members (#16): at
 test('branch workflow: editFile creates the branch from main (CAS: must not exist), merge lands it, delete removes it', async () => {
   const r = repo();
   const base = commitFiles(r.work, r.bare, { 'README.md': 'hello MARK\n' }, 'base');
-  const e = await editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'EDITED', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'edit on a branch' }, { tracer: new Tracer() });
+  const e = await unwrapAsync(editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'EDITED', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'edit on a branch' }, { tracer: new Tracer() }));
   assert.equal(e.oldCommit, base); assert.equal(sh(r.bare, ['rev-parse', 'refs/heads/ply/edit-1']).stdout.trim(), e.newCommit);
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), base, 'main untouched');
   assert.equal(sh(r.bare, ['rev-parse', `${e.newCommit}^`]).stdout.trim(), base, 'parent is main\'s head');
-  await assert.rejects(editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'AGAIN', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'm' }, { tracer: new Tracer() }), e => e.code === 'cas_conflict', 'branch exists → create refused');
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'AGAIN', ref: 'refs/heads/ply/edit-1', base: 'refs/heads/main', author, message: 'm' }, { tracer: new Tracer() })), e => e.code === 'cas_conflict', 'branch exists → create refused');
   const m = await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/ply/edit-1', author }, { tracer: new Tracer() }));
   assert.equal(m.outcome, 'fast_forward'); assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit);
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:README.md']).stdout, 'hello EDITED\n');
   const t = createTransport(r.url, { tracer: new Tracer() });
-  await deleteBranch(t, { ref: 'refs/heads/ply/edit-1', oid: e.newCommit });
+  await unwrapAsync(deleteBranch(t, { ref: 'refs/heads/ply/edit-1', oid: e.newCommit }));
   assert.notEqual(sh(r.bare, ['show-ref', '--verify', 'refs/heads/ply/edit-1']).status, 0, 'branch gone');
   // deleting with a stale oid is a CAS failure; deleting the current branch is refused by policy (receive.denyDeleteCurrent)
   sh(r.work, ['push', '-q', r.bare, `${base}:refs/heads/tmp`]);
-  await assert.rejects(deleteBranch(t, { ref: 'refs/heads/tmp', oid: e.newCommit }), e => e.code === 'cas_conflict', 'stale oid');
+  await assert.rejects(unwrapAsync(deleteBranch(t, { ref: 'refs/heads/tmp', oid: e.newCommit })), e => e.code === 'cas_conflict', 'stale oid');
   assert.equal(sh(r.bare, ['rev-parse', 'refs/heads/tmp']).stdout.trim(), base, 'tmp still there');
-  await assert.rejects(deleteBranch(t, { ref: 'refs/heads/main', oid: e.newCommit }), e => e.code === 'push_rejected' && /current branch/.test(e.message));
+  await assert.rejects(unwrapAsync(deleteBranch(t, { ref: 'refs/heads/main', oid: e.newCommit })), e => e.code === 'push_rejected' && /current branch/.test(e.message));
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit, 'main still there');
   assert.deepEqual(fsckProblems(r.bare), []);
 });

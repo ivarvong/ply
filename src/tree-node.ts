@@ -13,8 +13,8 @@
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a file's path in the tree throughout this file
 import { join } from 'node:path';
-import { fail, orThrow } from './errors.js';
-import type { ErrorOf } from './errors.js';
+import { fail } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
@@ -40,7 +40,7 @@ type DirError = ErrorOf<'bad_request' | 'limit_exceeded'>;
 
 // The walk as a value: a refused entry or bound is an Err. The file system's own failures (a missing directory, a
 // permission) reject as node:fs rejects them.
-export async function filesFromDirResult(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
+export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
   const { limits, filter } = withDefaults(options, { limits: DEFAULT_LIMITS, filter: null });
   const maxObject = readLimit(limits, 'maxObjectSize');
   if (!maxObject.ok) return maxObject;
@@ -80,12 +80,10 @@ export async function filesFromDirResult(dir: string, options: FilesFromDirOptio
   const walked = await walk('');
   return walked.ok ? ok(out) : walked;
 }
-// The throwing form ('ply/tree-node' is a public entry, which throws until the Result cut-over).
-export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<DirFile[]> {
-  return orThrow(await filesFromDirResult(dir, options));
-}
 
 export type PushDirSpec = Omit<TreeSpec, 'files'> & { readonly dir: string } & Input<{ readonly filter: DirFilter | null }>;
-export async function pushDir(url: string, { dir, filter = null, ...spec }: PushDirSpec, opts: PushTreeOptions = {}): Promise<PushTreeResult> {
-  return pushTree(url, { ...spec, files: await filesFromDir(dir, { limits: getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS), filter }) }, opts);
+export async function pushDir(url: string, { dir, filter = null, ...spec }: PushDirSpec, opts: PushTreeOptions = {}): Promise<Result<PushTreeResult, PlyError>> {
+  const files = await filesFromDir(dir, { limits: getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS), filter });
+  if (!files.ok) return files;
+  return pushTree(url, { ...spec, files: files.value }, opts);
 }

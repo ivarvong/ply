@@ -114,7 +114,7 @@ test('declared size one under, at, and one over the inflated length, on read and
       const parts = [];
       try { for await (const c of res.stream) parts.push(c); got = concat(parts); } catch (e) { err = e; }
     } else {
-      try { got = await editFile(url, { path: 'a.bin', find: FIND, replace: 'N', author: AUTHOR, message: 'lie' }, opts); }
+      try { got = await unwrapAsync(editFile(url, { path: 'a.bin', find: FIND, replace: 'N', author: AUTHOR, message: 'lie' }, opts)); }
       catch (e) { err = e; }
     }
     // each cell has its own bare repo; read the ref the operation left, then put main back only so a later

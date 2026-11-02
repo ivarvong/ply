@@ -180,7 +180,7 @@ const OPERATIONS = {
     const git = { tree: oldRows.map(r => ({ name: r.name.toString('hex'), mode: r.mode, oid: r.name.equals(B('f.txt')) ? newBlob : r.oid })), parents: [old], author: bytesOf(author.name).toString('hex'), message: B(unwrap(encodeBytes(message)), '\n').toString('hex') };
     gitCan(message, author.name);
     return { git, ply: async () => {
-      const r = await editFile(url, { ref, path: 'f.txt', find: 'line2', replace: 'EDITED', author, message }, O());
+      const r = await unwrapAsync(editFile(url, { ref, path: 'f.txt', find: 'line2', replace: 'EDITED', author, message }, O()));
       assert.equal(r.outcome ?? 'ok', 'ok');
       const now = refAt(fx.bare, ref);
       // no other ref appeared or moved (a ref name read as U+FFFD would push a new ref)
@@ -256,7 +256,7 @@ async function plyAnyway(fx, op, url) {
   if (op === 'listTree') return (await unwrapAsync(listTree(url, { ref: fx.target }, O()))).entries.length;
   if (op === 'readCommit') return (await unwrapAsync(readCommit(url, { ref: fx.target }, O()))).oid;
   if (op === 'checkoutTree') { const co = await unwrapAsync(checkoutTree(url, { ref: fx.target }, O())); for await (const f of co.files) await drain(f.stream); return co.entries.length; }
-  if (op === 'editFile') return (await editFile(url, { ref: fx.field === 'tagName' ? 'refs/heads/side' : fx.target, path: 'f.txt', find: 'line2', replace: 'X', author, message }, O())).outcome;
+  if (op === 'editFile') return (await unwrapAsync(editFile(url, { ref: fx.field === 'tagName' ? 'refs/heads/side' : fx.target, path: 'f.txt', find: 'line2', replace: 'X', author, message }, O()))).outcome;
   return (await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' })))).outcome;
 }
 

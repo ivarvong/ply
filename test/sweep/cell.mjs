@@ -55,14 +55,14 @@ const ops = {
     return { n: r.refs.size, head: r.head };
   },
   async editFile() {
-    const r = await editFile(cell.url, { path: cell.path, find: cell.find, replace: cell.replace, author, message: 'sweep', time: when }, opts);
+    const r = await unwrapAsync(editFile(cell.url, { path: cell.path, find: cell.find, replace: cell.replace, author, message: 'sweep', time: when }, opts));
     return { commit: r.newCommit };
   },
   async pushTree() {
     /** @type {Record<string, Uint8Array>} */
     const files = {};
     for (let i = 0; i < cell.nfiles; i++) files[`f/${String(i).padStart(7, '0')}.bin`] = new Uint8Array(cell.size).fill((i + 1) & 255);
-    const r = await pushTree(cell.url, { ref: 'refs/heads/main', files, author, message: 'sweep', time: when }, opts);
+    const r = await unwrapAsync(pushTree(cell.url, { ref: 'refs/heads/main', files, author, message: 'sweep', time: when }, opts));
     return { commit: r.newCommit, noop: r.noop };
   },
   async merge() {

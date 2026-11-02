@@ -53,11 +53,22 @@ const parseSideband = (payload: Uint8Array): { readonly band: number; readonly b
 declare const CHECKED: unique symbol;
 export type CheckedCaps = { readonly atomic: boolean; readonly pushOptions: readonly string[]; readonly [CHECKED]: true };
 
+// Each line as a pkt-line, or the first one pkt() refuses (longer than a pkt-line holds).
+function pkts(lines: readonly string[]): Result<Uint8Array[], ErrorOf<'bad_request'>> {
+  const out: Uint8Array[] = [];
+  for (const l of lines) {
+    const p = pkt(l);
+    if (!p.ok) return p;
+    out.push(p.value);
+  }
+  return ok(out);
+}
 // commands: [{ ref, oldOid, newOid }] (create: oldOid = zeros; delete: newOid = zeros). A push with only deletes sends no
-// pack. The wire encoder: `caps` is sent as given (push builds it with requestCaps).
-export const pushBody = ({ commands, caps = ['report-status', `agent=${UA.replace(/ .*/u, '')}`] }: { readonly commands: readonly Command[] } & Input<{ readonly caps: readonly string[] }>, pack: Uint8Array | null = null): Uint8Array<ArrayBuffer> => {
+// pack. The wire encoder: `caps` is sent as given (push builds it with requestCaps). A line pkt() refuses is its Err.
+export const pushBody = ({ commands, caps = ['report-status', `agent=${UA.replace(/ .*/u, '')}`] }: { readonly commands: readonly Command[] } & Input<{ readonly caps: readonly string[] }>, pack: Uint8Array | null = null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {
   const lines = commands.map((c, i) => `${c.oldOid} ${c.newOid} ${c.ref}${i === 0 ? `\0${caps.join(' ')}` : ''}\n`);
-  return concat([...lines.map(l => orThrow(pkt(l))), FLUSH, ...(pack ? [pack] : [])]);
+  const framed = pkts(lines);
+  return framed.ok ? ok(concat([...framed.value, FLUSH, ...(pack ? [pack] : [])])) : framed;
 };
 
 // ---- the push outcome (pure): wire → stream shape → report shape → outcome → Result, each a tagged union ----
@@ -89,41 +100,44 @@ export type StreamState = Reading | Broken | StreamReport;
 const broken = (why: string, remote: string | null = null): Broken => ({ tag: 'broken', why, remote });
 // `lines` grows in place (a report can hold limits.maxReportLines lines): a state is not reused once stepped.
 export const streamInit = (sideband: boolean): Reading => ({ tag: 'reading', sideband, phase: 'report', inner: pktInit(), lines: [], band2: '', band2Carry: new Uint8Array(0), band2Frames: 0 });
+// The band-1 pkt-lines that do not frame (pktStep's protocol error) are the Err: push reads it as a lost response.
 // @decoder streamStep prefix=stream
-export function streamStep(st: StreamState, f: Frame): StreamState {
+// oxlint-disable-next-line complexity -- one step machine: each frame kind and band in the order git writes them
+export function streamStep(st: StreamState, f: Frame): Result<StreamState, ErrorOf<'protocol'>> {
   // Stryker disable next-line ConditionalExpression: push stops stepping at the first non-reading state
-  if (st.tag !== 'reading') return st;
-  if (st.phase === 'done') return broken('data after the final flush');
+  if (st.tag !== 'reading') return ok(st);
+  if (st.phase === 'done') return ok(broken('data after the final flush'));
   if (f.kind === 'flush') {
-    if (!st.sideband || (st.phase === 'reported' && st.inner.carry === null)) return { ...st, phase: 'done' };
-    return broken('flush before the report ended');
+    if (!st.sideband || (st.phase === 'reported' && st.inner.carry === null)) return ok({ ...st, phase: 'done' });
+    return ok(broken('flush before the report ended'));
   }
   // Stryker disable next-line ConditionalExpression: a delim/end frame has no payload, so read as data it still breaks the stream or the report
-  if (f.kind !== 'data') return broken(`${f.kind} packet`);
-  if (!st.sideband) { st.lines.push(f.payload); return st; }
+  if (f.kind !== 'data') return ok(broken(`${f.kind} packet`));
+  if (!st.sideband) { st.lines.push(f.payload); return ok(st); }
   const { band, body }: { readonly band: number; readonly body: Uint8Array } = parseSideband(f.payload);
   // decodeChunk: a character cut by a frame boundary is held for the next frame instead of decoding as two U+FFFD (#43)
-  if (band === SIDEBAND_PROGRESS) { const d: { readonly text: string; readonly carry: Uint8Array } = decodeChunk(st.band2Carry, body); return { ...st, band2: (st.band2 + d.text).slice(-BAND_TAIL), band2Carry: d.carry, band2Frames: st.band2Frames + 1 }; }
-  if (band === SIDEBAND_ERROR) return broken('band 3', td.decode(body).trim());
-  if (band !== SIDEBAND_PACK) return broken(`bad sideband ${band}`);
+  if (band === SIDEBAND_PROGRESS) { const d: { readonly text: string; readonly carry: Uint8Array } = decodeChunk(st.band2Carry, body); return ok({ ...st, band2: (st.band2 + d.text).slice(-BAND_TAIL), band2Carry: d.carry, band2Frames: st.band2Frames + 1 }); }
+  if (band === SIDEBAND_ERROR) return ok(broken('band 3', td.decode(body).trim()));
+  if (band !== SIDEBAND_PACK) return ok(broken(`bad sideband ${band}`));
   // an empty band-1 packet is copy_to_sideband's keepalive: sent while hooks run, before the report and after it (post-receive)
-  if (body.length === 0) return st;
+  if (body.length === 0) return ok(st);
   // Stryker disable next-line ConditionalExpression: without it, band-1 bytes after the report's flush still break it (the loop below, or the carry at the outer flush)
-  if (st.phase !== 'report') return broken('band 1 after the report');
-  const r = orThrow(pktStep(st.inner, body));
+  if (st.phase !== 'report') return ok(broken('band 1 after the report'));
+  const r = pktStep(st.inner, body);
+  if (!r.ok) return r;
   let phase: Reading['phase'] = st.phase;
-  for (const g of r.frames) {
-    if (phase !== 'report') return broken('band 1 after the report');
+  for (const g of r.value.frames) {
+    if (phase !== 'report') return ok(broken('band 1 after the report'));
     switch (g.kind) {
       case 'flush': phase = 'reported'; continue;
       case 'data': st.lines.push(g.payload); continue;
       case 'delim':
-      case 'end': return broken(`${g.kind} packet in the report`);
+      case 'end': return ok(broken(`${g.kind} packet in the report`));
     }
     // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
     return assertNever(g);
   }
-  return { ...st, inner: r.state, phase };
+  return ok({ ...st, inner: r.value.state, phase });
 }
 // Stryker disable next-line ConditionalExpression: a broken state has no phase, so it stays broken either way
 export const streamFinish = (st: StreamState): Broken | StreamReport => {
@@ -407,13 +421,6 @@ const requestCap = (cap: PushRequestCap): PushRequestCap => {
 };
 export const requestCaps = (commands: readonly Command[], { sideband = true, reportV2 = false }: Input<{ readonly sideband: boolean; readonly reportV2: boolean }>, checked: CheckedCaps | null = null): string[] =>
   [reportV2 ? requestCap('report-status-v2') : requestCap('report-status'), ...(sideband ? [requestCap('side-band-64k')] : []), ...(checked !== null && checked.atomic ? [requestCap('atomic')] : []), ...(commands.some(c => c.newOid === ZERO_OID) ? [requestCap('delete-refs')] : []), ...(checked !== null && checked.pushOptions.length > 0 ? [requestCap('push-options')] : []), `agent=${UA.replace(/ .*/u, '')}`];
-// validate.ts still throws its refusals (a PlyError); here they are values. Anything else it threw is not a refusal.
-export function validated<T>(check: () => T): Result<T, PlyError> {
-  try { return ok(check()); } catch (e) {
-    if (isPlyError(e)) return err(e);
-    throw e;
-  }
-}
 // An untyped (JS) caller's atomic / pushOptions, which the type no longer has: refused rather than silently dropped.
 const unchecked = (o: unknown): boolean => {
   const atomic = field(o, 'atomic');
@@ -429,12 +436,12 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
   if (!maxRefs.ok) return maxRefs;
   if (commands.length > maxRefs.value) return err(limitExceeded('push commands', commands.length, maxRefs.value));
   for (const c of commands) {
-    const ref = validated(() => orThrow(validatePushRef(c.ref, c.newOid === ZERO_OID)));
+    const ref = validatePushRef(c.ref, c.newOid === ZERO_OID);
     if (!ref.ok) return ref;
     if (!OID.test(c.oldOid) || !OID.test(c.newOid)) return fail('bad_request', 'push: oids must be 40-hex');
   }
   for (const p of cfg.checked === null ? [] : cfg.checked.pushOptions) {
-    const option = validated(() => orThrow(validateWire(p, 'push option')));
+    const option = validateWire(p, 'push option');
     if (!option.ok) return option;
   }
   // read once, before anything is built or sent: the same values bound the pack and the report
@@ -445,10 +452,13 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
   return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value, objects: cfg.objects, sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
-const requestBody = (plan: PushPlan, pack: Uint8Array | null): Uint8Array<ArrayBuffer> => {
+const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {
   const options = plan.checked === null ? [] : plan.checked.pushOptions;
   if (options.length === 0) return pushBody(plan, pack);
-  return concat([pushBody(plan), ...options.map(p => orThrow(pkt(`${p}\n`))), FLUSH, ...(pack ? [pack] : [])]);
+  const head = pushBody(plan);
+  if (!head.ok) return head;
+  const framed = pkts(options.map(p => `${p}\n`));
+  return framed.ok ? ok(concat([head.value, ...framed.value, FLUSH, ...(pack ? [pack] : [])])) : framed;
 };
 
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the
@@ -463,7 +473,9 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: Uint8Array, 
     for await (const f of frames(t, 'git-receive-pack', body, span)) {
       reportBytes += f.kind === 'data' ? f.payload.length : 0;
       if (reportBytes > plan.maxPack) { lost = { cause: limitExceeded('report bytes', reportBytes, plan.maxPack) }; break; }
-      st = streamStep(st, f);
+      const stepped = streamStep(st, f);
+      if (!stepped.ok) { lost = { cause: stepped.error }; break; }
+      st = stepped.value;
       // Stryker disable next-line ConditionalExpression: a broken state has no lines, so reading on fails the read: ambiguous either way
       if (st.tag !== 'reading') break;
       reading = st;
@@ -499,7 +511,9 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   if (pack && pack.length > plan.maxPack) return err(limitExceeded('push pack bytes', pack.length, plan.maxPack));
   // The request body (commands + pack) is on the wire from here. Every failure — transport, HTTP status, framing,
   // band 3, a limit — and every report that is not exactly git's is 'ambiguous': the ref may have moved.
-  const r = await readResponse(t, plan, requestBody(plan, pack), span, plan.sideband);
+  const body = requestBody(plan, pack);
+  if (!body.ok) return body;
+  const r = await readResponse(t, plan, body.value, span, plan.sideband);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush returns a PlyError: the cause itself when it already is an 'ambiguous' one, else a new one
   if ('cause' in r) return err(ambiguousAfterPush(r.cause) as PlyError);
   const { done, reading } = r;
@@ -513,16 +527,26 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   return res.ok ? ok({ report: res.value, packBytes, entries, hookOutput: band2 }) : res;
 }
 
-// The effect. A refusal before the request (planPush) rejects with no span; everything after is under the span, whose
-// error is the PlyError the Result carries (the public API throws it until the Result cut-over, docs/STACK.md).
-// oxlint-disable-next-line eslint/require-await -- async so a refusal before the request rejects instead of throwing, as before
-export async function push(t: PushTransport, opts: PushOptions): Promise<PushResult> {
-  const plan = orThrow(planPush(opts, t.limits));
+// The request under its span (push, below, is the entry).
+// oxlint-disable-next-line eslint/require-await -- async, as push was
+async function receivePack(t: PushTransport, plan: PushPlan): Promise<PushResult> {
   const { commands, caps } = plan;
   // an empty list from an untyped caller has no first command: the TypeError below is coded 'protocol', as before
   const [first] = commands;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
   return orThrow(await coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), (span: Span) => send(t, plan, span))));
 
+}
+
+// The effect. A refusal before the request (planPush) is an Err with no span; everything after is under the span, whose
+// error is the PlyError the Result carries.
+export async function push(t: PushTransport, opts: PushOptions): Promise<Result<PushResult, PlyError>> {
+  const plan = planPush(opts, t.limits);
+  if (!plan.ok) return plan;
+  // Transitional: the span and the transport still raise (the wire layer's round); what they raise is this push's Err.
+  try { return ok(await receivePack(t, plan.value)); } catch (e) {
+    if (isPlyError(e)) return err(e);
+    throw e;
+  }
 }
 

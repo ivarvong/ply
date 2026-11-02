@@ -178,7 +178,7 @@ try {
     const exporter = arrayExporter();
     let result = null, error = null;
     const verify = rng.bool(0.5);
-    try { result = await editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'l', email: 'l@x' }, message: 'l' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }), verify }); }
+    try { result = await unwrapAsync(editFile(`${proxy.url}/${name}.git`, { path: FILE, find: 'MARK', replace: 'XX', author: { name: 'l', email: 'l@x' }, message: 'l' }, { tracer: new Tracer({ exporter }), limits: withLimits({ requestTimeoutMs: 3000 }), verify })); }
     catch (e) { error = e; }
     await proxy.close();
     const problems = [];

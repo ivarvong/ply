@@ -82,7 +82,7 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
   const objects = new Map(), refs = new Map(), log = [];
   const put = (typeName, data) => { data = bytesOf(data); const oid = hashObject(typeName, data); objects.set(oid, { type: TYPE_ID[typeName], data }); return oid; };
   const commit = (files, { ref = 'refs/heads/main', parents = [], time = T0, message = 'deploy\n' } = {}) => {
-    const built = buildTree(fileEntries(files));
+    const built = unwrap(buildTree(unwrap(fileEntries(files))));
     for (const tr of built.trees.values()) objects.set(tr.oid, { type: TYPE.TREE, data: tr.data });
     for (const [oid, data] of built.blobs) objects.set(oid, { type: TYPE.BLOB, data });
     const who = `A <a@x> ${time} +0000`;
@@ -165,59 +165,59 @@ function env(r, { limits = DEFAULT_LIMITS, quirks = {} } = {}) {
 // ======================================================================================================================
 
 test('fileEntries: the three input shapes, defaults and git blob oids', () => {
-  const fromObject = fileEntries({ 'a/b.txt': 'hello\n', bin: Uint8Array.of(0, 1), x: { data: 'ex', mode: '100755' } });
+  const fromObject = unwrap(fileEntries({ 'a/b.txt': 'hello\n', bin: Uint8Array.of(0, 1), x: { data: 'ex', mode: '100755' } }));
   assert.deepEqual(fromObject.map(e => [e.path, e.comps, e.mode, e.oid]), [
     ['a/b.txt', ['a', 'b.txt'], '100644', GIT.readme],
     ['bin', ['bin'], '100644', hashObject('blob', Uint8Array.of(0, 1))],
     ['x', ['x'], '100755', hashObject('blob', te.encode('ex'))],
   ]);
   assert.deepEqual([...fromObject[0].data], [...te.encode('hello\n')]);
-  const map = fileEntries(new Map([['m', 'hello\n']]));
+  const map = unwrap(fileEntries(new Map([['m', 'hello\n']])));
   assert.deepEqual(map.map(e => [e.path, e.mode, e.oid]), [['m', '100644', GIT.readme]]);
-  const list = fileEntries([{ path: 'l', data: '' }, { path: 'g', mode: '160000', oid: GITLINK }]);
+  const list = unwrap(fileEntries([{ path: 'l', data: '' }, { path: 'g', mode: '160000', oid: GITLINK }]));
   assert.deepEqual(list[0].oid, EMPTY_BLOB);
   assert.deepEqual(list[1], { path: 'g', comps: ['g'], mode: '160000', oid: GITLINK });
   assert.equal('data' in list[1], false);
-  assert.deepEqual(fileEntries({}), []);
-  assert.deepEqual(fileEntries([]), []);
-  assert.deepEqual(fileEntries({ s: { mode: '120000', data: 'target' } })[0].oid, hashObject('blob', te.encode('target')));
+  assert.deepEqual(unwrap(fileEntries({})), []);
+  assert.deepEqual(unwrap(fileEntries([])), []);
+  assert.deepEqual(unwrap(fileEntries({ s: { mode: '120000', data: 'target' } }))[0].oid, hashObject('blob', te.encode('target')));
 });
 
 test('fileEntries: every refusal, with its code, message and what', () => {
-  for (const bad of [null, undefined, 'files', 7]) throws(() => fileEntries(bad), 'bad_request', 'files must be an object or an iterable of { path, mode, data }', { what: 'files' });
-  throws(() => fileEntries({ g: { mode: '160000', oid: 'xyz' } }), 'bad_request', 'g: a gitlink (160000) takes a 40-hex oid and no data', { what: 'gitlink', path: 'g' });
-  throws(() => fileEntries({ g: { mode: '160000' } }), 'bad_request', 'g: a gitlink (160000) takes a 40-hex oid and no data', { what: 'gitlink' });
-  throws(() => fileEntries({ g: { mode: '160000', oid: GITLINK.toUpperCase() } }), 'bad_request', undefined, { what: 'gitlink' });
-  throws(() => fileEntries({ g: { mode: '160000', oid: `${GITLINK}0` } }), 'bad_request', undefined, { what: 'gitlink' });
-  throws(() => fileEntries({ g: { mode: '160000', oid: `x${GITLINK}` } }), 'bad_request', undefined, { what: 'gitlink' });
-  throws(() => fileEntries({ g: { mode: '160000', oid: GITLINK, data: '' } }), 'bad_request', undefined, { what: 'gitlink' });
-  for (const mode of ['100664', '40000', '644', 100644, '']) throws(() => fileEntries({ f: { mode, data: 'x' } }), 'bad_request', `f: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path: 'f' });
-  for (const data of [undefined, 5, null, [1]]) throws(() => fileEntries([{ path: 'f', data }]), 'bad_request', 'f: data must be a string or Uint8Array', { what: 'data', path: 'f' });
-  throws(() => fileEntries({ l: { mode: '120000', data: '' } }), 'bad_request', 'l: a symlink target must be non-empty and contain no NUL', { what: 'symlink', path: 'l' });
-  throws(() => fileEntries({ l: { mode: '120000', data: 'a\0b' } }), 'bad_request', undefined, { what: 'symlink' });
-  throws(() => fileEntries({ l: { mode: '120000', data: Uint8Array.of(0) } }), 'bad_request', undefined, { what: 'symlink' });
+  for (const bad of [null, undefined, 'files', 7]) throws(() => unwrap(fileEntries(bad)), 'bad_request', 'files must be an object or an iterable of { path, mode, data }', { what: 'files' });
+  throws(() => unwrap(fileEntries({ g: { mode: '160000', oid: 'xyz' } })), 'bad_request', 'g: a gitlink (160000) takes a 40-hex oid and no data', { what: 'gitlink', path: 'g' });
+  throws(() => unwrap(fileEntries({ g: { mode: '160000' } })), 'bad_request', 'g: a gitlink (160000) takes a 40-hex oid and no data', { what: 'gitlink' });
+  throws(() => unwrap(fileEntries({ g: { mode: '160000', oid: GITLINK.toUpperCase() } })), 'bad_request', undefined, { what: 'gitlink' });
+  throws(() => unwrap(fileEntries({ g: { mode: '160000', oid: `${GITLINK}0` } })), 'bad_request', undefined, { what: 'gitlink' });
+  throws(() => unwrap(fileEntries({ g: { mode: '160000', oid: `x${GITLINK}` } })), 'bad_request', undefined, { what: 'gitlink' });
+  throws(() => unwrap(fileEntries({ g: { mode: '160000', oid: GITLINK, data: '' } })), 'bad_request', undefined, { what: 'gitlink' });
+  for (const mode of ['100664', '40000', '644', 100644, '']) throws(() => unwrap(fileEntries({ f: { mode, data: 'x' } })), 'bad_request', `f: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path: 'f' });
+  for (const data of [undefined, 5, null, [1]]) throws(() => unwrap(fileEntries([{ path: 'f', data }])), 'bad_request', 'f: data must be a string or Uint8Array', { what: 'data', path: 'f' });
+  throws(() => unwrap(fileEntries({ l: { mode: '120000', data: '' } })), 'bad_request', 'l: a symlink target must be non-empty and contain no NUL', { what: 'symlink', path: 'l' });
+  throws(() => unwrap(fileEntries({ l: { mode: '120000', data: 'a\0b' } })), 'bad_request', undefined, { what: 'symlink' });
+  throws(() => unwrap(fileEntries({ l: { mode: '120000', data: Uint8Array.of(0) } })), 'bad_request', undefined, { what: 'symlink' });
   // a NUL is fine in a regular file, and an empty file is git's empty blob
-  assert.equal(fileEntries({ f: 'a\0b', e: '' }).length, 2);
-  throws(() => fileEntries({ '../x': 'y' }), 'bad_request', undefined, { what: 'path' });
-  throws(() => fileEntries([null]), 'bad_request', undefined, { what: 'path' });
-  throws(() => fileEntries([{ data: 'x' }]), 'bad_request', undefined, { what: 'path' });
+  assert.equal(unwrap(fileEntries({ f: 'a\0b', e: '' })).length, 2);
+  throws(() => unwrap(fileEntries({ '../x': 'y' })), 'bad_request', undefined, { what: 'path' });
+  throws(() => unwrap(fileEntries([null])), 'bad_request', undefined, { what: 'path' });
+  throws(() => unwrap(fileEntries([{ data: 'x' }])), 'bad_request', undefined, { what: 'path' });
 });
 
 test('fileEntries: maxPackObjects and maxObjectSize bound exactly', () => {
   const two = withLimits({ maxPackObjects: 2 });
-  assert.equal(fileEntries({ a: '1', b: '2' }, two).length, 2);
-  throws(() => fileEntries({ a: '1', b: '2', c: '3' }, two), 'limit_exceeded', 'files 3 exceeds limit 2', { what: 'files', got: 3, max: 2 });
+  assert.equal(unwrap(fileEntries({ a: '1', b: '2' }, two)).length, 2);
+  throws(() => unwrap(fileEntries({ a: '1', b: '2', c: '3' }, two)), 'limit_exceeded', 'files 3 exceeds limit 2', { what: 'files', got: 3, max: 2 });
   const four = withLimits({ maxObjectSize: 4 });
-  assert.equal(fileEntries({ a: 'abcd' }, four)[0].data.length, 4);
-  throws(() => fileEntries({ a: 'abcde' }, four), 'limit_exceeded', 'object size 5 exceeds limit 4', { what: 'object size', got: 5, max: 4 });
+  assert.equal(unwrap(fileEntries({ a: 'abcd' }, four))[0].data.length, 4);
+  throws(() => unwrap(fileEntries({ a: 'abcde' }, four)), 'limit_exceeded', 'object size 5 exceeds limit 4', { what: 'object size', got: 5, max: 4 });
   // a gitlink has no data, so the size cap never applies to it
-  assert.equal(fileEntries({ g: { mode: '160000', oid: GITLINK } }, withLimits({ maxObjectSize: 0 })).length, 1);
-  throws(() => fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxPackObjects: undefined }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
-  throws(() => fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxObjectSize: undefined }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  assert.equal(unwrap(fileEntries({ g: { mode: '160000', oid: GITLINK } }, withLimits({ maxObjectSize: 0 }))).length, 1);
+  throws(() => unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxPackObjects: undefined })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxObjectSize: undefined })), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
 });
 
 test('buildTree: git\'s tree oids, every directory, blobs by oid', () => {
-  const built = buildTree(fileEntries(FILES()));
+  const built = unwrap(buildTree(unwrap(fileEntries(FILES()))));
   assert.equal(built.root, GIT.root);
   assert.deepEqual([...built.trees.keys()].sort(), ['', 'src', 'src/lib']);
   assert.equal(built.trees.get('src').oid, GIT.src);
@@ -229,35 +229,35 @@ test('buildTree: git\'s tree oids, every directory, blobs by oid', () => {
   // blobs: every file's content once by oid; the gitlink names a commit that is not here
   assert.deepEqual([...built.blobs.keys()].sort(), [GIT.readme, GIT.link, GIT.run, GIT.a, GIT.b].sort());
   assert.equal(td.decode(built.blobs.get(GIT.b)), 'b\n');
-  const none = buildTree([]);
+  const none = unwrap(buildTree([]));
   assert.equal(none.root, EMPTY_TREE);
   assert.equal(none.trees.size, 1);
   assert.equal(none.blobs.size, 0);
   // an empty file is a blob too (an empty Uint8Array is truthy)
-  assert.deepEqual([...buildTree(fileEntries({ e: '' })).blobs.keys()], [EMPTY_BLOB]);
+  assert.deepEqual([...unwrap(buildTree(unwrap(fileEntries({ e: '' })))).blobs.keys()], [EMPTY_BLOB]);
   // deep before shallow: a four-level chain still encodes
-  const deep = buildTree(fileEntries({ 'a/b/c/d': 'x', 'a/y': 'z' }));
+  const deep = unwrap(buildTree(unwrap(fileEntries({ 'a/b/c/d': 'x', 'a/y': 'z' }))));
   assert.equal(deep.trees.size, 4);
   assert.equal(unwrap(parseTree(deep.trees.get('a/b').data))[0].oid, deep.trees.get('a/b/c').oid);
 });
 
 test('buildTree: file/directory clashes, duplicates and maxTreeEntries', () => {
-  const clash = files => () => buildTree(fileEntries(files));
+  const clash = files => () => unwrap(buildTree(unwrap(fileEntries(files))));
   throws(clash([{ path: 'x/a', data: '1' }, { path: 'x/a/b', data: '2' }]), 'bad_request', 'x/a is both a file and a directory', { what: 'path', path: 'x/a/b' });
   throws(clash([{ path: 'x/a/b', data: '1' }, { path: 'x/a', data: '2' }]), 'bad_request', 'x/a is both a file and a directory', { what: 'path', path: 'x/a' });
   throws(clash([{ path: 'x/a', data: '1' }, { path: 'x/a', data: '2' }]), 'bad_request', 'x/a is given twice', { what: 'path', path: 'x/a' });
   throws(clash([{ path: 'a', data: '1' }, { path: 'a/b/c', data: '2' }]), 'bad_request', 'a is both a file and a directory', { path: 'a/b/c' });
   // two files under one new directory share it
-  assert.equal(buildTree(fileEntries({ 'd/a': '1', 'd/b': '2' })).trees.get('d').entries.length, 2);
+  assert.equal(unwrap(buildTree(unwrap(fileEntries({ 'd/a': '1', 'd/b': '2' })))).trees.get('d').entries.length, 2);
   const two = withLimits({ maxTreeEntries: 2 });
-  assert.equal(buildTree(fileEntries({ a: '1', b: '2', 'c/d': '3', 'c/e': '4' }), withLimits({ maxTreeEntries: 3 })).trees.size, 2);
-  assert.equal(buildTree(fileEntries({ a: '1', b: '2' }), two).trees.get('').entries.length, 2);
-  throws(() => buildTree(fileEntries({ a: '1', b: '2', c: '3' }), two), 'limit_exceeded', 'tree entries 3 exceeds limit 2', { what: 'tree entries', got: 3, max: 2 });
-  throws(() => buildTree([], {}), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  assert.equal(unwrap(buildTree(unwrap(fileEntries({ a: '1', b: '2', 'c/d': '3', 'c/e': '4' })), withLimits({ maxTreeEntries: 3 }))).trees.size, 2);
+  assert.equal(unwrap(buildTree(unwrap(fileEntries({ a: '1', b: '2' })), two)).trees.get('').entries.length, 2);
+  throws(() => unwrap(buildTree(unwrap(fileEntries({ a: '1', b: '2', c: '3' })), two)), 'limit_exceeded', 'tree entries 3 exceeds limit 2', { what: 'tree entries', got: 3, max: 2 });
+  throws(() => unwrap(buildTree([], {})), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
 });
 
 test('selectObjects: walk order, dedupe, what the server has, gitlinks', () => {
-  const built = buildTree(fileEntries(FILES()));
+  const built = unwrap(buildTree(unwrap(fileEntries(FILES()))));
   const fresh = selectObjects(built);
   assert.deepEqual(fresh.trees.map(t => hashObject('tree', t.data)), [GIT.root, GIT.src, GIT.lib]);
   assert.ok(fresh.trees.every(t => t.type === TYPE.TREE && t.baseOid === undefined));
@@ -271,18 +271,18 @@ test('selectObjects: walk order, dedupe, what the server has, gitlinks', () => {
   assert.deepEqual(known.blobs.map(b => hashObject('blob', b.data)), [GIT.a, GIT.run, GIT.link]);
   assert.deepEqual(selectObjects(built, { have: new Set([GIT.root]) }), { trees: [], blobs: [], deltas: 0 });
   // one blob at two paths, one tree at two paths: each sent once
-  const twins = buildTree(fileEntries({ 'p/x': 'same', 'q/x': 'same', r: 'same' }));
+  const twins = unwrap(buildTree(unwrap(fileEntries({ 'p/x': 'same', 'q/x': 'same', r: 'same' }))));
   const sel = selectObjects(twins);
   assert.equal(sel.trees.length, 2);
   assert.equal(sel.blobs.length, 1);
   // a gitlink alone sends nothing but its tree
-  const g = selectObjects(buildTree(fileEntries({ g: { mode: '160000', oid: GITLINK } })));
+  const g = selectObjects(unwrap(buildTree(unwrap(fileEntries({ g: { mode: '160000', oid: GITLINK } })))));
   assert.deepEqual([g.trees.length, g.blobs.length], [1, 0]);
 });
 
 test('selectObjects: a tree goes as a REF_DELTA only when that is smaller and at least DELTA_SIZE_MIN', () => {
-  const before = buildTree(fileEntries(FILES()));
-  const after = buildTree(fileEntries({ ...FILES(), 'src/a.js': 'A\n' }));
+  const before = unwrap(buildTree(unwrap(fileEntries(FILES()))));
+  const after = unwrap(buildTree(unwrap(fileEntries({ ...FILES(), 'src/a.js': 'A\n' }))));
   assert.equal(after.root, GIT.root2);
   const old = new Map([['', { oid: GIT.root, data: before.trees.get('').data }], ['src', { oid: GIT.src, data: before.trees.get('src').data }]]);
   const sel = selectObjects(after, { have: new Set([GIT.lib, GIT.readme, GIT.link, GIT.run, GIT.b]), old });
@@ -292,7 +292,7 @@ test('selectObjects: a tree goes as a REF_DELTA only when that is smaller and at
   assert.deepEqual([...sel.trees[1].data], [...makeDelta(before.trees.get('src').data, after.trees.get('src').data).delta]);
   assert.deepEqual(sel.blobs.map(b => td.decode(b.data)), ['A\n']);
   // an unrelated base gives a delta no smaller than the tree: the tree goes whole
-  const other = buildTree(fileEntries({ zzz: 'q' }));
+  const other = unwrap(buildTree(unwrap(fileEntries({ zzz: 'q' }))));
   const whole = selectObjects(other, { old: new Map([['', { oid: GIT.lib, data: te.encode('#'.repeat(64)) }]]) });
   assert.equal(whole.deltas, 0);
   assert.deepEqual([...whole.trees[0].data], [...other.trees.get('').data]);
@@ -302,43 +302,43 @@ test('selectObjects: a tree goes as a REF_DELTA only when that is smaller and at
   assert.equal(lib.data.length, 4);
   assert.equal(lib.baseOid, 'f'.repeat(40));
   // the empty tree against itself: a 2-byte delta is under DELTA_SIZE_MIN, so whole (0 bytes)
-  const empty = buildTree([]);
+  const empty = unwrap(buildTree([]));
   const e = selectObjects(empty, { old: new Map([['', { oid: EMPTY_TREE, data: new Uint8Array(0) }]]) });
   assert.deepEqual([e.deltas, e.trees[0].data.length, e.trees[0].baseOid], [0, 0, undefined]);
 });
 
 test('validateTreeSpec: defaults, create, head, and each field checked before I/O', () => {
-  const s = validateTreeSpec({ files: { a: 'x' }, author: A, message: 'm', time: T0 }, DEFAULT_LIMITS);
+  const s = unwrap(validateTreeSpec({ files: { a: 'x' }, author: A, message: 'm', time: T0 }, DEFAULT_LIMITS));
   assert.equal(Object.isFrozen(s), true);
   assert.deepEqual([s.ref, s.base, s.create, s.files, s.message, s.head], ['refs/heads/main', 'refs/heads/main', false, 1, 'm', null]);
   assert.deepEqual({ ...s.author }, { name: 'A', email: 'a@x', time: T0, tz: '+0000' });
-  assert.equal(s.built.root, buildTree(fileEntries({ a: 'x' })).root);
-  const c = validateTreeSpec({ ref: 'refs/heads/new', base: 'refs/heads/main', files: {}, author: { ...A, tz: '+0530' }, message: '', time: 0 }, DEFAULT_LIMITS, 'a'.repeat(40));
+  assert.equal(s.built.root, unwrap(buildTree(unwrap(fileEntries({ a: 'x' })))).root);
+  const c = unwrap(validateTreeSpec({ ref: 'refs/heads/new', base: 'refs/heads/main', files: {}, author: { ...A, tz: '+0530' }, message: '', time: 0 }, DEFAULT_LIMITS, 'a'.repeat(40)));
   assert.deepEqual([c.ref, c.base, c.create, c.head, c.author.tz, c.files], ['refs/heads/new', 'refs/heads/main', true, 'a'.repeat(40), '+0530', 0]);
-  assert.equal(validateTreeSpec({ ref: 'refs/heads/x', files: {}, author: A, message: '' }, DEFAULT_LIMITS).base, 'refs/heads/x');
+  assert.equal(unwrap(validateTreeSpec({ ref: 'refs/heads/x', files: {}, author: A, message: '' }, DEFAULT_LIMITS)).base, 'refs/heads/x');
   const t0 = Math.floor(Date.now() / 1000);
-  const now = validateTreeSpec({ files: {}, author: A, message: '' }, DEFAULT_LIMITS).author.time;
+  const now = unwrap(validateTreeSpec({ files: {}, author: A, message: '' }, DEFAULT_LIMITS)).author.time;
   assert.ok(now >= t0 && now <= t0 + 2, `${now} vs ${t0}`);
   const ok = { files: {}, author: A, message: 'm', time: T0 };
-  throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, 'abc'), 'bad_request', 'head must be a 40-hex oid');
-  throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, 'A'.repeat(40)), 'bad_request', 'head must be a 40-hex oid');
-  throws(() => validateTreeSpec(ok, DEFAULT_LIMITS, `${'a'.repeat(40)}\n`), 'bad_request', 'head must be a 40-hex oid');
-  throws(() => validateTreeSpec({ ...ok, ref: 'main' }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'ref' });
-  throws(() => validateTreeSpec({ ...ok, base: 'main' }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'ref' });
-  throws(() => validateTreeSpec({ ...ok, author: undefined }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'author name' });
-  throws(() => validateTreeSpec({ ...ok, author: { name: 'A' } }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'author email' });
-  throws(() => validateTreeSpec({ ...ok, message: 'a\0' }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'message' });
-  throws(() => validateTreeSpec({ ...ok, files: null }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'files' });
-  throws(() => validateTreeSpec({ ...ok, files: { a: '1', 'a/b': '2' } }, DEFAULT_LIMITS), 'bad_request', 'a is both a file and a directory');
+  throws(() => unwrap(validateTreeSpec(ok, DEFAULT_LIMITS, 'abc')), 'bad_request', 'head must be a 40-hex oid');
+  throws(() => unwrap(validateTreeSpec(ok, DEFAULT_LIMITS, 'A'.repeat(40))), 'bad_request', 'head must be a 40-hex oid');
+  throws(() => unwrap(validateTreeSpec(ok, DEFAULT_LIMITS, `${'a'.repeat(40)}\n`)), 'bad_request', 'head must be a 40-hex oid');
+  throws(() => unwrap(validateTreeSpec({ ...ok, ref: 'main' }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'ref' });
+  throws(() => unwrap(validateTreeSpec({ ...ok, base: 'main' }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'ref' });
+  throws(() => unwrap(validateTreeSpec({ ...ok, author: undefined }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'author name' });
+  throws(() => unwrap(validateTreeSpec({ ...ok, author: { name: 'A' } }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'author email' });
+  throws(() => unwrap(validateTreeSpec({ ...ok, message: 'a\0' }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'message' });
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: null }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'files' });
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: '1', 'a/b': '2' } }, DEFAULT_LIMITS)), 'bad_request', 'a is both a file and a directory');
   // the total is the sum of blob bytes. Exactly the cap is kept; the next byte is limit_exceeded before buildTree.
   const cap = withLimits({ maxPushBytes: 4 });
-  assert.equal(validateTreeSpec({ ...ok, files: { a: 'ab', b: 'cd' } }, cap).built.root, buildTree(fileEntries({ a: 'ab', b: 'cd' }, cap)).root);
-  throws(() => validateTreeSpec({ ...ok, files: { a: 'abc', b: 'de' } }, cap), 'limit_exceeded', 'push bytes 5 exceeds limit 4', { what: 'push bytes', got: 5, max: 4 });
-  assert.equal(validateTreeSpec({ ...ok, files: { g: { mode: '160000', oid: GITLINK } } }, withLimits({ maxPushBytes: 0 })).files, 1);
-  throws(() => validateTreeSpec({ ...ok, files: { a: 'x' } }, withLimits({ maxPushBytes: 0 })), 'limit_exceeded', 'push bytes 1 exceeds limit 0', { what: 'push bytes', got: 1, max: 0 });
+  assert.equal(unwrap(validateTreeSpec({ ...ok, files: { a: 'ab', b: 'cd' } }, cap)).built.root, unwrap(buildTree(unwrap(fileEntries({ a: 'ab', b: 'cd' }, cap)))).root);
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'abc', b: 'de' } }, cap)), 'limit_exceeded', 'push bytes 5 exceeds limit 4', { what: 'push bytes', got: 5, max: 4 });
+  assert.equal(unwrap(validateTreeSpec({ ...ok, files: { g: { mode: '160000', oid: GITLINK } } }, withLimits({ maxPushBytes: 0 }))).files, 1);
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'x' } }, withLimits({ maxPushBytes: 0 }))), 'limit_exceeded', 'push bytes 1 exceeds limit 0', { what: 'push bytes', got: 1, max: 0 });
   // a file over maxObjectSize is still that error, from fileEntries, not the total
-  throws(() => validateTreeSpec({ ...ok, files: { a: 'abcd' } }, withLimits({ maxObjectSize: 2, maxPushBytes: 1 })), 'limit_exceeded', 'object size 4 exceeds limit 2');
-  throws(() => validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: undefined }), 'bad_request', 'limits.maxPushBytes must be a finite non-negative number');
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'abcd' } }, withLimits({ maxObjectSize: 2, maxPushBytes: 1 }))), 'limit_exceeded', 'object size 4 exceeds limit 2');
+  throws(() => unwrap(validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: undefined })), 'bad_request', 'limits.maxPushBytes must be a finite non-negative number');
 });
 
 // ======================================================================================================================
@@ -347,7 +347,7 @@ test('validateTreeSpec: defaults, create, head, and each field checked before I/
 
 test('pushTree: the first commit of a new ref is git\'s commit, every object sent, the CAS old oid zero', async () => {
   const r = remote(); const e = env(r);
-  const res = await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, e.opts);
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, e.opts));
   assert.deepEqual(res, {
     noop: false, ref: 'refs/heads/main', oldCommit: null, newCommit: GIT.commit, oldTree: null, newTree: GIT.root, hint: null, attempt: 0,
     pushBytes: res.pushBytes, treesRead: 0, objects: { files: 6, trees: 3, sent: 9, sentTrees: 3, sentBlobs: 5, treeDeltas: 0 },
@@ -372,7 +372,7 @@ test('pushTree: the first commit of a new ref is git\'s commit, every object sen
   assert.equal(diff.parentSpanId, root.spanId);
   // a message that already ends in a newline is not given a second one
   const r2 = remote();
-  assert.equal((await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy\n', time: T0 }, env(r2).opts)).newCommit, GIT.commit);
+  assert.equal((await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy\n', time: T0 }, env(r2).opts))).newCommit, GIT.commit);
 });
 
 test('pushTree: a repeat push reads only the changed trees, sends deltas and only the new blob; the same tree is a noop', async () => {
@@ -380,7 +380,7 @@ test('pushTree: a repeat push reads only the changed trees, sends deltas and onl
   assert.equal(r.refs.get('refs/heads/main'), GIT.commit);
   const cache = new Map();
   const e = env(r);
-  const res = await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { ...e.opts, cache });
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { ...e.opts, cache }));
   assert.equal(res.newCommit, GIT.commit2);
   assert.deepEqual([res.oldCommit, res.oldTree, res.newTree, res.treesRead], [GIT.commit, GIT.root, GIT.root2, 2]);
   assert.deepEqual(res.objects, { files: 6, trees: 3, sent: 4, sentTrees: 2, sentBlobs: 1, treeDeltas: 2 });
@@ -398,12 +398,12 @@ test('pushTree: a repeat push reads only the changed trees, sends deltas and onl
   // every new tree is cached by oid after the push; a later push from it reads nothing
   assert.deepEqual([...cache.keys()].sort(), [GIT.root, GIT.src, GIT.lib, GIT.root2, GIT.src2].sort());
   const e2 = env(r);
-  const back = await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e2.opts, cache });
+  const back = await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e2.opts, cache }));
   assert.deepEqual([back.treesRead, back.oldCommit, back.newTree], [0, GIT.commit2, GIT.root]);
   assert.deepEqual([e2.span('git.push_tree.diff').attrs['git.push_tree.diff.cache_hits'], e2.span('git.push_tree.diff').attrs['git.push_tree.diff.trees_read']], [2, 0]);
   // the same files again: noop, no receive-pack
   const e3 = env(r); const before = r.pushes().length;
-  const noop = await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'other', time: T0 + 5 }, e3.opts);
+  const noop = await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'other', time: T0 + 5 }, e3.opts));
   assert.deepEqual(noop, {
     noop: true, ref: 'refs/heads/main', oldCommit: back.newCommit, newCommit: back.newCommit, oldTree: GIT.root, newTree: GIT.root, hint: null, attempt: 0,
     pushBytes: 0, treesRead: 0, objects: { files: 6, trees: 3, sent: 0, sentTrees: 0, sentBlobs: 0, treeDeltas: 0 },
@@ -415,7 +415,7 @@ test('pushTree: a repeat push reads only the changed trees, sends deltas and onl
 test('pushTree: parent trees are read only where both sides are directories with different oids', async () => {
   const r = remote(); r.commit({ d: { mode: '120000', data: 'x' }, 'e/f': '1', 'g/h': '1', 'same/x': 's' });
   // d becomes a directory, e becomes a file, g changes, same is unchanged
-  const res = await pushTree('http://fake/r.git', { files: { 'd/y': '2', e: '3', 'g/h': '2', 'same/x': 's' }, author: A, message: 'm', time: T0 }, env(r).opts);
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: { 'd/y': '2', e: '3', 'g/h': '2', 'same/x': 's' }, author: A, message: 'm', time: T0 }, env(r).opts));
   assert.equal(res.treesRead, 2, 'the root and g');
   assert.deepEqual(r.fetches().slice(1).map(f => f.wants[0]).length, 2);
   const parsed = unwrap(parseTree(r.objects.get(unwrap(parseCommit(r.objects.get(res.newCommit).data)).tree).data));
@@ -426,17 +426,17 @@ test('pushTree: parent trees are read only where both sides are directories with
 
 test('pushTree: create a ref from base, refuse an absent base', async () => {
   const r = remote(); r.commit(FILES());
-  const res = await pushTree('http://fake/r.git', { ref: 'refs/heads/topic', base: 'refs/heads/main', files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, env(r).opts);
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { ref: 'refs/heads/topic', base: 'refs/heads/main', files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, env(r).opts));
   assert.equal(res.newCommit, GIT.commit2);
   assert.equal(res.oldCommit, GIT.commit);
   assert.deepEqual(r.pushes()[0].commands, [{ old: ZERO_OID, new: GIT.commit2, ref: 'refs/heads/topic' }]);
   assert.equal(r.refs.get('refs/heads/main'), GIT.commit);
   // base = the new ref's own tree: still a commit, never a noop, when creating
-  const same = await pushTree('http://fake/r.git', { ref: 'refs/heads/copy', base: 'refs/heads/main', files: FILES(), author: A, message: 'deploy', time: T0 }, env(r).opts);
+  const same = await unwrapAsync(pushTree('http://fake/r.git', { ref: 'refs/heads/copy', base: 'refs/heads/main', files: FILES(), author: A, message: 'deploy', time: T0 }, env(r).opts));
   assert.equal(same.noop, false);
   assert.equal(r.refs.get('refs/heads/copy'), same.newCommit);
   const e = env(r);
-  await rejects(pushTree('http://fake/r.git', { ref: 'refs/heads/x', base: 'refs/heads/gone', files: {}, author: A, message: 'm', time: T0 }, e.opts), 'not_found', 'ref refs/heads/gone not found', { attempt: 0, hint: null, miss: { kind: 'ref', ref: 'refs/heads/gone', candidates: ['refs/heads/gone'] } });
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', { ref: 'refs/heads/x', base: 'refs/heads/gone', files: {}, author: A, message: 'm', time: T0 }, e.opts)), 'not_found', 'ref refs/heads/gone not found', { attempt: 0, hint: null, miss: { kind: 'ref', ref: 'refs/heads/gone', candidates: ['refs/heads/gone'] } });
   assert.equal(e.span('git.push_tree').attrs['git.push_tree.outcome'], 'not_found');
 });
 
@@ -445,7 +445,7 @@ test('pushTree: a lost race is retried once from a fresh ls-refs, linked to the 
   let moves = 1;
   r.commit(FILES());
   const e = env(r);
-  const res = await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, e.opts);
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, e.opts));
   assert.equal(res.attempt, 1);
   const raced = unwrap(parseCommit(r.objects.get(r.refs.get('refs/heads/main')).data));
   assert.equal(raced.tree, GIT.root2);
@@ -457,7 +457,7 @@ test('pushTree: a lost race is retried once from a fresh ls-refs, linked to the 
   assert.equal(roots[0].links.length, 0);
   moves = 2;
   const e2 = env(r);
-  await rejects(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'deploy', time: T0 }, e2.opts), 'cas_conflict', 'push rejected: fetch first', { attempt: 1 });
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'deploy', time: T0 }, e2.opts)), 'cas_conflict', 'push rejected: fetch first', { attempt: 1 });
   assert.equal(e2.all('git.push_tree').length, 2);
 });
 
@@ -475,20 +475,20 @@ test('editFile: a lost race is retried once from a fresh ls-refs', async () => {
   } });
   r.commit(FILES());
   const e = env(r);
-  const res = await editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts);
+  const res = await unwrapAsync(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts));
   assert.equal(res.attempt, 1);
   assert.equal(res.noop, false);
   assert.deepEqual(e.all('git.edit').map(s => [s.attrs['git.edit.attempt'], s.attrs['git.edit.outcome']]), [[0, 'cas_conflict'], [1, 'ok']]);
   // a hint on the lost attempt is what the retry reports, and the retry's span links to the first
   moves = 1;
   const hinted = env(r);
-  const again = await editFile('http://fake/r.git', { path: 'README', find: 'HELLO', replace: 'AGAIN', author: A, message: 'm', time: T0 }, { ...hinted.opts, head: r.refs.get('refs/heads/main') });
+  const again = await unwrapAsync(editFile('http://fake/r.git', { path: 'README', find: 'HELLO', replace: 'AGAIN', author: A, message: 'm', time: T0 }, { ...hinted.opts, head: r.refs.get('refs/heads/main') }));
   assert.deepEqual([again.attempt, again.hint], [1, 'used']);
   const roots = hinted.all('git.edit');
   assert.deepEqual(roots[1].links.map(l => [l.spanId, l.attrs['ply.link']]), [[roots[0].spanId, 'retry_of']]);
   // a non-conflict error is the one attempt, not a retry
   const missing = env(r);
-  await rejects(editFile('http://fake/r.git', { ref: 'refs/heads/missing', path: 'README', find: 'a', replace: 'b', author: A, message: 'm', time: T0 }, missing.opts), 'not_found', 'ref refs/heads/missing not found', { miss: { kind: 'ref', ref: 'refs/heads/missing', candidates: ['refs/heads/missing'] } });
+  await rejects(unwrapAsync(editFile('http://fake/r.git', { ref: 'refs/heads/missing', path: 'README', find: 'a', replace: 'b', author: A, message: 'm', time: T0 }, missing.opts)), 'not_found', 'ref refs/heads/missing not found', { miss: { kind: 'ref', ref: 'refs/heads/missing', candidates: ['refs/heads/missing'] } });
   assert.equal(missing.all('git.edit').length, 1);
 });
 
@@ -500,14 +500,14 @@ test('lookupEntry: a missing name, a file along the way, and a last component th
     { name: 'link', mode: '120000', oid: GIT.link },
     { name: 'run.sh', mode: '100755', oid: GIT.run },
   ]));
-  throws(() => lookupEntry(tree, 'nope', true, DEFAULT_LIMITS), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: '' } });
-  throws(() => lookupEntry(tree, 'README', false, DEFAULT_LIMITS), 'not_found', 'README is not a directory', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
-  assert.equal(lookupEntry(tree, 'src', false, DEFAULT_LIMITS).entry.oid, GIT.src);
-  throws(() => lookupEntry(tree, 'src', true, DEFAULT_LIMITS), 'not_found', 'src is not a regular file (mode 40000)', { miss: { kind: 'is_directory', path: 'src', tree: GIT.src } });
-  throws(() => lookupEntry(tree, 'sub', true, DEFAULT_LIMITS), 'not_found', 'sub is not a regular file (mode 160000)', { miss: { kind: 'submodule', path: 'sub', commit: GITLINK } });
-  throws(() => lookupEntry(tree, 'link', true, DEFAULT_LIMITS), 'not_found', 'link is not a regular file (mode 120000)', { miss: { kind: 'not_directory', path: 'link', mode: '120000' } });
-  assert.equal(lookupEntry(tree, 'README', true, DEFAULT_LIMITS).entry.oid, GIT.readme);
-  assert.equal(lookupEntry(tree, 'run.sh', true, DEFAULT_LIMITS).entry.mode, '100755');
+  throws(() => unwrap(lookupEntry(tree, 'nope', true, DEFAULT_LIMITS)), 'not_found', 'path component nope not found', { miss: { kind: 'path', missing: 'nope', existingPath: '' } });
+  throws(() => unwrap(lookupEntry(tree, 'README', false, DEFAULT_LIMITS)), 'not_found', 'README is not a directory', { miss: { kind: 'not_directory', path: 'README', mode: '100644' } });
+  assert.equal(unwrap(lookupEntry(tree, 'src', false, DEFAULT_LIMITS)).entry.oid, GIT.src);
+  throws(() => unwrap(lookupEntry(tree, 'src', true, DEFAULT_LIMITS)), 'not_found', 'src is not a regular file (mode 40000)', { miss: { kind: 'is_directory', path: 'src', tree: GIT.src } });
+  throws(() => unwrap(lookupEntry(tree, 'sub', true, DEFAULT_LIMITS)), 'not_found', 'sub is not a regular file (mode 160000)', { miss: { kind: 'submodule', path: 'sub', commit: GITLINK } });
+  throws(() => unwrap(lookupEntry(tree, 'link', true, DEFAULT_LIMITS)), 'not_found', 'link is not a regular file (mode 120000)', { miss: { kind: 'not_directory', path: 'link', mode: '120000' } });
+  assert.equal(unwrap(lookupEntry(tree, 'README', true, DEFAULT_LIMITS)).entry.oid, GIT.readme);
+  assert.equal(unwrap(lookupEntry(tree, 'run.sh', true, DEFAULT_LIMITS)).entry.mode, '100755');
 });
 
 test('editFile and pushTree: a non-Error from the first attempt is a rejection, and is not retried', async () => {
@@ -519,21 +519,21 @@ test('editFile and pushTree: a non-Error from the first attempt is a rejection, 
   const e = env(r);
   const real = e.transport.frames;
   e.transport.frames = (...args) => { calls += 1; if (calls === 1) throw plain; return real(...args); };
-  const edit = await settled(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts));
+  const edit = await settled(unwrapAsync(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, e.opts)));
   assert.deepEqual(edit, { settled: 'rejected', reason: plain });
   assert.equal(calls, 1, 'a non-Error is not a cas_conflict retry');
   calls = 0;
-  const tree = await settled(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'm', time: T0 }, e.opts));
+  const tree = await settled(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'm', time: T0 }, e.opts)));
   assert.deepEqual(tree, { settled: 'rejected', reason: plain });
   assert.equal(calls, 1);
   // a string thrown after the protocol (the caller's signer) is not wrapped, and is not the return value
   const e2 = env(r);
   const before = r.pushes().length;
   const signer = { kind: 'ssh-ed25519', publicKeyLine: 'ssh-ed25519 AAAA', sign() { throw 'x'; } };
-  const signed = await settled(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'm', time: T0 }, { ...e2.opts, signer }));
+  const signed = await settled(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'm', time: T0 }, { ...e2.opts, signer })));
   assert.deepEqual(signed, { settled: 'rejected', reason: 'x' });
   assert.equal(r.pushes().length, before);
-  const editSigned = await settled(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, { ...env(r).opts, signer: { ...signer, sign() { throw 'y'; } } }));
+  const editSigned = await settled(unwrapAsync(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, { ...env(r).opts, signer: { ...signer, sign() { throw 'y'; } } })));
   assert.deepEqual(editSigned, { settled: 'rejected', reason: 'y' });
 });
 
@@ -541,7 +541,7 @@ test('pushTree: git.push_tree.diff belongs to the operation tracer, in the root 
   const r = remote(); r.commit(FILES());
   const opEx = arrayExporter(); const opTracer = new Tracer({ exporter: opEx });
   const wireEx = arrayExporter(); const wireTracer = new Tracer({ exporter: wireEx });
-  await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { tracer: opTracer, transport: r.transport({ tracer: wireTracer }) });
+  await unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'deploy', time: T0 }, { tracer: opTracer, transport: r.transport({ tracer: wireTracer }) }));
   const op = opEx.lines.flatMap(flattenLine);
   const root = op.find(s => s.name === 'git.push_tree');
   const diff = op.find(s => s.name === 'git.push_tree.diff');
@@ -573,36 +573,36 @@ test('pushTree: the head hint — used, stale, a failed speculative fetch, and s
   const r = remote(); r.commit(FILES());
   const files = { ...FILES(), 'src/a.js': 'A\n' };
   const spec = { files, author: A, message: 'deploy', time: T0 };
-  await rejects(pushTree('http://fake/r.git', spec, { ...env(r).opts, strictHead: true }), 'bad_request', 'strictHead needs head');
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', spec, { ...env(r).opts, strictHead: true })), 'bad_request', 'strictHead needs head');
   assert.equal(r.log.length, 0);
   // used: the speculative commit is the parent, fetched once
   const e = env(r);
-  const used = await pushTree('http://fake/r.git', spec, { ...e.opts, head: GIT.commit });
+  const used = await unwrapAsync(pushTree('http://fake/r.git', spec, { ...e.opts, head: GIT.commit }));
   assert.deepEqual([used.hint, used.newCommit], ['used', GIT.commit2]);
   assert.equal(r.fetches().filter(f => f.wants[0] === GIT.commit).length, 1);
   assert.deepEqual([e.span('git.push_tree').attrs['git.push_tree.head.hint'], e.span('git.push_tree').attrs['git.push_tree.head.outcome']], [GIT.commit, 'used']);
   // stale: ls-refs wins, the real parent is fetched as well
   r.log.length = 0;
-  const stale = await pushTree('http://fake/r.git', { ...spec, files: FILES() }, { ...env(r).opts, head: GIT.commit });
+  const stale = await unwrapAsync(pushTree('http://fake/r.git', { ...spec, files: FILES() }, { ...env(r).opts, head: GIT.commit }));
   assert.deepEqual([stale.hint, stale.oldCommit], ['stale', GIT.commit2]);
   assert.deepEqual(r.fetches().filter(f => f.deepen === 1).map(f => f.wants[0]).sort(), [GIT.commit, GIT.commit2].sort());
   // a hint the server does not have: recorded, and the push goes on from ls-refs
   const e3 = env(r);
   const ghost = 'd'.repeat(40);
-  const res = await pushTree('http://fake/r.git', { ...spec, files: { x: '1' } }, { ...e3.opts, head: ghost });
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { ...spec, files: { x: '1' } }, { ...e3.opts, head: ghost }));
   assert.equal(res.hint, 'stale');
   assert.equal(e3.span('git.push_tree').attrs['git.push_tree.head.speculative_error'], 'remote_error');
   assert.equal(e.span('git.push_tree').attrs['git.push_tree.head.speculative_error'], undefined);
   // strictHead with a stale hint: cas_conflict, never retried
   const e4 = env(r); r.log.length = 0;
-  await rejects(pushTree('http://fake/r.git', { ...spec, files: { y: '1' } }, { ...e4.opts, head: GIT.commit, strictHead: true }), 'cas_conflict',
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', { ...spec, files: { y: '1' } }, { ...e4.opts, head: GIT.commit, strictHead: true })), 'cas_conflict',
     `refs/heads/main is at ${res.newCommit}, not the expected head ${GIT.commit}`, { expected: GIT.commit, actual: res.newCommit, attempt: 0, hint: 'stale' });
   assert.equal(e4.all('git.push_tree').length, 1);
   assert.equal(r.pushes().length, 0);
   // strictHead with a matching hint pushes; with an absent ref, the hint is stale against nothing
-  const ok = await pushTree('http://fake/r.git', { ...spec, files: { y: '1' } }, { ...env(r).opts, head: res.newCommit, strictHead: true });
+  const ok = await unwrapAsync(pushTree('http://fake/r.git', { ...spec, files: { y: '1' } }, { ...env(r).opts, head: res.newCommit, strictHead: true }));
   assert.equal(ok.hint, 'used');
-  await rejects(pushTree('http://fake/r.git', { ...spec, ref: 'refs/heads/none' }, { ...env(r).opts, head: GIT.commit, strictHead: true }), 'cas_conflict',
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', { ...spec, ref: 'refs/heads/none' }, { ...env(r).opts, head: GIT.commit, strictHead: true })), 'cas_conflict',
     `refs/heads/none is at nothing, not the expected head ${GIT.commit}`);
 });
 
@@ -611,7 +611,7 @@ test('pushTree: a lost race with a hint retries without it and reports the first
   const r = remote({ hook: async req => { if (req.service === 'git-receive-pack' && moves-- > 0) r.commit({ other: 'x' }, { parents: [r.refs.get('refs/heads/main')] }); } });
   r.commit(FILES());
   const e = env(r);
-  const res = await pushTree('http://fake/r.git', { files: { z: '1' }, author: A, message: 'm', time: T0 }, { ...e.opts, head: GIT.commit });
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: { z: '1' }, author: A, message: 'm', time: T0 }, { ...e.opts, head: GIT.commit }));
   assert.deepEqual([res.attempt, res.hint], [1, 'used']);
   const roots = e.all('git.push_tree');
   assert.deepEqual(roots.map(s => [s.attrs['git.push_tree.head.hint'], s.attrs['git.push_tree.head.outcome']]), [[GIT.commit, 'used'], ['', 'used']]);
@@ -620,23 +620,23 @@ test('pushTree: a lost race with a hint retries without it and reports the first
 test('pushTree: verify reads the ref back; a different value after an acknowledged push is ambiguous', async () => {
   const r = remote();
   const e = env(r);
-  const res = await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e.opts, verify: true });
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e.opts, verify: true }));
   assert.equal(res.newCommit, GIT.commit);
   assert.equal(e.span('git.push_tree').attrs['git.push_tree.verify.ref'], GIT.commit);
   let pushed = false;
   const liar = remote({ hook: async req => { if (req.service === 'git-receive-pack') pushed = true; else if (pushed && req.command === 'ls-refs') return [{ kind: 'flush' }]; } });
-  await rejects(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...env(liar).opts, verify: true }), 'ambiguous',
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...env(liar).opts, verify: true })), 'ambiguous',
     `push reported ok but refs/heads/main is absent, not ${GIT.commit}`);
   // without verify, the same server is believed
   pushed = false;
-  assert.equal((await pushTree('http://fake/r.git', { ref: 'refs/heads/b', files: FILES(), author: A, message: 'deploy', time: T0 }, env(liar).opts)).newCommit, GIT.commit);
+  assert.equal((await unwrapAsync(pushTree('http://fake/r.git', { ref: 'refs/heads/b', files: FILES(), author: A, message: 'deploy', time: T0 }, env(liar).opts))).newCommit, GIT.commit);
 });
 
 test('pushTree: a signer\'s signature is in the pushed commit and on the span', async () => {
   const r = remote(); const e = env(r);
   const sig = '-----BEGIN SSH SIGNATURE-----\nU0lH\n-----END SSH SIGNATURE-----\n';
   const signer = { kind: 'ssh', publicKeyLine: 'ssh-ed25519 AAAA', sign: async () => sig };
-  const res = await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e.opts, signer });
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e.opts, signer }));
   const c = unwrap(parseCommit(r.objects.get(res.newCommit).data));
   assert.equal(c.tree, GIT.root);
   assert.ok(c.extra.some(l => l.startsWith('gpgsig -----BEGIN SSH SIGNATURE-----')));
@@ -644,12 +644,12 @@ test('pushTree: a signer\'s signature is in the pushed commit and on the span', 
   const root = e.span('git.push_tree');
   assert.deepEqual([root.attrs['git.push_tree.commit.signed'], root.attrs['git.push_tree.commit.signer']], ['ssh', 'ssh-ed25519 AAAA']);
   const r2 = remote(); const e2 = env(r2);
-  await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e2.opts, signer: { kind: 'x', sign: async () => sig } });
+  await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, { ...e2.opts, signer: { kind: 'x', sign: async () => sig } }));
   assert.equal(e2.span('git.push_tree').attrs['git.push_tree.commit.signer'], '');
   assert.equal(env(remote()).span('git.push_tree'), undefined);
   assert.equal(e2.spans().find(s => s.name === 'git.push_tree').attrs['git.push_tree.commit.signed'], 'x');
   const plain = env(remote());
-  await pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, plain.opts);
+  await unwrapAsync(pushTree('http://fake/r.git', { files: FILES(), author: A, message: 'deploy', time: T0 }, plain.opts));
   assert.equal(plain.span('git.push_tree').attrs['git.push_tree.commit.signed'], undefined);
 });
 
@@ -1371,15 +1371,15 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
   // pushTree asks ls-refs for the base alone, honours the caller's limits, and reads nested trees by their full path
   const r = remote(); r.commit(FILES());
   const e = env(r);
-  const res = await pushTree('http://fake/r.git', { files: { ...FILES(), 'src/lib/b.js': 'B\n' }, author: A, message: 'deploy', time: T0 }, e.opts);
+  const res = await unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/lib/b.js': 'B\n' }, author: A, message: 'deploy', time: T0 }, e.opts));
   assert.deepEqual(r.log.filter(x => x.command === 'ls-refs').map(x => x.prefixes), [['refs/heads/main']]);
   assert.equal(res.treesRead, 3);
   assert.deepEqual(r.pushes()[0].pack.objects.map(o => o.baseOid ?? null), [null, GIT.root, GIT.src, GIT.lib, null]);
-  await rejects(pushTree('http://fake/r.git', { files: { a: '1', b: '2' }, author: A, message: 'm', time: T0 }, { ...env(r).opts, limits: withLimits({ maxPackObjects: 1 }) }), 'limit_exceeded', 'files 2 exceeds limit 1');
+  await rejects(unwrapAsync(pushTree('http://fake/r.git', { files: { a: '1', b: '2' }, author: A, message: 'm', time: T0 }, { ...env(r).opts, limits: withLimits({ maxPackObjects: 1 }) })), 'limit_exceeded', 'files 2 exceeds limit 1');
   // a create whose tree equals the base's reads no parent tree (the server has the whole closure)
-  const copy = await pushTree('http://fake/r.git', { ref: 'refs/heads/copy2', base: 'refs/heads/main', files: { ...FILES(), 'src/lib/b.js': 'B\n' }, author: A, message: 'm', time: T0 }, env(r).opts);
+  const copy = await unwrapAsync(pushTree('http://fake/r.git', { ref: 'refs/heads/copy2', base: 'refs/heads/main', files: { ...FILES(), 'src/lib/b.js': 'B\n' }, author: A, message: 'm', time: T0 }, env(r).opts));
   assert.deepEqual([copy.treesRead, copy.objects.sent], [0, 1]);
-  throws(() => validateTreeSpec({ ref: 'main', base: 'refs/heads/main', files: {}, author: A, message: '' }, DEFAULT_LIMITS), 'bad_request', undefined, { what: 'ref' });
+  throws(() => unwrap(validateTreeSpec({ ref: 'main', base: 'refs/heads/main', files: {}, author: A, message: '' }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'ref' });
 
   // checkoutTree: the subtree path on the span and the result, joined with '/'
   const ce = env(r);

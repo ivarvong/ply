@@ -12,15 +12,14 @@
 // arguments; the effects (lsRefs, fetchObject, push, verifyRef) are free functions over a transport record.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
-// Decisions return Result; the public functions (fileEntries, buildTree, validateTreeSpec, pushTree) stay throwing until the Result
-// cut-over (docs/STACK.md step 3).
-import { fail, orThrow } from './errors.js';
+// Decisions and the public functions (fileEntries, buildTree, validateTreeSpec, pushTree) return Result.
+import { fail, isPlyError, orThrow } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
-import { push, validated, ZERO_OID } from './push.js';
+import { push, ZERO_OID } from './push.js';
 import { parseRefname } from './refname.js';
 import type { Refname } from './refname.js';
 import { makeDelta } from './packresolve.js';
@@ -31,17 +30,17 @@ import type { Limits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { decideHead, inSpan, limitsOf, needsHead, retryLink, strictParent, tagAttempt } from './edit.js';
 import type { Author, EditConfig, EditOptions, HintOutcome, Ident } from './edit.js';
-import { signCommitResult } from './sign.js';
+import { signCommit } from './sign.js';
 import { MODE_BLOB, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES, DELTA_SIZE_MIN } from './format.js';
 import type { Span } from './otel.js';
 import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCodeIs, thrownCodeOr } from './boundary.js';
+import { thrownCodeOr } from './boundary.js';
 import type { Input } from './absent.js';
 import { fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
-import { err, getOrElse, mapOption, matchOption, ok } from './result.js';
+import { err, getOrElse, map, mapOption, matchOption, ok } from './result.js';
 import type { Result } from './result.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -74,7 +73,7 @@ const specOf = (f: unknown): Input<FileSpec> => {
 // through validatePath (no `.git`, `..`, empty component); each blob is bounded by maxObjectSize and the count by
 // maxPackObjects before anything is hashed.
 // oxlint-disable-next-line complexity -- one check per field, in the order git would refuse them
-export function fileEntriesResult(files: unknown, limits: Limits = DEFAULT_LIMITS): Result<FileEntry[], PlyError> {
+export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Result<FileEntry[], PlyError> {
   if (files === null || typeof files !== 'object') return fail('bad_request', 'files must be an object or an iterable of { path, mode, data }', { what: 'files' });
   const maxFiles = readLimit(limits, 'maxPackObjects');
   if (!maxFiles.ok) return maxFiles;
@@ -91,7 +90,7 @@ export function fileEntriesResult(files: unknown, limits: Limits = DEFAULT_LIMIT
   for (const f of list) {
     if (out.length >= maxFiles.value) return err(limitExceeded('files', out.length + 1, maxFiles.value));
     const spec = specOf(f);
-    const comps = validated(() => orThrow(validatePath(spec.path, limits)).components);
+    const comps = map(validatePath(spec.path, limits), p => p.components);
     if (!comps.ok) return comps;
     const path = comps.value.join('/');
     // a mode left out is a file's; any other value (null included) is the caller's, and checked
@@ -113,8 +112,6 @@ export function fileEntriesResult(files: unknown, limits: Limits = DEFAULT_LIMIT
   }
   return ok(out);
 }
-// The throwing form (a public entry) until the Result cut-over.
-export const fileEntries = (files: unknown, limits: Limits = DEFAULT_LIMITS): FileEntry[] => orThrow(fileEntriesResult(files, limits));
 
 // A directory entry of a built tree; the built trees by directory ('' is the root) and the blobs by oid.
 export type DirEntry = { readonly mode: string; readonly name: string; readonly oid: string };
@@ -124,7 +121,7 @@ export type BuiltTree = { readonly root: string; readonly trees: ReadonlyMap<str
 // data) }; '' is the root directory. A path given twice, or used as both a file and a directory, is the caller's
 // error (git would reject the tree as duplicateEntries); each directory is bounded by maxTreeEntries. No files at all is
 // git's empty tree (4b825dc6…), a valid root.
-export function buildTreeResult(entries: readonly FileEntry[], limits: Limits = DEFAULT_LIMITS): Result<BuiltTree, TreeError> {
+export function buildTree(entries: readonly FileEntry[], limits: Limits = DEFAULT_LIMITS): Result<BuiltTree, TreeError> {
   const maxEntries = readLimit(limits, 'maxTreeEntries');
   if (!maxEntries.ok) return maxEntries;
   // null: a subdirectory (its entries are under its own key)
@@ -153,14 +150,14 @@ export function buildTreeResult(entries: readonly FileEntry[], limits: Limits = 
   const depth = (dir: string): number => (dir === '' ? 0 : dir.split('/').length);
   for (const dir of [...dirs.keys()].toSorted((a, b) => depth(b) - depth(a))) {
     const list = [...(dirs.get(dir) as Map<string, DirEntry | null>)].map(([name, e]) => (e === null ? { mode: MODE_TREE, name, oid: (trees.get(dir ? `${dir}/${name}` : name) as BuiltDir).oid } : e));
-    const data = orThrow(encodeTree(list));
+    const encoded = encodeTree(list);
+    if (!encoded.ok) return encoded;
+    const data = encoded.value;
     trees.set(dir, { oid: hashObject('tree', data), data, entries: list });
   }
   return ok({ root: (trees.get('') as BuiltDir).oid, trees, blobs });
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
 }
-// The throwing form (a public entry) until the Result cut-over.
-export const buildTree = (entries: readonly FileEntry[], limits: Limits = DEFAULT_LIMITS): BuiltTree => orThrow(buildTreeResult(entries, limits));
 
 // What the server is known to hold: `have` (oids), `old` (dir → the parent's tree there, a delta base).
 export type Known = { readonly have: ReadonlySet<string>; readonly old: ReadonlyMap<string, { readonly oid: string; readonly data: Uint8Array }> };
@@ -216,22 +213,22 @@ const authorInput = (author: Author | null, time: number): Parameters<typeof val
 // Pure: every caller-controlled field, checked before any I/O. `base` as in editFile: the ref whose head is the
 // parent (default `ref`); base ≠ ref creates `ref` (zero old oid). base = ref and the ref absent: the first commit of a
 // new ref, no parent, zero old oid — a deploy's first push.
-export function validateTreeSpecResult(spec: TreeSpec, limits: Limits, head: string | null = null): Result<TreePlan, PlyError> {
+export function validateTreeSpec(spec: TreeSpec, limits: Limits, head: string | null = null): Result<TreePlan, PlyError> {
   const { ref, time } = withDefaults(spec, { ref: 'refs/heads/main', time: Math.floor(Date.now() / 1000) });
   const { files, author, message } = spec;
-  const pushRef = validated(() => orThrow(validatePushRef(ref, false)));
+  const pushRef = validatePushRef(ref, false);
   if (!pushRef.ok) return pushRef;
   // a base left out is `ref`; any other value (null included) is the caller's, and checked
-  const baseRef = validated(() => orThrow(validateRef(getOrElse<unknown>(fromNullable(spec.base), ref))));
+  const baseRef = validateRef(getOrElse<unknown>(fromNullable(spec.base), ref));
   if (!baseRef.ok) return baseRef;
   const base = baseRef.value;
 
-  const person = validated(() => orThrow(validateIdent(authorInput(author, time))));
+  const person = validateIdent(authorInput(author, time));
   if (!person.ok) return person;
-  const checkedMessage = validated(() => orThrow(validateMessage(message)));
+  const checkedMessage = validateMessage(message);
   if (!checkedMessage.ok) return checkedMessage;
   if (head !== null && !OID.test(head)) return fail('bad_request', 'head must be a 40-hex oid');
-  const entries = fileEntriesResult(files, limits);
+  const entries = fileEntries(files, limits);
   if (!entries.ok) return entries;
   // Before buildTree retains the blobs. got is the running total, including the file that crossed the cap.
   // Exactly the cap is allowed. A gitlink has no bytes. A single file over maxObjectSize already failed above.
@@ -243,15 +240,13 @@ export function validateTreeSpecResult(spec: TreeSpec, limits: Limits, head: str
     if (next > maxPush.value) return err(limitExceeded('push bytes', next, maxPush.value));
     pushBytes = next;
   }
-  const built = buildTreeResult(entries.value, limits);
+  const built = buildTree(entries.value, limits);
   if (!built.ok) return built;
   // validatePushRef passed, so the ref is a refname
   const branded = parseRefname(ref);
   if (!branded.ok) return branded;
   return ok(Object.freeze({ ref: branded.value, base, create: base !== ref, built: built.value, files: entries.value.length, author: person.value, message, head }));
 }
-// The throwing form (a public entry) until the Result cut-over.
-export const validateTreeSpec = (spec: TreeSpec, limits: Limits, head: string | null = null): TreePlan => orThrow(validateTreeSpecResult(spec, limits, head));
 
 export type PushTreeResult = {
   readonly noop: boolean;
@@ -290,10 +285,10 @@ type Read = Known & { read: number; hits: number };
 // Effect: the parent's trees wherever the new tree differs, recursing only into directories present on both sides with
 // different oids. Every oid those trees name joins `have`. On a host that refuses tree:0 the first fetch is a blob:none
 // pack that brings every tree of the subtree (fetch.js harvests them), so the rest are answered without a round trip.
-async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: BuiltTree, oldTree: string | null, limits: Limits): Promise<Read> {
+async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: BuiltTree, oldTree: string | null, limits: Limits): Promise<Result<Read, PlyError>> {
   const have = new Set<string>(), old = new Map<string, { readonly oid: string; readonly data: Uint8Array }>();
   const k = { have, old, read: 0, hits: 0 };
-  if (oldTree === null) return k;
+  if (oldTree === null) return ok(k);
   have.add(oldTree);
   const read = async (oid: string): Promise<Uint8Array> => {
     const cached = mapGet(cache, oid);
@@ -302,22 +297,28 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
     cache.set(oid, data); k.read++;
     return data;
   };
-  const visit = async (dir: string, oid: string): Promise<void> => {
+  const visit = async (dir: string, oid: string): Promise<Result<null, PlyError>> => {
     const data = await read(oid);
     old.set(dir, { oid, data });
-    const before = new Map<string, TreeEntry>(orThrow(parseTree(data, limits)).map((e: TreeEntry) => [e.name, e]));
+    const parsed = parseTree(data, limits);
+    if (!parsed.ok) return parsed;
+    const before = new Map<string, TreeEntry>(parsed.value.map((e: TreeEntry) => [e.name, e]));
     for (const e of before.values()) have.add(e.oid);
-    const next: Array<Promise<void>> = [];
+    const next: Array<Promise<Result<null, PlyError>>> = [];
     // dir is a key of built.trees: the root, or a tree entry of a directory visited before it
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
     for (const e of (built.trees.get(dir) as BuiltDir).entries) {
       const was = mapGet(before, e.name);
       if (e.mode === MODE_TREE && was.tag === 'some' && was.value.mode === MODE_TREE && was.value.oid !== e.oid) next.push(visit(dir ? `${dir}/${e.name}` : e.name, was.value.oid));
     }
-    await Promise.all(next);
+    for (const r of await Promise.all(next)) if (!r.ok) return r;
+    return ok(null);
   };
-  if (oldTree !== built.root) await visit('', oldTree);
-  return k;
+  if (oldTree !== built.root) {
+    const visited = await visit('', oldTree);
+    if (!visited.ok) return visited;
+  }
+  return ok(k);
 }
 
 // Pure: an absent base is a new ref only when base = ref; a base ≠ ref must exist.
@@ -332,55 +333,80 @@ export type PushTreeOptions = Omit<EditOptions, 'allowLfsPointer'>;
 type TreeConfig = Omit<EditConfig, 'allowLfsPointer' | 'retry'>;
 const treeDefaults = (): { -readonly [K in keyof TreeConfig]: TreeConfig[K] } => ({ head: null, strictHead: false, cache: null, verify: false, signer: null });
 
-// oxlint-disable-next-line require-await -- async, as before: an error while starting the operation is a rejection
-async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, cfg: TreeConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<PushTreeResult> {
+// oxlint-disable-next-line require-await -- async, as before
+async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, cfg: TreeConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<PushTreeResult, PlyError>> {
   const { verify, signer, strictHead } = cfg;
   const cache = cfg.cache === null ? new Map<string, Uint8Array>() : cfg.cache;
   const limits = limitsOf(options);
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head === null ? '' : head, 'git.push_tree.attempt': attempt };
   // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
-  return orThrow(await operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
     const commitOf = async (oid: string): Promise<Fetched> => orThrow(await fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 }));
+    // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.
+    // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
+    const done = await (async (): Promise<Result<PushTreeResult, PlyError>> => {
     try {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
     const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(orThrow).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => getOrElse<string | null>(mapOption(mapGet(refs, s.base), r => r.oid), null)), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
-    orThrow(baseFound(s, resolved));
+    const found = baseFound(s, resolved);
+    if (!found.ok) return found;
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas === null ? decided.hint : hintWas;
     const parent = decided.oldCommit;
-    orThrow(strictParent(strictHead, decided, s.base, head));
+    const strict = strictParent(strictHead, decided, s.base, head);
+    if (!strict.ok) return strict;
     if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': thrownCodeOr(speculative, 'error') });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is commitOf's value (the rejection branch is the Error above)
-    const oldTree: string | null = parent === null ? null : orThrow(parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits)).tree;
+    let oldTree: string | null = null;
+    if (parent !== null) {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is commitOf's value (the rejection branch is the Error above)
+      const parsed = parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits);
+      if (!parsed.ok) return parsed;
+      oldTree = parsed.value.tree;
+    }
     root.set({ 'git.push_tree.commit.old': parent === null ? '' : parent, 'git.push_tree.tree.old': oldTree === null ? '' : oldTree });
     if (oldTree === s.built.root && !s.create) return outcome('noop', summarize({ s, parent, oldTree, hint, attempt }, null));
 
     // 2. what the server has: the parent's trees along every directory whose oid changed (cache by oid, immutable).
     // The operation's tracer, the one the root span is on: a caller's transport may carry a different one.
-    const known = orThrow(await inSpan(root.tracer, 'git.push_tree.diff', { parent: root }, async span => {
+    const diffed = await inSpan(root.tracer, 'git.push_tree.diff', { parent: root }, async span => {
       const k = await parentTrees(t, cache, s.built, oldTree, limits);
-      span.set({ 'git.push_tree.diff.trees_read': k.read, 'git.push_tree.diff.cache_hits': k.hits, 'git.push_tree.diff.have': k.have.size });
-      return ok(k);
-    }));
+      if (!k.ok) return k;
+      span.set({ 'git.push_tree.diff.trees_read': k.value.read, 'git.push_tree.diff.cache_hits': k.value.hits, 'git.push_tree.diff.have': k.value.have.size });
+      return k;
+    });
+    if (!diffed.ok) return diffed;
+    const known = diffed.value;
     const sel = selectObjects(s.built, known);
 
     // 3. the commit, then one push whose old oid is the CAS
-    const who = orThrow(ident(s.author));
+    const who = ident(s.author);
+    if (!who.ok) return who;
     // oxlint-disable-next-line typescript/strict-boolean-expressions, prefer-template -- bundle budget: the JS's own truthy test and concatenation, byte for byte
-    let commitData = orThrow(encodeCommit({ tree: s.built.root, parents: parent ? [parent] : [], author: who, committer: who, message: s.message.endsWith('\n') ? s.message : s.message + '\n' }));
-    if (signer !== null) { commitData = orThrow(await signCommitResult(commitData, signer)); root.set({ 'git.push_tree.commit.signed': signer.kind, 'git.push_tree.commit.signer': getOrElse(fromNullish(signer.publicKeyLine), '') }); }
+    const encoded = encodeCommit({ tree: s.built.root, parents: parent ? [parent] : [], author: who.value, committer: who.value, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
+    if (!encoded.ok) return encoded;
+    let commitData = encoded.value;
+    if (signer !== null) {
+      const signed = await signCommit(commitData, signer);
+      if (!signed.ok) return signed;
+      commitData = signed.value; root.set({ 'git.push_tree.commit.signed': signer.kind, 'git.push_tree.commit.signer': getOrElse(fromNullish(signer.publicKeyLine), '') });
+    }
     const newCommit = hashObject('commit', commitData);
     const objects = [{ type: TYPE.COMMIT, data: commitData }, ...sel.trees, ...sel.blobs];
     root.set({ 'git.push_tree.commit.new': newCommit, 'git.push_tree.send.trees': sel.trees.length, 'git.push_tree.send.tree_deltas': sel.deltas, 'git.push_tree.send.blobs': sel.blobs.length });
-    const pushed = await push(t, { ref: s.ref, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
+    const sent = await push(t, { ref: s.ref, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
+    if (!sent.ok) return sent;
+    const pushed = sent.value;
     for (const tr of s.built.trees.values()) cache.set(tr.oid, tr.data);
-    if (verify) orThrow(await verifyRef(t, root, 'git.push_tree', s.ref, newCommit));
+    if (verify) { const seen = await verifyRef(t, root, 'git.push_tree', s.ref, newCommit); if (!seen.ok) return seen; }
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt }, { newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });
-    // a thrown object gets the attempt's fields, as before, and leaves through operation(), which records it on the root
+    // Transitional (the wire layer still raises): a thrown object gets the attempt's fields and leaves through operation().
     } catch (e) { tagAttempt(e, attempt, hint); throw e; }
-  }));
+    })();
+    if (!done.ok) tagAttempt(done.error, attempt, hint);
+    return done;
+  });
 }
 
 // Same contract as editFile: `head` overlaps ls-refs with a speculative fetch of the hinted commit (ls-refs wins); a
@@ -389,18 +415,17 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
 // not read back is `ambiguous`. A retry rebuilds on the new head: the tree is still exactly `files` (that is the
 // contract — another writer's files are not merged in), its parent is whatever won the race.
 // The files are hashed once: the retry reuses the validated spec (same commit time, same trees).
-// An Error carries the attempt's tag (attempt, hint, the root span). A string or a plain object does not, and it is not
-// a result: resolving with it reported success for a failed first attempt.
-export async function pushTree(url: string, spec: TreeSpec, options: PushTreeOptions = {}): Promise<PushTreeResult> {
+// An Err carries the attempt's tag (attempt, hint, the root span).
+export async function pushTree(url: string, spec: TreeSpec, options: PushTreeOptions = {}): Promise<Result<PushTreeResult, PlyError>> {
   const cfg = withDefaults(options, treeDefaults());
-  orThrow(needsHead(cfg.strictHead, cfg.head));
-  const s = orThrow(validateTreeSpecResult(spec, limitsOf(options), cfg.head));
-  try {
-    return await pushTreeOnce(url, s, options, cfg, { head: cfg.head, attempt: 0, linkTo: null, hintWas: null });
-  } catch (e) {
-    // only a real Error is a cas_conflict that can be retried; anything else is what the caller threw, unchanged.
-    // the retry is not inside this try, so a second cas_conflict propagates (attempt 0 is the only one caught)
-    if (!(e instanceof Error) || !thrownCodeIs(e, 'cas_conflict') || cfg.strictHead) throw e;
-    return pushTreeOnce(url, s, options, cfg, { head: null, attempt: 1, ...retryLink(e) });
-  }
+  const needs = needsHead(cfg.strictHead, cfg.head);
+  if (!needs.ok) return needs;
+  const planned = validateTreeSpec(spec, limitsOf(options), cfg.head);
+  if (!planned.ok) return planned;
+  const s = planned.value;
+  const first = await pushTreeOnce(url, s, options, cfg, { head: cfg.head, attempt: 0, linkTo: null, hintWas: null });
+  // only attempt 0's cas_conflict is redone, once: the retry's Err is the answer
+  // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
+  if (first.ok || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
+  return pushTreeOnce(url, s, options, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
 }

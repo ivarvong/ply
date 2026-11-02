@@ -74,7 +74,7 @@ async function run(fault, { limits = withLimits({ requestTimeoutMs: 1500 }), fin
   const tracer = new Tracer({ exporter });
   const t0 = performance.now();
   let result = null, error = null;
-  try { result = await editFile(`${proxy.url}/${repo.name}.git`, { path: FILE, find, replace, author: AUTHOR, message: 'adv' }, { tracer, limits, ...opts }); }
+  try { result = await unwrapAsync(editFile(`${proxy.url}/${repo.name}.git`, { path: FILE, find, replace, author: AUTHOR, message: 'adv' }, { tracer, limits, ...opts })); }
   catch (e) { error = e; }
   const ms = performance.now() - t0;
   await proxy.close();
@@ -215,7 +215,7 @@ test('I5 caller input validation happens before any I/O', async () => {
     const exporter = arrayExporter();
     let calls = 0;
     const fetchImpl = async () => { calls++; throw new Error('should not be called'); };
-    await assert.rejects(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm', ...over }, { tracer: new Tracer({ exporter }), fetchImpl }),
+    await assert.rejects(unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm', ...over }, { tracer: new Tracer({ exporter }), fetchImpl })),
       e => e.code === 'bad_request' && (what === undefined || e.what === what), JSON.stringify(over));
     assert.equal(calls, 0, 'no I/O before validation');
   }
@@ -248,14 +248,14 @@ test('I5 every operation rejects a bad ident field before any fetch', async () =
     assert.equal(calls, 0, label);
   };
   for (const [field, person, what, time] of fields) {
-    await once(`editFile ${field}`, what, fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: person, message: 'm', time }, { fetchImpl }));
+    await once(`editFile ${field}`, what, fetchImpl => unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: person, message: 'm', time }, { fetchImpl })));
     await once(`mergeBranch ${field}`, what, fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: person, message: 'm', time }, { fetchImpl })));
     await once(`rebaseBranch ${field}`, what, fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: person, author: person, time }, { fetchImpl })));
     await once(`cherryPick ${field}`, what, fetchImpl => unwrapAsync(cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: person, time }, { fetchImpl })));
     await once(`revertCommit ${field}`, what, fetchImpl => unwrapAsync(revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'b'.repeat(40), committer: person, time }, { fetchImpl })));
   }
-  await once('edit message', 'message', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'x\0y' }, { fetchImpl }));
-  await once('edit ref', 'ref', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'm', ref: 'refs/heads/main\n' }, { fetchImpl }));
+  await once('edit message', 'message', fetchImpl => unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'x\0y' }, { fetchImpl })));
+  await once('edit ref', 'ref', fetchImpl => unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'm', ref: 'refs/heads/main\n' }, { fetchImpl })));
   await once('merge ref', 'ref', fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', from: 'refs/heads/other', author: good, message: 'm' }, { fetchImpl })));
   await once('merge message', 'message', fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: good, message: 'x\0y' }, { fetchImpl })));
   await once('rebase ref', 'ref', fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic\n', committer: good }, { fetchImpl })));
@@ -269,7 +269,7 @@ test('I6 secrets never reach telemetry: token in auth, token in URL userinfo', a
   const exporter = arrayExporter();
   const tracer = new Tracer({ exporter });
   const TOKEN = 'ghp_SECRET_TOKEN_1234567890';
-  const r = await editFile(`http://user:${TOKEN}@127.0.0.1:${new URL(srv.url).port}/${repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer, auth: { token: TOKEN } });
+  const r = await unwrapAsync(editFile(`http://user:${TOKEN}@127.0.0.1:${new URL(srv.url).port}/${repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer, auth: { token: TOKEN } }));
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), r.newCommit);
   const dump = JSON.stringify(exporter.lines);
   assert.ok(!dump.includes(TOKEN), 'token leaked into spans');
@@ -380,7 +380,7 @@ test('I6c a 3xx is never followed: cross-origin on the GET and the POST → type
       const post = await c.lsRefs(['refs/heads/']).catch(e => e);
       assert.equal(post.code, 'http', `POST ${s}: ${post.code} ${post.message}`); assert.equal(post.status, s);
       assert.match(post.message, /redirected to .*\/r\.git\/git-upload-pack; ply does not follow redirects/);
-      const edit = await editFile(`${redirector.url}/r.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } }).catch(e => e);
+      const edit = await unwrapAsync(editFile(`${redirector.url}/r.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } })).catch(e => e);
       assert.equal(edit.code, 'http', `edit ${s}: ${edit.code} ${edit.message}`);
       assert.ok(!JSON.stringify(ex.lines).includes(TOK));
     }
@@ -468,7 +468,7 @@ test('I6d URL userinfo authenticates fetch and push with the Authorization git s
       const read = await unwrapAsync(readFile(url, { path: FILE }, { tracer }));
       const parts = []; for await (const c of read.stream) parts.push(c);
       assert.equal(new TextDecoder().decode(concat(parts)), ORIG, `${name}: read`);
-      const r = await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer });
+      const r = await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer }));
       assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), r.newCommit, `${name}: push landed`);
       assert.ok(gate.seen.some(x => x.path.endsWith('/git-receive-pack')), `${name}: ply pushed through the gate`);
       assert.deepEqual([...new Set(gate.seen.map(x => x.authorization))], gitAuth, `${name}: ply's Authorization`);
@@ -490,7 +490,7 @@ test('I6d a refused URL credential is `auth`; the server echoing it reaches no e
       const url = `http://${ui}${new URL(gate.url).host}/r.git`;
       const errs = [
         await unwrapAsync(readFile(url, { path: FILE }, { tracer })).catch(e => e),
-        await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer }).catch(e => e),
+        await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer })).catch(e => e),
         await new GitHttp(url, { tracer }).discover().catch(e => e),
       ];
       const said = gate.seen.at(-1).authorization;
@@ -829,8 +829,8 @@ test('#34 a tree naming `d` twice (file and directory, apart) is pack_corrupt on
     'listTree d': () => unwrapAsync(listTree(url, { path: 'd' }, opts())),
     'checkoutTree': () => unwrapAsync(checkoutTree(url, {}, opts())).then(drain),
     'checkoutTree d': () => unwrapAsync(checkoutTree(url, { path: 'd' }, opts())).then(drain),
-    ...Object.fromEntries(['d', 'd/f', 'd.x', 'ok.txt', 'nope'].map(path => [`editFile ${path}`, () => editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'e' }, opts())])),
-    'pushTree': () => pushTree(url, { files: { 'new.txt': 'n\n' }, author: AUTHOR, message: 'p' }, opts()),
+    ...Object.fromEntries(['d', 'd/f', 'd.x', 'ok.txt', 'nope'].map(path => [`editFile ${path}`, () => unwrapAsync(editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'e' }, opts()))])),
+    'pushTree': () => unwrapAsync(pushTree(url, { files: { 'new.txt': 'n\n' }, author: AUTHOR, message: 'p' }, opts())),
     'mergeBranch main<-other': () => unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/other', author: AUTHOR, message: 'm', time: 1 }, opts())),
     'mergeBranch other<-main': () => unwrapAsync(mergeBranch(url, { ref: 'refs/heads/other', from: 'refs/heads/main', author: AUTHOR, message: 'm', time: 1 }, opts())),
     'rebaseBranch other onto main': () => unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/other', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts())),
@@ -858,7 +858,7 @@ test('ambiguous push (response lost after server applied it): ref == our commit;
   assert.notEqual(r.head, r.repo.head, 'server applied the push');
   assert.equal(r.content, EXPECTED);
   // retry against the real server
-  await assert.rejects(editFile(`${srv.url}/${r.repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer() }), e => e.code === 'match_count');
+  await assert.rejects(unwrapAsync(editFile(`${srv.url}/${r.repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer() })), e => e.code === 'match_count');
   assert.equal(gitBuf(r.repo.bare, ['cat-file', 'blob', `main:${FILE}`]).toString(), EXPECTED);
   assert.equal(git(r.repo.bare, ['rev-list', '--count', `${r.repo.head}..main`]).trim(), '1', 'no duplicate commit');
 });
@@ -960,7 +960,7 @@ test('I4 a blob fetch whose object header never ends: pack_corrupt within the fi
   const limits = withLimits({ requestTimeoutMs: 5000 });
   const refused = e => e.code === 'pack_corrupt' && e.message === 'pack: size varint longer than 64 bits';
   const paths = {
-    edit: f => editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }),
+    edit: f => unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f })),
     read: f => unwrapAsync(readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f })),
     checkout: async f => { const r = await unwrapAsync(checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 })); for await (const g of r.files) if (g.stream) for await (const _ of g.stream); },
   };
@@ -1015,7 +1015,7 @@ const STORED_FRAME = pktRaw(concat([Uint8Array.of(1), EMPTY_STORED]));
 const endlessStored = size => endlessBody({ first: concat([pktLine('packfile\n'), pktRaw(concat([Uint8Array.of(1), PACK_ONE, encodeObjHeader(3, size), Uint8Array.of(0x78, 0x01), EMPTY_STORED.subarray(0, 65000)]))]), frame: STORED_FRAME });
 
 const streamedPaths = (url, limits) => ({
-  edit: f => editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }),
+  edit: f => unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f })),
   read: async f => { const r = await unwrapAsync(readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f })); for await (const _ of r.stream) void _; },
   'checkout single': async f => { const r = await unwrapAsync(checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 })); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
   'checkout batched': async f => { const r = await unwrapAsync(checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f })); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
@@ -1074,7 +1074,7 @@ test('I4 maxPackBytes bounds the streamed body on every path: limit_exceeded wit
   // band 2 (progress) is the other stream a fetch response carries; it is held to the same cap
   const PROGRESS_FRAME = pktRaw(concat([Uint8Array.of(2), new Uint8Array(65515).fill(0x2e)]));
   const { served, f } = endlessBody({ first: concat([pktLine('packfile\n'), PROGRESS_FRAME]), frame: PROGRESS_FRAME });
-  const err = await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }).then(() => null, e => e);
+  const err = await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f })).then(() => null, e => e);
   assert.ok(err && err.code === 'limit_exceeded' && err.what === 'progress bytes', `progress flood: ${err?.code}: ${err?.message}`);
   assert.ok(served.bytes <= limits.maxPackBytes + 2 * PROGRESS_FRAME.length, `progress flood: ${served.bytes} B served`);
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head, 'I2: ref unchanged');
@@ -1236,7 +1236,7 @@ test('I4 #36 matrix: path × body shape × declared size × cap, every cell, nev
     const drain = async s => { const parts = []; for await (const c of s) parts.push(c); return concat(parts); };
     const files = async r => { const got = new Map(); for await (const g of r.files) got.set(g.path, g.stream ? await drain(g.stream) : null); return got; };
     const ops = {
-      edit: () => editFile(repo.url, { path: 'a.bin', find: MX.find, replace: MX.repl, author: AUTHOR, message: 'mx' }, opts),
+      edit: () => unwrapAsync(editFile(repo.url, { path: 'a.bin', find: MX.find, replace: MX.repl, author: AUTHOR, message: 'mx' }, opts)),
       read: async () => drain((await unwrapAsync(readFile(repo.url, { path: 'a.bin' }, opts))).stream),
       'checkout single': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, { ...opts, batch: 1 })))).get('a.bin'),
       'checkout batched': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, opts)))).get('a.bin'),
