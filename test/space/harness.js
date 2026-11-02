@@ -9,7 +9,7 @@ const { push } = await import(`${SRC}/push.js`);
 const { checkPushCaps } = await import(`${SRC}/receivecaps.js`);
 import { pktInit, pktStep, pktFinish } from '../../src/pktline.js';
 import { withLimits } from '../../src/limits.js';
-import { thrown as fail } from '../../src/errors.js';
+import { plyError as fail } from '../../src/errors.js';
 import { unwrap } from '../unwrap.js';
 
 const spanStub = { set() {}, event() {}, error() {} };

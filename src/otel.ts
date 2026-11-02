@@ -203,7 +203,7 @@ export class Tracer {
   public declare scope: Scope;
   public declare count: number;
   public constructor(options: TracerOptions = {}) {
-    const { exporter, resource, scope, maxEvents } = withDefaults(options, { exporter: () => { /* spans are dropped */ }, resource: {}, scope: { name: 'ply', version: '0.1.0' }, maxEvents: 256 });
+    const { exporter, resource, scope, maxEvents } = withDefaults(options, { exporter: () => { /* spans are dropped */ }, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
     this.exporter = exporter;
     this.maxEvents = maxEvents;
     this.resource = { attributes: kvs({ 'service.name': 'ply', 'telemetry.sdk.name': 'ply-otel', 'telemetry.sdk.language': 'javascript', ...resource }) };

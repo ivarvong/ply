@@ -9,7 +9,7 @@ import zlib from 'node:zlib';
 import { te, td, concat, take } from '../src/bytes.js';
 import { assertBytes } from './bytes-assert.js';
 import { fromHex } from '../src/sha1.js';
-import { thrown as fail } from '../src/errors.js';
+import { plyError as fail } from '../src/errors.js';
 import { validateIdent } from '../src/validate.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,

@@ -74,8 +74,9 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     if (t.scrub !== null) root.scrub = t.scrub;
     r = await body({ t, root, outcome, limits });
   } catch (e) {
-    // Transitional (cut-over round D deletes it): a body that throws is a bug. Until every entry body returns its errors (round C), a thrown
-    // PlyError is that body's Err. Any other thrown value is recorded and rethrown unchanged, as before the cut-over.
+    // Every ply failure is the body's Err. What still arrives as a throw is not ply's: the caller's own callback (a
+    // signer, a fetchImpl, a transport) raised it. A PlyError raised that way is still that body's Err; anything else
+    // is recorded on the root and rethrown unchanged, so the caller gets back exactly what its own code threw.
     if (isPlyError(e)) return failed(e);
     const code = thrownCode(e);
     const type: [] | [unknown] = code.tag === 'some' ? [code.value] : [];

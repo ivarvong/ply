@@ -4,7 +4,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { ok, err, map, mapErr, andThen, match, matchKind, matchOption, assertNever, errorKind, errorKindAttr, some, none, isSome, isNone, resultToOption, optionToResult, transposeResultOption, transposeOptionResult } from '../src/result.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { fail, plyError, thrown, orThrow, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
+import { fail, plyError, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
 import { checkLimit, readLimit, limitExceeded, limitError, DEFAULT_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
@@ -89,20 +89,17 @@ test('Span.error records error.kind beside error.type', () => {
   }
 });
 
-test('PlyError: one constructor, an Error carrying its fields; fail wraps it; orThrow throws it as is', () => {
+test('PlyError: one constructor, an Error carrying its fields; fail wraps it in an Err', () => {
   const e = plyError('http', 'HTTP 502', { status: 502 });
   assert.ok(e instanceof Error);
   assert.equal(e.code, 'http');
   assert.equal(e.message, 'HTTP 502');
   assert.equal(e.status, 502);
-  assert.equal(thrown, plyError);
   const r = fail('timeout', 't');
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'timeout');
   assert.equal(r.error.message, 't');
   assert.throws(() => plyError('nope', 'x'), { message: 'internal: unknown error code nope' });
-  assert.equal(orThrow(ok(7)), 7);
-  assert.throws(() => orThrow(r), err2 => err2 === r.error);
   assert.deepEqual(CODES, Object.keys(RETRY));
   assert.ok(Object.isFrozen(CODES) && Object.isFrozen(RETRY));
   assert.equal(isPlyCode('network'), true);

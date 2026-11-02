@@ -23,7 +23,6 @@ import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, 
 import { lsRefs as lsRefsAsked } from '../src/client.js';
 import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
-import { orThrow } from '../src/errors.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, readLimit, checkLimit } from '../src/limits.js';
@@ -1375,7 +1374,7 @@ test('aggregate caps fail closed before allocation', async () => {
     const r = planPush(delA, withLimits({ [key]: undefined }));
     assert.equal(r.ok, false); assert.equal(r.error.code, 'bad_request'); assert.equal(r.error.message, `limits.${key} must be a finite non-negative number`);
   }
-  const planned = orThrow(planPush(delA, withLimits({ maxReportLines: 1, maxPackBytes: 2 })));
+  const planned = unwrap(planPush(delA, withLimits({ maxReportLines: 1, maxPackBytes: 2 })));
   assert.deepEqual([planned.maxReportLines, planned.maxPack, planned.needPack, planned.checked], [1, 2, false, null]);
 
   const base = te.encode('abcd');
@@ -1517,13 +1516,13 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
   ];
   const all = new Set(['atomic', 'push-options']);
-  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: true })) })), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
+  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, checked: unwrap(checkPushCaps(all, { atomic: true })) })), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
   // atomic and push options only as checked capabilities: an untyped caller's raw fields are refused before anything is sent
   for (const raw of [{ atomic: true }, { pushOptions: ['x'] }]) await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, ...raw })), e => e.code === 'bad_request' && e.message === 'push: unchecked atomic or push options');
   await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, atomic: false, pushOptions: [] })), e => e.code === 'push_partial');
-  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: false })) })), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
+  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, checked: unwrap(checkPushCaps(all, { atomic: false })) })), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
   await assert.rejects(unwrapAsync(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false })), e => e.code === 'bad_request' && e.what === 'ref');
-  await assert.rejects(unwrapAsync(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, checked: orThrow(checkPushCaps(all, { pushOptions: ['a\nb'] })) })), e => e.code === 'bad_request' && e.what === 'push option');
+  await assert.rejects(unwrapAsync(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, checked: unwrap(checkPushCaps(all, { pushOptions: ['a\nb'] })) })), e => e.code === 'bad_request' && e.what === 'push option');
   await assert.rejects(unwrapAsync(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false })), e => e.code === 'limit_exceeded' && e.what === 'push commands');
 
   const fetchImpl = (_url, init) => new Promise((_resolve, reject) => {
@@ -1835,9 +1834,9 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
 
   // the checked capabilities: the request asks for atomic / push-options only from them
   const caps = (...c) => new Set(c);
-  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: ZERO_OID }], {}), ['report-status', 'side-band-64k', 'delete-refs', 'agent=ply/0.1.0']);
-  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], { sideband: false, reportV2: true }, orThrow(checkPushCaps(caps('atomic', 'push-options'), { atomic: true, pushOptions: ['o'] }))), ['report-status-v2', 'atomic', 'push-options', 'agent=ply/0.1.0']);
-  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], {}, orThrow(checkPushCaps(caps(), {}))), ['report-status', 'side-band-64k', 'agent=ply/0.1.0']);
+  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: ZERO_OID }], {}), ['report-status', 'side-band-64k', 'delete-refs', 'agent=ply/0.2.0']);
+  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], { sideband: false, reportV2: true }, unwrap(checkPushCaps(caps('atomic', 'push-options'), { atomic: true, pushOptions: ['o'] }))), ['report-status-v2', 'atomic', 'push-options', 'agent=ply/0.2.0']);
+  assert.deepEqual(requestCaps([{ ref: 'a', oldOid: oid(1), newOid: oid(2) }], {}, unwrap(checkPushCaps(caps(), {}))), ['report-status', 'side-band-64k', 'agent=ply/0.2.0']);
   assert.deepEqual(capsProblem(caps('atomic')), { tag: 'ok' });
   assert.deepEqual(capsProblem(caps('object-format=sha256', 'atomic'), { atomic: true }), { tag: 'objectFormat', format: 'sha256' });
   assert.deepEqual(capsProblem(caps('object-format=sha1'), { atomic: true }), { tag: 'noAtomic' });
@@ -1847,7 +1846,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.deepEqual([unsup.ok, unsup.error.code, unsup.error.message, unsup.error.caps], [false, 'unsupported', 'server does not advertise push-options', ['agent=x']]);
   assert.equal(checkPushCaps(caps('object-format=sha256')).error.message, 'server repository is object-format sha256');
   assert.equal(checkPushCaps(caps(), { atomic: true }).error.message, 'server does not advertise atomic');
-  assert.deepEqual(orThrow(checkPushCaps(caps('push-options'), { pushOptions: ['p'] })), { atomic: false, pushOptions: ['p'] });
+  assert.deepEqual(unwrap(checkPushCaps(caps('push-options'), { pushOptions: ['p'] })), { atomic: false, pushOptions: ['p'] });
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
   let adverts = 0;
   const advertised = advertCaps => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,

@@ -122,7 +122,7 @@ export const retryPolicy = (e: unknown): Retry => {
 export const isRetryable = (e: unknown): boolean => retryPolicy(e) === 'yes';
 
 // The one constructor. The typed signature is the error value for `code` with exactly its payload; `fail` wraps it in
-// an Err. Unconverted JS calls the same function as `thrown` (below), untyped; the code check is for those callers.
+// an Err. A JS caller reaches the untyped signature; the code check is for that caller (an unknown code is a bug).
 // An overload, not a cast: the implementation returns Error & { code }, which each member of the union refines.
 export function plyError<C extends Code>(code: C, message: string, ...detail: Payload<C>): ErrorOf<C>;
 export function plyError(code: string, message: string, ...extra: [] | [object]): Thrown {
@@ -133,14 +133,9 @@ export function plyError(code: string, message: string, ...extra: [] | [object])
 export const fail = <C extends Code>(code: C, message: string, ...detail: Payload<C>): Err<ErrorOf<C>> =>
   err(plyError(code, message, ...detail));
 
-// ---- Migration boundary -------------------------------------------------------------------------------------
-// Unconverted modules (the .js files under src/, scripts/ts-ratchet.mjs) throw. A PlyError is already the
-// Error they throw, so crossing the boundary is `throw r.error`. Delete this section with the last .js file in src/.
-
+// plyError's untyped signature: an Error carrying one of ply's codes.
 export type Thrown = Error & { readonly code: Code };
-// The legacy constructor (`throw thrown(code, message, extra)`); unconverted modules import it as `fail`.
-export { plyError as thrown };
-// A converted function's Result, at a call site that still throws.
+// Transitional: the last throwing call sites (client.ts's GitHttp) until they return Result; then deleted.
 export const orThrow = <T>(r: Result<T, PlyError>): T => {
   if (r.ok) return r.value;
   throw r.error;

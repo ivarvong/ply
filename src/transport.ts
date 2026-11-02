@@ -90,7 +90,7 @@ export function asTransport(t: TransportInput): Transport {
 }
 
 // We are not git and do not claim to be: servers that branch on the agent string get the truth.
-export const UA = 'ply/0.1.0';
+export const UA = 'ply/0.2.0';
 export const proto = (msg: string): Err<ErrorOf<'protocol'>> => fail('protocol', msg);
 
 export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncIterable<Frame> => t.frames(service, body, span, hints);

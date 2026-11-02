@@ -13,7 +13,7 @@ import { zlibDeflate, spliceDelta } from '../src/pack.js';
 import { inflate } from '../src/inflate.js';
 import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
-import { thrown as fail, scrubError } from '../src/errors.js';
+import { plyError as fail, scrubError } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
@@ -241,7 +241,7 @@ test('span naming convention: every span and attribute key in a trace follows th
 });
 
 test('error taxonomy: runtime table and documentation agree; fail refuses unknown codes', async () => {
-  const { RETRY, CODES, thrown: fail, retryPolicy, ambiguousAfterPush } = await import('../src/errors.js');
+  const { RETRY, CODES, plyError: fail, retryPolicy, ambiguousAfterPush } = await import('../src/errors.js');
   const { CODE_DOCS } = await import('../src/errors-doc.js');
   assert.deepEqual(Object.keys(CODE_DOCS).sort(), [...CODES].sort(), 'every code documented, nothing documented that does not exist');
   for (const c of CODES) assert.ok(['yes', 'no', 'fresh', 'read'].includes(RETRY[c]), c);

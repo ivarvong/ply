@@ -92,8 +92,8 @@ by hand. The ratchet refuses to pass once `src/` has no `.js` and these are stil
    error. An `if`/`else if` chain on the same tag ends in `assertNever`. `match(u, handlers)` demands one handler per
    tag. Adding a code or a payload field re-checks every constructor and every match.
 3. **A PlyError value is an `Error` instance** with its fields (`Object.assign(new Error(message), {code, …})`):
-   a stack for whoever logs it, and the exact shape thrown errors have today, so the migration boundary is the
-   identity (`orThrow(r)` is `if (!r.ok) throw r.error`). Nothing reads it as a class; its type is the union.
+   a stack for whoever logs it, and the shape a caller that rethrows it (`if (!r.ok) throw r.error`) expects from an
+   error. Nothing reads it as a class; its type is the union.
 4. **Pure functions where possible; I/O at the edges.** Parsers, encoders, validators, planners and merges take
    bytes/values and return values. Network, timers, crypto and the filesystem live in the transport, http and
    `*-node.ts` modules, and are passed in, not imported, where a pure module needs them.
@@ -138,15 +138,13 @@ gets `unknown`.
 
 Migration path:
 
-1. **Foundation (this PR).** Toolchain; `result`, `errors`, `errors-doc`, `limits` in TypeScript. The public API is
-   unchanged: `index` still exports the throwing constructor as `fail`, and unconverted modules import
-   `thrown as fail` from `./errors.ts`. Limits shows the pattern: `checkLimit`/`readLimit`/`limitExceeded` are the
-   value API; `finiteLimit`/`requireLimit`/`limitError` are the throwing wrappers JS callers still use.
-2. **Clusters (parallel, below).** Internal functions return `Result`. A converted function still called by `.js`
-   code gets a throwing wrapper at the boundary (`orThrow`), named as today, so its JS callers do not change.
-   Public entry points keep throwing until step 3.
-3. **Cut-over (one PR, after the ratchet list is empty).** Public entry points return `Result`; delete `thrown`,
-   `orThrow`, and every throwing wrapper; `index` stops exporting `fail` as a constructor. Bump to 0.2.0. In ply-web,
+1. **Foundation (done).** Toolchain; `result`, `errors`, `errors-doc`, `limits` in TypeScript.
+2. **Clusters (done).** Internal functions return `Result`; a throwing wrapper (`orThrow`) bridged what the public
+   API still called.
+3. **Cut-over (done, 0.2.0).** Public entry points return `Result`; `thrown`, `orThrow` and every throwing wrapper
+   are deleted; `index` exports `fail` (an Err) and `plyError` (the error value), not a throwing constructor. What
+   may still raise: `assertNever`, an `internal` invariant, a stream (a ReadableStream errors, an iterator rejects),
+   and a value the caller's own callback threw, which `operation()` passes back unchanged. In ply-web,
    in the same window: bump the pin, replace `try { … } catch (e) { code = e.code }` with `if (!r.ok)` and a
    `switch (r.error.code)` with no `default` and `assertNever` after it (ply-web already maps codes to HTTP statuses; it becomes
    exhaustive), delete `src/ply.d.ts` (ply ships its own types).
@@ -196,8 +194,7 @@ T (mechanical) PR, per file in the cluster:
 A (errors as values, ADTs, state machines) PR, after its T:
 
 4. Replace `throw fail(code, …)` with `return fail(code, …)` (the typed constructor from `./errors.js`), make the function
-   return `Result`, handle every `Err` in the cluster (early return, `andThen`, `match`). A function still called from
-   `.js` or from the public API keeps its old name as a throwing wrapper (`orThrow`) until the cut-over. A payload a
+   return `Result`, handle every `Err` in the cluster (early return, `andThen`, `match`). A payload a
    code always carries goes in `Detail` in `errors.ts` (a shared file: one-line change, own commit).
 5. Switches over unions list every member, have no `default`, and the next statement is `assertNever(x)`; stream parsers become tagged states with a transition
    function.

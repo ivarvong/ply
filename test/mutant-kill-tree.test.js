@@ -18,7 +18,7 @@ import { te, td, concat, bytesOf } from '../src/bytes.js';
 import { Sha1 } from '../src/sha1.js';
 import { ZERO_OID } from '../src/push.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
-import { thrown as fail } from '../src/errors.js';
+import { plyError as fail } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { errOf, unwrap, unwrapAsync } from './unwrap.js';
 import { ok } from '../src/result.js';
