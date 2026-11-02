@@ -11,8 +11,9 @@
 // A ref that already exists is `cas_conflict` with `expected` the zero id and `actual` its tip, as a create in
 // editFile and commitChanges reports it (the zero old id is the compare-and-swap "must not exist"), whether ply saw it
 // in ls-refs or receive-pack refused the create. A delete compares against `expected` when given, else the tip ls-refs
-// reported; a stale one is `cas_conflict` with `actual` the tip. What the server itself refuses (deleting the branch
-// HEAD names, a hook) is its own error, unchanged: `push_rejected` with git's reason.
+// reported; a stale one, or a push that loses the race to another writer, is `cas_conflict` with `actual` the tip
+// read back (null: deleted). What the server itself refuses (deleting the branch HEAD names, a hook) is its own
+// error, unchanged: `push_rejected` with git's reason.
 /* oxlint-disable require-await -- the entry points are async: a refused argument is an Err in a promise, like every other answer (read.ts) */
 /* oxlint-disable import/max-dependencies -- an operation over ls-refs, resolve, push and the tag codec: each module is one step */
 import type { PlyError } from './errors.js';
@@ -91,6 +92,16 @@ export async function createBranch(url: string, spec: CreateBranchSpec, options:
   });
 }
 
+// Effect: a delete receive-pack refused as stale (the ref moved between ls-refs and the push). receive-pack does not
+// say where the ref went, so re-read it: present, cas_conflict with `actual` the winner's tip; absent, someone else
+// deleted it first and the push's own cas_conflict (actual null) stands.
+async function lostDelete(t: OpContext['t'], ref: string, tip: string, pushed: Result<never, PlyError>): Promise<Result<never, PlyError>> {
+  const now = await lsRefs(t, [ref]);
+  if (!now.ok) return now;
+  const moved = refOid(now.value.refs, ref);
+  return moved.tag === 'some' ? fail('cas_conflict', `${ref} moved from ${tip} to ${moved.value}`, { what: 'ref', expected: tip, actual: moved.value }) : pushed;
+}
+
 export type DeleteBranchConfig = { readonly expected: string | null };
 export type DeleteBranchSpec = { readonly ref: string } & Input<DeleteBranchConfig>;
 export type DeleteBranchResult = { readonly ref: string; readonly oid: string };
@@ -110,7 +121,7 @@ export async function deleteBranch(url: string, spec: DeleteBranchSpec, options:
     if (expected !== null && expected !== tip) return fail('cas_conflict', `${ref} is at ${tip}, not ${expected}`, { what: 'ref', expected, actual: tip });
     root.set({ 'git.branch_delete.oid': tip });
     const pushed = await push(t, { ref, oldOid: tip, newOid: ZERO_OID, objects: [] });
-    if (!pushed.ok) return pushed;
+    if (!pushed.ok) return pushed.error.code === 'cas_conflict' ? lostDelete(t, ref, tip, pushed) : pushed;
     return outcome('deleted', { ref, oid: tip });
   });
 }
