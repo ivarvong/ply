@@ -1,11 +1,12 @@
 // pkt-line framing. 4 hex length (inclusive) + payload. 0000 flush, 0001 delim, 0002 response-end.
-// Decoder is a pure step function over an immutable state record. Errors are values: the `…Result` functions return
-// them; `pkt`, `pktStep` and `pktFinish` are the throwing forms for callers not yet on Result (docs/STACK.md).
+// Decoder is a pure step function over an immutable state record. Errors are values: every function that can refuse
+// returns a Result.
 import type { ErrorOf } from './errors.js';
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import type { Err, Result } from './result.js';
+import type { Input } from './absent.js';
 import { ok } from './result.js';
-import { te, concat, encodeBytesResult, HEXV } from './bytes.js';
+import { te, concat, encodeBytes, HEXV } from './bytes.js';
 import {
   PKT_LEN_HEX, PKT_HEX_BASE, PKT_FLUSH, PKT_DELIM, PKT_RESPONSE_END, PKT_LEN_INVALID,
   PKT_MAX_PAYLOAD, PKT_READ_MAX_PAYLOAD, PKT_LEN_SHIFTS,
@@ -17,11 +18,11 @@ const proto = (msg: string): Err<Protocol> => fail('protocol', msg);
 // The one pkt-line writer. A line longer than git's LARGE_PACKET_MAX is the caller's (a push option, a ref prefix, a
 // want or filter: fields without a length rule of their own), refused before any byte is written, as git's
 // format_packet dies "impossibly long line" (pkt-line.c). bad_request: no retry can make the line shorter.
-export function pktResult(payload: string | Uint8Array): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
+export function pkt(payload: string | Uint8Array): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
   // a ref name read from ls-refs may hold escaped bytes (#43): encodeBytes writes them back as the server sent them
   let p: Uint8Array;
   if (typeof payload === 'string') {
-    const e = encodeBytesResult(payload, 'pkt-line');
+    const e = encodeBytes(payload, 'pkt-line');
     if (!e.ok) return e;
     p = e.value;
   } else p = payload;
@@ -31,13 +32,23 @@ export function pktResult(payload: string | Uint8Array): Result<Uint8Array<Array
   out.set(p, PKT_LEN_HEX);
   return ok(out);
 }
-export const pkt = (payload: string | Uint8Array): Uint8Array<ArrayBuffer> => orThrow(pktResult(payload));
 export const FLUSH: Uint8Array = te.encode('0000');
 export const DELIM: Uint8Array = te.encode('0001');
 
-export type PktsOptions = { readonly delimAfter?: number; readonly flush?: boolean };
-export const pkts = (lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Uint8Array<ArrayBuffer> =>
-  concat(lines.flatMap((l, i) => (i === delimAfter ? [pkt(l), DELIM] : [pkt(l)])).concat(flush ? [FLUSH] : []));
+// delimAfter: the index of the line a delim packet follows (-1: none); flush: end with a flush packet.
+export type PktsConfig = { readonly delimAfter: number; readonly flush: boolean };
+export type PktsOptions = Input<PktsConfig>;
+export function pkts(lines: ReadonlyArray<string | Uint8Array>, { delimAfter = -1, flush = true }: PktsOptions = {}): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
+  const parts: Uint8Array[] = [];
+  for (const [i, l] of lines.entries()) {
+    const framed = pkt(l);
+    if (!framed.ok) return framed;
+    parts.push(framed.value);
+    if (i === delimAfter) parts.push(DELIM);
+  }
+  if (flush) parts.push(FLUSH);
+  return ok(concat(parts));
+}
 
 export type PktState = {
   readonly carry: Uint8Array | null;
@@ -64,9 +75,9 @@ export const pktInit = (): PktState => Object.freeze({
 // (pktHeader) before the loop waits for its payload. Every slice below is inside a length the loop has already
 // checked, so it is a view, not a bounded read: nothing here can be short.
 export type PktStepped = { frames: PktFrame[]; state: PktState };
-// @decoder pktStepResult prefix=pkt
+// @decoder pktStep prefix=pkt
 // oxlint-disable-next-line eslint/complexity -- one frame loop, a switch on the length
-export function pktStepResult(st: PktState, chunk: Uint8Array): Result<PktStepped, Protocol> {
+export function pktStep(st: PktState, chunk: Uint8Array): Result<PktStepped, Protocol> {
   const frames: PktFrame[] = [];
   const buf = st.carry ? concat([st.carry, chunk]) : chunk;
   let p = 0;
@@ -114,16 +125,11 @@ export function pktStepResult(st: PktState, chunk: Uint8Array): Result<PktSteppe
     }),
   });
 }
-// @decoder pktStep prefix=pkt
-export function pktStep(st: PktState, chunk: Uint8Array): PktStepped { return orThrow(pktStepResult(st, chunk)); }
-
-// @decoder pktFinishResult prefix=pkt
-export function pktFinishResult(st: PktState): Result<PktState, Protocol> {
-  // pktStepResult carries null, never an empty array, when nothing is left
+// @decoder pktFinish prefix=pkt
+export function pktFinish(st: PktState): Result<PktState, Protocol> {
+  // pktStep carries null, never an empty array, when nothing is left
   return st.carry ? proto(`trailing ${st.carry.length} bytes after last pkt-line`) : ok(st);
 }
-// @decoder pktFinish prefix=pkt
-export function pktFinish(st: PktState): PktState { return orThrow(pktFinishResult(st)); }
 
 export const pktAttrs = (st: PktState, prefix = 'git.pkt'): Record<string, number> => ({
   [`${prefix}.frames`]: st.frames, [`${prefix}.data`]: st.data, [`${prefix}.flush`]: st.flush,

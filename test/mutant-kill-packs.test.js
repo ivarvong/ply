@@ -4,17 +4,16 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readFileSync } from 'node:fs';
-import { takeResult, take, shortRead, encodeBytesResult, encodeBytes, HEXV, te, concat, decodeBytes as decodeBytesOf, decodeChunk as decodeChunkOf } from '../src/bytes.js';
-import { pktResult, pktStepResult, pktFinishResult, pktInit, pktStep } from '../src/pktline.js';
-import { inflateResult, inflate, DEFLATE_TABLES } from '../src/inflate.js';
-import {
-  readObjHeaderResult, readOfsDeltaResult, readUint32BEResult, parsePackResult, applyDeltaResult, resolvePackResult, resolvePack, parsePack,
-} from '../src/packresolve.js';
+import { take, shortRead, encodeBytes, HEXV, te, concat, decodeBytes as decodeBytesOf, decodeChunk as decodeChunkOf } from '../src/bytes.js';
+import { pkt, pktStep, pktFinish, pktInit } from '../src/pktline.js';
+import { inflate, DEFLATE_TABLES } from '../src/inflate.js';
+import { readObjHeader, readOfsDelta, readUint32BE, parsePack, applyDelta, resolvePack } from '../src/packresolve.js';
 import { buildPack, encodeObjHeader, spliceDelta } from '../src/pack.js';
 import { fromHex, toHex } from '../src/sha1.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits } from '../src/limits.js';
 import { PACK_HEADER_BYTES, OBJ_CONTINUE } from '../src/format.js';
+import { unwrap } from './unwrap.js';
 
 const errOf = (r, code, message) => {
   assert.equal(r.ok, false, 'an Err');
@@ -29,27 +28,27 @@ const errOf = (r, code, message) => {
 test('#76 a short read carries reason short_read on every bounded reader, and nothing else does', () => {
   const buf = Uint8Array.of(1, 2, 3);
   const sr = (r, code, message) => assert.equal(errOf(r, code, message).reason, 'short_read');
-  sr(takeResult(buf, 2, 2), 'pack_corrupt', 'short read: need 2 bytes at 2, have 3');
-  sr(takeResult(buf, 0, 4, 'protocol'), 'protocol', 'short read: need 4 bytes at 0, have 3');
-  sr(takeResult(undefined, 0, 0), 'pack_corrupt', 'short read: need 0 bytes at 0, have 0');
-  sr(takeResult(buf, -1, 1), 'pack_corrupt', 'short read: need 1 bytes at -1, have 3');
-  sr(takeResult(buf, 0.5, 1), 'pack_corrupt', 'short read: need 1 bytes at 0.5, have 3');
-  sr(takeResult(buf, 0, -1), 'pack_corrupt', 'short read: need -1 bytes at 0, have 3');
-  sr(takeResult(buf, 0, 1.5), 'pack_corrupt', 'short read: need 1.5 bytes at 0, have 3');
-  assert.deepEqual(takeResult(buf, 1, 2), { ok: true, value: buf.subarray(1, 3) });
-  assert.equal(takeResult(buf, 3, 0).value.length, 0);
-  assert.throws(() => take(buf, 2, 2), e => e.reason === 'short_read' && e.code === 'pack_corrupt');
+  sr(take(buf, 2, 2), 'pack_corrupt', 'short read: need 2 bytes at 2, have 3');
+  sr(take(buf, 0, 4, 'protocol'), 'protocol', 'short read: need 4 bytes at 0, have 3');
+  sr(take(undefined, 0, 0), 'pack_corrupt', 'short read: need 0 bytes at 0, have 0');
+  sr(take(buf, -1, 1), 'pack_corrupt', 'short read: need 1 bytes at -1, have 3');
+  sr(take(buf, 0.5, 1), 'pack_corrupt', 'short read: need 1 bytes at 0.5, have 3');
+  sr(take(buf, 0, -1), 'pack_corrupt', 'short read: need -1 bytes at 0, have 3');
+  sr(take(buf, 0, 1.5), 'pack_corrupt', 'short read: need 1.5 bytes at 0, have 3');
+  assert.deepEqual(take(buf, 1, 2), { ok: true, value: buf.subarray(1, 3) });
+  assert.equal(take(buf, 3, 0).value.length, 0);
+  assert.throws(() => unwrap(take(buf, 2, 2)), e => e.reason === 'short_read' && e.code === 'pack_corrupt');
   assert.deepEqual(shortRead('protocol', 7, 2, 5), Object.assign(new Error('short read: need 2 bytes at 7, have 5'), { code: 'protocol', reason: 'short_read' }));
   // an object header cut anywhere is a short read (fetch.ts spStep waits for more bytes on exactly this reason)
   const h = encodeObjHeader(TYPE.BLOB, 2 ** 20 + 3);
-  for (let i = 0; i < h.length; i++) sr(readObjHeaderResult(h.subarray(0, i), 0), 'pack_corrupt', `short read: need 1 bytes at ${i}, have ${i}`);
-  assert.deepEqual(readObjHeaderResult(h, 0), { ok: true, value: { type: TYPE.BLOB, size: 2 ** 20 + 3, next: h.length } });
-  sr(readOfsDeltaResult(Uint8Array.of(OBJ_CONTINUE), 0), 'pack_corrupt', 'short read: need 1 bytes at 1, have 1');
-  sr(readUint32BEResult(buf, 0), 'pack_corrupt', 'short read: need 4 bytes at 0, have 3');
-  sr(inflateResult(Uint8Array.of(0x78), 0), 'pack_corrupt', 'short read: need 2 bytes at 0, have 1');
+  for (let i = 0; i < h.length; i++) sr(readObjHeader(h.subarray(0, i), 0), 'pack_corrupt', `short read: need 1 bytes at ${i}, have ${i}`);
+  assert.deepEqual(readObjHeader(h, 0), { ok: true, value: { type: TYPE.BLOB, size: 2 ** 20 + 3, next: h.length } });
+  sr(readOfsDelta(Uint8Array.of(OBJ_CONTINUE), 0), 'pack_corrupt', 'short read: need 1 bytes at 1, have 1');
+  sr(readUint32BE(buf, 0), 'pack_corrupt', 'short read: need 4 bytes at 0, have 3');
+  sr(inflate(Uint8Array.of(0x78), 0), 'pack_corrupt', 'short read: need 2 bytes at 0, have 1');
   // a corrupt header is not a short read: no reason
   const long = new Uint8Array(12).fill(0x80);
-  const e = errOf(readObjHeaderResult(long, 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  const e = errOf(readObjHeader(long, 0), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   assert.equal(e.reason, undefined);
 });
 
@@ -62,9 +61,9 @@ test('#76 a thin pack resolves through the external phase; a base missing from b
   const id0 = hashObject('blob', v0), id1 = hashObject('blob', v1);
   // child first: d2 waits on d1 (in the pack) which waits on v0 (external only)
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: d2, baseOid: id1 }, { type: TYPE.BLOB, data: d1, baseOid: id0 }]);
-  const parsed = parsePack(pack);
+  const parsed = unwrap(parsePack(pack));
   let asked = [];
-  const r = resolvePackResult(parsed, o => { asked.push(o); return o === id0 ? { type: TYPE.BLOB, data: v0 } : undefined; });
+  const r = resolvePack(parsed, o => { asked.push(o); return o === id0 ? { type: TYPE.BLOB, data: v0 } : undefined; });
   assert.equal(r.ok, true);
   assert.deepEqual([...r.value.objects.keys()].sort(), [id1, hashObject('blob', v2)].sort());
   assert.equal(r.value.stats.externalBases, 1);
@@ -72,13 +71,13 @@ test('#76 a thin pack resolves through the external phase; a base missing from b
   // which the pack itself supplies a pass later)
   assert.deepEqual(asked, [id1, id0]);
   // nothing external: the error names the base the first waiting object (d2, pack order) is missing, as it always has
-  errOf(resolvePackResult(parsed), 'pack_corrupt', `pack: ref delta base ${id1} not found`);
-  assert.throws(() => resolvePack(parsed), e => e.code === 'pack_corrupt' && e.message === `pack: ref delta base ${id1} not found`);
+  errOf(resolvePack(parsed), 'pack_corrupt', `pack: ref delta base ${id1} not found`);
+  assert.throws(() => unwrap(resolvePack(parsed)), e => e.code === 'pack_corrupt' && e.message === `pack: ref delta base ${id1} not found`);
   // an error inside the chain is not mistaken for a missing base: a corrupt delta fails at once, even in the in-pack phase
   const bad = await buildPack([{ type: TYPE.BLOB, data: d2, baseOid: id1 }, { type: TYPE.BLOB, data: d1, baseOid: id0 }, { type: TYPE.BLOB, data: v0 }]);
-  const p2 = parsePack(bad.pack);
+  const p2 = unwrap(parsePack(bad.pack));
   const broken = { ...p2, objects: p2.objects.map((o, i) => (i === 1 ? { ...o, data: Uint8Array.of(v0.length + 1, 1, 1, 0x41) } : o)) };
-  errOf(resolvePackResult(broken), 'pack_corrupt', `delta: base size ${v0.length + 1} != ${v0.length}`);
+  errOf(resolvePack(broken), 'pack_corrupt', `delta: base size ${v0.length + 1} != ${v0.length}`);
 });
 
 test('#76 no src module in the packs cluster branches on an error message', () => {
@@ -92,41 +91,41 @@ test('#76 no src module in the packs cluster branches on an error message', () =
 // ---- Result cores: Err values, never throws, the same error the wrapper throws ----
 
 test('Result cores return Err for every refusal their wrappers throw', async () => {
-  errOf(pktStepResult(pktInit(), te.encode('zzzz')), 'protocol', 'bad pkt-line length at byte 0');
-  errOf(pktStepResult(pktInit(), te.encode('0003')), 'protocol', 'invalid pkt-line length 3');
-  errOf(pktStepResult(pktInit(), te.encode('fff4')), 'protocol', 'bad pkt-line length 65520');
-  assert.equal(pktStepResult(pktInit(), te.encode('fff3')).ok, true, '65523 is the longest frame git reads');
-  const half = pktStep(pktInit(), te.encode('0005a000')).state;
-  errOf(pktFinishResult(half), 'protocol', 'trailing 3 bytes after last pkt-line');
-  const big = errOf(pktResult(new Uint8Array(65517)), 'bad_request', 'pkt-line payload too large: 65517 bytes, the most git frames is 65516');
+  errOf(pktStep(pktInit(), te.encode('zzzz')), 'protocol', 'bad pkt-line length at byte 0');
+  errOf(pktStep(pktInit(), te.encode('0003')), 'protocol', 'invalid pkt-line length 3');
+  errOf(pktStep(pktInit(), te.encode('fff4')), 'protocol', 'bad pkt-line length 65520');
+  assert.equal(pktStep(pktInit(), te.encode('fff3')).ok, true, '65523 is the longest frame git reads');
+  const half = unwrap(pktStep(pktInit(), te.encode('0005a000'))).state;
+  errOf(pktFinish(half), 'protocol', 'trailing 3 bytes after last pkt-line');
+  const big = errOf(pkt(new Uint8Array(65517)), 'bad_request', 'pkt-line payload too large: 65517 bytes, the most git frames is 65516');
   assert.deepEqual([big.what, big.got, big.max], ['pkt-line', 65517, 65516]);
-  errOf(pktResult('\ud800'), 'bad_request', 'pkt-line: lone surrogate U+D800 is no byte sequence');
-  errOf(encodeBytesResult(7, 'ref'), 'bad_request', 'ref must be a string');
-  errOf(encodeBytesResult('\udcc3\udca9'), 'bad_request', 'string: escaped bytes spell well-formed UTF-8; pass the characters');
-  assert.deepEqual(encodeBytesResult('a\udce9'), { ok: true, value: Uint8Array.of(0x61, 0xe9) });
-  assert.throws(() => encodeBytes(7), e => e.code === 'bad_request' && e.what === 'string');
+  errOf(pkt('\ud800'), 'bad_request', 'pkt-line: lone surrogate U+D800 is no byte sequence');
+  errOf(encodeBytes(7, 'ref'), 'bad_request', 'ref must be a string');
+  errOf(encodeBytes('\udcc3\udca9'), 'bad_request', 'string: escaped bytes spell well-formed UTF-8; pass the characters');
+  assert.deepEqual(encodeBytes('a\udce9'), { ok: true, value: Uint8Array.of(0x61, 0xe9) });
+  assert.throws(() => unwrap(encodeBytes(7)), e => e.code === 'bad_request' && e.what === 'string');
 
   const z = zlib.deflateSync(te.encode('hello hello hello'));
-  errOf(inflateResult(z, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
-  const over = errOf(inflateResult(z, 0, { expectedSize: 17, maxOutput: 5 }), 'limit_exceeded', 'inflate: expected size 17 exceeds limit 5');
+  errOf(inflate(z, 0, { maxOutput: Infinity }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  const over = errOf(inflate(z, 0, { expectedSize: 17, maxOutput: 5 }), 'limit_exceeded', 'inflate: expected size 17 exceeds limit 5');
   assert.deepEqual([over.what, over.got, over.max], ['inflate expected size', 17, 5]);
-  const grow = errOf(inflateResult(z, 0, { maxOutput: 5 }), 'limit_exceeded', 'inflate: output exceeds limit 5');
+  const grow = errOf(inflate(z, 0, { maxOutput: 5 }), 'limit_exceeded', 'inflate: output exceeds limit 5');
   assert.deepEqual([grow.what, grow.max], ['inflate output', 5]);
   assert.ok(grow.got > 5);
   // BTYPE 3 is reserved: the exhaustive block type has no member for it
-  errOf(inflateResult(Uint8Array.of(0b111), 0, { raw: true }), 'pack_corrupt', 'inflate: invalid block type');
-  assert.throws(() => inflate(Uint8Array.of(0b111), 0, { raw: true }), e => e.code === 'pack_corrupt' && e.message === 'inflate: invalid block type');
+  errOf(inflate(Uint8Array.of(0b111), 0, { raw: true }), 'pack_corrupt', 'inflate: invalid block type');
+  assert.throws(() => unwrap(inflate(Uint8Array.of(0b111), 0, { raw: true })), e => e.code === 'pack_corrupt' && e.message === 'inflate: invalid block type');
   // a bug inside the decoder is not swallowed into an Err: only the STOP sentinel is converted
-  assert.throws(() => inflateResult(null, 0, { raw: true }), TypeError);
+  assert.throws(() => inflate(null, 0, { raw: true }), TypeError);
 
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('x') }]);
-  errOf(parsePackResult(pack, { maxObjects: -1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
-  errOf(parsePackResult(pack, { limits: withLimits({ maxObjectSize: NaN }) }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
-  const lim = errOf(parsePackResult(pack, { maxObjects: 0 }), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
+  errOf(parsePack(pack, { maxObjects: -1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  errOf(parsePack(pack, { limits: withLimits({ maxObjectSize: NaN }) }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  const lim = errOf(parsePack(pack, { maxObjects: 0 }), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
   assert.deepEqual([lim.what, lim.got, lim.max], ['pack objects', 1, 0]);
-  errOf(parsePackResult(pack.subarray(0, pack.length - 1)), 'pack_corrupt');
-  errOf(applyDeltaResult(new Uint8Array(0), Uint8Array.of(0, 1, 0x81), { maxResult: -1 }), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
-  errOf(resolvePackResult(parsePack(pack), undefined, withLimits({ maxDeltaChain: undefined })), 'bad_request', 'limits.maxDeltaChain must be a finite non-negative number');
+  errOf(parsePack(pack.subarray(0, pack.length - 1)), 'pack_corrupt');
+  errOf(applyDelta(new Uint8Array(0), Uint8Array.of(0, 1, 0x81), { maxResult: -1 }), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
+  errOf(resolvePack(unwrap(parsePack(pack)), undefined, withLimits({ maxDeltaChain: undefined })), 'bad_request', 'limits.maxDeltaChain must be a finite non-negative number');
 });
 
 test('applyDelta: a delta cut inside a copy opcode is a short read at its end, whichever byte is missing', () => {
@@ -136,18 +135,18 @@ test('applyDelta: a delta cut inside a copy opcode is a short read at its end, w
   const head = Uint8Array.of(0xac, 0x02, 0x80, 0x04); // base 300, result 512
   for (let cut = 1; cut < op.length; cut++) {
     const d = concat([head, op.subarray(0, cut)]);
-    assert.equal(errOf(applyDeltaResult(base, d), 'pack_corrupt', `short read: need 1 bytes at ${d.length}, have ${d.length}`).reason, 'short_read');
+    assert.equal(errOf(applyDelta(base, d), 'pack_corrupt', `short read: need 1 bytes at ${d.length}, have ${d.length}`).reason, 'short_read');
   }
 });
 
 test('ofs-delta offsets are capped like size varints: an endless continuation is corrupt within ten bytes', () => {
   const endless = new Uint8Array(4096).fill(0x80);
-  errOf(readOfsDeltaResult(endless, 0), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
+  errOf(readOfsDelta(endless, 0), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
   // ten bytes is the most a cap of 64 bits reads; the tenth may end it
   const ten = new Uint8Array(10).fill(0x80); ten[9] = 1;
-  assert.equal(readOfsDeltaResult(ten, 0).ok, true);
+  assert.equal(readOfsDelta(ten, 0).ok, true);
   const eleven = new Uint8Array(11).fill(0x80); eleven[10] = 1;
-  errOf(readOfsDeltaResult(eleven, 0), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
+  errOf(readOfsDelta(eleven, 0), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
 });
 
 test('parsePack: the six pack types are accepted and 0 and 5 refused, by kind', async () => {
@@ -155,11 +154,11 @@ test('parsePack: the six pack types are accepted and 0 and 5 refused, by kind', 
   for (const t of [0, 5]) {
     const p = Uint8Array.from(pack);
     p[PACK_HEADER_BYTES] = (p[PACK_HEADER_BYTES] & 0x8f) | (t << 4);
-    errOf(parsePackResult(p, { verify: false }), 'pack_corrupt', `pack: bad object type ${t} at ${PACK_HEADER_BYTES}`);
+    errOf(parsePack(p, { verify: false }), 'pack_corrupt', `pack: bad object type ${t} at ${PACK_HEADER_BYTES}`);
   }
   const objs = [TYPE.COMMIT, TYPE.TREE, TYPE.BLOB, TYPE.TAG].map(type => ({ type, data: te.encode('') }));
   const all = await buildPack([...objs, { type: TYPE.BLOB, data: Uint8Array.of(0, 0), baseOid: hashObject('tag', new Uint8Array(0)) }]);
-  const r = parsePackResult(all.pack);
+  const r = parsePack(all.pack);
   assert.equal(r.ok, true);
   assert.deepEqual(r.value.stats.byType, { commit: 1, tree: 1, blob: 1, tag: 1, ref_delta: 1 });
   assert.deepEqual([r.value.stats.full, r.value.stats.refDelta, r.value.stats.ofsDelta], [4, 1, 0]);
@@ -168,16 +167,16 @@ test('parsePack: the six pack types are accepted and 0 and 5 refused, by kind', 
 test('resolvePack refuses a type id outside the six before hashing it', () => {
   const data = te.encode('x');
   const parsed = { objects: [{ offset: PACK_HEADER_BYTES, type: 5, size: data.length, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] };
-  errOf(resolvePackResult(parsed), 'pack_corrupt', 'pack: bad object type 5');
+  errOf(resolvePack(parsed), 'pack_corrupt', 'pack: bad object type 5');
 });
 
 test('resolvePack hashes each full object once', async () => {
   const { pack } = await buildPack(Array.from({ length: 5 }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(`blob ${i}`) })));
-  const parsed = parsePack(pack);
+  const parsed = unwrap(parsePack(pack));
   let reads = 0;
   // count reads of `data` on full objects: hashing reads it once; a second hash would read it again
   const counted = { ...parsed, objects: parsed.objects.map(o => { let d = o.data; return Object.defineProperty({ ...o }, 'data', { get() { reads++; return d; }, enumerable: true }); }) };
-  const r = resolvePack(counted);
+  const r = unwrap(resolvePack(counted));
   assert.equal(r.objects.size, 5);
   assert.equal(reads, 10, 'each full object: one read to hash it, one to keep it as the resolved data');
 });
@@ -198,7 +197,7 @@ test('inflate: non-overlapping and overlapping matches, at every distance/length
       const seed = Uint8Array.from({ length: d }, (_, i) => (i * 37 + 11) & 0xff);
       const data = concat([seed, new Uint8Array(len).map((_, i) => seed[i % d])]);
       const z = zlib.deflateSync(data, { level: 9 });
-      const got = inflate(z, 0, { expectedSize: data.length }).out;
+      const got = unwrap(inflate(z, 0, { expectedSize: data.length })).out;
       assert.equal(Buffer.compare(Buffer.from(got), Buffer.from(data)), 0, `len ${len} distance ${d}`);
     }
   }
@@ -258,7 +257,7 @@ test('#84 decodeBytes is surrogateescape over every lead byte and boundary conti
       for (const b of [Uint8Array.of(lead, b1, b2, b3, 0xff), Uint8Array.of(0xff, lead, b1, b2, b3), Uint8Array.of(0xff, lead, b1)]) {
         const s = decodeBytesOf(b);
         if (s !== refDecode(b)) assert.fail(`decodeBytes(${[...b].map(x => x.toString(16)).join(' ')}) = ${JSON.stringify(s)}, want ${JSON.stringify(refDecode(b))}`);
-        const back = encodeBytesResult(s);
+        const back = encodeBytes(s);
         if (!back.ok || Buffer.compare(Buffer.from(back.value), Buffer.from(b)) !== 0) assert.fail(`encodeBytes does not invert decodeBytes on ${[...b].map(x => x.toString(16)).join(' ')}`);
       }
     }
@@ -266,17 +265,18 @@ test('#84 decodeBytes is surrogateescape over every lead byte and boundary conti
 });
 
 test('#84 encodeBytes: surrogate pairs at the edges are characters, lone ones outside the escape range are refused', () => {
-  const ok = (s, bytes) => assert.deepEqual([...encodeBytesResult(s).value], bytes, JSON.stringify(s));
+  const ok = (s, bytes) => assert.deepEqual([...encodeBytes(s).value], bytes, JSON.stringify(s));
   ok('􏿿\udce9', [0xf4, 0x8f, 0xbf, 0xbf, 0xe9]); // U+10FFFF, the last pair, beside an escape
   ok('𐀀\udc80', [0xf0, 0x90, 0x80, 0x80, 0x80]);
   ok('\udc80\udcff', [0x80, 0xff]);
-  const lone = (s, u) => assert.equal(errOf(encodeBytesResult(s, 'name'), 'bad_request', `name: lone surrogate U+${u} is no byte sequence`).what, 'name');
+  const lone = (s, u) => assert.equal(errOf(encodeBytes(s, 'name'), 'bad_request', `name: lone surrogate U+${u} is no byte sequence`).what, 'name');
   lone('\ud800􏳩', 'D800'); // a high surrogate followed by a high one is no pair
+  lone('\ud800', 'D800'); // nor followed by a code unit past the low surrogates (U+E000)
   lone('\udc7f', 'DC7F');
   lone('\udd00', 'DD00');
   lone('\udbff', 'DBFF');
-  assert.equal(errOf(encodeBytesResult('\udcc3\udca9', 'name'), 'bad_request', 'name: escaped bytes spell well-formed UTF-8; pass the characters').what, 'name');
-  assert.equal(errOf(encodeBytesResult(null), 'bad_request', 'string must be a string').what, 'string');
+  assert.equal(errOf(encodeBytes('\udcc3\udca9', 'name'), 'bad_request', 'name: escaped bytes spell well-formed UTF-8; pass the characters').what, 'name');
+  assert.equal(errOf(encodeBytes(null), 'bad_request', 'string must be a string').what, 'string');
 });
 
 test('#84 decodeChunk: any split of any byte stream gives the whole stream\'s text, and carries only an unfinished sequence', () => {
@@ -304,39 +304,39 @@ test('#84 decodeChunk: any split of any byte stream gives the whole stream\'s te
 });
 
 test('pktFinish refuses only a carry; parsePack refuses an ofs delta naming itself', async () => {
-  assert.equal(pktFinishResult(pktInit()).ok, true);
-  assert.equal(pktFinishResult(pktStep(pktInit(), te.encode('0000')).state).ok, true);
+  assert.equal(pktFinish(pktInit()).ok, true);
+  assert.equal(pktFinish(unwrap(pktStep(pktInit(), te.encode('0000'))).state).ok, true);
   // a one-object pack whose object is an OFS_DELTA with offset 0
   const body = concat([te.encode('PACK'), Uint8Array.of(0, 0, 0, 2, 0, 0, 0, 1), Uint8Array.of(0x62, 0x00), zlib.deflateSync(Uint8Array.of(0, 0))]);
   const sha = (await import('node:crypto')).createHash('sha1').update(body).digest();
-  errOf(parsePackResult(concat([body, sha])), 'pack_corrupt', `pack: ofs delta at ${PACK_HEADER_BYTES} is its own base`);
+  errOf(parsePack(concat([body, sha])), 'pack_corrupt', `pack: ofs delta at ${PACK_HEADER_BYTES} is its own base`);
 });
 
-test('parsePackResult passes each part\'s Err through: object header, ofs offset, ref id, zlib body', () => {
+test('parsePack passes each part\'s Err through: object header, ofs offset, ref id, zlib body', () => {
   const crypto = globalThis.process.getBuiltinModule('node:crypto');
   const packOf = (...obj) => { const body = concat([te.encode('PACK'), Uint8Array.of(0, 0, 0, 2, 0, 0, 0, 1), ...obj]); return concat([body, crypto.createHash('sha1').update(body).digest()]); };
   // an object header that never ends: the varint cap, not a TypeError on a missing header
-  errOf(parsePackResult(packOf(new Uint8Array(12).fill(0x80))), 'pack_corrupt', 'pack: size varint longer than 64 bits');
+  errOf(parsePack(packOf(new Uint8Array(12).fill(0x80))), 'pack_corrupt', 'pack: size varint longer than 64 bits');
   // an ofs delta whose offset never ends
-  errOf(parsePackResult(packOf(Uint8Array.of(0x62), new Uint8Array(12).fill(0x80))), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
+  errOf(parsePack(packOf(Uint8Array.of(0x62), new Uint8Array(12).fill(0x80))), 'pack_corrupt', 'pack: ofs delta offset longer than 64 bits');
   // a ref delta whose base id runs into the trailer: the id is read (the trailer is 20 bytes, an id's length), and the
   // object then has no zlib body before the end
-  errOf(parsePackResult(packOf(Uint8Array.of(0x72), new Uint8Array(4))), 'pack_corrupt');
+  errOf(parsePack(packOf(Uint8Array.of(0x72), new Uint8Array(4))), 'pack_corrupt');
   // a blob whose zlib body is not zlib
-  errOf(parsePackResult(packOf(Uint8Array.of(0x32), Uint8Array.of(0x78, 0x00, 0, 0, 0, 0))), 'pack_corrupt', 'zlib: bad header check');
+  errOf(parsePack(packOf(Uint8Array.of(0x32), Uint8Array.of(0x78, 0x00, 0, 0, 0, 0))), 'pack_corrupt', 'zlib: bad header check');
 });
 
-test('inflateResult converts only its own STOP: a bug inside the block loop propagates', () => {
+test('inflate converts only its own STOP: a bug inside the block loop propagates', () => {
   // a plain array has no subarray: the stored block's copy throws a TypeError inside the loop, which is not an Err
-  assert.throws(() => inflateResult([0b001, 1, 0, 0xfe, 0xff, 0x41], 0, { raw: true }), TypeError);
+  assert.throws(() => inflate([0b001, 1, 0, 0xfe, 0xff, 0x41], 0, { raw: true }), TypeError);
   // and a refusal is an Err, not a throw, from the same place
-  errOf(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xfe, 0x41), 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
-  assert.equal(inflateResult(Uint8Array.of(0b001, 1, 0, 0xfe, 0xff, 0x41), 0, { raw: true }).value.out[0], 0x41);
+  errOf(inflate(Uint8Array.of(0b001, 1, 0, 0xfe, 0xfe, 0x41), 0, { raw: true }), 'pack_corrupt', 'inflate: stored length check failed');
+  assert.equal(inflate(Uint8Array.of(0b001, 1, 0, 0xfe, 0xff, 0x41), 0, { raw: true }).value.out[0], 0x41);
 });
 
 test('readOfsDelta: an empty buffer is a short read, not offset 0', () => {
-  assert.equal(errOf(readOfsDeltaResult(new Uint8Array(0), 0), 'pack_corrupt', 'short read: need 1 bytes at 0, have 0').reason, 'short_read');
-  assert.equal(errOf(readOfsDeltaResult(Uint8Array.of(1, 2), 2), 'pack_corrupt', 'short read: need 1 bytes at 2, have 2').reason, 'short_read');
+  assert.equal(errOf(readOfsDelta(new Uint8Array(0), 0), 'pack_corrupt', 'short read: need 1 bytes at 0, have 0').reason, 'short_read');
+  assert.equal(errOf(readOfsDelta(Uint8Array.of(1, 2), 2), 'pack_corrupt', 'short read: need 1 bytes at 2, have 2').reason, 'short_read');
 });
 
 // The bit reader must not read a byte it does not need: a stored block drops the bits left in the current byte and reads
@@ -355,9 +355,182 @@ test('inflate: a stored block after a fixed one, at every leftover bit count, eq
     const head = Uint8Array.from({ length: bitsOut.length / 8 }, (_, i) => bitsOut.slice(i * 8, i * 8 + 8).reduce((a, b, j) => a | (b << j), 0));
     const raw = concat([head, Uint8Array.of(2, 0, 0xfd, 0xff, 0x5a, 0x59)]);
     const want = zlib.inflateRawSync(raw);
-    const got = inflateResult(raw, 0, { raw: true });
+    const got = inflate(raw, 0, { raw: true });
     assert.equal(got.ok, true, `k=${k}: ${got.error?.message}`);
     assert.equal(Buffer.compare(Buffer.from(got.value.out), want), 0, `k=${k}`);
     assert.equal(got.value.consumed, raw.length, `k=${k}`);
+  }
+});
+
+// ---- inflate: a stream cut exactly where each read of the block loop runs out ----
+// Every read in the block loop (the bit reader and the Huffman decoder) is checked where it is made. Without that check
+// the loop goes on with a negative value: the stream may still be refused, but with another message (a bad block type,
+// bad dynamic counts, a repeat with no previous, a repeat overflow, no end-of-block code, a distance too far back), or
+// not at all (a distance symbol that is not there reads as zero bytes). Each stream below is hand-built (stored, fixed
+// and dynamic blocks) and ends at one read with fewer bits left than that read needs, or with bits that match no code.
+
+// LSB-first bit writer (RFC 1951 §3.1.1): header fields and extra bits in value order, Huffman codes MSB first.
+class DeflateBits {
+  constructor() { this.out = []; }
+  bits(v, n) { for (let i = 0; i < n; i++) this.out.push((v >> i) & 1); return this; }
+  code([c, len]) { for (let i = len - 1; i >= 0; i--) this.out.push((c >> i) & 1); return this; }
+  // the bits left in the last byte after what was written
+  get left() { return (8 - (this.out.length % 8)) % 8; }
+  // as bytes; a partial last byte is padded with `pad`, LSB first
+  done(pad = 0) {
+    const bits = [...this.out];
+    for (let i = 0; bits.length % 8; i++) bits.push((pad >> i) & 1);
+    return Uint8Array.from({ length: bits.length / 8 }, (_, k) => bits.slice(k * 8, k * 8 + 8).reduce((a, b, i) => a | (b << i), 0));
+  }
+}
+// Canonical Huffman codes from code lengths (RFC 1951 §3.2.2): symbol -> [code, length], null for a symbol with none.
+function canonicalCodes(lengths) {
+  const max = Math.max(0, ...lengths);
+  const count = new Array(max + 1).fill(0);
+  for (const l of lengths) if (l) count[l]++;
+  const next = [];
+  for (let code = 0, bits = 1; bits <= max; bits++) { code = (code + count[bits - 1]) << 1; next[bits] = code; }
+  return lengths.map(l => (l ? [next[l]++, l] : null));
+}
+const FIXED_LIT = canonicalCodes(Array.from({ length: 288 }, (_, s) => (s < 144 ? 8 : s < 256 ? 9 : s < 280 ? 7 : 8)));
+const FIXED_DIST = canonicalCodes(new Array(30).fill(5));
+const CLORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+// A final dynamic block's header through the code length code lengths (HCLEN covers the last one given); returns that code.
+function dynamicHeader(w, { hlit, hdist, clens }) {
+  let hclen = 19;
+  while (hclen > 4 && !clens[CLORDER[hclen - 1]]) hclen--;
+  w.bits(1, 1).bits(2, 2).bits(hlit, 5).bits(hdist, 5).bits(hclen - 4, 4);
+  for (let i = 0; i < hclen; i++) w.bits(clens[CLORDER[i]] ?? 0, 3);
+  return canonicalCodes(Array.from({ length: 19 }, (_, s) => clens[s] ?? 0));
+}
+const fixedBlock = final => new DeflateBits().bits(final, 1).bits(1, 2);
+
+test('inflate: a stream cut at each read of the block loop is refused with that read\'s message', () => {
+  const END = 'inflate: unexpected end of input';
+  const NO_CODE = 'inflate: invalid huffman code';
+  const refused = (name, w, left, pad, message) => {
+    assert.equal(w.left, left, `${name}: bits left in the last byte`);
+    const bytes = w.done(pad);
+    errOf(inflate(bytes, 0, { raw: true }), 'pack_corrupt', message);
+    assert.throws(() => zlib.inflateRawSync(bytes), Error, `${name}: zlib refuses it too`);
+  };
+  // BFINAL: a non-final empty stored block, then nothing
+  errOf(inflate(Uint8Array.of(0b000, 0, 0, 0xff, 0xff), 0, { raw: true }), 'pack_corrupt', END);
+  // BTYPE: a non-final fixed block of four 9-bit literals (3 + 36 + 7 = 46 bits): BFINAL takes one of the 2 bits left
+  {
+    const w = fixedBlock(0);
+    for (const c of [0x90, 0x91, 0x92, 0x93]) w.code(FIXED_LIT[c]);
+    refused('btype', w.code(FIXED_LIT[256]), 2, 0b01, END);
+  }
+  // HDIST: after a 28-bit fixed block, BFINAL, BTYPE and HLIT (31, a count no stream may give) leave 4 bits: HDIST needs
+  // 5 (HCLEN, 4, would be there)
+  refused('hdist', fixedBlock(0).code(FIXED_LIT[0x90]).code(FIXED_LIT[0x91]).code(FIXED_LIT[256]).bits(1, 1).bits(2, 2).bits(31, 5), 4, 0b1111, END);
+  // HCLEN: BFINAL, BTYPE, HLIT (31) and HDIST end on bit 13 of 16: HCLEN needs 4 of the 3 left
+  refused('hclen', new DeflateBits().bits(1, 1).bits(2, 2).bits(31, 5).bits(0, 5), 3, 0b111, END);
+  // a code length code length: 16 and 17 (one bit each) are read, the third needs 3 bits and 1 is left
+  refused('clen', new DeflateBits().bits(1, 1).bits(2, 2).bits(0, 5).bits(0, 5).bits(0, 4).bits(1, 3).bits(1, 3), 1, 0, END);
+  // a code length symbol: 266 zeros (138 + 128, entry 256 among them) of 271 entries; the 3 padding bits are three more
+  // ('0' is symbol 0), then the next symbol runs out
+  {
+    const w = new DeflateBits();
+    const cl = dynamicHeader(w, { hlit: 13, hdist: 0, clens: { 0: 1, 18: 1 } });
+    refused('code length', w.code(cl[18]).bits(127, 7).code(cl[18]).bits(117, 7), 3, 0, END);
+  }
+  // a code length symbol that matches no code: the code length code has one code ('0', symbol 0); fifteen 1 bits
+  {
+    const w = new DeflateBits();
+    dynamicHeader(w, { hlit: 0, hdist: 0, clens: { 0: 1 } });
+    refused('code length, no code', w.bits(0x7fff, 15), 4, 0, NO_CODE);
+  }
+  // a repeat's extra bits: 249 zeros (138 + 111) of 258 entries, then an 18 whose 7 extra bits are not there
+  {
+    const w = new DeflateBits();
+    const cl = dynamicHeader(w, { hlit: 0, hdist: 0, clens: { 0: 1, 18: 1 } });
+    refused('repeat', w.code(cl[18]).bits(127, 7).code(cl[18]).bits(100, 7).code(cl[18]), 2, 0, END);
+  }
+  // a length's extra bits: a dynamic block (literal/length 256: '0', 281: '1'; distances 0: '0', 1: '1') whose first
+  // symbol is 281 (5 extra bits); 4 are left, the first of them a distance code
+  {
+    const w = new DeflateBits();
+    const cl = dynamicHeader(w, { hlit: 25, hdist: 1, clens: { 1: 1, 18: 1 } });
+    w.code(cl[18]).bits(127, 7).code(cl[18]).bits(107, 7); // 0..255: 256 zeros
+    w.code(cl[1]); // 256
+    w.code(cl[18]).bits(13, 7); // 257..280: 24 zeros
+    w.code(cl[1]).code(cl[1]).code(cl[1]); // 281, distances 0 and 1
+    const lit = canonicalCodes(Array.from({ length: 282 }, (_, s) => (s === 256 || s === 281 ? 1 : 0)));
+    refused('length extra', w.code(lit[281]), 4, 0, END);
+  }
+  // a distance symbol: fixed, two 9-bit literals and length 3 (3 + 18 + 7 = 28 bits): 4 of its 5 bits are left
+  refused('distance', fixedBlock(1).code(FIXED_LIT[0x90]).code(FIXED_LIT[0x91]).code(FIXED_LIT[257]), 4, 0, END);
+  // a distance symbol that matches no code: fixed distance codes 30 and 31 do not exist (11111 and ten more 1 bits)
+  refused('distance, no code', fixedBlock(1).code(FIXED_LIT[0x41]).code(FIXED_LIT[257]).bits(0x7fff, 15), 7, 0, NO_CODE);
+  // a distance's extra bits: one 9-bit literal, length 3, distance symbol 4 (one extra bit): 3 + 9 + 7 + 5 = 24 bits
+  refused('distance extra', fixedBlock(1).code(FIXED_LIT[0x90]).code(FIXED_LIT[257]).code(FIXED_DIST[4]), 0, 0, END);
+});
+
+// ---- the 0.2.0 cut-over: what the former throwing wrappers refused is an Err, named for what was encoded or parsed ----
+
+test('a string with no byte form is refused naming the field: commit, tag, tree entry name, ref, path, message, checkout path', async () => {
+  const { encodeCommit, encodeTag, encodeTree } = await import('../src/objects.js');
+  const { validateRef, validatePath, validateMessage, checkoutPathRefusal } = await import('../src/validate.js');
+  const { utf8ToStr } = await import('../src/attributes.js');
+  const lone = what => `${what}: lone surrogate U+D800 is no byte sequence`;
+  const tree = '1'.repeat(40);
+  errOf(encodeCommit({ tree, author: 'a <a@b> 0 +0000', message: '\ud800' }), 'bad_request', lone('commit'));
+  errOf(encodeTag({ object: tree, type: 'commit', tag: 'v1', tagger: 'a <a@b> 0 +0000', message: '\ud800' }), 'bad_request', lone('tag'));
+  errOf(encodeTree([{ mode: '100644', name: '\ud800', oid: tree }]), 'bad_request', lone('tree entry name'));
+  errOf(validateRef('refs/heads/\ud800'), 'bad_request', lone('ref'));
+  errOf(validatePath('a/\ud800', withLimits()), 'bad_request', lone('path'));
+  errOf(validateMessage('m\ud800'), 'bad_request', lone('message'));
+  errOf(checkoutPathRefusal('a/\ud800', '100644', 'linux'), 'bad_request', lone('checkout path'));
+  // a tree name's escaped bytes are matched as those bytes (one char per byte); a lone surrogate has none
+  assert.deepEqual(utf8ToStr('a\udce9/é'), { ok: true, value: 'a\xe9/\xc3\xa9' });
+  errOf(utf8ToStr('\ud800'), 'bad_request', lone('path'));
+});
+
+test('treeSort: the first name the sort compares that has no byte form is the refusal, as when the comparison threw', async () => {
+  const { treeSort } = await import('../src/objects.js');
+  const e = (name, mode = '100644') => ({ mode, name });
+  assert.deepEqual(treeSort([e('b'), e('a', '40000'), e('a.c')]), { ok: true, value: [e('a.c'), e('a', '40000'), e('b')] });
+  // one entry is never compared: its name is never encoded
+  assert.deepEqual(treeSort([e('\ud800')]), { ok: true, value: [e('\ud800')] });
+  // the oracle: the same sort with a comparator that throws at the first name it cannot encode (the 0.1 treeSort)
+  const thrownBy = entries => {
+    try {
+      [...entries].sort((a, b) => { unwrap(encodeBytes(a.mode === '40000' ? `${a.name}/` : a.name)); unwrap(encodeBytes(b.mode === '40000' ? `${b.name}/` : b.name)); return 0; });
+    } catch (x) { return x.message; }
+    return null;
+  };
+  for (const entries of [[e('\ud800'), e('a')], [e('a'), e('\ud801')], [e('\ud800'), e('\ud801')], [e('\ud801'), e('\ud800')], [e('z'), e('\ud802'), e('a'), e('\ud803', '40000')]]) {
+    const want = thrownBy(entries);
+    assert.match(want, /^string: lone surrogate U\+D80[0-3] is no byte sequence$/);
+    errOf(treeSort(entries), 'bad_request', want.replace(/^string/, 'tree entry name'));
+  }
+});
+
+test('packParseOpts reads the two pack caps out of limits, checked in order', async () => {
+  const { packParseOpts } = await import('../src/packresolve.js');
+  const limits = withLimits({ maxPackObjects: 3, maxInflatedTotal: 7 });
+  assert.deepEqual(packParseOpts(limits), { ok: true, value: { limits, maxObjects: 3, maxInflatedTotal: 7 } });
+  errOf(packParseOpts({}), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  errOf(packParseOpts({ maxPackObjects: 1 }), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+});
+
+test('parseRefname, parseBranchName, parseTagName, parsePath: the refusal names what was parsed; the validator\'s error is its cause', async () => {
+  const { parseRefname, parseBranchName, parseTagName } = await import('../src/refname.js');
+  const { parsePath } = await import('../src/path.js');
+  const full = 'invalid ref: must be a full ref name starting with refs/';
+  for (const [r, what, message] of [
+    [parseRefname('main'), 'ref', full],
+    [parseBranchName('main'), 'branch', full],
+    // a branch is checked as a ref a push creates: one level after refs/ is receive-pack's funny refname
+    [parseBranchName('refs/heads'), 'branch', 'invalid ref: receive-pack refuses it (funny refname)'],
+    [parseTagName('v1'), 'tag', full],
+    [parsePath(''), 'path', 'invalid path: must be a non-empty string'],
+  ]) {
+    const x = errOf(r, 'bad_request', message);
+    assert.equal(x.what, what, message);
+    assert.equal(x.cause.code, 'bad_request');
+    assert.equal(x.cause.message, message);
   }
 });

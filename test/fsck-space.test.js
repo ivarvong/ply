@@ -30,6 +30,7 @@ import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { assertFetched, parseCommit, parseTag, hashObject } from '../src/objects.js';
 import { commitView } from '../src/read.js';
+import { unwrap } from './unwrap.js';
 
 // ---- the fsck oracle (test/server.js `fsck` / `fsckProblemsOf` semantics, PR #53; one run per store) ----
 // git 2.50 prints an object problem as `error in <type> <oid>: <msgId>: <text>` or `warning in <type> <oid>: …` on
@@ -358,9 +359,9 @@ test('commit, tag and ident space: ply refuses exactly what git fsck --strict re
       expect = warnings.some(w => WARN_DECISION[w] === 'reject') ? 'reject' : 'accept';
     }
     const gitMsg = errors.find(Boolean) ?? null;
-    const ply = plyVerdict(() => assertFetched(c.type, c.data));
-    const parsed = plyVerdict(() => (c.type === 'commit' ? parseCommit(c.data) : parseTag(c.data)));
-    const view = c.type === 'commit' ? plyVerdict(() => commitView(c.data)) : parsed;
+    const ply = plyVerdict(() => unwrap(assertFetched(c.type, c.data)));
+    const parsed = plyVerdict(() => (c.type === 'commit' ? unwrap(parseCommit(c.data)) : unwrap(parseTag(c.data))));
+    const view = c.type === 'commit' ? plyVerdict(() => unwrap(commitView(c.data))) : parsed;
     const row = { oid: c.oid, type: c.type, axes: c.labels[0], git: c.git, ply };
     const allowed = expect === 'accept' && ply.verdict === 'reject' && ALLOWED_REFUSAL[ply.msgId] && c.labels.every(l => ALLOWED_REFUSAL_HEADERS.has(`${c.type}:${l.header}`));
     if (allowed) designed.push(row);

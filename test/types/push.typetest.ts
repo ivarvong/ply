@@ -49,5 +49,5 @@ const handle = (e: PushError): string => {
   }
   return assertNever(e);
 };
-const r = outcomeResult({ tag: 'landed' }, { report: null, hookOutput: '', remote: undefined, commands: [] });
+const r = outcomeResult({ tag: 'landed' }, { report: null, hookOutput: '', remote: null, commands: [] });
 if (!r.ok) void handle(r.error);

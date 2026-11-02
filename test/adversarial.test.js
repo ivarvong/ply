@@ -25,9 +25,9 @@ import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { GitHttp } from '../src/client.js';
-import { createTransport } from '../src/http.js';
-import { fetchObject } from '../src/fetch.js';
-import { fetchPack, fetchPackTree0 } from '../src/fetchpack.js';
+import { createTransport as createTransportR } from '../src/http.js';
+import { fetchObject as fetchObjectR } from '../src/fetch.js';
+import { fetchPack as fetchPackR, fetchPackTree0 as fetchPackTree0R } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
@@ -41,7 +41,13 @@ import zlib from 'node:zlib';
 import { adler32 } from '../src/inflate.js';
 import { zlibBound } from '../src/format.js';
 import { pkt, FLUSH } from '../src/pktline.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
+const fetchPack = (...a) => unwrapAsync(fetchPackR(...a));
+const fetchPackTree0 = (...a) => unwrapAsync(fetchPackTree0R(...a));
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 const AUTHOR = { name: 'adv', email: 'adv@x' };
 const FILE = 'a/b/target.txt';
@@ -68,7 +74,7 @@ async function run(fault, { limits = withLimits({ requestTimeoutMs: 1500 }), fin
   const tracer = new Tracer({ exporter });
   const t0 = performance.now();
   let result = null, error = null;
-  try { result = await editFile(`${proxy.url}/${repo.name}.git`, { path: FILE, find, replace, author: AUTHOR, message: 'adv' }, { tracer, limits, ...opts }); }
+  try { result = await unwrapAsync(editFile(`${proxy.url}/${repo.name}.git`, { path: FILE, find, replace, author: AUTHOR, message: 'adv' }, { tracer, limits, ...opts })); }
   catch (e) { error = e; }
   const ms = performance.now() - t0;
   await proxy.close();
@@ -153,14 +159,14 @@ test('I4 limits: hostile sizes are rejected before allocation; memory does not g
   const rssBefore = process.memoryUsage().rss;
   // object claims 2^40 bytes
   const p1 = sign(concat([hdr(1), encodeObjHeader(3, 2 ** 40), Uint8Array.from([0x78, 0x9c, 3, 0, 0, 0, 0, 1])]));
-  assert.throws(() => parsePack(p1), e => e.code === 'limit_exceeded');
+  assert.throws(() => unwrap(parsePack(p1)), e => e.code === 'limit_exceeded');
   // delta claims 2^40 result
-  assert.throws(() => applyDelta(new Uint8Array(1), Uint8Array.from([1, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00])), e => e.code === 'limit_exceeded');
+  assert.throws(() => unwrap(applyDelta(new Uint8Array(1), Uint8Array.from([1, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00]))), e => e.code === 'limit_exceeded');
   // honest-looking object whose declared size is small but zlib expands past it (bomb): must stop at the declared size
   const zlib = await import('node:zlib');
   const bomb = new Uint8Array(zlib.deflateSync(Buffer.alloc(8 << 20)));
   const p2 = sign(concat([hdr(1), encodeObjHeader(3, 100), bomb]));
-  assert.throws(() => parsePack(p2), e => e.code === 'pack_corrupt' && /exceeds expected/.test(e.message));
+  assert.throws(() => unwrap(parsePack(p2)), e => e.code === 'pack_corrupt' && /exceeds expected/.test(e.message));
   assert.ok(process.memoryUsage().rss - rssBefore < 64 * 1024 * 1024, 'rss grew');
 
   // over the wire: tree fetch answered with the bomb → streaming path stops early; metadata path rejects
@@ -209,19 +215,19 @@ test('I5 caller input validation happens before any I/O', async () => {
     const exporter = arrayExporter();
     let calls = 0;
     const fetchImpl = async () => { calls++; throw new Error('should not be called'); };
-    await assert.rejects(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm', ...over }, { tracer: new Tracer({ exporter }), fetchImpl }),
+    await assert.rejects(unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm', ...over }, { tracer: new Tracer({ exporter }), fetchImpl })),
       e => e.code === 'bad_request' && (what === undefined || e.what === what), JSON.stringify(over));
     assert.equal(calls, 0, 'no I/O before validation');
   }
   // encodeCommit refuses the injected header itself. The same bytes, written without that helper, are still
   // rejected by receive.fsckObjects: defense in depth if a caller pushes raw objects.
   const { encodeCommit } = await import('../src/objects.js');
-  assert.throws(() => encodeCommit({ tree: 'a'.repeat(40), parents: ['b'.repeat(40)], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' }), e => e.code === 'bad_request');
+  assert.throws(() => unwrap(encodeCommit({ tree: 'a'.repeat(40), parents: ['b'.repeat(40)], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' })), e => e.code === 'bad_request');
   const repo = freshRepo();
-  const c = new GitHttp(`${srv.url}/${repo.name}.git`, { tracer: new Tracer() });
+  const c = unwrap(GitHttp.create(`${srv.url}/${repo.name}.git`, { tracer: new Tracer() }));
   const tree = git(repo.bare, ['rev-parse', 'main^{tree}']).trim();
   const bad = te.encode(`tree ${tree}\nparent ${repo.head}\nauthor x <a@x> 1 +0000\ncommitter y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000\n\nm\n`);
-  await assert.rejects(c.push({ ref: 'refs/heads/main', oldOid: repo.head, newOid: hashObject('commit', bad), objects: [{ type: TYPE.COMMIT, data: bad }] }), e => e.code === 'push_rejected');
+  await assert.rejects(unwrapAsync(c.push({ ref: 'refs/heads/main', oldOid: repo.head, newOid: hashObject('commit', bad), objects: [{ type: TYPE.COMMIT, data: bad }] })), e => e.code === 'push_rejected');
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head);
 });
 
@@ -242,20 +248,20 @@ test('I5 every operation rejects a bad ident field before any fetch', async () =
     assert.equal(calls, 0, label);
   };
   for (const [field, person, what, time] of fields) {
-    await once(`editFile ${field}`, what, fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: person, message: 'm', time }, { fetchImpl }));
-    await once(`mergeBranch ${field}`, what, fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: person, message: 'm', time }, { fetchImpl }));
-    await once(`rebaseBranch ${field}`, what, fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: person, author: person, time }, { fetchImpl }));
-    await once(`cherryPick ${field}`, what, fetchImpl => cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: person, time }, { fetchImpl }));
-    await once(`revertCommit ${field}`, what, fetchImpl => revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'b'.repeat(40), committer: person, time }, { fetchImpl }));
+    await once(`editFile ${field}`, what, fetchImpl => unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: person, message: 'm', time }, { fetchImpl })));
+    await once(`mergeBranch ${field}`, what, fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: person, message: 'm', time }, { fetchImpl })));
+    await once(`rebaseBranch ${field}`, what, fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: person, author: person, time }, { fetchImpl })));
+    await once(`cherryPick ${field}`, what, fetchImpl => unwrapAsync(cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: person, time }, { fetchImpl })));
+    await once(`revertCommit ${field}`, what, fetchImpl => unwrapAsync(revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'b'.repeat(40), committer: person, time }, { fetchImpl })));
   }
-  await once('edit message', 'message', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'x\0y' }, { fetchImpl }));
-  await once('edit ref', 'ref', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'm', ref: 'refs/heads/main\n' }, { fetchImpl }));
-  await once('merge ref', 'ref', fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', from: 'refs/heads/other', author: good, message: 'm' }, { fetchImpl }));
-  await once('merge message', 'message', fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: good, message: 'x\0y' }, { fetchImpl }));
-  await once('rebase ref', 'ref', fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic\n', committer: good }, { fetchImpl }));
-  await once('rebase message', 'message', fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', committer: good, message: 'x\0y' }, { fetchImpl }));
-  await once('cherryPick message', 'message', fetchImpl => cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: good, message: 'x\0y' }, { fetchImpl }));
-  await once('revertCommit ref', 'ref', fetchImpl => revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', commit: 'b'.repeat(40), committer: good }, { fetchImpl }));
+  await once('edit message', 'message', fetchImpl => unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'x\0y' }, { fetchImpl })));
+  await once('edit ref', 'ref', fetchImpl => unwrapAsync(editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'm', ref: 'refs/heads/main\n' }, { fetchImpl })));
+  await once('merge ref', 'ref', fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', from: 'refs/heads/other', author: good, message: 'm' }, { fetchImpl })));
+  await once('merge message', 'message', fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: good, message: 'x\0y' }, { fetchImpl })));
+  await once('rebase ref', 'ref', fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic\n', committer: good }, { fetchImpl })));
+  await once('rebase message', 'message', fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', committer: good, message: 'x\0y' }, { fetchImpl })));
+  await once('cherryPick message', 'message', fetchImpl => unwrapAsync(cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: good, message: 'x\0y' }, { fetchImpl })));
+  await once('revertCommit ref', 'ref', fetchImpl => unwrapAsync(revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', commit: 'b'.repeat(40), committer: good }, { fetchImpl })));
 });
 
 test('I6 secrets never reach telemetry: token in auth, token in URL userinfo', async () => {
@@ -263,7 +269,7 @@ test('I6 secrets never reach telemetry: token in auth, token in URL userinfo', a
   const exporter = arrayExporter();
   const tracer = new Tracer({ exporter });
   const TOKEN = 'ghp_SECRET_TOKEN_1234567890';
-  const r = await editFile(`http://user:${TOKEN}@127.0.0.1:${new URL(srv.url).port}/${repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer, auth: { token: TOKEN } });
+  const r = await unwrapAsync(editFile(`http://user:${TOKEN}@127.0.0.1:${new URL(srv.url).port}/${repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer, auth: { token: TOKEN } }));
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), r.newCommit);
   const dump = JSON.stringify(exporter.lines);
   assert.ok(!dump.includes(TOKEN), 'token leaked into spans');
@@ -298,22 +304,22 @@ const AUTHS = [
   { name: 'header Basic', auth: { header: `Basic ${btoa(`${USER}:${PASS}`)}` }, secrets: [PASS, USER, btoa(`${USER}:${PASS}`)] },
   { name: 'bearer', auth: { bearer: TOK }, secrets: [TOK] },
 ];
-const band = (n, text) => pkt(concat([new Uint8Array([n]), typeof text === 'string' ? te.encode(text) : text]));
+const band = (n, text) => unwrap(pkt(concat([new Uint8Array([n]), typeof text === 'string' ? te.encode(text) : text])));
 const once = (stage, k, make) => ctx => (ctx.stage === stage && ctx.n === k && ctx.phase === 'request' ? { type: 'bytes', noForward: true, name: 'echo', bytes: make() } : null);
 // A v2 fetch answer whose band-2 progress carries `text` split across two frames, spliced after the packfile header.
 const withProgress = text => ctx => {
   if (ctx.stage !== 'fetch' || ctx.n !== 0 || ctx.phase === 'request') return { type: 'pass' };
-  const hdr = Buffer.from(pkt('packfile\n')); const b = Buffer.from(ctx.bytes); const at = b.indexOf(hdr) + hdr.length;
+  const hdr = Buffer.from(unwrap(pkt('packfile\n'))); const b = Buffer.from(ctx.bytes); const at = b.indexOf(hdr) + hdr.length;
   const half = text.length >> 1;
   return { type: 'bytes', name: 'progress-echo', bytes: concat([b.subarray(0, at), band(2, text.slice(0, half)), band(2, text.slice(half)), b.subarray(at)]) };
 };
-const report = (...lines) => concat([band(1, concat([...lines.map(l => pkt(`${l}\n`)), FLUSH]))]);
+const report = (...lines) => concat([band(1, concat([...lines.map(l => unwrap(pkt(`${l}\n`))), FLUSH]))]);
 const ECHOES = [
-  { name: 'ls-refs ERR', code: 'remote_error', fault: s => once('ls-refs', 0, () => concat([pkt(`ERR access denied for ${s}\n`), FLUSH])) },
-  { name: 'ls-refs malformed line (quoted, cut at 60)', code: 'protocol', fault: s => once('ls-refs', 0, () => concat([pkt(`bogus-${s}\n`), FLUSH])) },
-  { name: 'fetch ERR', code: 'remote_error', fault: s => once('fetch', 0, () => concat([pkt(`ERR upload-pack: ${s}\n`), FLUSH])) },
-  { name: 'fetch band 3 (commit)', code: 'remote_error', fault: s => once('fetch', 0, () => concat([pkt('packfile\n'), band(3, `fatal: ${s}\n`), FLUSH])) },
-  { name: 'fetch band 3 (streamed blob)', code: 'remote_error', fault: s => once('fetch', 4, () => concat([pkt('packfile\n'), band(3, `fatal: ${s}\n`), FLUSH])) },
+  { name: 'ls-refs ERR', code: 'remote_error', fault: s => once('ls-refs', 0, () => concat([unwrap(pkt(`ERR access denied for ${s}\n`)), FLUSH])) },
+  { name: 'ls-refs malformed line (quoted, cut at 60)', code: 'protocol', fault: s => once('ls-refs', 0, () => concat([unwrap(pkt(`bogus-${s}\n`)), FLUSH])) },
+  { name: 'fetch ERR', code: 'remote_error', fault: s => once('fetch', 0, () => concat([unwrap(pkt(`ERR upload-pack: ${s}\n`)), FLUSH])) },
+  { name: 'fetch band 3 (commit)', code: 'remote_error', fault: s => once('fetch', 0, () => concat([unwrap(pkt('packfile\n')), band(3, `fatal: ${s}\n`), FLUSH])) },
+  { name: 'fetch band 3 (streamed blob)', code: 'remote_error', fault: s => once('fetch', 4, () => concat([unwrap(pkt('packfile\n')), band(3, `fatal: ${s}\n`), FLUSH])) },
   { name: 'push ng reason + band-2 hook output', code: 'push_rejected', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: hook saw ${s}\n`), report('unpack ok', `ng refs/heads/main pre-receive hook declined: ${s}`), FLUSH])) },
   { name: 'push band-2 tail cut through the secret', code: 'push_rejected', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: ${s}`), band(2, `${'x'.repeat(4096 - 20)}\n`), report('unpack ok', 'ng refs/heads/main pre-receive hook declined'), FLUSH])) },
   { name: 'push band 3', code: 'ambiguous', fault: s => once('receive-pack', 0, () => concat([band(3, `error: ${s}\n`), FLUSH])) },
@@ -346,7 +352,7 @@ test('I6b a credential echoed by the server reaches no error (any field) and no 
 });
 
 test('I6b auth.user is scrubbed only when secret-shaped: a conventional user name in server text survives', async () => {
-  const r = await run(once('ls-refs', 0, () => concat([pkt(`ERR denied to x-access-token and git (token ${TOK})\n`), FLUSH])), { opts: { auth: { user: 'x-access-token', token: TOK } } });
+  const r = await run(once('ls-refs', 0, () => concat([unwrap(pkt(`ERR denied to x-access-token and git (token ${TOK})\n`)), FLUSH])), { opts: { auth: { user: 'x-access-token', token: TOK } } });
   assert.equal(r.error.code, 'remote_error');
   assert.match(r.error.message, /denied to x-access-token and git \(token \[redacted\]\)/);
   assert.ok(!JSON.stringify(r.exporter.lines).includes(TOK));
@@ -367,14 +373,14 @@ test('I6c a 3xx is never followed: cross-origin on the GET and the POST → type
     for (const s of [301, 302, 303, 307, 308]) {
       status = s;
       const ex = arrayExporter();
-      const c = new GitHttp(`${redirector.url}/r.git`, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } });
-      const get = await c.discover().catch(e => e);
+      const c = unwrap(GitHttp.create(`${redirector.url}/r.git`, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } }));
+      const get = await unwrapAsync(c.discover()).catch(e => e);
       assert.equal(get.code, 'http', `GET ${s}: ${get.code} ${get.message}`); assert.equal(get.status, s);
       assert.match(get.message, new RegExp(`^HTTP ${s} git-upload-pack advertisement: redirected to ${other.url}/r.git/info/refs; ply does not follow redirects`));
-      const post = await c.lsRefs(['refs/heads/']).catch(e => e);
+      const post = await unwrapAsync(c.lsRefs(['refs/heads/'])).catch(e => e);
       assert.equal(post.code, 'http', `POST ${s}: ${post.code} ${post.message}`); assert.equal(post.status, s);
       assert.match(post.message, /redirected to .*\/r\.git\/git-upload-pack; ply does not follow redirects/);
-      const edit = await editFile(`${redirector.url}/r.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } }).catch(e => e);
+      const edit = await unwrapAsync(editFile(`${redirector.url}/r.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } })).catch(e => e);
       assert.equal(edit.code, 'http', `edit ${s}: ${edit.code} ${edit.message}`);
       assert.ok(!JSON.stringify(ex.lines).includes(TOK));
     }
@@ -390,7 +396,7 @@ test('I6c a same-origin 301 on the POST (a moved repository) is a clear http err
     res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>repository page</html>');
   });
   try {
-    const err = await readFile(`${srv2.url}/old.git`, { path: 'README.md' }, { tracer: new Tracer(), auth: { token: TOK } }).catch(e => e);
+    const err = await unwrapAsync(readFile(`${srv2.url}/old.git`, { path: 'README.md' }, { tracer: new Tracer(), auth: { token: TOK } })).catch(e => e);
     assert.equal(err.code, 'http', `${err.code} ${err.message}`); assert.equal(err.status, 301);
     assert.equal(err.message, `HTTP 301 git-upload-pack: redirected to ${srv2.url}/new.git/git-upload-pack; ply does not follow redirects (update the remote URL)`);
     assert.equal(err.location, `${srv2.url}/new.git/git-upload-pack`);
@@ -401,7 +407,7 @@ test('I6c a same-origin 301 on the POST (a moved repository) is a clear http err
 test('I6c a Location carrying a query or the credential is quoted as origin + path, scrubbed', async () => {
   const srv2 = await listen((req, res) => { res.writeHead(302, { location: `https://elsewhere.example/${TOK}/x?sig=${TOK}` }); res.end(); });
   try {
-    const err = await new GitHttp(`${srv2.url}/r.git`, { tracer: new Tracer(), auth: { token: TOK } }).lsRefs().catch(e => e);
+    const err = await unwrapAsync(unwrap(GitHttp.create(`${srv2.url}/r.git`, { tracer: new Tracer(), auth: { token: TOK } })).lsRefs()).catch(e => e);
     assert.equal(err.code, 'http');
     assert.equal(err.location, 'https://elsewhere.example/[redacted]/x');
     assert.ok(!reachableText(err).includes(TOK));
@@ -414,7 +420,7 @@ const appendLsRefAttrs = (bytes, extra) => {
   while (o < bytes.length) {
     const len = parseInt(new TextDecoder().decode(bytes.subarray(o, o + 4)), 16);
     if (len < 4) { out.push(bytes.subarray(o, o + 4)); o += 4; continue; }
-    out.push(pkt(`${new TextDecoder().decode(bytes.subarray(o + 4, o + len)).replace(/\n$/, '')} ${extra}\n`)); o += len;
+    out.push(unwrap(pkt(`${new TextDecoder().decode(bytes.subarray(o + 4, o + len)).replace(/\n$/, '')} ${extra}\n`))); o += len;
   }
   return concat(out);
 };
@@ -459,10 +465,10 @@ test('I6d URL userinfo authenticates fetch and push with the Authorization git s
       // ply: a read (fetch) and an edit (fetch + push) through the same gate; every request carries git's value
       gate.seen.length = 0;
       const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
-      const read = await readFile(url, { path: FILE }, { tracer });
+      const read = await unwrapAsync(readFile(url, { path: FILE }, { tracer }));
       const parts = []; for await (const c of read.stream) parts.push(c);
       assert.equal(new TextDecoder().decode(concat(parts)), ORIG, `${name}: read`);
-      const r = await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer });
+      const r = await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer }));
       assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), r.newCommit, `${name}: push landed`);
       assert.ok(gate.seen.some(x => x.path.endsWith('/git-receive-pack')), `${name}: ply pushed through the gate`);
       assert.deepEqual([...new Set(gate.seen.map(x => x.authorization))], gitAuth, `${name}: ply's Authorization`);
@@ -483,9 +489,9 @@ test('I6d a refused URL credential is `auth`; the server echoing it reaches no e
       const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
       const url = `http://${ui}${new URL(gate.url).host}/r.git`;
       const errs = [
-        await readFile(url, { path: FILE }, { tracer }).catch(e => e),
-        await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer }).catch(e => e),
-        await new GitHttp(url, { tracer }).discover().catch(e => e),
+        await unwrapAsync(readFile(url, { path: FILE }, { tracer })).catch(e => e),
+        await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer })).catch(e => e),
+        await unwrapAsync(unwrap(GitHttp.create(url, { tracer })).discover()).catch(e => e),
       ];
       const said = gate.seen.at(-1).authorization;
       assert.ok(said, `${name}: no Authorization sent`);
@@ -501,7 +507,7 @@ test('I6d a refused URL credential is `auth`; the server echoing it reaches no e
       for (const s of [...secrets, said.slice(6), ui]) assert.ok(!dump.includes(s), `${name}: ${JSON.stringify(s)} in a span`);
     }
     // `git@` and `ivar@` alone are names: sent as `git:` / `ivar:` like git does, and not scrubbed from server text
-    const e = await readFile(`http://ivar@${new URL(gate.url).host}/r.git`, { path: FILE }, { tracer: new Tracer() }).catch(x => x);
+    const e = await unwrapAsync(readFile(`http://ivar@${new URL(gate.url).host}/r.git`, { path: FILE }, { tracer: new Tracer() })).catch(x => x);
     assert.equal(gate.seen.at(-1).authorization, `Basic ${btoa('ivar:')}`);
     assert.equal(e.code, 'auth'); assert.match(e.message, /\(ivar:\)/);
   } finally { await gate.close(); }
@@ -512,7 +518,7 @@ test('I6d unusable userinfo or a malformed URL is bad_request before any request
   for (const [name, ui, what] of cases) {
     let calls = 0;
     const fetchImpl = async () => { calls++; throw new Error('should not be called'); };
-    const e = await readFile(`http://${ui}127.0.0.1:1/r.git`, { path: FILE }, { tracer: new Tracer(), fetchImpl }).catch(x => x);
+    const e = await unwrapAsync(readFile(`http://${ui}127.0.0.1:1/r.git`, { path: FILE }, { tracer: new Tracer(), fetchImpl })).catch(x => x);
     assert.equal(e.code, 'bad_request', `${name}: ${e.code} ${e.message}`); assert.equal(e.what, what);
     assert.equal(calls, 0, name);
     assert.ok(!reachableText(e).includes(GHP.slice(0, 12)), `${name}: credential in the error`);
@@ -605,7 +611,7 @@ test('I6e the credential product: every source × user × password cell gets its
       // 1. ply through the accepting gate
       accept.seen.length = 0;
       const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
-      const got = await readFile(urlOf(accept), { path: FILE }, { tracer, auth }).then(async r => { const parts = []; for await (const c of r.stream) parts.push(c); return new TextDecoder().decode(concat(parts)); }, e => e);
+      const got = await unwrapAsync(readFile(urlOf(accept), { path: FILE }, { tracer, auth })).then(async r => { const parts = []; for await (const c of r.stream) parts.push(c); return new TextDecoder().decode(concat(parts)); }, e => e);
       const spans = exporter.lines.flatMap(flattenLine);
       if (want.refused) {
         assert.equal(got?.code, 'bad_request', `${cell}: ${got?.code} ${got?.message}`); assert.equal(got.what, want.refused, cell);
@@ -640,7 +646,7 @@ test('I6e the credential product: every source × user × password cell gets its
       // 3. a refusing server that echoes the credential: `auth`, and the echo is scrubbed everywhere
       if (want.header) {
         const ex2 = arrayExporter();
-        const e = await readFile(urlOf(refuse), { path: FILE }, { tracer: new Tracer({ exporter: ex2 }), auth }).catch(x => x);
+        const e = await unwrapAsync(readFile(urlOf(refuse), { path: FILE }, { tracer: new Tracer({ exporter: ex2 }), auth })).catch(x => x);
         assert.equal(e.code, 'auth', `${cell}: ${e.code} ${e.message}`);
         assert.equal(refuse.seen.at(-1).authorization, want.header, cell);
         if (secrets.length > 2) assert.match(e.message, /\[redacted\]/, `${cell}: the echo was not scrubbed: ${e.message}`);
@@ -659,7 +665,7 @@ test('I6e an Authorization header or a Bearer token that fetch could not send is
     ['bearer, non-ASCII', { bearer: 'tök€n-0123456789' }], ['bearer, control', { bearer: 't\x7fk-0123456789' }], ['bearer, empty', { bearer: '' }]]) {
     let calls = 0;
     const exporter = arrayExporter();
-    const e = await readFile('http://127.0.0.1:1/r.git', { path: FILE }, { tracer: new Tracer({ exporter }), auth, fetchImpl: async () => { calls++; throw new Error('sent'); } }).catch(x => x);
+    const e = await unwrapAsync(readFile('http://127.0.0.1:1/r.git', { path: FILE }, { tracer: new Tracer({ exporter }), auth, fetchImpl: async () => { calls++; throw new Error('sent'); } })).catch(x => x);
     assert.equal(e.code, 'bad_request', `${name}: ${e.code} ${e.message}`); assert.equal(calls, 0, name);
     assert.ok(!reachableText(e).includes('0123456789') && !JSON.stringify(exporter.lines).includes('0123456789'), `${name}: echoed`);
   }
@@ -702,7 +708,7 @@ function splitFetch(bytes) { // v2 fetch response → { shallow, objects: Map oi
     if (inPack) { if (body[0] === 1) parts.push(body.subarray(1)); continue; }
     const line = td.decode(body); if (line.startsWith('shallow ')) shallow.push(line.slice(8).trim()); if (line === 'packfile\n') inPack = true;
   }
-  return { shallow, objects: resolvePack(parsePack(concat(parts), packParseOpts())).objects };
+  return { shallow, objects: unwrap(resolvePack(unwrap(parsePack(concat(parts), unwrap(packParseOpts()))))).objects };
 }
 async function fetchReply(objects, shallow) {
   const { pack } = await buildPack([...objects.values()].map(o => ({ type: o.type, data: o.data })));
@@ -716,7 +722,7 @@ async function mergeVia(R, fault, op = 'merge') {
   const proxy = await startProxy(srv.url, fault);
   const url = `${proxy.url}/${R.name}.git`, opts = { tracer: new Tracer(), limits: withLimits({ requestTimeoutMs: 3000 }) };
   let result = null, error = null;
-  try { result = op === 'merge' ? await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: AUTHOR, message: 'm', time: 1 }, opts) : await rebaseBranch(url, { ref: 'refs/heads/lin', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts); }
+  try { result = op === 'merge' ? await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: AUTHOR, message: 'm', time: 1 }, opts)) : await unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/lin', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts)); }
   catch (e) { error = e; }
   await proxy.close();
   return { result, error, counts: { ...proxy.counts }, main: git(R.bare, ['rev-parse', 'main']).trim(), lin: git(R.bare, ['rev-parse', 'lin']).trim() };
@@ -815,21 +821,21 @@ test('#34 a tree naming `d` twice (file and directory, apart) is pack_corrupt on
   const who = { ...AUTHOR, time: 1700000000 };
   const drain = async r => { if (r?.stream) for await (const _ of r.stream); if (r?.files) for await (const g of r.files) if (g.stream) for await (const _ of g.stream); return r; };
   const ops = {
-    'readFile d': () => readFile(url, { path: 'd' }, opts()).then(drain),
-    'readFile d/f': () => readFile(url, { path: 'd/f' }, opts()).then(drain),
-    'readFile d.x': () => readFile(url, { path: 'd.x' }, opts()).then(drain),
-    'readFile ok.txt': () => readFile(url, { path: 'ok.txt' }, opts()).then(drain),
-    'listTree /': () => listTree(url, {}, opts()),
-    'listTree d': () => listTree(url, { path: 'd' }, opts()),
-    'checkoutTree': () => checkoutTree(url, {}, opts()).then(drain),
-    'checkoutTree d': () => checkoutTree(url, { path: 'd' }, opts()).then(drain),
-    ...Object.fromEntries(['d', 'd/f', 'd.x', 'ok.txt', 'nope'].map(path => [`editFile ${path}`, () => editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'e' }, opts())])),
-    'pushTree': () => pushTree(url, { files: { 'new.txt': 'n\n' }, author: AUTHOR, message: 'p' }, opts()),
-    'mergeBranch main<-other': () => mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/other', author: AUTHOR, message: 'm', time: 1 }, opts()),
-    'mergeBranch other<-main': () => mergeBranch(url, { ref: 'refs/heads/other', from: 'refs/heads/main', author: AUTHOR, message: 'm', time: 1 }, opts()),
-    'rebaseBranch other onto main': () => rebaseBranch(url, { ref: 'refs/heads/other', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts()),
-    'cherryPick other onto main': () => cherryPick(url, { ref: 'refs/heads/main', commit: R.c2, committer: who, time: 1 }, opts()),
-    'revertCommit main': () => revertCommit(url, { ref: 'refs/heads/main', commit: R.c1, committer: who, time: 1 }, opts()),
+    'readFile d': () => unwrapAsync(readFile(url, { path: 'd' }, opts())).then(drain),
+    'readFile d/f': () => unwrapAsync(readFile(url, { path: 'd/f' }, opts())).then(drain),
+    'readFile d.x': () => unwrapAsync(readFile(url, { path: 'd.x' }, opts())).then(drain),
+    'readFile ok.txt': () => unwrapAsync(readFile(url, { path: 'ok.txt' }, opts())).then(drain),
+    'listTree /': () => unwrapAsync(listTree(url, {}, opts())),
+    'listTree d': () => unwrapAsync(listTree(url, { path: 'd' }, opts())),
+    'checkoutTree': () => unwrapAsync(checkoutTree(url, {}, opts())).then(drain),
+    'checkoutTree d': () => unwrapAsync(checkoutTree(url, { path: 'd' }, opts())).then(drain),
+    ...Object.fromEntries(['d', 'd/f', 'd.x', 'ok.txt', 'nope'].map(path => [`editFile ${path}`, () => unwrapAsync(editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'e' }, opts()))])),
+    'pushTree': () => unwrapAsync(pushTree(url, { files: { 'new.txt': 'n\n' }, author: AUTHOR, message: 'p' }, opts())),
+    'mergeBranch main<-other': () => unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/other', author: AUTHOR, message: 'm', time: 1 }, opts())),
+    'mergeBranch other<-main': () => unwrapAsync(mergeBranch(url, { ref: 'refs/heads/other', from: 'refs/heads/main', author: AUTHOR, message: 'm', time: 1 }, opts())),
+    'rebaseBranch other onto main': () => unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/other', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts())),
+    'cherryPick other onto main': () => unwrapAsync(cherryPick(url, { ref: 'refs/heads/main', commit: R.c2, committer: who, time: 1 }, opts())),
+    'revertCommit main': () => unwrapAsync(revertCommit(url, { ref: 'refs/heads/main', commit: R.c1, committer: who, time: 1 }, opts())),
     'fetchObject tree': () => fetchObject(createTransport(url, opts()), { oid: R.tree, expectType: TYPE.TREE }),
     'fetchPackTree0 harvest': () => fetchPackTree0(createTransport(url, { ...opts(), quirks: { treeFilter: 'blob:none' } }), { wants: [R.c1], filter: 'tree:0', deepen: 1 }),
   };
@@ -852,7 +858,7 @@ test('ambiguous push (response lost after server applied it): ref == our commit;
   assert.notEqual(r.head, r.repo.head, 'server applied the push');
   assert.equal(r.content, EXPECTED);
   // retry against the real server
-  await assert.rejects(editFile(`${srv.url}/${r.repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer() }), e => e.code === 'match_count');
+  await assert.rejects(unwrapAsync(editFile(`${srv.url}/${r.repo.name}.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer() })), e => e.code === 'match_count');
   assert.equal(gitBuf(r.repo.bare, ['cat-file', 'blob', `main:${FILE}`]).toString(), EXPECTED);
   assert.equal(git(r.repo.bare, ['rev-list', '--count', `${r.repo.head}..main`]).trim(), '1', 'no duplicate commit');
 });
@@ -879,7 +885,7 @@ test('I4 six objects at the per-object cap exceed the inflated aggregate', { tim
   new DataView(hdr.buffer).setUint32(8, 6);
   const body = concat([hdr, entry, entry, entry, entry, entry]);
   const pack = concat([body, new Sha1().update(body).digest()]);
-  assert.throws(() => parsePack(pack, packParseOpts(DEFAULT_LIMITS)), e => {
+  assert.throws(() => unwrap(parsePack(pack, unwrap(packParseOpts(DEFAULT_LIMITS)))), e => {
     assert.equal(e.code, 'limit_exceeded');
     assert.equal(e.what, 'pack inflated bytes');
     assert.equal(e.got, per * 5);
@@ -896,9 +902,9 @@ test('I4 many ref-deltas resolve in linear lookups', { timeout: 30_000 }, async 
   const objects = [{ type: TYPE.BLOB, data: base }];
   for (let i = 0; i < n; i++) objects.push({ type: TYPE.BLOB, data: delta, baseOid });
   const { pack } = await buildPack(objects);
-  const parsed = parsePack(pack, packParseOpts());
+  const parsed = unwrap(parsePack(pack, unwrap(packParseOpts())));
   const t0 = Date.now();
-  const resolved = resolvePack(parsed);
+  const resolved = unwrap(resolvePack(parsed));
   const dt = Date.now() - t0;
   assert.equal(resolved.stats.baseLookups, n);
   assert.ok(dt < 3_000, `resolvePack took ${dt}ms`);
@@ -908,7 +914,7 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   for (let n = 1; n <= 4; n++) {
     const objects = Array.from({ length: n }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(String(i + 1)) }));
     const { pack } = await buildPack(objects);
-    const parsed = parsePack(pack, packParseOpts());
+    const parsed = unwrap(parsePack(pack, unwrap(packParseOpts())));
     assert.ok(parsed.stats.inflated <= DEFAULT_LIMITS.maxInflatedTotal);
     assert.ok(parsed.stats.inflated <= parsed.objects.reduce((s, o) => s + o.size, 0));
   }
@@ -919,7 +925,7 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   new DataView(hdr.buffer).setUint32(8, 1);
   const body = concat([hdr, encodeObjHeader(3, declared), Uint8Array.of(0)]);
   const pack = concat([body, new Sha1().update(body).digest()]);
-  assert.throws(() => parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 }), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
+  assert.throws(() => unwrap(parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 })), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
 });
 
 const pktLine = s => { const b = te.encode(s); return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); };
@@ -954,9 +960,9 @@ test('I4 a blob fetch whose object header never ends: pack_corrupt within the fi
   const limits = withLimits({ requestTimeoutMs: 5000 });
   const refused = e => e.code === 'pack_corrupt' && e.message === 'pack: size varint longer than 64 bits';
   const paths = {
-    edit: f => editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }),
-    read: f => readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f }),
-    checkout: async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream); },
+    edit: f => unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f })),
+    read: f => unwrapAsync(readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f })),
+    checkout: async f => { const r = await unwrapAsync(checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 })); for await (const g of r.files) if (g.stream) for await (const _ of g.stream); },
   };
   const seen = {};
   for (const [name, op] of Object.entries(paths)) {
@@ -1009,10 +1015,10 @@ const STORED_FRAME = pktRaw(concat([Uint8Array.of(1), EMPTY_STORED]));
 const endlessStored = size => endlessBody({ first: concat([pktLine('packfile\n'), pktRaw(concat([Uint8Array.of(1), PACK_ONE, encodeObjHeader(3, size), Uint8Array.of(0x78, 0x01), EMPTY_STORED.subarray(0, 65000)]))]), frame: STORED_FRAME });
 
 const streamedPaths = (url, limits) => ({
-  edit: f => editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }),
-  read: async f => { const r = await readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f }); for await (const _ of r.stream) void _; },
-  'checkout single': async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
-  'checkout batched': async f => { const r = await checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f }); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
+  edit: f => unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f })),
+  read: async f => { const r = await unwrapAsync(readFile(url, { path: FILE }, { tracer: new Tracer(), limits, fetchImpl: f })); for await (const _ of r.stream) void _; },
+  'checkout single': async f => { const r = await unwrapAsync(checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f, batch: 1 })); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
+  'checkout batched': async f => { const r = await unwrapAsync(checkoutTree(url, {}, { tracer: new Tracer(), limits, fetchImpl: f })); for await (const g of r.files) if (g.stream) for await (const _ of g.stream) void _; },
 });
 
 // The probe behind this test: on the previous source, readFile accepted 793.6 MiB and editFile 632.7 MiB of this stream in
@@ -1068,7 +1074,7 @@ test('I4 maxPackBytes bounds the streamed body on every path: limit_exceeded wit
   // band 2 (progress) is the other stream a fetch response carries; it is held to the same cap
   const PROGRESS_FRAME = pktRaw(concat([Uint8Array.of(2), new Uint8Array(65515).fill(0x2e)]));
   const { served, f } = endlessBody({ first: concat([pktLine('packfile\n'), PROGRESS_FRAME]), frame: PROGRESS_FRAME });
-  const err = await editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f }).then(() => null, e => e);
+  const err = await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'adv' }, { tracer: new Tracer(), limits, fetchImpl: f })).then(() => null, e => e);
   assert.ok(err && err.code === 'limit_exceeded' && err.what === 'progress bytes', `progress flood: ${err?.code}: ${err?.message}`);
   assert.ok(served.bytes <= limits.maxPackBytes + 2 * PROGRESS_FRAME.length, `progress flood: ${served.bytes} B served`);
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head, 'I2: ref unchanged');
@@ -1230,12 +1236,12 @@ test('I4 #36 matrix: path × body shape × declared size × cap, every cell, nev
     const drain = async s => { const parts = []; for await (const c of s) parts.push(c); return concat(parts); };
     const files = async r => { const got = new Map(); for await (const g of r.files) got.set(g.path, g.stream ? await drain(g.stream) : null); return got; };
     const ops = {
-      edit: () => editFile(repo.url, { path: 'a.bin', find: MX.find, replace: MX.repl, author: AUTHOR, message: 'mx' }, opts),
-      read: async () => drain((await readFile(repo.url, { path: 'a.bin' }, opts)).stream),
-      'checkout single': async () => (await files(await checkoutTree(repo.url, {}, { ...opts, batch: 1 }))).get('a.bin'),
-      'checkout batched': async () => (await files(await checkoutTree(repo.url, {}, opts))).get('a.bin'),
-      fetchObject: async () => (await new GitHttp(repo.url, opts).fetchObject({ oid: repo.oid, filter: null, expectType: TYPE.BLOB })).data,
-      fetchPack: async () => (await new GitHttp(repo.url, opts).fetchPack({ wants: [repo.oid] })).objects.get(repo.oid).data,
+      edit: () => unwrapAsync(editFile(repo.url, { path: 'a.bin', find: MX.find, replace: MX.repl, author: AUTHOR, message: 'mx' }, opts)),
+      read: async () => drain((await unwrapAsync(readFile(repo.url, { path: 'a.bin' }, opts))).stream),
+      'checkout single': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, { ...opts, batch: 1 })))).get('a.bin'),
+      'checkout batched': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, opts)))).get('a.bin'),
+      fetchObject: async () => (await unwrapAsync(unwrap(GitHttp.create(repo.url, opts)).fetchObject({ oid: repo.oid, filter: null, expectType: TYPE.BLOB }))).data,
+      fetchPack: async () => (await unwrapAsync(unwrap(GitHttp.create(repo.url, opts)).fetchPack({ wants: [repo.oid] }))).objects.get(repo.oid).data,
     };
     const t0 = performance.now();
     const res = await ops[path]().then(v => ({ v }), e => ({ e }));

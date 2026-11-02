@@ -29,7 +29,7 @@ const { CODES } = await import(join(ROOT, 'src/errors.ts'));
 const CODE_SET = new Set(CODES);
 // Files that define or document the taxonomy rather than decide with it.
 const SKIP_PRODUCERS = new Set(['src/errors.ts', 'src/errors-doc.ts']);
-// The constructors a site calls: `fail` (unconverted modules import `thrown as fail`), and plyError itself.
+// The constructors a site calls: `fail` (an Err), plyError itself, and `thrown` (its pre-0.2.0 name, for old trees).
 const CONSTRUCTORS = new Set(['fail', 'thrown', 'plyError']);
 // Source keeps `.js` specifiers for .ts files (test/ts-resolve.mjs): the file an import names is whichever exists.
 const srcFile = spec => { const js = `src/${spec.slice(2)}`; const ts = js.replace(/\.js$/, '.ts'); return existsSync(join(ROOT, ts)) ? ts : js; };

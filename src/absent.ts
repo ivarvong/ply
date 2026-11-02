@@ -37,6 +37,46 @@ export function unwrapOrAbsent<T>(value: Option<T>): T | undefined {
   return value.value;
 }
 
+// A field of any value, as `value?.[key]` read it: None when the value is not an object, lacks the field, or holds
+// null or the platform missing value there. The one reader for thrown values and foreign records.
+export function field(value: unknown, key: string): Option<unknown> {
+  if (typeof value !== 'object' || value === null || !(key in value)) return none;
+  return fromNullish(Reflect.get(value, key));
+}
+
+// ---- the input edge ----
+// What a caller may leave out of a record: every key optional, and an explicit missing value means the same as
+// leaving the key out. Entry points declare their options as Input<Config> and parse them once with withDefaults;
+// past that line the record is total and no code asks whether a field is there.
+export type Input<T> = { readonly [K in keyof T]?: T[K] | undefined };
+
+
+// Fill every key the caller left out (or passed as the missing value) from `defaults`. Keys outside `defaults` are not
+// read: the config's type is the schema. `defaults` is the caller's fresh record (a mutable default such as a quirks
+// object must not be shared between two calls), so it is filled in place and returned.
+export function withDefaults<T extends object>(input: Input<T> | null | undefined, defaults: T): T {
+  if (input === null || isMissing(input)) return defaults;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the keys of T, as Object.keys cannot type them
+  for (const key of Object.keys(defaults) as Array<keyof T>) {
+    const given = input[key];
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Input<T>[K] without its missing value is T[K]
+    if (!isMissing(given)) defaults[key] = given as T[keyof T];
+  }
+  return defaults;
+}
+
+// A record the caller owns and shares between calls (a transport's learned quirks): fill the keys it lacks in place,
+// so the caller's object stays the one every later call sees, and return it as the total type.
+export function fillIn<T extends object>(target: Input<T>, defaults: T): T {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the keys of T, as Object.keys cannot type them
+  for (const key of Object.keys(defaults) as Array<keyof T>) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a writable view of the caller's record, filled key by key
+    if (isMissing(target[key])) (target as { [K in keyof T]: T[K] })[key] = defaults[key];
+  }
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- every key of T is now present
+  return target as T;
+}
+
 // Direct index read: a negative index is absent, not the element from the end (that is Array#at's other behaviour).
 type Indexed<T> = ArrayLike<T> & { at(index: number): T | undefined };
 

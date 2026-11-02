@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpRoot, makeBareRepo, startGitServer, commitFiles, git } from '../server.js';
 import { editFile } from '../../src/edit.js';
 import { readFile, openBlob } from '../../src/read.js';
-import { fetchObject } from '../../src/fetch.js';
+import { fetchObject as fetchObjectR } from '../../src/fetch.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../../src/limits.js';
 import { buildPack, encodeObjHeader, spliceDelta, zlibDeflate } from '../../src/pack.js';
@@ -19,7 +19,10 @@ import { hashObject, TYPE } from '../../src/objects.js';
 import { Sha1 } from '../../src/sha1.js';
 import { concat, te } from '../../src/bytes.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
 const FIND = 'M';
 const AUTHOR = { name: 'adv', email: 'adv@x' };
 const FRAME = 8;
@@ -63,8 +66,8 @@ function intercept(oid, pack) {
   return async (url, init) => {
     const req = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
     if (!req.includes('command=fetch\n') || req.includes('filter ') || !req.includes(`want ${oid}\n`)) return fetch(url, init);
-    const frames = [pkt(te.encode('packfile\n'))];
-    for (let i = 0; i < pack.length; i += FRAME) frames.push(pkt(concat([Uint8Array.of(1), pack.subarray(i, i + FRAME)])));
+    const frames = [unwrap(pkt(te.encode('packfile\n')))];
+    for (let i = 0; i < pack.length; i += FRAME) frames.push(unwrap(pkt(concat([Uint8Array.of(1), pack.subarray(i, i + FRAME)]))));
     frames.push(FLUSH);
     let i = 0;
     const stream = new ReadableStream({
@@ -107,11 +110,11 @@ test('declared size one under, at, and one over the inflated length, on read and
     const where = `${path} n=${n} declared=${declared}`;
     let err = null, got = null;
     if (path === 'read') {
-      const res = await readFile(url, { path: 'a.bin' }, opts);
+      const res = await unwrapAsync(readFile(url, { path: 'a.bin' }, opts));
       const parts = [];
       try { for await (const c of res.stream) parts.push(c); got = concat(parts); } catch (e) { err = e; }
     } else {
-      try { got = await editFile(url, { path: 'a.bin', find: FIND, replace: 'N', author: AUTHOR, message: 'lie' }, opts); }
+      try { got = await unwrapAsync(editFile(url, { path: 'a.bin', find: FIND, replace: 'N', author: AUTHOR, message: 'lie' }, opts)); }
       catch (e) { err = e; }
     }
     // each cell has its own bare repo; read the ref the operation left, then put main back only so a later
@@ -145,7 +148,7 @@ test('a header that fails before the body: a raw reset, and a bad signature git 
   const oid = 'a'.repeat(40);
   const limits = DEFAULT_LIMITS;
   const transport = frames => ({
-    kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: {}, scrub: null,
+    kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: {}, objects: new Map(), scrub: null,
     frames, advertise: async () => { throw new Error('unused'); },
   });
   // openBlob returns the header failure (#145); it does not reject
@@ -203,7 +206,7 @@ test('blob:none object cap: one under, at, and one past each size the pack meets
       yield { kind: 'flush' };
     };
     const t = {
-      kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: { treeFilter: 'blob:none' }, scrub: null, frames,
+      kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks: { treeFilter: 'blob:none' }, objects: new Map(), scrub: null, frames,
       advertise: async () => { throw new Error('unused') },
     };
     const where = `base ${b.baseN} +${b.extraN} delta ${b.deltaN} result ${b.resultN} cap ${b.cap}`;

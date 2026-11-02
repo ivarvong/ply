@@ -10,6 +10,7 @@ import { SIDEBAND_PACK } from '../src/format.js';
 import { plyError } from '../src/errors.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { Tracer } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const G = o => new Map(Object.entries(o).map(([k, parents]) => [k, { parents }]));
 
@@ -52,23 +53,23 @@ function blobServer(data, failures) {
 test('attributeDrivers: a failed lookup is forgotten, a successful one shared (#79)', async () => {
   const attrs = te.encode('*.bin -merge\n*.u merge=union\n');
   const blob = hashObject('blob', attrs);
-  const root = encodeTree([{ mode: '100644', name: '.gitattributes', oid: blob }]);
+  const root = unwrap(encodeTree([{ mode: '100644', name: '.gitattributes', oid: blob }]));
   const tree = hashObject('tree', root);
   const t = blobServer(attrs, 1);
   const driverFor = attributeDrivers(t, new Map([[tree, root]]), tree);
-  await assert.rejects(driverFor('a.bin'), e => e.code === 'network');
+  await assert.rejects(unwrapAsync(driverFor('a.bin')), e => e.code === 'network');
   // it answered the cached rejection for every later path of the directory; now it asks again
-  assert.equal(await driverFor('a.bin'), 'binary');
+  assert.equal(await unwrapAsync(driverFor('a.bin')), 'binary');
   assert.equal(t.requests, 2);
-  assert.equal(await driverFor('b.u'), 'union');
-  assert.equal(await driverFor('c.txt'), 'text');
+  assert.equal(await unwrapAsync(driverFor('b.u')), 'union');
+  assert.equal(await unwrapAsync(driverFor('c.txt')), 'text');
   assert.equal(t.requests, 2, 'the successful lookup is shared by every later path');
   // concurrent lookups share one pending request, and a failure reaches each of them
   const u = blobServer(attrs, 1);
   const shared = attributeDrivers(u, new Map([[tree, root]]), tree);
-  const both = await Promise.allSettled([shared('x.bin'), shared('y.bin')]);
+  const both = await Promise.allSettled([unwrapAsync(shared('x.bin')), unwrapAsync(shared('y.bin'))]);
   assert.deepEqual(both.map(r => r.status), ['rejected', 'rejected']);
   assert.equal(u.requests, 1);
-  assert.deepEqual(await Promise.all([shared('x.bin'), shared('y.u')]), ['binary', 'union']);
+  assert.deepEqual(await Promise.all([unwrapAsync(shared('x.bin')), unwrapAsync(shared('y.u'))]), ['binary', 'union']);
   assert.equal(u.requests, 2);
 });

@@ -13,6 +13,7 @@ import { pktInit, pktStep, FLUSH } from '../../src/pktline.js';
 import { concat, te, indexOfBytes } from '../../src/bytes.js';
 import { ZERO_OID } from '../../src/push.js';
 import * as space from './push-outcome.space.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const ev = (name, tag, extra = {}) => {
   const vs = space.axis(name).variants.filter(v => v.tag === tag && Object.entries(extra).every(([k, x]) => (typeof x === 'string' && typeof v[k] === 'object' ? v[k].tag === x : v[k] === x)));
@@ -27,8 +28,8 @@ export const cellOf = spec => Object.fromEntries(space.AXES.map(a => {
 
 const commit = (msg, parents) => {
   const blob = te.encode(`${msg}\n`);
-  const tree = encodeTree([{ mode: '100644', name: 'f', oid: hashObject('blob', blob) }]);
-  const c = encodeCommit({ tree: hashObject('tree', tree), parents, author: 'a <a@x> 1700000000 +0000', message: `${msg}\n` });
+  const tree = unwrap(encodeTree([{ mode: '100644', name: 'f', oid: hashObject('blob', blob) }]));
+  const c = unwrap(encodeCommit({ tree: hashObject('tree', tree), parents, author: 'a <a@x> 1700000000 +0000', message: `${msg}\n` }));
   return { oid: hashObject('commit', c), objects: [{ type: TYPE.COMMIT, data: c }, { type: TYPE.TREE, data: tree }, { type: TYPE.BLOB, data: blob }] };
 };
 const C0 = commit('c0', []), C1 = commit('c1', [C0.oid]);
@@ -84,7 +85,7 @@ export const SCENARIOS = [
 // band 2 removed; runs of empty band-1 packets (keepalives) collapsed to one
 function normalize(bytes, sideband) {
   if (!sideband) return bytes;
-  const r = pktStep(pktInit(), bytes);
+  const r = unwrap(pktStep(pktInit(), bytes));
   const out = []; let prevKeepalive = false;
   for (const f of r.frames) {
     if (f.kind === 'flush') { out.push(FLUSH); prevKeepalive = false; continue; }
@@ -101,7 +102,7 @@ function normalize(bytes, sideband) {
 
 // what besides the report git sent on the side-band: band-2 frames, and empty band-1 keepalives before / after the report
 function extras(bytes) {
-  const r = pktStep(pktInit(), bytes);
+  const r = unwrap(pktStep(pktInit(), bytes));
   const x = { band2: 0, kaBefore: 0, kaAfter: 0 }; let reported = false;
   for (const f of r.frames) {
     if (f.kind !== 'data') continue;
@@ -133,10 +134,10 @@ export async function observeAll() {
       const cell = cellOf(spec);
       const n = N[cell.refs.tag];
       const bare = makeBareRepo(root, `s${id}`);
-      const seed = new GitHttp(`${srv.url}/s${id}.git`, { tracer: new Tracer({ exporter: arrayExporter() }) });
+      const seed = unwrap(GitHttp.create(`${srv.url}/s${id}.git`, { tracer: new Tracer({ exporter: arrayExporter() }) }));
       id++;
       // r0..r2 at C0; C1 exists on the server (refs/keep/c1) so a stale old oid names a known object, unless unknownOld
-      await seed.push({ commands: [...space.REFS.map(ref => ({ ref, oldOid: ZERO_OID, newOid: C0.oid })), ...(unknownOld ? [] : [{ ref: 'refs/keep/c1', oldOid: ZERO_OID, newOid: C1.oid }])], objects: unknownOld ? C0.objects : [...C0.objects, ...C1.objects], sideband: false });
+      await unwrapAsync(seed.push({ commands: [...space.REFS.map(ref => ({ ref, oldOid: ZERO_OID, newOid: C0.oid })), ...(unknownOld ? [] : [{ ref: 'refs/keep/c1', oldOid: ZERO_OID, newOid: C1.oid }])], objects: unknownOld ? C0.objects : [...C0.objects, ...C1.objects], sideband: false }));
       SETUP[setup](bare);
       const del = cell.commands.tag === 'deleteOnly';
       const commands = space.REFS.slice(0, n).map((ref, i) => ({ ref, oldOid: stale.includes(i) ? C1.oid : C0.oid, newOid: del ? ZERO_OID : C1.oid }));
@@ -150,10 +151,10 @@ export async function observeAll() {
         if (f.drop) throw new TypeError('fetch failed (injected: connection reset)');
         return new Response(bytes, { status: res.status, headers: res.headers });
       };
-      const client = new GitHttp(`${srv.url}/s${id - 1}.git`, { fetchImpl, tracer: new Tracer({ exporter: arrayExporter() }) });
+      const client = unwrap(GitHttp.create(`${srv.url}/s${id - 1}.git`, { fetchImpl, tracer: new Tracer({ exporter: arrayExporter() }) }));
       const before = git(bare, ['for-each-ref', '--format=%(refname) %(objectname)']);
       let err = null;
-      try { await client.push({ commands, objects: del ? [] : C1.objects, sideband: cell.framing.tag === 'sideband', reportV2: cell.format.tag === 'v2', atomic: cell.atomic.tag === 'on' }); } catch (e) { err = e; }
+      try { await unwrapAsync(client.push({ commands, objects: del ? [] : C1.objects, sideband: cell.framing.tag === 'sideband', reportV2: cell.format.tag === 'v2', atomic: cell.atomic.tag === 'on' })); } catch (e) { err = e; }
       const after = git(bare, ['for-each-ref', '--format=%(refname) %(objectname)']);
       const at = (text, ref) => text.split('\n').find(l => l.startsWith(`${ref} `)) ?? null;
       const moved = commands.map(c => c.ref).filter(ref => at(before, ref) !== at(after, ref));

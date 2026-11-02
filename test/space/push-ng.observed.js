@@ -22,6 +22,7 @@ const g = (cwd, args, opts = {}) => git(cwd, args, { env: ENV, ...opts }).trim()
 const ROOT_USER = process.getuid?.() === 0;
 // the local git's era (space axis `era`): a cell of the other era is derived on this run (CI runs git 2.56, a laptop may run 2.50)
 import { gitVersion } from '../gitversion.js';
+import { unwrap } from '../unwrap.js';
 const [MAJ, MIN] = gitVersion();
 export const LOCAL_ERA = MAJ > 2 || (MAJ === 2 && MIN >= 51) ? 'v2.51+' : 'v2.50';
 export const GIT_VERSION = `${MAJ}.${MIN}`;
@@ -168,8 +169,8 @@ async function observeShard({ concurrency = 4, filter = () => true, shard = [0, 
       if (pack && rec.pack) pack = rec.pack(pack);
       const caps = ['report-status', ...(c.atomic.tag === 'on' ? ['atomic'] : []), ...(cmds.some(x => x.new === space.ZERO) ? ['delete-refs'] : [])];
       const req = concat([
-        ...(rec.shallow ? [pkt(te.encode(`shallow ${fx.oids[rec.shallow]}\n`))] : []),
-        ...cmds.map((x, i) => pkt(te.encode(`${x.old} ${x.new} ${x.ref}${i === 0 ? '\0' + caps.join(' ') : ''}\n`))),
+        ...(rec.shallow ? [unwrap(pkt(te.encode(`shallow ${fx.oids[rec.shallow]}\n`)))] : []),
+        ...cmds.map((x, i) => unwrap(pkt(te.encode(`${x.old} ${x.new} ${x.ref}${i === 0 ? '\0' + caps.join(' ') : ''}\n`)))),
         FLUSH, ...(pack ? [pack] : []),
       ]);
       const res = await run(['receive-pack', '--stateless-rpc', ...(rec.args ?? []), dir], req);

@@ -13,6 +13,7 @@ import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const cell = JSON.parse(process.argv[2]);
 const opts = { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) };
@@ -37,41 +38,41 @@ async function drain(stream) {
 
 const ops = {
   async readFile() {
-    const r = await readFile(cell.url, { ref: cell.ref ?? null, path: cell.path }, opts);
+    const r = await unwrapAsync(readFile(cell.url, { ref: cell.ref ?? null, path: cell.path }, opts));
     const len = await drain(r.stream);
     return { blob: r.blob, size: r.size, len };
   },
   async listTree() {
-    const r = await listTree(cell.url, { ref: cell.ref ?? null, path: cell.path ?? '' }, opts);
+    const r = await unwrapAsync(listTree(cell.url, { ref: cell.ref ?? null, path: cell.path ?? '' }, opts));
     return { tree: r.tree, n: r.entries.length };
   },
   async readLog() {
-    const r = await readLog(cell.url, { ref: cell.ref ?? 'main', limit: cell.limit }, opts);
+    const r = await unwrapAsync(readLog(cell.url, { ref: cell.ref ?? 'main', limit: cell.limit }, opts));
     return { n: r.commits.length, truncated: r.truncated };
   },
   async lsRefs() {
-    const r = await new GitHttp(cell.url, opts).lsRefs(cell.prefixes ?? []);
+    const r = await unwrapAsync(unwrap(GitHttp.create(cell.url, opts)).lsRefs(cell.prefixes ?? []));
     return { n: r.refs.size, head: r.head };
   },
   async editFile() {
-    const r = await editFile(cell.url, { path: cell.path, find: cell.find, replace: cell.replace, author, message: 'sweep', time: when }, opts);
+    const r = await unwrapAsync(editFile(cell.url, { path: cell.path, find: cell.find, replace: cell.replace, author, message: 'sweep', time: when }, opts));
     return { commit: r.newCommit };
   },
   async pushTree() {
     /** @type {Record<string, Uint8Array>} */
     const files = {};
     for (let i = 0; i < cell.nfiles; i++) files[`f/${String(i).padStart(7, '0')}.bin`] = new Uint8Array(cell.size).fill((i + 1) & 255);
-    const r = await pushTree(cell.url, { ref: 'refs/heads/main', files, author, message: 'sweep', time: when }, opts);
+    const r = await unwrapAsync(pushTree(cell.url, { ref: 'refs/heads/main', files, author, message: 'sweep', time: when }, opts));
     return { commit: r.newCommit, noop: r.noop };
   },
   async merge() {
-    const r = await mergeBranch(cell.url, { ref: 'refs/heads/main', from: cell.from, author, message: 'sweep merge', time: when }, opts);
+    const r = await unwrapAsync(mergeBranch(cell.url, { ref: 'refs/heads/main', from: cell.from, author, message: 'sweep merge', time: when }, opts));
     return { outcome: r.outcome, base: r.base };
   },
   async pack() {
     const buf = new Uint8Array(readFileSync(cell.pack));
-    const parsed = parsePack(buf, { limits: opts.limits });
-    const resolved = resolvePack(parsed, () => null, opts.limits);
+    const parsed = unwrap(parsePack(buf, { limits: opts.limits }));
+    const resolved = unwrap(resolvePack(parsed, () => null, opts.limits));
     const hash = createHash('sha1');
     for (const oid of [...resolved.objects.keys()].sort()) hash.update(oid);
     return { n: resolved.objects.size, maxChain: resolved.stats.maxChain, oidsHash: hash.digest('hex') };

@@ -18,15 +18,15 @@
 // path'), so nothing is ever written through a link. Files are opened O_CREAT|O_EXCL ('wx'), which neither follows a symlink nor overwrites; symlink()
 // never replaces. A stream that fails (a blob that does not hash to its oid) removes its file before the error is
 // returned as Err; a checkout that returns Err leaves `dir` partial. A filesystem error that is not EILSEQ is
-// `unsupported` (kind: filesystem). checkoutTree is unmigrated and still throws; a PlyError from it is returned as Err.
+// `unsupported` (kind: filesystem). checkoutTree's Err is checkoutDir's.
 import { mkdir, readdir, lstat, open, symlink, unlink } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a checkout path throughout this file
 import { join } from 'node:path';
 import { fail, isPlyError, plyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { err, ok } from './result.js';
+import { err, getOrElse, ok } from './result.js';
 import type { Err, Result } from './result.js';
-import { limitError, requireLimit } from './limits.js';
+import { limitError, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePath, checkoutPathRefusal } from './validate.js';
 import { concat, encodeBytes } from './bytes.js';
@@ -34,7 +34,7 @@ import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
 import { checkoutTree } from './checkout.js';
 import type { CheckoutFile, CheckoutResult } from './checkout.js';
 import type { ReadOptions } from './read.js';
-import { thrownCode } from './boundary.js';
+import { thrownCodeIs } from './boundary.js';
 import type { HttpAuth } from './http.js';
 import type { Tracer, Span } from './otel.js';
 import type { Quirks, Transport } from './transport.js';
@@ -52,10 +52,15 @@ export const CHECKOUT_BATCH = 1000;
 // A tree name is bytes (#43): one that is not UTF-8 arrives with escaped bytes (bytes.js decodeBytes) and is written as
 // those bytes through a Buffer path, as git writes it. A filesystem that refuses the bytes (APFS: EILSEQ) is a typed
 // refusal naming the path, never a file under a U+FFFD name.
-const fsPath = (dir: string, rel: string): string | Buffer => { const p = join(dir, rel); return p.isWellFormed() ? p : Buffer.from(encodeBytes(p, 'checkout path')); };
+const fsPath = (dir: string, rel: string): Result<string | Buffer, PlyError> => {
+  const p = join(dir, rel);
+  if (p.isWellFormed()) return ok(p);
+  const bytes = encodeBytes(p, 'checkout path');
+  return bytes.ok ? ok(Buffer.from(bytes.value)) : bytes;
+};
 // A wrapper: the call site is the decision point (`refused(path, e)`), so the body stays the `fail()` itself.
 const refused = (path: string, e: unknown) =>
-  (thrownCode(e) === 'EILSEQ' ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
+  (thrownCodeIs(e, 'EILSEQ') ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
 
 const collision = (path: string, why: string): Err<ErrorOf<'bad_request'>> => fail('bad_request', `checkout: ${path} ${why}`, { what: 'checkout path', path });
 
@@ -72,7 +77,7 @@ const filesystem = (path: string, e: unknown): Err<WithKind<ErrorOf<'unsupported
   kinded(plyError('unsupported', `checkout: the filesystem refused ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }), 'filesystem');
 const caught = (e: unknown, path: string): Err<WriteFilesError> => (isPlyError(e) ? err(e) : filesystem(path, e));
 
-// The refusals writeFiles itself builds. A PlyError from validatePath, encodeBytes, requireLimit, or a blob stream
+// The refusals writeFiles itself builds. A PlyError from validatePath, encodeBytes, readLimit, or a blob stream
 // is returned as that error (its own code and miss); it is not re-tagged.
 export type WriteFilesError =
   | WithKind<ErrorOf<'bad_request'>, 'not_empty'>
@@ -92,10 +97,13 @@ async function emptyDir(dir: string): Promise<Result<true, WithKind<ErrorOf<'bad
   return ok(true);
 }
 
-// Effect: read a stream into one buffer, at most `max` bytes (a symlink target).
-async function slurp(stream: ReadableStream<Uint8Array>, max: number): Promise<Result<Uint8Array<ArrayBuffer>, WithKind<ErrorOf<'limit_exceeded'>, 'symlink_target'>>> {
+// Effect: read a stream into one buffer, at most `max` bytes (a symlink target). A stream that errors (a blob that does
+// not hash to its oid) is that error as an Err, like a regular file's.
+async function slurp(stream: ReadableStream<Uint8Array>, max: number, path: string): Promise<Result<Uint8Array<ArrayBuffer>, WriteFilesError>> {
   const parts: Uint8Array[] = []; let n = 0;
-  for await (const c of stream) { n += c.length; if (n > max) return kinded(limitError('symlink target', n, max), 'symlink_target'); parts.push(c); }
+  try {
+    for await (const c of stream) { n += c.length; if (n > max) return kinded(limitError('symlink target', n, max), 'symlink_target'); parts.push(c); }
+  } catch (e) { return caught(e, path); }
   return ok(concat(parts));
 }
 
@@ -106,11 +114,11 @@ async function ensureDir(dir: string, rel: string, made: Set<string>): Promise<R
   const i = rel.lastIndexOf('/');
   const up = await ensureDir(dir, i < 0 ? '' : rel.slice(0, i), made);
   if (!up.ok) return up;
-  let target: string | Buffer;
-  try { target = fsPath(dir, rel); }
-  catch (e) { return caught(e, rel); }
+  const named = fsPath(dir, rel);
+  if (!named.ok) return named;
+  const target = named.value;
   const created = await mkdir(target).then(() => ok(true), (e: unknown): Result<true, WriteFilesError> => {
-    if (thrownCode(e) === 'EEXIST') return ok(true);
+    if (thrownCodeIs(e, 'EEXIST')) return ok(true);
     const bytes = nameBytes(refused(rel, e));
     if (bytes) return bytes;
     return filesystem(rel, e);
@@ -129,14 +137,14 @@ export type WriteFilesOptions = { readonly limits: Limits; readonly platform: st
 // oxlint-disable-next-line eslint/complexity -- see above
 export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>, options: WriteFilesOptions): Promise<Result<Written, WriteFilesError>> {
   const { limits, platform } = options;
-  let maxObject: number;
-  try { maxObject = requireLimit(limits, 'maxObjectSize'); }
-  catch (e) { return caught(e, dir); }
+  const cap = readLimit(limits, 'maxObjectSize');
+  if (!cap.ok) return cap;
+  const maxObject = cap.value;
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;
   const made = new Set(['']);
   const out = { files: 0, bytes: 0, symlinks: 0, gitlinks: 0 };
-  // Pull by hand: a blob that fails before the entry is yielded throws from next(), and that throw is an Err.
+  // Pull by hand: a blob that fails before the entry is yielded rejects next(), and that rejection is an Err.
   // for-await would nest the body one level deeper than the depth cap.
   const iter = files[Symbol.asyncIterator]();
   const stop = async (r: Err<WriteFilesError>): Promise<Err<WriteFilesError>> => { if (iter.return) await iter.return(); return r; };
@@ -146,17 +154,19 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     catch (e) { return caught(e, dir); }
     if (next.done === true) break;
     const f = next.value;
-    try { validatePath(f.path, limits); }
-    catch (e) { return stop(caught(e, f.path)); }
-    const why = checkoutPathRefusal(f.path, f.mode, platform);
+    const valid = validatePath(f.path, limits);
+    if (!valid.ok) return stop(valid);
+    const refusal = checkoutPathRefusal(f.path, f.mode, platform);
+    if (!refusal.ok) return stop(refusal);
+    const why = getOrElse<string | null>(refusal.value, null);
     if (why !== null) {
       // a gitlink has no stream; every other entry does (CheckoutFile)
       if (f.mode !== MODE_COMMIT) await f.stream.cancel().catch(() => { /* refusing: the stream is not read */ });
       return stop(kinded(fail('unsupported', `checkout: git refuses to check out ${JSON.stringify(f.path)} on ${platform}: ${why}`, { what: 'checkout path', path: f.path }).error, 'path_refused'));
     }
-    let full: string | Buffer;
-    try { full = fsPath(dir, f.path); }
-    catch (e) { return stop(caught(e, f.path)); }
+    const named = fsPath(dir, f.path);
+    if (!named.ok) return stop(named);
+    const full = named.value;
     const slash = f.path.lastIndexOf('/');
     const parent = await ensureDir(dir, slash < 0 ? '' : f.path.slice(0, slash), made);
     if (!parent.ok) return stop(parent);
@@ -164,10 +174,10 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     // a regular file or a symlink: checkoutTree streams every entry that is not a gitlink (CheckoutFile)
     const stream = f.stream;
     if (f.mode === MODE_LINK) {
-      const target = await slurp(stream, maxObject);
+      const target = await slurp(stream, maxObject, f.path);
       if (!target.ok) return stop(target);
       const linked = await symlink(Buffer.from(target.value.buffer, target.value.byteOffset, target.value.length), full).then(() => ok(true), (e: unknown): Result<true, WriteFilesError> => {
-        if (thrownCode(e) === 'EEXIST') return kinded(collision(f.path, 'already exists').error, 'collision');
+        if (thrownCodeIs(e, 'EEXIST')) return kinded(collision(f.path, 'already exists').error, 'collision');
         const bytes = nameBytes(refused(f.path, e));
         if (bytes) return bytes;
         return filesystem(f.path, e);
@@ -177,7 +187,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     }
     const opened = await open(full, 'wx', f.mode === MODE_EXEC ? EXEC_MODE : FILE_MODE).then(fh => ok(fh), async (e: unknown): Promise<Result<Awaited<ReturnType<typeof open>>, WriteFilesError>> => {
       await stream.cancel().catch(() => { /* failing: the stream is not read */ });
-      if (thrownCode(e) === 'EEXIST') return kinded(collision(f.path, 'already exists').error, 'collision');
+      if (thrownCodeIs(e, 'EEXIST')) return kinded(collision(f.path, 'already exists').error, 'collision');
       const bytes = nameBytes(refused(f.path, e));
       if (bytes) return bytes;
       return filesystem(f.path, e);
@@ -187,7 +197,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     try {
       for await (const c of stream) { let o = 0; while (o < c.length) o += (await fh.write(c, o, c.length - o)).bytesWritten; out.bytes += c.length; }
     } catch (e) {
-      await fh.close(); await unlink(full).catch(() => { /* failing: the write error is the one reported */ });
+      await fh.close().catch(() => { /* failing: the write error is the one reported */ }); await unlink(full).catch(() => { /* failing: the write error is the one reported */ });
       return stop(caught(e, f.path));
     }
     try { await fh.close(); }
@@ -198,8 +208,7 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
 }
 
 export type CheckoutDirResult = Omit<CheckoutResult, 'files'> & { readonly written: Written };
-// dir is this function's own refusal. Everything else is writeFiles, or a PlyError checkoutTree still throws
-// (checkout.ts is unmigrated). A non-PlyError from checkoutTree is returned as kind filesystem.
+// dir is this function's own refusal. Everything else is writeFiles's Err or checkoutTree's.
 export type CheckoutDirError = WithKind<ErrorOf<'bad_request'>, 'dir'> | WriteFilesError;
 // Absence on a pass-through field is null. ref is a name or null (the remote's HEAD). path '' is the whole tree.
 export type CheckoutDirRequest = { readonly dir: string; readonly ref: string | null; readonly path: string };
@@ -234,10 +243,9 @@ export async function checkoutDir(url: string, request: CheckoutDirRequest, opts
   if (typeof dir !== 'string' || dir === '') return kinded(fail('bad_request', 'dir must be a non-empty string', { what: 'dir' }).error, 'dir');
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;
-  let checked: CheckoutResult;
-  try { checked = await checkoutTree(url, { ref, path }, treeOpts(opts)); }
-  catch (e) { if (isPlyError(e)) return err(e); return filesystem(dir, e); }
-  const { files, ...rest } = checked;
+  const checked = await checkoutTree(url, { ref, path }, treeOpts(opts));
+  if (!checked.ok) return checked;
+  const { files, ...rest } = checked.value;
   const written = await writeFiles(dir, files, { limits: opts.limits, platform: opts.platform });
   if (!written.ok) return written;
   return ok({ ...rest, written: written.value });

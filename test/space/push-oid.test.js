@@ -12,6 +12,7 @@ import { concat, te } from '../../src/bytes.js';
 import { planPush } from '../../src/push.js';
 import { DEFAULT_LIMITS } from '../../src/limits.js';
 import { createHash } from 'node:crypto';
+import { unwrap } from '../unwrap.js';
 
 const ENV = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000' };
 const ZERO = '0'.repeat(40);
@@ -47,7 +48,7 @@ test('push command oids: 6 × 6 shapes, ply against receive-pack', () => {
         assert.equal(planned.error.message, 'push: oids must be 40-hex', where);
       }
       assert.equal(plyOk, LOWER.test(oldOid) && LOWER.test(newOid), where);
-      const line = pkt(te.encode(`${oldOid} ${newOid} ${ref}\0report-status\n`));
+      const line = unwrap(pkt(te.encode(`${oldOid} ${newOid} ${ref}\0report-status\n`)));
       const git = spawnSync('git', ['receive-pack', '--stateless-rpc', dir], { env: ENV, input: concat([line, FLUSH, ...(newOid === ZERO ? [] : [pack])]) });
       const gitOk = ANY_CASE.test(oldOid) && ANY_CASE.test(newOid);
       if (gitOk) {

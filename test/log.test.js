@@ -16,19 +16,27 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { startProxy } from './proxy.js';
-import { readLog, logWindow } from '../src/log.js';
+import { readLog, logWindow, logOn } from '../src/log.js';
+import { fetchPackFiltered } from '../src/fetchpack.js';
+import { isFilterRefusal, isFilterRejection } from '../src/fetch.js';
 import { listTree } from '../src/read.js';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
+import { TYPE } from '../src/objects.js';
+import { DEFAULT_LIMITS } from '../src/limits.js';
 import { pkt } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const N = 5, BIG = 64;
 const LIMITS = { 1: 1, n: N, big: BIG };
 const SHAPES = ['linear', 'merges', 'root', 'exact', 'longer'];
 const SERVERS = ['tree0', 'blobnone'];
 const BEHAVIOURS = ['honest', 'omit-shallow', 'foreign'];
+const APIS = ['readLog', 'logOn'];
 
 let root, cleanup, srv;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -127,7 +135,7 @@ function omitShallow(bytes) {
 async function withForeign(url, reqBody, foreign) {
   const s = Buffer.from(reqBody).toString('latin1'); const at = s.indexOf('want ');
   const cut = at - 4 + parseInt(s.slice(at - 4, at), 16);
-  const body = concat([reqBody.subarray(0, cut), pkt(`want ${foreign}\n`), reqBody.subarray(cut)]);
+  const body = concat([reqBody.subarray(0, cut), unwrap(pkt(`want ${foreign}\n`)), reqBody.subarray(cut)]);
   const res = await fetch(`${url}/git-upload-pack`, { method: 'POST', body, headers: { 'content-type': 'application/x-git-upload-pack-request', 'git-protocol': 'version=2' } });
   return new Uint8Array(await res.arrayBuffer());
 }
@@ -146,14 +154,14 @@ test('logWindow (pure): first parent, truncated, the deepen contract', () => {
   const C = (...parents) => ({ parents });
   const a = 'a'.repeat(40), b = 'b'.repeat(40), c = 'c'.repeat(40), d = 'd'.repeat(40), x = 'e'.repeat(40);
   const m = new Map([[a, C(b, c)], [b, C(d)], [c, C(d)], [d, C()]]);
-  assert.deepEqual(logWindow(m, [], a, 1), { chain: [a], truncated: true, cut: false });
-  assert.deepEqual(logWindow(m, [], a, 3), { chain: [a, b, d], truncated: false, cut: false });
-  assert.deepEqual(logWindow(m, [], a, 9), { chain: [a, b, d], truncated: false, cut: false });
+  assert.deepEqual(unwrap(logWindow(m, [], a, 1)), { chain: [a], truncated: true, cut: false });
+  assert.deepEqual(unwrap(logWindow(m, [], a, 3)), { chain: [a, b, d], truncated: false, cut: false });
+  assert.deepEqual(unwrap(logWindow(m, [], a, 9)), { chain: [a, b, d], truncated: false, cut: false });
   const cutAtB = new Map([[a, C(b, c)], [b, C(d)], [c, C(d)]]);
-  assert.deepEqual(logWindow(cutAtB, [b, c], a, 5), { chain: [a, b], truncated: true, cut: true }, 'a server-side shallow boundary');
-  assert.throws(() => logWindow(cutAtB, [c], a, 5), e => e.code === 'pack_corrupt' && /withheld and .* not reported shallow/.test(e.message));
-  assert.throws(() => logWindow(new Map([...m, [x, C()]]), [], a, 5), e => e.code === 'pack_corrupt' && /not an ancestor/.test(e.message));
-  assert.throws(() => logWindow(new Map([[b, C()]]), [], a, 5), e => e.code === 'pack_corrupt' && /not in the pack/.test(e.message));
+  assert.deepEqual(unwrap(logWindow(cutAtB, [b, c], a, 5)), { chain: [a, b], truncated: true, cut: true }, 'a server-side shallow boundary');
+  assert.throws(() => unwrap(logWindow(cutAtB, [c], a, 5)), e => e.code === 'pack_corrupt' && /withheld and .* not reported shallow/.test(e.message));
+  assert.throws(() => unwrap(logWindow(new Map([...m, [x, C()]]), [], a, 5)), e => e.code === 'pack_corrupt' && /not an ancestor/.test(e.message));
+  assert.throws(() => unwrap(logWindow(new Map([[b, C()]]), [], a, 5)), e => e.code === 'pack_corrupt' && /not in the pack/.test(e.message));
 });
 
 test('readLog: server × shape × limit × behaviour, every cell against git', async () => {
@@ -168,23 +176,43 @@ test('readLog: server × shape × limit × behaviour, every cell against git', a
       const url = `${proxy.url}/${name}.git`;
       for (const [lname, limit] of Object.entries(LIMITS)) {
         const want = oracle(bare, head, limit);
-        for (const server of SERVERS) for (const behaviour of BEHAVIOURS) {
+        for (const server of SERVERS) for (const behaviour of BEHAVIOURS) for (const api of APIS) {
           Object.assign(state, { server, behaviour });
-          const cell = `${server} × ${shape} × limit ${lname} (${limit}) × ${behaviour}`;
+          const cell = `${api} × ${server} × ${shape} × limit ${lname} (${limit}) × ${behaviour}`;
           const fetchesBefore = proxy.log.filter(l => l.stage === 'fetch').length;
           const ex = arrayExporter(); const quirks = {};
-          const run = readLog(url, { ref: 'main', limit }, { tracer: new Tracer({ exporter: ex }), quirks });
+          const tracer = new Tracer({ exporter: ex });
+          const corrupt = behaviour === 'foreign' || (behaviour === 'omit-shallow' && want.cut);
           tally.cells++;
-          if (behaviour === 'foreign' || (behaviour === 'omit-shallow' && want.cut)) {
-            await assert.rejects(run, e => e.code === 'pack_corrupt' && (behaviour === 'foreign' ? /not an ancestor/ : /not reported shallow/).test(e.message), cell);
-            tally.pack_corrupt++;
+          if (api === 'readLog') {
+            const run = unwrapAsync(readLog(url, { ref: 'main', limit }, { tracer, quirks }));
+            if (corrupt) {
+              await assert.rejects(run, e => e.code === 'pack_corrupt' && (behaviour === 'foreign' ? /not an ancestor/ : /not reported shallow/).test(e.message), cell);
+              tally.pack_corrupt++;
+            } else {
+              const got = await run;
+              assert.deepEqual(got, { ref: 'refs/heads/main', oid: head, commits: want.commits, truncated: want.truncated }, cell);
+              const root = spansOf(ex).find(s => s.name === 'git.read_log').attrs;
+              assert.equal(root['git.read_log.filter'], server === 'tree0' ? 'tree:0' : 'blob:none', cell);
+              assert.equal(root['git.read_log.commits'], want.commits.length, cell);
+              assert.equal(root['git.read_log.cut'], false, cell);
+              tally.equal++;
+            }
           } else {
-            const got = await run;
-            assert.deepEqual(got, { ref: 'refs/heads/main', oid: head, commits: want.commits, truncated: want.truncated }, cell);
-            const root = spansOf(ex).find(s => s.name === 'git.read_log').attrs;
-            assert.equal(root['git.read_log.filter'], server === 'tree0' ? 'tree:0' : 'blob:none', cell);
-            assert.equal(root['git.read_log.commits'], want.commits.length, cell);
-            tally.equal++;
+            const got = await logOn(createTransport(url, { tracer, quirks }), { commit: head, limit });
+            if (corrupt) {
+              assert.equal(got.ok, false, cell);
+              assert.equal(got.error.code, 'pack_corrupt', cell);
+              assert.match(got.error.message, behaviour === 'foreign' ? /not an ancestor/ : /not reported shallow/, cell);
+              tally.pack_corrupt++;
+            } else {
+              assert.equal(got.ok, true, cell);
+              assert.deepEqual(got.value.commits, want.commits, cell);
+              assert.equal(got.value.truncated, want.truncated, cell);
+              assert.equal(got.value.cut, false, cell);
+              assert.equal(got.value.filter, server === 'tree0' ? 'tree:0' : 'blob:none', cell);
+              tally.equal++;
+            }
           }
           // one fetch; on the blob:none server one 400 first (learned into quirks)
           assert.equal(proxy.log.filter(l => l.stage === 'fetch').length - fetchesBefore, server === 'tree0' ? 1 : 2, `${cell}: fetches`);
@@ -193,7 +221,7 @@ test('readLog: server × shape × limit × behaviour, every cell against git', a
       }
     }
   } finally { await proxy.close(); }
-  assert.equal(tally.cells, SERVERS.length * SHAPES.length * Object.keys(LIMITS).length * BEHAVIOURS.length);
+  assert.equal(tally.cells, APIS.length * SERVERS.length * SHAPES.length * Object.keys(LIMITS).length * BEHAVIOURS.length);
   console.log(`  ${tally.cells} cells: ${tally.equal} equal to git, ${tally.pack_corrupt} pack_corrupt as predicted`);
 });
 
@@ -205,9 +233,16 @@ test('readLog on a shallow server repository: the log stops at the server\'s cut
   for (const server of SERVERS) {
     const proxy = await startProxy(srv.url, serverFault({ server, behaviour: 'honest' }));
     try {
-      const got = await readLog(`${proxy.url}/log-shallow.git`, { ref: 'main', limit: N }, { tracer: new Tracer() });
-      assert.deepEqual(got.commits.map(c => c.oid), git(bare, ['rev-list', '--first-parent', head]).trim().split('\n'), server);
+      const got = await unwrapAsync(readLog(`${proxy.url}/log-shallow.git`, { ref: 'main', limit: N }, { tracer: new Tracer() }));
+      const oids = git(bare, ['rev-list', '--first-parent', head]).trim().split('\n');
+      assert.deepEqual(got.commits.map(c => c.oid), oids, server);
       assert.equal(got.commits.length, 3); assert.equal(got.truncated, true, 'history continues past the cut');
+      const win = await logOn(createTransport(`${proxy.url}/log-shallow.git`, { tracer: new Tracer() }), { commit: head, limit: N });
+      assert.equal(win.ok, true, server);
+      assert.deepEqual(win.value.commits.map(c => c.oid), oids, `${server} logOn`);
+      assert.equal(win.value.truncated, true);
+      assert.equal(win.value.cut, true, `${server}: the chain stopped before the limit, on the server's shallow line`);
+      assert.equal(win.value.filter, server === 'tree0' ? 'tree:0' : 'blob:none');
     } finally { await proxy.close(); }
   }
 });
@@ -217,24 +252,29 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   git(bare, ['tag', '-a', '-m', 'annotated', 'v1', head]);
   const url = `${srv.url}/log-refs.git`; const opts = () => ({ tracer: new Tracer() });
   for (const [ref, name] of [[null, 'refs/heads/main'], ['HEAD', 'refs/heads/main'], ['v1', 'refs/tags/v1'], [head, head]]) {
-    const r = await readLog(url, { ref, limit: 2 }, opts());
+    const r = await unwrapAsync(readLog(url, { ref, limit: 2 }, opts()));
     assert.equal(r.ref, name); assert.equal(r.oid, head); assert.equal(r.commits.length, 2); assert.equal(r.truncated, true);
   }
-  assert.equal((await readLog(url, undefined, opts())).commits.length, 3, 'default limit 20 > history');
+  assert.equal((await unwrapAsync(readLog(url, undefined, opts()))).commits.length, 3, 'default limit 20 > history');
   const code = c => e => e.code === c && !(e instanceof TypeError);
-  await assert.rejects(readLog(url, { ref: 'nope' }, opts()), code('not_found'));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: 'nope' }, opts())), code('not_found'));
   const absent = 'f'.repeat(40);
-  await assert.rejects(readLog(url, { ref: absent }, opts()), e => e.code === 'not_found' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === absent && !(e instanceof TypeError));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: absent }, opts())), e => e.code === 'not_found' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === absent && !(e instanceof TypeError));
   const treeOid = git(bare, ['rev-parse', 'main^{tree}']).trim();
-  await assert.rejects(readLog(url, { ref: treeOid }, opts()), e => e.code === 'not_found' && e.message === `${treeOid} is not a commit (tree)` && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && !(e instanceof TypeError));
-  for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(readLog(url, { limit }, opts()), code('bad_request'), String(limit));
-  for (const bad of [null, 5, 'main']) await assert.rejects(readLog(url, bad, opts()), code('bad_request'), String(bad));
-  await assert.rejects(readLog(url, {}, null), code('bad_request'));
-  await assert.rejects(readLog(url, {}, {}), code('bad_request'), 'no tracer');
-  await assert.rejects(readLog(url, { path: 'f0.txt' }, opts()), code('bad_request'), 'path is not supported');
-  await assert.rejects(readLog(url, { ref: 'a..b' }, opts()), code('bad_request'));
-  await assert.rejects(readLog(url, { ref: 7 }, opts()), code('bad_request'));
-  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
+  await assert.rejects(unwrapAsync(readLog(url, { ref: treeOid }, opts())), e => e.code === 'not_found' && e.message === `${treeOid} is not a commit (tree)` && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && !(e instanceof TypeError));
+  for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(unwrapAsync(readLog(url, { limit }, opts())), code('bad_request'), String(limit));
+  const limitMsg = 'readLog: limit must be an integer from 1 to 1024 (limits.maxMergeDepth)';
+  await assert.rejects(unwrapAsync(readLog(url, { limit: 0 }, opts())), e => e.message === limitMsg);
+  await assert.rejects(unwrapAsync(readLog(url, { limit: 1025 }, opts())), e => e.message === limitMsg);
+  assert.equal((await unwrapAsync(readLog(url, { limit: 1023 }, opts()))).commits.length, 3, 'one under the default cap');
+  assert.equal((await unwrapAsync(readLog(url, { limit: 1024 }, opts()))).commits.length, 3, 'the default cap itself');
+  for (const bad of [null, 5, 'main']) await assert.rejects(unwrapAsync(readLog(url, bad, opts())), code('bad_request'), String(bad));
+  await assert.rejects(unwrapAsync(readLog(url, {}, null)), code('bad_request'));
+  await assert.rejects(unwrapAsync(readLog(url, {}, {})), code('bad_request'), 'no tracer');
+  await assert.rejects(unwrapAsync(readLog(url, { path: 'f0.txt' }, opts())), code('bad_request'), 'path is not supported');
+  await assert.rejects(unwrapAsync(readLog(url, { ref: 'a..b' }, opts())), code('bad_request'));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: 7 }, opts())), code('bad_request'));
+  assert.equal((await unwrapAsync(readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } }))).commits.length, 1);
 });
 
 test('readLog on blob:none: the trees are harvested; a following listTree on the same transport costs no fetch', async () => {
@@ -242,14 +282,26 @@ test('readLog on blob:none: the trees are harvested; a following listTree on the
   const proxy = await startProxy(srv.url, serverFault({ server: 'blobnone', behaviour: 'honest' }));
   try {
     const tracer = new Tracer(); const t = createTransport(`${proxy.url}/log-harvest.git`, { tracer });
-    const log = await readLog(null, { ref: 'main', limit: N }, { tracer, transport: t });
+    const log = await unwrapAsync(readLog(null, { ref: 'main', limit: N }, { tracer, transport: t }));
     const fetches = () => proxy.log.filter(l => l.stage === 'fetch').length;
     const before = fetches();
     for (const c of log.commits) {
-      const ls = await listTree(null, { ref: c.oid }, { tracer, transport: t });
+      const ls = await unwrapAsync(listTree(null, { ref: c.oid }, { tracer, transport: t }));
       assert.equal(ls.tree, c.tree); assert.deepEqual(ls.entries.map(e => e.oid), git(bare, ['ls-tree', '--format=%(objectname)', c.oid]).trim().split('\n'));
     }
     assert.equal(fetches(), before, 'every commit and root tree came from the harvest');
+    const head = git(bare, ['rev-parse', 'main']).trim();
+    const t2 = createTransport(`${proxy.url}/log-harvest.git`, { tracer, quirks: {} });
+    const beforeLog = fetches();
+    const win = await logOn(t2, { commit: head, limit: N });
+    assert.equal(win.ok, true);
+    assert.equal(fetches() - beforeLog, 2, 'logOn learns blob:none on its own transport');
+    const beforeTrees = fetches();
+    for (const c of win.value.commits) {
+      const ls = await unwrapAsync(listTree(null, { ref: c.oid }, { tracer, transport: t2 }));
+      assert.equal(ls.tree, c.tree);
+    }
+    assert.equal(fetches(), beforeTrees, 'logOn harvested the trees');
   } finally { await proxy.close(); }
 });
 
@@ -269,7 +321,7 @@ test('bytes: a 10-commit window on a wide repository, tree:0 vs blob:none', asyn
     try {
       const quirks = server === 'blobnone' ? { treeFilter: 'blob:none' } : {};
       const ex = arrayExporter();
-      const r = await readLog(`${proxy.url}/log-wide.git`, { ref: 'main', limit: 10 }, { tracer: new Tracer({ exporter: ex }), quirks });
+      const r = await unwrapAsync(readLog(`${proxy.url}/log-wide.git`, { ref: 'main', limit: 10 }, { tracer: new Tracer({ exporter: ex }), quirks }));
       assert.deepEqual(r.commits.map(c => c.oid), git(bare, ['rev-list', '--first-parent', '-n', '10', 'main']).trim().split('\n'));
       const f = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
       assert.equal(f.length, 1);
@@ -280,4 +332,172 @@ test('bytes: a 10-commit window on a wide repository, tree:0 vs blob:none', asyn
   console.log(`  10 commits, 48 dirs × 80 files: tree:0 ${t0.pack} B pack / ${t0.wire} B response, ${t0.objects} objects; blob:none ${bn.pack} B pack / ${bn.wire} B response, ${bn.objects} objects (${(bn.pack / t0.pack).toFixed(1)}×)`);
   assert.equal(t0.objects, 10, 'tree:0: the commits only');
   assert.ok(bn.objects > 10 + 48 && bn.pack > t0.pack);
+});
+
+const PHRASES = [
+  ['only blob:none is supported', true],
+  ['Unsupported Git fetch filter; only blob:none is supported.', true],
+  ['ONLY BLOB:NONE IS SUPPORTED', true],
+  ['unsupported fetch filter', true],
+  ['unsupported git fetch filter', true],
+  ['filter sparse:oid=abc not supported', true],
+  ['filter blob:limit=1 not allowed', true],
+  ['', false],
+  ['blob:none', false],
+  ['filter ok', false],
+];
+// 400 is the boundary. 0 and 1 are below any HTTP status a server sends; 399/401 bracket it; 500 and 2048 are past it.
+const REFUSAL_STATUSES = [0, 1, 399, 400, 401, 500, 2048];
+
+test('isFilterRefusal: status 400 and the phrase, and nothing else isFilterRejection treats as a raw 400', () => {
+  for (const status of REFUSAL_STATUSES) for (const [text, phrase] of PHRASES) {
+    assert.equal(isFilterRefusal(status, text), status === 400 && phrase, `${status} × ${JSON.stringify(text)}`);
+  }
+  const raw = 'Unsupported Git fetch filter; only blob:none is supported.';
+  const wrapped = `HTTP 400 git-upload-pack: ${raw}`;
+  assert.equal(isFilterRejection({ code: 'http', status: 400, message: wrapped }), true);
+  assert.equal(isFilterRejection({ code: 'http', status: 400, message: raw }), true);
+  assert.equal(isFilterRejection({ code: 'http', status: 0, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'http', status: 1, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'http', status: 399, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'http', status: 401, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'http', status: 500, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'http', status: 2048, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'http', message: raw }), false, 'an http error with no status is not a 400');
+  assert.equal(isFilterRejection({ code: 'http', status: '400', message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'remote_error', message: 'filter tree:0 not supported' }), true);
+  assert.equal(isFilterRejection({ code: 'protocol', message: 'unsupported fetch filter' }), true);
+  assert.equal(isFilterRejection({ code: 'remote_error', message: 'not our ref' }), false);
+  assert.equal(isFilterRejection({ code: 'protocol', message: '' }), false);
+  assert.equal(isFilterRejection({ code: 'pack_corrupt', status: 400, message: raw }), false);
+  assert.equal(isFilterRejection({ code: 'upstream_5xx', status: 500, message: raw }), false);
+  assert.equal(isFilterRejection(null), false);
+  assert.equal(isFilterRejection(undefined), false);
+});
+
+test('logOn limits and fetchPackFiltered arguments: 0, 1, one under the cap, the cap, one past it', async () => {
+  const bare = makeBareRepo(root, 'log-bounds');
+  const head = buildShape(bare, 'linear');
+  const url = `${srv.url}/log-bounds.git`;
+  const t = createTransport(url, { tracer: new Tracer() });
+  assert.equal((await logOn(t, null)).error.message, 'logOn: the second argument must be an object ({ commit, limit })');
+  assert.equal((await logOn(t, 'main')).error.message, 'logOn: the second argument must be an object ({ commit, limit })');
+  assert.equal((await logOn(t, {})).error.message, 'logOn: commit must be a string');
+  assert.equal((await logOn(t, { commit: 7, limit: 1 })).error.message, 'logOn: commit must be a string');
+  const capMsg = n => `logOn: limit must be an integer from 1 to ${n} (limits.maxMergeDepth)`;
+  assert.equal((await logOn(t, { commit: head, limit: 1025 })).error.message, capMsg(1024));
+  assert.equal((await logOn(t, { commit: head, limit: 0 })).error.message, capMsg(1024));
+  for (const limit of [-1, 1.5, '5', NaN, Infinity, null, 2 ** 53, 2048]) {
+    const got = await logOn(t, { commit: head, limit });
+    assert.equal(got.ok, false, String(limit));
+    assert.equal(got.error.code, 'bad_request', String(limit));
+    assert.equal(got.error.message, capMsg(1024), String(limit));
+  }
+  const narrow = createTransport(url, { tracer: new Tracer(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 4 } });
+  const fp = n => git(bare, ['rev-list', '--first-parent', '-n', String(n), head]).trim().split('\n');
+  for (const limit of [0, 5, 8, 64]) {
+    const got = await logOn(narrow, { commit: head, limit });
+    assert.equal(got.ok, false, String(limit));
+    assert.equal(got.error.message, capMsg(4), String(limit));
+  }
+  for (const limit of [1, 3, 4]) {
+    const got = await logOn(narrow, { commit: head, limit });
+    assert.equal(got.ok, true, String(limit));
+    assert.deepEqual(got.value.commits.map(c => c.oid), fp(limit), String(limit));
+    assert.equal(got.value.truncated, true, String(limit));
+    assert.equal(got.value.cut, false, String(limit));
+  }
+  const omitted = await logOn(narrow, { commit: head });
+  assert.equal(omitted.ok, false, 'the default 20 is past this cap of 4');
+  assert.equal(omitted.error.message, capMsg(4));
+  const full = await logOn(t, { commit: head });
+  assert.equal(full.ok, true);
+  assert.equal(full.value.commits.length, 12, 'default limit 20 holds this history of 12');
+  assert.equal(full.value.truncated, false);
+
+  assert.equal((await fetchPackFiltered(t, null)).error.message, 'fetchPackFiltered: expected { wants, filter, deepen }');
+  assert.equal((await fetchPackFiltered(t, undefined)).error.message, 'fetchPackFiltered: expected { wants, filter, deepen }');
+  assert.equal((await fetchPackFiltered(t, { wants: [head], filter: 'tree:1' })).error.message, 'fetchPackFiltered: filter must be tree:0 or blob:none, got "tree:1"');
+  assert.equal((await fetchPackFiltered(t, { wants: [head], filter: 0 })).error.message, 'fetchPackFiltered: filter must be tree:0 or blob:none, got 0');
+  assert.equal((await fetchPackFiltered(t, { wants: [head] })).error.message, 'fetchPackFiltered: filter must be tree:0 or blob:none, got undefined');
+  for (const filter of ['', 'blob:limit', 'TREE:0', null, false]) {
+    const got = await fetchPackFiltered(t, { wants: [head], filter });
+    assert.equal(got.ok, false, String(filter));
+    assert.equal(got.error.code, 'bad_request');
+  }
+  assert.equal((await fetchPackFiltered(t, { wants: head, filter: 'tree:0' })).error.message, 'fetchPackFiltered: wants must be a list of object ids');
+  assert.equal((await fetchPackFiltered(t, { wants: [], filter: 'tree:0' })).error.message, 'fetchPackFiltered: wants must name at least one object');
+  const parent = git(bare, ['rev-parse', `${head}^`]).trim();
+  const two = await fetchPackFiltered(t, { wants: [head, parent], filter: 'tree:0', deepen: 1 });
+  assert.equal(two.ok, true);
+  assert.equal(two.value.learned, false);
+  assert.equal(two.value.filter, 'tree:0');
+  assert.equal(two.value.objects.has(head), true);
+  assert.equal(two.value.objects.has(parent), true);
+  const neg = await fetchPackFiltered(t, { wants: [head], filter: 'tree:0', deepen: -1 });
+  assert.equal(neg.ok, false);
+  assert.equal(neg.error.code, 'bad_request');
+});
+
+test('fetchPackFiltered deepen 0/1/limit-1/limit/limit+1 against git rev-list, and the second fetch asks blob:none', async () => {
+  const bare = makeBareRepo(root, 'log-deepen');
+  const head = buildShape(bare, 'linear');
+  const all = Number(git(bare, ['rev-list', '--count', head]).trim());
+  assert.equal(all, 12);
+  const url = `${srv.url}/log-deepen.git`;
+  const t = createTransport(url, { tracer: new Tracer() });
+  const commitsOf = objects => [...objects.values()].filter(o => o.type === TYPE.COMMIT).map(o => o).length;
+  const fp = n => git(bare, ['rev-list', '--first-parent', '-n', String(n), head]).trim().split('\n');
+  // deepen 0 is omitted on the wire (fetchBody), so git sends the whole history. 12 is this repo's length.
+  for (const [deepen, n] of [[0, 12], [1, 1], [11, 11], [12, 12], [13, 12]]) {
+    const got = await fetchPackFiltered(t, { wants: [head], filter: 'tree:0', deepen });
+    assert.equal(got.ok, true, String(deepen));
+    assert.equal(got.value.learned, false, String(deepen));
+    assert.equal(got.value.filter, 'tree:0', String(deepen));
+    assert.equal(commitsOf(got.value.objects), n, `deepen ${deepen}`);
+    if (deepen !== 0) assert.deepEqual([...got.value.objects.keys()].filter(oid => fp(n).includes(oid)).length, n);
+  }
+  const wide = await fetchPackFiltered(t, { wants: [head], filter: 'blob:none', deepen: 1 });
+  assert.equal(wide.ok, true);
+  assert.equal(wide.value.learned, false, 'asking for blob:none is not a fallback');
+  assert.equal(wide.value.filter, 'blob:none');
+  assert.ok([...wide.value.objects.values()].some(o => o.type === TYPE.TREE), 'blob:none still carries the trees');
+
+  const filters = [];
+  const proxy = await startProxy(srv.url, ctx => {
+    if (ctx.stage !== 'fetch') return null;
+    const filter = filterOf(ctx.reqBody);
+    if (ctx.phase === 'request') filters.push(filter);
+    if (ctx.phase === 'request') return null;
+    if (filter !== null && filter !== 'blob:none') return { type: 'status', status: 400, contentType: 'text/plain; charset=utf-8', body: REJECT };
+    return { type: 'pass' };
+  });
+  try {
+    const quirks = {};
+    const ex1 = arrayExporter();
+    const first = await fetchPackFiltered(createTransport(`${proxy.url}/log-deepen.git`, { tracer: new Tracer({ exporter: ex1 }), quirks }), { wants: [head], filter: 'tree:0', deepen: 1 });
+    assert.equal(first.ok, true);
+    assert.equal(first.value.learned, true);
+    assert.equal(first.value.filter, 'blob:none');
+    assert.equal(quirks.treeFilter, 'blob:none');
+    assert.deepEqual(filters, ['tree:0', 'blob:none']);
+    const learned = spansOf(ex1).filter(s => s.name === 'git.upload-pack fetch').at(-1);
+    assert.equal(learned.attrs['git.fetch.filter.learned'], true);
+    filters.length = 0;
+    const ex2 = arrayExporter();
+    const second = await fetchPackFiltered(createTransport(`${proxy.url}/log-deepen.git`, { tracer: new Tracer({ exporter: ex2 }), quirks }), { wants: [head], filter: 'tree:0', deepen: 1 });
+    assert.equal(second.ok, true);
+    assert.equal(second.value.learned, false);
+    assert.equal(second.value.filter, 'blob:none');
+    assert.deepEqual(filters, ['blob:none'], 'the learned transport does not ask for tree:0 again');
+    const direct = spansOf(ex2).find(s => s.name === 'git.upload-pack fetch');
+    assert.equal(direct.attrs['git.fetch.filter.learned'], false);
+    assert.equal(direct.attrs['git.fetch.filter.fallback'], 'blob:none');
+    assert.equal(second.value.objects.has(head), true);
+    const again = await logOn(createTransport(`${proxy.url}/log-deepen.git`, { tracer: new Tracer(), quirks }), { commit: head, limit: 1 });
+    assert.equal(again.ok, true);
+    assert.equal(again.value.filter, 'blob:none');
+    assert.equal(again.value.commits.length, 1);
+    assert.deepEqual(filters, ['blob:none', 'blob:none']);
+  } finally { await proxy.close(); }
 });

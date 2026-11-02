@@ -9,6 +9,7 @@
 // sideband.c (demultiplex_sideband), pkt-line.c (recv_sideband, packet_writer_error, packet_read_with_status).
 import { pkt, FLUSH } from '../../src/pktline.js';
 import { concat, te } from '../../src/bytes.js';
+import { unwrap } from '../unwrap.js';
 
 export const ZERO = '0'.repeat(40);
 export const OLD = '1'.repeat(40);
@@ -189,7 +190,7 @@ export const statuses = c => Array.from({ length: c.refs.n }, (_, i) => (c.sprea
 
 // ---- rendering: one function per axis, composed ----
 const line = (...parts) => concat(parts.map(p => (typeof p === 'string' ? te.encode(p) : p)));
-const band = (b, body) => pkt(concat([Uint8Array.of(b), body]));
+const band = (b, body) => unwrap(pkt(concat([Uint8Array.of(b), body])));
 const OPTION_LINE = line('option forced-update\n');
 
 export const RENDER = {
@@ -221,17 +222,17 @@ export const RENDER = {
   spread: (c, refs, options) => statuses(c).flatMap((s, i) => RENDER.status(s, refs[i], options)),
   // framing: report lines (+ the event's frames) → outer frames. A frame is { data } or { flush: true }.
   framing: (v, { lines, pre, post, reportFlush, split, reportBand = 1, after = new Uint8Array(0) }) => v.tag === 'plain'
-    ? [...pre, ...lines.map(data => ({ data: pkt(data) })), { flush: true, final: true }]
+    ? [...pre, ...lines.map(data => ({ data: unwrap(pkt(data)) })), { flush: true, final: true }]
     : [...pre, ...(split
-      ? [...lines.map(data => ({ data: band(reportBand, pkt(data)) })), ...(reportFlush ? [{ data: band(reportBand, FLUSH) }] : [])]
-      : [{ data: band(reportBand, concat([...lines.map(d => pkt(d)), ...(reportFlush ? [FLUSH] : []), after])) }]), ...post, { flush: true, final: true }],
+      ? [...lines.map(data => ({ data: band(reportBand, unwrap(pkt(data))) })), ...(reportFlush ? [{ data: band(reportBand, FLUSH) }] : [])]
+      : [{ data: band(reportBand, concat([...lines.map(d => unwrap(pkt(d))), ...(reportFlush ? [FLUSH] : []), after])) }]), ...post, { flush: true, final: true }],
   event: v => ({
     clean: () => ({ pre: [], post: [] }),
     progress: () => ({ pre: [{ data: band(2, line('Resolving deltas: 100% (1/1), done.\n')) }], post: [{ data: band(2, line('post-receive: deployed\n')) }] }),
     keepalive: () => ({ pre: [{ data: band(1, new Uint8Array(0)) }], post: [{ data: band(1, new Uint8Array(0)) }] }),
     band3Before: () => ({ pre: [{ data: band(3, line('internal server error\n')) }], post: [] }),
     band3After: () => ({ pre: [], post: [{ data: band(3, line('internal server error\n')) }] }),
-    errPkt: () => ({ pre: [{ data: pkt('ERR access denied\n') }], post: [] }),
+    errPkt: () => ({ pre: [{ data: unwrap(pkt('ERR access denied\n')) }], post: [] }),
     dropBeforePack: () => ({ drop: 'before the pack' }),
     dropMidPack: () => ({ drop: 'inside the pack' }),
     dropAfterPack: () => ({ drop: 'after the pack' }),

@@ -9,9 +9,10 @@ const { push } = await import(`${SRC}/push.js`);
 const { checkPushCaps } = await import(`${SRC}/receivecaps.js`);
 import { pktInit, pktStep, pktFinish } from '../../src/pktline.js';
 import { withLimits } from '../../src/limits.js';
-import { thrown as fail } from '../../src/errors.js';
+import { plyError as fail } from '../../src/errors.js';
+import { unwrap } from '../unwrap.js';
 
-const spanStub = { set() {}, event() {} };
+const spanStub = { set() {}, event() {}, error() {} };
 const tracer = { span: async (_name, _opts, fn) => fn(spanStub) };
 
 export function fakeTransport(response, limits) {
@@ -21,10 +22,10 @@ export function fakeTransport(response, limits) {
       t.sent++;
       if (service !== 'git-receive-pack' || !(body instanceof Uint8Array)) throw new Error('harness: bad request');
       if (response.drop) throw fail('network', `connection reset ${response.drop}`);
-      const r = pktStep(pktInit(), response.bytes);
+      const r = unwrap(pktStep(pktInit(), response.bytes));
       yield* r.frames;
       if (response.end === 'throw') throw fail('network', 'connection reset after the response');
-      pktFinish(r.state);
+      unwrap(pktFinish(r.state));
     },
   };
   return t;
@@ -37,7 +38,9 @@ export async function runPush(rendered, response = rendered.response) {
   try {
     const { atomic = false, pushOptions = [], ...opts } = rendered.opts ?? {};
     const checked = checkPushCaps && (atomic || pushOptions.length > 0) ? checkPushCaps(new Set(['atomic', 'push-options']), { atomic, pushOptions }).value : undefined;
-    await push(t, { commands: rendered.commands, objects: [], ...(checkPushCaps ? { ...opts, ...(checked ? { checked } : {}) } : rendered.opts) });
+    // push returns a Result (an older src/ threw): an Err is read below as the throw was
+    const r = await push(t, { commands: rendered.commands, objects: [], ...(checkPushCaps ? { ...opts, ...(checked ? { checked } : {}) } : rendered.opts) });
+    if (r?.ok === false) throw r.error;
     return { tag: 'landed', refs: rendered.commands.map(c => c.ref) };
   } catch (e) {
     if (t.sent === 0 && (e.code === 'bad_request' || e.code === 'limit_exceeded')) return { tag: 'preSend', code: e.code, what: e.what };

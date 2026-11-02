@@ -1,7 +1,8 @@
 // Object ids as a type. A full SHA-1 name is 40 lowercase hex characters (gitformat-pack(5)). git's revision
 // parser also accepts a unique abbreviation, a ref name, and uppercase hex; parseOid does not. The zero id is a
 // real object name (a compare-and-swap "ref does not exist") and not a commit.
-import { ok } from './result.js';
+import { getOrElse, ok } from './result.js';
+import { fromNullable } from './absent.js';
 import type { Result } from './result.js';
 import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
@@ -23,11 +24,9 @@ function oidOf(value: string): Oid {
 
 export const ZERO_OID: Oid = oidOf(ZERO_OID_TEXT);
 
-// codePointAt's type includes undefined; an index inside the string is a code point. -1 is not hex.
+// codePointAt misses past the end; an index inside the string is a code point. -1 (the miss) is not hex.
 function codeAt(value: string, i: number): number {
-  const c = value.codePointAt(i);
-  if (c === undefined) return -1;
-  return c;
+  return getOrElse(fromNullable(value.codePointAt(i)), -1);
 }
 
 // 40 lowercase hex. A String object is not a string. Anything else is bad_request: the wrong type, the wrong length,

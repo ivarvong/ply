@@ -12,12 +12,18 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
-import { createTransport as rawTransport } from '../src/http.js';
+import { createTransport as rawTransportR } from '../src/http.js';
 import { Tracer } from '../src/otel.js';
-import { lsRefs, discover, GitHttp } from '../src/client.js';
-import { lsRefs as lsRefsWire, parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
+import { lsRefs, discover as discoverR, GitHttp } from '../src/client.js';
+import { lsRefs as lsRefsWireR, parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
 import { pkts } from '../src/pktline.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const rawTransport = (...a) => unwrap(rawTransportR(...a));
+const discover = (...a) => unwrapAsync(discoverR(...a));
+const lsRefsWire = (...a) => unwrapAsync(lsRefsWireR(...a));
+const parseLsRefLine = (...a) => unwrap(parseLsRefLineR(...a));
 const td = new TextDecoder();
 const createTransport = (u, opts = {}) => rawTransport(u, { tracer: new Tracer(), ...opts });
 const DEFAULT_BRANCH = 'zz-default';
@@ -111,7 +117,7 @@ test('lsRefs unborn: the argument, the answer and the ref listing agree with git
       for (const ask of [true, false]) {
         const cell = `${name} prefixes=${JSON.stringify(prefixes)} unborn=${ask}`;
         const { t, seen } = recorded(name);
-        const r = await lsRefs(t, prefixes, ask ? { unborn: true } : {});
+        const r = await unwrapAsync(lsRefs(t, prefixes, ask ? { unborn: true } : {}));
         const lsReq = seen.filter(s => s.request.includes('command=ls-refs'));
         assert.equal(lsReq.length, 1, cell);
         const sent = pktLines(new TextEncoder().encode(lsReq[0].request)).includes('unborn');
@@ -148,7 +154,7 @@ test('lsRefs unborn: an empty repository clones to the branch ply reports (git c
     const c = await gitAsync(root, ['-c', 'protocol.version=2', '-c', `init.defaultBranch=${DEFAULT_BRANCH}`, 'clone', '-q', url(name), dest]);
     assert.equal(c.status, 0, c.stderr);
     const cloneHead = git(dest, ['symbolic-ref', 'HEAD']).trim();
-    const r = await lsRefs(createTransport(url(name)), ['HEAD'], { unborn: true });
+    const r = await unwrapAsync(lsRefs(createTransport(url(name)), ['HEAD'], { unborn: true }));
     assert.equal(r.unborn?.target ?? `refs/heads/${DEFAULT_BRANCH}`, cloneHead, name);
     assert.equal(r.head, null, name);
     assert.equal(r.refs.size, 0, name);
@@ -165,14 +171,14 @@ test('lsRefs unborn: a discover() result in hand answers the capability, with no
     const { t, seen } = recorded(name);
     const gets = [];
     const t2 = createTransport(url(name), { fetchImpl: async (u, init) => { if ((init?.method ?? 'GET') === 'GET') gets.push(u); return fetch(u, init); } });
-    const r = await lsRefs(t2, [], { unborn: true, info });
+    const r = await unwrapAsync(lsRefs(t2, [], { unborn: true, info }));
     assert.deepEqual(gets, [], `${cfg}: no advertisement fetched`);
     assert.deepEqual(r.unborn, cfg === 'advertise' ? { name: 'HEAD', target: 'refs/heads/main' } : null);
     // the GitHttp method takes the same options
-    const viaClient = await new GitHttp(url(name), { tracer: new Tracer() }).lsRefs([], { unborn: true });
+    const viaClient = await unwrapAsync(unwrap(GitHttp.create(url(name), { tracer: new Tracer() })).lsRefs([], { unborn: true }));
     assert.deepEqual(viaClient.unborn, r.unborn);
     // asking costs exactly one advertisement GET without info
-    await lsRefs(t, [], { unborn: true });
+    await unwrapAsync(lsRefs(t, [], { unborn: true }));
     assert.equal(seen.length, 1);
   }
 });
@@ -185,7 +191,7 @@ test('lsRefs: not asked, an unborn line a server sends anyway is skipped; the wi
   assert.ok(!seen[0].request.includes('unborn'));
   // a hand-built response with unborn lines and no request for them: git's process_ref_v2 records them only into a
   // target its caller supplied; ply with no reader skips them
-  const body = pkts(['unborn HEAD symref-target:refs/heads/x\n', `${oid} refs/heads/main\n`]);
+  const body = unwrap(pkts(['unborn HEAD symref-target:refs/heads/x\n', `${oid} refs/heads/main\n`]));
   const fake = createTransport('http://fake.invalid/r.git', { fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) });
   const r2 = await lsRefsWire(fake, []);
   assert.equal(r2.unborn, null);

@@ -3,9 +3,11 @@
 // Shape: pure decisions between thin effects. Every decision (validateSpec, decideHead, lookupEntry, buildCommitObjects,
 // memFromScan, summarize) is a function of its arguments; the effects (lsRefs, fetchObject, packStream, push) are free
 // functions over a transport record, imported individually so a bundle of this file carries nothing else.
+// Decisions and the public entries (editFile, validateSpec, lookupEntry) return Result; inside the operation each step's
+// Err is the operation's, which operation() records on its span.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { thrown as fail, isPlyCode } from './errors.js';
-import type { Extra, Miss } from './errors.js';
+import { fail, isPlyError } from './errors.js';
+import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
 import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
@@ -15,10 +17,11 @@ import { parseCommit, parseTree, objectHeader, TYPE } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
-import type { Attrs, Span, Tracer } from './otel.js';
+import type { Attrs, Span, StartOptions, Tracer } from './otel.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
+import type { IdentInput, ValidatedIdent } from './validate.js';
 import { parseCommitId } from './oid.js';
 import { signCommit } from './sign.js';
 import type { OperationOpts } from './operation.js';
@@ -27,13 +30,17 @@ import type { PackObject } from './push.js';
 import type { Signer } from './sign.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownAttrs, thrownCode, thrownMessage } from './boundary.js';
+import { isPlyThrown, thrownText } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
-import { fromNullish } from './absent.js';
+import type { Input } from './absent.js';
+import { atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
+import { err, getOrElse, map, mapOption, ok } from './result.js';
+import type { Err, Result } from './result.js';
+import { DEFAULT_REF } from './refname.js';
 import type { Refname } from './refname.js';
 import type { Path } from './path.js';
 import { buildCommitObjects, withCommitData } from './commit-build.js';
-import type { Level as BuiltLevel, NewTree as BuiltNewTree } from './commit-build.js';
+import type { Author, Level as BuiltLevel, NewTree as BuiltNewTree } from './commit-build.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -42,9 +49,9 @@ export { spInit, spStep, spFinish }; // the single-object pack parser lives in f
 export { buildCommitObjects, withCommitData } from './commit-build.js';
 
 // A caller's identity, before validateIdent. `time` overrides the spec's `time` for this person; omitted uses the spec's.
-export type Author = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number };
+export type { Author };
 // A validated identity (validate.js validateIdent): frozen, branded, the only input ident() accepts.
-export type Ident = ReturnType<typeof validateIdent>;
+export type Ident = ValidatedIdent;
 
 // ---- streaming find/replace scanner (pure step) ----
 // Emits transformed bytes; counts matches and records the first MATCH_OFFSETS_KEPT offsets. Carry ≤ |find|-1 bytes.
@@ -102,17 +109,17 @@ export const scanAttrs = (st: ScanState): Attrs => ({
 
 const OID = /^[0-9a-f]{40}$/;
 
-export type EditSpec = {
-  readonly ref?: Refname;
-  readonly base?: string;
+// What the caller names. `ref` defaults to DEFAULT_REF; `base` (a ref or a 40-hex commit id) to `ref`; `committer` (null
+// or left out) is the author; `time` to now (an author's own time wins).
+export type EditSpecConfig = { readonly ref: Refname; readonly base: string | null; readonly committer: Author | null; readonly time: number | null };
+export type EditSpec = Input<EditSpecConfig> & {
   readonly path: Path;
   readonly find: string | Uint8Array;
   readonly replace: string | Uint8Array;
   readonly author: Author;
-  readonly committer?: Author | null;
   readonly message: string;
-  readonly time?: number;
 };
+const specDefaults = (): { -readonly [K in keyof EditSpecConfig]: EditSpecConfig[K] } => ({ ref: DEFAULT_REF, base: null, committer: null, time: null });
 export type EditPlan = {
   readonly ref: Refname;
   readonly base: string;
@@ -133,60 +140,57 @@ const HEX40 = /^[0-9a-fA-F]{40}$/u;
 // `base`: the ref whose head the commit is built on (default: `ref` itself), or a 40-hex commit id. With a ref base ≠ ref
 // the push *creates* `ref` (old oid = zeros). A commit id is that parent; the ref is created only when it is absent,
 // and when it exists the id must be its tip (refuseRebase). The zero id is not a commit (parseCommitId, before any I/O).
-function resolvedBase(base: string): { readonly base: string; readonly oid: boolean } {
-  if (!HEX40.test(base)) return { base: validateRef(base), oid: false };
+function resolvedBase(base: string): Result<{ readonly base: string; readonly oid: boolean }, PlyError> {
+  if (!HEX40.test(base)) {
+    const ref = validateRef(base);
+    return ref.ok ? ok({ base: ref.value, oid: false }) : ref;
+  }
   const id = parseCommitId(base);
-  if (!id.ok) throw id.error;
-  return { base: id.value, oid: true };
+  return id.ok ? ok({ base: id.value, oid: true }) : id;
 }
-import { parseRefname } from './refname.js';
-export function validateSpec(spec: EditSpec, limits: Limits, head: string | null = null): EditPlan {
-  const fallbackRef = parseRefname('refs/heads/main');
-  const givenRef = spec.ref ?? (fallbackRef.ok ? fallbackRef.value : (() => { throw fail('bad_request', 'invalid default ref'); })());
-  const baseIn: string | Refname = (spec as { base?: string }).base ?? givenRef;
-  const pathIn = spec.path;
-  const findIn = spec.find;
-  const replaceIn = spec.replace;
+// One person as validateIdent takes it: the time given, and the zone only when one is (UTC otherwise).
+const identInput = (who: Author, time: number): IdentInput => {
+  const tz = fromNullish(who.tz);
+  return tz.tag === 'some' ? { name: who.name, email: who.email, time, tz: tz.value } : { name: who.name, email: who.email, time };
+};
+export function validateSpec(spec: EditSpec, limits: Limits, head: string | null = null): Result<EditPlan, PlyError> {
+  const given = withDefaults(spec, specDefaults());
+  // a null ref is the default too, as the JS read it
+  const givenRef = getOrElse(fromNullish(given.ref), DEFAULT_REF);
+  const baseIn: string = given.base === null ? givenRef : given.base;
   const author = spec.author;
-  const committer = spec.committer ?? null;
   const message = spec.message;
-  const time = spec.author.time ?? spec.time ?? Math.floor(Date.now() / 1000);
-  validatePushRef(givenRef, false);
-  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion
-  const parsed = resolvedBase(String(baseIn));
-  const resolved = parsed.base;
-  const baseIsOid = parsed.oid;
   const atAuthorTime = fromNullish(author.time);
-  const stamp = atAuthorTime.tag === 'some' ? atAuthorTime.value : time;
-  // Build ident inputs without spelling platform undefined: include tz only when present.
-  const authorBase = { name: author.name, email: author.email, time: stamp } as const;
-  const aTz = fromNullish(author.tz);
-  const person = validateIdent(aTz.tag === 'some' ? { ...authorBase, tz: aTz.value } : authorBase);
-  const written = (() => {
-    const maybe = fromNullish(committer);
-    if (maybe.tag === 'none') return person;
-    const c = maybe.value;
-    const cTime = fromNullish(c.time);
-    const when = cTime.tag === 'some' ? cTime.value : stamp;
-    const base = { name: c.name, email: c.email, time: when } as const;
-    const cTz = fromNullish(c.tz);
-    return validateIdent(cTz.tag === 'some' ? { ...base, tz: cTz.value } : base);
-  })();
-  validateMessage(message);
-  const comps = validatePath(pathIn, limits);
-  const find: unknown = bytesOf(findIn), replace: unknown = bytesOf(replaceIn);
-  if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) throw fail('bad_request', 'find/replace must be string or Uint8Array');
-  if (!find.length) throw fail('bad_request', 'find must be non-empty');
-  if (head !== null && !OID.test(head)) throw fail('bad_request', 'head must be a 40-hex oid');
-  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion
-  return Object.freeze({ ref: givenRef, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== String(givenRef), path: String(pathIn), comps, find, replace, author: person, committer: written, message, time: person.time, head });
+  const stamp = atAuthorTime.tag === 'some' ? atAuthorTime.value : getOrElse(fromNullish(given.time), Math.floor(Date.now() / 1000));
+  const pushRef = validatePushRef(givenRef, false);
+  if (!pushRef.ok) return pushRef;
+  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- a JS caller's base may be any value; String() as before
+  const parsed = resolvedBase(String(baseIn));
+  if (!parsed.ok) return parsed;
+  const resolved = parsed.value.base;
+  const baseIsOid = parsed.value.oid;
+  const person = validateIdent(identInput(author, stamp));
+  if (!person.ok) return person;
+  const committer = fromNullish(given.committer);
+  const written = committer.tag === 'none' ? person : validateIdent(identInput(committer.value, getOrElse(fromNullish(committer.value.time), stamp)));
+  if (!written.ok) return written;
+  const checkedMessage = validateMessage(message);
+  if (!checkedMessage.ok) return checkedMessage;
+  const comps = map(validatePath(spec.path, limits), p => p.components);
+  if (!comps.ok) return comps;
+  const find: unknown = bytesOf(spec.find), replace: unknown = bytesOf(spec.replace);
+  if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) return fail('bad_request', 'find/replace must be string or Uint8Array');
+  if (!find.length) return fail('bad_request', 'find must be non-empty');
+  if (head !== null && !OID.test(head)) return fail('bad_request', 'head must be a 40-hex oid');
+  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- a JS caller's ref and path may be any value; String() as before
+  return ok(Object.freeze({ ref: givenRef, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== String(givenRef), path: String(spec.path), comps: comps.value, find, replace, author: person.value, committer: written.value, message, time: person.value.time, head }));
 }
 
 // The ref exists and the caller named a commit that is not its tip. Committing there would move the ref off its
 // history. A new ref is how that commit is published. Not inside editOnce: that function's fail sites belong to the
 // merged `edges` space.
-export function refuseRebase(ref: string, base: string, tip: string): never {
-  throw fail('bad_request', `base ${base} is not the tip of ${ref} (${tip}); omit base to commit on the tip, or name a new ref to start from that commit`, { what: 'rebase' });
+export function refuseRebase(ref: string, base: string, tip: string): Err<ErrorOf<'bad_request'>> {
+  return fail('bad_request', `base ${base} is not the tip of ${ref} (${tip}); omit base to commit on the tip, or name a new ref to start from that commit`, { what: 'rebase' });
 }
 
 // Pure: which oid is the parent, and what the hint turned out to be. ls-refs always wins; the hint only decides
@@ -197,22 +201,35 @@ export function decideHead<R extends string | null>({ hint, resolved }: { readon
   if (hint === null) return { oldCommit: resolved, hint: null };
   return { oldCommit: resolved, hint: hint === resolved ? 'used' : 'stale' };
 }
+// Pure: `strictHead` makes the hint a precondition. A stale hint is a cas_conflict before anything is pushed.
+export function strictParent(strictHead: boolean, decided: HeadDecision<string | null>, base: string, head: string | null): Result<null, ErrorOf<'cas_conflict'>> {
+  if (!strictHead || decided.hint !== 'stale') return ok(null);
+  return fail('cas_conflict', `${base} is at ${getOrElse(fromNullish(decided.oldCommit), 'nothing')}, not the expected head ${String(head)}`, { expected: head, actual: decided.oldCommit });
+}
+// Pure: `strictHead` without a `head` has nothing to hold the ref to.
+export function needsHead(strictHead: boolean, head: string | null): Result<null, ErrorOf<'bad_request'>> {
+  return strictHead && head === null ? fail('bad_request', 'strictHead needs head') : ok(null);
+}
 
 // Pure: one path component against one tree's entries.
-export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: Limits): { readonly entry: TreeEntry; readonly attrs: Attrs } {
-  const entries: readonly TreeEntry[] = parseTree(data, limits);
-  const entry = entries.find(e => e.name === name);
-  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': !!entry, 'git.edit.tree.entry.mode': entry?.mode ?? '', 'git.edit.tree.entry.oid': entry?.oid ?? '', 'git.edit.tree.entry.oid_offset': entry?.oidOffset ?? -1 };
-  if (!entry) throw fail('not_found', `path component ${name} not found`, { attrs, miss: { kind: 'path', missing: name, existingPath: '' } });
-  if (!last && entry.mode !== '40000') throw fail('not_found', `${name} is not a directory`, { attrs, miss: { kind: 'not_directory', path: name, mode: entry.mode } });
+export type Found = { readonly entry: TreeEntry; readonly attrs: Attrs };
+export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: Limits): Result<Found, PlyError> {
+  const parsed = parseTree(data, limits);
+  if (!parsed.ok) return parsed;
+  const entries: readonly TreeEntry[] = parsed.value;
+  const found = fromNullish(entries.find(e => e.name === name));
+  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': found.tag === 'some', 'git.edit.tree.entry.mode': getOrElse(mapOption(found, e => e.mode), ''), 'git.edit.tree.entry.oid': getOrElse(mapOption(found, e => e.oid), ''), 'git.edit.tree.entry.oid_offset': getOrElse(mapOption(found, e => e.oidOffset), -1) };
+  if (found.tag === 'none') return fail('not_found', `path component ${name} not found`, { attrs, miss: { kind: 'path', missing: name, existingPath: '' } });
+  const entry = found.value;
+  if (!last && entry.mode !== '40000') return fail('not_found', `${name} is not a directory`, { attrs, miss: { kind: 'not_directory', path: name, mode: entry.mode } });
   if (last && !(entry.mode === '100644' || entry.mode === '100755')) {
     let miss: Miss;
     if (entry.mode === '40000') miss = { kind: 'is_directory', path: name, tree: entry.oid };
     else if (entry.mode === '160000') miss = { kind: 'submodule', path: name, commit: entry.oid };
     else miss = { kind: 'not_directory', path: name, mode: entry.mode };
-    throw fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs, miss });
+    return fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs, miss });
   }
-  return { entry, attrs };
+  return ok({ entry, attrs });
 }
 
 export type Level = BuiltLevel;
@@ -223,7 +240,7 @@ export type BlobEdit = {
   readonly delta: Uint8Array;
   readonly baseLen: number;
   readonly newLen: number;
-  readonly matchOffset: number | undefined;
+  readonly matchOffset: number;
   readonly scan: ScanState;
   readonly inflated: number;
 };
@@ -254,7 +271,7 @@ export type EditResult = {
   readonly newTree: string;
   readonly oldBlob: string;
   readonly newBlob: string;
-  readonly matchOffset: number | undefined;
+  readonly matchOffset: number;
   readonly baseLen: number;
   readonly newLen: number;
   readonly pushBytes: number;
@@ -262,34 +279,68 @@ export type EditResult = {
   readonly hint: HintOutcome | null;
   readonly attempt: number;
 };
-// Pure: the result record.
-const summarize = ({ oldCommit, commit, blob, hint, attempt, newCommit = oldCommit, newTree = commit.tree, trees = [], pushBytes = 0, noop = false }: {
+// Pure: the result record. `next` is the commit that was pushed; a no-op has none.
+type Pushed = { readonly newCommit: string; readonly newTree: string; readonly trees: readonly NewTree[]; readonly pushBytes: number };
+const summarize = ({ oldCommit, commit, blob, hint, attempt }: {
   readonly oldCommit: string;
   readonly commit: { readonly tree: string };
   readonly blob: BlobEdit;
   readonly hint: HintOutcome | null;
   readonly attempt: number;
-  readonly newCommit?: string;
-  readonly newTree?: string;
-  readonly trees?: readonly NewTree[];
-  readonly pushBytes?: number;
-  readonly noop?: boolean;
-}): EditResult =>
-  ({ noop, oldCommit, newCommit, oldTree: commit.tree, newTree, oldBlob: blob.oldOid, newBlob: blob.newOid, matchOffset: blob.matchOffset, baseLen: blob.baseLen, newLen: blob.newLen, pushBytes, trees: trees.map(t => ({ old: t.baseOid, new: t.newOid })), hint, attempt });
+}, next: Pushed | null): EditResult => {
+  const { newCommit, newTree, trees, pushBytes }: Pushed = next === null ? { newCommit: oldCommit, newTree: commit.tree, trees: [], pushBytes: 0 } : next;
+  return { noop: next === null, oldCommit, newCommit, oldTree: commit.tree, newTree, oldBlob: blob.oldOid, newBlob: blob.newOid, matchOffset: blob.matchOffset, baseLen: blob.baseLen, newLen: blob.newLen, pushBytes, trees: trees.map(t => ({ old: t.baseOid, new: t.newOid })), hint, attempt };
+};
 
 // The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …); these are the edit's own.
-export type EditOptions = EntryOptions & {
-  readonly head?: string | null;
-  readonly strictHead?: boolean;
-  readonly cache?: Map<string, Uint8Array>;
-  readonly verify?: boolean;
-  readonly allowLfsPointer?: boolean;
-  readonly signer?: Signer | null;
-  readonly retry?: boolean;
+// `cache` null: a fresh tree cache per attempt. `signer` null: the commit is not signed.
+export type EditConfig = {
+  readonly head: string | null;
+  readonly strictHead: boolean;
+  readonly cache: Map<string, Uint8Array> | null;
+  readonly verify: boolean;
+  readonly allowLfsPointer: boolean;
+  readonly signer: Signer | null;
+  readonly retry: boolean;
 };
-// What operation() and the attempt loop attach to an error on its way out: the root span, the attempt, the hint.
-type Tagged = { code?: unknown; span?: Span; attempt?: number; hint?: HintOutcome | null };
-type Attempt = { readonly head: string | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas?: HintOutcome | null };
+export type EditOptions = EntryOptions & Input<EditConfig>;
+const editDefaults = (): { -readonly [K in keyof EditConfig]: EditConfig[K] } => ({ head: null, strictHead: false, cache: null, verify: false, allowLfsPointer: false, signer: null, retry: true });
+type Attempt = { readonly head: string | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null };
+
+// The limits an entry's options name, else the defaults.
+export const limitsOf = (opts: EntryOptions): Limits => getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS);
+// A packcache fetch reports its counters (attrs()); any other fetch has none.
+const fetchCounters = (opts: EntryOptions): Attrs => {
+  const fetchImpl = fromNullish(opts.fetchImpl);
+  if (fetchImpl.tag === 'none') return {};
+  const counters = fromNullish(fetchImpl.value.attrs);
+  return counters.tag === 'some' ? counters.value() : {};
+};
+
+// A span whose body answers with a Result: an Err is recorded on the span as a thrown error would be (status, error.type,
+// the exception event), and returned. What the body throws (another module's refusal) still ends the span as an error.
+// oxlint-disable-next-line typescript/promise-function-async -- the span's promise, returned as is
+export function inSpan<T>(tracer: Tracer, name: string, opts: StartOptions, body: (span: Span) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> {
+  return tracer.span(name, opts, async span => {
+    const r = await body(span);
+    if (!r.ok) span.error(r.error);
+    return r;
+  });
+}
+
+// What a failed attempt carries out (operation() sets the root span; the attempt loop sets attempt and hint), read back
+// for the retry: the span to link to and the hint as it turned out.
+const isSpan = (v: unknown): v is Span => typeof v === 'object' && v !== null && 'spanId' in v && 'traceId' in v;
+const isHint = (v: unknown): v is HintOutcome => v === 'used' || v === 'stale';
+export const retryLink = (e: unknown): { readonly linkTo: Span | null; readonly hintWas: HintOutcome | null } => {
+  const span = field(e, 'span');
+  const hint = field(e, 'hint');
+  return { linkTo: span.tag === 'some' && isSpan(span.value) ? span.value : null, hintWas: hint.tag === 'some' && isHint(hint.value) ? hint.value : null };
+};
+// An attempt's error leaves with its attempt number and how the hint turned out (an object only: a primitive has no fields).
+export const tagAttempt = (e: unknown, attempt: number, hint: HintOutcome | null): void => {
+  if (typeof e === 'object' && e !== null) Object.assign(e, { attempt, hint });
+};
 
 // Effect: stream one blob through inflate → scan → sha, never holding it. Returns the new blob's identity and delta.
 // A Git LFS pointer is what the repository stores for an LFS-tracked file; the real content lives in the LFS store.
@@ -298,62 +349,76 @@ type Attempt = { readonly head: string | null; readonly attempt: number; readonl
 type Hasher = ReturnType<typeof streamingSha1>;
 const LFS_MAGIC = te.encode('version https://git-lfs.github.com/spec/v1');
 export const isLfsPointerPrefix = (bytes: Uint8Array): boolean => { const n = Math.min(bytes.length, LFS_MAGIC.length); for (let i = 0; i < n; i++) if (bytes[i] !== LFS_MAGIC[i]) return false; return n === LFS_MAGIC.length; };
+const ignore
+ = (): void => { /* the read side's error is the one reported */ };
 
-// oxlint-disable-next-line require-await -- async, as before: a throw while starting the span is a rejection
-async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPointer = false }: {
+type BlobWant = {
   readonly t: Transport;
   readonly tracer: Tracer;
   readonly root: Span;
   readonly blobOid: string;
   readonly find: Uint8Array;
   readonly replace: Uint8Array;
-  readonly allowLfsPointer?: boolean;
-}): Promise<BlobEdit> {
-  return tracer.span('git.edit.blob', { parent: root, attrs: { 'git.edit.blob.oid': blobOid } }, async span => {
+  readonly allowLfsPointer: boolean;
+};
+// oxlint-disable-next-line typescript/promise-function-async -- the span's promise, returned as is
+function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPointer }: BlobWant): Promise<Result<BlobEdit, PlyError>> {
+  return inSpan(tracer, 'git.edit.blob', { parent: root, attrs: { 'git.edit.blob.oid': blobOid } }, async span => {
     const fetchSpan = tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
     let sp: SpState = spInit();
     let scan = scanInit({ find, replace });
-    let newLen: number | null = null;
-    let sha: Hasher | null = null;
+    // -1 until the declared size is known and checked (begin)
+    let newLen = -1;
     let inflated = 0;
     let cpuMs = 0;
     const ds = new DecompressionStream('deflate');
     const writer = ds.writable.getWriter();
-    const pump = (async () => {
+    // The pump's failure reaches the inflate side through the stream protocol: aborting the writer errors ds.readable,
+    // which inflate() reads, so the pump itself never rejects.
+    const abortWith = async (e: unknown): Promise<void> => { fetchSpan.error(e).end(); await writer.abort(e).catch(ignore); };
+    const pump = (async (): Promise<void> => {
       try {
         for await (const chunk of packStream(t, { wants: [blobOid] }, fetchSpan)) {
-          const r = spStep(sp, chunk); sp = r.state;
-          for (const z of r.zlib) await writer.write(bufferSource(z));
+          const r = spStep(sp, chunk);
+          if (!r.ok) { await abortWith(r.error); return; }
+          sp = r.value.state;
+          for (const z of r.value.zlib) await writer.write(bufferSource(z));
         }
-        sp = spFinish(sp);
+        const finished = spFinish(sp);
+        if (!finished.ok) { await abortWith(finished.error); return; }
+        sp = finished.value;
         await writer.close();
         fetchSpan.end();
-      } catch (e) { fetchSpan.error(e).end(); await writer.abort(e).catch(() => { /* the stream is already failing */ }); throw e; }
+      } catch (e) { await abortWith(e); }
     })();
-    const partial = (): Span => span.set({ 'git.edit.blob.base_len': sp.size, 'git.edit.blob.new_len': newLen ?? -1, 'git.edit.blob.inflated': inflated, 'git.edit.blob.zlib.bytes': sp.zlibBytes, 'git.edit.blob.pack.bytes': sp.bytes, 'git.edit.blob.pack.trailer': sp.trailer ?? '', 'git.edit.blob.cpu_ms': cpuMs, ...scanAttrs(scan) });
+    const partial = (): Span => span.set({ 'git.edit.blob.base_len': sp.size, 'git.edit.blob.new_len': newLen, 'git.edit.blob.inflated': inflated, 'git.edit.blob.zlib.bytes': sp.zlibBytes, 'git.edit.blob.pack.bytes': sp.bytes, 'git.edit.blob.pack.trailer': getOrElse(fromNullish(sp.trailer), ''), 'git.edit.blob.cpu_ms': cpuMs, ...scanAttrs(scan) });
     // the hasher, once the declared size is known and checked: it has hashed the object header
-    const begin = async (): Promise<Hasher> => {
-      if (sp.type !== TYPE.BLOB) throw fail('pack_corrupt', `expected blob, got type ${sp.type}`);
-      if (sp.size < find.length) throw fail('match_count', `blob (${sp.size} bytes) is shorter than find (${find.length} bytes): expected exactly one match, found 0`, { matches: 0 });
+    const begin = async (): Promise<Result<Hasher, PlyError>> => {
+      if (sp.type !== TYPE.BLOB) return fail('pack_corrupt', `expected blob, got type ${sp.type}`);
+      if (sp.size < find.length) return fail('match_count', `blob (${sp.size} bytes) is shorter than find (${find.length} bytes): expected exactly one match, found 0`, { matches: 0 });
       newLen = sp.size - find.length + replace.length; // exactly-one-match contract
       const h = streamingSha1(); span.set({ 'git.edit.blob.hasher': h.kind });
       await h.update(objectHeader('blob', newLen));
-      return h;
+      return ok(h);
     };
-    try {
+    // The inflate side: every chunk scanned and hashed. The hasher once the first chunk arrived (none for an empty blob).
+    const inflate = async (): Promise<Result<Hasher | null, PlyError>> => {
+      let sha: Hasher | null = null;
       for await (const chunk of ds.readable) {
         // before begin(): a stream that inflates past its declared size is the server's lie (pack_corrupt), even when the
         // declared size is shorter than find (an empty blob followed by a byte used to be reported as match_count)
         inflated += chunk.length;
-        if (inflated > sp.size) throw fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
+        if (inflated > sp.size) return fail('pack_corrupt', `server streamed more than the ${sp.size} bytes it declared`);
         if (sha === null) {
           // Unreachable: zlib is written only after phase is body, and a header-phase size is 0, so any positive
-          // chunk has already thrown on the declared-size check. DecompressionStream emits no empty chunk.
-          if (sp.phase !== 'body') throw fail('pack_corrupt', 'inflated bytes before header');
+          // chunk has already failed the declared-size check. DecompressionStream emits no empty chunk.
+          if (sp.phase !== 'body') return fail('pack_corrupt', 'inflated bytes before header');
           const lfs = isLfsPointerPrefix(chunk); span.set({ 'git.edit.blob.lfs_pointer': lfs });
           // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the pointer's size rides as an ad-hoc field (errors.ts Extra), as fetch.ts's size does
-          if (lfs && !allowLfsPointer) throw fail('lfs_pointer', `${blobOid} is a Git LFS pointer (${sp.size} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`, { size: sp.size } as Extra);
-          sha = await begin();
+          if (lfs && !allowLfsPointer) return fail('lfs_pointer', `${blobOid} is a Git LFS pointer (${sp.size} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`, { size: sp.size } as Extra);
+          const began = await begin();
+          if (!began.ok) return began;
+          sha = began.value;
         }
         const c0 = cpuNow();
         const r = scanStep(scan, chunk); scan = r.state;
@@ -361,71 +426,93 @@ async function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLf
         const dc = cpuSince(c0); if (dc !== null) cpuMs += dc;
       }
       await pump;
-    } catch (e) {
-      await pump.catch(() => { /* the read side's error is the one reported */ });
+      return ok(sha);
+    };
+    let inflatedTo: Result<Hasher | null, PlyError>;
+    try { inflatedTo = await inflate(); } catch (e) {
+      await pump.catch(ignore);
       partial();
-      if (!isPlyCode(thrownCode(e))) throw fail('pack_corrupt', `blob stream: ${String(thrownMessage(e) ?? e)}`, { cause: e });
+      if (isPlyError(e)) return err(e);
+      if (!isPlyThrown(e)) return fail('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
+      // a coded value that is not an Error: the caller's own, passed on as thrown
       throw e;
     }
-    if (sha === null) { try { sha = await begin(); } catch (e) { partial(); throw e; } } // empty blob
+    if (!inflatedTo.ok) { await pump.catch(ignore); partial(); return inflatedTo; }
+    let sha: Hasher;
+    if (inflatedTo.value === null) { // empty blob
+      const began = await begin();
+      if (!began.ok) { partial(); return began; }
+      sha = began.value;
+    } else sha = inflatedTo.value;
     const fin = scanFinish(scan); scan = fin.state; for (const p of fin.emit) await sha.update(p);
     partial();
-    if (inflated !== sp.size) throw fail('pack_corrupt', `inflated ${inflated} != header size ${sp.size}`);
-    if (scan.count !== 1) throw fail('match_count', `expected exactly one match, found ${scan.count}`, { matches: scan.count });
-    if (scan.emitted !== newLen) throw fail('internal', `emitted ${scan.emitted} != ${newLen}`);
+    if (inflated !== sp.size) return fail('pack_corrupt', `inflated ${inflated} != header size ${sp.size}`);
+    if (scan.count !== 1) return fail('match_count', `expected exactly one match, found ${scan.count}`, { matches: scan.count });
+    if (scan.emitted !== newLen) return fail('internal', `emitted ${scan.emitted} != ${newLen}`);
     const newOid = await sha.hex();
     // exactly one match (checked above), so matches[0] is its offset
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const { delta, ops } = spliceDelta({ baseLen: sp.size, off: scan.matches[0] as number, oldLen: find.length, insert: replace });
-    span.set({ 'git.edit.blob.new': newOid, 'git.edit.blob.match_offset': scan.matches[0], 'git.edit.blob.delta.bytes': delta.length, 'git.edit.blob.delta.copy_ops': ops.copy, 'git.edit.blob.delta.insert_ops': ops.insert });
-    return { oldOid: blobOid, newOid, delta, baseLen: sp.size, newLen, matchOffset: scan.matches[0], scan, inflated };
+    const matchOffset = atOr(scan.matches, 0, 0);
+    const { delta, ops } = spliceDelta({ baseLen: sp.size, off: matchOffset, oldLen: find.length, insert: replace });
+    span.set({ 'git.edit.blob.new': newOid, 'git.edit.blob.match_offset': matchOffset, 'git.edit.blob.delta.bytes': delta.length, 'git.edit.blob.delta.copy_ops': ops.copy, 'git.edit.blob.delta.insert_ops': ops.insert });
+    return ok({ oldOid: blobOid, newOid, delta, baseLen: sp.size, newLen, matchOffset, scan, inflated });
   });
 }
 
-// oxlint-disable-next-line require-await -- async: a synchronous throw (validateSpec) is a rejection, which editFile's .catch sees
-async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, Uint8Array>(), verify = false, allowLfsPointer = false, signer = null, fetchImpl, strictHead = false, ...opts }: Omit<EditOptions, 'head'> = {}, { head, attempt, linkTo, hintWas = null }: Attempt): Promise<EditResult> {
-  const limits = opts.limits ?? DEFAULT_LIMITS;
-  const s = validateSpec(spec, limits, head);
+// oxlint-disable-next-line require-await -- async, as before: the spec's refusal is an Err the promise resolves with
+async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: EditConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<EditResult, PlyError>> {
+  const { verify, allowLfsPointer, signer, strictHead } = cfg;
+  const cache = cfg.cache === null ? new Map<string, Uint8Array>() : cfg.cache;
+  const limits = limitsOf(options);
+  const planned = validateSpec(spec, limits, head);
+  if (!planned.ok) return planned;
+  const s = planned.value;
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
   let streamed: { readonly scan: Held; readonly inflated: number } = { scan: { chunks: 0, maxChunk: 0 }, inflated: 0 };
   let hint = hintWas;
   let creating = s.create;
-  const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head ?? '', 'git.edit.attempt': attempt };
+  const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': s.base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head === null ? '' : head, 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
-  const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint ?? '', ...memAttrs({ objects: held, ...streamed }), ...(fetchImpl?.attrs ? fetchImpl.attrs() : {}) });
+  const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint === null ? '' : hint, ...memAttrs({ objects: held, ...streamed }), ...fetchCounters(options) });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('edit', url, ({ ...opts, fetchImpl, attrs, onFinish, link: linkTo ? { span: linkTo, kind: 'retry_of' } : null } as OperationOpts), async ({ t, root, outcome }) => {
+  return operation('edit', url, ({ ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
-    const getObject = async (oid: string, expectType: number, deepen?: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
-    try {
+    const getObject = async (oid: string, expectType: number, deepen: number): Promise<Result<Fetched, PlyError>> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); if (o.ok) held.push(o.value.size); return o; };
+    // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.
+    // oxlint-disable-next-line complexity -- the edit is one sequence of protocol steps
+    const done = await (async (): Promise<Result<EditResult, PlyError>> => {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // A ref base keeps the original chain. A 40-hex base is that commit; the ref is listed, and a tip that is some
     // other commit is refuseRebase (the ref is not moved off its tip). A missing ref is not_found with miss.kind 'ref'.
-    const resolve = async (): Promise<string> => {
+    const resolve = async (): Promise<Result<string, PlyError>> => {
       if (s.baseOid) {
-        const { refs } = await lsRefs(t, [s.ref]);
-        const tip = refs.get(s.ref)?.oid ?? null;
-        if (tip !== null && tip !== s.base) refuseRebase(s.ref, s.base, tip);
-        creating = tip === null;
-        return s.base;
+        const listed = await lsRefs(t, [s.ref]); if (!listed.ok) return listed;
+        const tip = mapOption(mapGet(listed.value.refs, s.ref), r => r.oid);
+        if (tip.tag === 'some' && tip.value !== s.base) return refuseRebase(s.ref, s.base, tip.value);
+        creating = tip.tag === 'none';
+        return ok(s.base);
       }
-      const { refs } = await lsRefs(t, [s.base]);
-      const found = refs.get(s.base);
-      if (!found) throw fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } });
-      return found.oid;
+      const listed = await lsRefs(t, [s.base]); if (!listed.ok) return listed;
+      const found = mapGet(listed.value.refs, s.base);
+      if (found.tag === 'none') return fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } });
+      return ok(found.value.oid);
     };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolved, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e) : null]);
+    const [resolvedTo, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1) : null]);
+    if (!resolvedTo.ok) return resolvedTo;
+    const resolved = resolvedTo.value;
     root.set({ 'git.edit.create': creating });
     const decided = decideHead({ hint: head, resolved });
-    hint = hintWas ?? decided.hint;
+    hint = hintWas === null ? decided.hint : hintWas;
     const { oldCommit } = decided;
-    if (strictHead && decided.hint === 'stale') throw fail('cas_conflict', `${s.base} is at ${oldCommit}, not the expected head ${head}`, { expected: head, actual: oldCommit });
-    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': thrownCode(speculative) ?? 'error' });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is getObject's value (the rejection branch is the Error above)
-    const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await getObject(oldCommit, TYPE.COMMIT, 1);
-    const commit: { readonly tree: string; readonly parents: readonly string[] } = parseCommit(commitObj.data, limits);
+    const strict = strictParent(strictHead, decided, s.base, head);
+    if (!strict.ok) return strict;
+    if (speculative !== null && !speculative.ok) root.set({ 'git.edit.head.speculative_error': speculative.error.code });
+    const commitGot = decided.hint === 'used' && speculative !== null && speculative.ok ? speculative : await getObject(oldCommit, TYPE.COMMIT, 1);
+    if (!commitGot.ok) return commitGot;
+    const parsed = parseCommit(commitGot.value.data, limits);
+    if (!parsed.ok) return parsed;
+    const commit: { readonly tree: string; readonly parents: readonly string[] } = parsed.value;
     root.set({ 'git.edit.commit.old': oldCommit, 'git.edit.tree.root': commit.tree, 'git.edit.commit.old.parents': commit.parents.length });
 
     // 3. trees, one per level. Effect: fetch on cache miss; decision: lookupEntry.
@@ -435,39 +522,58 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
     for (const [depth, name] of s.comps.entries()) {
       const last = depth === s.comps.length - 1;
       // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
-      const lvl = await tracer.span('git.edit.tree', { parent: root, attrs: { 'git.edit.tree.depth': depth, 'git.edit.tree.oid': treeOid, 'git.edit.tree.lookup': name } }, async span => {
-        let data = cache.get(treeOid);
-        const hit = !!data;
-        if (data) cacheHits++; else { data = (await getObject(treeOid, TYPE.TREE)).data; cache.set(treeOid, data); }
-        span.set({ 'git.edit.tree.cache_hit': hit });
-        try { const { entry, attrs: found } = lookupEntry(data, name, last, limits); span.set(found); return { treeOid, data, entry }; }
-        catch (e) { const found = thrownAttrs(e); if (found) span.set(found); throw e; }
+      const lvl = await inSpan(tracer, 'git.edit.tree', { parent: root, attrs: { 'git.edit.tree.depth': depth, 'git.edit.tree.oid': treeOid, 'git.edit.tree.lookup': name } }, async span => {
+        const cached = mapGet(cache, treeOid);
+        let data: Uint8Array;
+        if (cached.tag === 'some') { data = cached.value; cacheHits++; } else { const got = await getObject(treeOid, TYPE.TREE, 0); if (!got.ok) return got; data = got.value.data; cache.set(treeOid, data); }
+        span.set({ 'git.edit.tree.cache_hit': cached.tag === 'some' });
+        const found = lookupEntry(data, name, last, limits);
+        if (!found.ok) {
+          const seen = fromNullish(found.error.attrs);
+          if (seen.tag === 'some') span.set(seen.value);
+          return found;
+        }
+        span.set(found.value.attrs);
+        return ok({ treeOid, data, entry: found.value.entry });
       });
-      levels.push(lvl);
-      treeOid = lvl.entry.oid;
+      if (!lvl.ok) return lvl;
+      const level = lvl.value;
+      levels.push(level);
+      treeOid = level.entry.oid;
     }
     const blobOid = treeOid;
     root.set({ 'git.edit.blob.old': blobOid, 'git.edit.tree.cache_hits': cacheHits, 'git.edit.tree.fetches': s.comps.length - cacheHits });
 
     // 4. streamed blob replace. Effect: one pack stream; decisions: spStep/scanStep (pure), the exactly-one-match contract.
-    const blob = await streamBlobEdit({ t, tracer, root, blobOid, find: s.find, replace: s.replace, allowLfsPointer });
+    const edited = await streamBlobEdit({ t, tracer, root, blobOid, find: s.find, replace: s.replace, allowLfsPointer });
+    if (!edited.ok) return edited;
+    const blob = edited.value;
     streamed = { scan: blob.scan, inflated: blob.inflated };
 
     // identical content → no commit; a no-op edit must not create an empty commit
-    if (blob.newOid === blobOid) return outcome('noop', summarize({ oldCommit, commit, blob, hint, attempt, noop: true }), { 'git.edit.blob.new': blob.newOid });
+    if (blob.newOid === blobOid) return outcome('noop', summarize({ oldCommit, commit, blob, hint, attempt }, null), { 'git.edit.blob.new': blob.newOid });
 
     // 5+6. new trees + commit (pure), then push (effect).
-    let built = buildCommitObjects({ levels, blob, oldCommit, author: s.author, committer: s.committer, time: s.time, message: s.message });
-    if (signer) { built = withCommitData(built, await signCommit(built.commitData, signer)); root.set({ 'git.edit.commit.signed': signer.kind, 'git.edit.commit.signer': signer.publicKeyLine ?? '' }); }
+    const objects = buildCommitObjects({ levels, blob, oldCommit, author: s.author, committer: s.committer, time: s.time, message: s.message });
+    if (!objects.ok) return objects;
+    let built = objects.value;
+    if (signer !== null) {
+      const signed = await signCommit(built.commitData, signer);
+      if (!signed.ok) return signed;
+      built = withCommitData(built, signed.value); root.set({ 'git.edit.commit.signed': signer.kind, 'git.edit.commit.signer': getOrElse(fromNullish(signer.publicKeyLine), '') });
+    }
     for (const tr of built.trees) cache.set(tr.newOid, tr.newData);
     root.set({ 'git.edit.tree.new': built.newTree, 'git.edit.commit.new': built.newCommit, 'git.edit.commit.bytes': built.commitData.length });
     const pushed = await push(t, { ref: s.ref, oldOid: creating ? ZERO_OID : oldCommit, newOid: built.newCommit, objects: built.objects });
+    if (!pushed.ok) return pushed;
     // report-status is the only receipt git offers, and a middlebox can forge it. verify: re-read the ref (one ~100 B
     // roundtrip) and require it to be our commit; a mismatch is 'ambiguous' (the push was acknowledged but not observed).
-    if (verify) await verifyRef(t, root, 'git.edit', s.ref, built.newCommit);
-    return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt, newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: pushed.packBytes }), { 'git.edit.push.bytes': pushed.packBytes, 'git.edit.push.ratio': pushed.packBytes / Math.max(1, blob.newLen) });
-    // oxlint-disable-next-line typescript/strict-boolean-expressions, typescript/no-unsafe-type-assertion -- bundle budget: the JS's own test, byte for byte; a thrown object gets the attempt's fields, as before
-    } catch (e) { if (e && typeof e === 'object') { (e as Tagged).attempt = attempt; (e as Tagged).hint = hint; } throw e; }
+    if (verify) { const seen = await verifyRef(t, root, 'git.edit', s.ref, built.newCommit); if (!seen.ok) return seen; }
+    const { packBytes } = pushed.value;
+    return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt }, { newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: packBytes }), { 'git.edit.push.bytes': packBytes, 'git.edit.push.ratio': packBytes / Math.max(1, blob.newLen) });
+    })();
+    if (!done.ok) tagAttempt(done.error, attempt, hint);
+    return done;
   });
 }
 
@@ -478,18 +584,14 @@ async function editOnce(url: string, spec: EditSpec, { cache = new Map<string, U
 // `strictHead: true` turns the hint into a precondition: if `ref` is not at `head`, the edit is a `cas_conflict` before
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
 // `retry: false` is the caller's own race handling (commitChanges): attempt 0's cas_conflict is not redone here.
-// An Error carries the attempt's tag (attempt, hint, the root span). A string or a plain object does not, and it is not
-// a result: resolving with it reported success for a failed first attempt.
-const isAttemptError = (e: unknown): e is Error & Tagged => e instanceof Error;
-
-export async function editFile(url: string, spec: EditSpec, { head = null, strictHead = false, retry = true, ...opts }: EditOptions = {}): Promise<EditResult> {
-  if (strictHead && head === null) throw fail('bad_request', 'strictHead needs head');
-  try {
-    return await editOnce(url, spec, { ...opts, strictHead }, { head, attempt: 0, linkTo: null });
-  } catch (e) {
-    // only a real Error is a cas_conflict that can be retried; anything else is the caller's throw, unchanged.
-    // the retry is not inside this try, so a second cas_conflict propagates (attempt 0 is the only one caught)
-    if (!retry || !isAttemptError(e) || e.code !== 'cas_conflict' || strictHead) throw e;
-    return editOnce(url, spec, opts, { head: null, attempt: 1, linkTo: e.span ?? null, hintWas: e.hint ?? null });
-  }
+// An Err carries the attempt's tag (attempt, hint, the root span).
+export async function editFile(url: string, spec: EditSpec, options: EditOptions = {}): Promise<Result<EditResult, PlyError>> {
+  const cfg = withDefaults(options, editDefaults());
+  const needs = needsHead(cfg.strictHead, cfg.head);
+  if (!needs.ok) return needs;
+  const first = await editOnce(url, spec, options, cfg, { head: cfg.head, attempt: 0, linkTo: null, hintWas: null });
+  // only attempt 0's cas_conflict is redone, once: the retry's Err is the answer
+  // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
+  if (first.ok || !cfg.retry || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
+  return editOnce(url, spec, options, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
 }

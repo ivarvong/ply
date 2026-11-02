@@ -2,6 +2,7 @@
 // (sequentially, or concurrently with ?concurrent=1) and reports results, spans summary, and timing.
 import { editFile } from '../../src/edit.js';
 import { readFile } from '../../src/read.js';
+import { unwrapAsync, unwrap } from '../unwrap.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
@@ -31,18 +32,18 @@ export default {
     if (u.pathname === '/fetchpack') {
       const body = await req.json();
       const exporter = arrayExporter();
-      const c = new GitHttp(body.url, { tracer: new Tracer({ exporter }) });
+      const c = unwrap(GitHttp.create(body.url, { tracer: new Tracer({ exporter }) }));
       const t0 = Date.now();
       try {
-        const r = await c.fetchPack(body.req);
+        const r = await unwrapAsync(c.fetchPack(body.req));
         return Response.json({ ok: true, objects: r.parsed?.stats.count ?? 0, ms: Date.now() - t0, spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, ms: s.durationMs, attrs: pick(s.attrs) })) });
       } catch (e) { return Response.json({ ok: false, code: e.code, message: e.message, ms: Date.now() - t0 }); }
     }
     if (u.pathname === '/redirect') { // ply against a redirecting server; plus what workerd's own `follow` does with Authorization
       const body = await req.json();
-      const c = new GitHttp(body.url, { tracer: new Tracer(), auth: body.auth });
+      const c = unwrap(GitHttp.create(body.url, { tracer: new Tracer(), auth: body.auth }));
       const res = {};
-      for (const [k, op] of [['get', () => c.discover()], ['post', () => c.lsRefs()]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
+      for (const [k, op] of [['get', () => unwrapAsync(c.discover())], ['post', () => unwrapAsync(c.lsRefs())]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
       try { const r = await fetch(`${body.url}/info/refs?service=git-upload-pack`, { headers: { Authorization: 'Bearer workerd-follow-probe' } }); res.follow = { status: r.status, url: r.url }; await r.body?.cancel(); } catch (e) { res.follow = { error: e.message }; }
       return Response.json(res);
     }
@@ -50,7 +51,7 @@ export default {
       const body = await req.json();
       const exporter = arrayExporter();
       try {
-        const r = await readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) });
+        const r = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) }));
         let bytes = 0;
         const rd = r.stream.getReader();
         if (body.cancel) { const { value } = await rd.read(); bytes = value?.length ?? 0; await rd.cancel('enough'); }
@@ -70,7 +71,7 @@ export default {
       const one = async i => {
         const t0 = Date.now();
         try {
-          const r = await editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: `wd ${i}` }, { tracer, cache, limits, auth: body.auth, fetchImpl, head: body.head ?? null, signer: signing?.signer ?? null });
+          const r = await unwrapAsync(editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: `wd ${i}` }, { tracer, cache, limits, auth: body.auth, fetchImpl, head: body.head ?? null, signer: signing?.signer ?? null }));
           return { ok: true, ms: Date.now() - t0, newCommit: r.newCommit, oldCommit: r.oldCommit, pushBytes: r.pushBytes, noop: !!r.noop, hint: r.hint, packCache: fetchImpl.stats ?? null };
         } catch (e) { return { ok: false, ms: Date.now() - t0, code: e.code, message: e.message }; }
       };

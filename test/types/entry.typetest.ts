@@ -27,10 +27,10 @@ const stored: number = collected.lines.length;
 void stored;
 
 const limits: Limits = DEFAULT_LIMITS;
-const made: Transport = createTransport('https://example.test/repo.git', {
+const made = createTransport('https://example.test/repo.git', {
   tracer, userAgent: 'ply-web', limits, signal: new AbortController().signal, fetchImpl: globalThis.fetch, quirks: {},
 });
-void made;
+if (made.ok) { const madeT: Transport = made.value; void madeT; }
 
 const opts: OperationOpts = { tracer };
 void opts;
@@ -39,7 +39,9 @@ const fetchOpts: FetchOpts = { wants: ['a'.repeat(40)], filter: 'blob:none' };
 
 // fetchPack → push, and spliceDelta → zlibDeflate, through the entry. SharedArrayBuffer views are inputs.
 const consumer = async (): Promise<void> => {
-  const fetched = await fetchPack(transport, fetchOpts);
+  const fetchedR = await fetchPack(transport, fetchOpts);
+  if (!fetchedR.ok) return;
+  const fetched = fetchedR.value;
   const objects: PackObject[] = [...(fetched.objects?.values() ?? [])].map(o => ({ type: o.type, data: o.data }));
   // helper: unwrap a Result Ok (type-level)
   const expectOk = <T, E>(r: { ok: true; value: T } | { ok: false; error: E }): T => (r.ok ? r.value : (null as unknown as T));
@@ -50,19 +52,24 @@ const consumer = async (): Promise<void> => {
   await zlibDeflate(shared);
   void deflated;
 
-  const info = await discover(transport);
+  const infoR = await discover(transport);
+  if (!infoR.ok) return;
+  const info = infoR.value;
   const caps: ReadonlyMap<string, string> | Map<string, string> = info.caps;
   void caps;
-  const listed = await lsRefs(transport, ['refs/heads/']);
-  const head: string | null = listed.head;
+  const listedR = await lsRefs(transport, ['refs/heads/']);
+  if (!listedR.ok) return;
+  const head: string | null = listedR.value.head;
   void head;
-  const object = await fetchObject(transport, { oid: 'c'.repeat(40), filter: 'blob:none' });
+  const objectR = await fetchObject(transport, { oid: 'c'.repeat(40), filter: 'blob:none' });
+  if (!objectR.ok) return;
+  const object = objectR.value;
   const view = commitView(object.data, limits);
-  const tree: string | null = view.tree;
+  const tree: string | null = view.ok ? view.value.tree : null;
   void tree;
   const entry: string = entryType('100644');
   const mode: string = lsMode('100644');
-  const names: readonly string[] = refCandidates('main');
+  const names: readonly string[] = expectOk(refCandidates('main'));
   void entry; void mode; void names;
   const span = tracer.start('git.fetch');
   for await (const chunk of packStream(transport, fetchOpts, span)) {
@@ -70,13 +77,18 @@ const consumer = async (): Promise<void> => {
     void bytes;
   }
   let cursor: SpState = spInit();
-  const stepped = spStep(cursor, anyBytes);
-  cursor = spFinish(stepped.state);
+  const steppedR = spStep(cursor, anyBytes);
+  if (!steppedR.ok) return;
+  const stepped = steppedR.value;
+  const finished = spFinish(stepped.state);
+  if (!finished.ok) return;
+  cursor = finished.value;
   const pieces: readonly Uint8Array[] = stepped.zlib;
   void cursor; void pieces;
   const inflated = inflate(anyBytes, 0, { expectedSize: 1, maxOutput: 8 });
+  if (!inflated.ok) return;
   // `out` is a subarray of the growable buffer, so the published type is `Uint8Array` (any backing).
-  const out: Uint8Array = inflated.out;
+  const out: Uint8Array = inflated.value.out;
   void out;
   const rejected: boolean = isFilterRejection(new Error('no'));
   const known: boolean = isPlyCode('pack_corrupt');

@@ -1,9 +1,12 @@
 // A stalled response body must still hit requestTimeoutMs after a GC. AbortSignal.timeout() does not:
 // AbortSignal.any holds its sources weakly, and the timeout signal is retained only by that weak timer.
 import http from 'node:http';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 
+import { unwrap } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 if (typeof globalThis.gc !== 'function') {
   console.error('node --expose-gc is required');
   process.exit(2);
@@ -16,7 +19,7 @@ const server = http.createServer((_req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const ms = 300;
-const span = { set() {}, event() {} };
+const span = { set() {}, event() {}, error() {} };
 const transport = createTransport(`http://127.0.0.1:${port}/r.git`, {
   limits: withLimits({ requestTimeoutMs: ms }),
   tracer: { span: async (_name, _opts, fn) => fn(span) },

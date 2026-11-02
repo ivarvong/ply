@@ -20,6 +20,7 @@ const { root, cleanup } = tmpRoot();
 // capture the real pack-objects invocation through uploadpack.packObjectsHook (honored from protected config only)
 import { writeFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 const hookCfg = join(root, 'gitconfig'); const hookLog = join(root, 'hooklog');
 writeFileSync(hookCfg, `[uploadpack]\n\tpackObjectsHook = ${fileURLToPath(new URL('./pack-objects-hook.sh', import.meta.url))}\n`);
 const srv = await startGitServer(root, { GIT_CONFIG_GLOBAL: hookCfg, PLY_HOOK_LOG: hookLog });
@@ -75,13 +76,13 @@ try {
     const wantCommits = wants.map(w => model.tags.get(w) ?? w).filter(w => model.commits.has(w));
     const degenerate = (deepenSince || deepenNot.length) && (wantCommits.length === 0 || wantCommits.some(w => (deepenSince && model.commits.get(w).date < deepenSince) || (deepenNot.length && !exp.inDepth.has(w))));
     const exporter = arrayExporter();
-    const c = new GitHttp(`${srv.url}/${R.name}.git`, { tracer: new Tracer({ exporter }) });
+    const c = unwrap(GitHttp.create(`${srv.url}/${R.name}.git`, { tracer: new Tracer({ exporter }) }));
     const external = oid => (model.type.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[model.type.get(oid)], data: new Uint8Array(gitBuf(R.bare, ['cat-file', model.type.get(oid), oid])) } : undefined);
     const problems = [];
     let r, usedNegotiate = false;
     const t0 = performance.now();
     try {
-      r = done ? await c.fetchPack(req, { external }) : await c.negotiate(req, { external });
+      r = done ? await unwrapAsync(c.fetchPack(req, { external })) : await unwrapAsync(c.negotiate(req, { external }));
       usedNegotiate = !done;
       if (!r.parsed) throw Object.assign(new Error(`no pack (acks=${r.acks} nak=${r.nak})`), { code: 'nopack' });
     } catch (e) {
@@ -179,8 +180,8 @@ try {
         console.log('     shallow got:', r.shallow.map(idx), 'exp:', exp.shallow.map(idx), 'unshallow got:', r.unshallow.map(idx), 'exp:', exp.unshallow.map(idx));
         console.log('     ext bases:', [...r.objects.values()].filter(o => o.baseOid && !r.objects.has(o.baseOid)).map(o => idx(o.baseOid)).join(' '));
       } else {
-        const { fetchBody } = await import('../../src/client.js');
-        const res = await fetch(`${srv.url}/${R.name}.git/git-upload-pack`, { method: 'POST', headers: { 'Content-Type': 'application/x-git-upload-pack-request', 'Git-Protocol': 'version=2' }, body: fetchBody(req) });
+        const { fetchBody: fetchBodyR } = await import('../../src/client.js');
+        const res = await fetch(`${srv.url}/${R.name}.git/git-upload-pack`, { method: 'POST', headers: { 'Content-Type': 'application/x-git-upload-pack-request', 'Git-Protocol': 'version=2' }, body: fetchBodyR(req).value });
         console.log('     raw:', res.status, JSON.stringify(Buffer.from(await res.arrayBuffer()).toString('latin1').slice(0, 200)));
       }
     }

@@ -13,7 +13,7 @@ export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 export const ERRORS = join(ROOT, 'src/errors.ts');
 export const ERRORS_URL = pathToFileURL(ERRORS).href;
 export const KEY = Symbol.for('ply.failsite');
-const DECL = 'export function plyError(code: string, message: string, extra?: object): Thrown {';
+const DECL = 'export function plyError(code: string, message: string, ...extra: [] | [object]): Thrown {';
 
 export function instrument(source) {
   if (!source.includes(DECL)) throw new Error(`failsite: src/errors.ts no longer declares \`${DECL}\`; update test/space/failsite-instrument.mjs`);

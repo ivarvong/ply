@@ -9,7 +9,7 @@ import zlib from 'node:zlib';
 import { te, td, concat, take } from '../src/bytes.js';
 import { assertBytes } from './bytes-assert.js';
 import { fromHex } from '../src/sha1.js';
-import { thrown as fail } from '../src/errors.js';
+import { plyError as fail } from '../src/errors.js';
 import { validateIdent } from '../src/validate.js';
 import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,
@@ -18,15 +18,26 @@ import { pkt, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.j
 import { encodeObjHeader, buildPack, spliceDelta } from '../src/pack.js';
 import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packresolve.js';
 import { inflate } from '../src/inflate.js';
-import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
-import { parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
-import { parseCapabilitiesV2 } from '../src/discover.js';
+import { parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, v2Init, v2Step as v2StepR } from '../src/fetch.js';
+import { parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
+import { parseCapabilitiesV2 as parseCapabilitiesV2R } from '../src/discover.js';
 import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
+import { parsePath } from '../src/path.js';
+import { parseRefname, parseBranchName, parseTagName } from '../src/refname.js';
+import { DEFAULT_LIMITS } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const parseSideband = (...a) => unwrap(parseSidebandR(...a));
+const spStep = (...a) => unwrap(spStepR(...a));
+const spFinish = (...a) => unwrap(spFinishR(...a));
+const v2Step = (...a) => unwrap(v2StepR(...a));
+const parseLsRefLine = (...a) => unwrap(parseLsRefLineR(...a));
+const parseCapabilitiesV2 = (...a) => unwrap(parseCapabilitiesV2R(...a));
 const covered = new Set();
 const property = (id, name, fn) => { covered.add(id); test(name, fn); };
 const oid = n => n.toString(16).padStart(OID_HEX_CHARS, '0');
@@ -39,7 +50,7 @@ function sampleTree() {
     { mode: '100644', name: 'c', oid: oid(2) },
     { mode: '100755', name: 'de', oid: oid(3) },
   ];
-  return { entries, bytes: encodeTree(entries) };
+  return { entries, bytes: unwrap(encodeTree(entries)) };
 }
 
 // The guard Ivar's review caught: `nul + OID_BYTES > length` plus a clamping subarray. Kept here so the property's
@@ -104,9 +115,9 @@ property('tree', 'tree prefix-closure fails on the pre-fix parser at 29/89', () 
 property('tree', 'tree prefix-closure holds, including the 29/89 cut', () => {
   const { bytes, entries } = sampleTree();
   assert.equal(bytes.length, 89);
-  assert.throws(() => parseTree(bytes.subarray(0, 29)), e => e.code === 'pack_corrupt' && /short read:/.test(e.message));
-  assertTree(parseTree, bytes);
-  assert.deepEqual(parseTree(bytes).map(e => e.name), entries.map(e => e.name));
+  assert.throws(() => unwrap(parseTree(bytes.subarray(0, 29))), e => e.code === 'pack_corrupt' && /short read:/.test(e.message));
+  assertTree(b => unwrap(parseTree(b)), bytes);
+  assert.deepEqual(unwrap(parseTree(bytes)).map(e => e.name), entries.map(e => e.name));
 });
 
 test('tree: fsck-hard malformations are rejected; a bad filemode warning still parses', () => {
@@ -126,9 +137,9 @@ test('tree: fsck-hard malformations are rejected; a bad filemode warning still p
     ['unsorted', concat([raw('100644 b\0'), raw('100644 a\0')])],
     ['duplicate', concat([raw('100644 a\0'), raw('100644 a\0', oidBytes(5))])],
   ];
-  for (const [label, bytes] of bad) assert.throws(() => parseTree(bytes), e => e.code === 'pack_corrupt', label);
-  assert.equal(parseTree(raw('100664 a\0'))[0].mode, '100644'); // canon_mode, as git ls-tree prints it
-  assert.equal(parseTree(new Uint8Array(0)).length, 0);
+  for (const [label, bytes] of bad) assert.throws(() => unwrap(parseTree(bytes)), e => e.code === 'pack_corrupt', label);
+  assert.equal(unwrap(parseTree(raw('100664 a\0')))[0].mode, '100644'); // canon_mode, as git ls-tree prints it
+  assert.equal(unwrap(parseTree(new Uint8Array(0))).length, 0);
   assert.equal(id.length, OID_HEX_CHARS);
 });
 
@@ -184,20 +195,20 @@ function assertHeaderObject(parse, bytes) {
   }
 }
 
-const author = ident(validateIdent({ name: 'Ada', email: 'ada@x', time: 1700000000 }));
-const commitBytes = encodeCommit({
+const author = unwrap(ident(unwrap(validateIdent({ name: 'Ada', email: 'ada@x', time: 1700000000 }))));
+const commitBytes = unwrap(encodeCommit({
   tree: oid(9), parents: [oid(8)], author, message: 'subject\n\nbody\n', extra: ['gpgsig -----BEGIN', ' signature'],
-});
-const tagBytes = encodeTag({ object: oid(9), type: 'commit', tag: 'v1', tagger: author, message: 'release\n' });
+}));
+const tagBytes = unwrap(encodeTag({ object: oid(9), type: 'commit', tag: 'v1', tagger: author, message: 'release\n' }));
 
 property('commit', 'commit prefix-closure: header lines are entries, the message is an opaque tail', () => {
-  assertHeaderObject(parseCommit, commitBytes);
-  assertHeaderObject(parseCommit, encodeCommit({ tree: oid(1), author, message: null }));
-  assertHeaderObject(parseCommit, encodeCommit({ tree: oid(9), author, encoding: 'UTF-8', message: 'm\n', extra: ['gpgsig -----BEGIN', ' signature'] }));
+  assertHeaderObject(b => unwrap(parseCommit(b)), commitBytes);
+  assertHeaderObject(b => unwrap(parseCommit(b)), unwrap(encodeCommit({ tree: oid(1), author, message: null })));
+  assertHeaderObject(b => unwrap(parseCommit(b)), unwrap(encodeCommit({ tree: oid(9), author, encoding: 'UTF-8', message: 'm\n', extra: ['gpgsig -----BEGIN', ' signature'] })));
 });
 
 property('tag', 'tag prefix-closure matches the commit header framing', () => {
-  assertHeaderObject(parseTag, tagBytes);
+  assertHeaderObject(b => unwrap(parseTag(b)), tagBytes);
 });
 
 property('ident', 'ident prefixes are field prefixes and never throw', () => {
@@ -217,34 +228,34 @@ property('ident', 'ident prefixes are field prefixes and never throw', () => {
 });
 
 test('assertFetched and parseCommit apply fsck to a complete object; a header prefix is refused', () => {
-  const tree = encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }]);
-  assertFetched('tree', tree);
-  assert.throws(() => assertFetched('tree', tree.subarray(0, tree.length - 1)), e => e.code === 'pack_corrupt');
-  const good = encodeCommit({ tree: oid(1), author, message: 'm\n' });
-  assertFetched('commit', good);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\ncommitter ${author}\n\nm\n`)), /missingAuthor/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\n\nm\n`)), /missingAuthor/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada 1700000000 +0000\ncommitter ${author}\n\nm\n`)), /missingEmail/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada <ada@x> soon +0000\ncommitter ${author}\n\nm\n`)), /badDate/);
-  assert.throws(() => assertFetched('commit', te.encode(`tree short\nauthor ${author}\ncommitter ${author}\n\nm\n`)), /badTreeSha1/);
-  assertFetched('tag', tagBytes);
-  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\ntagger ${author}\n\nm\n`)), /missingTagEntry/);
-  assert.throws(() => assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\n\nm\n`)), /missingTagEntry/);
+  const tree = unwrap(encodeTree([{ mode: '100644', name: 'a', oid: oid(1) }]));
+  unwrap(assertFetched('tree', tree));
+  assert.throws(() => unwrap(assertFetched('tree', tree.subarray(0, tree.length - 1))), e => e.code === 'pack_corrupt');
+  const good = unwrap(encodeCommit({ tree: oid(1), author, message: 'm\n' }));
+  unwrap(assertFetched('commit', good));
+  assert.throws(() => unwrap(assertFetched('commit', te.encode(`tree ${oid(1)}\ncommitter ${author}\n\nm\n`))), /missingAuthor/);
+  assert.throws(() => unwrap(assertFetched('commit', te.encode(`tree ${oid(1)}\n\nm\n`))), /missingAuthor/);
+  assert.throws(() => unwrap(assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada 1700000000 +0000\ncommitter ${author}\n\nm\n`))), /missingEmail/);
+  assert.throws(() => unwrap(assertFetched('commit', te.encode(`tree ${oid(1)}\nauthor Ada <ada@x> soon +0000\ncommitter ${author}\n\nm\n`))), /badDate/);
+  assert.throws(() => unwrap(assertFetched('commit', te.encode(`tree short\nauthor ${author}\ncommitter ${author}\n\nm\n`))), /badTreeSha1/);
+  unwrap(assertFetched('tag', tagBytes));
+  assert.throws(() => unwrap(assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\ntagger ${author}\n\nm\n`))), /missingTagEntry/);
+  assert.throws(() => unwrap(assertFetched('tag', te.encode(`object ${oid(1)}\ntype commit\n\nm\n`))), /missingTagEntry/);
   assert.equal(hashObject('blob', te.encode('x')).length, OID_HEX_CHARS);
   // parseCommit is the fsck check itself (#59): a header prefix that stops before the committer is not a commit
-  assert.throws(() => parseCommit(te.encode(`tree ${oid(1)}\n`)), /missingAuthor/);
+  assert.throws(() => unwrap(parseCommit(te.encode(`tree ${oid(1)}\n`))), /missingAuthor/);
 });
 
 function stepPkt(bytes) {
   let st = pktInit();
-  const r = pktStep(st, bytes);
+  const r = unwrap(pktStep(st, bytes));
   st = r.state;
-  pktFinish(st);
+  unwrap(pktFinish(st));
   return r.frames;
 }
 
 property('pkt', 'pkt-line prefix-closure, finished so a partial frame cannot hide in the carry', () => {
-  const frames = [pkt('hello'), pkt(''), FLUSH, DELIM, te.encode('0002'), pkt('z')];
+  const frames = [unwrap(pkt('hello')), unwrap(pkt('')), FLUSH, DELIM, te.encode('0002'), unwrap(pkt('z'))];
   const bytes = concat(frames);
   const full = stepPkt(bytes);
   const ends = [];
@@ -270,8 +281,8 @@ property('pkt', 'pkt-line prefix-closure, finished so a partial frame cannot hid
 property('obj-header', 'object-header prefixes are short reads until the continuation bit clears', () => {
   for (const [type, size] of [[1, 0], [3, 15], [2, 16], [7, 2 ** 20 + 3]]) {
     const h = encodeObjHeader(type, size);
-    for (let i = 1; i < h.length; i++) assert.throws(() => readObjHeader(h.subarray(0, i), 0), e => e.code === 'pack_corrupt');
-    const got = readObjHeader(h, 0);
+    for (let i = 1; i < h.length; i++) assert.throws(() => unwrap(readObjHeader(h.subarray(0, i), 0)), e => e.code === 'pack_corrupt');
+    const got = unwrap(readObjHeader(h, 0));
     assert.equal(got.type, type);
     assert.equal(got.size, size);
     assert.equal(got.next, h.length);
@@ -281,22 +292,22 @@ property('obj-header', 'object-header prefixes are short reads until the continu
 property('ofs-delta', 'ofs-delta prefixes are short reads until the offset is complete', () => {
   // off = (1 + 1) * 128 + 2 = 258, two bytes, continuation on the first.
   const enc = Uint8Array.of(OBJ_CONTINUE | 1, 2);
-  assert.throws(() => readOfsDelta(enc.subarray(0, 1), 0), e => e.code === 'pack_corrupt');
-  assert.deepEqual(readOfsDelta(enc, 0), { off: (1 + 1) * (OBJ_SIZE_NEXT_MASK + 1) + 2, next: 2 });
+  assert.throws(() => unwrap(readOfsDelta(enc.subarray(0, 1), 0)), e => e.code === 'pack_corrupt');
+  assert.deepEqual(unwrap(readOfsDelta(enc, 0)), { off: (1 + 1) * (OBJ_SIZE_NEXT_MASK + 1) + 2, next: 2 });
 });
 
 property('pack', 'every strict prefix of a pack throws', async () => {
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('hello') }]);
-  parsePack(pack);
-  for (let i = 1; i < pack.length; i++) assert.throws(() => parsePack(pack.subarray(0, i)), e => e.code === 'pack_corrupt');
+  unwrap(parsePack(pack));
+  for (let i = 1; i < pack.length; i++) assert.throws(() => unwrap(parsePack(pack.subarray(0, i))), e => e.code === 'pack_corrupt');
 });
 
 property('delta', 'every strict prefix of a delta throws', () => {
   const base = te.encode('hello world, hello');
   const { delta } = spliceDelta({ baseLen: base.length, off: 6, oldLen: 5, insert: te.encode('there') });
   assert.ok(delta.length >= 4);
-  applyDelta(base, delta);
-  for (let i = 1; i < delta.length; i++) assert.throws(() => applyDelta(base, delta.subarray(0, i)), e => e.code === 'pack_corrupt');
+  unwrap(applyDelta(base, delta));
+  for (let i = 1; i < delta.length; i++) assert.throws(() => unwrap(applyDelta(base, delta.subarray(0, i))), e => e.code === 'pack_corrupt');
 });
 
 property('sideband', 'a sideband frame is a channel byte plus an opaque body prefix', () => {
@@ -325,8 +336,8 @@ property('sp-header', 'a strict prefix of a single-object pack does not finish',
 
 property('inflate', 'every strict prefix of a zlib stream throws', () => {
   const z = zlib.deflateSync(Buffer.from('hello prefix'));
-  inflate(z);
-  for (let i = 1; i < z.length; i++) assert.throws(() => inflate(z.subarray(0, i)), e => e.code === 'pack_corrupt');
+  unwrap(inflate(z));
+  for (let i = 1; i < z.length; i++) assert.throws(() => unwrap(inflate(z.subarray(0, i))), e => e.code === 'pack_corrupt');
 });
 
 property('v2', 'a prefix of a v2 fetch response is a prefix of its sections and pack bytes', () => {
@@ -424,13 +435,13 @@ property('report', 'a proper prefix of a git report never classifies as definite
 });
 
 property('stream', 'a proper prefix of a git response stream is never a report', () => {
-  const inner = concat([pkt('unpack ok\n'), pkt('ok refs/heads/main\n'), FLUSH]);
+  const inner = concat([unwrap(pkt('unpack ok\n')), unwrap(pkt('ok refs/heads/main\n')), FLUSH]);
   const shapes = {
     plain: { sideband: false, frames: [{ kind: 'data', payload: te.encode('unpack ok\n') }, { kind: 'data', payload: te.encode('ok refs/heads/main\n') }, { kind: 'flush' }] },
     sideband: { sideband: true, frames: [{ kind: 'data', payload: concat([Uint8Array.of(2), te.encode('hook\n')]) }, { kind: 'data', payload: concat([Uint8Array.of(1), inner]) }, { kind: 'data', payload: Uint8Array.of(1) }, { kind: 'flush' }] },
   };
   for (const [name, { sideband, frames }] of Object.entries(shapes)) {
-    const run = fs => { let st = streamInit(sideband); for (const f of fs) st = streamStep(st, f); return streamFinish(st); };
+    const run = fs => { let st = streamInit(sideband); for (const f of fs) st = unwrap(streamStep(st, f)); return streamFinish(st); };
     assert.equal(run(frames).tag, 'report', name);
     assert.equal(run(frames).lines.length, 2, name);
     for (let i = 0; i < frames.length; i++) assert.equal(run(frames.slice(0, i)).tag, 'broken', `${name}: ${i} frames`);
@@ -472,6 +483,37 @@ property('oid', 'a prefix of an object id is not an object id', () => {
   }
 });
 
+// A validator has no framing: a prefix of a valid name may itself be valid ("refs/heads/m" of "refs/heads/main").
+// Closure here is that every prefix is a value equal to that prefix or a typed bad_request, never a throw or another value.
+const closedUnderPrefix = (full, parse, valueOf) => {
+  const whole = parse(full);
+  assert.equal(whole.ok, true, full);
+  assert.equal(valueOf(whole.value), full);
+  for (let i = 0; i < full.length; i++) {
+    const cut = full.slice(0, i);
+    const r = parse(cut);
+    if (r.ok) assert.equal(valueOf(r.value), cut, `prefix ${JSON.stringify(cut)} parsed to another value`);
+    else assert.equal(r.error.code, 'bad_request', `prefix ${JSON.stringify(cut)}`);
+  }
+};
+
+property('path', 'a prefix of a path is that path or a bad_request', () => {
+  for (const full of ['a', 'src/index.ts', 'a/b/c/d.e', 'dir with space/f\u00e9.txt', '.github/workflows/ci.yml']) {
+    closedUnderPrefix(full, v => parsePath(v, DEFAULT_LIMITS), v => v.path);
+  }
+});
+
+property('refname', 'a prefix of a refname is that refname or a bad_request', () => {
+  for (const full of ['refs/heads/main', 'refs/heads/feature/x-1', 'refs/tags/v1.2.3', 'refs/notes/commits']) closedUnderPrefix(full, parseRefname, v => v);
+  for (const full of ['refs/heads/main', 'refs/heads/a/b']) closedUnderPrefix(full, parseBranchName, v => v);
+  for (const full of ['refs/tags/v1.2.3', 'refs/tags/release/2026']) closedUnderPrefix(full, parseTagName, v => v);
+  // a valid ref of the other kind is refused by name, not by syntax
+  const tagAsBranch = parseBranchName('refs/tags/v1.2.3');
+  assert.equal(tagAsBranch.ok, false);
+  if (!tagAsBranch.ok) assert.equal(tagAsBranch.error.code, 'bad_request');
+  assert.equal(parseTagName('refs/heads/main').ok, false);
+});
+
 property('commit-id', 'a prefix of a commit id is not a commit id', () => {
   const full = 'b'.repeat(OID_HEX_CHARS);
   assert.equal(parseCommitId(full).ok, true);
@@ -484,10 +526,10 @@ property('commit-id', 'a prefix of a commit id is not a commit id', () => {
 
 test('take() throws a typed short read and does not clamp', () => {
   const buf = new Uint8Array([1, 2, 3, 4]);
-  assert.throws(() => take(buf, 2, 3), e => e.code === 'pack_corrupt' && e.message.startsWith('short read:'));
-  assert.throws(() => take(buf, 3, 2, 'protocol'), e => e.code === 'protocol' && e.message.startsWith('short read:'));
-  assert.deepEqual([...take(buf, 1, 2)], [2, 3]);
-  assert.equal(take(buf, 4, 0).length, 0);
+  assert.throws(() => unwrap(take(buf, 2, 3)), e => e.code === 'pack_corrupt' && e.message.startsWith('short read:'));
+  assert.throws(() => unwrap(take(buf, 3, 2, 'protocol')), e => e.code === 'protocol' && e.message.startsWith('short read:'));
+  assert.deepEqual([...unwrap(take(buf, 1, 2))], [2, 3]);
+  assert.equal(unwrap(take(buf, 4, 0)).length, 0);
 });
 
 const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)(Result)?$/;

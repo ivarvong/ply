@@ -11,6 +11,7 @@ import { parsePack, resolvePack, buildPack, makeDelta } from '../src/pack.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter } from '../src/otel.js';
 import { toHex } from '../src/sha1.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const SEED = parseInt(process.env.SEED ?? '7', 10);
 let root, cleanup, srv, bare, work;
@@ -42,11 +43,11 @@ test('tree encoding: our tree oid == git write-tree for sort-edge names, modes, 
     if (rng.bool(0.5) && !files.lnk) stage('120000', 'lnk', 'a');
     const treeOid = git(sub, ['write-tree']).trim();
     const raw = gitBuf(sub, ['cat-file', 'tree', treeOid]);
-    const entries = parseTree(new Uint8Array(raw));
-    assert.equal(hashObject('tree', encodeTree(entries)), treeOid, `round ${round}`);
+    const entries = unwrap(parseTree(new Uint8Array(raw)));
+    assert.equal(hashObject('tree', unwrap(encodeTree(entries))), treeOid, `round ${round}`);
     // shuffle then re-encode must still match (sort is ours, not git's order)
     const shuffled = [...entries].sort(() => rng.float() - 0.5);
-    assert.equal(hashObject('tree', encodeTree(shuffled)), treeOid);
+    assert.equal(hashObject('tree', unwrap(encodeTree(shuffled))), treeOid);
     // git ls-tree agreement on modes
     const ls = git(sub, ['ls-tree', treeOid]).trim().split('\n').map(l => l.split(/\s+/)[0]);
     assert.deepEqual(entries.map(e => e.mode.padStart(6, '0')), ls);
@@ -76,9 +77,9 @@ test('git pack-objects (ofs-delta, varied window/depth/compression) parses and r
   const truth = new Map(git(sub, ['cat-file', '--batch-check', '--batch-all-objects']).trim().split('\n').map(l => { const [oid, type, size] = l.split(' '); return [oid, { type, size: +size }]; }));
   for (const [window, depth, comp] of [[10, 50, 0], [1, 1, 1], [250, 50, 9], [0, 0, 6], [5, 2, -1]]) {
     const pack = new Uint8Array(gitBuf(sub, ['-c', `pack.compression=${comp}`, 'pack-objects', '--delta-base-offset', `--window=${window}`, `--depth=${depth}`, '--all', '--stdout', '--revs'], 'HEAD\n'));
-    const parsed = parsePack(pack);
+    const parsed = unwrap(parsePack(pack));
     assert.equal(parsed.stats.count, truth.size, `all objects (w${window} d${depth} c${comp})`);
-    const r = resolvePack(parsed);
+    const r = unwrap(resolvePack(parsed));
     for (const [oid, t] of truth) {
       const o = r.objects.get(oid);
       assert.ok(o, `missing ${oid}`);
@@ -116,28 +117,28 @@ test('v2 fetch filter=blob:none deepen=1 returns exactly git rev-list --objects 
   const head = commitFiles(work, bare, { 'a/b/c.txt': 'c', 'a/d.txt': 'd', 'e/f/g/h.txt': 'h', 'top.txt': 'top' }, 'one');
   const head2 = commitFiles(work, bare, { 'top.txt': 'top2' }, 'two');
   const tracer = new Tracer({ exporter: arrayExporter() });
-  const c = new GitHttp(`${srv.url}/o.git`, { tracer });
-  const { refs } = await c.lsRefs(['refs/heads/main']);
+  const c = unwrap(GitHttp.create(`${srv.url}/o.git`, { tracer }));
+  const { refs } = await unwrapAsync(c.lsRefs(['refs/heads/main']));
   assert.equal(refs.get('refs/heads/main').oid, head2);
-  const r = await c.fetchPack({ wants: [head2], filter: 'blob:none', deepen: 1 });
+  const r = await unwrapAsync(c.fetchPack({ wants: [head2], filter: 'blob:none', deepen: 1 }));
   const expected = git(bare, ['rev-list', '--objects', '--no-object-names', '--filter=blob:none', '--max-count=1', head2]).trim().split('\n').sort();
   assert.deepEqual([...r.objects.keys()].sort(), expected);
   assert.ok(r.parsed.stats.byType.blob === undefined);
-  const r0 = await c.fetchPack({ wants: [head2], filter: 'tree:0', deepen: 1 });
+  const r0 = await unwrapAsync(c.fetchPack({ wants: [head2], filter: 'tree:0', deepen: 1 }));
   assert.equal(r0.parsed.stats.count, 1);
   // deepen 1 on a 2-commit history reports shallow
   const span = tracer.exporter.lines.flatMap(l => l.resourceSpans[0].scopeSpans[0].spans).find(s => s.name === 'git.upload-pack fetch');
   assert.ok(span.attributes.find(a => a.key === 'git.fetch.shallow').value.arrayValue.values.length === 1);
   // tree:N is NOT a subset of blob:none: it includes blobs at depth < N (oracle-verified; top.txt comes back).
-  const r3 = await c.fetchPack({ wants: [head2], filter: 'tree:2', deepen: 1 });
+  const r3 = await unwrapAsync(c.fetchPack({ wants: [head2], filter: 'tree:2', deepen: 1 }));
   assert.ok([...r3.objects.values()].some(o => TYPE_NAME[o.type] === 'blob'), 'tree:2 includes depth-1 blobs');
   // combine:blob:none+tree:N is the real "trees to depth N, no blobs" filter, a strict subset of blob:none.
-  const r4 = await c.fetchPack({ wants: [head2], filter: 'combine:blob:none+tree:2', deepen: 1 });
+  const r4 = await unwrapAsync(c.fetchPack({ wants: [head2], filter: 'combine:blob:none+tree:2', deepen: 1 }));
   assert.ok([...r4.objects.values()].every(o => TYPE_NAME[o.type] !== 'blob'));
   assert.ok(r4.parsed.stats.count < r.parsed.stats.count);
   for (const oid of r4.objects.keys()) assert.ok(r.objects.has(oid));
   // want an arbitrary blob by oid
   const blobOid = git(bare, ['rev-parse', `${head}:a/b/c.txt`]).trim();
-  const rb = await c.fetchPack({ wants: [blobOid] });
+  const rb = await unwrapAsync(c.fetchPack({ wants: [blobOid] }));
   assert.equal(new TextDecoder().decode(rb.objects.get(blobOid).data), 'c');
 });

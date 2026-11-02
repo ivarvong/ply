@@ -2,7 +2,7 @@
 // calls exactly two things on it and never looks inside:
 //
 //   t.frames(service, body, span, hints)  → AsyncIterable of pkt-line frames of one command's response
-//   t.advertise(service, span)            → Uint8Array: the service's capability advertisement (pkt-lines)
+//   t.advertise(service, span)            → Result<Uint8Array>: the service's capability advertisement (pkt-lines)
 //
 // plus the data every caller may read: t.kind ('http'), t.url (credential-free, for spans and messages),
 // t.tracer, t.parent (the span wire spans hang under), t.limits, t.signal, and t.scrub: null, or a function that
@@ -22,11 +22,16 @@
 //                                   cached response's). Omitted on a live response.
 // and may add transport-specific detail under http.*. Implementation: http.ts (an SSH one was removed 2026-10-31;
 // history on branch archive/ssh).
-import type { Code, ErrorOf } from './errors.js';
-import { thrown as fail, isPlyCode } from './errors.js';
+import type { Code, ErrorOf, PlyError } from './errors.js';
+import { fail, plyError } from './errors.js';
+import type { Err, Result } from './result.js';
+import { err } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import { KIND } from './otel.js';
+import type { Input } from './absent.js';
+import { field, fillIn, readKey } from './absent.js';
+import { isPlyThrown, thrownText } from './boundary.js';
 
 // One pkt-line frame as pktline.js yields it.
 export type Frame =
@@ -34,14 +39,19 @@ export type Frame =
   | { readonly kind: 'flush' }
   | { readonly kind: 'delim' }
   | { readonly kind: 'end' };
-export type Hints = { readonly bypassCache?: boolean };
+export type Hints = { readonly bypassCache: boolean };
+export const NO_HINTS: Hints = Object.freeze({ bypassCache: false });
 export type Scrub = (s: string) => string;
 // What a server was found to need, learned at run time and shared by every view of the transport (mutable on purpose).
-// treeFilter: a host that refuses tree:0 (fetch). blobWants: a host that refuses a multi-blob want list (checkout).
-export type Quirks = { treeFilter?: 'blob:none'; blobWants?: 'single' };
+// treeFilter: 'blob:none' for a host that refuses tree:0 (fetch). blobWants: 'single' for a host that refuses a
+// multi-blob want list (checkout). A caller passes one record to every call on a server; ply fills it (absent.fillIn).
+export type Quirks = { treeFilter: 'tree:0' | 'blob:none'; blobWants: 'many' | 'single' };
+export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'many' });
 // Commits and trees harvested from over-wide packs (fetch.js), keyed by oid; `bytes` is their running total.
 export type HeldObject = { readonly type: number; readonly data: Uint8Array };
-export type Harvest = Map<string, HeldObject> & { bytes?: number };
+export type Harvest = Map<string, HeldObject>;
+// Bytes held: the store is bounded by limits.maxHarvestBytes, so a sum over it is a bounded scan.
+export const harvestBytes = (store: Harvest): number => { let n = 0; for (const o of store.values()) n += o.data.length; return n; };
 // Span attributes as otel.js records them.
 export type Attrs = Record<string, unknown>;
 
@@ -52,23 +62,40 @@ export type Transport = {
   readonly parent: Span | null;
   readonly limits: Limits;
   readonly signal: AbortSignal | null;
-  readonly quirks?: Quirks | null;
-  readonly objects?: Harvest | null;
+  readonly quirks: Quirks;
+  readonly objects: Harvest;
   readonly scrub: Scrub | null;
-  frames: (service: string, body: Uint8Array, span: Span, hints?: Hints) => AsyncIterable<Frame>;
-  advertise: (service: string, span: Span) => Promise<Uint8Array>;
+  frames: (service: string, body: Uint8Array, span: Span, hints: Hints) => AsyncIterable<Frame>;
+  advertise: (service: string, span: Span) => Promise<Result<Uint8Array, PlyError>>;
 };
 
-// A thrown value read loosely, as the JS read it: `?.` makes the read safe for any value. TODO(A3): Results replace it.
-export type Loose = { readonly code?: unknown; readonly message?: unknown; readonly name?: unknown } | null | undefined;
+// A transport as a caller may hand one in (operations take `transport`): it may lack the learned-quirks record and the
+// harvest store and the credential scrubber, or pass null for them. asTransport fills them once, at the edge: a transport that had none had no
+// memory of either, so a private fresh record behaves the same.
+export type TransportInput = Omit<Transport, 'quirks' | 'objects' | 'scrub'> & Input<{ readonly quirks: Input<Quirks> | null; readonly objects: Harvest | null; readonly scrub: Scrub | null }>;
+export function asTransport(t: TransportInput): Transport {
+  const q = readKey(t, 'quirks');
+  const o = readKey(t, 'objects');
+  const sc = readKey(t, 'scrub');
+  const scrub = sc.tag === 'some' ? sc.value : null;
+  const quirks = fillIn(q.tag === 'some' && q.value !== null ? q.value : {}, freshQuirks());
+  const objects = o.tag === 'some' && o.value !== null ? o.value : new Map<string, HeldObject>();
+  if (q.tag === 'some' && q.value === quirks && o.tag === 'some' && o.value === objects && sc.tag === 'some') {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- both fields were present; the record is a Transport
+    return t as Transport;
+  }
+  // A view, like withParent: the caller's methods and state stay the prototype's.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; the view is `t` with the two fields filled
+  return Object.create(t, { quirks: { value: quirks, enumerable: true }, objects: { value: objects, enumerable: true }, scrub: { value: scrub, enumerable: true } }) as Transport;
+}
 
 // We are not git and do not claim to be: servers that branch on the agent string get the truth.
-export const UA = 'ply/0.1.0';
-export const proto = (msg: string): ErrorOf<'protocol'> => fail('protocol', msg);
+export const UA = 'ply/0.2.0';
+export const proto = (msg: string): Err<ErrorOf<'protocol'>> => fail('protocol', msg);
 
-export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = {}): AsyncIterable<Frame> => t.frames(service, body, span, hints);
+export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncIterable<Frame> => t.frames(service, body, span, hints);
 // oxlint-disable-next-line typescript/promise-function-async -- a pass-through: the transport's own promise, unwrapped (async adds a wrapper and bytes)
-export const advertise = (t: Transport, service: string, span: Span): Promise<Uint8Array> => t.advertise(service, span);
+export const advertise = (t: Transport, service: string, span: Span): Promise<Result<Uint8Array, PlyError>> => t.advertise(service, span);
 
 // The same transport, with wire spans parented under `parent` (an operation's root). State is shared with the original:
 // the view only shadows `parent`. (A transport's methods must therefore read `parent` from the record they are called on.)
@@ -78,20 +105,46 @@ export const withParent = <T extends Transport>(t: T, parent: Span): T => Object
 export type SpanOpts = { readonly parent: Span | null; readonly kind: number; readonly attrs: Attrs; readonly scrub: Scrub | null };
 // Span options for a wire round trip under this transport's parent.
 // It carries the transport's `scrub` (credential redaction, http.js), so even an unparented wire span exports none.
-export const clientSpan = (t: Transport, attrs: Attrs = {}): SpanOpts => ({ parent: t.parent, kind: KIND.CLIENT, attrs, scrub: t.scrub ?? null });
+export const clientSpan = (t: Transport, attrs: Attrs = {}): SpanOpts => ({ parent: t.parent, kind: KIND.CLIENT, attrs, scrub: t.scrub });
 
-// Give an untyped failure a default code (typed errors keep theirs). The assignment throws for a primitive, null or a
-// frozen value; that one is wrapped instead.
-export async function coded<T>(code: Code, fn: () => Promise<T>): Promise<T> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, no-ex-assign -- see Loose; any thrown value is assigned to as the JS did, and replaced when it cannot be
-  try { return await fn(); } catch (e) { if (!isPlyCode((e as Loose)?.code)) { try { (e as { code: unknown }).code = code; } catch { e = fail(code, String((e as Loose)?.message ?? e), { cause: e }); } } throw e; }
+// Set `code` on a raised value. False for a primitive, null or a frozen value (Reflect.set answers false, or a setter
+// throws): that one is wrapped instead.
+const setCode = (e: unknown, code: Code): boolean => {
+  try { return (typeof e === 'object' || typeof e === 'function') && e !== null && Reflect.set(e, 'code', code); } catch { return false; }
+};
+// A raised value as the PlyError it is: a typed error keeps its code; any other value is given `code` (on the value
+// itself when it takes one, else on a wrapper that has it as the cause).
+export function raised(code: Code, e: unknown): PlyError {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- it carries one of ply's codes (already, or just set): a PlyError's shape
+  if (isPlyThrown(e) || setCode(e, code)) return e as PlyError;
+  return plyError(code, thrownText(e), { cause: e });
 }
+// The stream edge: a transport's frames signal failure through the stream protocol (the iterator rejects), and a
+// transport the caller hands in may raise anything. Caught here, once per exchange, and returned as the Err it is.
+export async function coded<T>(code: Code, fn: () => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> {
+  try { return await fn(); } catch (e) { return err(raised(code, e)); }
+}
+// fn(span) under a wire span. An Err is recorded on the span (error status, error.type, the exception event) as the
+// tracer records a raised error; a raised one still is, by the tracer, before coded() catches it.
+// oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
+export const spanned = <T>(t: Transport, name: string, opts: SpanOpts, fn: (span: Span) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> =>
+  t.tracer.span(name, opts, async (span: Span): Promise<Result<T, PlyError>> => {
+    const r = await fn(span);
+    if (!r.ok) span.error(r.error);
+    return r;
+  });
 
-export function wrapNet(e: unknown, signal?: AbortSignal | null): unknown {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
-  if (isPlyCode((e as Loose)?.code)) return e;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- see Loose; a thrown value renders as String() renders it
-  if (Boolean(signal?.aborted) || (e as Loose)?.name === 'AbortError' || (e as Loose)?.name === 'TimeoutError') return fail((e as Loose)?.name === 'TimeoutError' || (signal?.reason as Loose)?.name === 'TimeoutError' ? 'timeout' : 'aborted', `request aborted: ${(e as Loose)?.message ?? e}`, { cause: e });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/restrict-template-expressions -- as above
-  return fail('network', `network: ${(e as Loose)?.message ?? e}`, { cause: e });
+// A thrown value's `name` is `want` (an AbortError, a TimeoutError). Any value may be thrown: a primitive has no name.
+const nameIs = (e: unknown, want: string): boolean => { const n = field(e, 'name'); return n.tag === 'some' && n.value === want; };
+// A platform fetch failure → the PlyError it is: aborted or timeout when the signal fired or the error says so, else
+// network. A typed error passes through.
+export function wrapNet(e: unknown, signal: AbortSignal | null = null): PlyError {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- it carries one of ply's codes: a PlyError's shape
+  if (isPlyThrown(e)) return e as PlyError;
+  const aborted = signal !== null && signal.aborted;
+  if (aborted || nameIs(e, 'AbortError') || nameIs(e, 'TimeoutError')) {
+    const timedOut = nameIs(e, 'TimeoutError') || (signal !== null && nameIs(signal.reason, 'TimeoutError'));
+    return plyError(timedOut ? 'timeout' : 'aborted', `request aborted: ${thrownText(e)}`, { cause: e });
+  }
+  return plyError('network', `network: ${thrownText(e)}`, { cause: e });
 }

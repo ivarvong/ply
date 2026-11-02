@@ -10,6 +10,7 @@ import { editFile, buildCommitObjects, withCommitData } from '../src/edit.js';
 import { generateSigner, signCommit, withGpgsig, armor } from '../src/sign.js';
 import { encodeCommit, hashObject, parseCommit } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 let root, cleanup, srv, bare, work, url, signers;
 const author = { name: 'signer', email: 'signer@x' };
@@ -30,7 +31,7 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
   const { signer, publicKeyRaw } = await generateSigner();
   writeFileSync(signers, `${author.email} namespaces="git" ${signer.publicKeyLine}\n`);
   const ex = arrayExporter();
-  const r = await editFile(url, { path: 'f.txt', find: 'MARK', replace: 'SIGNED', author, message: 'signed edit' }, { tracer: new Tracer({ exporter: ex }), signer });
+  const r = await unwrapAsync(editFile(url, { path: 'f.txt', find: 'MARK', replace: 'SIGNED', author, message: 'signed edit' }, { tracer: new Tracer({ exporter: ex }), signer }));
   assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.newCommit);
   const rootSpan = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit');
   assert.equal(rootSpan.attrs['git.edit.commit.signed'], 'ssh-ed25519'); assert.equal(rootSpan.attrs['git.edit.commit.signer'], signer.publicKeyLine);
@@ -43,7 +44,7 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
   const headers = raw.slice(0, raw.indexOf('\n\n')).split('\n');
   const ci = headers.findIndex(l => l.startsWith('committer ')); assert.ok(headers[ci + 1].startsWith('gpgsig -----BEGIN SSH SIGNATURE-----'));
   assert.ok(headers.slice(ci + 2).every(l => l.startsWith(' ')), 'continuation lines');
-  assert.equal(parseCommit(new TextEncoder().encode(raw)).message, 'signed edit\n');
+  assert.equal(unwrap(parseCommit(new TextEncoder().encode(raw))).message, 'signed edit\n');
   // 3. ssh-keygen over the exact payload git signs (the commit without its gpgsig header)
   const payload = raw.split('\n').filter((l, i, a) => !(l.startsWith('gpgsig ') || (i > ci + 1 && l.startsWith(' ') && a.slice(ci + 1, i).every(x => x.startsWith('gpgsig ') || x.startsWith(' '))))).join('\n');
   const sigText = headers.slice(ci + 1).map(l => l.replace(/^gpgsig /, '').replace(/^ /, '')).join('\n') + '\n';
@@ -51,7 +52,7 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
   const sk = execFileSync('ssh-keygen', ['-Y', 'verify', '-f', signers, '-I', author.email, '-n', 'git', '-s', sigFile], { input: payload, encoding: 'utf8' });
   assert.match(sk, /Good "git" signature/);
   // 4. tamper: same signature over a different message must fail
-  const bad = withGpgsig(encodeCommit({ ...parseCommit(new TextEncoder().encode(payload)), author: parseCommit(new TextEncoder().encode(payload)).author, committer: parseCommit(new TextEncoder().encode(payload)).committer, message: 'tampered\n' }), sigText);
+  const bad = unwrap(withGpgsig(unwrap(encodeCommit({ ...unwrap(parseCommit(new TextEncoder().encode(payload))), author: unwrap(parseCommit(new TextEncoder().encode(payload))).author, committer: unwrap(parseCommit(new TextEncoder().encode(payload))).committer, message: 'tampered\n' })), sigText));
   const badOid = execFileSync('git', ['-C', bare, 'hash-object', '-t', 'commit', '-w', '--stdin'], { input: bad, encoding: 'utf8' }).trim();
   const tampered = verifyCommit(badOid);
   assert.equal(tampered.ok, false); assert.match(tampered.out, /incorrect signature/, 'rejected for the signature, not for some other reason');
@@ -61,15 +62,15 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
 });
 
 test('withCommitData keeps trees/blob objects and recomputes identity; armor wraps at 70 like ssh-keygen', async () => {
-  const commit = encodeCommit({ tree: 'a'.repeat(40), parents: [], author: 'n <e@x> 1 +0000', committer: 'n <e@x> 1 +0000', message: 'm\n' });
+  const commit = unwrap(encodeCommit({ tree: 'a'.repeat(40), parents: [], author: 'n <e@x> 1 +0000', committer: 'n <e@x> 1 +0000', message: 'm\n' }));
   const built = { commitData: commit, newCommit: hashObject('commit', commit), objects: [{ type: 1, data: commit }, { type: 2, data: new Uint8Array(5), baseOid: 'b'.repeat(40) }], trees: [], newTree: 'a'.repeat(40) };
   const { signer } = await generateSigner();
-  const signed = await signCommit(commit, signer);
+  const signed = await unwrapAsync(signCommit(commit, signer));
   const w = withCommitData(built, signed);
   assert.equal(w.newCommit, hashObject('commit', signed)); assert.notEqual(w.newCommit, built.newCommit);
   assert.equal(w.objects.length, 2); assert.equal(w.objects[1], built.objects[1]);
   const text = new TextDecoder().decode(signed);
   assert.ok(text.includes('\ncommitter n <e@x> 1 +0000\ngpgsig -----BEGIN SSH SIGNATURE-----\n '));
   const a = armor(new Uint8Array(200)); for (const l of a.split('\n').slice(1, -2)) assert.ok(l.length <= 70);
-  assert.throws(() => withGpgsig(new TextEncoder().encode('tree x\n\nm'), 'sig'), e => e.code === 'bad_request');
+  assert.throws(() => unwrap(withGpgsig(new TextEncoder().encode('tree x\n\nm'), 'sig')), e => e.code === 'bad_request');
 });

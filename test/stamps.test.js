@@ -13,6 +13,7 @@ import { oracleRediff } from './gitversion.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
+import { unwrapAsync } from './unwrap.js';
 
 const rediff = oracleRediff();
 const BASE_ENV = { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -61,27 +62,27 @@ async function cell(op, a, c) {
     const env = as(a, c);
     if (op.startsWith('merge')) {
       const from = op === 'merge from a branch' ? 'refs/heads/feat' : r.feat;
-      const res = await mergeBranch(r.url, { ref: 'refs/heads/main', from, author: a, committer: c, message: 'merge msg', noFastForward: true }, opts);
+      const res = await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from, author: a, committer: c, message: 'merge msg', noFastForward: true }, opts));
       run(d, ['merge', '--no-ff', '-q', '-m', 'merge msg', r.feat], env);
       return [[raw(r.bare, res.oid)], [raw(d, 'HEAD')]];
     }
     if (op.startsWith('rebase')) {
       const onto = op === 'rebase onto a branch' ? 'refs/heads/main' : r.main;
-      const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto, committer: c }, opts);
+      const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto, committer: c }, opts));
       run(d, ['rebase', '-q', r.main], env);
       return [range(r.bare, r.main, res.oid), range(d, r.main, 'HEAD')];
     }
     if (op === 'squash') {
-      const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: c, author: a, squash: true, message: 'squash msg\n' }, opts);
+      const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: c, author: a, squash: true, message: 'squash msg\n' }, opts));
       run(d, ['checkout', '-q', '-B', 'sq', r.main], env); run(d, ['merge', '--squash', '-q', r.feat], env); run(d, ['commit', '-q', '-m', 'squash msg'], env);
       return [[raw(r.bare, res.oid)], [raw(d, 'HEAD')]];
     }
     if (op === 'cherry-pick') {
-      const res = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.feat, committer: c }, opts);
+      const res = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.feat, committer: c }, opts));
       run(d, ['cherry-pick', r.feat], env);
       return [[raw(r.bare, res.oid)], [raw(d, 'HEAD')]];
     }
-    const res = await revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, author: a }, opts);
+    const res = await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, author: a }, opts));
     run(d, ['revert', '--no-edit', r.main], env);
     return [[raw(r.bare, res.oid)], [raw(d, 'HEAD')]];
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -101,12 +102,12 @@ test('author and committer stamps with zones, from/onto by commit id: every comm
 test('from / onto: the zero oid is refused before any request; an oid that is not a commit is not_found', async () => {
   const r = build(); const opts = { tracer: new Tracer(), rediff };
   const zero = '0'.repeat(40);
-  await assert.rejects(mergeBranch(r.url, { from: zero, author: PAIRS[0][0] }, opts), e => e.code === 'bad_request' && e.what === 'from');
-  await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: zero, committer: PAIRS[0][1] }, opts), e => e.code === 'bad_request' && e.what === 'onto');
+  await assert.rejects(unwrapAsync(mergeBranch(r.url, { from: zero, author: PAIRS[0][0] }, opts)), e => e.code === 'bad_request' && e.what === 'from');
+  await assert.rejects(unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: zero, committer: PAIRS[0][1] }, opts)), e => e.code === 'bad_request' && e.what === 'onto');
   const tree = run(r.bare, ['rev-parse', 'main^{tree}'], BASE_ENV);
-  await assert.rejects(mergeBranch(r.url, { from: tree, author: PAIRS[0][0] }, opts), e => e.code === 'not_found' && e.what === 'from' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && e.miss.miss.oid === tree);
+  await assert.rejects(unwrapAsync(mergeBranch(r.url, { from: tree, author: PAIRS[0][0] }, opts)), e => e.code === 'not_found' && e.what === 'from' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && e.miss.miss.oid === tree);
   const onto = 'f'.repeat(40);
-  await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto, committer: PAIRS[0][1] }, opts), e => e.code === 'not_found' && e.what === 'onto' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === onto);
+  await assert.rejects(unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto, committer: PAIRS[0][1] }, opts)), e => e.code === 'not_found' && e.what === 'onto' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === onto);
   assert.equal(run(r.bare, ['rev-parse', 'main'], BASE_ENV), r.main, 'nothing pushed');
   assert.equal(run(r.bare, ['rev-parse', 'feat'], BASE_ENV), r.feat, 'nothing pushed');
 });

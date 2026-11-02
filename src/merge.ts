@@ -11,15 +11,23 @@
 //                         are a superset of git's: the rename guards below, and the rare file where git's diff falls back to
 //                         classic Myers, which we do not port (test/fuzz/linemerge.mjs measures it). Where we succeed, the
 //                         tree is what `git merge-tree --write-tree` produces (test/merge.test.js).
-// The pure parts: threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits), uniqueObjects; linemerge.js. The effects: lsRefs, fetchObject, push.
+// The pure parts: decidePath / threeWay (one directory), mergeMode, bestBases (git merge-base --all over known commits),
+// searchStep (the merge-base search's transition), decideMerge (what a verdict means for the branch), uniqueObjects;
+// linemerge.js. The effects: lsRefs, fetchObject, push. Every step that can fail returns a Result, the entry points
+// (mergeBranch, mergeBase, mergeTrees, attributeTree) included.
 /* oxlint-disable import/max-dependencies -- a merge drives ls-refs, fetch, push, the object codecs and the line merge */
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
-import type { Extra, Miss } from './errors.js';
-import { thrown as fail } from './errors.js';
-import { assertNever } from './result.js';
+import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
+import type { Err, Ok, Option, Result } from './result.js';
+import type { Input } from './absent.js';
+import type { LsRefsResult } from './lsrefs.js';
+import type { OperationOpts, Outcome } from './operation.js';
+import { fail } from './errors.js';
+import { andThen, assertNever, err, getOrElse, isNone, isSome, map, mapOption, none, ok, some } from './result.js';
+import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
@@ -29,16 +37,16 @@ import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TY
 import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
-import { attributesFor, bytesToStr, utf8ToStr } from './attributes.js';
+import { attributeOf, attributesFor, bytesToStr, popLast, utf8ToStr } from './attributes.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
-import { limitError, requireLimit, finiteLimit, LIMIT_MERGE_BLOB } from './limits.js';
+import { checkLimit, limitError, readLimit } from './limits.js';
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons and bases are extras (errors.ts is shared; additive
 // detail is the steward's call).
 type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
 
-// The shapes this module reads from unconverted modules (objects, transport, operation, push, ls-refs); their own
-// clusters own the full types.
+// The shapes this module reads from other modules (objects, transport, operation, push, ls-refs); their own modules
+// own the full types.
 export type TreeEntry = { readonly mode: string; readonly name: string; readonly oid: string };
 export type Commit = {
   readonly tree: string;
@@ -56,39 +64,60 @@ import type { Transport } from './transport.js';
 // the span every operation records on (src/otel.js); re-exported for rebase.ts
 export type { Span } from './otel.js';
 import type { Span } from './otel.js';
-export type Outcome = <R>(kind: string, result: R, attrs?: Readonly<Record<string, unknown>>) => R;
+export type { Outcome } from './operation.js';
 export type OpContext = { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits };
 export type PushResult = { readonly packBytes: number };
-export type Refs = { readonly refs: ReadonlyMap<string, { readonly oid: string; readonly peeled?: string }> };
 // a commit stamp: `time` (unix seconds) defaults to the operation's `time`, `tz` (+HHMM / -HHMM) to +0000
-export type Author = { readonly name: string; readonly email: string; readonly tz?: string; readonly time?: number };
+export type Author = { readonly name: string; readonly email: string } & Input<{ readonly tz: string; readonly time: number }>;
 // a commit signer (src/sign.ts); re-exported for rebase.ts
 export type { Signer } from './sign.js';
 import type { Signer } from './sign.js';
 export type TreeCache = Map<string, Uint8Array>;
-type Fetched = { readonly data: Uint8Array };
 export type PushObject = { readonly type: number; readonly data: Uint8Array };
 
-// The unconverted modules' functions as this module calls them. TS infers their parameter types from the JS defaults
-// (`expectType = null` reads as null, `parents = []` as never[]), which no caller satisfies. Each call casts to the
-// signature here (a type-only cast: an alias `const f = g as F` would cost bundle bytes). These go as they convert.
-type FetchObject = (t: Transport, o: { readonly oid: string | null | undefined; readonly expectType: number; readonly deepen?: number }) => Promise<Fetched>;
-type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<PushResult>;
-type Operation = <R>(op: string, url: string, opts: Readonly<Record<string, unknown>>, body: (ctx: OpContext) => Promise<R>) => Promise<R>;
-type EncodeCommit = (c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string }) => Uint8Array<ArrayBuffer>;
+// push.ts takes a branded Refname; the ref here is validated (validatePushRef) as a plain string. Each call casts to
+// this signature (a type-only cast: an alias `const f = g as F` would cost bundle bytes).
+type Push = (t: Transport, o: { readonly ref: string; readonly oldOid: string; readonly newOid: string; readonly objects: readonly PushObject[] }) => Promise<Result<PushResult, PlyError>>;
 
 const EMPTY: readonly TreeEntry[] = [];
-// An entry absent on a side is undefined.
-type Entry = TreeEntry | undefined;
-const same = (a: Entry, b: Entry): boolean => a === b || (a !== undefined && b !== undefined && a.mode === b.mode && a.oid === b.oid);
-const isTree = (e: Entry): boolean => e?.mode === '40000';
+const NO_PARENTS: readonly string[] = [];
+const isTreeEntry = (e: TreeEntry): boolean => e.mode === '40000';
+// An entry absent on a side is None.
+type Entry = Option<TreeEntry>;
+const same = (a: Entry, b: Entry): boolean => (a.tag === 'none' || b.tag === 'none' ? a.tag === b.tag : a.value.mode === b.value.mode && a.value.oid === b.value.oid);
+const isTree = (e: Entry): boolean => e.tag === 'some' && isTreeEntry(e.value);
+const isFile = (e: Entry): boolean => e.tag === 'some' && (e.value.mode === '100644' || e.value.mode === '100755');
+// directory vs directory, or a directory one side deleted/added: recurse so the conflict (if any) is per file,
+// and untouched files inside a directory the other side deleted go away, as git does
+const treeish = (e: Entry): boolean => e.tag === 'none' || isTree(e);
+const recurses = (O: Entry, T: Entry): boolean => treeish(O) && treeish(T) && (isTree(O) || isTree(T));
+const byName = (list: readonly TreeEntry[]): Map<string, TreeEntry> => new Map(list.map(e => [e.name, e]));
 
-// Pure: three-way merge of one directory's entries. Returns { entries (resolved, in no particular order), recurse: [name],
-// conflicts: [name], content: [name], deletedBoth, addedOurs, addedTheirs }. An entry absent on a side is undefined. Rules
-// (git's trivial-merge rules, tree level): same on both sides → that; unchanged on one side → the other side's; both
-// trees → recurse; both regular files changed differently over a regular base → `content` (a line merge may resolve it);
-// otherwise → conflict. The deleted/added lists feed the rename guards in mergeTrees.
-// A6 pass: PathDecision = take | drop | recurse | content | conflict{reason} instead of parallel lists.
+// Pure: what a three-way merge does with one name of a directory, git's trivial-merge rules at tree level: same on both
+// sides → that; unchanged on one side → the other side's (an absent result drops the name); both trees → recurse; both
+// regular files changed differently over a regular base → content (a line merge may resolve it); otherwise → conflict.
+export type PathDecision =
+  | { readonly kind: 'take'; readonly entry: TreeEntry }
+  | { readonly kind: 'drop' }
+  | { readonly kind: 'recurse' }
+  | { readonly kind: 'content' }
+  | { readonly kind: 'conflict' };
+const DROP: PathDecision = { kind: 'drop' };
+const RECURSE: PathDecision = { kind: 'recurse' };
+const CONTENT: PathDecision = { kind: 'content' };
+const CONFLICT: PathDecision = { kind: 'conflict' };
+const taken = (e: Entry): PathDecision => (e.tag === 'some' ? { kind: 'take', entry: e.value } : DROP);
+function decidePath(B: Entry, O: Entry, T: Entry): PathDecision {
+  if (same(O, T) || same(B, T)) return taken(O);
+  if (same(B, O)) return taken(T);
+  if (recurses(O, T)) return RECURSE;
+  if (isFile(B) && isFile(O) && isFile(T)) return CONTENT;
+  return CONFLICT;
+}
+
+// Pure: three-way merge of one directory's entries, as lists by decision: { entries (resolved, in no particular order),
+// recurse: [name], conflicts: [name], content: [name], deletedBoth, addedOurs, addedTheirs }. The deleted/added lists
+// feed the rename guards in mergeTrees.
 export type ThreeWay = {
   readonly entries: TreeEntry[];
   readonly recurse: string[];
@@ -98,12 +127,6 @@ export type ThreeWay = {
   readonly addedOurs: string[];
   readonly addedTheirs: string[];
 };
-const isFile = (e: Entry): boolean => e?.mode === '100644' || e?.mode === '100755';
-// directory vs directory, or a directory one side deleted/added: recurse so the conflict (if any) is per file,
-// and untouched files inside a directory the other side deleted go away, as git does
-const treeish = (e: Entry): boolean => e === undefined || isTree(e);
-const recurses = (O: Entry, T: Entry): boolean => treeish(O) && treeish(T) && (isTree(O) || isTree(T));
-const byName = (list: readonly TreeEntry[]): Map<string, TreeEntry> => new Map(list.map(e => [e.name, e]));
 export function threeWay(base: readonly TreeEntry[], ours: readonly TreeEntry[], theirs: readonly TreeEntry[]): ThreeWay {
   const b = byName(base);
   const o = byName(ours);
@@ -117,22 +140,28 @@ export function threeWay(base: readonly TreeEntry[], ours: readonly TreeEntry[],
   const addedOurs: string[] = [];
   const addedTheirs: string[] = [];
   for (const name of names) {
-    const B = b.get(name);
-    const O = o.get(name);
-    const T = t.get(name);
-    if (B && !O && !T) deletedBoth.push(name);
-    if (!B && O) addedOurs.push(name);
-    if (!B && T) addedTheirs.push(name);
-    if (same(O, T) || same(B, T)) { if (O) entries.push(O); }
-    else if (same(B, O)) { if (T) entries.push(T); }
-    else if (recurses(O, T)) recurse.push(name);
-    else if (isFile(B) && isFile(O) && isFile(T)) content.push(name);
-    else conflicts.push(name);
+    const B = mapGet(b, name);
+    const O = mapGet(o, name);
+    const T = mapGet(t, name);
+    if (B.tag === 'some' && O.tag === 'none' && T.tag === 'none') deletedBoth.push(name);
+    if (B.tag === 'none' && O.tag === 'some') addedOurs.push(name);
+    if (B.tag === 'none' && T.tag === 'some') addedTheirs.push(name);
+    const d = decidePath(B, O, T);
+    switch (d.kind) {
+      case 'take': entries.push(d.entry); continue;
+      case 'drop': continue;
+      case 'recurse': recurse.push(name); continue;
+      case 'content': content.push(name); continue;
+      case 'conflict': conflicts.push(name); continue;
+    }
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    assertNever(d);
   }
   return { entries, recurse, conflicts, content, deletedBoth, addedOurs, addedTheirs };
 }
 
-// Pure: git's mode merge for a regular file both sides touched: equal → that; one side unchanged → the other's.
+// Pure: git's mode merge for a regular file both sides touched: equal → that; one side unchanged → the other's; null:
+// both changed it, differently (a conflict).
 export const mergeMode = (b: string, o: string, t: string): string | null => {
   if (o === t || b === t) return o;
   if (b === o) return t;
@@ -154,13 +183,15 @@ export const mergeMode = (b: string, o: string, t: string): string | null => {
 // A single best base over a graph whose only cuts are settled is final, and the rule says so without a special case:
 // every settled commit is the base or below it, so the one base reaches every settled cut.
 export type Parents = { readonly parents: readonly string[] };
+// a known commit's parents; a cut has none known
+const parentsIn = (commits: ReadonlyMap<string, Parents>, c: string): readonly string[] => getOrElse(mapOption(mapGet(commits, c), x => x.parents), NO_PARENTS);
 export function bestBases(commits: ReadonlyMap<string, Parents>, a: string, b: string): { best: string[]; truncated: boolean } {
   // the commits reachable from `starts`, not walking into `stop` (a commit not in the map is reached, not walked)
-  const closure = (starts: readonly string[], stop: ReadonlySet<string> = new Set()): Set<string> => { const seen = new Set<string>(); const st = [...starts]; for (let c = st.pop(); c !== undefined; c = st.pop()) { if (seen.has(c) || stop.has(c)) continue; seen.add(c); for (const p of commits.get(c)?.parents ?? []) st.push(p); } return seen; };
+  const closure = (starts: readonly string[], stop: ReadonlySet<string> = new Set()): Set<string> => { const seen = new Set<string>(); const st = [...starts]; for (let c = popLast(st); c.tag === 'some'; c = popLast(st)) { if (seen.has(c.value) || stop.has(c.value)) continue; seen.add(c.value); for (const p of parentsIn(commits, c.value)) st.push(p); } return seen; };
   const A = closure([a]);
   const B = closure([b]);
   const common = [...A].filter(c => B.has(c));
-  const below = closure(common.flatMap(c => commits.get(c)?.parents ?? [])); // proper ancestors of common ancestors
+  const below = closure(common.flatMap(c => parentsIn(commits, c))); // proper ancestors of common ancestors
   const best = common.filter(c => !below.has(c)).toSorted();
   const settled = new Set([...common, ...below]);
   const cut = (c: string): boolean => !commits.has(c);
@@ -175,21 +206,24 @@ export function bestBases(commits: ReadonlyMap<string, Parents>, a: string, b: s
 // hash-verified, so ancestry cannot be forged, only withheld; a server that withholds it without saying so would make
 // bestBases answer over a cut graph that looks whole (#18), so that is `pack_corrupt` here. git's upload-pack keeps the
 // contract (the boundary of the depth and of a shallow server repository are both reported).
-type Tree0Pack = { readonly objects?: ReadonlyMap<string, { readonly type: number; readonly data: Uint8Array }> | null; readonly shallow: readonly string[] };
-export async function ancestors(t: Transport, head: string, depth: number): Promise<Map<string, Commit>> {
-  const r: Tree0Pack = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
-  const commits = new Map<string, Commit>(); for (const [oid, o] of r.objects ?? []) if (o.type === TYPE.COMMIT) commits.set(oid, parseCommit(o.data, t.limits));
-  if (!commits.has(head)) throw fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
+export async function ancestors(t: Transport, head: string, depth: number): Promise<Result<Map<string, Commit>, PlyError>> {
+  const got = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
+  if (!got.ok) return got;
+  const r = got.value;
+  const commits = new Map<string, Commit>();
+  const objects = fromNullish(r.objects);
+  if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) { const c = parseCommit(o.data, t.limits); if (!c.ok) return c; commits.set(oid, c.value); }
+  if (!commits.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
   const seen = new Set([head]);
   // seen grows while it is walked: every commit reachable from head through the pack
-  for (const c of seen) for (const p of commits.get(c)?.parents ?? []) seen.add(p);
+  for (const c of seen) for (const p of parentsIn(commits, c)) seen.add(p);
   const shallow = new Set(r.shallow);
   for (const [oid, c] of commits) {
-    if (!seen.has(oid)) throw fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
-    const missing = shallow.has(oid) ? undefined : c.parents.find(p => !commits.has(p));
-    if (missing !== undefined) throw fail('pack_corrupt', `parent ${missing} of ${oid} withheld and ${oid} not reported shallow`);
+    if (!seen.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
+    const missing = shallow.has(oid) ? none : fromNullable(c.parents.find(p => !commits.has(p)));
+    if (missing.tag === 'some') return fail('pack_corrupt', `parent ${missing.value} of ${oid} withheld and ${oid} not reported shallow`);
   }
-  return commits;
+  return ok(commits);
 }
 
 // The merge-base search as a machine. It starts searching a window of 8 commits a side and, while the window's graph
@@ -212,15 +246,21 @@ export function searchStep(depth: number, cap: number, commits: ReadonlyMap<stri
   // Both sides complete and still truncated cannot happen (ancestors refuses a parent withheld without a shallow line);
   // it used to be accepted (#18).
   if (truncated) return depth < cap ? { tag: 'searching', depth: Math.min(depth * 2, cap) } : { tag: 'capped', depth };
-  const [base] = best;
-  if (base === undefined) return { tag: 'unrelated', depth, bases: best };
-  return best.length > 1 ? { tag: 'criss-cross', depth, bases: best } : { tag: 'found', depth, base, bases: best };
+  const first = at(best, 0);
+  if (first.tag === 'none') return { tag: 'unrelated', depth, bases: best };
+  return best.length > 1 ? { tag: 'criss-cross', depth, bases: best } : { tag: 'found', depth, base: first.value, bases: best };
 }
 
 // base is the verdict's one base, or null
 export type MergeBase = { readonly base: string | null; readonly bases: string[]; readonly depth: number; readonly commits: Map<string, Commit>; readonly verdict: Verdict };
-export async function mergeBase(t: Transport, a: string, b: string, { maxDepth }: { readonly maxDepth?: number } = {}): Promise<MergeBase> {
-  const cap = maxDepth === undefined ? requireLimit(t.limits, 'maxMergeDepth') : finiteLimit(maxDepth, 'maxMergeDepth');
+// maxDepth: the search cap in commits a side; null (the default) reads the transport's limits.maxMergeDepth.
+export type MergeBaseConfig = { readonly maxDepth: number | null };
+export type MergeBaseOptions = Input<MergeBaseConfig>;
+export async function mergeBase(t: Transport, a: string, b: string, options: MergeBaseOptions = {}): Promise<Result<MergeBase, PlyError>> {
+  const { maxDepth } = withDefaults<MergeBaseConfig>(options, { maxDepth: null });
+  const capped = maxDepth === null ? readLimit(t.limits, 'maxMergeDepth') : checkLimit(maxDepth, 'maxMergeDepth');
+  if (!capped.ok) return capped;
+  const cap = capped.value;
   const top = Math.floor(cap);
   let s: Search = top < 1 ? { tag: 'capped', depth: 0 } : { tag: 'searching', depth: Math.min(8, top) };
   let commits = new Map<string, Commit>();
@@ -228,51 +268,64 @@ export async function mergeBase(t: Transport, a: string, b: string, { maxDepth }
     const { depth } = s;
     // oxlint-disable-next-line eslint/no-await-in-loop -- each round deepens from what the last one found
     const [A, B] = await Promise.all([ancestors(t, a, depth), ancestors(t, b, depth)]);
-    commits = new Map([...B, ...A]);
+    if (!A.ok) return A;
+    if (!B.ok) return B;
+    commits = new Map([...B.value, ...A.value]);
     s = searchStep(depth, top, commits, a, b);
   }
   switch (s.tag) {
     case 'capped': {
       const attempted = s.depth === 0 ? 1 : s.depth * 2;
-      throw limitError('merge-base search depth', attempted, cap);
+      return err(limitError('merge-base search depth', attempted, cap));
     }
-    case 'found': return { base: s.base, bases: s.bases, depth: s.depth, commits, verdict: s };
+    case 'found': return ok({ base: s.base, bases: s.bases, depth: s.depth, commits, verdict: s });
     case 'criss-cross':
-    case 'unrelated': return { base: null, bases: s.bases, depth: s.depth, commits, verdict: s };
+    case 'unrelated': return ok({ base: null, bases: s.bases, depth: s.depth, commits, verdict: s });
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(s);
 }
 
-// Effect: a tree's entries, from the oid → bytes cache or fetched into it (`fetched` counts a fetch)
+// Effect: a tree's entries, from the oid → bytes cache or fetched into it (`onFetch` counts a fetch)
+const NO_COUNT = (): void => { /* not counted */ };
 // oxlint-disable-next-line eslint/max-params -- the transport, the cache, the oid and the counter
-const cachedTree = async (t: Transport, cache: TreeCache, oid: string, fetched?: () => void): Promise<TreeEntry[]> => {
-  let data = cache.get(oid);
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  if (!data) { data = (await (fetchObject as unknown as FetchObject)(t, { oid, expectType: TYPE.TREE })).data; cache.set(oid, data); fetched?.(); }
+const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: () => void = NO_COUNT): Promise<Result<TreeEntry[], PlyError>> => {
+  const held = mapGet(cache, oid);
+  if (held.tag === 'some') return parseTree(held.value, t.limits);
+  const got = await fetchObject(t, { oid, expectType: TYPE.TREE });
+  if (!got.ok) return got;
+  const { data } = got.value;
+  cache.set(oid, data); onFetch();
   return parseTree(data, t.limits);
 };
-const subtree = (e: Entry): string | null => (e?.mode === '40000' ? e.oid : null);
-type ReadTree = (oid: string | null | undefined) => Promise<readonly TreeEntry[]>;
+const subtree = (e: Entry): string | null => (e.tag === 'some' && isTreeEntry(e.value) ? e.value.oid : null);
+// a tree by oid; null is the empty tree
+type ReadTree = (oid: string | null) => Promise<Result<readonly TreeEntry[], PlyError>>;
 // Effect: the paths `side` adds relative to `base` (both tree oids), recursing only into differing subtrees; a directory
 // new on `side` is one entry, 'dir/', standing for everything inside it.
-async function addedPaths(read: ReadTree, base: string | null | undefined, side: string | null | undefined, prefix = ''): Promise<string[]> {
-  if (base === side) return [];
+async function addedPaths(read: ReadTree, base: string | null, side: string | null, prefix = ''): Promise<Result<string[], PlyError>> {
+  if (base === side) return ok([]);
   const [B, S] = await Promise.all([read(base), read(side)]);
-  const b = byName(B); const out: string[] = [];
-  for (const e of S) {
-    const old = b.get(e.name);
+  if (!B.ok) return B;
+  if (!S.ok) return S;
+  const b = byName(B.value); const out: string[] = [];
+  for (const e of S.value) {
+    const was = mapGet(b, e.name);
     // new, or a file where a directory was (or the reverse): added
-    if (!old || isTree(e) !== isTree(old)) out.push(prefix + e.name + (isTree(e) ? '/' : ''));
-    // oxlint-disable-next-line eslint/no-await-in-loop -- one subtree at a time, as before
-    else if (isTree(e) && old.oid !== e.oid) out.push(...await addedPaths(read, old.oid, e.oid, `${prefix}${e.name}/`));
+    if (was.tag === 'none' || isTreeEntry(e) !== isTreeEntry(was.value)) out.push(prefix + e.name + (isTreeEntry(e) ? '/' : ''));
+    else if (isTreeEntry(e) && was.value.oid !== e.oid) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- one subtree at a time, as before
+      const inner = await addedPaths(read, was.value.oid, e.oid, `${prefix}${e.name}/`);
+      if (!inner.ok) return inner;
+      out.push(...inner.value);
+    }
   }
-  return out;
+  return ok(out);
 }
 
 // a path list as one comparable value (paths hold no NUL)
 const pathSet = (l: readonly string[]): string => [...l].toSorted().join('\0');
-export type DriverFor = (path: string) => Promise<Driver>;
+export type DriverFor = (path: string) => Promise<Result<Driver, PlyError>>;
 // Why a path conflicts. The text is the reason a caller reads in merge_conflict's `reasons`.
 export type ContentReason =
   | 'binary (merge attribute)' | 'too large to merge' | 'binary'
@@ -286,21 +339,31 @@ export type ConflictReason =
   | 'possible directory rename (added inside a directory the other side removed)'
   | 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)'
   | 'possible rename target (added while the merge has a deletion conflict)';
-export type BlobSpec = { readonly base: string; readonly ours: string; readonly theirs: string; readonly path: string; readonly driverFor?: DriverFor | null };
-export type BlobMerge = { readonly oid: string; readonly data?: Uint8Array; readonly reason?: never; readonly conflict?: false } | { readonly conflict: true; readonly reason: ContentReason };
+export type BlobSpec = { readonly base: string; readonly ours: string; readonly theirs: string; readonly path: string; readonly driverFor: DriverFor | null };
+// A both-sides-changed file's content: one side's blob as it is (already on the server), a new merged blob (to push),
+// or a conflict with its reason.
+export type BlobMerge =
+  | { readonly kind: 'existing'; readonly oid: string }
+  | { readonly kind: 'merged'; readonly oid: string; readonly data: Uint8Array }
+  | { readonly kind: 'conflict'; readonly reason: ContentReason };
 export type MergeStats = { merged: number; undecided: number; unioned: number; attrBinary: number };
-export type MergeBlob = ((spec: BlobSpec) => Promise<BlobMerge>) & { stats: MergeStats };
+export type MergeBlob = ((spec: BlobSpec) => Promise<Result<BlobMerge, PlyError>>) & { stats: MergeStats };
 export type Removed = 'ours' | 'theirs' | null;
-export type MergeTreesSpec = {
-  readonly base?: string | null | undefined;
-  readonly ours?: string | null | undefined;
-  readonly theirs?: string | null | undefined;
-  readonly prefix?: string;
-  readonly removed?: Removed;
-  readonly mergeBlob?: MergeBlob | null;
-  readonly driverFor?: DriverFor | null;
+// The three trees by oid (null: the empty tree), the path prefix of this directory, which side removed the directory
+// being merged (null: neither), the line merge for a both-sides-changed file (null: such a file conflicts), and the
+// .gitattributes merge driver per path (null: text).
+export type MergeTreesConfig = {
+  readonly base: string | null;
+  readonly ours: string | null;
+  readonly theirs: string | null;
+  readonly prefix: string;
+  readonly removed: Removed;
+  readonly mergeBlob: MergeBlob | null;
+  readonly driverFor: DriverFor | null;
 };
-// The accumulator one merge shares across its recursion. reasons is keyed by path and has no prototype.
+export type MergeTreesSpec = Input<MergeTreesConfig>;
+// The accumulator one merge shares across its recursion. reasons is keyed by path and has no prototype. deletedOne: a
+// modify/delete conflict was seen.
 export type MergeAcc = {
   objects: PackObject[];
   conflicts: string[];
@@ -309,9 +372,11 @@ export type MergeAcc = {
   dirAdds: string[];
   reasons: Record<string, ConflictReason>;
   contentMerged: number;
-  deletedOne?: boolean;
+  deletedOne: boolean;
 };
+// oid: the merged tree, or null when the merge conflicts or the tree is empty
 export type MergeTreesResult = MergeAcc & { readonly oid: string | null };
+const mergeTreesDefaults = (): MergeTreesConfig => ({ base: null, ours: null, theirs: null, prefix: '', removed: null, mergeBlob: null, driverFor: null });
 
 // Effect: merge three trees (by oid, any may be null = empty) into a new tree, returning its oid, the new objects to push
 // and conflicts as paths. Fetches only directories where the sides differ; `cache` is the oid → bytes tree cache.
@@ -324,14 +389,15 @@ export type MergeTreesResult = MergeAcc & { readonly oid: string | null };
 //   (G2's target is a path git computes from the directory rename; we report the added path and the reason.)
 //   G2  a directory one side removed entirely, the other side adds inside it   (directory rename + add)
 // A rename on one side with the other side untouched merges exactly as git does.
-/* oxlint-disable eslint/no-await-in-loop, eslint/complexity -- one path at a time (the merges share `out`, the cache and the fetch budget); the A6 pass splits planDir and the rename guards out */
-export async function mergeTrees(t: Transport, cache: TreeCache, { base, ours, theirs, prefix = '', removed = null, mergeBlob = null, driverFor = null }: MergeTreesSpec, into: MergeAcc | null = null): Promise<MergeTreesResult> {
-  const top = into === null;
-  // reasons is keyed by path, so it has no prototype: a path named `__proto__` or `constructor` is recorded like any other
-  const out: MergeAcc = into ?? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: Object.create(null), contentMerged: 0 };
+/* oxlint-disable eslint/no-await-in-loop, eslint/complexity, eslint/max-params -- one path at a time (the merges share `out`, the cache and the fetch budget); the rename guards run once, at the top */
+async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, prefix, removed, mergeBlob, driverFor }: MergeTreesConfig, out: MergeAcc, top: boolean): Promise<Result<MergeTreesResult, PlyError>> {
   const conflict = (path: string, why: ConflictReason): void => { out.conflicts.push(path); out.reasons[path] = why; };
-  const read: ReadTree = async oid => (oid === null || oid === undefined ? EMPTY : cachedTree(t, cache, oid, () => { out.fetched++; }));
-  const [B, O, T] = await Promise.all([read(base), read(ours), read(theirs)]);
+  const read: ReadTree = async oid => (oid === null ? ok(EMPTY) : cachedTree(t, cache, oid, () => { out.fetched++; }));
+  const [readB, readO, readT] = await Promise.all([read(base), read(ours), read(theirs)]);
+  if (!readB.ok) return readB;
+  if (!readO.ok) return readO;
+  if (!readT.ok) return readT;
+  const [B, O, T] = [readB.value, readO.value, readT.value];
   const r = threeWay(B, O, T);
   const { entries } = r;
   // Names are the repository's: a Map, so a directory called `constructor` or `__proto__` is not Object.prototype's
@@ -345,122 +411,173 @@ export async function mergeTrees(t: Transport, cache: TreeCache, { base, ours, t
   if (removed === 'theirs') for (const name of r.addedOurs) out.dirAdds.push(prefix + name);
   for (const name of r.content) {
     // content names are files on all three sides (threeWay)
-    const eb = b.get(name);
-    const eo = o.get(name);
-    const et = th.get(name);
-    if (!eb || !eo || !et) continue;
-    const mode = mergeMode(eb.mode, eo.mode, et.mode);
-    const blob = mode === null || !mergeBlob ? null : await mergeBlob({ base: eb.oid, ours: eo.oid, theirs: et.oid, path: prefix + name, driverFor });
-    if (mode === null || blob === null || blob.conflict === true) { conflict(prefix + name, mode === null ? 'mode' : blob?.reason ?? 'content'); continue; }
-    entries.push({ mode, name, oid: blob.oid });
-    if (blob.data) out.objects.push({ type: TYPE.BLOB, data: blob.data, oid: blob.oid });
-    out.contentMerged++;
+    const eb = mapGet(b, name);
+    const eo = mapGet(o, name);
+    const et = mapGet(th, name);
+    if (eb.tag === 'none' || eo.tag === 'none' || et.tag === 'none') continue;
+    const mode = mergeMode(eb.value.mode, eo.value.mode, et.value.mode);
+    if (mode === null) { conflict(prefix + name, 'mode'); continue; }
+    if (mergeBlob === null) { conflict(prefix + name, 'content'); continue; }
+    const blobMerged = await mergeBlob({ base: eb.value.oid, ours: eo.value.oid, theirs: et.value.oid, path: prefix + name, driverFor });
+    if (!blobMerged.ok) return blobMerged;
+    const blob = blobMerged.value;
+    switch (blob.kind) {
+      case 'conflict': conflict(prefix + name, blob.reason); continue;
+      case 'existing': entries.push({ mode, name, oid: blob.oid }); out.contentMerged++; continue;
+      case 'merged': entries.push({ mode, name, oid: blob.oid }); out.objects.push({ type: TYPE.BLOB, data: blob.data, oid: blob.oid }); out.contentMerged++; continue;
+    }
+    // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+    assertNever(blob);
   }
   for (const name of r.recurse) {
+    const eb = mapGet(b, name);
     let sideRemoved = removed;
-    if (sideRemoved === null && b.get(name)?.mode === '40000') { if (!o.has(name)) sideRemoved = 'ours'; else if (!th.has(name)) sideRemoved = 'theirs'; }
-    const sub = await mergeTrees(t, cache, { base: subtree(b.get(name)), ours: subtree(o.get(name)), theirs: subtree(th.get(name)), prefix: `${prefix}${name}/`, removed: sideRemoved, mergeBlob, driverFor }, out);
-    if (sub.oid !== null) entries.push({ mode: '40000', name, oid: sub.oid }); // an empty merged subtree drops the directory, as git does
+    if (sideRemoved === null && isTree(eb)) { if (!o.has(name)) sideRemoved = 'ours'; else if (!th.has(name)) sideRemoved = 'theirs'; }
+    const sub = await mergeDir(t, cache, { base: subtree(eb), ours: subtree(mapGet(o, name)), theirs: subtree(mapGet(th, name)), prefix: `${prefix}${name}/`, removed: sideRemoved, mergeBlob, driverFor }, out, false);
+    if (!sub.ok) return sub;
+    if (sub.value.oid !== null) entries.push({ mode: '40000', name, oid: sub.value.oid }); // an empty merged subtree drops the directory, as git does
   }
   if (top) for (const p of out.dirAdds) if (!(p in out.reasons)) conflict(p, 'possible directory rename (added inside a directory the other side removed)');
-  const data: Uint8Array = encodeTree(entries);
+  const encoded = encodeTree(entries);
+  if (!encoded.ok) return encoded;
+  const data: Uint8Array = encoded.value;
   const oid: string = hashObject('tree', data);
   // deletedOne is set only beside a conflict
-  if (top && (out.deletedBoth.length > 0 || out.deletedOne === true)) {
+  if (top && (out.deletedBoth.length > 0 || out.deletedOne)) {
     // Every path either side added, across the whole tree — the walk above skips directories only one side changed, and a
     // rename target can be anywhere. Fetched only when a deletion is in play.
-    const addedOurs = await addedPaths(read, base, ours);
-    const addedTheirs = await addedPaths(read, base, theirs);
+    const addedOursR = await addedPaths(read, base, ours);
+    if (!addedOursR.ok) return addedOursR;
+    const addedTheirsR = await addedPaths(read, base, theirs);
+    if (!addedTheirsR.ok) return addedTheirsR;
+    const addedOurs = addedOursR.value;
+    const addedTheirs = addedTheirsR.value;
     const added = [...new Set([...addedOurs, ...addedTheirs])];
     // G1 stands down when the rename is already applied (#103): the rename-blind merge is ours' tree (every change theirs
     // made is in ours) and both sides added and deleted exactly the same paths, so git pairs the same renames on both
     // sides and finds nothing to conflict (a cherry-pick of it is empty). An add or delete on ours alone could let git
     // pair a different source or target there (rename/rename, rename/delete), so the guard stays.
-    const sameChanges = async (): Promise<boolean> => pathSet(addedOurs) === pathSet(addedTheirs) && pathSet(await addedPaths(read, ours, base)) === pathSet(await addedPaths(read, theirs, base));
-    const applied = out.conflicts.length === 0 && oid === ours && await sameChanges();
+    const sameChanges = async (): Promise<Result<boolean, PlyError>> => {
+      if (pathSet(addedOurs) !== pathSet(addedTheirs)) return ok(false);
+      const removedOurs = await addedPaths(read, ours, base);
+      if (!removedOurs.ok) return removedOurs;
+      return map(await addedPaths(read, theirs, base), removedTheirs => pathSet(removedOurs.value) === pathSet(removedTheirs));
+    };
+    const unchanged = out.conflicts.length === 0 && oid === ours ? await sameChanges() : ok(false);
+    if (!unchanged.ok) return unchanged;
+    const applied = unchanged.value;
     if (added.length > 0 && !applied) for (const p of out.deletedBoth) conflict(p, 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)');
     // Naming: git reports a rename's conflict at the rename target (rename/delete, rename/rename, or a content conflict
     // after following a rename onto a modify/delete). When this merge conflicts with a deletion in play, every added path
     // is a possible target, so it is listed too. This adds names to a conflicting merge; it never makes one conflict.
     if (out.conflicts.length > 0) for (const p of added) if (!(p in out.reasons)) conflict(p, 'possible rename target (added while the merge has a deletion conflict)');
   }
-  if (out.conflicts.length > 0 || entries.length === 0) return { oid: null, ...out };
+  if (out.conflicts.length > 0 || entries.length === 0) return ok({ oid: null, ...out });
   if (oid !== ours && oid !== theirs && oid !== base) out.objects.push({ type: TYPE.TREE, data, oid });
   cache.set(oid, data);
-  return { oid, ...out };
+  return ok({ oid, ...out });
 }
-/* oxlint-enable eslint/no-await-in-loop, eslint/complexity */
+/* oxlint-enable eslint/no-await-in-loop, eslint/complexity, eslint/max-params */
 
+export async function mergeTrees(t: Transport, cache: TreeCache, spec: MergeTreesSpec, into: MergeAcc | null = null): Promise<Result<MergeTreesResult, PlyError>> {
+  const top = into === null;
+  // reasons is keyed by path, so it has no prototype: a path named `__proto__` or `constructor` is recorded like any other
+  const out: MergeAcc = into === null ? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: Object.create(null), contentMerged: 0, deletedOne: false } : into;
+  return mergeDir(t, cache, withDefaults(spec, mergeTreesDefaults()), out, top);
+}
 // Effect: the merge driver for a path from the .gitattributes files of one tree (git's attr.tree / --attr-source, or the
 // worktree's — which is ours — for a non-bare `git merge`). Reads only the directories on the path, each once; returns
 // 'text' | 'union' | 'binary' as find_ll_merge_driver picks: merge set → text, -merge → binary, merge=binary|union|text
 // → that, any other name → text (a custom driver is server configuration we cannot see), unspecified → text.
 export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string): DriverFor {
   // Each directory's tree and .gitattributes text is looked up once and shared, while it is pending or once it has
-  // succeeded. A lookup that fails is forgotten as it fails, so the next path asks again (#79: one transient failure
-  // poisoned every later lookup of that directory).
-  const memo = new Map<string, Promise<string | null>>([['/', Promise.resolve(treeOid)]]);
-  const once = (key: string, look: () => Promise<string | null>): Promise<string | null> => {
-    let p = memo.get(key);
-    if (!p) { p = look(); memo.set(key, p); p.catch(() => memo.delete(key)); }
+  // succeeded. A lookup that fails (an Err, or a rejection) is forgotten as it fails, so the next path asks again (#79:
+  // one transient failure poisoned every later lookup of that directory).
+  type Look = Promise<Result<Option<string>, PlyError>>;
+  const memo = new Map<string, Look>([['/', Promise.resolve(ok(some(treeOid)))]]);
+  const once = (key: string, look: () => Look): Look => {
+    const known = mapGet(memo, key);
+    if (known.tag === 'some') return known.value;
+    const p = look(); memo.set(key, p); p.then(r => r.ok || memo.delete(key), () => memo.delete(key)).catch(() => false);
     return p;
   };
+  // the first entry of the tree `oid` that `keep` accepts
+  const entryIn = async (oid: string, keep: (e: TreeEntry) => boolean): Promise<Result<Option<TreeEntry>, PlyError>> => map(await cachedTree(t, cache, oid), l => fromNullable(l.find(e => keep(e))));
   // keys: '/' + dir for a directory's tree oid, dir alone for its .gitattributes text (a dir never starts with '/')
-  const treeOf = (dir: string): Promise<string | null> => once(`/${dir}`, async () => {
+  const treeOf = (dir: string): Look => once(`/${dir}`, async () => {
     const cut = dir.lastIndexOf('/');
     const p = await treeOf(cut < 0 ? '' : dir.slice(0, cut));
-    return p === null ? null : (await cachedTree(t, cache, p)).find(e => e.name === dir.slice(cut + 1) && e.mode === '40000')?.oid ?? null;
+    if (!p.ok || p.value.tag === 'none') return p;
+    return map(await entryIn(p.value.value, e => e.name === dir.slice(cut + 1) && e.mode === '40000'), found => mapOption(found, e => e.oid));
   });
-  const fileOf = (dir: string): Promise<string | null> => once(dir, async () => {
+  // a .gitattributes entry's text
+  const textOf = async (e: Option<TreeEntry>): Promise<Result<Option<string>, PlyError>> => {
+    if (e.tag === 'none') return ok(none);
+    return map(await fetchObject(t, { oid: e.value.oid, expectType: TYPE.BLOB }), b => some(bytesToStr(b.data)));
+  };
+  const fileOf = (dir: string): Look => once(dir, async () => {
     const oid = await treeOf(dir);
-    const e = oid === null ? null : (await cachedTree(t, cache, oid)).find(x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000');
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    return e ? bytesToStr((await (fetchObject as unknown as FetchObject)(t, { oid: e.oid, expectType: TYPE.BLOB })).data) : null;
+    if (!oid.ok || oid.value.tag === 'none') return oid;
+    const e = await entryIn(oid.value.value, x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000');
+    if (!e.ok) return e;
+    return textOf(e.value);
   });
   return async path => {
     const dirs = ['']; for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) dirs.push(path.slice(0, i));
     const texts = await Promise.all(dirs.map(d => fileOf(d)));
+    for (const r of texts) if (!r.ok) return r;
     const byDir = new Map<string, string>();
-    for (const [i, d] of dirs.entries()) { const text = texts[i]; if (text !== null && text !== undefined) byDir.set(utf8ToStr(d), text); }
-    const v = attributesFor(utf8ToStr(path), byDir).get('merge');
-    if (v === false) return 'binary';
-    if (v === 'binary' || v === 'union') return v;
-    return 'text';
+    for (const [i, d] of dirs.entries()) {
+      const text = at(texts, i);
+      if (text.tag === 'none' || !text.value.ok || text.value.value.tag === 'none') continue;
+      const dir = utf8ToStr(d);
+      if (!dir.ok) return dir;
+      byDir.set(dir.value, text.value.value.value);
+    }
+    const file = utf8ToStr(path);
+    if (!file.ok) return file;
+    const v = attributeOf(attributesFor(file.value, byDir), 'merge');
+    if (v.tag === 'none') return ok<Driver>('text');
+    if (v.value === false) return ok<Driver>('binary');
+    if (v.value === 'binary' || v.value === 'union') return ok<Driver>(v.value);
+    return ok<Driver>('text');
   };
 }
 
-const refused = (reason: ContentReason): BlobMerge => ({ conflict: true, reason });
-// A thrown value, read loosely for its code (as errors.ts's retryPolicy reads one).
-type Loose = { readonly code?: unknown } | null | undefined;
+const refused = (reason: ContentReason): Ok<BlobMerge> => ok({ kind: 'conflict', reason });
+// A blob that could not be read: too large is a refusal (the merge goes on), anything else fails it.
+const lost = (r: Err<PlyError>): Result<BlobMerge, PlyError> => (r.error.code === 'limit_exceeded' ? refused('too large to merge') : r);
 
 // Effect: the content half of a both-sides-changed file — git's shortcuts first (one side equal to base or both equal),
-// then the three blobs (bounded by limits.maxMergeBlobBytes) through the ported xdiff merge. Returns { oid, data? } or
-// { conflict: true, reason }. Shared by merge, rebase, cherry-pick and revert.
-export function blobMerger(t: Transport, { maxMergeBlobBytes = LIMIT_MERGE_BLOB, rediff = 'myers', stats = { merged: 0, undecided: 0, unioned: 0, attrBinary: 0 } }: { readonly maxMergeBlobBytes?: number; readonly rediff?: Rediff; readonly stats?: MergeStats } = {}): MergeBlob {
-  if (!['undecided', 'skip', 'myers'].includes(rediff)) throw fail('bad_request', `rediff must be 'undecided', 'skip' or 'myers', not ${JSON.stringify(rediff)}`);
-  const blobCap = finiteLimit(maxMergeBlobBytes, 'maxMergeBlobBytes');
-  const objectCap = requireLimit(t.limits, 'maxObjectSize');
-  const bounded: Transport = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(objectCap, blobCap) } } });
+// then the three blobs (bounded by maxMergeBlobBytes) through the ported xdiff merge. Shared by merge, rebase,
+// cherry-pick and revert. Refused (bad_request) before any merge: a rediff that is not one of the three, a blob cap or a
+// transport object cap that bounds nothing.
+export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Rediff): Result<MergeBlob, ErrorOf<'bad_request'>> {
+  if (!['undecided', 'skip', 'myers'].includes(rediff)) return fail('bad_request', `rediff must be 'undecided', 'skip' or 'myers', not ${JSON.stringify(rediff)}`);
+  const blobCapped = checkLimit(maxMergeBlobBytes, 'maxMergeBlobBytes');
+  if (!blobCapped.ok) return blobCapped;
+  const objectCapped = readLimit(t.limits, 'maxObjectSize');
+  if (!objectCapped.ok) return objectCapped;
+  const blobCap = blobCapped.value;
+  const stats: MergeStats = { merged: 0, undecided: 0, unioned: 0, attrBinary: 0 };
+  const bounded: Transport = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(objectCapped.value, blobCap) } } });
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  const get = async (oid: string): Promise<Uint8Array> => made.get(oid) ?? (await (fetchObject as unknown as FetchObject)(bounded, { oid, expectType: TYPE.BLOB })).data;
-  const f = async ({ base, ours, theirs, path, driverFor = null }: BlobSpec): Promise<BlobMerge> => {
-    if (ours === theirs || theirs === base) return { oid: ours };
-    if (ours === base) return { oid: theirs };
+  const get = async (oid: string): Promise<Result<Uint8Array, PlyError>> => { const held = mapGet(made, oid); return held.tag === 'some' ? ok(held.value) : map(await fetchObject(bounded, { oid, expectType: TYPE.BLOB }), b => b.data); };
+  const f = async ({ base, ours, theirs, path, driverFor }: BlobSpec): Promise<Result<BlobMerge, PlyError>> => {
+    if (ours === theirs || theirs === base) return ok({ kind: 'existing', oid: ours });
+    if (ours === base) return ok({ kind: 'existing', oid: theirs });
     // the merge attribute (when an attribute source was given): binary/-merge conflicts without reading the blobs
-    const driver = driverFor ? await driverFor(path) : 'text';
+    const driven = driverFor === null ? ok<Driver>('text') : await driverFor(path);
+    if (!driven.ok) return driven;
+    const driver = driven.value;
     if (driver === 'binary') { stats.attrBinary++; return refused('binary (merge attribute)'); }
-    let B: Uint8Array;
-    let O: Uint8Array;
-    let T: Uint8Array;
-    try { [B, O, T] = await Promise.all([get(base), get(ours), get(theirs)]); }
-    catch (error) {
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see Loose
-      if ((error as Loose)?.code === 'limit_exceeded') return refused('too large to merge');
-      throw error;
-    }
+    const [rB, rO, rT] = await Promise.all([get(base), get(ours), get(theirs)]);
+    if (!rB.ok) return lost(rB);
+    if (!rO.ok) return lost(rO);
+    if (!rT.ok) return lost(rT);
+    const [B, O, T] = [rB.value, rO.value, rT.value];
     const m = mergeLines(B, O, T, { maxBytes: blobCap, rediff, driver });
     if (!m.clean) {
       if (m.reason === 'undecided') { stats.undecided++; return refused('content (git would decide this with a classic-diff fallback ply does not implement)'); }
@@ -468,10 +585,9 @@ export function blobMerger(t: Transport, { maxMergeBlobBytes = LIMIT_MERGE_BLOB,
     }
     stats.merged++; if ('unioned' in m) stats.unioned++;
     const oid: string = hashObject('blob', m.data); made.set(oid, m.data);
-    return { oid, data: m.data };
+    return ok({ kind: 'merged', oid, data: m.data });
   };
-  f.stats = stats;
-  return f;
+  return ok(Object.assign(f, { stats }));
 }
 
 // Pure: one entry per oid, first wins. git's unpack-objects/index-pack refuse a pack that carries an object twice
@@ -484,123 +600,211 @@ export const uniqueObjects = <O extends { readonly oid: string }>(objects: reado
 // 2.43–2.45 in a bare repository whose HEAD is the target branch); a ref name or commit oid → its tree (attr.tree=<rev>).
 // 'ours' | 'theirs' | 'base', a ref name or a commit oid, or null
 export type AttributeSource = string | null;
-export const validateAttributes = (a: unknown): void => {
-  if (a === null || a === undefined) return;
-  if (typeof a !== 'string') throw fail('bad_request', 'attributes must be null, ours, theirs, base, a ref or a commit oid');
-  if (a === 'ours' || a === 'theirs' || a === 'base' || isOid(a)) return;
-  validateRef(a);
+// A caller's attributes option, checked (a JS caller's missing value is null).
+export const validateAttributes = (a: unknown): Result<AttributeSource, ErrorOf<'bad_request'>> => {
+  const given = fromNullish(a);
+  if (given.tag === 'none') return ok(null);
+  const v = given.value;
+  if (typeof v !== 'string') return fail('bad_request', 'attributes must be null, ours, theirs, base, a ref or a commit oid');
+  if (v === 'ours' || v === 'theirs' || v === 'base' || isOid(v)) return ok(v);
+  return map(validateRef(v), () => v);
 };
-export type Trees = { readonly base?: string | null | undefined; readonly ours?: string | null | undefined; readonly theirs?: string | null | undefined };
+// The three sides' trees (null: the empty tree, or a side not in play).
+export type Trees = { readonly base: string | null; readonly ours: string | null; readonly theirs: string | null };
+export const NO_TREES: Trees = { base: null, ours: null, theirs: null };
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
-export async function attributeTree(t: Transport, attributes: AttributeSource | undefined, trees: Trees): Promise<string | null> {
-  if (attributes === null || attributes === undefined) return null;
-  if (attributes === 'ours' || attributes === 'theirs' || attributes === 'base') return trees[attributes] ?? null;
+// a ref's oid in an ls-refs answer
+export const refOid = (refs: LsRefsResult['refs'], ref: string): Option<string> => mapOption(mapGet(refs, ref), r => r.oid);
+// The tree whose .gitattributes apply; a JS caller's missing tree is null.
+export async function attributeTree(t: Transport, attributes: AttributeSource, given: Input<Trees>): Promise<Result<string | null, PlyError>> {
+  const trees = withDefaults(given, { ...NO_TREES });
+  if (attributes === null) return ok(null);
+  if (attributes === 'ours' || attributes === 'theirs' || attributes === 'base') return ok(trees[attributes]);
   // validateAttributes ran first (mergeBranch, rebaseBranch, pickCommit): a ref name or an oid
-  let oid: string | undefined = attributes;
+  let oid = attributes;
   if (!isOid(attributes)) {
-    validateRef(attributes);
-    const refs: Refs = await lsRefs(t, [attributes]);
-    oid = refs.refs.get(attributes)?.oid;
-    if (oid === undefined) throw fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
+    const named = validateRef(attributes);
+    if (!named.ok) return named;
+    const listed = await lsRefs(t, [attributes]); if (!listed.ok) return listed;
+    const found = refOid(listed.value.refs, attributes);
+    if (found.tag === 'none') return fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
+    oid = found.value;
   }
-  return (await commitAt(t, oid)).tree;
+  return map(await commitAt(t, oid), c => c.tree);
 }
 
 // Fast-forward `ref` to `to`, expecting it to be at `from` (CAS). Empty pack: the server already has the objects.
-export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: string; readonly from: string; readonly to: string }): Promise<PushResult> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+export async function fastForward(t: Transport, { ref, from, to }: { readonly ref: string; readonly from: string; readonly to: string }): Promise<Result<PushResult, PlyError>> {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
   return (push as unknown as Push)(t, { ref, oldOid: from, newOid: to, objects: [] });
 }
 
-export async function deleteBranch(t: Transport, { ref, oid }: { readonly ref: string; readonly oid: string }): Promise<PushResult> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
+export async function deleteBranch(t: Transport, { ref, oid }: { readonly ref: string; readonly oid: string }): Promise<Result<PushResult, PlyError>> {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
   return (push as unknown as Push)(t, { ref, oldOid: oid, newOid: ZERO_OID, objects: [] });
 }
 
-export type MergeSpec = {
-  readonly ref?: string;
-  readonly from: string;
-  readonly author?: Author | null;
-  // defaults to the author (one identity, one time, as before)
-  readonly committer?: Author | null;
-  readonly message?: string | null;
-  readonly time?: number;
-  readonly fastForwardOnly?: boolean;
-  readonly noFastForward?: boolean;
+// What a merge-base verdict means for landing `theirs` on `ours`, before any tree is read: nothing to do, a
+// fast-forward, or a three-way merge over the one base. Criss-cross history is refused (git merges the bases into a
+// virtual one, recursively; a single base can give a clean result that differs from git's, so we refuse rather than
+// guess), as are unrelated histories and, when only a fast-forward is allowed, a merge commit.
+type Landing =
+  | { readonly kind: 'up_to_date'; readonly base: string }
+  | { readonly kind: 'fast_forward'; readonly base: string }
+  | { readonly kind: 'three_way'; readonly base: string };
+type LandingFlags = { readonly ref: string; readonly from: string; readonly fastForwardOnly: boolean; readonly noFastForward: boolean };
+function decideMerge(verdict: Verdict, ours: string, theirs: string, { ref, from, fastForwardOnly, noFastForward }: LandingFlags): Result<Landing, PlyError> {
+  switch (verdict.tag) {
+    case 'criss-cross': return fail('merge_conflict', `${ref} and ${from} have ${verdict.bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases: verdict.bases } as ConflictDetail);
+    case 'unrelated': return fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
+    case 'found': {
+      const { base } = verdict;
+      if (base === theirs) return ok({ kind: 'up_to_date', base });
+      if (base === ours && !noFastForward) return ok({ kind: 'fast_forward', base });
+      if (fastForwardOnly) return fail('not_fast_forward', `${ref} has moved past the merge base; a merge commit would be needed`);
+      return ok({ kind: 'three_way', base });
+    }
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(verdict);
+}
+
+export type MergeSpecConfig = {
+  readonly ref: string;
+  readonly author: Author | null;
+  // null: the author (one identity, one time, as before)
+  readonly committer: Author | null;
+  readonly message: string | null;
+  readonly time: number;
+  readonly fastForwardOnly: boolean;
+  readonly noFastForward: boolean;
 };
+export type MergeSpec = Input<MergeSpecConfig> & { readonly from: string };
+const mergeSpecDefaults = (): MergeSpecConfig => ({ ref: 'refs/heads/main', author: null, committer: null, message: null, time: Math.floor(Date.now() / 1000), fastForwardOnly: false, noFastForward: false });
 // The operation options (auth, tracer, limits, …) pass through to operation(); these are the ones merge reads.
-export type MergeOptions = {
-  readonly cache?: TreeCache;
-  readonly signer?: Signer | null;
-  readonly verify?: boolean;
-  readonly rediff?: Rediff;
-  readonly attributes?: AttributeSource;
-  readonly [option: string]: unknown;
+export type MergeConfig = {
+  readonly cache: TreeCache;
+  readonly signer: Signer | null;
+  readonly verify: boolean;
+  readonly rediff: Rediff;
+  readonly attributes: AttributeSource;
 };
+export type MergeOptions = Input<MergeConfig> & Readonly<Record<string, unknown>>;
+const mergeDefaults = (): MergeConfig => ({ cache: new Map(), signer: null, verify: false, rediff: 'myers', attributes: null });
 type Sides = { readonly ref: string; readonly oid: string; readonly ours: string; readonly theirs: string };
 export type MergeOutcome =
   | Sides & { readonly outcome: 'up_to_date' | 'fast_forward'; readonly base: string }
   | Sides & { readonly outcome: 'merge'; readonly tree: string; readonly base: string; readonly pushBytes: number; readonly newTrees: number; readonly contentMerged: number };
 
-/* oxlint-disable eslint/complexity -- one operation's steps in order; A6 splits out decideMerge */
-export async function mergeBranch(url: string, { ref = 'refs/heads/main', from, author, committer, message, time = Math.floor(Date.now() / 1000), fastForwardOnly = false, noFastForward = false }: MergeSpec, { cache = new Map(), signer = null, verify = false, rediff = 'myers', attributes = null, ...opts }: MergeOptions = {}): Promise<MergeOutcome> {
-  validatePushRef(ref, false); const fromOid = givenOid(from, 'from');
-  const person: ValidatedIdent | null = author ? stamp(author, time) : null;
-  const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;
-  if (message !== undefined && message !== null && message !== '') validateMessage(message); validateAttributes(attributes);
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-  return (operation as unknown as Operation)('merge', url, { ...opts, attrs: { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward } }, async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => {
-    const { refs }: Refs = await lsRefs(t, fromOid === null ? [ref, from] : [ref]);
-    const ours = refs.get(ref)?.oid;
-    const theirs = fromOid ?? refs.get(from)?.oid;
-    if (ours === undefined) throw fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) }); if (theirs === undefined) throw fail('not_found', `ref ${from} not found`, { miss: refMiss(from) });
+// The entry options as operation() takes them, with the operation's attributes. The tracer is the caller's, required at
+// run time (operation starts the root span on it), as for every entry (boundary.ts EntryOptions).
+export const operationOpts = (options: Readonly<Record<string, unknown>>, attrs: Readonly<Record<string, unknown>>): OperationOpts =>
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time (see above)
+  ({ ...options, attrs }) as OperationOpts;
+
+// an annotated tag's peeled commit, as ls-refs reports it
+const peeledOf = (refs: LsRefsResult['refs'], ref: string): Option<string> => {
+  const r = mapGet(refs, ref);
+  return r.tag === 'none' ? none : fromNullish(r.value.peeled);
+};
+
+// Effect: a landing that writes no merge commit: nothing to do, or the fast-forward push.
+type Quick = Exclude<Landing, { readonly kind: 'three_way' }>;
+async function landWithoutMerge(t: Transport, outcome: Outcome, land: Quick, { ref, ours, theirs }: { readonly ref: string; readonly ours: string; readonly theirs: string }): Promise<Result<MergeOutcome, PlyError>> {
+  switch (land.kind) {
+    case 'up_to_date': return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base: land.base });
+    case 'fast_forward': {
+      const r = await fastForward(t, { ref, from: ours, to: theirs });
+      if (!r.ok) return r;
+      return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: theirs, ours, theirs, base: land.base }, { 'git.merge.push.bytes': r.value.packBytes });
+    }
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(land);
+}
+
+// A stamp, or None when none was given.
+const stampOf = (p: Author | null, time: number): Result<Option<ValidatedIdent>, PlyError> => (p === null ? ok(none) : map(stamp(p, time), some));
+
+// The inputs are checked before any I/O; a refusal returns before the operation starts. The body's refusals keep the
+// names the decision inventory knows them by (mergeBranch#…), and the operation records an Err's code on the root span.
+/* oxlint-disable eslint/complexity -- one operation's steps in order: refs, merge base, landing, tree merge, commit, push */
+export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOptions = {}): Promise<Result<MergeOutcome, PlyError>> {
+  const { ref, author, committer, message, time, fastForwardOnly, noFastForward } = withDefaults(spec, mergeSpecDefaults());
+  const { from } = spec;
+  const { cache, signer, verify, rediff, attributes: attributesGiven } = withDefaults(options, mergeDefaults());
+  const pushRef = validatePushRef(ref, false); if (!pushRef.ok) return pushRef;
+  const given = givenOid(from, 'from'); if (!given.ok) return given;
+  const fromOid = given.value;
+  const authorStamp = stampOf(author, time); if (!authorStamp.ok) return authorStamp;
+  const committerStamp = committer === null ? authorStamp : stampOf(committer, time); if (!committerStamp.ok) return committerStamp;
+  const person = authorStamp.value;
+  const committerPerson = committerStamp.value;
+  if (message !== null && message !== '') { const checked = validateMessage(message); if (!checked.ok) return checked; }
+  const attributesChecked = validateAttributes(attributesGiven); if (!attributesChecked.ok) return attributesChecked;
+  const attributes = attributesChecked.value;
+  return operation('merge', url, operationOpts(options, { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward }), async ({ t, root, outcome }: OpContext): Promise<Result<MergeOutcome, PlyError>> => {
+    const listed = await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]); if (!listed.ok) return listed;
+    const { refs } = listed.value;
+    const oursAt = refOid(refs, ref);
+    const theirsAt = isSome(fromOid) ? fromOid : refOid(refs, from);
+    if (oursAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
+    if (theirsAt.tag === 'none') return fail('not_found', `ref ${from} not found`, { miss: refMiss(from) });
+    const ours = oursAt.value;
+    const theirs = theirsAt.value;
     // ls-refs names an annotated tag's object, not a commit; `git merge <tag>` records the tag in a mergetag header, which
     // ply does not write. Refused by name (it read as a missing commit, pack_corrupt, before #43's matrix ran it).
-    for (const r of [ref, from]) { const peeled = refs.get(r)?.peeled; if (peeled !== undefined) throw fail('unsupported', `${r} is an annotated tag (git merge writes a mergetag header ply does not); merge its commit ${peeled}`, { what: r === ref ? 'ref' : 'from' }); }
-    if (fromOid !== null) await assertCommit(t, fromOid, 'from');
+    for (const r of [ref, from]) { const peeled = peeledOf(refs, r); if (peeled.tag === 'some') return fail('unsupported', `${r} is an annotated tag (git merge writes a mergetag header ply does not); merge its commit ${peeled.value}`, { what: r === ref ? 'ref' : 'from' }); }
+    if (fromOid.tag === 'some') { const c = await assertCommit(t, fromOid.value, 'from'); if (!c.ok) return c; }
     root.set({ 'git.merge.ours': ours, 'git.merge.theirs': theirs });
-    const upToDate = (base: string): MergeOutcome => outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
+    const upToDate = (base: string): Ok<MergeOutcome> => outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
     if (ours === theirs) return upToDate(ours);
-    const { base: one, bases, depth, verdict } = await mergeBase(t, ours, theirs);
-    root.set({ 'git.merge.base': one ?? '', 'git.merge.bases': bases.length, 'git.merge.base.depth': depth });
-    // criss-cross history: git merges the bases into a virtual one (merge-ort, recursively); a single base can give a
-    // clean result that differs from git's, so we refuse rather than guess
-    const base = ((): string => {
-      switch (verdict.tag) {
-        case 'criss-cross': throw fail('merge_conflict', `${ref} and ${from} have ${bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases } as ConflictDetail);
-        case 'unrelated': throw fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
-        case 'found': return verdict.base;
-      }
-      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-      return assertNever(verdict);
-    })();
-    if (base === theirs) return upToDate(base);
-    if (base === ours && !noFastForward) {
-      const r = await fastForward(t, { ref, from: ours, to: theirs });
-      return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: theirs, ours, theirs, base }, { 'git.merge.push.bytes': r.packBytes });
-    }
-    if (fastForwardOnly) throw fail('not_fast_forward', `${ref} has moved past the merge base; a merge commit would be needed`);
+    const found = await mergeBase(t, ours, theirs);
+    if (!found.ok) return found;
+    const { base: one, bases, depth, verdict } = found.value;
+    root.set({ 'git.merge.base': one === null ? '' : one, 'git.merge.bases': bases.length, 'git.merge.base.depth': depth });
+    const landing = decideMerge(verdict, ours, theirs, { ref, from, fastForwardOnly, noFastForward });
+    if (!landing.ok) return landing;
+    const land = landing.value;
+    if (land.kind !== 'three_way') return landWithoutMerge(t, outcome, land, { ref, ours, theirs });
+    const { base } = land;
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
-    const [cB, cO, cT]: Array<{ readonly data: Uint8Array }> = await Promise.all([base, ours, theirs].map(oid => commitBytesAt(t, oid)));
-    const tree = (c: { readonly data: Uint8Array } | undefined): string => parseCommit(c?.data ?? new Uint8Array(0), t.limits).tree;
-    const trees = { base: tree(cB), ours: tree(cO), theirs: tree(cT) };
-    const mergeBlob = blobMerger(t, { maxMergeBlobBytes: requireLimit(t.limits, 'maxMergeBlobBytes'), rediff });
+    const [cB, cO, cT] = await Promise.all([commitBytesAt(t, base), commitBytesAt(t, ours), commitBytesAt(t, theirs)]);
+    const tree = (c: Result<{ readonly data: Uint8Array }, PlyError>): Result<string, PlyError> => andThen(c, b => map(parseCommit(b.data, t.limits), x => x.tree));
+    const tB = tree(cB); if (!tB.ok) return tB;
+    const tO = tree(cO); if (!tO.ok) return tO;
+    const tT = tree(cT); if (!tT.ok) return tT;
+    const trees: Trees = { base: tB.value, ours: tO.value, theirs: tT.value };
+    const blobCap = readLimit(t.limits, 'maxMergeBlobBytes');
+    if (!blobCap.ok) return blobCap;
+    const merger = blobMerger(t, blobCap.value, rediff);
+    if (!merger.ok) return merger;
+    const mergeBlob = merger.value;
     const attrTree = await attributeTree(t, attributes, trees);
-    root.set({ 'git.merge.attributes': attributes ?? '' });
-    const merged = await mergeTrees(t, cache, { ...trees, mergeBlob, driverFor: attrTree === null ? null : attributeDrivers(t, cache, attrTree) });
+    if (!attrTree.ok) return attrTree;
+    root.set({ 'git.merge.attributes': attributes === null ? '' : attributes });
+    const treesMerged = await mergeTrees(t, cache, { ...trees, mergeBlob, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
+    if (!treesMerged.ok) return treesMerged;
+    const merged = treesMerged.value;
     const newTrees = merged.objects.filter(o => o.type === TYPE.TREE).length;
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': newTrees, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
-    if (merged.conflicts.length > 0) throw fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
-    const treeOid: string = merged.oid ?? hashObject('tree', encodeTree([]));
-    if (!person || !committerPerson) throw fail('bad_request', 'author is required for a merge commit');
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    let commitData = (encodeCommit as unknown as EncodeCommit)({ tree: treeOid, parents: [ours, theirs], author: ident(person), committer: ident(committerPerson), message: (message ?? `Merge ${short(from)} into ${short(ref)}`).replace(/\n?$/u, '\n') });
-    if (signer) commitData = await signCommit(commitData, signer);
+    if (merged.conflicts.length > 0) return fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
+    const emptyTree = encodeTree([]); if (!emptyTree.ok) return emptyTree;
+    const treeOid: string = merged.oid === null ? hashObject('tree', emptyTree.value) : merged.oid;
+    if (person.tag === 'none' || committerPerson.tag === 'none') return fail('bad_request', 'author is required for a merge commit');
+    const authorLine = ident(person.value); if (!authorLine.ok) return authorLine;
+    const committerLine = ident(committerPerson.value); if (!committerLine.ok) return committerLine;
+    const encoded = encodeCommit({ tree: treeOid, parents: [ours, theirs], author: authorLine.value, committer: committerLine.value, message: (message === null ? `Merge ${short(from)} into ${short(ref)}` : message).replace(/\n?$/u, '\n') });
+    if (!encoded.ok) return encoded;
+    let commitData = encoded.value;
+    if (signer) { const signed = await signCommit(commitData, signer); if (!signed.ok) return signed; commitData = signed.value; }
     const oid: string = hashObject('commit', commitData);
-    const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: encodeTree([]), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the JS signature, typed above
-    const r = await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects });
-    if (verify) await verifyRef(t, root, 'git.merge', ref, oid);
+    const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: emptyTree.value, oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
+    const pushed = await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects });
+    if (!pushed.ok) return pushed;
+    const r = pushed.value;
+    if (verify) { const seen = await verifyRef(t, root, 'git.merge', ref, oid); if (!seen.ok) return seen; }
     return outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes });
   });
 }

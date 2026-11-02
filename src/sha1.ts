@@ -1,16 +1,14 @@
 // Streaming SHA-1. Needed because crypto.subtle.digest is whole-buffer only,
 // and pack trailers / object ids must be computed over data we never hold at once.
 
-import { encodeBytes, HEXV } from './bytes.js';
+import { HEXV } from './bytes.js';
+import { atOr, field } from './absent.js';
+import { flatMapOption } from './result.js';
 
 // Workers' crypto.DigestStream: a WritableStream whose `digest` is a promise of the ArrayBuffer. Not in lib.dom, and
-// absent on node and in browsers, hence optional.
-declare global {
-  // oxlint-disable-next-line typescript/consistent-type-definitions -- augments lib.dom's Crypto: merging needs an interface
-  interface Crypto {
-    readonly DigestStream?: new (algorithm: string) => WritableStream<Uint8Array> & { readonly digest: Promise<ArrayBuffer> };
-  }
-}
+// not on node or in browsers, so it is read as a field of the global (None there), never declared on Crypto.
+type DigestStream = new (algorithm: string) => WritableStream<Uint8Array> & { readonly digest: Promise<ArrayBuffer> };
+const isDigestStream = (ctor: unknown): ctor is DigestStream => typeof ctor === 'function';
 
 const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 export function toHex(bytes: Uint8Array): string {
@@ -25,9 +23,9 @@ export function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length >> 1);
   for (let i = 0; i < out.length; i++) {
     // oxlint-disable-next-line unicorn/prefer-code-point -- a code unit indexes the byte table; one past it reads -1
-    const hi = HEXV[hex.charCodeAt(2 * i)] ?? -1;
+    const hi = atOr(HEXV, hex.charCodeAt(2 * i), -1);
     // oxlint-disable-next-line unicorn/prefer-code-point -- see above
-    const lo = HEXV[hex.charCodeAt(2 * i + 1)] ?? -1;
+    const lo = atOr(HEXV, hex.charCodeAt(2 * i + 1), -1);
     out[i] = (hi | lo) < 0 ? Number.parseInt(hex.slice(2 * i, 2 * i + 2), 16) : (hi << 4) | lo;
   }
   return out;
@@ -40,8 +38,8 @@ export class Sha1 {
   private len = 0;
   private readonly w = new Uint32Array(80);
 
-  public update(data: string | Uint8Array): this {
-    const bytes = typeof data === 'string' ? encodeBytes(data) : data;
+  // Bytes only: a string has no bytes until a caller encodes it (bytes.ts encodeBytes, a Result).
+  public update(bytes: Uint8Array): this {
     this.len += bytes.length;
     let i = 0;
     if (this.bufLen) {
@@ -62,7 +60,7 @@ export class Sha1 {
   }
 
   // Every index below is in range (p holds 64 bytes at o, w is 80 words, h is 5), which noUncheckedIndexedAccess cannot
-  // see; `as number` says so at no runtime cost (a `?? 0` per read is bundle bytes and a branch in the hot loop).
+  // see; `as number` says so at no runtime cost (a fallback per read is bundle bytes and a branch in the hot loop).
   /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above (`as number`, not the `!` src/ forbids) */
   private block(p: Uint8Array, o: number): void {
     const w = this.w;
@@ -126,8 +124,9 @@ export type StreamingSha1 =
 // incrementally at native speed); node and browsers do not, so the pure-JS Sha1 above is the fallback. Same interface,
 // async because the native one is. SHA-1 is ~80% of the streamed-edit CPU (test/calibrate.mjs), so this is the lever.
 export function streamingSha1(): StreamingSha1 {
-  if (typeof crypto !== 'undefined' && typeof crypto.DigestStream === 'function') {
-    const ds = new crypto.DigestStream('SHA-1'); // it IS a WritableStream; `digest` is a promise of the ArrayBuffer
+  const native = flatMapOption(field(globalThis, 'crypto'), c => field(c, 'DigestStream'));
+  if (native.tag === 'some' && isDigestStream(native.value)) {
+    const ds = new native.value('SHA-1'); // it IS a WritableStream; `digest` is a promise of the ArrayBuffer
     const w = ds.getWriter();
     // update hands back the writer's own promise (no extra tick per chunk)
     // oxlint-disable-next-line typescript/promise-function-async -- see above

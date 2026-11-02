@@ -17,19 +17,23 @@ import { validateIdent } from '../../src/validate.js';
 import { buildPack } from '../../src/pack.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
 import { listTree, readCommit } from '../../src/read.js';
-import { createTransport } from '../../src/http.js';
-import { fetchObject } from '../../src/fetch.js';
+import { createTransport as createTransportR } from '../../src/http.js';
+import { fetchObject as fetchObjectR } from '../../src/fetch.js';
 import { Tracer, arrayExporter } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { Rng } from './prng.js';
 import { OID_BYTES } from '../../src/format.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '20', 10);
 const SEED = parseInt(args.seed ?? '1', 10);
 const ONLY = args.case && args.case !== true ? String(args.case) : null;
 const LIMITS = withLimits({ requestTimeoutMs: 4000 });
-const AUTHOR = ident(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }));
+const AUTHOR = unwrap(ident(unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }))));
 const REJECT = new Set(['pack_corrupt', 'protocol', 'remote_error', 'not_found', 'unsupported']);
 
 const entry = (mode, name, oid) => concat([te.encode(`${mode} ${name}\0`), oid]);
@@ -67,8 +71,8 @@ function writeChain(objects) {
 let current = null;
 async function packResponse(obj) {
   const { pack } = await buildPack([{ type: TYPE[obj.type.toUpperCase()], data: obj.data }]);
-  const parts = [pkt('packfile\n')];
-  for (let i = 0; i < pack.length; i += 65000) parts.push(pkt(concat([Uint8Array.of(1), pack.subarray(i, Math.min(i + 65000, pack.length))])));
+  const parts = [unwrap(pkt('packfile\n'))];
+  for (let i = 0; i < pack.length; i += 65000) parts.push(unwrap(pkt(concat([Uint8Array.of(1), pack.subarray(i, Math.min(i + 65000, pack.length))]))));
   parts.push(FLUSH);
   return concat(parts);
 }
@@ -80,15 +84,15 @@ const server = http.createServer(async (req, res) => {
     let bytes;
     if (body.includes('command=ls-refs')) {
       bytes = concat([
-        pkt(`${current.head} HEAD symref-target:refs/heads/main\n`),
-        pkt(`${current.head} refs/heads/main\n`),
+        unwrap(pkt(`${current.head} HEAD symref-target:refs/heads/main\n`)),
+        unwrap(pkt(`${current.head} refs/heads/main\n`)),
         FLUSH,
       ]);
     } else if (body.includes('command=fetch')) {
       const want = body.match(/want ([0-9a-f]{40})/);
       const obj = want && current.byOid.get(want[1]);
-      bytes = obj ? await packResponse(obj) : concat([pkt('ERR not our ref\n'), FLUSH]);
-    } else bytes = concat([pkt('ERR\n'), FLUSH]);
+      bytes = obj ? await packResponse(obj) : concat([unwrap(pkt('ERR not our ref\n')), FLUSH]);
+    } else bytes = concat([unwrap(pkt('ERR\n')), FLUSH]);
     res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-result', 'cache-control': 'no-store' });
     res.end(Buffer.from(bytes));
   } catch (e) {
@@ -102,8 +106,8 @@ const url = `http://127.0.0.1:${server.address().port}/hostile.git`;
 async function plyAccepts(focus, head) {
   const tracer = new Tracer({ exporter: arrayExporter() });
   try {
-    if (focus === 'tree') await listTree(url, { ref: 'refs/heads/main' }, { tracer, limits: LIMITS });
-    else if (focus === 'commit') await readCommit(url, { ref: 'refs/heads/main' }, { tracer, limits: LIMITS });
+    if (focus === 'tree') await unwrapAsync(listTree(url, { ref: 'refs/heads/main' }, { tracer, limits: LIMITS }));
+    else if (focus === 'commit') await unwrapAsync(readCommit(url, { ref: 'refs/heads/main' }, { tracer, limits: LIMITS }));
     else {
       const t = createTransport(url, { tracer, limits: LIMITS });
       await fetchObject(t, { oid: head, filter: 'blob:none', expectType: TYPE.TAG });
@@ -126,7 +130,7 @@ function mutate(rng, bytes) {
 }
 
 function validTree(blobOid) {
-  return encodeTree([{ mode: '100644', name: 'a', oid: blobOid }]);
+  return unwrap(encodeTree([{ mode: '100644', name: 'a', oid: blobOid }]));
 }
 
 const cases = [];
@@ -136,12 +140,12 @@ const blobOid = hashObject('blob', blob);
 const blobBytes = fromHex(blobOid);
 const treeOk = validTree(blobOid);
 const treeOid = hashObject('tree', treeOk);
-const commitOk = encodeCommit({ tree: treeOid, author: AUTHOR, message: 'm\n' });
+const commitOk = unwrap(encodeCommit({ tree: treeOid, author: AUTHOR, message: 'm\n' }));
 const commitOid = hashObject('commit', commitOk);
 
 add('valid', { objects: [{ type: 'blob', data: blob }, { type: 'tree', data: treeOk }, { type: 'commit', data: commitOk }], focus: 'tree', normal: true });
 add('empty-tree', {
-  objects: [{ type: 'blob', data: blob }, { type: 'tree', data: new Uint8Array(0) }, { type: 'commit', data: encodeCommit({ tree: hashObject('tree', new Uint8Array(0)), author: AUTHOR, message: 'm\n' }) }],
+  objects: [{ type: 'blob', data: blob }, { type: 'tree', data: new Uint8Array(0) }, { type: 'commit', data: unwrap(encodeCommit({ tree: hashObject('tree', new Uint8Array(0)), author: AUTHOR, message: 'm\n' })) }],
   focus: 'tree', normal: true,
 });
 for (const [name, tree] of [
@@ -159,7 +163,7 @@ for (const [name, tree] of [
 ]) {
   const oid = hashObject('tree', tree);
   add(name, {
-    objects: [{ type: 'blob', data: blob }, { type: 'tree', data: tree }, { type: 'commit', data: encodeCommit({ tree: oid, author: AUTHOR, message: 'm\n' }) }],
+    objects: [{ type: 'blob', data: blob }, { type: 'tree', data: tree }, { type: 'commit', data: unwrap(encodeCommit({ tree: oid, author: AUTHOR, message: 'm\n' })) }],
     focus: 'tree', normal: false,
   });
 }
@@ -177,7 +181,7 @@ add('bad-date', {
 });
 add('valid-commit', { objects: [{ type: 'blob', data: blob }, { type: 'tree', data: treeOk }, { type: 'commit', data: commitOk }], focus: 'commit', normal: true });
 {
-  const tag = encodeTag({ object: commitOid, type: 'commit', tag: 'v1', tagger: AUTHOR, message: 'rel\n' });
+  const tag = unwrap(encodeTag({ object: commitOid, type: 'commit', tag: 'v1', tagger: AUTHOR, message: 'rel\n' }));
   add('valid-tag', { objects: [{ type: 'blob', data: blob }, { type: 'tree', data: treeOk }, { type: 'commit', data: commitOk }, { type: 'tag', data: tag }], focus: 'tag', normal: true });
   // encodeTag refuses an empty tag name (git hash-object's badTagName), so the malformed object is spelled out
   const emptyName = te.encode(`object ${commitOid}\ntype commit\ntag \ntagger ${AUTHOR}\n\nrel\n`);
@@ -191,7 +195,7 @@ for (let i = 0; i < N; i++) {
   if (rng.bool()) {
     const tree = mutate(rng, treeOk);
     const oid = hashObject('tree', tree);
-    randoms.push({ name: `tree#${seed}`, seed, objects: [{ type: 'blob', data: blob }, { type: 'tree', data: tree }, { type: 'commit', data: encodeCommit({ tree: oid, author: AUTHOR, message: 'm\n' }) }], focus: 'tree', normal: false });
+    randoms.push({ name: `tree#${seed}`, seed, objects: [{ type: 'blob', data: blob }, { type: 'tree', data: tree }, { type: 'commit', data: unwrap(encodeCommit({ tree: oid, author: AUTHOR, message: 'm\n' })) }], focus: 'tree', normal: false });
   } else {
     const commit = mutate(rng, commitOk);
     randoms.push({ name: `commit#${seed}`, seed, objects: [{ type: 'blob', data: blob }, { type: 'tree', data: treeOk }, { type: 'commit', data: commit }], focus: 'commit', normal: false });

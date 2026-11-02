@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { Tracer, arrayExporter, KIND } from '../src/otel.js';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { editFile } from '../src/edit.js';
 import { commitChanges } from '../src/changes.js';
 import { pushTree } from '../src/tree.js';
@@ -28,11 +28,18 @@ import { checkoutTree } from '../src/checkout.js';
 import { readFile, listTree, readCommit } from '../src/read.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
-import { lsRefs } from '../src/lsrefs.js';
-import { fetchPack } from '../src/fetchpack.js';
-import { discover } from '../src/discover.js';
-import { receiveCaps } from '../src/receivecaps.js';
+import { lsRefs as lsRefsR } from '../src/lsrefs.js';
+import { fetchPack as fetchPackR } from '../src/fetchpack.js';
+import { discover as discoverR } from '../src/discover.js';
+import { receiveCaps as receiveCapsR } from '../src/receivecaps.js';
 
+import { unwrap, unwrapAsync } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
+const fetchPack = (...a) => unwrapAsync(fetchPackR(...a));
+const discover = (...a) => unwrapAsync(discoverR(...a));
+const receiveCaps = (...a) => unwrapAsync(receiveCapsR(...a));
 const SNAPSHOT = new URL('./span-contract.json', import.meta.url);
 const UPDATE = process.env.UPDATE_SPAN_CONTRACT === '1';
 const author = { name: 'contract', email: 'contract@x' };
@@ -153,33 +160,33 @@ const traced = () => { const ex = arrayExporter(); return { tracer: new Tracer({
 
 // one entry per public operation (and the wire layer): name → async ({ tracer }) => void, every stream drained
 const SCENARIOS = {
-  editFile: async ({ tracer }) => { const r = seeded(); await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true }); },
+  editFile: async ({ tracer }) => { const r = seeded(); await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true })); },
   commitChanges: async ({ tracer }) => {
     const r = seeded();
-    await commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: 'n\n' }], author, message: 'add', time: 1700000000 }, { tracer, verify: true });
-    await commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'MARK', replace: 'DONE' }], author, message: 'edit', time: 1700000000 }, { tracer, verify: true });
+    await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: 'n\n' }], author, message: 'add', time: 1700000000 }, { tracer, verify: true }));
+    await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'MARK', replace: 'DONE' }], author, message: 'edit', time: 1700000000 }, { tracer, verify: true }));
   },
-  pushTree: async ({ tracer }) => { const r = seeded(); await pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true }); },
-  checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, {}, { tracer }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
-  'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, { path: 'a' }, { tracer, batch: 1 }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
-  readFile: async ({ tracer }) => { const r = seeded(); const res = await readFile(r.url, { path: 'a/b.txt' }, { tracer }); await drain(res.stream); },
-  listTree: async ({ tracer }) => { const r = seeded(); await listTree(r.url, { path: 'a' }, { tracer }); },
-  readCommit: async ({ tracer }) => { const r = seeded(); await readCommit(r.url, {}, { tracer }); },
+  pushTree: async ({ tracer }) => { const r = seeded(); await unwrapAsync(pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true })); },
+  checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await unwrapAsync(checkoutTree(r.url, {}, { tracer })); for await (const f of res.files) if (f.stream) await drain(f.stream); },
+  'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await unwrapAsync(checkoutTree(r.url, { path: 'a' }, { tracer, batch: 1 })); for await (const f of res.files) if (f.stream) await drain(f.stream); },
+  readFile: async ({ tracer }) => { const r = seeded(); const res = await unwrapAsync(readFile(r.url, { path: 'a/b.txt' }, { tracer })); await drain(res.stream); },
+  listTree: async ({ tracer }) => { const r = seeded(); await unwrapAsync(listTree(r.url, { path: 'a' }, { tracer })); },
+  readCommit: async ({ tracer }) => { const r = seeded(); await unwrapAsync(readCommit(r.url, {}, { tracer })); },
   mergeBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, message: 'merge feat' }, { tracer, verify: true });
+    await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, message: 'merge feat' }, { tracer, verify: true }));
   },
   rebaseBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat 1', 'main'); commitOn(r, 'feat', { 'g.txt': 'g\n' }, 'feat 2'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { tracer });
+    await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { tracer }));
   },
   cherryPick: async ({ tracer }) => {
     const r = seeded(); const pick = commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer: author }, { tracer });
+    await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer: author }, { tracer }));
   },
   revertCommit: async ({ tracer }) => {
     const r = seeded(); const bad = commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'oops'); commitOn(r, 'main', { 'f.txt': 'f\n' }, 'later');
-    await revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { tracer });
+    await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { tracer }));
   },
   // the wire spans on their own, under a harness span that is not part of the contract
   wire: async ({ tracer }) => {
@@ -249,7 +256,7 @@ test('span naming: the rules test/pure.test.js checks on one edit hold on every 
 
 test('span lifetimes: a blob read long after readFile returns is its own trace, linked both ways, and ends with the stream', async () => {
   const r = seeded(); const { tracer, spans } = traced();
-  const res = await readFile(r.url, { path: 'big.bin' }, { tracer });
+  const res = await unwrapAsync(readFile(r.url, { path: 'big.bin' }, { tracer }));
   const rootSpan = spans().find(s => s.name === 'git.read');
   assert.ok(rootSpan, 'the root is exported when readFile returns, before the stream is read');
   assert.equal(spans().find(s => s.name === 'git.read.blob'), undefined, 'the blob span is still open');
@@ -269,7 +276,7 @@ test('span lifetimes: a cancelled blob stream ends its spans with outcome cancel
   const r = seeded();
   for (const [path, how] of [['a/b.txt', 'before-read'], ['big.bin', 'mid-read']]) {
     const { tracer, spans } = traced();
-    const res = await readFile(r.url, { path }, { tracer });
+    const res = await unwrapAsync(readFile(r.url, { path }, { tracer }));
     if (how === 'before-read') { await new Promise(ok => setTimeout(ok, 50)); await res.stream.cancel('done'); }
     else { const rd = res.stream.getReader(); await rd.read(); await rd.cancel('done'); }
     const blob = spans().find(s => s.name === 'git.read.blob');

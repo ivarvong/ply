@@ -21,6 +21,7 @@ import { mergeBranch } from '../src/merge.js';
 import { decodeBytes, encodeBytes } from '../src/bytes.js';
 import { isPlyCode } from '../src/errors.js';
 import { Tracer } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const O = (extra = {}) => ({ tracer: new Tracer(), ...extra });
 
@@ -71,9 +72,9 @@ const catCommit = (bare, rev) => { const raw = gitOk(bare, ['cat-file', 'commit'
 // Ref names never go through argv (it is UTF-8 to node): git lists them as bytes, and is asked by oid. for-each-ref
 // skips a name check-ref-format refuses ("ignoring ref with broken name"), so absence is git's refusal.
 const gitRefs = bare => { const out = gitOk(bare, ['for-each-ref', '--format=%(objectname) %(*objectname) %(refname)%00']); const m = new Map(); let p = 0; while (p < out.length) { const nul = out.indexOf(0, p); const line = out.subarray(p, nul); const [oid, peeled] = line.subarray(0, 82).toString().split(' '); m.set(Buffer.from(line.subarray(line.indexOf(32, 41) + 1)).toString('latin1'), { oid, commit: peeled || oid }); p = nul + 2; } return m; };
-const refAt = (bare, name) => { const r = gitRefs(bare).get(Buffer.from(encodeBytes(name)).toString('latin1')); if (!r) throw new Error(`git: no ref ${JSON.stringify(name)} (for-each-ref lists no such name)`); return r.commit; };
+const refAt = (bare, name) => { const r = gitRefs(bare).get(Buffer.from(unwrap(encodeBytes(name))).toString('latin1')); if (!r) throw new Error(`git: no ref ${JSON.stringify(name)} (for-each-ref lists no such name)`); return r.commit; };
 const refList = bare => [...gitRefs(bare)].map(([n, r]) => `${r.oid} ${n}`).join('\n');
-const bytesOf = s => Buffer.from(encodeBytes(s));
+const bytesOf = s => Buffer.from(unwrap(encodeBytes(s)));
 const drain = async stream => { const parts = []; for await (const c of stream) parts.push(Buffer.from(c)); return Buffer.concat(parts); };
 
 // ---- one fixture per (content, field) ----
@@ -138,27 +139,27 @@ const OPERATIONS = {
   async readFile(fx, url) {
     const rows = lsTree(fx.bare, revOf(fx)).filter(r => r.type === 'blob');
     const git = rows.map(r => ({ name: r.name.toString('hex'), data: gitOk(fx.bare, ['cat-file', 'blob', r.oid]).toString('hex') }));
-    return { git, ply: async () => { const out = []; for (const r of rows) { const f = await readFile(url, { ref: fx.target, path: decodeBytes(r.name) }, O()); out.push({ name: r.name.toString('hex'), data: (await drain(f.stream)).toString('hex') }); } return out; } };
+    return { git, ply: async () => { const out = []; for (const r of rows) { const f = await unwrapAsync(readFile(url, { ref: fx.target, path: decodeBytes(r.name) }, O())); out.push({ name: r.name.toString('hex'), data: (await drain(f.stream)).toString('hex') }); } return out; } };
   },
   async listTree(fx, url) {
     const git = lsTree(fx.bare, revOf(fx)).map(r => ({ name: r.name.toString('hex'), mode: r.mode, oid: r.oid }));
-    return { git, ply: async () => (await listTree(url, { ref: fx.target }, O())).entries.map(e => ({ name: bytesOf(e.name).toString('hex'), mode: e.mode, oid: e.oid })) };
+    return { git, ply: async () => (await unwrapAsync(listTree(url, { ref: fx.target }, O()))).entries.map(e => ({ name: bytesOf(e.name).toString('hex'), mode: e.mode, oid: e.oid })) };
   },
   async readCommit(fx, url) {
     const c = catCommit(fx.bare, revOf(fx));
     const git = { tree: c.tree, parents: c.parents, author: c.authorName.toString('hex'), message: c.message.toString('hex') };
-    return { git, ply: async () => { const r = await readCommit(url, { ref: fx.target }, O()); return { tree: r.tree, parents: r.parents, author: bytesOf(r.author.name).toString('hex'), message: bytesOf(r.message).toString('hex') }; } };
+    return { git, ply: async () => { const r = await unwrapAsync(readCommit(url, { ref: fx.target }, O())); return { tree: r.tree, parents: r.parents, author: bytesOf(r.author.name).toString('hex'), message: bytesOf(r.message).toString('hex') }; } };
   },
   async checkoutTree(fx, url) {
     const rows = lsTree(fx.bare, revOf(fx)).filter(r => r.type === 'blob');
     const git = rows.map(r => ({ path: r.name.toString('hex'), data: gitOk(fx.bare, ['cat-file', 'blob', r.oid]).toString('hex') })).sort(byPath);
     return { git, ply: async () => {
-      const co = await checkoutTree(url, { ref: fx.target }, O());
+      const co = await unwrapAsync(checkoutTree(url, { ref: fx.target }, O()));
       const files = []; for await (const f of co.files) files.push({ path: bytesOf(f.path).toString('hex'), data: (await drain(f.stream)).toString('hex') });
       // and onto a filesystem: the names on disk are git's bytes
       const dir = mkdtempSync(join(fx.bare, '..', 'co-'));
       try {
-        const written = await writeFiles(dir, (await checkoutTree(url, { ref: fx.target }, O())).files, { limits: DEFAULT_LIMITS, platform: process.platform });
+        const written = await writeFiles(dir, (await unwrapAsync(checkoutTree(url, { ref: fx.target }, O()))).files, { limits: DEFAULT_LIMITS, platform: process.platform });
         if (!written.ok) throw written.error;
         const disk = readdirSync(dir, { encoding: 'buffer' }).map(n => n.toString('hex')).sort();
         assert.deepEqual(disk, files.map(f => f.path).sort(), 'names on disk');
@@ -176,14 +177,14 @@ const OPERATIONS = {
     const oldRows = lsTree(fx.bare, old);
     const fOld = oldRows.find(r => r.name.equals(B('f.txt'))).oid;
     const newBlob = gitOk(fx.bare, ['hash-object', '--stdin'], { input: B(gitOk(fx.bare, ['cat-file', 'blob', fOld]).toString().replace('line2', 'EDITED')) }).toString().trim();
-    const git = { tree: oldRows.map(r => ({ name: r.name.toString('hex'), mode: r.mode, oid: r.name.equals(B('f.txt')) ? newBlob : r.oid })), parents: [old], author: bytesOf(author.name).toString('hex'), message: B(encodeBytes(message), '\n').toString('hex') };
+    const git = { tree: oldRows.map(r => ({ name: r.name.toString('hex'), mode: r.mode, oid: r.name.equals(B('f.txt')) ? newBlob : r.oid })), parents: [old], author: bytesOf(author.name).toString('hex'), message: B(unwrap(encodeBytes(message)), '\n').toString('hex') };
     gitCan(message, author.name);
     return { git, ply: async () => {
-      const r = await editFile(url, { ref, path: 'f.txt', find: 'line2', replace: 'EDITED', author, message }, O());
+      const r = await unwrapAsync(editFile(url, { ref, path: 'f.txt', find: 'line2', replace: 'EDITED', author, message }, O()));
       assert.equal(r.outcome ?? 'ok', 'ok');
       const now = refAt(fx.bare, ref);
       // no other ref appeared or moved (a ref name read as U+FFFD would push a new ref)
-      const others = list => list.split('\n').filter(l => !l.endsWith(` ${Buffer.from(encodeBytes(ref)).toString('latin1')}`)).join('\n');
+      const others = list => list.split('\n').filter(l => !l.endsWith(` ${Buffer.from(unwrap(encodeBytes(ref))).toString('latin1')}`)).join('\n');
       assert.equal(others(refList(fx.bare)), others(fx.refsBefore), 'refs other than the edited one');
       const c = catCommit(fx.bare, now);
       return { tree: lsTree(fx.bare, now).map(x => ({ name: x.name.toString('hex'), mode: x.mode, oid: x.oid })), parents: c.parents, author: c.authorName.toString('hex'), message: c.message.toString('hex') };
@@ -195,9 +196,9 @@ const OPERATIONS = {
     gitCan(message, author.name);
     const r = run(fx.bare, ['-c', 'attr.tree=refs/heads/main', 'merge-tree', '--write-tree', 'refs/heads/main', refAt(fx.bare, fx.from)]);
     if (r.status !== 0 && r.status !== 1) throw new Error(`git merge-tree: ${r.stderr}`);
-    const git = r.status === 0 ? { clean: true, tree: r.stdout.toString().split('\n')[0], message: B(encodeBytes(message), '\n').toString('hex'), author: bytesOf(author.name).toString('hex') } : { clean: false };
+    const git = r.status === 0 ? { clean: true, tree: r.stdout.toString().split('\n')[0], message: B(unwrap(encodeBytes(message)), '\n').toString('hex'), author: bytesOf(author.name).toString('hex') } : { clean: false };
     return { git, ply: async () => {
-      let m; try { m = await mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' })); } catch (e) { if (e.code === 'merge_conflict') return { clean: false }; throw e; }
+      let m; try { m = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' }))); } catch (e) { if (e.code === 'merge_conflict') return { clean: false }; throw e; }
       const c = catCommit(fx.bare, 'refs/heads/main');
       assert.equal(m.outcome, 'merge');
       return { clean: true, tree: c.tree, message: c.message.toString('hex'), author: c.authorName.toString('hex') };
@@ -217,15 +218,15 @@ function gitCanUpdate(bare, ref, old) {
     cpSync(bare, a, { recursive: true }); cpSync(bare, b, { recursive: true });
     const argvSafe = ref.isWellFormed() && /^[\x21-\x7e]+$/.test(ref);
     const child = gitOk(a, ['commit-tree', `${old}^{tree}`, '-p', old, '-m', 'probe'], { env: { GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@x' } }).toString().trim();
-    const r = argvSafe ? run(a, ['push', '-q', b, `${child}:${ref}`]) : run(b, ['update-ref', '--stdin'], { input: B('update ', encodeBytes(ref), ` ${old} ${old}\n`) });
+    const r = argvSafe ? run(a, ['push', '-q', b, `${child}:${ref}`]) : run(b, ['update-ref', '--stdin'], { input: B('update ', unwrap(encodeBytes(ref)), ` ${old} ${old}\n`) });
     if (r.status !== 0) throw new Error(`git ${argvSafe ? 'push' : 'update-ref'}: ${(r.stderr.toString().trim().split('\n').find(l => l.includes('rejected')) ?? r.stderr.toString().trim())}`);
   } finally { rmSync(a, { recursive: true, force: true }); rmSync(b, { recursive: true, force: true }); }
 }
 // What git refuses to write from a caller: a NUL in a message (commit-tree: "a NUL byte in commit log message not
 // allowed") or in an ident (an environment variable cannot hold one); a ref name check-ref-format refuses.
 function gitCan(message, name) {
-  if (encodeBytes(message).includes(0)) throw new Error('git commit-tree: a NUL byte in commit log message not allowed');
-  if (encodeBytes(name).includes(0)) throw new Error('git: an ident cannot hold NUL');
+  if (unwrap(encodeBytes(message)).includes(0)) throw new Error('git commit-tree: a NUL byte in commit log message not allowed');
+  if (unwrap(encodeBytes(name)).includes(0)) throw new Error('git: an ident cannot hold NUL');
 }
 
 // ---- run the product ----
@@ -251,12 +252,12 @@ const verdict = async (fx, op) => {
 async function plyAnyway(fx, op, url) {
   const message = fx.field === 'commitMessage' ? fieldIn(fx, 'msg') : 'msg';
   const author = fx.field === 'authorName' ? { ...WHO, name: fieldIn(fx, 'P Ly') } : WHO;
-  if (op === 'readFile') return (await readFile(url, { ref: fx.target, path: 'f.txt' }, O())).size;
-  if (op === 'listTree') return (await listTree(url, { ref: fx.target }, O())).entries.length;
-  if (op === 'readCommit') return (await readCommit(url, { ref: fx.target }, O())).oid;
-  if (op === 'checkoutTree') { const co = await checkoutTree(url, { ref: fx.target }, O()); for await (const f of co.files) await drain(f.stream); return co.entries.length; }
-  if (op === 'editFile') return (await editFile(url, { ref: fx.field === 'tagName' ? 'refs/heads/side' : fx.target, path: 'f.txt', find: 'line2', replace: 'X', author, message }, O())).outcome;
-  return (await mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' }))).outcome;
+  if (op === 'readFile') return (await unwrapAsync(readFile(url, { ref: fx.target, path: 'f.txt' }, O()))).size;
+  if (op === 'listTree') return (await unwrapAsync(listTree(url, { ref: fx.target }, O()))).entries.length;
+  if (op === 'readCommit') return (await unwrapAsync(readCommit(url, { ref: fx.target }, O()))).oid;
+  if (op === 'checkoutTree') { const co = await unwrapAsync(checkoutTree(url, { ref: fx.target }, O())); for await (const f of co.files) await drain(f.stream); return co.entries.length; }
+  if (op === 'editFile') return (await unwrapAsync(editFile(url, { ref: fx.field === 'tagName' ? 'refs/heads/side' : fx.target, path: 'f.txt', find: 'line2', replace: 'X', author, message }, O()))).outcome;
+  return (await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' })))).outcome;
 }
 
 test(`git bytes: ${Object.keys(CONTENT).length} contents × ${FIELDS.length} fields × ${OPS.length} operations, every cell against git`, async () => {

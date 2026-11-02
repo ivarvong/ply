@@ -1,42 +1,6 @@
 {
   "entries": [
     {
-      "id": "refs.lsRefs.10000",
-      "heap": "default",
-      "actual": { "status": "refused", "code": "limit_exceeded", "what": "ls-refs lines", "got": 10001, "max": 10000 },
-      "why": "HEAD is inserted into the same map as the refs, so 10000 refs plus HEAD is refused one line early"
-    },
-    {
-      "id": "refs.lsRefs.10000",
-      "heap": "128",
-      "actual": { "status": "refused", "code": "limit_exceeded", "what": "ls-refs lines", "got": 10001, "max": 10000 },
-      "why": "HEAD is inserted into the same map as the refs, so 10000 refs plus HEAD is refused one line early"
-    },
-    {
-      "id": "depth.mergebase.k1025",
-      "heap": "default",
-      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
-      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
-    },
-    {
-      "id": "depth.mergebase.k1025",
-      "heap": "128",
-      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
-      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
-    },
-    {
-      "id": "depth.mergebase.k2048",
-      "heap": "default",
-      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
-      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
-    },
-    {
-      "id": "depth.mergebase.k2048",
-      "heap": "128",
-      "actual": { "status": "refused", "code": "limit_exceeded", "what": "merge-base search depth", "got": 1024, "max": 1024 },
-      "why": "mergeBase passes the cap as the attempted depth; the next doubling step is 2048"
-    },
-    {
       "id": "tree.listTree.199999",
       "heap": "128",
       "actual": { "status": "oom" },

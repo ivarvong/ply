@@ -17,6 +17,7 @@ import { classifyReport, decideOutcome } from '../src/push.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const filterOf = body => /filter ([^\n]+)\n/.exec(Buffer.from(body).toString('latin1'))?.[1] ?? null;
@@ -52,12 +53,12 @@ test('editFile: a stale-ref rejection on the first push is retried from a fresh 
   let pushes = 0;
   const staleOnce = ctx => {
     if (ctx.stage !== 'receive-pack' || ctx.phase !== 'request' || pushes++ > 0) return null;
-    const report = concat([pkt('unpack ok\n'), pkt('ng refs/heads/main stale ref\n'), FLUSH]);
-    return { type: 'bytes', noForward: true, name: 'stale-ref', bytes: concat([pkt(concat([new Uint8Array([1]), report])), FLUSH]) };
+    const report = concat([unwrap(pkt('unpack ok\n')), unwrap(pkt('ng refs/heads/main stale ref\n')), FLUSH]);
+    return { type: 'bytes', noForward: true, name: 'stale-ref', bytes: concat([unwrap(pkt(concat([new Uint8Array([1]), report]))), FLUSH]) };
   };
   const r = await repo({ 'f.txt': 'MARK\n' }, artifactsFault(staleOnce));
   try {
-    const res = await editFile(r.url, { path: 'f.txt', find: 'MARK', replace: 'DONE', author: A, message: 'm' }, { tracer: new Tracer() });
+    const res = await unwrapAsync(editFile(r.url, { path: 'f.txt', find: 'MARK', replace: 'DONE', author: A, message: 'm' }, { tracer: new Tracer() }));
     assert.equal(res.attempt, 1, 'retried once');
     assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), res.newCommit);
     assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:f.txt']).toString(), 'DONE\n');
@@ -70,7 +71,7 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
   const r = await repo(files);
   try {
     const quirks = {}; const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
-    const res = await editFile(r.url, { path: 'a/b/c/d/deep.txt', find: 'MARK', replace: 'EDITED', author: A, message: 'm' }, { tracer, quirks, verify: true });
+    const res = await unwrapAsync(editFile(r.url, { path: 'a/b/c/d/deep.txt', find: 'MARK', replace: 'EDITED', author: A, message: 'm' }, { tracer, quirks, verify: true }));
     assert.equal(quirks.treeFilter, 'blob:none');
     assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), res.newCommit);
     assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:a/b/c/d/deep.txt']).toString(), 'deep EDITED\n');
@@ -85,14 +86,14 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
     assert.equal(rejected, 1, 'one 400, then remembered');
     // second operation, same quirks object: no 400 at all; read == git show
     const before400 = rejected;
-    const rd = await readFile(r.url, { path: 'a/b/c/d/deep.txt' }, { tracer: new Tracer(), quirks });
+    const rd = await unwrapAsync(readFile(r.url, { path: 'a/b/c/d/deep.txt' }, { tracer: new Tracer(), quirks }));
     const chunks = []; for await (const c of rd.stream) chunks.push(Buffer.from(c));
     assert.ok(Buffer.concat(chunks).equals(gitBuf(r.bare, ['show', 'main:a/b/c/d/deep.txt'])));
-    const ls = await listTree(r.url, { path: 'many' }, { tracer: new Tracer(), quirks });
+    const ls = await unwrapAsync(listTree(r.url, { path: 'many' }, { tracer: new Tracer(), quirks }));
     assert.equal(ls.entries.length, 40); assert.equal(ls.tree, git(r.bare, ['rev-parse', 'main:many']).trim());
     assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400, 'no further 400s');
     // a fresh transport without the quirks object learns it again (one more 400) and still answers correctly
-    const rd2 = await readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() });
+    const rd2 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() }));
     for await (const _ of rd2.stream); // eslint-disable-line no-unused-vars
     assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400 + 1);
   } finally { await r.proxy.close(); }
@@ -109,19 +110,19 @@ test('blob:none fallback: merge, rebase, cherry-pick, revert trees equal git mer
     git(work, ['checkout', '-q', 'main']);
     const m1 = commitTo('refs/heads/main', { 'y.txt': 'y1 main\n' }, 'main');
     const opts = () => ({ tracer: new Tracer(), quirks });
-    const mg = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge' }, opts());
+    const mg = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge' }, opts()));
     assert.equal(mg.outcome, 'merge');
     assert.equal(mg.tree, git(bare, ['merge-tree', '--write-tree', m1, f1]).trim().split('\n')[0]);
     assert.equal(tree(bare, 'main'), mg.tree);
     // rebase feat2 (one commit on base) onto main
     git(work, ['checkout', '-q', '-b', 'feat2', base]); const f2 = commitTo('refs/heads/feat2', { 'd/z.txt': 'z feat2\n' }, 'feat2');
-    const rb = await rebaseBranch(url, { ref: 'refs/heads/feat2', onto: 'refs/heads/main', committer: A }, opts());
+    const rb = await unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/feat2', onto: 'refs/heads/main', committer: A }, opts()));
     assert.equal(rb.outcome, 'rebase');
     assert.equal(tree(bare, 'feat2'), git(bare, ['merge-tree', '--write-tree', `--merge-base=${base}`, mg.oid, f2]).trim().split('\n')[0]);
     // cherry-pick f2 onto main, then revert it
-    const cp = await cherryPick(url, { ref: 'refs/heads/main', commit: f2, committer: A }, opts());
+    const cp = await unwrapAsync(cherryPick(url, { ref: 'refs/heads/main', commit: f2, committer: A }, opts()));
     assert.equal(cp.tree, git(bare, ['merge-tree', '--write-tree', `--merge-base=${base}`, mg.oid, f2]).trim().split('\n')[0]);
-    const rv = await revertCommit(url, { ref: 'refs/heads/main', commit: cp.oid, committer: A }, opts());
+    const rv = await unwrapAsync(revertCommit(url, { ref: 'refs/heads/main', commit: cp.oid, committer: A }, opts()));
     assert.equal(rv.tree, mg.tree, 'revert restores the pre-pick tree');
     assert.deepEqual(fsckProblems(bare), []);
     assert.equal(quirks.treeFilter, 'blob:none');
@@ -132,8 +133,8 @@ test('git-default server: no fallback attributes, tree:0 throughout (the fallbac
   const r = await repo({ 'a/b.txt': 'MARK\n' }, () => ({ type: 'pass' }));
   try {
     const ex = arrayExporter(); const quirks = {};
-    await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: A, message: 'm' }, { tracer: new Tracer({ exporter: ex }), quirks });
-    assert.equal(quirks.treeFilter, undefined);
+    await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: A, message: 'm' }, { tracer: new Tracer({ exporter: ex }), quirks }));
+    assert.equal(quirks.treeFilter, 'tree:0'); // the caller's record states what the server took
     for (const s of spansOf(ex).filter(s => s.name === 'git.upload-pack fetch')) assert.ok(!('git.fetch.filter.fallback' in s.attrs));
   } finally { await r.proxy.close(); }
 });

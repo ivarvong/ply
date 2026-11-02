@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { buildPack, parsePack, resolvePack, makeDelta } from '../../src/pack.js';
 import { hashObject } from '../../src/objects.js';
 import { cells } from './thin-base.space.js';
+import { unwrap } from '../unwrap.js';
 
 const ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
@@ -68,7 +69,7 @@ test('thin REF base: every claim × byte form against git hash-object and index-
     for (const [tag, obj] of Object.entries(made)) {
       assert.equal(hashObject(tag, obj.base), obj.oid, `${tag} base hashes as git stored it`);
       const { pack } = await buildPack([{ type: cType(tag), data: makeDelta(obj.base, obj.target).delta, baseOid: obj.oid }]);
-      packs[tag] = parsePack(pack);
+      packs[tag] = unwrap(parsePack(pack));
       const indexed = git(dir, ['index-pack', '--stdin', '--strict', '--fix-thin'], pack);
       assert.match(indexed.toString(), /^pack\t[0-9a-f]{40}\n$/);
       assert.equal(line(dir, ['cat-file', '-t', obj.targetOid]), tag);
@@ -80,7 +81,7 @@ test('thin REF base: every claim × byte form against git hash-object and index-
       const parsed = packs[c.base.tag];
       let threw = null;
       let resolved = null;
-      try { resolved = resolvePack(parsed, oid => (oid === obj.oid ? { type: c.claim.type, data } : undefined)); }
+      try { resolved = unwrap(resolvePack(parsed, oid => (oid === obj.oid ? { type: c.claim.type, data } : undefined))); }
       catch (e) { threw = e; }
       if (c.honest) {
         assert.equal(threw, null, `${c.id}: ${threw?.message}`);

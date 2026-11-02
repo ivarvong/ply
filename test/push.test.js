@@ -10,6 +10,7 @@ import { GitHttp, ZERO_OID } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 import { makeDelta } from '../src/pack.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -87,9 +88,9 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
       const t = twins(cfg, hook);
       const { ours, git: refspecs, extra = [] } = mkCmd(t);
       const exporter = arrayExporter();
-      const client = new GitHttp(`${srv.url}/o${t.id}.git`, { tracer: new Tracer({ exporter }) });
+      const client = unwrap(GitHttp.create(`${srv.url}/o${t.id}.git`, { tracer: new Tracer({ exporter }) }));
       let res, err;
-      try { res = await client.push({ ...ours, ...caps }); } catch (e) { err = e; }
+      try { res = await unwrapAsync(client.push({ ...ours, ...caps })); } catch (e) { err = e; }
       const g = gitPush(t.work, t.theirs, refspecs, [...extra, ...(caps.pushOptions ?? []).flatMap(o => ['-o', o])]);
       // 1. accept/reject parity
       if (caps.pushOptions && ck !== 'push-options') { // git: "the receiving end does not support push options" (client-side); ours: server rejects the capability
@@ -147,12 +148,12 @@ test('push default: side-band-64k is requested unless disabled, and band 2 lands
   const hooks = join(bare, 'hooks'); mkdirSync(hooks, { recursive: true });
   writeFileSync(join(hooks, 'pre-receive'), '#!/bin/sh\necho "from hook" >&2\nexit 0\n'); chmodSync(join(hooks, 'pre-receive'), 0o755);
   const ex = arrayExporter();
-  const c = new GitHttp(`${srv.url}/sbdef.git`, { tracer: new Tracer({ exporter: ex }) });
+  const c = unwrap(GitHttp.create(`${srv.url}/sbdef.git`, { tracer: new Tracer({ exporter: ex }) }));
   const blob = new TextEncoder().encode('y\n');
-  const treeData = (await import('../src/objects.js')).encodeTree([{ mode: '100644', name: 'f.txt', oid: (await import('../src/objects.js')).hashObject('blob', blob) }]);
-  const commitData = (await import('../src/objects.js')).encodeCommit({ tree: (await import('../src/objects.js')).hashObject('tree', treeData), parents: [head], author: 'a <a@x> 1 +0000', message: 'm\n' });
+  const treeData = unwrap((await import('../src/objects.js')).encodeTree([{ mode: '100644', name: 'f.txt', oid: (await import('../src/objects.js')).hashObject('blob', blob) }]));
+  const commitData = unwrap((await import('../src/objects.js')).encodeCommit({ tree: (await import('../src/objects.js')).hashObject('tree', treeData), parents: [head], author: 'a <a@x> 1 +0000', message: 'm\n' }));
   const newOid = (await import('../src/objects.js')).hashObject('commit', commitData);
-  const r = await c.push({ ref: 'refs/heads/main', oldOid: head, newOid, objects: [{ type: TYPE.COMMIT, data: commitData }, { type: TYPE.TREE, data: treeData }, { type: TYPE.BLOB, data: blob }] });
+  const r = await unwrapAsync(c.push({ ref: 'refs/heads/main', oldOid: head, newOid, objects: [{ type: TYPE.COMMIT, data: commitData }, { type: TYPE.TREE, data: treeData }, { type: TYPE.BLOB, data: blob }] }));
   assert.equal(r.hookOutput.trim(), 'from hook');
   const span = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.receive-pack');
   assert.ok(span.attrs['git.push.caps'].includes('side-band-64k'));

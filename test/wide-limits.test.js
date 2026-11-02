@@ -28,6 +28,7 @@ import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { readFile, listTree } from '../src/read.js';
 import { checkoutTree } from '../src/checkout.js';
+import { unwrapAsync } from './unwrap.js';
 import { mergeBranch } from '../src/merge.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
@@ -105,21 +106,21 @@ const sha = b => createHash('sha256').update(b).digest('hex').slice(0, 12);
 const drain = async stream => { const out = []; for await (const c of stream) out.push(Buffer.from(c)); return Buffer.concat(out); };
 async function runOp(op, url, wanted, opts) {
   const T = TARGET[wanted];
-  if (op === 'readFile') { const r = await readFile(url, { path: T.file }, opts); const b = await drain(r.stream); return { answer: `blob ${r.blob} ${sha(b)}`, check: bare => assert.ok(b.equals(gitBuf(bare, ['show', `main:${T.file}`]))) }; }
+  if (op === 'readFile') { const r = await unwrapAsync(readFile(url, { path: T.file }, opts)); const b = await drain(r.stream); return { answer: `blob ${r.blob} ${sha(b)}`, check: bare => assert.ok(b.equals(gitBuf(bare, ['show', `main:${T.file}`]))) }; }
   if (op === 'listTree') {
-    const r = await listTree(url, { path: T.dir }, opts);
+    const r = await unwrapAsync(listTree(url, { path: T.dir }, opts));
     return { answer: `tree ${r.tree} ${sha(JSON.stringify(r.entries))}`, check: bare => assert.deepEqual(r.entries.map(e => `${e.mode} ${e.type} ${e.oid}\t${e.name}`), git(bare, ['ls-tree', `main:${T.dir}`]).trim().split('\n')) };
   }
   if (op === 'editFile') {
-    const r = await editFile(url, { path: T.file, find: T.find, replace: `${T.find}X`, author: A, message: 'edit', time: TIME }, opts);
+    const r = await unwrapAsync(editFile(url, { path: T.file, find: T.find, replace: `${T.find}X`, author: A, message: 'edit', time: TIME }, opts));
     return { answer: `commit ${r.newCommit}`, check: bare => { assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.newCommit); assert.ok(gitBuf(bare, ['show', `main:${T.file}`]).toString().startsWith(`${T.find}X`)); } };
   }
   if (op === 'checkoutTree') {
-    const r = await checkoutTree(url, { path: T.dir }, opts);
+    const r = await unwrapAsync(checkoutTree(url, { path: T.dir }, opts));
     const files = []; for await (const f of r.files) files.push(`${f.path} ${f.oid} ${sha(await drain(f.stream))}`);
     return { answer: `tree ${r.tree} ${sha(files.join('\n'))}`, check: bare => assert.deepEqual(r.entries.map(e => `${e.mode} blob ${e.oid}\t${e.path}`), git(bare, ['ls-tree', '-r', `main:${T.dir}`]).trim().split('\n')) };
   }
-  const r = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge', time: TIME }, opts);
+  const r = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge', time: TIME }, opts));
   return { answer: `${r.outcome} ${r.oid} ${r.tree}`, check: bare => { assert.equal(r.outcome, 'merge'); assert.equal(r.tree, git(bare, ['merge-tree', '--write-tree', `${r.oid}^1`, `${r.oid}^2`]).trim().split('\n')[0]); assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.oid); } };
 }
 
