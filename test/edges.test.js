@@ -9,7 +9,7 @@ import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
 import { TYPE_NAME } from '../src/objects.js';
-import { unwrapAsync } from './unwrap.js';
+import { unwrapAsync, unwrap } from './unwrap.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -94,16 +94,16 @@ test('REF_DELTA packs (server without ofs-delta) resolve identically; thin-pack 
   let text = 'line\n'.repeat(500);
   const c1 = commitFiles(r.work, r.bare, { 'd/a.txt': text, 'd/b.txt': text + 'b', 'd/c.txt': text + 'c' }, 'one');
   const c2 = commitFiles(r.work, r.bare, { 'd/a.txt': text + 'changed\n' }, 'two');
-  const c = new GitHttp(r.url, { tracer: new Tracer() });
-  const ofs = await c.fetchPack({ wants: [c2], filter: 'blob:none', deepen: 2, ofsDelta: true });
-  const ref = await c.fetchPack({ wants: [c2], filter: 'blob:none', deepen: 2, ofsDelta: false });
+  const c = unwrap(GitHttp.create(r.url, { tracer: new Tracer() }));
+  const ofs = await unwrapAsync(c.fetchPack({ wants: [c2], filter: 'blob:none', deepen: 2, ofsDelta: true }));
+  const ref = await unwrapAsync(c.fetchPack({ wants: [c2], filter: 'blob:none', deepen: 2, ofsDelta: false }));
   assert.equal(ref.parsed.stats.ofsDelta, 0);
   assert.deepEqual([...ref.objects.keys()].sort(), [...ofs.objects.keys()].sort());
   for (const [oid, o] of ref.objects) assert.deepEqual([...o.data], [...ofs.objects.get(oid).data]);
   // thin: have c1, want c2's blob a.txt → server may send it as a delta against c1's a.txt, which we supply externally
   const blobOld = git(r.bare, ['rev-parse', `${c1}:d/a.txt`]).trim(), blobNew = git(r.bare, ['rev-parse', `${c2}:d/a.txt`]).trim();
   const base = gitBuf(r.bare, ['cat-file', 'blob', blobOld]);
-  const thin = await c.fetchPack({ wants: [c2], haves: [c1], thinPack: true, deepen: 1 }, { external: oid => (oid === blobOld ? { type: 3, data: new Uint8Array(base) } : undefined) });
+  const thin = await unwrapAsync(c.fetchPack({ wants: [c2], haves: [c1], thinPack: true, deepen: 1 }, { external: oid => (oid === blobOld ? { type: 3, data: new Uint8Array(base) } : undefined) }));
   assert.ok(thin.objects.has(blobNew));
   assert.ok(Buffer.from(thin.objects.get(blobNew).data).equals(gitBuf(r.bare, ['cat-file', 'blob', blobNew])));
 });

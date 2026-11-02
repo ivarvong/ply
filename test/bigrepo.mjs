@@ -8,7 +8,7 @@ import { startGitServer } from './server.js';
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { unwrapAsync } from './unwrap.js';
+import { unwrapAsync, unwrap } from './unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const COMMITS = +(args.commits ?? 1000), HEAD_MB = +(args.headMB ?? 50), TOTAL_GB = +(args.totalGB ?? 10), DIR = args.dir ?? '/tmp/bigrepo';
@@ -76,9 +76,9 @@ git(['update-ref', 'refs/heads/main', head]); // undo for the next run
 const b = await run('warm tree cache (same root tree → 0 tree fetches)', t => edit(t, lastRev, cache));
 git(['update-ref', 'refs/heads/main', head]);
 console.log('\n--- what the naive alternatives cost on this repo (server side, wire bytes)');
-const c = new GitHttp(url, { tracer: new Tracer() });
+const c = unwrap(GitHttp.create(url, { tracer: new Tracer() }));
 for (const [label, req] of [['blob:none (textbook blobless, depth 1)', { wants: [head], filter: 'blob:none', deepen: 1 }], ['tree:0 (our commit fetch)', { wants: [head], filter: 'tree:0', deepen: 1 }], ['combine:blob:none+tree:3 (one-shot trees to depth 3)', { wants: [head], filter: 'combine:blob:none+tree:3', deepen: 1 }], ['depth-1 full clone pack (what `git clone --depth 1` moves)', { wants: [head], deepen: 1 }]]) {
-  const t0 = Date.now(); let n = 0, objs = 0; try { const r = await c.fetchPack(req); n = r.parsed.bytes; objs = r.parsed.stats.count; } catch (e) { console.log(label, 'ERR', e.message.slice(0, 80)); continue; }
+  const t0 = Date.now(); let n = 0, objs = 0; try { const r = await unwrapAsync(c.fetchPack(req)); n = r.parsed.bytes; objs = r.parsed.stats.count; } catch (e) { console.log(label, 'ERR', e.message.slice(0, 80)); continue; }
   console.log(`${label.padEnd(60)} ${String(Date.now() - t0).padStart(6)}ms  ${String(n).padStart(10)}B  ${objs} objects`);
 }
 await srv.close();

@@ -11,6 +11,7 @@ import { genDag, readModel } from './fuzz/dag.js';
 import { Rng } from './fuzz/prng.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 let root, cleanup, srv, hookLog, bare, model, dag, url, anc;
 before(async () => {
@@ -43,7 +44,7 @@ const cli = (args, cwd = root) => { rmSync(hookLog + '.args', { force: true }); 
 
 test('clone --depth N / --filter / --shallow-since / --shallow-exclude: same invocation, same shallow set, same objects', async () => {
   const tip = dag.tip;
-  const c = new GitHttp(url, { tracer: new Tracer() });
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer() }));
   const scenarios = [
     ['--depth=1', { wants: [tip], deepen: 1 }],
     ['--depth=2', { wants: [tip], deepen: 2 }],
@@ -63,7 +64,7 @@ test('clone --depth N / --filter / --shallow-since / --shallow-exclude: same inv
     const gitInv = cli(['clone', '-q', '--no-tags', '--single-branch', '-b', 'main', ...(req.filter ? ['--no-checkout'] : []), ...flags.split(' '), url, dst]); // a checkout would lazily fetch filtered blobs: a second request
     const gitObjects = objectsIn(dst), gitShallow = shallowOf(dst);
     rmSync(hookLog + '.args', { force: true });
-    const r = await c.fetchPack({ ...req, ofsDelta: true, thinPack: true, includeTag: true, noProgress: true });
+    const r = await unwrapAsync(c.fetchPack({ ...req, ofsDelta: true, thinPack: true, includeTag: true, noProgress: true }));
     const ourInv = capture();
     assert.equal(ourInv.args, gitInv.args, `${flags}: argv`);
     assert.deepEqual(norm(ourInv.stdin), norm(gitInv.stdin), `${flags}: stdin`);
@@ -76,7 +77,7 @@ test('clone --depth N / --filter / --shallow-since / --shallow-exclude: same inv
 
 test('fetch after a shallow clone: --deepen (relative), --depth=N, --unshallow, --shallow-since, --shallow-exclude', async () => {
   const tip = dag.tip;
-  const c = new GitHttp(url, { tracer: new Tracer() });
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer() }));
   for (const [flags, mk] of [
     ['--deepen=1', s => ({ deepen: 1, deepenRelative: true })],
     ['--deepen=2', s => ({ deepen: 2, deepenRelative: true })],
@@ -95,7 +96,7 @@ test('fetch after a shallow clone: --deepen (relative), --depth=N, --unshallow, 
     // our equivalent: want tip, declare the same shallow set, have the tip (git's local ref)
     // thin bases resolve from the same local store git's client has (the clone before the fetch)
     const external = oid => (before.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[git(dst, ['cat-file', '-t', oid]).trim()], data: new Uint8Array(gitBuf(dst, ['cat-file', git(dst, ['cat-file', '-t', oid]).trim(), oid])) } : undefined);
-    const r = await c.fetchPack({ wants: [tip], haves: [tip], shallows: shallowBefore, ...mk(shallowBefore), ofsDelta: true, thinPack: true }, { external });
+    const r = await unwrapAsync(c.fetchPack({ wants: [tip], haves: [tip], shallows: shallowBefore, ...mk(shallowBefore), ofsDelta: true, thinPack: true }, { external }));
     const ourInv = capture();
     assert.equal(ourInv.args, gitInv.args, `${flags}: argv`);
     assert.deepEqual(norm(ourInv.stdin), norm(gitInv.stdin), `${flags}: stdin`);
@@ -110,9 +111,9 @@ test('ls-refs == git ls-remote (prefixes, symrefs, peeled tags, many refs)', asy
   for (let i = 0; i < 300; i++) git(bare, ['update-ref', `refs/heads/many/b${String(i).padStart(4, '0')}`, anc[i % anc.length]]);
   git(bare, ['update-ref', 'refs/tags/light', dag.tip]);
   git(bare, ['symbolic-ref', 'refs/heads/alias', 'refs/heads/main']);
-  const c = new GitHttp(url, { tracer: new Tracer() });
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer() }));
   for (const prefixes of [[], ['refs/heads/'], ['refs/tags/'], ['refs/heads/many/b00'], ['refs/heads/main', 'refs/tags/v1'], ['HEAD']]) {
-    const { refs, head } = await c.lsRefs(prefixes);
+    const { refs, head } = await unwrapAsync(c.lsRefs(prefixes));
     const remote = git(bare, ['ls-remote', '--symref', ...(prefixes.length ? ['.', ...prefixes.map(p => p.replace(/\/$/, '/*'))] : ['.'])]).trim().split('\n').filter(Boolean);
     // ls-remote with globs approximates ref-prefix (prefix match); compare on the exact-prefix filter ourselves
     const exp = git(bare, ['ls-remote', '--symref', '.']).trim().split('\n').filter(Boolean).filter(l => prefixes.length === 0 || prefixes.some(p => l.split(/\s+/)[1].startsWith(p) || (l.startsWith('ref:') && l.split(/\s+/)[2].startsWith(p))));

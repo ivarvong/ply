@@ -156,8 +156,8 @@ test('push: sideband on by default; hook stderr lands in git.push.remote.message
 
 test('discover: v2 capability canary against real git', async () => {
   const ex = arrayExporter();
-  const c = new GitHttp(url, { tracer: new Tracer({ exporter: ex }) });
-  const info = await c.discover();
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer({ exporter: ex }) }));
+  const info = await unwrapAsync(c.discover());
   assert.equal(info.version, 2); assert.match(info.agent, /^git\/\d/); assert.equal(info.objectFormat, 'sha1');
   assert.equal(info.filter, true, 'uploadpack.allowFilter is on in the fixture'); assert.equal(info.shallow, true);
   const span = spansOf(ex).find(s => s.name === 'git.upload-pack discover');
@@ -213,22 +213,22 @@ test('buffered fetchPack (general client): poisoned cache entry → one bust →
   const cache = memoryCache();
   const f = cachingFetch(globalThis.fetch, cache);
   const ex = arrayExporter();
-  const c = new GitHttp(url, { tracer: new Tracer({ exporter: ex }), fetchImpl: f });
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer({ exporter: ex }), fetchImpl: f }));
   const head = headOf();
-  const a = await c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const a = await unwrapAsync(c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 }));
   assert.equal(a.parsed.stats.count, 1); assert.equal(cache.entries.size, 1);
   for (const e of cache.entries.values()) e.body[e.body.length - 30] ^= 0xff;
-  const b = await c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const b = await unwrapAsync(c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 }));
   assert.equal(b.parsed.stats.count, 1); assert.equal(f.stats.bust, 1);
   const spans = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
   assert.deepEqual(spans.map(s => s.attrs['git.pack.cache.bust']), [false, false, true]); assert.deepEqual(spans.map(s => s.attrs['git.response.cache']), ['MISS', 'HIT', 'BUST']);
   // the wrapper delegates to the same functions (getters + one of each family)
   assert.equal(c.url, url); assert.equal(c.limits.maxRefs > 0, true); assert.equal(c.tracer instanceof Tracer, true); assert.equal(c.parent, null);
-  const o = await c.fetchObject({ oid: head, deepen: 1 }); assert.equal(o.oid, head);
-  const caps = await c.receiveCaps(); assert.ok(caps.has('report-status'));
-  assert.equal((await c.negotiate({ wants: [head], haves: [], filter: 'tree:0', deepen: 1 })).parsed.stats.count, 1);
+  const o = await unwrapAsync(c.fetchObject({ oid: head, deepen: 1 })); assert.equal(o.oid, head);
+  const caps = await unwrapAsync(c.receiveCaps()); assert.ok(caps.has('report-status'));
+  assert.equal((await unwrapAsync(c.negotiate({ wants: [head], haves: [], filter: 'tree:0', deepen: 1 }))).parsed.stats.count, 1);
   let st; for await (const _ of c.packStream({ wants: [head], filter: 'tree:0', deepen: 1 }, new Tracer().start('x'))) { st = _; } assert.ok(st);
-  await assert.rejects(c.push({ ref: 'refs/heads/main', oldOid: head, newOid: head, objects: [], pushOptions: ['x'] }), e => e.code === 'unsupported', 'push-options checked against the advertisement');
+  await assert.rejects(unwrapAsync(c.push({ ref: 'refs/heads/main', oldOid: head, newOid: head, objects: [], pushOptions: ['x'] })), e => e.code === 'unsupported', 'push-options checked against the advertisement');
   // with the server advertising push-options, the options ride after the command flush and reach the hook
   git(bare, ['config', 'receive.advertisePushOptions', 'true']);
   const hooks = join(bare, 'hooks'); mkdirSync(hooks, { recursive: true });
@@ -238,7 +238,7 @@ test('buffered fetchPack (general client): poisoned cache entry → one bust →
     const { TYPE } = await import('../src/objects.js');
     const blob = new TextEncoder().encode('po\n'); const tree = unwrap(encodeTree([{ mode: '100644', name: 'po.txt', oid: hashObject('blob', blob) }]));
     const commit = unwrap(encodeCommit({ tree: hashObject('tree', tree), parents: [head], author: 'a <a@x> 1 +0000', message: 'po\n' }));
-    const r = await c.push({ ref: 'refs/heads/main', oldOid: head, newOid: hashObject('commit', commit), objects: [{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tree }, { type: TYPE.BLOB, data: blob }], pushOptions: ['ci.skip'] });
+    const r = await unwrapAsync(c.push({ ref: 'refs/heads/main', oldOid: head, newOid: hashObject('commit', commit), objects: [{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tree }, { type: TYPE.BLOB, data: blob }], pushOptions: ['ci.skip'] }));
     assert.match(r.hookOutput, /opts=1:ci.skip/);
     git(bare, ['update-ref', 'refs/heads/main', head]);
   } finally { rmSync(join(hooks, 'pre-receive'), { force: true }); git(bare, ['config', '--unset', 'receive.advertisePushOptions']); }
@@ -274,9 +274,9 @@ test('agent: we identify as ply, not git', async () => {
 test('negotiation, deterministic: haves in rounds — NAK rounds of unknown oids, then ACKs of shared history, ready, and a pack of only what is new', async () => {
   const nb = makeBareRepo(root, 'nego'); const nw = join(root, 'wnego'); mkdirSync(nw); git(nw, ['init', '-q', '-b', 'main']);
   const commits = []; for (let i = 0; i < 30; i++) commits.push(commitFiles(nw, nb, { 'f.txt': `v${i}\n` }, `c${i}`));
-  const c = new GitHttp(`${srv.url}/nego.git`, { tracer: new Tracer() });
+  const c = unwrap(GitHttp.create(`${srv.url}/nego.git`, { tracer: new Tracer() }));
   const unknown = Array.from({ length: 20 }, (_, i) => (i.toString(16).padStart(2, '0')).repeat(20));
-  const r = await c.negotiate({ wants: [commits[29]], haves: [...unknown, ...commits.slice(10, 20).reverse()], batch: 8 });
+  const r = await unwrapAsync(c.negotiate({ wants: [commits[29]], haves: [...unknown, ...commits.slice(10, 20).reverse()], batch: 8 }));
   assert.ok(r.rounds.length >= 3, `several rounds (${r.rounds.length})`);
   assert.equal(r.rounds[0].acks.length, 0, 'first round: only unknown oids → no acks');
   assert.ok(r.rounds.some(x => x.acks.length > 0), 'shared history is acknowledged');

@@ -26,7 +26,6 @@ import { commitChanges } from '../src/changes.js';
 import { pushTree } from '../src/tree.js';
 import { checkoutTree } from '../src/checkout.js';
 import { readFile, listTree, readCommit } from '../src/read.js';
-import { unwrapAsync } from './unwrap.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { lsRefs as lsRefsR } from '../src/lsrefs.js';

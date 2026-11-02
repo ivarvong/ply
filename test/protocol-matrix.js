@@ -14,6 +14,7 @@ import { Rng } from './fuzz/prng.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE_NAME } from '../src/objects.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 let root, srv, hookLog;
 
@@ -47,7 +48,7 @@ export async function runMode(mode) {
   const HAVES = { none: [], ancestor: [mid], old: [old], branch: [branch], tip: [tip], tree: [subtree], blob: [oldBlob], tag: [tag], unknown: ['e'.repeat(40)], 'tip+old': [tip, old], 'old+tip': [old, tip] };
   const DEEPEN = { none: {}, d1: { deepen: 1 }, d2: { deepen: 2 }, d99: { deepen: 99 }, since: { deepenSince: model.commits.get(old).date - 500 }, not: { deepenNot: ['refs/tags/v1'] } };
   const FILTER = [undefined, 'blob:none', 'blob:limit=100', 'blob:limit=1', 'tree:0', 'tree:1', 'tree:2', 'combine:blob:none+tree:1', 'combine:blob:limit=100+tree:2'];
-  const client = new GitHttp(`${srv.url}/${S.name}.git`, { tracer: new Tracer() });
+  const client = unwrap(GitHttp.create(`${srv.url}/${S.name}.git`, { tracer: new Tracer() }));
   const external = oid => (model.type.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[model.type.get(oid)], data: new Uint8Array(gitBuf(bare, ['cat-file', model.type.get(oid), oid])) } : undefined);
   let i = 0;
   for (const [wk, wants] of Object.entries(WANTS)) for (const [hk, haves] of Object.entries(HAVES)) for (const [dk, d] of Object.entries(DEEPEN)) for (const filter of FILTER) {
@@ -63,7 +64,7 @@ export async function runMode(mode) {
     const bound = requiredAndHad(model, { ...req, shallow });
     const degenerate = (d.deepenSince || d.deepenNot) && (wantCommits.length === 0 || wantCommits.some(w => (d.deepenSince && model.commits.get(w).date < d.deepenSince) || (d.deepenNot && !exp.inDepth.has(w))));
     let r;
-    try { r = done ? await client.fetchPack(req, { external }) : await client.negotiate(req, { external }); }
+    try { r = done ? await unwrapAsync(client.fetchPack(req, { external })) : await unwrapAsync(client.negotiate(req, { external })); }
     catch (e) {
       if (e.code === 'remote_error') { stats.remote++; continue; }
       if (e.code === 'protocol' && /without flush/.test(e.message) && degenerate) { stats.crash++; continue; }

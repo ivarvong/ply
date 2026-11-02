@@ -20,7 +20,7 @@ import { ZERO_OID } from '../src/push.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { thrown as fail } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { errOf, unwrap, unwrapAsync } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 import { ok } from '../src/result.js';
 
 const GITLINK = 'c0ffee'.padEnd(40, '0');

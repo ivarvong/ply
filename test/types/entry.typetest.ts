@@ -57,8 +57,9 @@ const consumer = async (): Promise<void> => {
   const info = infoR.value;
   const caps: ReadonlyMap<string, string> | Map<string, string> = info.caps;
   void caps;
-  const listed = await lsRefs(transport, ['refs/heads/']);
-  const head: string | null = listed.head;
+  const listedR = await lsRefs(transport, ['refs/heads/']);
+  if (!listedR.ok) return;
+  const head: string | null = listedR.value.head;
   void head;
   const objectR = await fetchObject(transport, { oid: 'c'.repeat(40), filter: 'blob:none' });
   if (!objectR.ok) return;

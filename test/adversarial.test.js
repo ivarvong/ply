@@ -224,10 +224,10 @@ test('I5 caller input validation happens before any I/O', async () => {
   const { encodeCommit } = await import('../src/objects.js');
   assert.throws(() => unwrap(encodeCommit({ tree: 'a'.repeat(40), parents: ['b'.repeat(40)], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' })), e => e.code === 'bad_request');
   const repo = freshRepo();
-  const c = new GitHttp(`${srv.url}/${repo.name}.git`, { tracer: new Tracer() });
+  const c = unwrap(GitHttp.create(`${srv.url}/${repo.name}.git`, { tracer: new Tracer() }));
   const tree = git(repo.bare, ['rev-parse', 'main^{tree}']).trim();
   const bad = te.encode(`tree ${tree}\nparent ${repo.head}\nauthor x <a@x> 1 +0000\ncommitter y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000\n\nm\n`);
-  await assert.rejects(c.push({ ref: 'refs/heads/main', oldOid: repo.head, newOid: hashObject('commit', bad), objects: [{ type: TYPE.COMMIT, data: bad }] }), e => e.code === 'push_rejected');
+  await assert.rejects(unwrapAsync(c.push({ ref: 'refs/heads/main', oldOid: repo.head, newOid: hashObject('commit', bad), objects: [{ type: TYPE.COMMIT, data: bad }] })), e => e.code === 'push_rejected');
   assert.equal(git(repo.bare, ['rev-parse', 'main']).trim(), repo.head);
 });
 
@@ -373,11 +373,11 @@ test('I6c a 3xx is never followed: cross-origin on the GET and the POST → type
     for (const s of [301, 302, 303, 307, 308]) {
       status = s;
       const ex = arrayExporter();
-      const c = new GitHttp(`${redirector.url}/r.git`, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } });
-      const get = await c.discover().catch(e => e);
+      const c = unwrap(GitHttp.create(`${redirector.url}/r.git`, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } }));
+      const get = await unwrapAsync(c.discover()).catch(e => e);
       assert.equal(get.code, 'http', `GET ${s}: ${get.code} ${get.message}`); assert.equal(get.status, s);
       assert.match(get.message, new RegExp(`^HTTP ${s} git-upload-pack advertisement: redirected to ${other.url}/r.git/info/refs; ply does not follow redirects`));
-      const post = await c.lsRefs(['refs/heads/']).catch(e => e);
+      const post = await unwrapAsync(c.lsRefs(['refs/heads/'])).catch(e => e);
       assert.equal(post.code, 'http', `POST ${s}: ${post.code} ${post.message}`); assert.equal(post.status, s);
       assert.match(post.message, /redirected to .*\/r\.git\/git-upload-pack; ply does not follow redirects/);
       const edit = await unwrapAsync(editFile(`${redirector.url}/r.git`, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer: new Tracer({ exporter: ex }), auth: { token: TOK } })).catch(e => e);
@@ -407,7 +407,7 @@ test('I6c a same-origin 301 on the POST (a moved repository) is a clear http err
 test('I6c a Location carrying a query or the credential is quoted as origin + path, scrubbed', async () => {
   const srv2 = await listen((req, res) => { res.writeHead(302, { location: `https://elsewhere.example/${TOK}/x?sig=${TOK}` }); res.end(); });
   try {
-    const err = await new GitHttp(`${srv2.url}/r.git`, { tracer: new Tracer(), auth: { token: TOK } }).lsRefs().catch(e => e);
+    const err = await unwrapAsync(unwrap(GitHttp.create(`${srv2.url}/r.git`, { tracer: new Tracer(), auth: { token: TOK } })).lsRefs()).catch(e => e);
     assert.equal(err.code, 'http');
     assert.equal(err.location, 'https://elsewhere.example/[redacted]/x');
     assert.ok(!reachableText(err).includes(TOK));
@@ -491,7 +491,7 @@ test('I6d a refused URL credential is `auth`; the server echoing it reaches no e
       const errs = [
         await unwrapAsync(readFile(url, { path: FILE }, { tracer })).catch(e => e),
         await unwrapAsync(editFile(url, { path: FILE, find: FIND, replace: REPL, author: AUTHOR, message: 'm' }, { tracer })).catch(e => e),
-        await new GitHttp(url, { tracer }).discover().catch(e => e),
+        await unwrapAsync(unwrap(GitHttp.create(url, { tracer })).discover()).catch(e => e),
       ];
       const said = gate.seen.at(-1).authorization;
       assert.ok(said, `${name}: no Authorization sent`);
@@ -1240,8 +1240,8 @@ test('I4 #36 matrix: path × body shape × declared size × cap, every cell, nev
       read: async () => drain((await unwrapAsync(readFile(repo.url, { path: 'a.bin' }, opts))).stream),
       'checkout single': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, { ...opts, batch: 1 })))).get('a.bin'),
       'checkout batched': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, opts)))).get('a.bin'),
-      fetchObject: async () => (await new GitHttp(repo.url, opts).fetchObject({ oid: repo.oid, filter: null, expectType: TYPE.BLOB })).data,
-      fetchPack: async () => (await new GitHttp(repo.url, opts).fetchPack({ wants: [repo.oid] })).objects.get(repo.oid).data,
+      fetchObject: async () => (await unwrapAsync(unwrap(GitHttp.create(repo.url, opts)).fetchObject({ oid: repo.oid, filter: null, expectType: TYPE.BLOB }))).data,
+      fetchPack: async () => (await unwrapAsync(unwrap(GitHttp.create(repo.url, opts)).fetchPack({ wants: [repo.oid] }))).objects.get(repo.oid).data,
     };
     const t0 = performance.now();
     const res = await ops[path]().then(v => ({ v }), e => ({ e }));

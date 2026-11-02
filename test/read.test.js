@@ -17,7 +17,6 @@ import { parseIdent, TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
 
-import { unwrap, unwrapAsync } from './unwrap.js';
 // Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
 const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
 const createTransport = (...a) => unwrap(createTransportR(...a));

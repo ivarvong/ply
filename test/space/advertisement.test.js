@@ -24,7 +24,7 @@ const { lsRefs } = await import(`${SRC}/lsrefs.js`);
 import { pktInit, pktStep } from '../../src/pktline.js';
 import { Tracer } from '../../src/otel.js';
 import { td } from '../../src/bytes.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const spanStub = { set() {}, event() {}, end() {}, error() {} };
 const tracer = { span: async (_n, _o, fn) => fn(spanStub) };
@@ -141,7 +141,7 @@ function startFront(backendUrl) {
 let keyN = 0;
 const route = r => { const key = `k${keyN++}`; routes.set(key, r); return key; };
 const urlOf = key => `${front.url}/${key}/r.git`;
-const ply = url => new GitHttp(url, { tracer: new Tracer() });
+const ply = url => unwrap(GitHttp.create(url, { tracer: new Tracer() }));
 const gitIn = async (args, cwd) => gitAsync(cwd ?? root, ['-c', 'protocol.version=2', ...args]);
 const freshRepo = name => { const d = join(root, `c-${name}-${keyN}`); rmSync(d, { recursive: true, force: true }); git(root, ['init', '-q', d]); return d; };
 // the request lines of a v2 command body, after the delim (capabilities before it: command, agent, object-format)
@@ -215,7 +215,7 @@ test('real git http-backend configurations advertise exactly what the renderer w
     if (unmodelled.length) console.log(`${rc.name}: capabilities with no axis (this git is newer than the model): ${unmodelled.join(', ')}`);
     const cell = capsCell(rc.cell);
     assert.deepEqual(real, advLines(S.renderCaps(cell, fx).body), rc.name);
-    const got = await outcomeOf(() => ply(`${backend.url}/${name}.git`).discover(), capsOk);
+    const got = await outcomeOf(() => unwrapAsync(ply(`${backend.url}/${name}.git`).discover()), capsOk);
     if (got.info) { got.info.agent = got.info.agent.replace(/^git\/.*/, S.AGENT); got.info.fetch = got.info.fetch.filter(x => S.FETCH_FEATURES.includes(x)); if (got.info.sessionId) got.info.sessionId = 'sid-1'; }
     assert.equal(judge(S.expectedCaps(cell).ply, got), null, `${rc.name}: ply discover`);
     console.log(`${rc.name}: ${S.capsCellId(cell)} → ${got.tag}`);
@@ -233,7 +233,7 @@ test('caps: every cell within one deviation of git\'s default, judged by git ls-
     const ls = await gitIn(['ls-remote', urlOf(key)]);
     const lsGot = ls.status === 0 ? 'ok' : 'refuse';
     if (lsGot !== want.git.lsRemote) bad.push(`${id}: git ls-remote ${lsGot} (${ls.stderr.trim().split('\n').pop()}), table ${want.git.lsRemote}`);
-    const got = await outcomeOf(() => ply(urlOf(key)).discover(), capsOk);
+    const got = await outcomeOf(() => unwrapAsync(ply(urlOf(key)).discover()), capsOk);
     const w = judge(want.ply, got); if (w) bad.push(`${id}: ply over HTTP: ${w}`);
     // git fetch on the cells that vary the fetch command, and git's default: which features git uses, from its requests
     if (c.protocol.tag === 'v2' && e.objectFormat === 'sha1' && want.git.lsRemote === 'ok' && (S.capsDeviations(c) === 0 || (c.fetch.tag !== 'features' || c.fetch.set.join(',') !== S.CANONICAL_CAPS.fetch))) {
@@ -270,7 +270,7 @@ test('refs: every cell, judged by git ls-remote; a duplicate ref resolves to its
     const ls = await gitIn(['ls-remote', urlOf(key)]);
     const lsGot = ls.status === 0 ? 'ok' : 'refuse';
     if (lsGot !== want.git) bad.push(`${S.refsCellId(c)}: git ls-remote ${lsGot} (${ls.stderr.trim().split('\n').pop()}), table ${want.git}`);
-    const got = await outcomeOf(() => ply(urlOf(key)).lsRefs(), refsOk);
+    const got = await outcomeOf(() => unwrapAsync(ply(urlOf(key)).lsRefs()), refsOk);
     const w = judge(want.ply, got); if (w) bad.push(`${S.refsCellId(c)}: ply over HTTP: ${w}`);
     if (c.record.tag === 'duplicate' && c.eol.tag === 'lf' && c.framing.tag === 'flush') {
       const d = freshRepo('dup');
@@ -307,7 +307,7 @@ test('push: request × advertised atomic × advertised push-options × object-fo
     if (want.git.tag === 'refuse' && !g.stderr.includes(S.GIT_PUSH_REFUSAL[want.git.why])) bad.push(`${S.pushCellId(c)}: git's refusal is not "${S.GIT_PUSH_REFUSAL[want.git.why]}": ${g.stderr.trim()}`);
     if (want.git.tag === 'refuse' && git(bare, ['for-each-ref']) !== refsBefore) bad.push(`${S.pushCellId(c)}: git's refused push moved a ref`);
     let got;
-    try { await ply(`${backend.url}/${name}.git`).push({ ref: 'refs/heads/p', oldOid: '0'.repeat(40), newOid: next, objects: [obj], atomic, pushOptions: options ? ['x'] : [] }); got = { tag: 'landed' }; } catch (e) { got = { tag: e.code, message: e.message }; }
+    try { await unwrapAsync(ply(`${backend.url}/${name}.git`).push({ ref: 'refs/heads/p', oldOid: '0'.repeat(40), newOid: next, objects: [obj], atomic, pushOptions: options ? ['x'] : [] })); got = { tag: 'landed' }; } catch (e) { got = { tag: e.code, message: e.message }; }
     if (got.tag !== want.ply.tag) bad.push(`${S.pushCellId(c)}: ply ${got.tag} (${got.message ?? ''}), table ${want.ply.tag}`);
     const landed = git(bare, ['for-each-ref', '--format=%(refname)']).split('\n').includes('refs/heads/p');
     if (landed !== (want.ply.tag === 'landed')) bad.push(`${S.pushCellId(c)}: refs/heads/p ${landed ? 'landed' : 'absent'} after ply's ${got.tag}`);
@@ -357,7 +357,7 @@ test('request: fetch arguments ply sends, judged by git fetch\'s own request and
     // a deepen from a shallow boundary comes as a thin pack against the have: its bases are the client's objects
     const bare = join(root, repo);
     const external = oid => { try { const type = git(bare, ['cat-file', '-t', oid]).trim(); return { type: { commit: 1, tree: 2, blob: 3, tag: 4 }[type], data: new Uint8Array(git(bare, ['cat-file', type, oid], { encoding: 'buffer' })) }; } catch { return undefined; } };
-    const got = await outcomeOf(() => ply(urlOf(pkey)).fetchPack(req, { external }), r => ({ objects: r.objects.size }));
+    const got = await outcomeOf(() => unwrapAsync(ply(urlOf(pkey)).fetchPack(req, { external })), r => ({ objects: r.objects.size }));
     if (got.tag !== want.ply.tag) { bad.push(`${id}: ply ${got.tag} (${got.message ?? ''}), table ${want.ply.tag}`); continue; }
     if (got.tag === 'ok') {
       const pb = fetchBodies(pkey).pop();

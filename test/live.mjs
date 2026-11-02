@@ -12,15 +12,15 @@ const auth = process.env.PLY_TOKEN ? { token: process.env.PLY_TOKEN } : undefine
 const lines = [];
 const file = await jsonlExporter('live-trace.jsonl');
 const tracer = new Tracer({ exporter: l => { lines.push(l); file(l); } });
-const c = new GitHttp(url, { auth, tracer });
-const { refs } = await c.lsRefs([ref]);
+const c = unwrap(GitHttp.create(url, { auth, tracer }));
+const { refs } = await unwrapAsync(c.lsRefs([ref]));
 const head = refs.get(ref)?.oid; if (!head) throw new Error(`no ${ref}`);
-const cf = await c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
+const cf = await unwrapAsync(c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 }));
 const commit = unwrap(parseCommit(cf.objects.get(head).data));
 console.log('head', head, 'tree', commit.tree, 'parents', commit.parents.length);
 let tree = commit.tree;
 for (const name of (path ?? '').split('/').filter(Boolean)) {
-  const t = (await c.fetchPack({ wants: [tree], filter: 'tree:0' })).objects.get(tree);
+  const t = (await unwrapAsync(c.fetchPack({ wants: [tree], filter: 'tree:0' }))).objects.get(tree);
   const e = unwrap(parseTree(t.data)).find(x => x.name === name); if (!e) throw new Error(`no ${name}`);
   console.log(' ', e.mode, e.oid, name, `(${t.data.length}B tree)`);
   tree = e.oid;
