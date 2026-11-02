@@ -1,6 +1,6 @@
 // Branch and message assertions for the mutation gate. Prefix and round-trip tests kill the happy path;
 // these kill a mutant that deletes one check, flips one comparison, or empties one error string.
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -18,7 +18,7 @@ import { inflate, huffBuild, adler32 } from '../src/inflate.js';
 import { v2Init, v2Step as v2StepR, parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, fetchBody as fetchBodyR, isShortRead } from '../src/fetch.js';
 import { attributeTree, bestBases, mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
-import { Tracer } from '../src/otel.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
 import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
@@ -1588,6 +1588,15 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
   assert.equal(sent, 1, 'under the cap the body is sent');
 });
 
+test('git.push.object names every entry: a type id with no name is its decimal, not otel\'s null-as-empty', async () => {
+  const ex = arrayExporter();
+  const t = { limits: DEFAULT_LIMITS, tracer: new Tracer({ exporter: ex }), parent: null, async *frames() { for (const f of []) yield f; } };
+  const objects = [{ type: 5, data: te.encode('x') }, { type: TYPE.BLOB, data: te.encode('y') }, { type: TYPE.BLOB, data: te.encode('z'), baseOid: oid(4) }];
+  await assert.rejects(unwrapAsync(push(t, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false })), e => e.code === 'ambiguous');
+  const span = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.receive-pack');
+  assert.deepEqual(span.events.filter(e => e.name === 'git.push.object').map(e => e.attrs['git.object.type']), ['5', 'blob', 'ref_delta']);
+});
+
 test('size varints stop at 64 bits: a header that never ends is pack_corrupt at its 11th byte, never a NaN size (#13)', () => {
   const ones = n => new Uint8Array(n).fill(0x80);
   // ten bytes is the longest legal object header (4 + 9 × 7 bits), and every size it can carry is finite
@@ -2215,4 +2224,19 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   const waited = spStep(spInit(), concat([Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1), continued.subarray(0, 1)]));
   assert.equal(waited.state.phase, 'header');
   assert.equal(isShortRead(Object.assign(new Error('short read: need 1 bytes at 12, have 13'), { code: 'pack_corrupt', reason: 'short_read' })), true);
+});
+
+// constantRefname (src/refname.ts) runs once, at module load, on the literal 'refs/heads/main', so its refusal is reached
+// only when the validator refuses: here a stand-in validateRef does, and loading the module fails with the internal error.
+test('constantRefname: a literal the validator refuses fails the module load as internal, naming the literal', async () => {
+  const real = await import('../src/refname.js');
+  assert.equal(real.DEFAULT_REF, 'refs/heads/main');
+  vi.resetModules();
+  vi.doMock('../src/validate.js', async orig => ({ ...(await orig()), validateRef: () => ({ ok: false, error: { code: 'bad_request', message: 'refused' } }) }));
+  try {
+    await assert.rejects(import('../src/refname.js'), e => e.code === 'internal' && e.message === 'refs/heads/main is not a refname');
+  } finally {
+    vi.doUnmock('../src/validate.js');
+    vi.resetModules();
+  }
 });
