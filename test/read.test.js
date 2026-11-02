@@ -15,6 +15,7 @@ import { createTransport } from '../src/http.js';
 import { fetchObject } from '../src/fetch.js';
 import { parseIdent, TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 let root, cleanup, srv, R;
 const tracer = () => new Tracer();
@@ -41,11 +42,11 @@ before(async () => {
 after(async () => { await srv.close(); cleanup(); });
 
 test('refCandidates is git rev-parse order (tags before heads); oids skip ls-refs; bad refs refused', () => {
-  assert.deepEqual(refCandidates(null), ['HEAD']);
-  assert.deepEqual(refCandidates('main'), ['refs/main', 'refs/tags/main', 'refs/heads/main']);
-  assert.deepEqual(refCandidates('refs/heads/x'), ['refs/heads/x']);
-  assert.deepEqual(refCandidates('a'.repeat(40)), []);
-  for (const bad of ['ma..in', 'x y', 'refs/heads/a\nb', 'a:b']) assert.throws(() => refCandidates(bad), e => e.code === 'bad_request', bad);
+  assert.deepEqual(unwrap(refCandidates(null)), ['HEAD']);
+  assert.deepEqual(unwrap(refCandidates('main')), ['refs/main', 'refs/tags/main', 'refs/heads/main']);
+  assert.deepEqual(unwrap(refCandidates('refs/heads/x')), ['refs/heads/x']);
+  assert.deepEqual(unwrap(refCandidates('a'.repeat(40))), []);
+  for (const bad of ['ma..in', 'x y', 'refs/heads/a\nb', 'a:b']) assert.throws(() => unwrap(refCandidates(bad)), e => e.code === 'bad_request', bad);
 });
 
 test('readFile bytes == git show <ref>:<path> for every blob path and every ref form', async () => {
@@ -56,7 +57,7 @@ test('readFile bytes == git show <ref>:<path> for every blob path and every ref 
   for (const ref of refs) for (const path of paths) {
     const spec = `${ref ?? 'HEAD'}:${path}`;
     let want; try { want = gitBuf(R.bare, ['show', spec]); } catch { continue; } // link does not exist at v1
-    const r = await readFile(R.url, { ref, path }, { tracer: tracer() });
+    const r = await unwrapAsync(readFile(R.url, { ref, path }, { tracer: tracer() }));
     const got = await drain(r.stream);
     assert.equal(r.size, want.length, spec);
     assert.ok(got.equals(want), `${spec}: bytes differ`);
@@ -65,30 +66,30 @@ test('readFile bytes == git show <ref>:<path> for every blob path and every ref 
     n++;
   }
   assert.ok(n >= 60, `cases ${n}`);
-  const dup = await readFile(R.url, { ref: 'dup', path: 'README.md' }, { tracer: tracer() });
+  const dup = await unwrapAsync(readFile(R.url, { ref: 'dup', path: 'README.md' }, { tracer: tracer() }));
   assert.equal(dup.ref, 'refs/tags/dup'); assert.equal((await drain(dup.stream)).toString(), '# v1\n');
-  const head = await readFile(R.url, { path: 'README.md' }, { tracer: tracer() });
+  const head = await unwrapAsync(readFile(R.url, { path: 'README.md' }, { tracer: tracer() }));
   assert.equal(head.ref, 'refs/heads/main'); assert.equal((await drain(head.stream)).toString(), '# v3 main\n');
   console.log(`  ${n} (ref, path) cases equal to git show`);
 });
 
 test('modes: symlink reads as its target (120000), executable 100755; gitlink and tree are not files', async () => {
-  const link = await readFile(R.url, { path: 'link' }, { tracer: tracer() });
+  const link = await unwrapAsync(readFile(R.url, { path: 'link' }, { tracer: tracer() }));
   assert.equal(link.mode, '120000'); assert.equal((await drain(link.stream)).toString(), 'a/b/c.txt');
-  const sh = await readFile(R.url, { path: 'run.sh' }, { tracer: tracer() }); await drain(sh.stream);
+  const sh = await unwrapAsync(readFile(R.url, { path: 'run.sh' }, { tracer: tracer() })); await drain(sh.stream);
   assert.equal(sh.mode, '100755');
-  await assert.rejects(readFile(R.url, { path: 'vendor/sub' }, { tracer: tracer() }), e => e.code === 'not_found' && /submodule/.test(e.message));
-  await assert.rejects(readFile(R.url, { path: 'a/b' }, { tracer: tracer() }), e => e.code === 'not_found' && /directory/.test(e.message));
+  await assert.rejects(unwrapAsync(readFile(R.url, { path: 'vendor/sub' }, { tracer: tracer() })), e => e.code === 'not_found' && /submodule/.test(e.message));
+  await assert.rejects(unwrapAsync(readFile(R.url, { path: 'a/b' }, { tracer: tracer() })), e => e.code === 'not_found' && /directory/.test(e.message));
 });
 
 test('typed misses match git: ref, unborn HEAD, path, directory, submodule', async () => {
   const ref = 'no-such-branch';
   assert.throws(() => git(R.bare, ['rev-parse', '--verify', '--quiet', ref]));
-  await assert.rejects(readFile(R.url, { ref, path: 'README.md' }, { tracer: tracer() }), e => {
+  await assert.rejects(unwrapAsync(readFile(R.url, { ref, path: 'README.md' }, { tracer: tracer() })), e => {
     assert.equal(e.code, 'not_found');
     assert.equal(e.miss.kind, 'ref');
     assert.equal(e.miss.ref, ref);
-    assert.deepEqual([...e.miss.candidates], refCandidates(ref));
+    assert.deepEqual([...e.miss.candidates], unwrap(refCandidates(ref)));
     return true;
   });
 
@@ -99,11 +100,11 @@ test('typed misses match git: ref, unborn HEAD, path, directory, submodule', asy
   const target = git(empty, ['symbolic-ref', 'HEAD']).trim();
   assert.equal(target, 'refs/heads/main');
   for (const asked of [null, 'HEAD', 'main', 'refs/heads/main']) {
-    const got = await readCommit(`${srv.url}/empty.git`, { ref: asked }, { tracer: tracer() });
+    const got = await unwrapAsync(readCommit(`${srv.url}/empty.git`, { ref: asked }, { tracer: tracer() }));
     assert.deepEqual(got, { empty: true, ref: target }, String(asked));
   }
-  await assert.rejects(readFile(`${srv.url}/empty.git`, { path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found' && e.miss.kind === 'head_unborn' && e.miss.target === target);
-  await assert.rejects(readFile(`${srv.url}/empty.git`, { ref: 'nope', path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found' && e.miss.kind === 'ref' && e.miss.ref === 'nope');
+  await assert.rejects(unwrapAsync(readFile(`${srv.url}/empty.git`, { path: 'README.md' }, { tracer: tracer() })), e => e.code === 'not_found' && e.miss.kind === 'head_unborn' && e.miss.target === target);
+  await assert.rejects(unwrapAsync(readFile(`${srv.url}/empty.git`, { ref: 'nope', path: 'README.md' }, { tracer: tracer() })), e => e.code === 'not_found' && e.miss.kind === 'ref' && e.miss.ref === 'nope');
 
   const tree = git(R.bare, ['rev-parse', 'HEAD^{tree}']).trim();
   const t = createTransport(R.url, { tracer: tracer() });
@@ -117,13 +118,13 @@ test('typed misses match git: ref, unborn HEAD, path, directory, submodule', asy
     const mode = git(R.bare, ['ls-tree', 'HEAD', 'README.md']).slice(0, 6);
     assert.deepEqual(throughFile.error.miss, { kind: 'not_directory', path: 'README.md', mode });
   }
-  const dir = await readFile(R.url, { path: 'a/b' }, { tracer: tracer() }).then(() => { throw new Error('a directory was a file'); }, e => e);
+  const dir = await unwrapAsync(readFile(R.url, { path: 'a/b' }, { tracer: tracer() })).then(() => { throw new Error('a directory was a file'); }, e => e);
   assert.equal(dir.code, 'not_found');
   assert.deepEqual(dir.miss, { kind: 'is_directory', path: 'a/b', tree: git(R.bare, ['rev-parse', 'HEAD:a/b']).trim() });
   const subLine = git(R.bare, ['ls-tree', 'HEAD', 'vendor/sub']).trim();
   const subOid = subLine.split(/\s+/)[2];
   assert.equal(subLine.slice(0, 6), '160000');
-  const sub = await readFile(R.url, { path: 'vendor/sub' }, { tracer: tracer() }).then(() => { throw new Error('a submodule was a file'); }, e => e);
+  const sub = await unwrapAsync(readFile(R.url, { path: 'vendor/sub' }, { tracer: tracer() })).then(() => { throw new Error('a submodule was a file'); }, e => e);
   assert.equal(sub.code, 'not_found');
   assert.deepEqual(sub.miss, { kind: 'submodule', path: 'vendor/sub', commit: subOid });
 });
@@ -205,39 +206,39 @@ test('fetchCommit matches git fetch and cat-file; a tree want of a blob stays pa
 });
 
 test('not_found shapes: missing path, path through a file, missing ref, unknown oid; bad path is bad_request before I/O', async () => {
-  for (const path of ['nope', 'a/nope', 'a/b/c.txt/x', 'README.md/x', 'empty.txt/x/y']) await assert.rejects(readFile(R.url, { path }, { tracer: tracer() }), e => e.code === 'not_found', path);
-  for (const path of ['nope', 'README.md', 'a/b/c.txt', 'vendor/sub']) await assert.rejects(listTree(R.url, { path }, { tracer: tracer() }), e => e.code === 'not_found', path);
-  await assert.rejects(readFile(R.url, { ref: 'no-such-branch', path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found');
-  await assert.rejects(readFile(R.url, { ref: 'f'.repeat(40), path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found', 'unknown oid');
+  for (const path of ['nope', 'a/nope', 'a/b/c.txt/x', 'README.md/x', 'empty.txt/x/y']) await assert.rejects(unwrapAsync(readFile(R.url, { path }, { tracer: tracer() })), e => e.code === 'not_found', path);
+  for (const path of ['nope', 'README.md', 'a/b/c.txt', 'vendor/sub']) await assert.rejects(unwrapAsync(listTree(R.url, { path }, { tracer: tracer() })), e => e.code === 'not_found', path);
+  await assert.rejects(unwrapAsync(readFile(R.url, { ref: 'no-such-branch', path: 'README.md' }, { tracer: tracer() })), e => e.code === 'not_found');
+  await assert.rejects(unwrapAsync(readFile(R.url, { ref: 'f'.repeat(40), path: 'README.md' }, { tracer: tracer() })), e => e.code === 'not_found', 'unknown oid');
   const blobOid = git(R.bare, ['rev-parse', 'main:README.md']).trim();
-  await assert.rejects(readFile(R.url, { ref: blobOid, path: 'README.md' }, { tracer: tracer() }), e => e.code === 'not_found', 'oid of a blob is not a commit');
+  await assert.rejects(unwrapAsync(readFile(R.url, { ref: blobOid, path: 'README.md' }, { tracer: tracer() })), e => e.code === 'not_found', 'oid of a blob is not a commit');
   let calls = 0; const counting = (u, i) => { calls++; return fetch(u, i); };
-  for (const path of ['', '../x', 'a//b', '.git/config', 'a/.git']) await assert.rejects(readFile(R.url, { path }, { tracer: tracer(), fetchImpl: counting }), e => e.code === 'bad_request', JSON.stringify(path));
+  for (const path of ['', '../x', 'a//b', '.git/config', 'a/.git']) await assert.rejects(unwrapAsync(readFile(R.url, { path }, { tracer: tracer(), fetchImpl: counting })), e => e.code === 'bad_request', JSON.stringify(path));
   assert.equal(calls, 0);
 });
 
 test('listTree == git ls-tree <ref>:<path> (root, nested, gitlink, symlink, exec, at a tag)', async () => {
   for (const [ref, path] of [[null, ''], ['main', 'a'], ['main', 'a/b'], ['main', 'a/b/'], ['main', 'vendor'], ['main', 'dir with space'], ['v1', ''], ['feature', '']]) {
-    const r = await listTree(R.url, { ref, path }, { tracer: tracer() });
+    const r = await unwrapAsync(listTree(R.url, { ref, path }, { tracer: tracer() }));
     const spec = `${ref ?? 'HEAD'}:${path.replace(/\/$/, '')}`;
     assert.deepEqual(r.entries, lsTree(R.bare, spec), spec);
     assert.equal(r.tree, git(R.bare, ['rev-parse', spec]).trim());
   }
-  const top = await listTree(R.url, {}, { tracer: tracer() });
+  const top = await unwrapAsync(listTree(R.url, {}, { tracer: tracer() }));
   assert.deepEqual(Object.fromEntries(top.entries.map(e => [e.name, `${e.mode} ${e.type}`])), { 'README.md': '100644 blob', a: '040000 tree', 'big.bin': '100644 blob', 'dir with space': '040000 tree', 'empty.txt': '100644 blob', link: '120000 blob', 'run.sh': '100755 blob', vendor: '040000 tree' });
-  const vendor = await listTree(R.url, { path: 'vendor' }, { tracer: tracer() });
+  const vendor = await unwrapAsync(listTree(R.url, { path: 'vendor' }, { tracer: tracer() }));
   assert.deepEqual(vendor.entries.map(e => [e.mode, e.type]), [['160000', 'commit']]);
 });
 
 test('streamed: a 3 MiB blob arrives in many chunks; tree cache is reused across reads', async () => {
   const cache = new Map(); const ex = arrayExporter();
-  const r = await readFile(R.url, { path: 'big.bin' }, { tracer: new Tracer({ exporter: ex }), cache });
+  const r = await unwrapAsync(readFile(R.url, { path: 'big.bin' }, { tracer: new Tracer({ exporter: ex }), cache }));
   let chunks = 0, max = 0, len = 0; for await (const c of r.stream) { chunks++; max = Math.max(max, c.length); len += c.length; }
   assert.equal(len, 3 << 20); assert.ok(chunks > 10, `chunks ${chunks}`); assert.ok(max <= 1 << 16, `max chunk ${max}`);
   const blob = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.read.blob');
   assert.equal(blob.attrs['git.read.blob.verified'], true); assert.equal(blob.attrs['git.read.blob.bytes'], 3 << 20);
   const ex2 = arrayExporter();
-  const r2 = await readFile(R.url, { path: 'a/b/c.txt' }, { tracer: new Tracer({ exporter: ex2 }), cache }); await drain(r2.stream);
+  const r2 = await unwrapAsync(readFile(R.url, { path: 'a/b/c.txt' }, { tracer: new Tracer({ exporter: ex2 }), cache })); await drain(r2.stream);
   const trees = ex2.lines.flatMap(flattenLine).filter(s => s.name === 'git.read.tree');
   assert.deepEqual(trees.map(s => s.attrs['git.read.tree.cache_hit']), [true, false, false]);
 });
@@ -249,15 +250,15 @@ test('a server that serves a different blob than asked: the stream errors (pack_
     if (body && body.includes(`want ${want}\n`) && !body.includes('filter ')) return fetch(u, { ...init, body: Buffer.from(body.replace(want, other), 'latin1') });
     return fetch(u, init);
   };
-  const r = await readFile(R.url, { path: 'README.md' }, { tracer: tracer(), fetchImpl: liar });
+  const r = await unwrapAsync(readFile(R.url, { path: 'README.md' }, { tracer: tracer(), fetchImpl: liar }));
   await assert.rejects(drain(r.stream), e => e.code === 'pack_corrupt' && /hashes to/.test(e.message));
 });
 
 test('credential hygiene: never in spans; an upstream error body echoing Authorization is scrubbed', async () => {
   const token = 'ghp_SECRETTOKEN1234567890abcdef';
   const ex = arrayExporter();
-  const r = await readFile(R.url, { path: 'README.md' }, { tracer: new Tracer({ exporter: ex }), auth: { token } }); await drain(r.stream);
-  await listTree(R.url, {}, { tracer: new Tracer({ exporter: ex }), auth: { header: `Bearer ${token}` } });
+  const r = await unwrapAsync(readFile(R.url, { path: 'README.md' }, { tracer: new Tracer({ exporter: ex }), auth: { token } })); await drain(r.stream);
+  await unwrapAsync(listTree(R.url, {}, { tracer: new Tracer({ exporter: ex }), auth: { header: `Bearer ${token}` } }));
   const dump = JSON.stringify(ex.lines);
   for (const s of [token, btoa(`x-access-token:${token}`)]) assert.ok(!dump.includes(s), 'credential in spans');
   const echo = http.createServer((req, res) => { res.writeHead(500, { 'content-type': 'text/plain' }); res.end(`you sent: ${req.headers.authorization} / decoded: ${Buffer.from(String(req.headers.authorization).split(' ')[1] ?? '', 'base64').toString()}`); });
@@ -266,7 +267,7 @@ test('credential hygiene: never in spans; an upstream error body echoing Authori
     const url = `http://127.0.0.1:${echo.address().port}/x.git`;
     for (const auth of [{ token }, { bearer: token }, { header: `Bearer ${token}` }, { header: `Basic ${btoa(`oauth2:${token}`)}` }]) {
       const ex2 = arrayExporter();
-      const err = await readFile(url, { path: 'README.md' }, { tracer: new Tracer({ exporter: ex2 }), auth }).catch(e => e);
+      const err = await unwrapAsync(readFile(url, { path: 'README.md' }, { tracer: new Tracer({ exporter: ex2 }), auth })).catch(e => e);
       assert.equal(err.code, 'upstream_5xx'); assert.equal(err.status, 500);
       assert.match(err.message, /\[redacted\]/);
       const all = err.message + JSON.stringify(ex2.lines);
@@ -342,33 +343,33 @@ test('readCommit == git log -1 / git cat-file commit: root, merge (2 parents), s
   const cases = [[null, 'HEAD', 'refs/heads/main'], ['main', 'main', 'refs/heads/main'], ['refs/heads/main', 'main', 'refs/heads/main'], ['side', 'side', 'refs/heads/side'], ['signed', 'signed', 'refs/heads/signed'],
     ['v1', 'v1^{commit}', 'refs/tags/v1'], ['refs/tags/light', 'light', 'refs/tags/light'], [rootOid, rootOid, rootOid], [sideOid, sideOid, sideOid]];
   for (const [ref, spec, name] of cases) {
-    const got = await readCommit(url, { ref }, { tracer: tracer() });
+    const got = await unwrapAsync(readCommit(url, { ref }, { tracer: tracer() }));
     const { ref: gotRef, ...rest } = got;
     assert.equal(gotRef, name, String(ref));
     assert.deepEqual(rest, gitCommit(bare, spec), `${ref}: readCommit != git`);
   }
   // the properties each case was built for, stated independently of the oracle
-  const merge = await readCommit(url, {}, { tracer: tracer() });
+  const merge = await unwrapAsync(readCommit(url, {}, { tracer: tracer() }));
   assert.equal(merge.parents.length, 2); assert.deepEqual(merge.parents, [git(bare, ['rev-parse', 'main^1']).trim(), sideOid]); assert.equal(merge.signed, false);
   assert.equal(merge.author.tz, '-0330'); assert.equal(merge.author.time, '2023-11-15T01:13:20Z'); assert.equal(merge.author.epoch, 1700010800);
-  const side = await readCommit(url, { ref: 'side' }, { tracer: tracer() });
+  const side = await unwrapAsync(readCommit(url, { ref: 'side' }, { tracer: tracer() }));
   assert.equal(side.message, msg); assert.deepEqual(side.author, { name: 'Zoë Ångström 李雷', email: 'zoë@exämple.org', time: '2023-11-14T22:13:20Z', epoch: 1700000000, tz: '+0530' });
   assert.equal(side.committer.name, 'Ørjan Nüñez'); assert.equal(side.committer.tz, '-0800');
-  const signed = await readCommit(url, { ref: 'signed' }, { tracer: tracer() });
+  const signed = await unwrapAsync(readCommit(url, { ref: 'signed' }, { tracer: tracer() }));
   assert.equal(signed.signed, true, how); assert.equal(signed.message, 'signed commit\n\nwith a body\n');
-  const r0 = await readCommit(url, { ref: 'v1' }, { tracer: tracer() });
+  const r0 = await unwrapAsync(readCommit(url, { ref: 'v1' }, { tracer: tracer() }));
   assert.deepEqual(r0.parents, []); assert.equal(r0.oid, rootOid);
   // not_found: missing ref, unknown oid, the oid of a tree; bad ref is bad_request
-  await assert.rejects(readCommit(url, { ref: 'nope' }, { tracer: tracer() }), e => e.code === 'not_found');
-  await assert.rejects(readCommit(url, { ref: 'f'.repeat(40) }, { tracer: tracer() }), e => e.code === 'not_found');
-  await assert.rejects(readCommit(url, { ref: git(bare, ['rev-parse', 'main^{tree}']).trim() }, { tracer: tracer() }), e => e.code === 'not_found');
-  await assert.rejects(readCommit(url, { ref: 'a..b' }, { tracer: tracer() }), e => e.code === 'bad_request');
+  await assert.rejects(unwrapAsync(readCommit(url, { ref: 'nope' }, { tracer: tracer() })), e => e.code === 'not_found');
+  await assert.rejects(unwrapAsync(readCommit(url, { ref: 'f'.repeat(40) }, { tracer: tracer() })), e => e.code === 'not_found');
+  await assert.rejects(unwrapAsync(readCommit(url, { ref: git(bare, ['rev-parse', 'main^{tree}']).trim() }, { tracer: tracer() })), e => e.code === 'not_found');
+  await assert.rejects(unwrapAsync(readCommit(url, { ref: 'a..b' }, { tracer: tracer() })), e => e.code === 'bad_request');
   console.log(`  ${cases.length} refs equal to git (signature: ${how})`);
 });
 
 test('readCommit fetches the commit object only: one tree:0 deepen-1 fetch, no tree fetches', async () => {
   const ex = arrayExporter();
-  await readCommit(R.url, { ref: 'main' }, { tracer: new Tracer({ exporter: ex }) });
+  await unwrapAsync(readCommit(R.url, { ref: 'main' }, { tracer: new Tracer({ exporter: ex }) }));
   const spans = ex.lines.flatMap(flattenLine);
   const fetches = spans.filter(s => s.name === 'git.upload-pack fetch');
   assert.equal(fetches.length, 1);
@@ -436,7 +437,7 @@ test('abbreviated oids: unique among advertised tips agrees with git, and a ref 
   const advertised = git(bare, ['for-each-ref', '--format=%(objectname) %(objecttype) %(*objectname)']).trim().split('\n').flatMap(l => l.split(' ').filter(x => /^[0-9a-f]{40}$/.test(x)));
   const expectOids = prefix => [...new Set(advertised.filter(o => o.startsWith(prefix)))].sort();
   // a ref named like the prefix wins (git warns that the name is ambiguous, and still answers the ref)
-  const named = await resolveCommit(t(), namePrefix, { abbrev: 'advertised' });
+  const named = await unwrapAsync(resolveCommit(t(), namePrefix, { abbrev: 'advertised' }));
   assert.deepEqual(named, { name: `refs/heads/${namePrefix}`, commit: nameTarget });
   const rev = spawnSync('git', ['rev-parse', namePrefix], { cwd: bare, encoding: 'utf8' });
   assert.equal(rev.status, 0);
@@ -444,7 +445,7 @@ test('abbreviated oids: unique among advertised tips agrees with git, and a ref 
   assert.equal(rev.stdout.trim(), nameTarget);
   assert.equal(git(bare, ['rev-parse', `${namePrefix}^{commit}`]).trim(), nameTarget);
   // unique among advertised tips: git's candidates include that commit
-  const unique = await resolveCommit(t(), up, { abbrev: 'advertised' });
+  const unique = await unwrapAsync(resolveCommit(t(), up, { abbrev: 'advertised' }));
   assert.deepEqual(unique, { name: uniqueOid, commit: uniqueOid });
   const uniqueObjs = disambiguate(up);
   assert.ok(uniqueObjs.includes(uniqueOid), uniqueObjs.join(' '));
@@ -460,7 +461,7 @@ test('abbreviated oids: unique among advertised tips agrees with git, and a ref 
   for (const prefix of [pair4[0], pair5[0]]) {
     const want = expectOids(prefix);
     assert.ok(want.length >= 2, prefix);
-    await assert.rejects(resolveCommit(t(), prefix, { abbrev: 'advertised' }), e => {
+    await assert.rejects(unwrapAsync(resolveCommit(t(), prefix, { abbrev: 'advertised' })), e => {
       assert.equal(e.code, 'bad_request');
       assert.deepEqual([...e.got].sort(), want);
       return true;
@@ -470,9 +471,9 @@ test('abbreviated oids: unique among advertised tips agrees with git, and a ref 
   }
   // git's only object for this prefix is an interior commit: ply does not call it ambiguous
   assert.deepEqual(disambiguate(interiorPrefix), [interiorOid]);
-  await assert.rejects(resolveCommit(t(), interiorPrefix, { abbrev: 'advertised' }), e => e.code === 'not_found');
+  await assert.rejects(unwrapAsync(resolveCommit(t(), interiorPrefix, { abbrev: 'advertised' })), e => e.code === 'not_found');
   // default off: the same prefix is a ref name that does not exist, not an object id
-  await assert.rejects(resolveCommit(t(), up), e => e.code === 'not_found');
+  await assert.rejects(unwrapAsync(resolveCommit(t(), up)), e => e.code === 'not_found');
   console.log(`  abbrev oracle over ${oids.length} commits`);
 });
 

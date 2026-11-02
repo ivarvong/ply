@@ -24,11 +24,10 @@
 //   readBlob(transport, oid, { maxBytes, follows }) → Result<{ kind:'bytes', data } | { kind:'too_big', size }, PlyError>
 // `too_big` is decided from the pack object header. The fetch is cancelled and no body byte is delivered.
 //
-// Errors are values inside this module (…Result functions, walkPath, openBlob, readBlob). The public entries readFile,
-// listTree, readCommit, resolveCommit and refCandidates still raise theirs (orThrow at the boundary: docs/STACK.md step 2). The
-// blob stream errors as a stream does: its pull, transform and flush raise the PlyError the consumer reads.
+// Errors are values: every function here returns a Result (docs/STACK.md "Public API policy"). The blob stream errors
+// as a stream does: its pull, transform and flush raise the PlyError the consumer reads.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { fail, isPlyCode, orThrow, plyError } from './errors.js';
+import { fail, isPlyCode, plyError } from './errors.js';
 import type { Miss, PlyError } from './errors.js';
 import { assertNever, err, getOrElse, isSome, mapOption, none, ok, some } from './result.js';
 import type { Err, Option, Result } from './result.js';
@@ -49,13 +48,13 @@ import type { SpState } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
-import { attempt, attemptSync, caughtErr, fetchCommit } from './commit.js';
+import { attempt, caughtErr, fetchCommit } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
-/* oxlint-disable require-await -- the entry points are async so that a refused argument is a rejection, as before */
+/* oxlint-disable require-await -- the entry points are async: a refused argument is an Err in a promise, like every other answer */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
 
 const OID = /^[0-9a-f]{40}$/;
@@ -64,15 +63,19 @@ const isNothing = (v: unknown): boolean => fromNullish(v).tag === 'none';
 
 // Pure: what to ask ls-refs for, and which answer wins. git's ref_rev_parse_rules minus the remote-tracking forms.
 // `ref` is the caller's, checked here: anything but null, the missing value or a string is bad_request.
-export function refCandidatesResult(ref: unknown): Result<string[], PlyError> {
+export function refCandidates(ref: unknown): Result<string[], PlyError> {
   if (isNothing(ref) || ref === '' || ref === 'HEAD') return ok(['HEAD']);
   if (typeof ref !== 'string') return fail('bad_request', 'ref must be a string');
   if (OID.test(ref)) return ok([]);
-  if (ref.startsWith('refs/')) return attemptSync(() => [orThrow(validateRef(ref))]);
-  return attemptSync(() => [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`].map(r => orThrow(validateRef(r))));
+  const names = ref.startsWith('refs/') ? [ref] : [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`];
+  const out: string[] = [];
+  for (const name of names) {
+    const valid = validateRef(name);
+    if (!valid.ok) return valid;
+    out.push(valid.value);
+  }
+  return ok(out);
 }
-// The throwing entry (public API until the Result cut-over).
-export const refCandidates = (ref: unknown): string[] => orThrow(refCandidatesResult(ref));
 
 // git ls-tree's object types.
 export type EntryType = 'tree' | 'commit' | 'blob';
@@ -150,11 +153,11 @@ function advertisedCommit(prefix: string, listed: LsRefsResult): Result<Option<R
   return assertNever(found);
 }
 // One ls-refs. `hit` is the ref name, a bare oid, or a unique advertised prefix. `miss` is the name not listed and the
-// prefix not unique. The abbrev refusal lives here so resolveCommitResult's only fail() is not_found.
+// prefix not unique. The abbrev refusal lives here so resolveCommit's only fail() is not_found.
 type Lookup = { readonly kind: 'hit'; readonly resolved: Resolved } | { readonly kind: 'miss'; readonly candidates: readonly string[] };
 async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promise<Result<Lookup, PlyError>> {
   if (abbrev !== 'off' && abbrev !== 'advertised') return fail('bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
-  const named = refCandidatesResult(ref);
+  const named = refCandidates(ref);
   if (!named.ok) return named;
   const cands = named.value;
   // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it refused).
@@ -181,7 +184,7 @@ export type ResolveOptions = Input<ResolveConfig>;
 // Effect: ref → { name, commit } (annotated tags peeled; a bare oid is taken as given and checked by the commit fetch).
 // `abbrev: 'advertised'` asks once for the name's candidates plus HEAD, branches and tags, tries the name first, then
 // the prefix. `'off'` is the candidates alone. A miss is not_found, and an unborn HEAD the caller named is head_unborn.
-export async function resolveCommitResult(t: Transport, ref: unknown, options: ResolveOptions = {}): Promise<Result<Resolved, PlyError>> {
+export async function resolveCommit(t: Transport, ref: unknown, options: ResolveOptions = {}): Promise<Result<Resolved, PlyError>> {
   const { abbrev } = withDefaults<ResolveConfig>(options, { abbrev: 'off' });
   const looked = await lookupRef(t, ref, abbrev);
   if (!looked.ok) return looked;
@@ -200,10 +203,6 @@ export async function resolveCommitResult(t: Transport, ref: unknown, options: R
   else if (head) miss = { kind: 'head_absent' };
   else miss = { kind: 'ref', ref: asked, candidates };
   return fail('not_found', head ? 'remote HEAD is unborn or absent (some hosts point HEAD at a deleted branch); pass ref explicitly' : `ref ${asked} not found`, { miss });
-}
-// The throwing entry (public API until the Result cut-over).
-export async function resolveCommit(t: Transport, ref: unknown, options: ResolveOptions = {}): Promise<Resolved> {
-  return orThrow(await resolveCommitResult(t, ref, options));
 }
 
 export { fetchCommit, type FetchedCommit, type CommitMiss } from './commit.js';
@@ -229,10 +228,12 @@ export type CommitView = {
   readonly message: string;
   readonly signed: boolean;
 };
-// Pure: a commit object's view. parseCommit (objects.ts) throws on a malformed commit; this is public API that throws.
-export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): CommitView {
-  const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = orThrow(parseCommit(data, limits));
-  return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message === null ? '' : c.message, signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
+// Pure: a commit object's view. A malformed commit is parseCommit's (objects.ts) Err.
+export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<CommitView, PlyError> {
+  const parsed = parseCommit(data, limits);
+  if (!parsed.ok) return parsed;
+  const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = parsed.value;
+  return ok({ tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message === null ? '' : c.message, signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) });
 }
 
 // The options operation() reads pass through (tracer, auth, fetchImpl, limits, transport, …).
@@ -251,17 +252,22 @@ const unbornState = (r: Result<Resolved, PlyError>): Option<EmptyCommit> => {
   if (r.ok || r.error.code !== 'not_found' || r.error.miss.kind !== 'head_unborn') return none;
   return some({ empty: true, ref: r.error.miss.target });
 };
-export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: ReadOptions = {}): Promise<CommitResult | EmptyCommit> {
+export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: ReadOptions = {}): Promise<Result<CommitResult | EmptyCommit, PlyError>> {
   const { ref } = withDefaults<RefConfig>(spec, { ref: null });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return orThrow(await operation<EmptyCommit | CommitResult>('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } } as OperationOpts), async ({ t, outcome }) => {
-    const resolved = await resolveCommitResult(t, ref);
+  return operation<EmptyCommit | CommitResult>('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } } as OperationOpts), async ({ t, outcome }) => {
+    const resolved = await resolveCommit(t, ref);
     const empty = unbornState(resolved);
     if (empty.tag === 'some') return outcome('ok', empty.value);
-    const { name, commit } = orThrow(resolved);
-    const view = commitView(orThrow(await fetchCommit(t, commit)).data, t.limits);
+    if (!resolved.ok) return resolved;
+    const { name, commit } = resolved.value;
+    const fetched = await fetchCommit(t, commit);
+    if (!fetched.ok) return fetched;
+    const viewed = commitView(fetched.value.data, t.limits);
+    if (!viewed.ok) return viewed;
+    const view = viewed.value;
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
-  }));
+  });
 }
 
 // Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
@@ -291,7 +297,7 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
       span.set({ 'git.read.tree.cache_hit': isSome(cached) });
       const tree = cached.tag === 'some' ? ok(cached.value) : await fetchTree(t, cache, here);
       if (!tree.ok) return spanErr(span, tree);
-      const entries = attemptSync(() => orThrow(parseTree(tree.value, t.limits)));
+      const entries = parseTree(tree.value, t.limits);
       if (!entries.ok) return spanErr(span, entries);
       const found = fromNullable(entries.value.find(x => x.name === name));
       span.set({ 'git.read.tree.entries': entries.value.length, 'git.read.tree.entry.found': found.tag === 'some', 'git.read.tree.entry.mode': getOrElse(mapOption(found, f => f.mode), '') });
@@ -310,7 +316,7 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
 async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Result<Walked, PlyError>> {
   const fetched = await fetchCommit(t, commit);
   if (!fetched.ok) return fetched;
-  const info = attemptSync(() => orThrow(parseCommit(fetched.value.data, limits)));
+  const info = parseCommit(fetched.value.data, limits);
   if (!info.ok) return info;
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
   const walked = await walkPath(t, info.value.tree, comps, { cache });
@@ -321,7 +327,8 @@ async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: 
 // A path as the entries take it: validated components. With `allowRoot`, a missing, null, empty or '/' path is the root.
 export const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): Result<string[], PlyError> => {
   if (allowRoot && (isNothing(path) || path === '' || path === '/')) return ok([]);
-  return attemptSync(() => orThrow(validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits)).components);
+  const valid = validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
+  return valid.ok ? ok(valid.value.components) : valid;
 };
 
 // What listTree and readFile take as their second argument. `path: null` is the root for listTree, and refused by readFile.
@@ -345,21 +352,31 @@ function listedDir(walked: Walked, comps: readonly string[]): Result<string, Ply
   if (entry.mode !== '40000') return fail('not_found', `${comps.join('/')} is not a directory (mode ${entry.mode})`, { miss: { kind: 'not_directory', path: comps.join('/'), mode: entry.mode } });
   return ok(entry.oid);
 }
-export async function listTree(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<ListResult> {
+export async function listTree(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<Result<ListResult, PlyError>> {
   const { ref, path } = withDefaults<PathConfig>(spec, { ref: null, path: '' });
   const { cache, limits } = treeReadConfig(options);
-  const comps = orThrow(pathComps(path, limits, { allowRoot: true }));
+  const checked = pathComps(path, limits, { allowRoot: true });
+  if (!checked.ok) return checked;
+  const comps = checked.value;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return orThrow(await operation('ls_tree', url, ({ ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
-    const { name, commit } = orThrow(await resolveCommitResult(t, ref));
+  return operation('ls_tree', url, ({ ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+    const resolved = await resolveCommit(t, ref);
+    if (!resolved.ok) return resolved;
+    const { name, commit } = resolved.value;
     // the tracer operation() started the root span on (opts.tracer)
-    const walked = orThrow(await walk(t, root, { commit, comps, cache, limits }));
-    const oid = orThrow(listedDir(walked, comps));
+    const walked = await walk(t, root, { commit, comps, cache, limits });
+    if (!walked.ok) return walked;
+    const dir = listedDir(walked.value, comps);
+    if (!dir.ok) return dir;
+    const oid = dir.value;
     const cached = mapGet(cache, oid);
-    const data = cached.tag === 'some' ? cached.value : orThrow(await fetchTree(t, cache, oid));
-    const entries: readonly TreeEntry[] = orThrow(parseTree(data, limits));
+    const data = cached.tag === 'some' ? ok(cached.value) : await fetchTree(t, cache, oid);
+    if (!data.ok) return data;
+    const parsed = parseTree(data.value, limits);
+    if (!parsed.ok) return parsed;
+    const entries: readonly TreeEntry[] = parsed.value;
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
-  }));
+  });
 }
 
 export type FileResult = {
@@ -380,20 +397,30 @@ function fileEntry(entry: TreeEntry, comps: readonly string[]): Result<TreeEntry
 // The root span ends when the stream is open (size known); the content's own span, `git.read.blob`, ends when the
 // stream does, with the bytes delivered and whether the oid verified. It outlives the root, so it is not the root's child
 // but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
-export async function readFile(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<FileResult> {
+export async function readFile(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<Result<FileResult, PlyError>> {
   const { ref, path } = withDefaults<PathConfig>(spec, { ref: null, path: null });
   const { cache, limits } = treeReadConfig(options);
-  const comps = orThrow(pathComps(path, limits, { allowRoot: false }));
+  const checked = pathComps(path, limits, { allowRoot: false });
+  if (!checked.ok) return checked;
+  const comps = checked.value;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return orThrow(await operation('read', url, ({ ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
-    const { name, commit } = orThrow(await resolveCommitResult(t, ref));
+  return operation('read', url, ({ ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+    const resolved = await resolveCommit(t, ref);
+    if (!resolved.ok) return resolved;
+    const { name, commit } = resolved.value;
+    const walked = await walk(t, root, { commit, comps, cache, limits });
+    if (!walked.ok) return walked;
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
-    const entry = orThrow(fileEntry(orThrow(await walk(t, root, { commit, comps, cache, limits })).entry as TreeEntry, comps));
+    const file = fileEntry(walked.value.entry as TreeEntry, comps);
+    if (!file.ok) return file;
+    const entry = file.value;
     // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
-    const opened = orThrow(await openBlob(t, entry.oid, { follows: root }));
-    return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: opened.size, stream: opened.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': opened.size, 'git.read.blob.mode': entry.mode });
-  }));
+    const opened = await openBlob(t, entry.oid, { follows: root });
+    if (!opened.ok) return opened;
+    const { size, stream } = opened.value;
+    return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size, stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': size, 'git.read.blob.mode': entry.mode });
+  });
 }
 
 export type BlobStream = { readonly kind: 'stream'; readonly size: number; readonly stream: ReadableStream<Uint8Array> };

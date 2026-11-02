@@ -361,7 +361,7 @@ test('commit, tag and ident space: ply refuses exactly what git fsck --strict re
     const gitMsg = errors.find(Boolean) ?? null;
     const ply = plyVerdict(() => unwrap(assertFetched(c.type, c.data)));
     const parsed = plyVerdict(() => (c.type === 'commit' ? unwrap(parseCommit(c.data)) : unwrap(parseTag(c.data))));
-    const view = c.type === 'commit' ? plyVerdict(() => commitView(c.data)) : parsed;
+    const view = c.type === 'commit' ? plyVerdict(() => unwrap(commitView(c.data))) : parsed;
     const row = { oid: c.oid, type: c.type, axes: c.labels[0], git: c.git, ply };
     const allowed = expect === 'accept' && ply.verdict === 'reject' && ALLOWED_REFUSAL[ply.msgId] && c.labels.every(l => ALLOWED_REFUSAL_HEADERS.has(`${c.type}:${l.header}`));
     if (allowed) designed.push(row);

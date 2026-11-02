@@ -26,19 +26,19 @@
 // (v2Step): a single blob whose pack is over it is limit_exceeded, not fetched (the default, 128 MiB, is above GitHub's
 // 100 MiB file cap). The iterator holds at most the batch it is yielding (and the previous one while its streams are unread).
 //
-// Errors are values here (fetchTrees, subtree, treeFilesResult, fetchBlobs). checkoutTree and treeFiles are the throwing
-// public entries (orThrow); the files iterator errors as an async iterator does, at next().
+// Errors are values: checkoutTree and treeFiles return a Result. The files iterator errors as an async iterator does, at
+// next(), with the PlyError.
 //
 // Workers-safe (Web APIs only). Writing into a directory is Node's and lives in checkout-node.js.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp, typescript/prefer-includes -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change); RegExp#test, not includes: a thrown value's message may be no string at run time */
-import { fail, orThrow, type CommitMiss, type PlyError } from './errors.js';
+import { fail, type CommitMiss, type PlyError } from './errors.js';
 import { assertNever, err, getOrElse, mapOption, ok } from './result.js';
 import type { Result } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
-import { resolveCommitResult, openBlob, pathComps } from './read.js';
+import { resolveCommit, openBlob, pathComps } from './read.js';
 import type { ReadOptions, RefSpec } from './read.js';
 import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
@@ -51,7 +51,7 @@ import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { thrownCodeIs, thrownCodeOr, thrownReasonIs } from './boundary.js';
 import type { TypeNames } from './boundary.js';
-import { attempt, attemptSync, caughtErr } from './commit.js';
+import { attempt, caughtErr } from './commit.js';
 import { fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 
@@ -84,7 +84,7 @@ export type TreeFilesOptions = Input<TreeFilesConfig>;
 // for a name given twice (git fsck duplicateEntries: a symlink `a` beside a directory `a` would route a later write
 // through the link). Every entry visited counts against maxPackObjects, trees included, so a tree reused at many paths
 // (each a distinct path, one object) cannot make the walk outgrow the pack it came from by more than that.
-export function treeFilesResult(tree: TreeLookup, oid: string, options: TreeFilesOptions = {}): Result<CheckoutEntry[], PlyError> {
+export function treeFiles(tree: TreeLookup, oid: string, options: TreeFilesOptions = {}): Result<CheckoutEntry[], PlyError> {
   const { depth, limits } = withDefaults<TreeFilesConfig>(options, { depth: 0, limits: DEFAULT_LIMITS });
   const entriesCap = readLimit(limits, 'maxPackObjects');
   if (!entriesCap.ok) return entriesCap;
@@ -116,10 +116,6 @@ export function treeFilesResult(tree: TreeLookup, oid: string, options: TreeFile
   if (!walked.ok) return walked;
   return ok(out);
 }
-// The throwing entry (public API until the Result cut-over): `tree(oid)` returns the entries, and what it throws is
-// thrown as it was.
-export const treeFiles = (tree: (oid: string) => readonly TreeEntry[], oid: string, options: TreeFilesOptions = {}): CheckoutEntry[] =>
-  orThrow(treeFilesResult(at => attemptSync(() => tree(at)), oid, options));
 
 type Trees = { readonly root: string; readonly tree: TreeLookup; readonly objects: number; readonly trees: number };
 // Effect: the commit and every tree under it, as one blob:none pack (deepen 1). Returns { root, tree } where tree(oid)
@@ -153,11 +149,10 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   const tree = (oid: string): Result<readonly TreeEntry[], PlyError> => {
     const o = mapGet(objects, oid);
     if (o.tag === 'none' || o.value.type !== TYPE.TREE) return fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
-    const data = o.value.data;
-    return attemptSync(() => orThrow(parseTree(data, limits)));
+    return parseTree(o.value.data, limits);
   };
   let trees = 0; for (const o of objects.values()) if (o.type === TYPE.TREE) trees++;
-  const parsed = attemptSync(() => orThrow(parseCommit(c.data, limits)));
+  const parsed = parseCommit(c.data, limits);
   if (!parsed.ok) return parsed;
   return ok({ root: parsed.value.tree, tree, objects: objects.size, trees });
 }
@@ -195,6 +190,9 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<Result
 // from then on (remembered on the transport's quirks). A lie (pack_corrupt) is never a reason to fall back.
 const isWantsRefusal = (e: unknown): boolean => { const code = thrownCodeOr(e, null); return code === 'http' || code === 'remote_error' || code === 'protocol'; };
 
+// The files iterator's edge: a failure (a refused fetch, a blob that cannot be opened) rejects next() with its PlyError.
+const raise = (e: PlyError): never => { throw e; };
+
 const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new ReadableStream({ start(c) { if (data.length) c.enqueue(data); c.close(); } });
 
 // The files iterator. Gitlinks first (nothing to fetch), then the unique blobs in `batch`-sized wants lists; every path
@@ -210,6 +208,13 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
   const stat = { fetches: 0, buffered: 0, streamed: 0, splits: 0, bytes: 0 };
   span.set({ 'git.checkout.blobs.unique': byOid.size, 'git.checkout.blobs.paths': entries.length });
   let single = t.quirks.blobWants === 'single';
+  // A buffered blob is a stream over its bytes; any other is openBlob's.
+  const openPath = async (oid: string, data: Uint8Array | null): Promise<{ readonly size: number; readonly stream: ReadableStream<Uint8Array> }> => {
+    if (data) return { size: data.length, stream: bytesStream(data) };
+    const o = await openBlob(t, oid, { follows: span });
+    if (!o.ok) return raise(o.error);
+    return o.value;
+  };
   // [oid, data | null] for each oid, in order; null means "stream it on its own"
   async function* group(oids: readonly string[]): AsyncGenerator<readonly [string, Uint8Array | null], void, void> {
     if (oids.length === 1 || single) { for (const oid of oids) yield [oid, null]; return; }
@@ -217,7 +222,7 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
     if (!got.ok) {
       const e = got.error;
       if (e.code === 'limit_exceeded') { stat.splits++; const h = Math.ceil(oids.length / 2); yield* group(oids.slice(0, h)); yield* group(oids.slice(h)); return; }
-      if (!isWantsRefusal(e)) throw e;
+      if (!isWantsRefusal(e)) raise(e);
       single = true;
       t.quirks.blobWants = 'single';
       span.set({ 'git.checkout.blobs.refused': e.code });
@@ -236,7 +241,7 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
         for (const e of byOid.get(oid) as CheckoutEntry[]) {
           // a streamed blob is opened per path: one stream cannot be read twice, and tee() would hold the whole blob
-          const opened = data ? { size: data.length, stream: bytesStream(data) } : orThrow(await openBlob(t, oid, { follows: span }));
+          const opened = await openPath(oid, data);
           // oxlint-disable-next-line max-depth -- try, batch, group, paths of one blob: the iterator's shape, as before
           if (data) stat.buffered++; else stat.streamed++;
           stat.bytes += opened.size;
@@ -291,24 +296,34 @@ function checkoutArgs(path: unknown, batch: number, limits: Limits): Result<stri
   if (batch > max.value) return fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
   return comps;
 }
-// oxlint-disable-next-line require-await -- async so that a refused argument is a rejection, as before
-export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options: CheckoutOptions = {}): Promise<CheckoutResult> {
+// oxlint-disable-next-line require-await -- async: a refused argument is an Err in a promise, like every other answer
+export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options: CheckoutOptions = {}): Promise<Result<CheckoutResult, PlyError>> {
   const { ref, path } = withDefaults<CheckoutConfig>(spec, { ref: null, path: '' });
   const { batch } = withDefaults<{ readonly batch: number }>(options, { batch: BATCH });
   // A null limits record is the default, as the nullish read had it.
   const limits = getOrElse(fromNullish(options.limits), DEFAULT_LIMITS);
-  const comps = orThrow(checkoutArgs(path, batch, limits));
+  const args = checkoutArgs(path, batch, limits);
+  if (!args.ok) return args;
+  const comps = args.value;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return orThrow(await operation('checkout', url, ({ ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
-    const { name, commit } = orThrow(await resolveCommitResult(t, ref));
-    const trees = orThrow(await fetchTrees(t, commit, limits));
-    const oid = orThrow(subtree(trees.tree, trees.root, comps));
-    const entries = orThrow(treeFilesResult(trees.tree, oid, { depth: comps.length, limits }));
+  return operation('checkout', url, ({ ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
+    const resolved = await resolveCommit(t, ref);
+    if (!resolved.ok) return resolved;
+    const { name, commit } = resolved.value;
+    const fetched = await fetchTrees(t, commit, limits);
+    if (!fetched.ok) return fetched;
+    const trees = fetched.value;
+    const sub = subtree(trees.tree, trees.root, comps);
+    if (!sub.ok) return sub;
+    const oid = sub.value;
+    const listed = treeFiles(trees.tree, oid, { depth: comps.length, limits });
+    if (!listed.ok) return listed;
+    const entries = listed.value;
     // the tracer operation() started the root span on (opts.tracer)
     const files = blobFiles(t, root.tracer, root, entries, batch);
     return outcome('ok', { ref: name, commit, tree: oid, path: comps.join('/'), entries, files }, {
       'git.checkout.commit': commit, 'git.checkout.tree': oid, 'git.checkout.entries': entries.length,
       'git.checkout.pack.objects': trees.objects, 'git.checkout.pack.trees': trees.trees,
     });
-  }));
+  });
 }

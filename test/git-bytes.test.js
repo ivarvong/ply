@@ -139,27 +139,27 @@ const OPERATIONS = {
   async readFile(fx, url) {
     const rows = lsTree(fx.bare, revOf(fx)).filter(r => r.type === 'blob');
     const git = rows.map(r => ({ name: r.name.toString('hex'), data: gitOk(fx.bare, ['cat-file', 'blob', r.oid]).toString('hex') }));
-    return { git, ply: async () => { const out = []; for (const r of rows) { const f = await readFile(url, { ref: fx.target, path: decodeBytes(r.name) }, O()); out.push({ name: r.name.toString('hex'), data: (await drain(f.stream)).toString('hex') }); } return out; } };
+    return { git, ply: async () => { const out = []; for (const r of rows) { const f = await unwrapAsync(readFile(url, { ref: fx.target, path: decodeBytes(r.name) }, O())); out.push({ name: r.name.toString('hex'), data: (await drain(f.stream)).toString('hex') }); } return out; } };
   },
   async listTree(fx, url) {
     const git = lsTree(fx.bare, revOf(fx)).map(r => ({ name: r.name.toString('hex'), mode: r.mode, oid: r.oid }));
-    return { git, ply: async () => (await listTree(url, { ref: fx.target }, O())).entries.map(e => ({ name: bytesOf(e.name).toString('hex'), mode: e.mode, oid: e.oid })) };
+    return { git, ply: async () => (await unwrapAsync(listTree(url, { ref: fx.target }, O()))).entries.map(e => ({ name: bytesOf(e.name).toString('hex'), mode: e.mode, oid: e.oid })) };
   },
   async readCommit(fx, url) {
     const c = catCommit(fx.bare, revOf(fx));
     const git = { tree: c.tree, parents: c.parents, author: c.authorName.toString('hex'), message: c.message.toString('hex') };
-    return { git, ply: async () => { const r = await readCommit(url, { ref: fx.target }, O()); return { tree: r.tree, parents: r.parents, author: bytesOf(r.author.name).toString('hex'), message: bytesOf(r.message).toString('hex') }; } };
+    return { git, ply: async () => { const r = await unwrapAsync(readCommit(url, { ref: fx.target }, O())); return { tree: r.tree, parents: r.parents, author: bytesOf(r.author.name).toString('hex'), message: bytesOf(r.message).toString('hex') }; } };
   },
   async checkoutTree(fx, url) {
     const rows = lsTree(fx.bare, revOf(fx)).filter(r => r.type === 'blob');
     const git = rows.map(r => ({ path: r.name.toString('hex'), data: gitOk(fx.bare, ['cat-file', 'blob', r.oid]).toString('hex') })).sort(byPath);
     return { git, ply: async () => {
-      const co = await checkoutTree(url, { ref: fx.target }, O());
+      const co = await unwrapAsync(checkoutTree(url, { ref: fx.target }, O()));
       const files = []; for await (const f of co.files) files.push({ path: bytesOf(f.path).toString('hex'), data: (await drain(f.stream)).toString('hex') });
       // and onto a filesystem: the names on disk are git's bytes
       const dir = mkdtempSync(join(fx.bare, '..', 'co-'));
       try {
-        const written = await writeFiles(dir, (await checkoutTree(url, { ref: fx.target }, O())).files, { limits: DEFAULT_LIMITS, platform: process.platform });
+        const written = await writeFiles(dir, (await unwrapAsync(checkoutTree(url, { ref: fx.target }, O()))).files, { limits: DEFAULT_LIMITS, platform: process.platform });
         if (!written.ok) throw written.error;
         const disk = readdirSync(dir, { encoding: 'buffer' }).map(n => n.toString('hex')).sort();
         assert.deepEqual(disk, files.map(f => f.path).sort(), 'names on disk');
@@ -252,10 +252,10 @@ const verdict = async (fx, op) => {
 async function plyAnyway(fx, op, url) {
   const message = fx.field === 'commitMessage' ? fieldIn(fx, 'msg') : 'msg';
   const author = fx.field === 'authorName' ? { ...WHO, name: fieldIn(fx, 'P Ly') } : WHO;
-  if (op === 'readFile') return (await readFile(url, { ref: fx.target, path: 'f.txt' }, O())).size;
-  if (op === 'listTree') return (await listTree(url, { ref: fx.target }, O())).entries.length;
-  if (op === 'readCommit') return (await readCommit(url, { ref: fx.target }, O())).oid;
-  if (op === 'checkoutTree') { const co = await checkoutTree(url, { ref: fx.target }, O()); for await (const f of co.files) await drain(f.stream); return co.entries.length; }
+  if (op === 'readFile') return (await unwrapAsync(readFile(url, { ref: fx.target, path: 'f.txt' }, O()))).size;
+  if (op === 'listTree') return (await unwrapAsync(listTree(url, { ref: fx.target }, O()))).entries.length;
+  if (op === 'readCommit') return (await unwrapAsync(readCommit(url, { ref: fx.target }, O()))).oid;
+  if (op === 'checkoutTree') { const co = await unwrapAsync(checkoutTree(url, { ref: fx.target }, O())); for await (const f of co.files) await drain(f.stream); return co.entries.length; }
   if (op === 'editFile') return (await editFile(url, { ref: fx.field === 'tagName' ? 'refs/heads/side' : fx.target, path: 'f.txt', find: 'line2', replace: 'X', author, message }, O())).outcome;
   return (await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' })))).outcome;
 }

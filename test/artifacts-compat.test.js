@@ -86,14 +86,14 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
     assert.equal(rejected, 1, 'one 400, then remembered');
     // second operation, same quirks object: no 400 at all; read == git show
     const before400 = rejected;
-    const rd = await readFile(r.url, { path: 'a/b/c/d/deep.txt' }, { tracer: new Tracer(), quirks });
+    const rd = await unwrapAsync(readFile(r.url, { path: 'a/b/c/d/deep.txt' }, { tracer: new Tracer(), quirks }));
     const chunks = []; for await (const c of rd.stream) chunks.push(Buffer.from(c));
     assert.ok(Buffer.concat(chunks).equals(gitBuf(r.bare, ['show', 'main:a/b/c/d/deep.txt'])));
-    const ls = await listTree(r.url, { path: 'many' }, { tracer: new Tracer(), quirks });
+    const ls = await unwrapAsync(listTree(r.url, { path: 'many' }, { tracer: new Tracer(), quirks }));
     assert.equal(ls.entries.length, 40); assert.equal(ls.tree, git(r.bare, ['rev-parse', 'main:many']).trim());
     assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400, 'no further 400s');
     // a fresh transport without the quirks object learns it again (one more 400) and still answers correctly
-    const rd2 = await readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() });
+    const rd2 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() }));
     for await (const _ of rd2.stream); // eslint-disable-line no-unused-vars
     assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400 + 1);
   } finally { await r.proxy.close(); }

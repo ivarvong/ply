@@ -19,7 +19,7 @@ import { hashObject, TYPE } from '../../src/objects.js';
 import { Sha1 } from '../../src/sha1.js';
 import { concat, te } from '../../src/bytes.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const FIND = 'M';
 const AUTHOR = { name: 'adv', email: 'adv@x' };
@@ -108,7 +108,7 @@ test('declared size one under, at, and one over the inflated length, on read and
     const where = `${path} n=${n} declared=${declared}`;
     let err = null, got = null;
     if (path === 'read') {
-      const res = await readFile(url, { path: 'a.bin' }, opts);
+      const res = await unwrapAsync(readFile(url, { path: 'a.bin' }, opts));
       const parts = [];
       try { for await (const c of res.stream) parts.push(c); got = concat(parts); } catch (e) { err = e; }
     } else {
