@@ -43,10 +43,20 @@ export type Hints = { readonly bypassCache: boolean };
 export const NO_HINTS: Hints = Object.freeze({ bypassCache: false });
 export type Scrub = (s: string) => string;
 // What a server was found to need, learned at run time and shared by every view of the transport (mutable on purpose).
-// treeFilter: 'blob:none' for a host that refuses tree:0 (fetch). blobWants: 'single' for a host that refuses a
-// multi-blob want list (checkout). A caller passes one record to every call on a server; ply fills it (absent.fillIn).
-export type Quirks = { treeFilter: 'tree:0' | 'blob:none'; blobWants: 'many' | 'single' };
+// treeFilter: what a filtered fetch is sent as. 'blob:none' for a host that refuses tree:0 (fetch.ts, learned from its
+// 400); 'none' for a host whose upload-pack advertisement has no `filter` on its `fetch=` line (git's own default,
+// uploadpack.allowFilter unset), learned from that advertisement (learnFilter): no filter is sent and the fetch takes
+// the unfiltered pack. blobWants: 'single' for a host that refuses a multi-blob want list (checkout). A caller passes
+// one record to every call on a server; ply fills it (absent.fillIn).
+export type TreeFilter = 'tree:0' | 'blob:none' | 'none';
+export type Quirks = { treeFilter: TreeFilter; blobWants: 'many' | 'single' };
 export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'many' });
+// What an upload-pack advertisement says about `filter`, kept: absent is 'none'; present undoes an earlier 'none' (the
+// host turned it on) and leaves a learned blob:none alone (Artifacts advertises `filter` and refuses tree:0).
+export function learnFilter(t: Transport, advertised: boolean): void {
+  if (!advertised) t.quirks.treeFilter = 'none';
+  else if (t.quirks.treeFilter === 'none') t.quirks.treeFilter = 'tree:0';
+}
 // Commits and trees harvested from over-wide packs (fetch.js), keyed by oid; `bytes` is their running total.
 export type HeldObject = { readonly type: number; readonly data: Uint8Array };
 export type Harvest = Map<string, HeldObject>;
