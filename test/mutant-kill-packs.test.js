@@ -362,3 +362,108 @@ test('inflate: a stored block after a fixed one, at every leftover bit count, eq
   }
 });
 
+// ---- inflate: a stream cut exactly where each read of the block loop runs out ----
+// Every read in the block loop (the bit reader and the Huffman decoder) is checked where it is made. Without that check
+// the loop goes on with a negative value: the stream may still be refused, but with another message (a bad block type,
+// bad dynamic counts, a repeat with no previous, a repeat overflow, no end-of-block code, a distance too far back), or
+// not at all (a distance symbol that is not there reads as zero bytes). Each stream below is hand-built (stored, fixed
+// and dynamic blocks) and ends at one read with fewer bits left than that read needs, or with bits that match no code.
+
+// LSB-first bit writer (RFC 1951 §3.1.1): header fields and extra bits in value order, Huffman codes MSB first.
+class DeflateBits {
+  constructor() { this.out = []; }
+  bits(v, n) { for (let i = 0; i < n; i++) this.out.push((v >> i) & 1); return this; }
+  code([c, len]) { for (let i = len - 1; i >= 0; i--) this.out.push((c >> i) & 1); return this; }
+  // the bits left in the last byte after what was written
+  get left() { return (8 - (this.out.length % 8)) % 8; }
+  // as bytes; a partial last byte is padded with `pad`, LSB first
+  done(pad = 0) {
+    const bits = [...this.out];
+    for (let i = 0; bits.length % 8; i++) bits.push((pad >> i) & 1);
+    return Uint8Array.from({ length: bits.length / 8 }, (_, k) => bits.slice(k * 8, k * 8 + 8).reduce((a, b, i) => a | (b << i), 0));
+  }
+}
+// Canonical Huffman codes from code lengths (RFC 1951 §3.2.2): symbol -> [code, length], null for a symbol with none.
+function canonicalCodes(lengths) {
+  const max = Math.max(0, ...lengths);
+  const count = new Array(max + 1).fill(0);
+  for (const l of lengths) if (l) count[l]++;
+  const next = [];
+  for (let code = 0, bits = 1; bits <= max; bits++) { code = (code + count[bits - 1]) << 1; next[bits] = code; }
+  return lengths.map(l => (l ? [next[l]++, l] : null));
+}
+const FIXED_LIT = canonicalCodes(Array.from({ length: 288 }, (_, s) => (s < 144 ? 8 : s < 256 ? 9 : s < 280 ? 7 : 8)));
+const FIXED_DIST = canonicalCodes(new Array(30).fill(5));
+const CLORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+// A final dynamic block's header through the code length code lengths (HCLEN covers the last one given); returns that code.
+function dynamicHeader(w, { hlit, hdist, clens }) {
+  let hclen = 19;
+  while (hclen > 4 && !clens[CLORDER[hclen - 1]]) hclen--;
+  w.bits(1, 1).bits(2, 2).bits(hlit, 5).bits(hdist, 5).bits(hclen - 4, 4);
+  for (let i = 0; i < hclen; i++) w.bits(clens[CLORDER[i]] ?? 0, 3);
+  return canonicalCodes(Array.from({ length: 19 }, (_, s) => clens[s] ?? 0));
+}
+const fixedBlock = final => new DeflateBits().bits(final, 1).bits(1, 2);
+
+test('inflate: a stream cut at each read of the block loop is refused with that read\'s message', () => {
+  const END = 'inflate: unexpected end of input';
+  const NO_CODE = 'inflate: invalid huffman code';
+  const refused = (name, w, left, pad, message) => {
+    assert.equal(w.left, left, `${name}: bits left in the last byte`);
+    const bytes = w.done(pad);
+    errOf(inflate(bytes, 0, { raw: true }), 'pack_corrupt', message);
+    assert.throws(() => zlib.inflateRawSync(bytes), Error, `${name}: zlib refuses it too`);
+  };
+  // BFINAL: a non-final empty stored block, then nothing
+  errOf(inflate(Uint8Array.of(0b000, 0, 0, 0xff, 0xff), 0, { raw: true }), 'pack_corrupt', END);
+  // BTYPE: a non-final fixed block of four 9-bit literals (3 + 36 + 7 = 46 bits): BFINAL takes one of the 2 bits left
+  {
+    const w = fixedBlock(0);
+    for (const c of [0x90, 0x91, 0x92, 0x93]) w.code(FIXED_LIT[c]);
+    refused('btype', w.code(FIXED_LIT[256]), 2, 0b01, END);
+  }
+  // HDIST: after a 28-bit fixed block, BFINAL, BTYPE and HLIT (31, a count no stream may give) leave 4 bits: HDIST needs
+  // 5 (HCLEN, 4, would be there)
+  refused('hdist', fixedBlock(0).code(FIXED_LIT[0x90]).code(FIXED_LIT[0x91]).code(FIXED_LIT[256]).bits(1, 1).bits(2, 2).bits(31, 5), 4, 0b1111, END);
+  // HCLEN: BFINAL, BTYPE, HLIT (31) and HDIST end on bit 13 of 16: HCLEN needs 4 of the 3 left
+  refused('hclen', new DeflateBits().bits(1, 1).bits(2, 2).bits(31, 5).bits(0, 5), 3, 0b111, END);
+  // a code length code length: 16 and 17 (one bit each) are read, the third needs 3 bits and 1 is left
+  refused('clen', new DeflateBits().bits(1, 1).bits(2, 2).bits(0, 5).bits(0, 5).bits(0, 4).bits(1, 3).bits(1, 3), 1, 0, END);
+  // a code length symbol: 266 zeros (138 + 128, entry 256 among them) of 271 entries; the 3 padding bits are three more
+  // ('0' is symbol 0), then the next symbol runs out
+  {
+    const w = new DeflateBits();
+    const cl = dynamicHeader(w, { hlit: 13, hdist: 0, clens: { 0: 1, 18: 1 } });
+    refused('code length', w.code(cl[18]).bits(127, 7).code(cl[18]).bits(117, 7), 3, 0, END);
+  }
+  // a code length symbol that matches no code: the code length code has one code ('0', symbol 0); fifteen 1 bits
+  {
+    const w = new DeflateBits();
+    dynamicHeader(w, { hlit: 0, hdist: 0, clens: { 0: 1 } });
+    refused('code length, no code', w.bits(0x7fff, 15), 4, 0, NO_CODE);
+  }
+  // a repeat's extra bits: 249 zeros (138 + 111) of 258 entries, then an 18 whose 7 extra bits are not there
+  {
+    const w = new DeflateBits();
+    const cl = dynamicHeader(w, { hlit: 0, hdist: 0, clens: { 0: 1, 18: 1 } });
+    refused('repeat', w.code(cl[18]).bits(127, 7).code(cl[18]).bits(100, 7).code(cl[18]), 2, 0, END);
+  }
+  // a length's extra bits: a dynamic block (literal/length 256: '0', 281: '1'; distances 0: '0', 1: '1') whose first
+  // symbol is 281 (5 extra bits); 4 are left, the first of them a distance code
+  {
+    const w = new DeflateBits();
+    const cl = dynamicHeader(w, { hlit: 25, hdist: 1, clens: { 1: 1, 18: 1 } });
+    w.code(cl[18]).bits(127, 7).code(cl[18]).bits(107, 7); // 0..255: 256 zeros
+    w.code(cl[1]); // 256
+    w.code(cl[18]).bits(13, 7); // 257..280: 24 zeros
+    w.code(cl[1]).code(cl[1]).code(cl[1]); // 281, distances 0 and 1
+    const lit = canonicalCodes(Array.from({ length: 282 }, (_, s) => (s === 256 || s === 281 ? 1 : 0)));
+    refused('length extra', w.code(lit[281]), 4, 0, END);
+  }
+  // a distance symbol: fixed, two 9-bit literals and length 3 (3 + 18 + 7 = 28 bits): 4 of its 5 bits are left
+  refused('distance', fixedBlock(1).code(FIXED_LIT[0x90]).code(FIXED_LIT[0x91]).code(FIXED_LIT[257]), 4, 0, END);
+  // a distance symbol that matches no code: fixed distance codes 30 and 31 do not exist (11111 and ten more 1 bits)
+  refused('distance, no code', fixedBlock(1).code(FIXED_LIT[0x41]).code(FIXED_LIT[257]).bits(0x7fff, 15), 7, 0, NO_CODE);
+  // a distance's extra bits: one 9-bit literal, length 3, distance symbol 4 (one extra bit): 3 + 9 + 7 + 5 = 24 bits
+  refused('distance extra', fixedBlock(1).code(FIXED_LIT[0x90]).code(FIXED_LIT[257]).code(FIXED_DIST[4]), 0, 0, END);
+});

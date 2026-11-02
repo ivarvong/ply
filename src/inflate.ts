@@ -204,16 +204,13 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
       const li = sym - DEFLATE_HLIT_BASE;
       if (li >= DEFLATE_LENGTH_CODES) return corrupt('inflate: bad length symbol');
       const lx = bits(LEXT[li] as number);
-      // Stryker disable next-line ConditionalExpression: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
       if (lx < 0) return ended();
       const len = (LBASE[li] as number) + lx;
       const di = decode(dist);
-      // Stryker disable next-line ConditionalExpression: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
       if (di < 0) return unread(di);
       // Stryker disable next-line ConditionalExpression,EqualityOperator,StringLiteral: ndist cannot exceed DEFLATE_HDIST_MAX, so a distance symbol is never out of that table
       if (di >= DEFLATE_HDIST_MAX) return corrupt('inflate: bad distance symbol');
       const dx = bits(DEXT[di] as number);
-      // Stryker disable next-line ConditionalExpression: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
       if (dx < 0) return ended();
       const d = (DBASE[di] as number) + dx;
       if (d > o) return corrupt('inflate: distance too far back');
@@ -237,8 +234,9 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
     const hlit = bits(DEFLATE_HLIT_BITS);
     const hdist = bits(DEFLATE_HDIST_BITS);
     const hclen = bits(DEFLATE_HCLEN_BITS);
-    // Stryker disable next-line ConditionalExpression,LogicalOperator: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
-    if (hlit < 0 || hdist < 0 || hclen < 0) return ended();
+    // A read that runs out reads no byte, so the next read of as many bits or more runs out too: HLIT's failure is
+    // HDIST's (5 bits each). HCLEN (4) can still be there after HDIST ran out, so both are checked.
+    if (hdist < 0 || hclen < 0) return ended();
     const nlen = hlit + DEFLATE_HLIT_BASE;
     const ndist = hdist + DEFLATE_HDIST_BASE;
     const ncode = hclen + DEFLATE_HCLEN_BASE;
@@ -246,7 +244,6 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
     const lengths = new Uint8Array(DEFLATE_HLIT_MAX + DEFLATE_HDIST_MAX);
     for (let i = 0; i < ncode; i++) {
       const l = bits(DEFLATE_CODELEN_BITS);
-      // Stryker disable next-line ConditionalExpression: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
       if (l < 0) return ended();
       lengths[CLORDER[i] as number] = l;
     }
@@ -254,7 +251,6 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
     let i = 0;
     while (i < nlen + ndist) {
       const sym = decode(lencode);
-      // Stryker disable next-line ConditionalExpression: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
       if (sym < 0) return unread(sym);
       if (sym < DEFLATE_REPEAT_PREV) { lengths[i++] = sym; continue; }
       let base: number;
@@ -264,7 +260,6 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
       if (sym === DEFLATE_REPEAT_PREV) { val = lengths[i - 1] as number; base = DEFLATE_REPEAT16_BASE; rx = bits(DEFLATE_REPEAT16_BITS); }
       else if (sym === DEFLATE_REPEAT_ZERO3) { base = DEFLATE_REPEAT17_BASE; rx = bits(DEFLATE_REPEAT17_BITS); }
       else { base = DEFLATE_REPEAT18_BASE; rx = bits(DEFLATE_REPEAT18_BITS); } // 18: lencode has 19 symbols, 0-18
-      // Stryker disable next-line ConditionalExpression: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
       if (rx < 0) return ended();
       let rep = base + rx;
       if (i + rep > nlen + ndist) return corrupt('inflate: repeat overflow');
@@ -308,8 +303,8 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
     if (p - start > maxInput) return tooLong(p - start);
     last = bits(DEFLATE_BFINAL_BITS);
     const btype = bits(DEFLATE_BTYPE_BITS);
-    // Stryker disable next-line ConditionalExpression,LogicalOperator: a failed read is the input running out or a code matching nothing; going on past this early return reaches the next read, which fails the same way, or a check of the value, which refuses the stream: the stream is refused either way
-    if (last < 0 || btype < 0) return ended();
+    // BFINAL (1 bit) that ran out leaves BTYPE (2) nothing to read: BTYPE's check is BFINAL's too
+    if (btype < 0) return ended();
     stats.blocks++;
     const done = block(blockKind(btype));
     if (!done.ok) return done;
