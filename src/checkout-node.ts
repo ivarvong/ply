@@ -4,7 +4,8 @@
 //
 //   writeFiles(dir, files, { limits, platform }) → Result<{ files, bytes, symlinks, gitlinks }>   files: checkoutTree's `files`
 //   checkoutDir(url, { dir, ref, path }, opts) → Result of checkoutTree's record without `files`, plus `written`
-// Every field of both records is required. A caller passes CHECKOUT_BATCH, DEFAULT_LIMITS, and process.platform.
+// writeFiles takes both fields. checkoutDir takes `dir` and the tracer; the rest default (ref: the remote's HEAD, path:
+// the whole tree, batch: CHECKOUT_BATCH, limits: DEFAULT_LIMITS, platform: this process's, the others none).
 //
 // Layout as git's checkout (entry.c): a 100755 file is created 0777 & ~umask, any other 0666 & ~umask; a 120000 is a
 // symlink whose target is the blob, never followed; a 160000 gitlink is an empty directory (an uninitialised submodule).
@@ -22,11 +23,12 @@
 import { mkdir, readdir, lstat, open, symlink, unlink } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a checkout path throughout this file
 import { join } from 'node:path';
+import { platform as processPlatform } from 'node:process';
 import { fail, isPlyError, plyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Err, Result } from './result.js';
-import { limitError, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePath, checkoutPathRefusal } from './validate.js';
 import { concat, encodeBytes } from './bytes.js';
@@ -38,6 +40,8 @@ import { thrownCodeIs } from './boundary.js';
 import type { HttpAuth } from './http.js';
 import type { Tracer, Span } from './otel.js';
 import type { Quirks, Transport } from './transport.js';
+import type { Input } from './absent.js';
+import { withDefaults } from './absent.js';
 
 /* oxlint-disable no-await-in-loop -- files are written one at a time, in order, each stream drained before the next */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
@@ -211,10 +215,10 @@ export type CheckoutDirResult = Omit<CheckoutResult, 'files'> & { readonly writt
 // dir is this function's own refusal. Everything else is writeFiles's Err or checkoutTree's.
 export type CheckoutDirError = WithKind<ErrorOf<'bad_request'>, 'dir'> | WriteFilesError;
 // Absence on a pass-through field is null. ref is a name or null (the remote's HEAD). path '' is the whole tree.
-export type CheckoutDirRequest = { readonly dir: string; readonly ref: string | null; readonly path: string };
-export type CheckoutDirOptions = {
+export type CheckoutDirConfig = { readonly ref: string | null; readonly path: string };
+export type CheckoutDirRequest = { readonly dir: string } & Input<CheckoutDirConfig>;
+export type CheckoutDirOptionsConfig = {
   readonly auth: HttpAuth | null;
-  readonly tracer: Tracer;
   readonly parent: Span | null;
   readonly fetchImpl: NonNullable<ReadOptions['fetchImpl']> | null;
   readonly limits: Limits;
@@ -224,8 +228,13 @@ export type CheckoutDirOptions = {
   readonly batch: number;
   readonly platform: string;
 };
+export type CheckoutDirOptions = { readonly tracer: Tracer } & Input<CheckoutDirOptionsConfig>;
+type CheckoutDirOptionsTotal = { readonly tracer: Tracer } & CheckoutDirOptionsConfig;
+const dirDefaults = (): CheckoutDirOptionsConfig => ({
+  auth: null, parent: null, fetchImpl: null, limits: DEFAULT_LIMITS, signal: null, quirks: null, transport: null, batch: CHECKOUT_BATCH, platform: processPlatform,
+});
 // checkoutTree still takes a partial ReadOptions. Null pass-through fields stay off that object.
-function treeOpts(opts: CheckoutDirOptions): ReadOptions & { readonly batch: number } {
+function treeOpts(opts: CheckoutDirOptionsTotal): ReadOptions & { readonly batch: number } {
   const base = {
     auth: opts.auth,
     tracer: opts.tracer,
@@ -238,8 +247,10 @@ function treeOpts(opts: CheckoutDirOptions): ReadOptions & { readonly batch: num
   const withFetch = opts.fetchImpl === null ? base : { ...base, fetchImpl: opts.fetchImpl };
   return opts.quirks === null ? withFetch : { ...withFetch, quirks: opts.quirks };
 }
-export async function checkoutDir(url: string, request: CheckoutDirRequest, opts: CheckoutDirOptions): Promise<Result<CheckoutDirResult, CheckoutDirError>> {
-  const { dir, ref, path } = request;
+export async function checkoutDir(url: string, request: CheckoutDirRequest, options: CheckoutDirOptions): Promise<Result<CheckoutDirResult, CheckoutDirError>> {
+  const { dir } = request;
+  const { ref, path } = withDefaults<CheckoutDirConfig>(request, { ref: null, path: '' });
+  const opts: CheckoutDirOptionsTotal = { ...withDefaults(options, dirDefaults()), tracer: options.tracer };
   if (typeof dir !== 'string' || dir === '') return kinded(fail('bad_request', 'dir must be a non-empty string', { what: 'dir' }).error, 'dir');
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;

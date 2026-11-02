@@ -54,14 +54,14 @@ const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export type { BlobMode };
-// `mode` left out is a regular file (100644).
-type Content = { readonly path: Path; readonly content: string | Uint8Array } & Input<{ readonly mode: BlobMode }>;
+// `mode` left out is a regular file (100644). Paths are plain strings, checked (validatePath) before any I/O.
+type Content = { readonly path: string; readonly content: string | Uint8Array } & Input<{ readonly mode: BlobMode }>;
 export type Change =
   | ({ readonly kind: 'create' } & Content)
   | ({ readonly kind: 'write' } & Content)
-  | { readonly kind: 'edit'; readonly path: Path; readonly find: string | Uint8Array; readonly replace: string | Uint8Array }
-  | { readonly kind: 'delete'; readonly path: Path }
-  | { readonly kind: 'rename'; readonly from: Path; readonly to: Path };
+  | { readonly kind: 'edit'; readonly path: string; readonly find: string | Uint8Array; readonly replace: string | Uint8Array }
+  | { readonly kind: 'delete'; readonly path: string }
+  | { readonly kind: 'rename'; readonly from: string; readonly to: string };
 
 // `ref` null: the remote's HEAD. `base` null: the target's tip. `committer` null: the author. `time` null: now.
 export type CommitChangesConfig = { readonly ref: string | null; readonly base: string | null; readonly committer: Author | null; readonly time: number | null };

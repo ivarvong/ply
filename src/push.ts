@@ -13,7 +13,6 @@ import { frames, coded, clientSpan, spanned, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePushRef, validateWire } from './validate.js';
-import type { Refname } from './refname.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -28,8 +27,9 @@ const OID = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`, 'u');
 
 export { ZERO_OID };
 
-// One ref update. create: oldOid = zeros; delete: newOid = zeros.
-export type Command = { readonly ref: Refname; readonly oldOid: string; readonly newOid: string };
+// One ref update. create: oldOid = zeros; delete: newOid = zeros. `ref` is a plain string: planPush checks every
+// command's ref (validatePushRef) before anything is built or sent.
+export type Command = { readonly ref: string; readonly oldOid: string; readonly newOid: string };
 // At least one: push reads the first command for its span (an empty list is refused there, by a TypeError coded 'protocol').
 export type Commands = readonly [Command, ...Command[]];
 // A pkt-line frame as pktStep and the transports' frames() yield it.
@@ -37,8 +37,8 @@ export type { Frame } from './transport.js';
 import type { Frame, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
-// oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack, transport, limits, validation, Result
 import type { Span } from './otel.js';
+// oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack, transport, limits, validation, Result
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, withDefaults } from './absent.js';
 
@@ -389,7 +389,7 @@ export type PackEntry = BuiltEntry;
 //            checkPushCaps; pushWithOptions and GitHttp.push do it).
 //   commands null: the single-ref form, ref/oldOid/newOid (each refused by planPush when left out).
 export type PushConfig = {
-  readonly ref: Refname | null;
+  readonly ref: string | null;
   readonly oldOid: string;
   readonly newOid: string;
   readonly objects: readonly PackObject[];

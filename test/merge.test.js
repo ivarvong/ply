@@ -13,7 +13,7 @@ import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
 import { editFile } from '../src/edit.js';
 import { rebaseBranch } from '../src/rebase.js';
-import { mergeBranch, deleteBranch, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
+import { mergeBranch, deleteRef, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { attributesFor } from '../src/attributes.js';
 import { createTransport as createTransportR } from '../src/http.js';
@@ -347,13 +347,13 @@ test('branch workflow: editFile creates the branch from main (CAS: must not exis
   assert.equal(m.outcome, 'fast_forward'); assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit);
   assert.equal(sh(r.bare, ['cat-file', '-p', 'main:README.md']).stdout, 'hello EDITED\n');
   const t = createTransport(r.url, { tracer: new Tracer() });
-  await unwrapAsync(deleteBranch(t, { ref: 'refs/heads/ply/edit-1', oid: e.newCommit }));
+  await unwrapAsync(deleteRef(t, { ref: 'refs/heads/ply/edit-1', oid: e.newCommit }));
   assert.notEqual(sh(r.bare, ['show-ref', '--verify', 'refs/heads/ply/edit-1']).status, 0, 'branch gone');
   // deleting with a stale oid is a CAS failure; deleting the current branch is refused by policy (receive.denyDeleteCurrent)
   sh(r.work, ['push', '-q', r.bare, `${base}:refs/heads/tmp`]);
-  await assert.rejects(unwrapAsync(deleteBranch(t, { ref: 'refs/heads/tmp', oid: e.newCommit })), e => e.code === 'cas_conflict', 'stale oid');
+  await assert.rejects(unwrapAsync(deleteRef(t, { ref: 'refs/heads/tmp', oid: e.newCommit })), e => e.code === 'cas_conflict', 'stale oid');
   assert.equal(sh(r.bare, ['rev-parse', 'refs/heads/tmp']).stdout.trim(), base, 'tmp still there');
-  await assert.rejects(unwrapAsync(deleteBranch(t, { ref: 'refs/heads/main', oid: e.newCommit })), e => e.code === 'push_rejected' && /current branch/.test(e.message));
+  await assert.rejects(unwrapAsync(deleteRef(t, { ref: 'refs/heads/main', oid: e.newCommit })), e => e.code === 'push_rejected' && /current branch/.test(e.message));
   assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), e.newCommit, 'main still there');
   assert.deepEqual(fsckProblems(r.bare), []);
 });

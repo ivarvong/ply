@@ -6,17 +6,274 @@ Every byte and every roundtrip is recorded as an OTLP span. The test suite is a 
 
 The hosted HTTP API and the public repository viewer live in [ply-web](https://github.com/ivarvong/ply-web) (the Cloudflare Worker `ply`). This repository is the git client.
 
+## Install
+
+ply is not on npm (the npm name `ply` belongs to another package). Install it from GitHub; npm builds `dist/` on install:
+
+```sh
+npm install github:ivarvong/ply              # the default branch, as of now
+npm install github:ivarvong/ply#<commit-sha>  # recommended: pin a commit for reproducible builds
+```
+
+It installs as `ply`, so imports read `from 'ply'` and `from 'ply/<subpath>'` (`ply/edit`, `ply/read`, `ply/tree`, `ply/checkout-node`, …). Types ship with it (`dist/*.d.ts`); JavaScript and TypeScript use the same calls.
+
+## Beta
+
+ply is pre-1.0 (0.2.0). The API can change between commits without a deprecation period, and there are no tagged releases yet: pin a commit sha, read the commit log before moving the pin, and let your type checker or tests catch a changed signature. Span names and attributes are a stated contract (see [Telemetry contract](#telemetry-contract)).
+
+## Requirements
+
+- **Runtime**: Node ≥ 20, Cloudflare Workers, or any runtime with `fetch`, `CompressionStream`/`DecompressionStream`, `crypto.getRandomValues` and `Uint8Array` (a browser works behind a CORS proxy). `ply/tree-node` and `ply/checkout-node` are Node only (`node:fs`).
+- **A git smart-HTTP server**: GitHub, GitLab, Gitea/Forgejo, Cloudflare Artifacts, or self-hosted `git http-backend` (with `http.receivepack true` to push; until ply falls back on a server that does not advertise `filter`, reads, edits and merges also need `uploadpack.allowFilter true`: `STOCK_SERVER_SUPPORTED` in `test/e2e-customer.test.js` says which). ply speaks protocol v2 for reads and receive-pack for pushes; SHA-1 repositories only.
+- **Auth**, per call in `opts.auth`: `{ token }` (HTTP Basic with user `x-access-token`, which GitHub tokens use), `{ token, user }` (a host that wants a username: GitLab `oauth2` for an OAuth token, your Gitea/Forgejo user), `{ bearer }`, or `{ header }` (an `Authorization` value sent as is). Or userinfo in the URL (`https://<token>@host/…`), sent as git sends it. No `auth` and no userinfo: anonymous. Credentials never reach a span or an error message; redirects are not followed. Details in "Credentials" under [More detail](#more-detail).
+
+What ply does **not** do: create or delete repositories (that is the host's API, or `git init --bare` on your server: ply needs one to exist, empty or not); SSH transport (removed; HTTPS only); Git LFS content (an LFS pointer is refused by edits, see [Guards](#guards-and-policy)); pull requests, issues or any other host API object; a working tree or index (there is no clone: every call reads what it needs over the wire).
+
+## Quick start: a repo end to end
+
+Every call takes `(url, spec, opts)`, where `opts.tracer` is required (a `new Tracer()` with no exporter drops its spans), and returns a `Result`: `{ ok: true, value }` or `{ ok: false, error }`, never a throw. The blocks below run in order against one repository that starts empty (they are executed as written, against `git http-backend`, by `test/e2e-customer.test.js`, and type-checked as TypeScript by `test/types/readme.typetest.ts`). A ref that is written is a full name (`refs/heads/main`; a tag's `name` may be short); a ref that is only read (`readCommit`'s `ref`, `createBranch`'s `from`, `createTag`'s `target`) may also be a short name (`main`, `v1.3.0`) or a commit id.
+
+```js
+// quick-start: setup
+import { Tracer } from 'ply';
+
+const url = 'https://git.example.com/acme/site.git';  // an existing repository, empty or not
+const opts = { auth: { token: process.env['GIT_TOKEN'] }, tracer: new Tracer() };  // Tracer({ exporter }) to export spans
+const author = { name: 'Release Bot', email: 'bot@example.com' };  // time defaults to now, tz to +0000
+const outDir = './site-checkout';  // checkoutDir writes here; it must be absent or empty
+```
+
+**First commit into an empty repository.** `pushTree` commits exactly `files` as the tree. A branch that does not exist yet is created as a root commit.
+
+```js
+// quick-start: first-commit
+import { pushTree } from 'ply';
+
+const first = await pushTree(url, {
+  ref: 'refs/heads/main',
+  files: {
+    'README.md': '# site\n',
+    'src/config.ts': 'export const VERSION = "1.2.3";\n',
+    'bin/build': { data: '#!/bin/sh\necho build\n', mode: '100755' },
+  },
+  author, message: 'Initial commit',
+}, opts);
+if (!first.ok) throw first.error;
+console.log(first.value.newCommit);  // the commit id main now points at
+```
+
+**Read** a commit, a directory, and a file (streamed, hash-checked as it is read).
+
+```js
+// quick-start: read
+import { readCommit, listTree, readFile } from 'ply';
+
+const head = await readCommit(url, { ref: 'main' }, opts);
+if (!head.ok) throw head.error;
+if ('empty' in head.value) throw new Error('main has no commits yet');
+console.log(head.value.oid, head.value.tree, head.value.parents, head.value.message);
+
+const listing = await listTree(url, { ref: 'main', path: 'src' }, opts);
+if (!listing.ok) throw listing.error;
+for (const e of listing.value.entries) console.log(e.mode, e.type, e.oid, e.name);  // as git ls-tree prints them
+
+const file = await readFile(url, { ref: 'main', path: 'src/config.ts' }, opts);
+if (!file.ok) throw file.error;
+const config = await new Response(file.value.stream).text();  // read the stream to the end (or cancel it)
+console.log(file.value.size, config);
+```
+
+**Edit one file**: find exactly one occurrence and replace it. The blob streams through; the push is a delta.
+
+```js
+// quick-start: edit
+import { editFile } from 'ply';
+
+const bump = await editFile(url, {
+  ref: 'refs/heads/main', path: 'src/config.ts',
+  find: 'VERSION = "1.2.3"', replace: 'VERSION = "1.2.4"',
+  author, message: 'Bump version to 1.2.4',
+}, opts);
+if (!bump.ok) throw bump.error;  // match_count when find is not there exactly once
+console.log(bump.value.newCommit, bump.value.noop);  // noop: find === replace, nothing pushed
+```
+
+**Several changes in one commit**, applied in order.
+
+```js
+// quick-start: commit-changes
+import { commitChanges } from 'ply';
+
+const change = await commitChanges(url, {
+  ref: 'refs/heads/main',
+  changes: [
+    { kind: 'create', path: 'docs/intro.md', content: '# Intro\n' },  // refuses a path that exists
+    { kind: 'write', path: 'README.md', content: '# site\n\nHello.\n' },  // creates or overwrites
+    { kind: 'edit', path: 'src/config.ts', find: '1.2.4', replace: '1.3.0' },  // exactly one match
+    { kind: 'delete', path: 'bin/build' },  // a file or a whole directory
+    { kind: 'rename', from: 'docs/intro.md', to: 'docs/index.md' },
+  ],
+  author, message: 'Docs; version 1.3.0',
+}, opts);
+if (!change.ok) throw change.error;
+console.log(change.value.outcome, change.value.oid);  // 'commit', or 'noop' when the tree did not change
+```
+
+**Branches**: create one at a commit (a ref name or a 40-hex commit id), commit to it, merge it back. `mergeBranch` fast-forwards when it can and otherwise writes a merge commit (git's merge-ort result for clean merges; `merge_conflict` with the paths otherwise).
+
+```js
+// quick-start: branch-merge
+import { createBranch, mergeBranch } from 'ply';
+
+const feature = await createBranch(url, { ref: 'refs/heads/feature', from: 'main' }, opts);
+if (!feature.ok) throw feature.error;  // cas_conflict when the branch already exists
+
+const work = await commitChanges(url, {
+  ref: 'refs/heads/feature',
+  changes: [{ kind: 'create', path: 'src/feature.ts', content: 'export const feature = true;\n' }],
+  author, message: 'Add feature flag',
+}, opts);
+if (!work.ok) throw work.error;
+
+const hotfix = await editFile(url, {  // main moves on meanwhile
+  ref: 'refs/heads/main', path: 'README.md', find: 'Hello.', replace: 'Hello, world.', author, message: 'Fix greeting',
+}, opts);
+if (!hotfix.ok) throw hotfix.error;
+
+const merged = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feature', author }, opts);
+if (!merged.ok) throw merged.error;
+console.log(merged.value.outcome, merged.value.oid);  // 'merge': a commit with parents [main, feature]
+```
+
+**Tags**: lightweight (the ref names the commit) or annotated (a tag object with a tagger and message).
+
+```js
+// quick-start: tag
+import { createTag } from 'ply';
+
+const release = await createTag(url, { name: 'v1.3.0', target: 'refs/heads/main' }, opts);
+if (!release.ok) throw release.error;
+const notes = await createTag(url, { name: 'v1.3.0-notes', target: release.value.commit, message: 'Release 1.3.0', tagger: author }, opts);
+if (!notes.ok) throw notes.error;
+console.log(notes.value.oid, notes.value.commit);  // the tag object, and the commit it names
+```
+
+**Rebase, cherry-pick, revert.** Each replays commits with the same three-way merge and pushes with the old tip as the compare-and-swap.
+
+```js
+// quick-start: rebase-pick-revert
+import { rebaseBranch, cherryPick, revertCommit } from 'ply';
+
+const topic = await createBranch(url, { ref: 'refs/heads/topic', from: 'refs/heads/main' }, opts);
+if (!topic.ok) throw topic.error;
+const onTopic = await commitChanges(url, { ref: 'refs/heads/topic', changes: [{ kind: 'create', path: 'src/topic.ts', content: 'export const topic = 1;\n' }], author, message: 'Add topic' }, opts);
+if (!onTopic.ok) throw onTopic.error;
+const onMain = await commitChanges(url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'CHANGELOG.md', content: '1.3.0\n' }], author, message: 'Changelog' }, opts);
+if (!onMain.ok) throw onMain.error;
+
+const rebased = await rebaseBranch(url, { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: author }, opts);
+if (!rebased.ok) throw rebased.error;  // topic's commits replayed onto main's tip
+
+const picked = await cherryPick(url, { ref: 'refs/heads/main', commit: rebased.value.oid, committer: author }, opts);
+if (!picked.ok) throw picked.error;  // outcome 'ok', or 'empty' when main already has the change (nothing written)
+
+const reverted = await revertCommit(url, { ref: 'refs/heads/main', commit: picked.value.oid, committer: author }, opts);
+if (!reverted.ok) throw reverted.error;  // a 'Revert "Add topic"' commit on main
+```
+
+**History**, first parent, newest first (`git log --first-parent`).
+
+```js
+// quick-start: history
+import { readLog } from 'ply';
+
+const log = await readLog(url, { ref: 'refs/heads/main', limit: 10 }, opts);
+if (!log.ok) throw log.error;
+for (const c of log.value.commits) console.log(c.oid.slice(0, 7), c.parents.length, c.message.split('\n')[0]);
+```
+
+**Check out a whole tree**: as streams (Workers-safe), or into a directory (Node, laid out as `git clone` would, without `.git`).
+
+```js
+// quick-start: checkout
+import { checkoutTree } from 'ply';
+import { checkoutDir } from 'ply/checkout-node';
+
+const tree = await checkoutTree(url, { ref: 'v1.3.0' }, opts);
+if (!tree.ok) throw tree.error;
+for await (const f of tree.value.files) {
+  if (f.stream) console.log(f.path, f.mode, (await new Response(f.stream).arrayBuffer()).byteLength);  // read each stream
+}
+
+const written = await checkoutDir(url, { dir: outDir, ref: 'main' }, opts);
+if (!written.ok) throw written.error;
+console.log(written.value.written.files);  // files written under outDir
+```
+
+**Delete a branch.** Without `expected` the tip ls-refs reports is the compare-and-swap; with `expected: '<oid>'` the delete happens only from that tip. The branch the remote's HEAD names is refused by the server (`push_rejected`).
+
+```js
+// quick-start: delete-branch
+import { deleteBranch } from 'ply';
+
+const gone = await deleteBranch(url, { ref: 'refs/heads/feature', expected: work.value.oid }, opts);
+if (!gone.ok) throw gone.error;  // cas_conflict when feature moved off that commit; not_found when it is gone
+```
+
+**Errors.** `error.code` is a closed union, so a `switch` with `assertNever` in `default` is checked exhaustive by TypeScript (a new code in ply fails your build, not your users). What to do with each:
+
+```js
+// quick-start: errors
+import { assertNever } from 'ply';
+
+const stale = await editFile(url, {
+  ref: 'refs/heads/main', path: 'src/config.ts', find: 'VERSION = "9.9.9"', replace: 'VERSION = "10.0.0"', author, message: 'Bump',
+}, opts);
+if (!stale.ok) {
+  const e = stale.error;
+  switch (e.code) {
+    case 'cas_conflict':  // the ref moved between read and push (editFile already redid it once): read again, redo
+      console.warn('moved', e.expected, e.actual); break;
+    case 'match_count':  // find matched e.matches times, not once: the file is not what you expected
+      console.warn('matches', e.matches); break;
+    case 'not_found':  // e.miss.kind: 'ref' | 'path' | 'repository' | 'head_unborn' | 'commit' | …
+      console.warn('missing', e.miss.kind); break;
+    case 'auth':  // 401/403: the credential is missing, wrong, or lacks write access
+      console.warn('auth'); break;
+    case 'limit_exceeded':  // a limits.* bound (e.what, e.got, e.max): raise it with withLimits, or do less per call
+      console.warn('limit', e.what, e.got, e.max); break;
+    case 'ambiguous':  // the push was sent and may have landed: read the ref back before doing anything else
+      console.warn('unknown outcome'); break;
+    case 'network': case 'timeout': case 'rate_limited': case 'upstream_5xx': case 'protocol': case 'pack_corrupt':
+      console.warn('transient: retry with backoff', e.code); break;  // isRetryable(e) is true for exactly these
+    case 'merge_conflict': case 'not_fast_forward': case 'not_linear': case 'unrelated_histories':
+      console.warn('history needs a human', e.code); break;
+    case 'push_rejected': case 'push_partial': case 'remote_error':  // a hook, branch protection, or the server said no
+      console.warn('refused', e.message); break;
+    case 'bad_request': case 'unsupported': case 'lfs_pointer': case 'http': case 'not_git': case 'aborted': case 'internal':
+      console.warn('fix the call or the setup', e.code, e.message); break;
+    default:
+      assertNever(e);
+  }
+}
+```
+
+`retryPolicy(error)` gives the same advice as data (`yes`, `fresh`, `read`, `no`), and `CODE_DOCS[code]` a one-line description. Every option an entry takes is in its section below.
+
+## More detail
+
 `parsePack` accepts optional `maxObjects` and `maxInflatedTotal`. Omitting them uses `DEFAULT_LIMITS` (`maxPackObjects` 100_000, `maxInflatedTotal` 256 MiB). A limits object that drops either key fails closed (`bad_request`) instead of leaving the cap off. `validateIdent({ name, email, time, tz })` is the only way to build an author, committer, or tagger: `time` is a non-negative safe integer, `tz` is a civil offset (`-1200`..`+1400`), and the result is branded so a spread cannot reach `ident()`. [ply-web](https://github.com/ivarvong/ply-web) also uses these entry-point exports: `validateIdent`, `validateRef`, `validatePath`, `concat`, `limitError`, `isFilterRejection`, `fromAny`, `packParseOpts`.
 
 ```js
-import { editFile, Tracer, jsonlExporter } from 'ply';
+import { editFile, Tracer, consoleExporter } from 'ply';
 
-const tracer = new Tracer({ exporter: await jsonlExporter('trace.jsonl') });
+const tracer = new Tracer({ exporter: consoleExporter() });  // logs each OTLP/JSON export line; or your own (line) => …
+const cache = new Map();  // trees by oid, reused across edits
 const r = await editFile('https://github.com/o/r.git', {
   ref: 'refs/heads/main', path: 'src/config.ts',
   find: 'VERSION = "1.2.3"', replace: 'VERSION = "1.2.4"',
   author: { name: 'bot', email: 'bot@x' }, message: 'bump',
-}, { auth: { token: PAT }, tracer, cache });
+}, { auth: { token: process.env.GIT_TOKEN }, tracer, cache });
 if (!r.ok) {
   switch (r.error.code) { /* exhaustive over Code: every case, no default, then assertNever(r.error) */ }
 }
@@ -124,7 +381,8 @@ Artifacts advertises `fetch=filter` but answers anything other than `blob:none` 
 ## Branches and merging (git operations only)
 
 - `editFile(url, { ref: 'refs/heads/feature', base: 'refs/heads/main', … })` builds the commit on `base`'s head and *creates* `ref` (zero old-oid: the CAS means "must not exist yet").
-- `mergeBranch(url, { ref, from, author })` lands `from` into `ref`: merge-base via commit-only packs, then `up_to_date` / `fast_forward` (empty pack — the server has every object) / a merge commit with parents `[ours, theirs]` from a three-way tree merge (git's trivial-merge rules per directory, only differing subtrees fetched). A file both sides changed is merged **line by line with a port of git's xdiff** (`linemerge.js`: histogram diff with its classic-Myers fallback, group compaction, zealous conflict refinement — what merge-ort runs), so a clean result is byte-for-byte git's; anything else is `merge_conflict` with the paths and a reason per path (`content`, `binary`, `too large to merge`, `undecided`, `possible rename …`). Git changed its compaction in 2.54; `rediff: 'myers'` (default) matches git ≥ 2.54, `'skip'` older git, `'undecided'` conflicts wherever the two differ. `.gitattributes` merge drivers apply when you say which tree supplies them — `attributes: 'ours'` (what `git merge` in a worktree reads), `'theirs'`, `'base'`, a ref or commit (`attr.tree`), or `null` (default: none, as git ≥ 2.46 does in a bare repository): `-merge`/`binary` conflict, `merge=union` keeps both sides. The merge base is git's (`merge-base --all`); a criss-cross history with two bases is refused rather than merged against one. The remaining supersets are renames (no rename detection: the guards conflict instead) and criss-cross. `fastForwardOnly`, `noFastForward`, `signer`, `verify`, `limits.maxMergeBlobBytes` (8 MiB); `deleteBranch` with the CAS oid.
+- `mergeBranch(url, { ref, from, author })` lands `from` into `ref`: merge-base via commit-only packs, then `up_to_date` / `fast_forward` (empty pack — the server has every object) / a merge commit with parents `[ours, theirs]` from a three-way tree merge (git's trivial-merge rules per directory, only differing subtrees fetched). A file both sides changed is merged **line by line with a port of git's xdiff** (`linemerge.js`: histogram diff with its classic-Myers fallback, group compaction, zealous conflict refinement — what merge-ort runs), so a clean result is byte-for-byte git's; anything else is `merge_conflict` with the paths and a reason per path (`content`, `binary`, `too large to merge`, `undecided`, `possible rename …`). Git changed its compaction in 2.54; `rediff: 'myers'` (default) matches git ≥ 2.54, `'skip'` older git, `'undecided'` conflicts wherever the two differ. `.gitattributes` merge drivers apply when you say which tree supplies them — `attributes: 'ours'` (what `git merge` in a worktree reads), `'theirs'`, `'base'`, a ref or commit (`attr.tree`), or `null` (default: none, as git ≥ 2.46 does in a bare repository): `-merge`/`binary` conflict, `merge=union` keeps both sides. The merge base is git's (`merge-base --all`); a criss-cross history with two bases is refused rather than merged against one. The remaining supersets are renames (no rename detection: the guards conflict instead) and criss-cross. `fastForwardOnly`, `noFastForward`, `signer`, `verify`, `limits.maxMergeBlobBytes` (8 MiB).
+- `createBranch(url, { ref, from })`, `deleteBranch(url, { ref, expected? })` and `createTag(url, { name, target, message?, tagger? })` manage refs by URL (`src/refops.ts`): one receive-pack command each, no objects except an annotated tag's tag object. `from`/`target` is a ref name (resolved as `readCommit` resolves one; an annotated tag is peeled) or a 40-hex commit id the server must have. A ref that already exists is `cas_conflict` (`expected` the zero id, `actual` its tip), as a create is in `editFile`; a delete whose `expected` is not the tip is `cas_conflict` before anything is sent; an absent ref is `not_found`; what the server refuses (deleting the branch HEAD names) is its `push_rejected`. `verify: true` reads a created ref back. On a transport you already hold: `fastForward(t, { ref, from, to })` and `deleteRef(t, { ref, oid })`.
 - `rebaseBranch(url, { ref, onto, committer })` replays the branch's linear chain onto `onto`'s head (per commit: three-way of parent-tree / new-tip / commit-tree; author and message kept, committer ours, signatures dropped as git does) and force-updates the branch with its old tip as the CAS; commits that become empty are dropped as git's `--empty=drop` does; `squash: true` makes one commit. `cherryPick` / `revertCommit` are the same primitive with one commit. Merge commits in the chain → `not_linear`. A root commit (no parent) is picked and reverted against the empty tree, as git does. `empty: 'keep'` writes the commit when the result tree is already the target's (`git cherry-pick --keep-redundant-commits`, which also keeps a commit that was empty to start); the result is `outcome: 'kept_empty'`. The default `empty: 'stop'` reports `outcome: 'empty'` and writes nothing. The kept commit is built by the same path as a non-empty one: a cherry-pick keeps the picked author line (name, email, time, zone) and message, a revert uses the reverting author and git's `Revert "<subject>"` message, and the committer stamp is the caller's.
 - One primitive underneath all of it — the three-way tree merge, with the line merge for files both sides changed — with different arguments:
 
@@ -164,14 +422,14 @@ Each layer is testable without the one below it, and `test/bundle.test.js` asser
 
 ## Telemetry conventions (enforced by `test/pure.test.js` and `test/span-contract.test.js`)
 
-- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.commit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`); `git.<op>.<phase>` for their children.
+- Span names: `git.<service> <command>` for wire round trips (`git.upload-pack ls-refs`, `git.upload-pack fetch`, `git.receive-pack`); `git.<op>` for operation roots (`git.edit`, `git.commit`, `git.push_tree`, `git.checkout`, `git.read_log`, `git.merge`, `git.rebase`, `git.cherry_pick`, `git.revert`, `git.branch_create`, `git.branch_delete`, `git.tag_create`); `git.<op>.<phase>` for their children.
 - Attribute keys: dotted lowercase under `git.` `http.` `url.` `server.` `mem.` `error.` `ply.` `exception.`.
 - Every trace root (operation roots and the spans that follow them, below) carries `<name>.outcome` (`ok`, `noop`, `fast_forward`, `cancelled`, …, or the error code).
 - Every wire span carries `git.transport`, `git.request.bytes`, `git.response.bytes`, `server.address`.
 
 ### Telemetry contract
 
-Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, commitChanges, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit), and the wire spans against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
+Span names, kinds, parent/child structure, links and attribute keys (with their value types) are public API. [`test/span-contract.json`](test/span-contract.json) is the contract: `test/span-contract.test.js` runs every operation (editFile, commitChanges, pushTree, checkoutTree, readFile, listTree, readCommit, mergeBranch, rebaseBranch, cherryPick, revertCommit, createBranch, deleteBranch, createTag), and the wire spans against real git and fails, naming each span and key, when what is emitted differs from the file. Values are not part of the contract; repeated siblings (three fetches) are one node, so round-trip counts are not either.
 
 - **Removing or renaming** a span or key, changing a value's type, or moving a span is a **breaking change** for consumers' dashboards and alerts, and is called out as one in the PR and the release notes.
 - **Adding** one also fails the test until the snapshot is regenerated (`npm run test:spans:update`), so every addition is visible in review as a diff of `test/span-contract.json`.

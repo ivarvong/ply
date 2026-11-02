@@ -38,7 +38,6 @@ import { err, getOrElse, map, mapOption, ok } from './result.js';
 import type { Err, Result } from './result.js';
 import { DEFAULT_REF } from './refname.js';
 import type { Refname } from './refname.js';
-import type { Path } from './path.js';
 import { buildCommitObjects, withCommitData } from './commit-build.js';
 import type { Author, Level as BuiltLevel, NewTree as BuiltNewTree } from './commit-build.js';
 
@@ -110,10 +109,11 @@ export const scanAttrs = (st: ScanState): Attrs => ({
 const OID = /^[0-9a-f]{40}$/;
 
 // What the caller names. `ref` defaults to DEFAULT_REF; `base` (a ref or a 40-hex commit id) to `ref`; `committer` (null
-// or left out) is the author; `time` to now (an author's own time wins).
-export type EditSpecConfig = { readonly ref: Refname; readonly base: string | null; readonly committer: Author | null; readonly time: number | null };
+// or left out) is the author; `time` to now (an author's own time wins). `ref` and `path` are plain strings: validateSpec
+// checks them (validatePushRef, validatePath) and the plan carries the branded ref.
+export type EditSpecConfig = { readonly ref: string; readonly base: string | null; readonly committer: Author | null; readonly time: number | null };
 export type EditSpec = Input<EditSpecConfig> & {
-  readonly path: Path;
+  readonly path: string;
   readonly find: string | Uint8Array;
   readonly replace: string | Uint8Array;
   readonly author: Author;
@@ -183,7 +183,7 @@ export function validateSpec(spec: EditSpec, limits: Limits, head: string | null
   if (!find.length) return fail('bad_request', 'find must be non-empty');
   if (head !== null && !OID.test(head)) return fail('bad_request', 'head must be a 40-hex oid');
   // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- a JS caller's ref and path may be any value; String() as before
-  return ok(Object.freeze({ ref: givenRef, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== String(givenRef), path: String(spec.path), comps: comps.value, find, replace, author: person.value, committer: written.value, message, time: person.value.time, head }));
+  return ok(Object.freeze({ ref: pushRef.value, base: resolved, baseOid: baseIsOid, create: !baseIsOid && resolved !== String(givenRef), path: String(spec.path), comps: comps.value, find, replace, author: person.value, committer: written.value, message, time: person.value.time, head }));
 }
 
 // The ref exists and the caller named a commit that is not its tip. Committing there would move the ref off its

@@ -159,6 +159,7 @@ export const SPACES = [
     ],
     cells: '173,664 (66,744 two-name pairs + 106,920 names in a full listing)', observed: 173664, derived: 0,
     oracle: 'git tag -l --sort=version:refname on every unordered pair (two names are versioncmp, including where versionsort.suffix makes it cyclic). Seven suffix lists: the 11,880-name listing equals a sort by compareVersionRefnames. The release between prereleases, and the release before -rc, make versioncmp cyclic, so git qsort of the whole list differs; each disagreed pair is checked again as two names and matches versioncmp (#124). A non-string or a non-byte string is a typed refusal; the byte strings beside those refusals match the same git listing' },
+  curated('customer-e2e', ['test/e2e-customer.test.js'], 'the README quick start executed as written against git http-backend (default fixture; stock: http.receivepack only), then git rev-parse / cat-file / ls-tree / show / merge-tree / write-tree / rev-list / clone + diff -r / fsck --strict after every step; createBranch, deleteBranch, createTag refusals and races against the ref git holds'),
   curated('read', ['test/read.test.js', 'test/log.test.js', 'test/artifacts-compat.test.js'], 'git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56)'),
   { name: 'chunking', status: 'main', kind: 'random', runners: ['test/props.test.js'], run: 'ci',
     axes: [{ tag: 'input', doc: 'random valid and corrupt inputs' }, { tag: 'split', doc: 'random chunk boundaries' }],
@@ -194,6 +195,8 @@ export const DECISIONS = [
   // manual
   { match: 'src/memtree.ts#*:*', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/changes.ts#*:*', space: 'commit-changes', axisTag: 'op' },
+  { match: 'src/refops.ts#*:*', space: 'customer-e2e', axisTag: 'case' },
+  { match: 'src/operation.ts#operation:*', space: 'customer-e2e', axisTag: 'case' },
   { match: 'src/edit.ts#refuseRebase:*', space: 'commit-changes', axisTag: 'op' },
   // refuseRebase is a wrapper, so the call inside resolve is its own site. The generated resolve:* glob would hand it to
   // hostile-server, whose runner never takes a 40-hex base off the tip. That cell is commit-changes.
