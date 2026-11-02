@@ -19,6 +19,7 @@ import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { oracleRediff } from './gitversion.js';
 import { cherryPick, revertCommit, pickCommit } from '../src/rebase.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrapAsync } from './unwrap.js';
 
 const rediff = oracleRediff();
 const BASE_ENV = { ...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -108,7 +109,7 @@ test('cherry-pick --keep-redundant-commits and --allow-empty: commit bytes match
     const d = clone(r.bare, 'main');
     try {
       // `add m` is already the tip: its patch is contained, so the pick is empty
-      const stopped = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'stop' }, opts(new Tracer()));
+      const stopped = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'stop' }, opts(new Tracer())));
       assert.equal(stopped.outcome, 'empty');
       assert.equal(stopped.oid, r.main);
       assert.equal(tip(r.bare, 'main'), r.main);
@@ -117,7 +118,7 @@ test('cherry-pick --keep-redundant-commits and --allow-empty: commit bytes match
       assert.equal(ok(d, ['rev-parse', 'HEAD'], env), r.main);
       ok(d, ['cherry-pick', '--abort'], env);
 
-      const kept = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'keep' }, opts(new Tracer()));
+      const kept = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'keep' }, opts(new Tracer())));
       assert.equal(kept.outcome, 'kept_empty');
       assert.equal(kept.onto, r.main);
       assert.equal(kept.tree, ok(r.bare, ['rev-parse', 'main^{tree}']));
@@ -128,7 +129,7 @@ test('cherry-pick --keep-redundant-commits and --allow-empty: commit bytes match
       // an initially empty commit: --allow-empty and --keep-redundant-commits write the same object
       const d2 = clone(r.bare, 'main');
       try {
-        const emptyStop = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.empty, committer: c }, opts(new Tracer()));
+        const emptyStop = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.empty, committer: c }, opts(new Tracer())));
         assert.equal(emptyStop.outcome, 'empty');
         assert.equal(tip(r.bare, 'main'), kept.oid, 'stop does not move the ref the keep just wrote');
         const allow = gitPick(d2, r.empty, env, '--allow-empty');
@@ -139,7 +140,7 @@ test('cherry-pick --keep-redundant-commits and --allow-empty: commit bytes match
           const again = gitPick(d3, r.empty, env, '--keep-redundant-commits');
           assert.equal(again.status, 0, again.stderr);
           assert.equal(raw(d2, 'HEAD'), raw(d3, 'HEAD'));
-          const emptyKept = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.empty, committer: c, empty: 'keep' }, opts(new Tracer()));
+          const emptyKept = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.empty, committer: c, empty: 'keep' }, opts(new Tracer())));
           assert.equal(emptyKept.outcome, 'kept_empty');
           assert.equal(raw(r.bare, emptyKept.oid), raw(d2, 'HEAD'));
         } finally { rmSync(d3, { recursive: true, force: true }); }
@@ -153,21 +154,21 @@ test('revert of a change already absent: stop writes nothing; keep matches git c
     const env = envOf(a, c);
     const r = contentRepo();
     // first revert removes m.txt; the second is empty
-    const first = await revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, ...who(a, c) }, opts(new Tracer()));
+    const first = await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, ...who(a, c) }, opts(new Tracer())));
     assert.equal(first.outcome, 'ok');
     const d = clone(r.bare, 'main');
     try {
       gitRevert(d, r.main, env, false);
       assert.equal(raw(r.bare, first.oid), raw(d, 'HEAD'));
       const before = tip(r.bare, 'main');
-      const stopped = await revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, ...who(a, c), empty: 'stop' }, opts(new Tracer()));
+      const stopped = await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, ...who(a, c), empty: 'stop' }, opts(new Tracer())));
       assert.equal(stopped.outcome, 'empty');
       assert.equal(stopped.oid, before);
       assert.equal(tip(r.bare, 'main'), before);
       gitRevert(d, r.main, env, false);
       assert.equal(ok(d, ['rev-parse', 'HEAD'], env), first.oid);
       // git 2.43's empty revert exits without a sequencer (REVERT_HEAD is absent); MERGE_MSG is what --allow-empty reads.
-      const kept = await revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, ...who(a, c), empty: 'keep' }, opts(new Tracer()));
+      const kept = await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: r.main, ...who(a, c), empty: 'keep' }, opts(new Tracer())));
       assert.equal(kept.outcome, 'kept_empty');
       assert.equal(kept.tree, ok(r.bare, ['rev-parse', `${before}^{tree}`]));
       gitRevert(d, r.main, env, true);
@@ -182,12 +183,12 @@ test('already-applied rename: keep matches git cherry-pick --keep-redundant-comm
   const r = renameRepo();
   const d = clone(r.bare, 'dst');
   try {
-    const stopped = await cherryPick(r.url, { ref: 'refs/heads/dst', commit: r.renamed, committer: c }, opts(new Tracer()));
+    const stopped = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/dst', commit: r.renamed, committer: c }, opts(new Tracer())));
     assert.equal(stopped.outcome, 'empty');
     const plain = gitPick(d, r.renamed, env);
     assert.notEqual(plain.status, 0, 'git without the flag must not write the empty rename pick');
     ok(d, ['cherry-pick', '--abort'], env);
-    const kept = await cherryPick(r.url, { ref: 'refs/heads/dst', commit: r.renamed, committer: c, empty: 'keep' }, opts(new Tracer()));
+    const kept = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/dst', commit: r.renamed, committer: c, empty: 'keep' }, opts(new Tracer())));
     assert.equal(kept.outcome, 'kept_empty');
     const g = gitPick(d, r.renamed, env, '--keep-redundant-commits');
     assert.equal(g.status, 0, g.stderr);
@@ -202,24 +203,24 @@ test('root commit: cherry-pick and revert match git, including an empty keep ont
     const onto = clone(r.bare, 'other');
     const down = clone(r.bare, 'main');
     try {
-      const picked = await cherryPick(r.url, { ref: 'refs/heads/other', commit: r.rootOid, committer: c }, opts(new Tracer()));
+      const picked = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/other', commit: r.rootOid, committer: c }, opts(new Tracer())));
       assert.equal(picked.outcome, 'ok');
       const g = gitPick(onto, r.rootOid, env);
       assert.equal(g.status, 0, g.stderr);
       assert.equal(raw(r.bare, picked.oid), raw(onto, 'HEAD'));
-      const reverted = await revertCommit(r.url, { ref: 'refs/heads/other', commit: r.rootOid, ...who(a, c) }, opts(new Tracer()));
+      const reverted = await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/other', commit: r.rootOid, ...who(a, c) }, opts(new Tracer())));
       assert.equal(reverted.outcome, 'ok');
       gitRevert(onto, r.rootOid, env, false);
       assert.equal(raw(r.bare, reverted.oid), raw(onto, 'HEAD'));
 
       // the root's patch is already in main: stop writes nothing, keep matches --keep-redundant-commits
-      const stopped = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.rootOid, committer: c, empty: 'stop' }, opts(new Tracer()));
+      const stopped = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.rootOid, committer: c, empty: 'stop' }, opts(new Tracer())));
       assert.equal(stopped.outcome, 'empty');
       assert.equal(tip(r.bare, 'main'), r.main);
       const plain = gitPick(down, r.rootOid, env);
       assert.notEqual(plain.status, 0);
       ok(down, ['cherry-pick', '--abort'], env);
-      const kept = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.rootOid, committer: c, empty: 'keep' }, opts(new Tracer()));
+      const kept = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.rootOid, committer: c, empty: 'keep' }, opts(new Tracer())));
       assert.equal(kept.outcome, 'kept_empty');
       const gk = gitPick(down, r.rootOid, env, '--keep-redundant-commits');
       assert.equal(gk.status, 0, gk.stderr);
@@ -234,7 +235,7 @@ test('a caller message on an empty keep replaces git\'s message; the author line
   const d = clone(r.bare, 'main');
   try {
     const env = envOf(ORIG, c);
-    const kept = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'keep', message: 'custom\n' }, opts(new Tracer()));
+    const kept = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'keep', message: 'custom\n' }, opts(new Tracer())));
     assert.equal(kept.outcome, 'kept_empty');
     const g = gitPick(d, r.main, env, '--keep-redundant-commits');
     assert.equal(g.status, 0, g.stderr);
@@ -248,7 +249,7 @@ test('a caller message on an empty keep replaces git\'s message; the author line
 test('empty other than stop or keep is bad_request; a merge commit is not_linear', async () => {
   const r = contentRepo();
   const c = PAIRS[0][1];
-  await assert.rejects(pickCommit(r.url, { ref: 'refs/heads/main', commit: r.feat, committer: c, empty: 'drop' }, opts(new Tracer())), e => e.code === 'bad_request' && e.what === 'empty');
+  await assert.rejects(unwrapAsync(pickCommit(r.url, { ref: 'refs/heads/main', commit: r.feat, committer: c, empty: 'drop' }, opts(new Tracer()))), e => e.code === 'bad_request' && e.what === 'empty');
   assert.equal(tip(r.bare, 'main'), r.main);
   // a merge: two parents, refused before any transplant. git cherry-pick without -m refuses it too.
   const w = join(root, 'merge-src'); mkdirSync(w);
@@ -263,7 +264,7 @@ test('empty other than stop or keep is bad_request; a merge commit is not_linear
   ok(w, ['push', '-q', r.bare, 'HEAD:refs/heads/main'], env);
   const d = clone(r.bare, 'main');
   try {
-    await assert.rejects(cherryPick(r.url, { ref: 'refs/heads/main', commit: merge, committer: c }, opts(new Tracer())), e => e.code === 'not_linear');
+    await assert.rejects(unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: merge, committer: c }, opts(new Tracer()))), e => e.code === 'not_linear');
     const g = gitPick(d, merge, envOf(PAIRS[0][0], c));
     assert.notEqual(g.status, 0);
     assert.match(`${g.stderr}`, /is a merge but no -m option was given/u);
@@ -274,14 +275,14 @@ test('spans record empty stop or keep, and a kept commit carries the same result
   const r = contentRepo();
   const c = PAIRS[0][1];
   const stopEx = arrayExporter();
-  const stopped = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'stop' }, opts(new Tracer({ exporter: stopEx })));
+  const stopped = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'stop' }, opts(new Tracer({ exporter: stopEx }))));
   assert.equal(stopped.outcome, 'empty');
   const stopRoot = stopEx.lines.flatMap(flattenLine).find(s => s.name === 'git.cherry_pick');
   assert.equal(stopRoot.attrs['git.cherry_pick.empty'], 'stop');
   assert.equal(stopRoot.attrs['git.cherry_pick.outcome'], 'empty');
   assert.equal(stopRoot.attrs['git.cherry_pick.new'], undefined);
   const keepEx = arrayExporter();
-  const kept = await cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'keep' }, opts(new Tracer({ exporter: keepEx })));
+  const kept = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: r.main, committer: c, empty: 'keep' }, opts(new Tracer({ exporter: keepEx }))));
   assert.equal(kept.outcome, 'kept_empty');
   const keepRoot = keepEx.lines.flatMap(flattenLine).find(s => s.name === 'git.cherry_pick');
   assert.equal(keepRoot.attrs['git.cherry_pick.empty'], 'keep');

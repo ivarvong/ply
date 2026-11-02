@@ -14,6 +14,7 @@ import { editFile } from '../src/edit.js';
 import { generateSigner } from '../src/sign.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { oracleRediff } from './gitversion.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 const rediff = oracleRediff();
 
 let root, cleanup, srv, n = 0;
@@ -39,9 +40,9 @@ const T = () => ({ tracer: new Tracer(), rediff });
 
 test('pure: linearChain and carriedExtra', () => {
   const c = new Map([['3', { parents: ['2'], tree: 't3' }], ['2', { parents: ['1'], tree: 't2' }], ['1', { parents: ['0'], tree: 't1' }], ['m', { parents: ['3', 'x'], tree: 'tm' }]]);
-  assert.deepEqual(linearChain(c, '3', '0').map(x => x.oid), ['1', '2', '3']);
-  assert.deepEqual(linearChain(c, '3', '3'), []);
-  assert.throws(() => linearChain(c, 'm', '0'), e => e.code === 'not_linear');
+  assert.deepEqual(unwrap(linearChain(c, '3', '0')).map(x => x.oid), ['1', '2', '3']);
+  assert.deepEqual(unwrap(linearChain(c, '3', '3')), []);
+  assert.throws(() => unwrap(linearChain(c, 'm', '0')), e => e.code === 'not_linear');
   assert.deepEqual(carriedExtra(['encoding utf8', 'gpgsig -----BEGIN', ' abc', ' def', 'x y']), ['encoding utf8', 'x y']);
 });
 
@@ -55,7 +56,7 @@ test('rebase: three commits onto a moved main — trees, authors, messages equal
   // git's answer
   const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitLog = log(d, 'origin/main..HEAD'); rmSync(d, { recursive: true, force: true });
   const ex = arrayExporter();
-  const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { tracer: new Tracer({ exporter: ex }) });
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { tracer: new Tracer({ exporter: ex }) }));
   assert.equal(res.outcome, 'rebase'); assert.equal(res.commits, 3); assert.equal(res.oldTip, tip); assert.equal(res.onto, mainNow); assert.equal(res.base, base);
   assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), res.oid);
   const ours = log(r.bare, `main..feat`);
@@ -65,9 +66,9 @@ test('rebase: three commits onto a moved main — trees, authors, messages equal
   assert.deepEqual(fsckProblems(r.bare), []);
   const rootSpan = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.rebase'); assert.equal(rootSpan.attrs['git.rebase.commits'], 3);
   // up to date now; and a stale view of the tip is refused by the CAS
-  assert.equal((await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T())).outcome, 'up_to_date');
+  assert.equal((await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T()))).outcome, 'up_to_date');
   // land it: fast-forward
-  const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: committer }, T());
+  const m = await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: committer }, T()));
   assert.equal(m.outcome, 'fast_forward'); assert.equal(ok(sh(r.bare, ['rev-parse', 'main'])), res.oid);
   assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:d/x.txt'])), 'x-feat'); assert.equal(sh(r.bare, ['cat-file', '-e', 'main:b.txt']).status !== 0, true);
 });
@@ -79,17 +80,17 @@ test('rebase: conflict where git conflicts; branch untouched; squash produces on
   const tip = commitOn(r, 'feat', 'feat', { 'c.txt': 'c\n' }, 'feat 2');
   commitOn(r, 'main', 'main', { 'a.txt': 'a-main\n' }, 'main');
   const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); assert.notEqual(sh(d, ['rebase', '-q', 'origin/main']).status, 0, 'git conflicts too'); rmSync(d, { recursive: true, force: true });
-  await assert.rejects(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T()), e => e.code === 'merge_conflict' && e.conflicts[0] === 'a.txt' && e.replayed.length === 0);
+  await assert.rejects(unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T())), e => e.code === 'merge_conflict' && e.conflicts[0] === 'a.txt' && e.replayed.length === 0);
   assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), tip, 'untouched');
   // resolve on main's side by taking feat's a.txt, then squash
   commitOn(r, 'main', 'main', { 'a.txt': 'a-feat\n' }, 'main takes feat a');
   const d2 = clone(r.bare); ok(sh(d2, ['checkout', '-q', 'feat'])); ok(sh(d2, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d2, 'HEAD'); rmSync(d2, { recursive: true, force: true });
-  const s = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash: true, message: 'feat squashed' }, T());
+  const s = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash: true, message: 'feat squashed' }, T()));
   assert.equal(s.outcome, 'squash'); assert.equal(treeOf(r.bare, 'feat'), gitTree, 'squash tree == git rebase tip tree');
   assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..feat'])), '1'); assert.equal(ok(sh(r.bare, ['log', '-1', '--format=%s', 'feat'])), 'feat squashed');
   // a branch strictly behind main: rebase makes it equal main
   ok(sh(r.work, ['push', '-q', r.bare, `${ok(sh(r.bare, ['rev-parse', 'main~1']))}:refs/heads/old`]));
-  const b = await rebaseBranch(r.url, { ref: 'refs/heads/old', onto: 'refs/heads/main', committer }, T());
+  const b = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/old', onto: 'refs/heads/main', committer }, T()));
   assert.equal(b.outcome, 'fast_forward'); assert.equal(ok(sh(r.bare, ['rev-parse', 'old'])), ok(sh(r.bare, ['rev-parse', 'main'])));
   assert.deepEqual(fsckProblems(r.bare), []);
 });
@@ -104,7 +105,7 @@ test('rebase and squash when the merge base sits exactly at the first window\'s 
     let tip = base, main = base;
     for (let i = 1; i <= n; i++) { tip = commitOn(r, 'feat', tip, { [`t${i}.txt`]: `${i}\n` }, `feat ${i}`); main = commitOn(r, 'main', main, { [`m${i}.txt`]: `${i}\n` }, `main ${i}`); }
     const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); const gitLog = log(d, 'origin/main..HEAD'); rmSync(d, { recursive: true, force: true });
-    const res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash }, T());
+    const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash }, T()));
     assert.equal(res.outcome, squash ? 'squash' : 'rebase', `n=${n}`); assert.equal(res.base, base); assert.equal(res.commits, n);
     assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), res.oid);
     assert.equal(treeOf(r.bare, 'feat'), gitTree, `${squash ? 'squash' : 'rebase'}: tip tree == git rebase`);
@@ -121,21 +122,21 @@ test('cherry-pick and revert: trees equal git; signature not carried; signed res
   commitOn(r, 'main', 'main', { 'c.txt': 'c\n' }, 'main moved');
   const d = clone(r.bare); ok(sh(d, ['cherry-pick', fix])); const gitPick = treeOf(d, 'HEAD'); ok(sh(d, ['revert', '--no-edit', 'HEAD'])); const gitRevert = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
   const { signer } = await generateSigner();
-  const p = await cherryPick(r.url, { ref: 'refs/heads/main', commit: fix, committer }, { tracer: new Tracer(), signer });
+  const p = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: fix, committer }, { tracer: new Tracer(), signer }));
   assert.equal(p.outcome, 'ok'); assert.equal(p.tree, gitPick); assert.equal(ok(sh(r.bare, ['rev-parse', 'main'])), p.oid);
   assert.equal(ok(sh(r.bare, ['log', '-1', '--format=%an|%s', 'main'])), 'w|the fix', 'author and message kept');
   assert.match(ok(sh(r.bare, ['cat-file', 'commit', p.oid])), /gpgsig -----BEGIN SSH SIGNATURE/);
-  const rv = await revertCommit(r.url, { ref: 'refs/heads/main', commit: p.oid, committer }, T());
+  const rv = await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: p.oid, committer }, T()));
   assert.equal(rv.outcome, 'ok'); assert.equal(rv.tree, gitRevert);
   assert.match(ok(sh(r.bare, ['log', '-1', '--format=%s', 'main'])), /^Revert "the fix"/);
-  assert.equal((await cherryPick(r.url, { ref: 'refs/heads/main', commit: p.oid, committer }, T())).outcome, 'ok', 'picking the fix again after its revert applies again');
+  assert.equal((await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: p.oid, committer }, T()))).outcome, 'ok', 'picking the fix again after its revert applies again');
   assert.equal(treeOf(r.bare, 'main'), gitPick);
   // picking a commit whose change is already present is empty
-  assert.equal((await cherryPick(r.url, { ref: 'refs/heads/main', commit: fix, committer }, T())).outcome, 'empty');
+  assert.equal((await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: fix, committer }, T()))).outcome, 'empty');
   // conflict: pick a commit that rewrote a.txt onto a main that also rewrote it
   const clash = commitOn(r, 'feat', 'feat', { 'a.txt': 'feat-a\n' }, 'clash');
   commitOn(r, 'main', 'main', { 'a.txt': 'main-a\n' }, 'main a');
-  await assert.rejects(cherryPick(r.url, { ref: 'refs/heads/main', commit: clash, committer }, T()), e => e.code === 'merge_conflict' && e.conflicts.includes('a.txt'));
+  await assert.rejects(unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: clash, committer }, T())), e => e.code === 'merge_conflict' && e.conflicts.includes('a.txt'));
   assert.deepEqual(fsckProblems(r.bare), []);
 });
 
@@ -157,12 +158,12 @@ test('property: line-level edits to the same files on both sides — rebase and 
     // rebase
     const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat'])); const gr = sh(d, ['rebase', '-q', 'origin/main']);
     const gitLog = gr.status === 0 ? log(d, 'origin/main..HEAD') : null; rmSync(d, { recursive: true, force: true });
-    let res = null, err = null; try { res = await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T()); } catch (e) { if (e.code !== 'merge_conflict') { if (process.env.REBASE_DEBUG) console.log(i, e.hookOutput, e.report); throw e; } err = e; }
+    let res = null, err = null; try { res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, T())); } catch (e) { if (e.code !== 'merge_conflict') { if (process.env.REBASE_DEBUG) console.log(i, e.hookOutput, e.report); throw e; } err = e; }
     if (res) { assert.ok(gitLog, `case ${i}: we rebased cleanly but git conflicts`); assert.deepEqual(log(r.bare, 'main..feat'), gitLog, `case ${i}: per-commit trees == git rebase`); stats.rebased++; }
     else if (gitLog) stats.conservative++; else stats.conflict++;
     // cherry-pick the first feat commit onto main
     const d2 = clone(r.bare); const gp = sh(d2, ['cherry-pick', f1]); const gitPick = gp.status === 0 ? treeOf(d2, 'HEAD') : null; const gitEmpty = gp.status !== 0 && /empty/.test(gp.stderr + gp.stdout); rmSync(d2, { recursive: true, force: true });
-    let p = null; try { p = await cherryPick(r.url, { ref: 'refs/heads/main', commit: f1, committer }, T()); } catch (e) { if (e.code !== 'merge_conflict') throw e; }
+    let p = null; try { p = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: f1, committer }, T())); } catch (e) { if (e.code !== 'merge_conflict') throw e; }
     if (p?.outcome === 'ok') { assert.equal(p.tree, gitPick, `case ${i}: cherry-pick tree == git`); stats.picked++; }
     else if (p?.outcome === 'empty') assert.ok(gitEmpty, `case ${i}: we say empty, git does not`);
     else if (gitPick) stats.conservative++;
@@ -181,8 +182,8 @@ test('attributes in cherry-pick and rebase: \'ours\' is the tree being built on,
   commitOn(r, 'main', 'main', { 'CHANGELOG': L(3) + 'main entry\n', '.gitattributes': 'CHANGELOG merge=union\n' }, 'main entry + union');
   // git, in a worktree on main (attributes from the checkout = ours)
   const d = clone(r.bare); const gp = sh(d, ['cherry-pick', pick]); assert.equal(gp.status, 0, gp.stderr); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
-  await assert.rejects(cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer }, T()), e => e.code === 'merge_conflict', 'without attributes the appends clash');
-  const p = await cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer }, { ...T(), attributes: 'ours' });
+  await assert.rejects(unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer }, T())), e => e.code === 'merge_conflict', 'without attributes the appends clash');
+  const p = await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer }, { ...T(), attributes: 'ours' }));
   assert.equal(p.tree, gitTree, 'union cherry-pick tree == git cherry-pick');
   // rebase: feat (one commit appending) onto main, attributes from the tree being built on
   const r2 = repo();
@@ -191,7 +192,7 @@ test('attributes in cherry-pick and rebase: \'ours\' is the tree being built on,
   commitOn(r2, 'feat', 'feat', { 'CHANGELOG': L(3) + 'feat 1\nfeat 2\n' }, 'f2');
   commitOn(r2, 'main', 'main', { 'CHANGELOG': L(3) + 'main 1\n' }, 'm1');
   const d2 = clone(r2.bare); ok(sh(d2, ['checkout', '-q', 'feat'])); const gr = sh(d2, ['rebase', '-q', 'origin/main']); assert.equal(gr.status, 0, gr.stderr); const gitLog = log(d2, 'origin/main..HEAD'); rmSync(d2, { recursive: true, force: true });
-  const rb = await rebaseBranch(r2.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), attributes: 'ours' });
+  const rb = await unwrapAsync(rebaseBranch(r2.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), attributes: 'ours' }));
   assert.equal(rb.outcome, 'rebase'); assert.deepEqual(log(r2.bare, 'main..feat'), gitLog, 'per-commit trees == git rebase with union');
 });
 
@@ -200,9 +201,9 @@ test('end to end: edit on a branch, main moves, rebase, fast-forward land, delet
   commitFiles(r.work, r.bare, { 'README.md': 'hello MARK\n', 'other.txt': 'o\n' }, 'base');
   const e = await editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'WORLD', ref: 'refs/heads/ply/x', base: 'refs/heads/main', author: committer, message: 'edit' }, T());
   commitOn(r, 'main', 'main', { 'other.txt': 'o2\n' }, 'main moved');
-  const rb = await rebaseBranch(r.url, { ref: 'refs/heads/ply/x', onto: 'refs/heads/main', committer }, T());
+  const rb = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/ply/x', onto: 'refs/heads/main', committer }, T()));
   assert.equal(rb.outcome, 'rebase'); assert.equal(rb.commits, 1);
-  const m = await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/ply/x', author: committer }, T());
+  const m = await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/ply/x', author: committer }, T()));
   assert.equal(m.outcome, 'fast_forward');
   assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:README.md'])), 'hello WORLD'); assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:other.txt'])), 'o2');
   assert.equal(ok(sh(r.bare, ['log', '--format=%s', '-3', 'main'])).split('\n').join('|'), 'edit|main moved|base', 'linear history');

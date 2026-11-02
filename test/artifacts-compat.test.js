@@ -17,7 +17,7 @@ import { classifyReport, decideOutcome } from '../src/push.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const filterOf = body => /filter ([^\n]+)\n/.exec(Buffer.from(body).toString('latin1'))?.[1] ?? null;
@@ -110,19 +110,19 @@ test('blob:none fallback: merge, rebase, cherry-pick, revert trees equal git mer
     git(work, ['checkout', '-q', 'main']);
     const m1 = commitTo('refs/heads/main', { 'y.txt': 'y1 main\n' }, 'main');
     const opts = () => ({ tracer: new Tracer(), quirks });
-    const mg = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge' }, opts());
+    const mg = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge' }, opts()));
     assert.equal(mg.outcome, 'merge');
     assert.equal(mg.tree, git(bare, ['merge-tree', '--write-tree', m1, f1]).trim().split('\n')[0]);
     assert.equal(tree(bare, 'main'), mg.tree);
     // rebase feat2 (one commit on base) onto main
     git(work, ['checkout', '-q', '-b', 'feat2', base]); const f2 = commitTo('refs/heads/feat2', { 'd/z.txt': 'z feat2\n' }, 'feat2');
-    const rb = await rebaseBranch(url, { ref: 'refs/heads/feat2', onto: 'refs/heads/main', committer: A }, opts());
+    const rb = await unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/feat2', onto: 'refs/heads/main', committer: A }, opts()));
     assert.equal(rb.outcome, 'rebase');
     assert.equal(tree(bare, 'feat2'), git(bare, ['merge-tree', '--write-tree', `--merge-base=${base}`, mg.oid, f2]).trim().split('\n')[0]);
     // cherry-pick f2 onto main, then revert it
-    const cp = await cherryPick(url, { ref: 'refs/heads/main', commit: f2, committer: A }, opts());
+    const cp = await unwrapAsync(cherryPick(url, { ref: 'refs/heads/main', commit: f2, committer: A }, opts()));
     assert.equal(cp.tree, git(bare, ['merge-tree', '--write-tree', `--merge-base=${base}`, mg.oid, f2]).trim().split('\n')[0]);
-    const rv = await revertCommit(url, { ref: 'refs/heads/main', commit: cp.oid, committer: A }, opts());
+    const rv = await unwrapAsync(revertCommit(url, { ref: 'refs/heads/main', commit: cp.oid, committer: A }, opts()));
     assert.equal(rv.tree, mg.tree, 'revert restores the pre-pick tree');
     assert.deepEqual(fsckProblems(bare), []);
     assert.equal(quirks.treeFilter, 'blob:none');

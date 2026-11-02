@@ -13,7 +13,7 @@ import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const cell = JSON.parse(process.argv[2]);
 const opts = { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) };
@@ -66,7 +66,7 @@ const ops = {
     return { commit: r.newCommit, noop: r.noop };
   },
   async merge() {
-    const r = await mergeBranch(cell.url, { ref: 'refs/heads/main', from: cell.from, author, message: 'sweep merge', time: when }, opts);
+    const r = await unwrapAsync(mergeBranch(cell.url, { ref: 'refs/heads/main', from: cell.from, author, message: 'sweep merge', time: when }, opts));
     return { outcome: r.outcome, base: r.base };
   },
   async pack() {

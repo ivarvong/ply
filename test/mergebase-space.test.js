@@ -40,6 +40,7 @@ import { createTransport } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
+import { unwrapAsync } from './unwrap.js';
 
 const rediff = oracleRediff();
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
@@ -133,9 +134,9 @@ async function cell(S, R, server, op, seed, git) {
   const url = `${proxy.url}/${R.name}.git`; const limits = withLimits({ requestTimeoutMs: 5000, maxMergeDepth: CAP });
   let res = null, err = null;
   try {
-    if (op === 'mergeBase') res = await mergeBase(createTransport(url, { tracer: new Tracer(), limits }), ours, theirs, { maxDepth: CAP });
-    else if (op === 'mergeBranch') res = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { tracer: new Tracer(), limits, rediff });
-    else res = await rebaseBranch(url, { ref: 'refs/heads/main', onto: 'refs/heads/feat', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { tracer: new Tracer(), limits, rediff });
+    if (op === 'mergeBase') res = await unwrapAsync(mergeBase(createTransport(url, { tracer: new Tracer(), limits }), ours, theirs, { maxDepth: CAP }));
+    else if (op === 'mergeBranch') res = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' } }, { tracer: new Tracer(), limits, rediff }));
+    else res = await unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/main', onto: 'refs/heads/feat', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { tracer: new Tracer(), limits, rediff }));
   } catch (e) { err = e; }
   await proxy.close();
   const p = []; const lied = M.lied > 0;
@@ -238,8 +239,8 @@ test('pickCommit: parents 0–3 × cherry-pick/revert, against git', { timeout: 
       try {
         const spec = { ref: 'refs/heads/main', commit: commitOid, committer: who, time: 1700000000 };
         ply = op === 'cherry'
-          ? await cherryPick(url, spec, { tracer: new Tracer(), limits, rediff })
-          : await revertCommit(url, spec, { tracer: new Tracer(), limits, rediff });
+          ? await unwrapAsync(cherryPick(url, spec, { tracer: new Tracer(), limits, rediff }))
+          : await unwrapAsync(revertCommit(url, spec, { tracer: new Tracer(), limits, rediff }));
       } catch (e) { err = e; }
       const where = `${op} parents=${n}`;
       const head = out(bare, ['rev-parse', 'refs/heads/main']);

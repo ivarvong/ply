@@ -37,7 +37,7 @@ import {
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
-import { unwrap, errOf } from './unwrap.js';
+import { errOf, unwrap, unwrapAsync } from './unwrap.js';
 
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
 const oidBytes = n => Uint8Array.from({ length: OID_BYTES }, () => n);
@@ -1942,17 +1942,17 @@ test('a missing ref is not_found with a ref miss, for attributes and for rebase'
   const gone = { kind: 'ref', ref: 'refs/heads/gone', candidates: ['refs/heads/gone'] };
   s.t.refs.set('refs/heads/main', s.oid('root'));
   s.t.refs.set('refs/heads/feat', s.oid('root'));
-  assert.match(await attributeTree(s.t, 'refs/heads/main', {}), /^[0-9a-f]{40}$/);
-  const same = await mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+  assert.match(await unwrapAsync(attributeTree(s.t, 'refs/heads/main', {})), /^[0-9a-f]{40}$/);
+  const same = await unwrapAsync(mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/feat', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }));
   assert.equal(same.outcome, 'up_to_date');
-  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/gone', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  await assert.rejects(unwrapAsync(mergeBranch('stub://graph', { ref: 'refs/heads/main', from: 'refs/heads/gone', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer })), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
   s.t.refs.delete('refs/heads/main');
   s.t.refs.delete('refs/heads/feat');
-  await assert.rejects(attributeTree(s.t, 'refs/heads/gone', {}), e => e.code === 'not_found' && e.message === 'attributes ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === gone.ref && e.miss.candidates.length === 1 && e.miss.candidates[0] === gone.ref);
-  await assert.rejects(mergeBranch('stub://graph', { ref: 'refs/heads/gone', from: 'refs/heads/main', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone' && e.miss.candidates[0] === 'refs/heads/gone');
-  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
+  await assert.rejects(unwrapAsync(attributeTree(s.t, 'refs/heads/gone', {})), e => e.code === 'not_found' && e.message === 'attributes ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === gone.ref && e.miss.candidates.length === 1 && e.miss.candidates[0] === gone.ref);
+  await assert.rejects(unwrapAsync(mergeBranch('stub://graph', { ref: 'refs/heads/gone', from: 'refs/heads/main', author: { name: 'm', email: 'm@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer })), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss?.kind === 'ref' && e.miss.ref === 'refs/heads/gone' && e.miss.candidates[0] === 'refs/heads/gone');
+  await assert.rejects(unwrapAsync(rebaseBranch('stub://graph', { ref: 'refs/heads/gone', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer })), e => e.code === 'not_found' && e.message === 'ref refs/heads/gone not found' && e.miss.kind === 'ref' && e.miss.ref === 'refs/heads/gone');
   s.t.refs.set('refs/heads/feat', s.oid('root'));
-  await assert.rejects(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }), e => e.code === 'not_found' && e.message === 'ref refs/heads/main not found' && e.miss.ref === 'refs/heads/main' && e.miss.candidates[0] === 'refs/heads/main');
+  await assert.rejects(unwrapAsync(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer })), e => e.code === 'not_found' && e.message === 'ref refs/heads/main not found' && e.miss.ref === 'refs/heads/main' && e.miss.candidates[0] === 'refs/heads/main');
 });
 
 test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was only named, and a cut below two candidates deepens', async () => {
@@ -1961,27 +1961,27 @@ test('#41/#42: the merge-base window\'s cut — rebase fetches a base it was onl
   for (const n of [8, 7]) {
     const s = graphServer({ root: [], ...chain('f', n, 'root'), ...chain('m', n, 'root') });
     s.t.refs.set('refs/heads/feat', s.oid('f1')); s.t.refs.set('refs/heads/main', s.oid('m1'));
-    const res = await rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer });
+    const res = await unwrapAsync(rebaseBranch('stub://graph', { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: { name: 'r', email: 'r@x' }, time: 1700000000 }, { transport: s.t, tracer: s.t.tracer }));
     assert.deepEqual([res.outcome, res.commits, res.base, res.onto], ['rebase', n, s.oid('root'), s.oid('m1')]);
     assert.equal(s.t.refs.get('refs/heads/feat'), res.oid, 'the branch was force-updated to the new tip');
     assert.equal(s.t.requests.filter(q => q.want === s.oid('root') && q.deepen === 1).length, n === 8 ? 1 : 0, 'base fetched once at the cut (n=8), not when the window held it (n=7)');
   }
   // #42: a,b → [c, z]; c → p1..p6 → x → z. Depth 8 cuts x: {c, z} looks criss-cross; one more window shows z below c.
   { const s = graphServer({ a: ['c', 'z'], b: ['c', 'z'], ...chain('p', 6, 'x'), c: ['p1'], x: ['z'], z: [] });
-    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    const res = await unwrapAsync(mergeBase(s.t, s.oid('a'), s.oid('b')));
     assert.deepEqual([res.base, res.bases, res.depth], [s.oid('c'), [s.oid('c')], 16]); }
   // a true criss-cross with nothing cut below it is final at the first window (two bases, not a deeper search)
   { const s = graphServer({ a: ['x', 'y'], b: ['y', 'x'], x: ['r'], y: ['r'], r: [] });
-    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    const res = await unwrapAsync(mergeBase(s.t, s.oid('a'), s.oid('b')));
     assert.deepEqual([res.base, res.bases, res.depth], [null, [s.oid('x'), s.oid('y')].sort(), 8]); }
   // ...nor over deep shared history: a cut both bases reach cannot join them (the research rule deepened to the cap here:
   // limit_exceeded where git answers two bases)
   { const s = graphServer({ a: ['x', 'y'], b: ['y', 'x'], x: ['h1'], y: ['h1'], ...chain('h', 40, 'r'), r: [] });
-    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'), { maxDepth: 16 });
+    const res = await unwrapAsync(mergeBase(s.t, s.oid('a'), s.oid('b'), { maxDepth: 16 }));
     assert.deepEqual([res.base, res.bases, res.depth], [null, [s.oid('x'), s.oid('y')].sort(), 8]); }
   // a single base over a settled cut stays final at the first window
   { const s = graphServer({ a: ['c'], b: ['c'], ...chain('p', 9, 'r'), c: ['p1'], r: [] });
-    const res = await mergeBase(s.t, s.oid('a'), s.oid('b'));
+    const res = await unwrapAsync(mergeBase(s.t, s.oid('a'), s.oid('b')));
     assert.deepEqual([res.base, res.depth], [s.oid('c'), 8]); }
   const G = o => new Map(Object.entries(o).map(([k, parents]) => [k, { parents }]));
   assert.deepEqual(bestBases(G({ a: ['c', 'z'], b: ['c', 'z'], c: ['x'], z: [] }), 'a', 'b'), { best: ['c', 'z'], truncated: true });

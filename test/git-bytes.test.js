@@ -21,7 +21,7 @@ import { mergeBranch } from '../src/merge.js';
 import { decodeBytes, encodeBytes } from '../src/bytes.js';
 import { isPlyCode } from '../src/errors.js';
 import { Tracer } from '../src/otel.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const O = (extra = {}) => ({ tracer: new Tracer(), ...extra });
 
@@ -198,7 +198,7 @@ const OPERATIONS = {
     if (r.status !== 0 && r.status !== 1) throw new Error(`git merge-tree: ${r.stderr}`);
     const git = r.status === 0 ? { clean: true, tree: r.stdout.toString().split('\n')[0], message: B(unwrap(encodeBytes(message)), '\n').toString('hex'), author: bytesOf(author.name).toString('hex') } : { clean: false };
     return { git, ply: async () => {
-      let m; try { m = await mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' })); } catch (e) { if (e.code === 'merge_conflict') return { clean: false }; throw e; }
+      let m; try { m = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' }))); } catch (e) { if (e.code === 'merge_conflict') return { clean: false }; throw e; }
       const c = catCommit(fx.bare, 'refs/heads/main');
       assert.equal(m.outcome, 'merge');
       return { clean: true, tree: c.tree, message: c.message.toString('hex'), author: c.authorName.toString('hex') };
@@ -257,7 +257,7 @@ async function plyAnyway(fx, op, url) {
   if (op === 'readCommit') return (await readCommit(url, { ref: fx.target }, O())).oid;
   if (op === 'checkoutTree') { const co = await checkoutTree(url, { ref: fx.target }, O()); for await (const f of co.files) await drain(f.stream); return co.entries.length; }
   if (op === 'editFile') return (await editFile(url, { ref: fx.field === 'tagName' ? 'refs/heads/side' : fx.target, path: 'f.txt', find: 'line2', replace: 'X', author, message }, O())).outcome;
-  return (await mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' }))).outcome;
+  return (await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: fx.from, author, message }, O({ attributes: 'ours' })))).outcome;
 }
 
 test(`git bytes: ${Object.keys(CONTENT).length} contents × ${FIELDS.length} fields × ${OPS.length} operations, every cell against git`, async () => {

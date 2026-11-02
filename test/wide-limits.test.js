@@ -31,6 +31,7 @@ import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
+import { unwrapAsync } from './unwrap.js';
 
 const L = 10; // maxTreeEntries; every "over" directory holds L + 1 entries, the issue's core cell (limit = size − 1)
 const LIMITS = withLimits({ maxTreeEntries: L });
@@ -119,7 +120,7 @@ async function runOp(op, url, wanted, opts) {
     const files = []; for await (const f of r.files) files.push(`${f.path} ${f.oid} ${sha(await drain(f.stream))}`);
     return { answer: `tree ${r.tree} ${sha(files.join('\n'))}`, check: bare => assert.deepEqual(r.entries.map(e => `${e.mode} blob ${e.oid}\t${e.path}`), git(bare, ['ls-tree', '-r', `main:${T.dir}`]).trim().split('\n')) };
   }
-  const r = await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge', time: TIME }, opts);
+  const r = await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge', time: TIME }, opts));
   return { answer: `${r.outcome} ${r.oid} ${r.tree}`, check: bare => { assert.equal(r.outcome, 'merge'); assert.equal(r.tree, git(bare, ['merge-tree', '--write-tree', `${r.oid}^1`, `${r.oid}^2`]).trim().split('\n')[0]); assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.oid); } };
 }
 

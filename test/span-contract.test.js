@@ -32,6 +32,7 @@ import { lsRefs } from '../src/lsrefs.js';
 import { fetchPack } from '../src/fetchpack.js';
 import { discover } from '../src/discover.js';
 import { receiveCaps } from '../src/receivecaps.js';
+import { unwrapAsync } from './unwrap.js';
 
 const SNAPSHOT = new URL('./span-contract.json', import.meta.url);
 const UPDATE = process.env.UPDATE_SPAN_CONTRACT === '1';
@@ -167,19 +168,19 @@ const SCENARIOS = {
   readCommit: async ({ tracer }) => { const r = seeded(); await readCommit(r.url, {}, { tracer }); },
   mergeBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, message: 'merge feat' }, { tracer, verify: true });
+    await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author, message: 'merge feat' }, { tracer, verify: true }));
   },
   rebaseBranch: async ({ tracer }) => {
     const r = seeded(); commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat 1', 'main'); commitOn(r, 'feat', { 'g.txt': 'g\n' }, 'feat 2'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { tracer });
+    await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer: author }, { tracer }));
   },
   cherryPick: async ({ tracer }) => {
     const r = seeded(); const pick = commitOn(r, 'feat', { 'f.txt': 'f\n' }, 'feat', 'main'); commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'main moves');
-    await cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer: author }, { tracer });
+    await unwrapAsync(cherryPick(r.url, { ref: 'refs/heads/main', commit: pick, committer: author }, { tracer }));
   },
   revertCommit: async ({ tracer }) => {
     const r = seeded(); const bad = commitOn(r, 'main', { 'a/c.txt': 'c2\n' }, 'oops'); commitOn(r, 'main', { 'f.txt': 'f\n' }, 'later');
-    await revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { tracer });
+    await unwrapAsync(revertCommit(r.url, { ref: 'refs/heads/main', commit: bad, committer: author }, { tracer }));
   },
   // the wire spans on their own, under a harness span that is not part of the contract
   wire: async ({ tracer }) => {
