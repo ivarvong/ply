@@ -467,3 +467,70 @@ test('inflate: a stream cut at each read of the block loop is refused with that 
   // a distance's extra bits: one 9-bit literal, length 3, distance symbol 4 (one extra bit): 3 + 9 + 7 + 5 = 24 bits
   refused('distance extra', fixedBlock(1).code(FIXED_LIT[0x90]).code(FIXED_LIT[257]).code(FIXED_DIST[4]), 0, 0, END);
 });
+
+// ---- the 0.2.0 cut-over: what the former throwing wrappers refused is an Err, named for what was encoded or parsed ----
+
+test('a string with no byte form is refused naming the field: commit, tag, tree entry name, ref, path, message, checkout path', async () => {
+  const { encodeCommit, encodeTag, encodeTree } = await import('../src/objects.js');
+  const { validateRef, validatePath, validateMessage, checkoutPathRefusal } = await import('../src/validate.js');
+  const { utf8ToStr } = await import('../src/attributes.js');
+  const lone = what => `${what}: lone surrogate U+D800 is no byte sequence`;
+  const tree = '1'.repeat(40);
+  errOf(encodeCommit({ tree, author: 'a <a@b> 0 +0000', message: '\ud800' }), 'bad_request', lone('commit'));
+  errOf(encodeTag({ object: tree, type: 'commit', tag: 'v1', tagger: 'a <a@b> 0 +0000', message: '\ud800' }), 'bad_request', lone('tag'));
+  errOf(encodeTree([{ mode: '100644', name: '\ud800', oid: tree }]), 'bad_request', lone('tree entry name'));
+  errOf(validateRef('refs/heads/\ud800'), 'bad_request', lone('ref'));
+  errOf(validatePath('a/\ud800', withLimits()), 'bad_request', lone('path'));
+  errOf(validateMessage('m\ud800'), 'bad_request', lone('message'));
+  errOf(checkoutPathRefusal('a/\ud800', '100644', 'linux'), 'bad_request', lone('checkout path'));
+  // a tree name's escaped bytes are matched as those bytes (one char per byte); a lone surrogate has none
+  assert.deepEqual(utf8ToStr('a\udce9/é'), { ok: true, value: 'a\xe9/\xc3\xa9' });
+  errOf(utf8ToStr('\ud800'), 'bad_request', lone('path'));
+});
+
+test('treeSort: the first name the sort compares that has no byte form is the refusal, as when the comparison threw', async () => {
+  const { treeSort } = await import('../src/objects.js');
+  const e = (name, mode = '100644') => ({ mode, name });
+  assert.deepEqual(treeSort([e('b'), e('a', '40000'), e('a.c')]), { ok: true, value: [e('a.c'), e('a', '40000'), e('b')] });
+  // one entry is never compared: its name is never encoded
+  assert.deepEqual(treeSort([e('\ud800')]), { ok: true, value: [e('\ud800')] });
+  // the oracle: the same sort with a comparator that throws at the first name it cannot encode (the 0.1 treeSort)
+  const thrownBy = entries => {
+    try {
+      [...entries].sort((a, b) => { unwrap(encodeBytes(a.mode === '40000' ? `${a.name}/` : a.name)); unwrap(encodeBytes(b.mode === '40000' ? `${b.name}/` : b.name)); return 0; });
+    } catch (x) { return x.message; }
+    return null;
+  };
+  for (const entries of [[e('\ud800'), e('a')], [e('a'), e('\ud801')], [e('\ud800'), e('\ud801')], [e('\ud801'), e('\ud800')], [e('z'), e('\ud802'), e('a'), e('\ud803', '40000')]]) {
+    const want = thrownBy(entries);
+    assert.match(want, /^string: lone surrogate U\+D80[0-3] is no byte sequence$/);
+    errOf(treeSort(entries), 'bad_request', want.replace(/^string/, 'tree entry name'));
+  }
+});
+
+test('packParseOpts reads the two pack caps out of limits, checked in order', async () => {
+  const { packParseOpts } = await import('../src/packresolve.js');
+  const limits = withLimits({ maxPackObjects: 3, maxInflatedTotal: 7 });
+  assert.deepEqual(packParseOpts(limits), { ok: true, value: { limits, maxObjects: 3, maxInflatedTotal: 7 } });
+  errOf(packParseOpts({}), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  errOf(packParseOpts({ maxPackObjects: 1 }), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+});
+
+test('parseRefname, parseBranchName, parseTagName, parsePath: the refusal names what was parsed; the validator\'s error is its cause', async () => {
+  const { parseRefname, parseBranchName, parseTagName } = await import('../src/refname.js');
+  const { parsePath } = await import('../src/path.js');
+  const full = 'invalid ref: must be a full ref name starting with refs/';
+  for (const [r, what, message] of [
+    [parseRefname('main'), 'ref', full],
+    [parseBranchName('main'), 'branch', full],
+    // a branch is checked as a ref a push creates: one level after refs/ is receive-pack's funny refname
+    [parseBranchName('refs/heads'), 'branch', 'invalid ref: receive-pack refuses it (funny refname)'],
+    [parseTagName('v1'), 'tag', full],
+    [parsePath(''), 'path', 'invalid path: must be a non-empty string'],
+  ]) {
+    const x = errOf(r, 'bad_request', message);
+    assert.equal(x.what, what, message);
+    assert.equal(x.cause.code, 'bad_request');
+    assert.equal(x.cause.message, message);
+  }
+});
