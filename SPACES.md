@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **507** (441 fail sites, 16 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 408, by a pending PR 44, excluded 27, unregistered 28. Fail sites no cell reaches: 30 of 441. Of the registered points, 220 are claimed by an enumerated space, 10 only by a random one and 222 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **524** (457 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 425, by a pending PR 44, excluded 27, unregistered 28. Fail sites no cell reaches: 30 of 457. Of the registered points, 220 are claimed by an enumerated space, 10 only by a random one and 239 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -73,7 +73,9 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
 | `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
 | `version-refname` | main | enumerated | left(6) × mid(5) × end(4) × suffixes(9) × corpus(2) × refusal | 173,664 (66,744 two-name pairs + 106,920 names in a full listing) | 173,664 / 0 | git tag -l --sort=version:refname on every unordered pair (two names are versioncmp, including where versionsort.suffix makes it cyclic). Seven suffix lists: the 11,880-name listing equals a sort by compareVersionRefnames. The release between prereleases, and the release before -rc, make versioncmp cyclic, so git qsort of the whole list differs; each disagreed pair is checked again as two names and matches versioncmp (#124). A non-string or a non-byte string is a typed refusal; the byte strings beside those refusals match the same git listing | 1 | 0 | ci (`test/space/version-refname.test.js`) | — |
+| `customer-e2e` | main | curated | case | cases | — | the README quick start executed as written against git http-backend (default fixture; stock: upload-pack defaults, no filter), then git rev-parse / cat-file / ls-tree / show / merge-tree / write-tree / rev-list / clone + diff -r / fsck --strict after every step; createBranch, deleteBranch, createTag refusals and races against the ref git holds | 15 | 0 | ci (`test/e2e-customer.test.js`) | — |
 | `read` | main | curated | case | cases | — | git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56) | 23 | 0 | ci (`test/read.test.js`, `test/log.test.js`, `test/artifacts-compat.test.js`) | — |
+| `no-filter` | main | curated | case | cases | — | a stock git http-backend (uploadpack.allowFilter unset, no `filter` advertised) against its allowFilter twin: every read and write answers the same oids, trees and file bytes; fsck --strict after the writes; pack limits still limit_exceeded | 2 | 0 | ci (`test/no-filter.test.js`) | — |
 | `chunking` | main | random | input × split | seeded | — | the unsplit run (I10: every pure step is chunking-invariant) | 7 | 0 | ci (`test/props.test.js`) | — |
 | `edit-fuzz` | main | random | repo × edit | seeded | — | git: ref, blob splice, diff --name-only, fsck --strict (I3) | 0 | 0 | local (`test/fuzz/run.mjs`) | dependent¹ |
 | `hostile-fuzz` | main | random | exchange × mutation | seeded | — | safety invariants against git (I1, I2) | 0 | 0 | local (`test/fuzz/hostile.mjs`) | — |
@@ -107,7 +109,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/bytes.ts` decodeBytes() | strict | strict | `git-bytes` / content |
 | `src/bytes.ts` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
 | `src/bytes.ts` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
-| `src/discover.ts` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
+| `src/caps.ts` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
 | `src/fetch.ts` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
 | `src/fetch.ts` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
 | `src/http.ts` utf8() | replacement | td | **HOLE (data path)** |
@@ -137,13 +139,13 @@ Ranked by severity, then category (`git`: a git check with no space; `decisions`
 |---|---|---|---|
 | git | `fsck:unknownType` | git fsck.h:61 FOREACH_FSCK_MSG_ID() | fsck-msg: UNKNOWN_TYPE ERROR |
 | decisions | `src/fetch.ts#wideObject:pack_corrupt:expected …, got …` | src/fetch.ts wideObject() | pack_corrupt: expected …, got … |
-| decisions | `src/fetch.ts#wideObject:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts wideObject() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| decisions | `src/fetch.ts#wideObject:pack_corrupt:object … not in the … pack (… objects)` | src/fetch.ts wideObject() | pack_corrupt: object … not in the … pack (… objects) |
 | decisions | `src/http.ts#utf8:decode:replacement:Uint8Array.from(b, c => c.charCodeAt(0))` | src/http.ts utf8() | &lt;decode:replacement>: Uint8Array.from(b, c => c.charCodeAt(0)) |
 | decisions | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts codes() | pack_corrupt: inflate: bad distance symbol |
 | decisions | `src/read.ts#flush:pack_corrupt:blob content hashes to …, not …` | src/read.ts flush() | pack_corrupt: blob content hashes to …, not … |
 | failsites | `src/edit.ts#begin:pack_corrupt:expected blob, got type …` | src/edit.ts begin() | pack_corrupt: expected blob, got type … |
 | failsites | `src/fetch.ts#wideObject:pack_corrupt:expected …, got …` | src/fetch.ts wideObject() | pack_corrupt: expected …, got … |
-| failsites | `src/fetch.ts#wideObject:pack_corrupt:object … not in the blob:none pack (… objects)` | src/fetch.ts wideObject() | pack_corrupt: object … not in the blob:none pack (… objects) |
+| failsites | `src/fetch.ts#wideObject:pack_corrupt:object … not in the … pack (… objects)` | src/fetch.ts wideObject() | pack_corrupt: object … not in the … pack (… objects) |
 | failsites | `src/inflate.ts#codes:pack_corrupt:inflate: bad distance symbol` | src/inflate.ts codes() | pack_corrupt: inflate: bad distance symbol |
 | failsites | `src/read.ts#flush:pack_corrupt:blob content hashes to …, not …` | src/read.ts flush() | pack_corrupt: blob content hashes to …, not … |
 

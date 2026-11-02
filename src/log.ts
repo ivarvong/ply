@@ -29,11 +29,10 @@
 //
 // Errors are values: readLog, logOn and logWindow return a Result.
 import { fail, type CommitMiss, type PlyError } from './errors.js';
-import { at, field, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
+import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 import { ok, assertNever, flatMapOption, getOrElse, none } from './result.js';
 import type { Option, Result } from './result.js';
-import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
@@ -167,11 +166,10 @@ export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Resul
   return ok({ commits, truncated: w.value.truncated, cut: w.value.cut, filter: answered.tag === 'some' ? answered.value : null, window: { commits: parsed.size, shallow: r.shallow.length } });
 }
 
-// readLog's arguments, checked in the order the entry always checked them. `opts` needs a tracer with start().
+// readLog's arguments, checked in the order the entry always checked them. `opts.tracer` is optional (operation()).
 function logArgs(spec: LogSpec, opts: ReadOptions): Result<{ readonly ref: string | null; readonly limit: number }, PlyError> {
   if (!isObject(spec)) return fail('bad_request', 'readLog: the second argument must be an object ({ ref, limit })');
-  const start = flatMapOption(field(opts, 'tracer'), tracer => field(tracer, 'start'));
-  if (!isObject(opts) || typeof getOrElse(start, null) !== 'function') return fail('bad_request', 'readLog: opts.tracer is required');
+  if (!isObject(opts)) return fail('bad_request', 'readLog: the third argument must be an object (options)');
   const { ref, limit, path } = withDefaults<LogConfig>(spec, { ref: null, limit: DEFAULT_LOG_LIMIT, path: null });
   if (path !== null) return fail('bad_request', 'readLog: path filtering is not supported');
   // A null limits record is the default, as the nullish read had it.
@@ -185,8 +183,7 @@ export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions
   const args = logArgs(spec, opts);
   if (!args.ok) return args;
   const { ref, limit } = args.value;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
+  return operation('read_log', url, { ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;

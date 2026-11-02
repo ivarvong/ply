@@ -11,7 +11,6 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
 import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
@@ -54,14 +53,14 @@ const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export type { BlobMode };
-// `mode` left out is a regular file (100644).
-type Content = { readonly path: Path; readonly content: string | Uint8Array } & Input<{ readonly mode: BlobMode }>;
+// `mode` left out is a regular file (100644). Paths are plain strings, checked (validatePath) before any I/O.
+type Content = { readonly path: string; readonly content: string | Uint8Array } & Input<{ readonly mode: BlobMode }>;
 export type Change =
   | ({ readonly kind: 'create' } & Content)
   | ({ readonly kind: 'write' } & Content)
-  | { readonly kind: 'edit'; readonly path: Path; readonly find: string | Uint8Array; readonly replace: string | Uint8Array }
-  | { readonly kind: 'delete'; readonly path: Path }
-  | { readonly kind: 'rename'; readonly from: Path; readonly to: Path };
+  | { readonly kind: 'edit'; readonly path: string; readonly find: string | Uint8Array; readonly replace: string | Uint8Array }
+  | { readonly kind: 'delete'; readonly path: string }
+  | { readonly kind: 'rename'; readonly from: string; readonly to: string };
 
 // `ref` null: the remote's HEAD. `base` null: the target's tip. `committer` null: the author. `time` null: now.
 export type CommitChangesConfig = { readonly ref: string | null; readonly base: string | null; readonly committer: Author | null; readonly time: number | null };
@@ -608,8 +607,7 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
     'git.commit.creating': false, 'git.commit.attempt': 0,
   };
   const opts: StreamOpts = { rest: options, limits, verify, signer, allowLfs: allowLfsPointer, pinned };
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- tracer is optional on EntryOptions and required by operation(), as editFile
-  return operation('commit', url, { ...options, limits, attrs } as OperationOpts, async ({ t, root, outcome }) => {
+  return operation('commit', url, { ...options, limits, attrs }, async ({ t, root, outcome }) => {
     const finish = (done: CommitChangesResult, objects: number): Ok<CommitChangesResult> => outcome(done.outcome, done, {
       'git.commit.tree': done.tree, 'git.commit.oid': done.oid, 'git.commit.push.bytes': done.pushBytes, ...(objects > 0 ? { 'git.commit.objects': objects } : {}),
     });

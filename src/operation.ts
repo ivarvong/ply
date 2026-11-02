@@ -10,7 +10,8 @@
 // as `span` (a caller links a retry to it) and is returned. operation() itself returns the Result; it never throws.
 import type { ErrorOf, Extra, PlyError } from './errors.js';
 import type { Limits } from './limits.js';
-import type { Span, Tracer } from './otel.js';
+import type { Span } from './otel.js';
+import { Tracer } from './otel.js';
 import type { Attrs, Quirks, Transport, TransportInput } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
@@ -20,9 +21,9 @@ import type { LsRefsResult } from './lsrefs.js';
 import { fail, isPlyError } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Input } from './absent.js';
-import { mapGet, withDefaults } from './absent.js';
+import { field, mapGet, withDefaults } from './absent.js';
 import type { Ok, Option, Result } from './result.js';
-import { err, getOrElse, mapOption, ok } from './result.js';
+import { err, flatMapOption, getOrElse, mapOption, ok } from './result.js';
 import { thrownCode, thrownMessage } from './boundary.js';
 
 // Everything an operation takes besides the url and the body, total. `null` is "none": no credential, no parent span,
@@ -40,7 +41,7 @@ export type OperationConfig = {
   readonly onFinish: (() => Attrs) | null;
 };
 // What callers pass: any of the config, and the tracer the root span starts on.
-export type OperationOpts = Input<OperationConfig> & { readonly tracer: Tracer };
+export type OperationOpts = Input<OperationConfig & { readonly tracer: Tracer }>;
 const operationDefaults = (): { -readonly [K in keyof OperationConfig]: OperationConfig[K] } => ({
   auth: null, parent: null, fetchImpl: null, limits: DEFAULT_LIMITS, signal: null, quirks: null, transport: null, attrs: {}, link: null, onFinish: null,
 });
@@ -49,7 +50,13 @@ export type Outcome = <R>(kind: string, result: R, ...extra: [] | [Attrs]) => Ok
 export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits }) => Promise<Result<R, PlyError>>;
 
 export async function operation<R>(op: string, url: string | URL, opts: OperationOpts, body: OperationBody<R>): Promise<Result<R, PlyError>> {
-  const { tracer } = opts;
+  // `tracer` is optional (boundary.ts EntryOptions): a caller who passes none gets a Tracer with no exporter, whose spans
+  // are dropped. Anything given that is not a tracer (no start()) is that caller's bug, named in a bad_request.
+  const passed = field(opts, 'tracer');
+  const start = flatMapOption(passed, t => field(t, 'start'));
+  if (passed.tag === 'some' && typeof getOrElse(start, null) !== 'function') return fail('bad_request', `git.${op}: opts.tracer must be a Tracer (new Tracer() from ply)`, { what: 'tracer' });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- checked just above: it has start()
+  const tracer: Tracer = passed.tag === 'some' ? (passed.value as Tracer) : new Tracer();
   const { auth, parent, fetchImpl, limits, signal, quirks, transport, attrs, link, onFinish } = withDefaults(opts, operationDefaults());
   const name = `git.${op}`;
   const root = tracer.start(name, { parent, attrs: { [`${name}.url`]: transport === null ? redactUrl(url) : transport.url, ...attrs } });

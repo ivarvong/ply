@@ -159,7 +159,9 @@ export const SPACES = [
     ],
     cells: '173,664 (66,744 two-name pairs + 106,920 names in a full listing)', observed: 173664, derived: 0,
     oracle: 'git tag -l --sort=version:refname on every unordered pair (two names are versioncmp, including where versionsort.suffix makes it cyclic). Seven suffix lists: the 11,880-name listing equals a sort by compareVersionRefnames. The release between prereleases, and the release before -rc, make versioncmp cyclic, so git qsort of the whole list differs; each disagreed pair is checked again as two names and matches versioncmp (#124). A non-string or a non-byte string is a typed refusal; the byte strings beside those refusals match the same git listing' },
+  curated('customer-e2e', ['test/e2e-customer.test.js'], 'the README quick start executed as written against git http-backend (default fixture; stock: upload-pack defaults, no filter), then git rev-parse / cat-file / ls-tree / show / merge-tree / write-tree / rev-list / clone + diff -r / fsck --strict after every step; createBranch, deleteBranch, createTag refusals and races against the ref git holds'),
   curated('read', ['test/read.test.js', 'test/log.test.js', 'test/artifacts-compat.test.js'], 'git cat-file / ls-tree; git rev-list --first-parent and git log for readLog (#56)'),
+  curated('no-filter', ['test/no-filter.test.js'], 'a stock git http-backend (uploadpack.allowFilter unset, no `filter` advertised) against its allowFilter twin: every read and write answers the same oids, trees and file bytes; fsck --strict after the writes; pack limits still limit_exceeded'),
   { name: 'chunking', status: 'main', kind: 'random', runners: ['test/props.test.js'], run: 'ci',
     axes: [{ tag: 'input', doc: 'random valid and corrupt inputs' }, { tag: 'split', doc: 'random chunk boundaries' }],
     cells: 'seeded', oracle: 'the unsplit run (I10: every pure step is chunking-invariant)' },
@@ -194,6 +196,8 @@ export const DECISIONS = [
   // manual
   { match: 'src/memtree.ts#*:*', space: 'commit-changes', axisTag: 'op' },
   { match: 'src/changes.ts#*:*', space: 'commit-changes', axisTag: 'op' },
+  { match: 'src/refops.ts#*:*', space: 'customer-e2e', axisTag: 'case' },
+  { match: 'src/operation.ts#operation:*', space: 'customer-e2e', axisTag: 'case' },
   { match: 'src/edit.ts#refuseRebase:*', space: 'commit-changes', axisTag: 'op' },
   // refuseRebase is a wrapper, so the call inside resolve is its own site. The generated resolve:* glob would hand it to
   // hostile-server, whose runner never takes a 40-hex base off the tip. That cell is commit-changes.
@@ -214,14 +218,16 @@ export const DECISIONS = [
   { match: 'src/receivecaps.ts#receiveCaps:protocol:<state>', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#receiveCaps:*', space: 'push-parity', axisTag: 'caps' },
   // the advertisement space (#65): discover, ls-refs parsing, the push capability check, the reader's line limit
-  { match: 'src/discover.ts#parseCapabilitiesV2:unsupported:*', space: 'advertisement', axisTag: 'protocol' },
-  { match: 'src/discover.ts#parseCapabilitiesV2:remote_error:*', space: 'advertisement', axisTag: 'protocol' },
-  { match: "src/discover.ts#parseCapabilitiesV2:protocol:advertisement: no flush after the service line", space: 'pkt-frame', axisTag: 'position' },
-  { match: 'src/discover.ts#parseCapabilitiesV2:*', space: 'advertisement', axisTag: 'malformed' },
-  { match: 'src/discover.ts#parseCapabilitiesV2:export', space: 'advertisement', axisTag: 'malformed' },
+  { match: 'src/caps.ts#parseCapabilitiesV2:unsupported:*', space: 'advertisement', axisTag: 'protocol' },
+  { match: 'src/caps.ts#parseCapabilitiesV2:remote_error:*', space: 'advertisement', axisTag: 'protocol' },
+  { match: "src/caps.ts#parseCapabilitiesV2:protocol:advertisement: no flush after the service line", space: 'pkt-frame', axisTag: 'position' },
+  { match: 'src/caps.ts#parseCapabilitiesV2:*', space: 'advertisement', axisTag: 'malformed' },
+  { match: 'src/caps.ts#parseCapabilitiesV2:export', space: 'advertisement', axisTag: 'malformed' },
   { match: 'src/discover.ts#serverFits:unsupported:server does not advertise …', space: 'advertisement', axisTag: 'lsRefs' },
   { match: 'src/discover.ts#serverFits:unsupported:unsupported object-format …', space: 'advertisement', axisTag: 'objectFormat' },
   { match: 'src/discover.ts#discover:protocol:<state>', space: 'pkt-frame', axisTag: 'position' },
+  // the advertisement probe after a filtered fetch died with an empty response (fetch.ts filterUnadvertised)
+  { match: 'src/fetch.ts#filterUnadvertised:*', space: 'no-filter', axisTag: 'case' },
   { match: 'src/discover.ts#discover:*', space: 'advertisement', axisTag: 'malformed' },
   { match: 'src/http.ts#advertisementBody:not_git:unexpected content-type from … advertisement', space: 'advertisement', axisTag: 'protocol' },
   { match: 'src/attributes.ts#parseLine:export', space: 'attributes', axisTag: 'gitattributes' },
@@ -234,7 +240,7 @@ export const DECISIONS = [
   // (ref names, tree entry names, messages, idents, URL paths, userinfo) is a hole until it is lossless and a space with
   // a non-UTF-8 content axis (git-bytes, #55) reaches it; those are deliberately not registered. Only display text and
   // protocol keywords are excluded here, each with why the bytes cannot differ from git's.
-  { match: 'src/discover.ts#text:decode:*', excluded: 'display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on)' },
+  { match: 'src/caps.ts#text:decode:*', excluded: 'display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on)' },
   { match: 'src/fetch.ts#v2Step:decode:replacement:band.body*', excluded: 'display-only: band 2 progress and the band 3 message, quoted into a span or an error' },
   { match: 'src/fetch.ts#v2Step:decode:replacement:frame.payload', excluded: 'protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git' },
   { match: 'src/http.ts#statusError:decode:*', excluded: 'display-only: the body preview quoted in an HTTP error' },
@@ -339,7 +345,7 @@ export const DECISIONS = [
   { match: "src/log.ts#logOn:bad_request:logOn: limit must be an integer from 1 to … (limits.maxM…", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logOn:bad_request:logOn: the second argument must be an object ({ commit, …", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logArgs:bad_request:readLog: limit must be an integer from 1 to … (limits.ma…", space: 'read', axisTag: 'case' },
-  { match: "src/log.ts#logArgs:bad_request:readLog: opts.tracer is required", space: 'read', axisTag: 'case' },
+  { match: "src/log.ts#logArgs:bad_request:readLog: the third argument must be an object (options)", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logArgs:bad_request:readLog: path filtering is not supported", space: 'read', axisTag: 'case' },
   { match: "src/log.ts#logArgs:bad_request:readLog: the second argument must be an object ({ ref, l…", space: 'read', axisTag: 'case' },
   { match: "src/merge.ts#mergeBranch:unsupported:… is an annotated tag (git merge writes a mergetag heade…", space: 'git-bytes', axisTag: 'op' },
@@ -408,7 +414,7 @@ export const DECISIONS = [
   { match: "src/checkout-node.ts#writeFiles:unsupported:checkout: git refuses to check out … on …: …", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout.ts#walk:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout.ts#fetchTrees:not_found:commit … not found on the remote", space: 'mutant-kill', axisTag: 'case' },
-  { match: "src/checkout.ts#fetchTrees:pack_corrupt:commit … not in the blob:none pack (… objects)", space: 'checkout-tree', axisTag: 'case' },
+  { match: "src/checkout.ts#fetchTrees:pack_corrupt:commit … not in the … pack (… objects)", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout.ts#fetchTrees:not_found:… is not a commit", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout.ts#tree:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/checkout.ts#subtree:not_found:path component … not found", space: 'checkout-tree', axisTag: 'case' },
