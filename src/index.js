@@ -98,7 +98,8 @@ export { parsePath } from './path.js';
  * An OFS base (offset, and the base id once that object resolved) or a REF base (an id).
  * @typedef {import('./packresolve.js').PackBase} PackBase
  */
-export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
+export { spliceDelta, buildPack, encodeOfsDistance, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
+export { encodeDelta, planDeltas, DELTA_WINDOW, DELTA_DEPTH, DELTA_MAX_BYTES } from './delta.js'; // pushing a local repository is 'ply/repo-node'
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, parseTag, encodeTag, ident, TYPE, TYPE_NAME, TYPE_ID } from './objects.js';

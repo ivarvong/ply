@@ -1,4 +1,4 @@
-// examples/push-tree.mjs and examples/checkout-tree.mjs, run as a user runs them: a child `node` whose PATH holds node
+// examples/push-tree.mjs, examples/checkout-tree.mjs and examples/push-repo.mjs, run as a user runs them: a child `node` whose PATH holds node
 // and nothing else (no git on the client), against `git http-backend` (test/server.js), with the credential in the
 // environment behind Basic auth. git is only the judge: push → checkout must give back the source directory byte for
 // byte with its modes and symlinks; `git clone` of the remote must equal the source; a repeat with nothing changed is a
@@ -92,4 +92,46 @@ test('examples: push-tree → checkout-tree round-trips byte-identical with mode
   await assert.rejects(run('push-tree.mjs', [src, url], { PLY_TOKEN: '' }), e => /auth/.test(e.stderr) && !e.stderr.includes(TOKEN));
   assert.ok(auth.seen.every(s => s.authorization === null || s.authorization.startsWith('Basic ')), 'only Basic, from env');
   console.log(`  create: ${out1.trim().split('\n')[1].trim()}\n  update: ${out3.trim().split('\n')[1].trim()}\n  checkout: ${outCo.trim().split('\n')[1].trim()}`);
+});
+
+test('examples: push-repo with only node on PATH: first push, incremental, up to date, non-fast-forward refused then forced, tags, dry run', async () => {
+  const bare = makeBareRepo(root, 'repo', { stock: true }); const url = `${auth.url}/repo.git`;
+  const local = join(root, 'local-repo');
+  git(root, ['init', '-q', '-b', 'main', local]);
+  const commit = (i) => {
+    writeFileSync(join(local, 'app.js'), Array.from({ length: 200 }, (_, k) => `export const v${k} = ${k === i ? 'changed' : k};\n`).join(''));
+    writeFileSync(join(local, `note${i}.md`), `note ${i}\n`);
+    git(local, ['add', '-A']); git(local, ['-c', 'user.name=L', '-c', 'user.email=l@x', 'commit', '-q', '-m', `c${i}`]);
+  };
+  for (let i = 0; i < 4; i++) commit(i);
+  git(local, ['branch', 'old', 'main~2']);
+  git(local, ['-c', 'user.name=L', '-c', 'user.email=l@x', 'tag', '-a', 'v1', '-m', 'v1', 'main~1']);
+  const rev = (d, r) => git(d, ['rev-parse', r]).trim();
+  const fsckBare = () => git(bare, ['fsck', '--strict']);
+  const objects = args => git(local, ['rev-list', '--objects', ...args]).trim().split('\n').length;
+
+  const out1 = await run('push-repo.mjs', [local, url, 'old:main']);
+  assert.match(out1, /\[new\] refs\/heads\/main/);
+  assert.match(out1, new RegExp(`sent ${objects(['old'])} objects \\(\\d+ deltas\\)`));
+  fsckBare(); assert.equal(rev(bare, 'main'), rev(local, 'old'));
+
+  const out2 = await run('push-repo.mjs', [local, url, 'main']);
+  assert.match(out2, new RegExp(`${rev(local, 'old').slice(0, 7)}\\.\\.${rev(local, 'main').slice(0, 7)} refs/heads/main`));
+  assert.match(out2, new RegExp(`sent ${objects(['main', '^old'])} objects`));
+  fsckBare(); assert.equal(rev(bare, 'main'), rev(local, 'main'));
+
+  assert.match(await run('push-repo.mjs', [local, url]), /^Everything up-to-date/);
+
+  await assert.rejects(run('push-repo.mjs', [local, url, 'old:main']), e => /^not_fast_forward: .*refs\/heads\/main \(non-fast-forward\)/.test(e.stderr));
+  assert.equal(rev(bare, 'main'), rev(local, 'main'));
+  assert.match(await run('push-repo.mjs', [local, url, '+old:refs/heads/rewound']), /\[new\] refs\/heads\/rewound/);
+  assert.match(await run('push-repo.mjs', [local, url, 'main:rewound', '--force']), /\.\.[0-9a-f]{7} refs\/heads\/rewound/);
+
+  const dry = await run('push-repo.mjs', [local, url, '--tags', '--dry-run']);
+  assert.match(dry, /\[new\] refs\/tags\/v1\ndry run, would send 1 objects/);
+  assert.ok(!git(bare, ['tag', '-l']).includes('v1'));
+  assert.match(await run('push-repo.mjs', [local, url, '--tags']), /sent 1 objects/);
+  assert.equal(git(bare, ['cat-file', '-t', 'v1']).trim(), 'tag');
+  fsckBare();
+  for (const ref of ['refs/heads/main', 'refs/heads/rewound', 'refs/tags/v1']) assert.equal(rev(bare, ref), rev(local, ref.replace('rewound', 'main')), ref);
 });

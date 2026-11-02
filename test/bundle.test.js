@@ -195,10 +195,10 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
-  // src/ imports node: builtins in exactly the two Node adapters
+  // src/ imports node: builtins in exactly the three Node adapters
   const { readdirSync, readFileSync } = await import('node:fs');
   const withNode = readdirSync('src').filter(f => /\.[jt]s$/.test(f) && /from 'node:/.test(readFileSync(`src/${f}`, 'utf8'))).sort();
-  assert.deepEqual(withNode, ['checkout-node.ts', 'tree-node.ts']);
+  assert.deepEqual(withNode, ['checkout-node.ts', 'repo-node.ts', 'tree-node.ts']);
 });
 
 test('checkout entry: checkoutTree is Workers-safe and carries no push or merge code; the directory writer is checkout-node.js', async () => {
@@ -237,5 +237,18 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
+  assert.match(node.outputFiles[0].text, /node:fs\/promises/);
+});
+
+test('repo entry: pushRepo (node:fs) lives only in repo-node.js; the delta generator stays out of the edit, tree and checkout bundles', async () => {
+  for (const entry of ['src/edit.ts', 'src/tree.ts', 'src/checkout.ts']) {
+    const files = retained(await bundle(entry)).map(([k]) => k);
+    for (const f of ['delta.js', 'repo-node.js']) assert.ok(!files.includes(f), `${f} is in the ${entry} bundle`);
+  }
+  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
+  const inFull = retained(full).map(([k]) => k);
+  assert.ok(!inFull.includes('repo-node.js'), 'the full entry does not carry the Node repository reader');
+  assert.ok(inFull.includes('delta.js'), 'encodeDelta and planDeltas are on the full entry');
+  const node = await build({ entryPoints: ['src/repo-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
 });

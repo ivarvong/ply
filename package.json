@@ -38,6 +38,10 @@
       "types": "./dist/checkout-node.d.ts",
       "default": "./dist/checkout-node.js"
     },
+    "./repo-node": {
+      "types": "./dist/repo-node.d.ts",
+      "default": "./dist/repo-node.js"
+    },
     "./client": {
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"

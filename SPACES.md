@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **524** (457 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 425, by a pending PR 44, excluded 27, unregistered 28. Fail sites no cell reaches: 30 of 457. Of the registered points, 220 are claimed by an enumerated space, 10 only by a random one and 239 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **547** (479 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 447, by a pending PR 44, excluded 28, unregistered 28. Fail sites no cell reaches: 30 of 479. Of the registered points, 220 are claimed by an enumerated space, 10 only by a random one and 261 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -62,6 +62,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 7 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) | — |
 | `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) | — |
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
+| `push-repo` | main | curated | case | cases | — | a local repository built by git (loose and packed objects, packed and loose refs, an annotated tag, a gitlink) pushed to git http-backend (default and stock): git rev-list --objects is the object set git push would send, git index-pack --strict on the captured pack, git fsck --strict and for-each-ref on the remote, git clone --mirror; git pack-objects for the pack size; git itself for the refusals (shallow, alternates, sha256, a non-fast-forward) | 22 | 0 | ci (`test/push-repo.test.js`) | — |
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 22 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
@@ -98,7 +99,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (24: lossless 8, strict 3, replacement 13)
+## Decode sites (25: lossless 9, strict 3, replacement 13)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
@@ -127,6 +128,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/receivecaps.ts` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
+| `src/repo-node.ts` get() | lossless | decodeBytes | excluded: protocol: a loose object header is "&lt;type> &lt;size>" in ASCII, which the regex after the decode checks; a non-ASCII byte fails that check as it fails git (and the object hash is checked too) |
 | `src/sign.ts` withGpgsig() | lossless | decodeBytes | `sign` / case |
 
 ## Holes (58)
