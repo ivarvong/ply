@@ -484,9 +484,8 @@ type StreamJob = {
 function parseEditInputs(targetRef: string, editPath: string, limits: Limits): Result<{ readonly ref: Refname; readonly path: Path }, BadRequest> {
   const branded = parseRefname(targetRef);
   if (!branded.ok) return branded;
-  const parsedPath = parsePath(editPath, limits);
-  if (!parsedPath.ok) return parsedPath;
-  return ok({ ref: branded.value, path: parsedPath.value.path });
+  // editPath is normalize()'s join of the components validatePath took under these limits: parsePath only brands it
+  return map(parsePath(editPath, limits), p => ({ ref: branded.value, path: p.path }));
 }
 // The single edit of an existing file, streamed by editFile. Its Err is read here: a lost race (or a rebase refusal on a
 // new ref) is this commit's cas_conflict; any other Err is the commit's as it is.

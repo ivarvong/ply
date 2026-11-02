@@ -20,6 +20,7 @@ import { attributeTree, bestBases, mergeBase, mergeBranch } from '../src/merge.j
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
+import { parseCapabilitiesV2 } from '../src/discover.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
 import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
@@ -754,6 +755,8 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
   assert.equal(bandErr('not our refresh').reason, undefined);
   throws(() => feed({ kind: 'data', payload: Uint8Array.of(9, 1) }), 'protocol', 'v2: bad sideband 9');
   throws(() => parseSideband(new Uint8Array(0)), 'protocol', 'short read: need 1 bytes at 0, have 0');
+  // an empty data frame (0004) in the packfile section has no band byte: parseSideband's short read is the step's Err
+  throws(() => feed({ kind: 'data', payload: new Uint8Array(0) }), 'protocol', 'short read: need 1 bytes at 0, have 0');
   assert.equal(parseSideband(Uint8Array.of(SIDEBAND_PACK)).body.length, 0);
   assert.deepEqual(parseSideband(concat([Uint8Array.of(SIDEBAND_PROGRESS), te.encode('z')])).body, te.encode('z'));
 
@@ -2239,4 +2242,41 @@ test('constantRefname: a literal the validator refuses fails the module load as 
     vi.doUnmock('../src/validate.js');
     vi.resetModules();
   }
+});
+
+test('parseLsRefLine: an empty name before the attributes keeps them (the attributes start one past the cut at 0)', () => {
+  // `<oid>  symref-target:x`: the name is "" (cut 0), and the attributes are everything after that one space
+  assert.deepEqual(parseLsRefLine(`${oid(1)}  symref-target:refs/heads/main peeled:${oid(2)}`), { oid: oid(1), name: '', peeled: oid(2), 'symref-target': 'refs/heads/main' });
+  assert.deepEqual(parseLsRefLine(`${oid(1)} HEAD symref-target:refs/heads/main`), { oid: oid(1), name: 'HEAD', peeled: null, 'symref-target': 'refs/heads/main' });
+});
+
+test('parseCapabilitiesV2: each refusal by its own check, code and message', () => {
+  const d = l => ({ kind: 'data', payload: te.encode(l) });
+  const FL = { kind: 'flush' };
+  const SVC = d('# service=git-upload-pack\n');
+  const refused = (frames, code, message, extra = {}) => {
+    const r = parseCapabilitiesV2(frames);
+    assert.equal(r.ok, false, message);
+    assert.deepEqual([r.error.code, r.error.message], [code, message]);
+    for (const [k, v] of Object.entries(extra)) assert.deepEqual(r.error[k], v, k);
+  };
+  // the service header's metadata ends at its own flush: a delim there is refused, not read past
+  refused([SVC, d('version 2\n'), { kind: 'delim' }, FL], 'protocol', 'advertisement: no flush after the service line');
+  refused([SVC, d('version 2\n')], 'protocol', 'advertisement: no flush after the service line');
+  // a header and its flush with nothing after
+  refused([SVC, FL], 'protocol', 'advertisement: nothing after the service line');
+  // no first data line at all: the first line is "", and it is not `version 2`
+  refused([FL], 'unsupported', 'server did not answer protocol v2 (first line "")', { lines: [''] });
+  refused([], 'unsupported', 'server did not answer protocol v2 (first line "")', { lines: [''] });
+  refused([SVC, FL, FL], 'unsupported', 'server did not answer protocol v2 (first line "")', { lines: [''] });
+  // the server's ERR line, with or without the header; a line that only ends in "ERR " is not one
+  refused([d('ERR access denied\n'), FL], 'remote_error', 'remote: access denied');
+  refused([SVC, FL, d('ERR repository not found\n'), FL], 'remote_error', 'remote: repository not found');
+  refused([d('x ERR \n'), FL], 'unsupported', 'server did not answer protocol v2 (first line "x ERR ")', { lines: ['x ERR '] });
+  // the capabilities end at a flush, and nothing follows it
+  refused([d('version 2\n'), d('agent=x\n'), { kind: 'delim' }], 'protocol', 'advertisement: expected flush after capabilities, got delim');
+  refused([d('version 2\n'), d('agent=x\n')], 'protocol', 'advertisement: expected flush after capabilities, got end of stream');
+  refused([d('version 2\n'), FL, FL], 'protocol', "advertisement: flush after the capabilities' flush");
+  assert.deepEqual(parseCapabilitiesV2([SVC, FL, d('version 2\n'), d('agent=x\n'), FL]), { ok: true, value: ['agent=x'] });
+  assert.deepEqual(parseCapabilitiesV2([d('version 2\n'), FL]), { ok: true, value: [] });
 });

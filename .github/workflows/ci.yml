@@ -226,6 +226,9 @@ jobs:
   mutate-shard:
     name: mutate-shard (${{ matrix.shard }}/16)
     runs-on: ubuntu-latest
+    # Shards are planned at ~28 min each (scripts/mutate.mjs --plan 16, from scripts/mutate-weights.json). Without a
+    # limit a runaway shard holds the job, and the mutate gate, for GitHub's 6 h default; this fails it at 2x the plan.
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: write # setup-node persists the npm cache
