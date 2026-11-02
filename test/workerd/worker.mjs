@@ -2,6 +2,7 @@
 // (sequentially, or concurrently with ?concurrent=1) and reports results, spans summary, and timing.
 import { editFile } from '../../src/edit.js';
 import { readFile } from '../../src/read.js';
+import { unwrapAsync } from '../unwrap.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
@@ -50,7 +51,7 @@ export default {
       const body = await req.json();
       const exporter = arrayExporter();
       try {
-        const r = await readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) });
+        const r = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) }));
         let bytes = 0;
         const rd = r.stream.getReader();
         if (body.cancel) { const { value } = await rd.read(); bytes = value?.length ?? 0; await rd.cancel('enough'); }

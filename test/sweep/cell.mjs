@@ -13,7 +13,7 @@ import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const cell = JSON.parse(process.argv[2]);
 const opts = { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) };
@@ -38,16 +38,16 @@ async function drain(stream) {
 
 const ops = {
   async readFile() {
-    const r = await readFile(cell.url, { ref: cell.ref ?? null, path: cell.path }, opts);
+    const r = await unwrapAsync(readFile(cell.url, { ref: cell.ref ?? null, path: cell.path }, opts));
     const len = await drain(r.stream);
     return { blob: r.blob, size: r.size, len };
   },
   async listTree() {
-    const r = await listTree(cell.url, { ref: cell.ref ?? null, path: cell.path ?? '' }, opts);
+    const r = await unwrapAsync(listTree(cell.url, { ref: cell.ref ?? null, path: cell.path ?? '' }, opts));
     return { tree: r.tree, n: r.entries.length };
   },
   async readLog() {
-    const r = await readLog(cell.url, { ref: cell.ref ?? 'main', limit: cell.limit }, opts);
+    const r = await unwrapAsync(readLog(cell.url, { ref: cell.ref ?? 'main', limit: cell.limit }, opts));
     return { n: r.commits.length, truncated: r.truncated };
   },
   async lsRefs() {
