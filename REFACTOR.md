@@ -1,17 +1,16 @@
 # The refactor: target and gates
 
 The rules are `docs/STACK.md` ("Rules for code in src/", "Absence", "Public API policy"). This file is the finish
-line in numbers, and the order the work lands in. Pre-1.0 and breaking by design: no compat shims beyond the
-throwing wrappers STACK.md step 2 allows until the cut-over.
+line in numbers, and the order the work lands in. Pre-1.0 and breaking by design: no compat shims.
 
 ## Finish line (each one a gate that fails the build, not a goal)
 
 | # | Property | Gate | Today → done |
 |---|---|---|---|
 | 1 | No platform absence outside `src/absent.ts`: no `undefined`, `?:`, `?.`, `??` | `scripts/absence-ratchet.mjs` (in `npm run typecheck`) | **met** (a7982c0): 308/375/146/260 → 0/0/0/0 |
-| 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, and the throwing wrappers of step 2 | `scripts/throw-ratchet.mjs` (in `npm run typecheck`) | 377 → 50 (wrappers and stream edges); the cut-over takes it to `assertNever`/`internal` only |
+| 2 | Errors are values: `throw` only for `assertNever`, an `internal` invariant, a stream's own protocol, and a caller's callback's value passed back | `scripts/throw-ratchet.mjs` (in `npm run typecheck`) | **met**: 377 → 23 (every one of those four kinds; no throwing wrapper is left) |
 | 3 | Every switch or tag chain over a closed union ends in `assertNever` | `scripts/exhaustive.mjs` (in `npm run lint`) | holds |
-| 4 | The public API returns `Result` (0.2.0), ply-web updated in the same window | the bundle and type tests on `dist/` | after 1 and 2 |
+| 4 | The public API returns `Result` (0.2.0), ply-web updated in the same window | the bundle and type tests on `dist/` | **met** in ply (rounds A–D); ply-web must switch before this lands on main |
 | 5 | Every gate CI runs is green on every commit to main | `.github/workflows/ci.yml`, all 26 jobs | the rewrite left 23 red. Locally on ef29502 every gate passes but `push-ng` (local git 2.43; fails identically on the untouched pre-rewrite tag; CI runs 2.56) |
 
 ## The one edge
@@ -43,8 +42,8 @@ tagged unions.
 4. **Leftovers**: LsRef total, OrMissing deleted, honest Result/wrapper names (ec02ad6, 3814e4a). Done.
 5. **Cut-over** (STACK.md step 3), bottom-up so a function's callers convert after it: round A codecs and validation;
    round B protocol, transport and `operation()`; round C the entries (write, read, merge in parallel); round D
-   delete `thrown`/`orThrow`, 0.2.0, docs. Tests keep their assertions through `test/unwrap.js`. ply-web switches
-   `catch` for an exhaustive `switch (r.error.code)` before this lands on main.
+   delete `thrown`/`orThrow`, 0.2.0, docs. Tests keep their assertions through `test/unwrap.js`. Done. ply-web
+   switches `catch` for an exhaustive `switch (r.error.code)` before this lands on main.
 
 ## Visible changes so far (callers can observe these)
 
@@ -58,6 +57,14 @@ tagged unions.
   onto the caller's parsed objects.
 - `mergeBase` with `maxDepth: null`, and `inflate` with `expectedSize: null`, mean "not given" (the configured limit,
   no expected size) instead of `bad_request`.
+
+- 0.2.0: every exported function that can fail returns `Result<T, PlyError>`; `GitHttp` is built with
+  `GitHttp.create(url, opts)` (a `Result`), and its methods return the free functions' Results.
+- `fail` from the package is `Err(plyError(…))`; `plyError` builds the error value. `thrown`/`orThrow` are gone.
+- A value a caller-supplied transport raises that carries a ply code but is not an `Error` comes back as the Err,
+  unchanged (it used to be rethrown); it is never mistaken for ply's own `cas_conflict` (no retry) or an unborn HEAD.
+- A value the caller's own callback throws (a signer, a `fetchImpl`) still propagates as thrown.
+- The user agent and the otel scope version are `ply/0.2.0` / `0.2.0`.
 
 ## Not carried forward
 
