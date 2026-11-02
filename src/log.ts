@@ -27,15 +27,15 @@
 // `path` (commits touching a path) is not supported: under tree:0 the window carries no trees, and comparing trees per
 // commit would cost a fetch per commit on a tree:0 server. Passing one is `bad_request`.
 //
-// Errors are values here (logOn, logWindowResult); readLog and logWindow are the throwing public entries (orThrow).
-import { fail, orThrow, type CommitMiss, type PlyError } from './errors.js';
+// Errors are values: readLog, logOn and logWindow return a Result.
+import { fail, type CommitMiss, type PlyError } from './errors.js';
 import { at, field, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 import { ok, assertNever, flatMapOption, getOrElse, none } from './result.js';
 import type { Option, Result } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
-import { resolveCommitResult, commitView } from './read.js';
+import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { parseCommit, TYPE, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, readLimit } from './limits.js';
@@ -44,7 +44,7 @@ import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import { thrownCodeIs, thrownReasonIs } from './boundary.js';
 // oxlint-disable-next-line import/max-dependencies -- the read path's edge to the modules not yet converted to Result
-import { attemptSync, caughtErr } from './commit.js';
+import { caughtErr } from './commit.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | null };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
@@ -57,7 +57,7 @@ type Parents = { readonly parents: readonly string[] };
 // `shallow` the server's shallow lines. Err pack_corrupt when the window breaks the deepen contract. Returns
 // { chain: [oid], truncated, cut } where `cut` says the chain stopped at a shallow commit before `limit`.
 export type LogWindow = { readonly chain: string[]; readonly truncated: boolean; readonly cut: boolean };
-export function logWindowResult(commits: ReadonlyMap<string, Parents>, shallow: Iterable<string>, head: string, limit: number): Result<LogWindow, PlyError> {
+export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterable<string>, head: string, limit: number): Result<LogWindow, PlyError> {
   if (!commits.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
   // every oid in q is in `commits`: head was checked, and a parent joins only when present
   const reach = new Set([head]); const q = [head];
@@ -81,9 +81,6 @@ export function logWindowResult(commits: ReadonlyMap<string, Parents>, shallow: 
     c = first.value;
   }
 }
-// The throwing entry (public API until the Result cut-over, docs/STACK.md).
-export const logWindow = (commits: ReadonlyMap<string, Parents>, shallow: Iterable<string>, head: string, limit: number): LogWindow =>
-  orThrow(logWindowResult(commits, shallow, head, limit));
 
 // Effect: the window's pack, with a want that is not a commit (or not on the server) as the caller's not_found.
 async function fetchWindow(t: Transport, commit: string, limit: number): Promise<Result<FetchedPack, PlyError>> {
@@ -152,17 +149,17 @@ export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Resul
   const parsed = new Map<string, Parents>();
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT) continue;
-    const c = attemptSync(() => orThrow(parseCommit(o.data, t.limits)));
+    const c = parseCommit(o.data, t.limits);
     if (!c.ok) return c;
     parsed.set(oid, c.value);
   }
-  const w = logWindowResult(parsed, r.shallow, commit, depth);
+  const w = logWindow(parsed, r.shallow, commit, depth);
   if (!w.ok) return w;
   const commits: LogCommit[] = [];
   for (const oid of w.value.chain) {
     // every oid in the chain is a commit the pack held (logWindow walked them), so the object is there
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-    const view = attemptSync(() => commitView((objects.get(oid) as { readonly data: Uint8Array }).data, t.limits));
+    const view = commitView((objects.get(oid) as { readonly data: Uint8Array }).data, t.limits);
     if (!view.ok) return view;
     commits.push({ oid, ...view.value });
   }
@@ -183,16 +180,22 @@ function logArgs(spec: LogSpec, opts: ReadOptions): Result<{ readonly ref: strin
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap.value) return fail('bad_request', `readLog: limit must be an integer from 1 to ${cap.value} (limits.maxMergeDepth)`, { what: 'limit' });
   return ok({ ref, limit });
 }
-// oxlint-disable-next-line require-await -- async so that a refused argument is a rejection, as before
-export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<LogResult> {
-  const { ref, limit } = orThrow(logArgs(spec, opts));
+// oxlint-disable-next-line require-await -- async: a refused argument is an Err in a promise, like every other answer
+export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<Result<LogResult, PlyError>> {
+  const args = logArgs(spec, opts);
+  if (!args.ok) return args;
+  const { ref, limit } = args.value;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return orThrow(await operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
-    const { name, commit } = orThrow(await resolveCommitResult(t, ref));
-    const got = orThrow(await logOn(t, { commit, limit }));
+  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
+    const resolved = await resolveCommit(t, ref);
+    if (!resolved.ok) return resolved;
+    const { name, commit } = resolved.value;
+    const window = await logOn(t, { commit, limit });
+    if (!window.ok) return window;
+    const got = window.value;
     return outcome('ok', { ref: name, oid: commit, commits: got.commits, truncated: got.truncated }, {
       'git.read_log.oid': commit, 'git.read_log.commits': got.commits.length, 'git.read_log.truncated': got.truncated, 'git.read_log.cut': got.cut,
       'git.read_log.window.commits': got.window.commits, 'git.read_log.window.shallow': got.window.shallow, 'git.read_log.filter': got.filter,
     });
-  }));
+  });
 }

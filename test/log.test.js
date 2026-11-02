@@ -26,7 +26,7 @@ import { DEFAULT_LIMITS } from '../src/limits.js';
 import { pkt } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const N = 5, BIG = 64;
@@ -152,14 +152,14 @@ test('logWindow (pure): first parent, truncated, the deepen contract', () => {
   const C = (...parents) => ({ parents });
   const a = 'a'.repeat(40), b = 'b'.repeat(40), c = 'c'.repeat(40), d = 'd'.repeat(40), x = 'e'.repeat(40);
   const m = new Map([[a, C(b, c)], [b, C(d)], [c, C(d)], [d, C()]]);
-  assert.deepEqual(logWindow(m, [], a, 1), { chain: [a], truncated: true, cut: false });
-  assert.deepEqual(logWindow(m, [], a, 3), { chain: [a, b, d], truncated: false, cut: false });
-  assert.deepEqual(logWindow(m, [], a, 9), { chain: [a, b, d], truncated: false, cut: false });
+  assert.deepEqual(unwrap(logWindow(m, [], a, 1)), { chain: [a], truncated: true, cut: false });
+  assert.deepEqual(unwrap(logWindow(m, [], a, 3)), { chain: [a, b, d], truncated: false, cut: false });
+  assert.deepEqual(unwrap(logWindow(m, [], a, 9)), { chain: [a, b, d], truncated: false, cut: false });
   const cutAtB = new Map([[a, C(b, c)], [b, C(d)], [c, C(d)]]);
-  assert.deepEqual(logWindow(cutAtB, [b, c], a, 5), { chain: [a, b], truncated: true, cut: true }, 'a server-side shallow boundary');
-  assert.throws(() => logWindow(cutAtB, [c], a, 5), e => e.code === 'pack_corrupt' && /withheld and .* not reported shallow/.test(e.message));
-  assert.throws(() => logWindow(new Map([...m, [x, C()]]), [], a, 5), e => e.code === 'pack_corrupt' && /not an ancestor/.test(e.message));
-  assert.throws(() => logWindow(new Map([[b, C()]]), [], a, 5), e => e.code === 'pack_corrupt' && /not in the pack/.test(e.message));
+  assert.deepEqual(unwrap(logWindow(cutAtB, [b, c], a, 5)), { chain: [a, b], truncated: true, cut: true }, 'a server-side shallow boundary');
+  assert.throws(() => unwrap(logWindow(cutAtB, [c], a, 5)), e => e.code === 'pack_corrupt' && /withheld and .* not reported shallow/.test(e.message));
+  assert.throws(() => unwrap(logWindow(new Map([...m, [x, C()]]), [], a, 5)), e => e.code === 'pack_corrupt' && /not an ancestor/.test(e.message));
+  assert.throws(() => unwrap(logWindow(new Map([[b, C()]]), [], a, 5)), e => e.code === 'pack_corrupt' && /not in the pack/.test(e.message));
 });
 
 test('readLog: server × shape × limit × behaviour, every cell against git', async () => {
@@ -183,7 +183,7 @@ test('readLog: server × shape × limit × behaviour, every cell against git', a
           const corrupt = behaviour === 'foreign' || (behaviour === 'omit-shallow' && want.cut);
           tally.cells++;
           if (api === 'readLog') {
-            const run = readLog(url, { ref: 'main', limit }, { tracer, quirks });
+            const run = unwrapAsync(readLog(url, { ref: 'main', limit }, { tracer, quirks }));
             if (corrupt) {
               await assert.rejects(run, e => e.code === 'pack_corrupt' && (behaviour === 'foreign' ? /not an ancestor/ : /not reported shallow/).test(e.message), cell);
               tally.pack_corrupt++;
@@ -231,7 +231,7 @@ test('readLog on a shallow server repository: the log stops at the server\'s cut
   for (const server of SERVERS) {
     const proxy = await startProxy(srv.url, serverFault({ server, behaviour: 'honest' }));
     try {
-      const got = await readLog(`${proxy.url}/log-shallow.git`, { ref: 'main', limit: N }, { tracer: new Tracer() });
+      const got = await unwrapAsync(readLog(`${proxy.url}/log-shallow.git`, { ref: 'main', limit: N }, { tracer: new Tracer() }));
       const oids = git(bare, ['rev-list', '--first-parent', head]).trim().split('\n');
       assert.deepEqual(got.commits.map(c => c.oid), oids, server);
       assert.equal(got.commits.length, 3); assert.equal(got.truncated, true, 'history continues past the cut');
@@ -250,29 +250,29 @@ test('readLog: refs, not_found, bad_request; never a TypeError', async () => {
   git(bare, ['tag', '-a', '-m', 'annotated', 'v1', head]);
   const url = `${srv.url}/log-refs.git`; const opts = () => ({ tracer: new Tracer() });
   for (const [ref, name] of [[null, 'refs/heads/main'], ['HEAD', 'refs/heads/main'], ['v1', 'refs/tags/v1'], [head, head]]) {
-    const r = await readLog(url, { ref, limit: 2 }, opts());
+    const r = await unwrapAsync(readLog(url, { ref, limit: 2 }, opts()));
     assert.equal(r.ref, name); assert.equal(r.oid, head); assert.equal(r.commits.length, 2); assert.equal(r.truncated, true);
   }
-  assert.equal((await readLog(url, undefined, opts())).commits.length, 3, 'default limit 20 > history');
+  assert.equal((await unwrapAsync(readLog(url, undefined, opts()))).commits.length, 3, 'default limit 20 > history');
   const code = c => e => e.code === c && !(e instanceof TypeError);
-  await assert.rejects(readLog(url, { ref: 'nope' }, opts()), code('not_found'));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: 'nope' }, opts())), code('not_found'));
   const absent = 'f'.repeat(40);
-  await assert.rejects(readLog(url, { ref: absent }, opts()), e => e.code === 'not_found' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === absent && !(e instanceof TypeError));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: absent }, opts())), e => e.code === 'not_found' && e.miss?.kind === 'commit' && e.miss.miss.kind === 'absent' && e.miss.miss.oid === absent && !(e instanceof TypeError));
   const treeOid = git(bare, ['rev-parse', 'main^{tree}']).trim();
-  await assert.rejects(readLog(url, { ref: treeOid }, opts()), e => e.code === 'not_found' && e.message === `${treeOid} is not a commit (tree)` && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && !(e instanceof TypeError));
-  for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(readLog(url, { limit }, opts()), code('bad_request'), String(limit));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: treeOid }, opts())), e => e.code === 'not_found' && e.message === `${treeOid} is not a commit (tree)` && e.miss?.kind === 'commit' && e.miss.miss.kind === 'not_commit' && e.miss.miss.type === 'tree' && !(e instanceof TypeError));
+  for (const limit of [0, -1, 1.5, '5', NaN, Infinity, null, 1025, 2 ** 53]) await assert.rejects(unwrapAsync(readLog(url, { limit }, opts())), code('bad_request'), String(limit));
   const limitMsg = 'readLog: limit must be an integer from 1 to 1024 (limits.maxMergeDepth)';
-  await assert.rejects(readLog(url, { limit: 0 }, opts()), e => e.message === limitMsg);
-  await assert.rejects(readLog(url, { limit: 1025 }, opts()), e => e.message === limitMsg);
-  assert.equal((await readLog(url, { limit: 1023 }, opts())).commits.length, 3, 'one under the default cap');
-  assert.equal((await readLog(url, { limit: 1024 }, opts())).commits.length, 3, 'the default cap itself');
-  for (const bad of [null, 5, 'main']) await assert.rejects(readLog(url, bad, opts()), code('bad_request'), String(bad));
-  await assert.rejects(readLog(url, {}, null), code('bad_request'));
-  await assert.rejects(readLog(url, {}, {}), code('bad_request'), 'no tracer');
-  await assert.rejects(readLog(url, { path: 'f0.txt' }, opts()), code('bad_request'), 'path is not supported');
-  await assert.rejects(readLog(url, { ref: 'a..b' }, opts()), code('bad_request'));
-  await assert.rejects(readLog(url, { ref: 7 }, opts()), code('bad_request'));
-  assert.equal((await readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } })).commits.length, 1);
+  await assert.rejects(unwrapAsync(readLog(url, { limit: 0 }, opts())), e => e.message === limitMsg);
+  await assert.rejects(unwrapAsync(readLog(url, { limit: 1025 }, opts())), e => e.message === limitMsg);
+  assert.equal((await unwrapAsync(readLog(url, { limit: 1023 }, opts()))).commits.length, 3, 'one under the default cap');
+  assert.equal((await unwrapAsync(readLog(url, { limit: 1024 }, opts()))).commits.length, 3, 'the default cap itself');
+  for (const bad of [null, 5, 'main']) await assert.rejects(unwrapAsync(readLog(url, bad, opts())), code('bad_request'), String(bad));
+  await assert.rejects(unwrapAsync(readLog(url, {}, null)), code('bad_request'));
+  await assert.rejects(unwrapAsync(readLog(url, {}, {})), code('bad_request'), 'no tracer');
+  await assert.rejects(unwrapAsync(readLog(url, { path: 'f0.txt' }, opts())), code('bad_request'), 'path is not supported');
+  await assert.rejects(unwrapAsync(readLog(url, { ref: 'a..b' }, opts())), code('bad_request'));
+  await assert.rejects(unwrapAsync(readLog(url, { ref: 7 }, opts())), code('bad_request'));
+  assert.equal((await unwrapAsync(readLog(url, { limit: 1 }, { tracer: new Tracer(), limits: { ...(await import('../src/limits.js')).DEFAULT_LIMITS, maxMergeDepth: 1 } }))).commits.length, 1);
 });
 
 test('readLog on blob:none: the trees are harvested; a following listTree on the same transport costs no fetch', async () => {
@@ -280,11 +280,11 @@ test('readLog on blob:none: the trees are harvested; a following listTree on the
   const proxy = await startProxy(srv.url, serverFault({ server: 'blobnone', behaviour: 'honest' }));
   try {
     const tracer = new Tracer(); const t = createTransport(`${proxy.url}/log-harvest.git`, { tracer });
-    const log = await readLog(null, { ref: 'main', limit: N }, { tracer, transport: t });
+    const log = await unwrapAsync(readLog(null, { ref: 'main', limit: N }, { tracer, transport: t }));
     const fetches = () => proxy.log.filter(l => l.stage === 'fetch').length;
     const before = fetches();
     for (const c of log.commits) {
-      const ls = await listTree(null, { ref: c.oid }, { tracer, transport: t });
+      const ls = await unwrapAsync(listTree(null, { ref: c.oid }, { tracer, transport: t }));
       assert.equal(ls.tree, c.tree); assert.deepEqual(ls.entries.map(e => e.oid), git(bare, ['ls-tree', '--format=%(objectname)', c.oid]).trim().split('\n'));
     }
     assert.equal(fetches(), before, 'every commit and root tree came from the harvest');
@@ -296,7 +296,7 @@ test('readLog on blob:none: the trees are harvested; a following listTree on the
     assert.equal(fetches() - beforeLog, 2, 'logOn learns blob:none on its own transport');
     const beforeTrees = fetches();
     for (const c of win.value.commits) {
-      const ls = await listTree(null, { ref: c.oid }, { tracer, transport: t2 });
+      const ls = await unwrapAsync(listTree(null, { ref: c.oid }, { tracer, transport: t2 }));
       assert.equal(ls.tree, c.tree);
     }
     assert.equal(fetches(), beforeTrees, 'logOn harvested the trees');
@@ -319,7 +319,7 @@ test('bytes: a 10-commit window on a wide repository, tree:0 vs blob:none', asyn
     try {
       const quirks = server === 'blobnone' ? { treeFilter: 'blob:none' } : {};
       const ex = arrayExporter();
-      const r = await readLog(`${proxy.url}/log-wide.git`, { ref: 'main', limit: 10 }, { tracer: new Tracer({ exporter: ex }), quirks });
+      const r = await unwrapAsync(readLog(`${proxy.url}/log-wide.git`, { ref: 'main', limit: 10 }, { tracer: new Tracer({ exporter: ex }), quirks }));
       assert.deepEqual(r.commits.map(c => c.oid), git(bare, ['rev-list', '--first-parent', '-n', '10', 'main']).trim().split('\n'));
       const f = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
       assert.equal(f.length, 1);

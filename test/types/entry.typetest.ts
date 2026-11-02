@@ -58,11 +58,11 @@ const consumer = async (): Promise<void> => {
   void head;
   const object = await fetchObject(transport, { oid: 'c'.repeat(40), filter: 'blob:none' });
   const view = commitView(object.data, limits);
-  const tree: string | null = view.tree;
+  const tree: string | null = view.ok ? view.value.tree : null;
   void tree;
   const entry: string = entryType('100644');
   const mode: string = lsMode('100644');
-  const names: readonly string[] = refCandidates('main');
+  const names: readonly string[] = expectOk(refCandidates('main'));
   void entry; void mode; void names;
   const span = tracer.start('git.fetch');
   for await (const chunk of packStream(transport, fetchOpts, span)) {

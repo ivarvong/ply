@@ -1,7 +1,7 @@
 // One commit object by oid. readCommit, the tree walk, and pickCommit's assertCommit all go through fetchCommit.
 // It lives here so merge and rebase can use it without pulling read's blob stream (openBlob) into their bundle.
-// The read path's edge to modules not yet converted to Result (caughtErr, attempt, attemptSync) lives here for that reason:
-// read, log and checkout all import this file.
+// The read path's edge to the wire modules that still throw (caughtErr, attempt) lives here for that reason: read, log
+// and checkout all import this file. Only the wire calls (ls-refs, fetch, discover) go through it.
 import { fail, isPlyError, orThrow } from './errors.js';
 import type { CommitMiss, PlyError } from './errors.js';
 import { ok, err } from './result.js';
@@ -24,9 +24,6 @@ export function caughtErr(e: unknown): Err<PlyError> {
 // The edge to a function of a module that still throws: its PlyError becomes an Err (caughtErr).
 export async function attempt<T>(f: () => Promise<T>): Promise<Result<T, PlyError>> {
   try { return ok(await f()); } catch (e) { return caughtErr(e); }
-}
-export function attemptSync<T>(f: () => T): Result<T, PlyError> {
-  try { return ok(f()); } catch (e) { return caughtErr(e); }
 }
 
 // One commit object, hash-verified. A not_found carries Miss `{ kind: 'commit', miss }`; every other code is the error
