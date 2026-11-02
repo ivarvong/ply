@@ -198,7 +198,8 @@ function build() {
       expect: S > objCap ? refused('limit_exceeded', { what: 'object size' }) : ok,
     });
   }
-  // The sum of the file bytes, refused in validateTreeSpec before the blobs are copied. 3 × 48 MiB is 144 MiB (ratchet).
+  // The sum of the file bytes, refused in validateTreeSpec before the blobs are copied. 3 × 48 MiB is 144 MiB, past the cap.
+  // 100000 × 8 is under it, but the cap counts payload only, not per-object overhead (ratchet, #142).
   const pushCap = DEFAULT_LIMITS.maxPushBytes;
   for (const [n, s] of [[1, MiB], [1, 16 * MiB], [10000, 64], [3, 48 * MiB], [100000, 8]]) {
     const total = n * s;

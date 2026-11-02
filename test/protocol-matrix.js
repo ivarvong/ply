@@ -61,7 +61,7 @@ export async function runMode(mode) {
     stats.cells++;
     const wantCommits = wants.map(w => model.tags.get(w) ?? w).filter(w => model.commits.has(w));
     const exp = expectedObjects(model, { ...req, shallow, bitmap: S.bitmap });
-    const bound = requiredAndHad(model, { ...req, shallow });
+    const bound = requiredAndHad(model, { ...req, shallow, bitmap: S.bitmap });
     const degenerate = (d.deepenSince || d.deepenNot) && (wantCommits.length === 0 || wantCommits.some(w => (d.deepenSince && model.commits.get(w).date < d.deepenSince) || (d.deepenNot && !exp.inDepth.has(w))));
     let r;
     try { r = done ? await unwrapAsync(client.fetchPack(req, { external })) : await unwrapAsync(client.negotiate(req, { external })); }

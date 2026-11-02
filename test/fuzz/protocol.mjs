@@ -99,7 +99,7 @@ try {
     else if (r) {
       const got = new Set(r.objects.keys());
       // (1) two-sided bound from the model: everything required is present; every extra is something the client has
-      const bound = requiredAndHad(model, { wants, haves, deepen, deepenSince, deepenNot, filter, shallow });
+      const bound = requiredAndHad(model, { wants, haves, deepen, deepenSince, deepenNot, filter, shallow, bitmap: R.bitmap });
       const missingReq = [...bound.required].filter(o => !got.has(o)), extraNotHad = [...got].filter(o => !bound.required.has(o) && !bound.had.has(o));
       if (missingReq.length) problems.push(`BOUND: ${missingReq.length} required objects missing [${missingReq.slice(0, 3).map(o => model.type.get(o)).join(',')}]`);
       if (missingReq.length && process.env.PROTO_DEBUG) {
