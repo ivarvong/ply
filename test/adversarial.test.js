@@ -25,9 +25,9 @@ import { checkoutTree } from '../src/checkout.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { GitHttp } from '../src/client.js';
-import { createTransport } from '../src/http.js';
-import { fetchObject } from '../src/fetch.js';
-import { fetchPack, fetchPackTree0 } from '../src/fetchpack.js';
+import { createTransport as createTransportR } from '../src/http.js';
+import { fetchObject as fetchObjectR } from '../src/fetch.js';
+import { fetchPack as fetchPackR, fetchPackTree0 as fetchPackTree0R } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
@@ -41,8 +41,13 @@ import zlib from 'node:zlib';
 import { adler32 } from '../src/inflate.js';
 import { zlibBound } from '../src/format.js';
 import { pkt, FLUSH } from '../src/pktline.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
+const fetchPack = (...a) => unwrapAsync(fetchPackR(...a));
+const fetchPackTree0 = (...a) => unwrapAsync(fetchPackTree0R(...a));
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 const AUTHOR = { name: 'adv', email: 'adv@x' };
 const FILE = 'a/b/target.txt';

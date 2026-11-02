@@ -17,14 +17,17 @@ import { validateIdent } from '../../src/validate.js';
 import { buildPack } from '../../src/pack.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
 import { listTree, readCommit } from '../../src/read.js';
-import { createTransport } from '../../src/http.js';
-import { fetchObject } from '../../src/fetch.js';
+import { createTransport as createTransportR } from '../../src/http.js';
+import { fetchObject as fetchObjectR } from '../../src/fetch.js';
 import { Tracer, arrayExporter } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { Rng } from './prng.js';
 import { OID_BYTES } from '../../src/format.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '20', 10);
 const SEED = parseInt(args.seed ?? '1', 10);

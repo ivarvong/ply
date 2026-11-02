@@ -12,7 +12,7 @@ import { withLimits } from '../../src/limits.js';
 import { thrown as fail } from '../../src/errors.js';
 import { unwrap } from '../unwrap.js';
 
-const spanStub = { set() {}, event() {} };
+const spanStub = { set() {}, event() {}, error() {} };
 const tracer = { span: async (_name, _opts, fn) => fn(spanStub) };
 
 export function fakeTransport(response, limits) {

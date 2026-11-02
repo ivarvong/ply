@@ -18,12 +18,15 @@ import { genDag, readModel } from './dag.js';
 import { MERGE_LIES, mergeLie, fetchResponse, pktLine, FLUSH } from './mergelies.js';
 import { editFile } from '../../src/edit.js';
 import { mergeBase, mergeBranch } from '../../src/merge.js';
-import { createTransport } from '../../src/http.js';
+import { createTransport as createTransportR } from '../../src/http.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { TYPE } from '../../src/objects.js';
 import { concat, te } from '../../src/bytes.js';
 
+import { unwrap } from '../unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10), ONLY = args.case ? parseInt(args.case, 10) : null;
 const OP = args.op ?? 'mixed';

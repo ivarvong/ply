@@ -179,8 +179,8 @@ try {
         console.log('     shallow got:', r.shallow.map(idx), 'exp:', exp.shallow.map(idx), 'unshallow got:', r.unshallow.map(idx), 'exp:', exp.unshallow.map(idx));
         console.log('     ext bases:', [...r.objects.values()].filter(o => o.baseOid && !r.objects.has(o.baseOid)).map(o => idx(o.baseOid)).join(' '));
       } else {
-        const { fetchBody } = await import('../../src/client.js');
-        const res = await fetch(`${srv.url}/${R.name}.git/git-upload-pack`, { method: 'POST', headers: { 'Content-Type': 'application/x-git-upload-pack-request', 'Git-Protocol': 'version=2' }, body: fetchBody(req) });
+        const { fetchBody: fetchBodyR } = await import('../../src/client.js');
+        const res = await fetch(`${srv.url}/${R.name}.git/git-upload-pack`, { method: 'POST', headers: { 'Content-Type': 'application/x-git-upload-pack-request', 'Git-Protocol': 'version=2' }, body: fetchBodyR(req).value });
         console.log('     raw:', res.status, JSON.stringify(Buffer.from(await res.arrayBuffer()).toString('latin1').slice(0, 200)));
       }
     }

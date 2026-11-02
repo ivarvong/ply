@@ -7,13 +7,20 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { createTransport } from '../src/http.js';
-import { discover } from '../src/discover.js';
-import { lsRefs } from '../src/lsrefs.js';
-import { fetchPack, fetchPackTree0 } from '../src/fetchpack.js';
+import { createTransport as createTransportR } from '../src/http.js';
+import { discover as discoverR } from '../src/discover.js';
+import { lsRefs as lsRefsR } from '../src/lsrefs.js';
+import { fetchPack as fetchPackR, fetchPackTree0 as fetchPackTree0R } from '../src/fetchpack.js';
 import { cachingFetch, memoryCache } from '../src/packcache.js';
 import { td } from '../src/bytes.js';
 
+import { unwrap, unwrapAsync } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const discover = (...a) => unwrapAsync(discoverR(...a));
+const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
+const fetchPack = (...a) => unwrapAsync(fetchPackR(...a));
+const fetchPackTree0 = (...a) => unwrapAsync(fetchPackTree0R(...a));
 const KEY = /^(git|http|url|server|mem|error|ply|exception)\.[a-z0-9_.-]+$/;
 const CAP = 128;
 let root, cleanup, srv, n = 0;
@@ -113,7 +120,7 @@ test('a recorded value is scrubbed, then capped at 128, on the span that receive
   const { tracer, spans } = traced();
   const span = tracer.start('contract.harness');
   const t = createTransport('http://127.0.0.1/r.git', { tracer, parent: span, auth: { bearer: token }, fetchImpl, recordResponseHeaders: ['cf-ray'] });
-  assert.equal((await t.advertise('git-upload-pack', span)).length, 1);
+  assert.equal((await unwrapAsync(t.advertise('git-upload-pack', span))).length, 1);
   span.end();
   const ray = spans().find(s => s.name === 'contract.harness').attrs['http.response.header.cf-ray'];
   assert.equal(ray.length, CAP);
@@ -133,7 +140,7 @@ test('a recorded value is kept at 0, 1, cap-1 and cap, and cut at cap+1 and beyo
     const { tracer, spans } = traced();
     const span = tracer.start('contract.harness');
     const t = createTransport('http://127.0.0.1/r.git', { tracer, parent: span, fetchImpl, recordResponseHeaders: ['cf-ray'] });
-    await t.advertise('git-upload-pack', span);
+    await unwrapAsync(t.advertise('git-upload-pack', span));
     span.end();
     const ray = spans().find(s => s.name === 'contract.harness').attrs['http.response.header.cf-ray'];
     assert.equal(ray, raw.slice(0, CAP), `value length ${n}`);

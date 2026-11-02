@@ -24,14 +24,19 @@ import { deflateSync } from 'node:zlib';
 import { buildPacks, indexPackOracle } from './pack-fixtures.js';
 import { transport, outcome, outcomeSync, v2PackResponse, cat } from './wire.js';
 import { parsePack, resolvePack, packParseOpts, readObjHeader, readOfsDelta, readUint32BE } from '../../src/pack.js';
-import { fetchObject, spInit, spStep, spFinish } from '../../src/fetch.js';
-import { fetchPack } from '../../src/fetchpack.js';
+import { fetchObject as fetchObjectR, spInit, spStep as spStepR, spFinish as spFinishR } from '../../src/fetch.js';
+import { fetchPack as fetchPackR } from '../../src/fetchpack.js';
 import { inflate } from '../../src/inflate.js';
 import { hashObject, TYPE_NAME } from '../../src/objects.js';
 import { DEFAULT_LIMITS } from '../../src/limits.js';
 import { encodeObjHeader, encodeVarint } from '../../src/pack.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
+const spStep = (...a) => unwrap(spStepR(...a));
+const spFinish = (...a) => unwrap(spFinishR(...a));
+const fetchPack = (...a) => unwrapAsync(fetchPackR(...a));
 const FULL = process.env.PACK_SPACE === 'full';
 const F = buildPacks();
 const ORACLE = indexPackOracle();

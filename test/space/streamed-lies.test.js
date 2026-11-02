@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpRoot, makeBareRepo, startGitServer, commitFiles, git } from '../server.js';
 import { editFile } from '../../src/edit.js';
 import { readFile, openBlob } from '../../src/read.js';
-import { fetchObject } from '../../src/fetch.js';
+import { fetchObject as fetchObjectR } from '../../src/fetch.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits, DEFAULT_LIMITS } from '../../src/limits.js';
 import { buildPack, encodeObjHeader, spliceDelta, zlibDeflate } from '../../src/pack.js';
@@ -19,8 +19,10 @@ import { hashObject, TYPE } from '../../src/objects.js';
 import { Sha1 } from '../../src/sha1.js';
 import { concat, te } from '../../src/bytes.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
 const FIND = 'M';
 const AUTHOR = { name: 'adv', email: 'adv@x' };
 const FRAME = 8;

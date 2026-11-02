@@ -146,7 +146,7 @@ function remote({ head = 'refs/heads/main', chunk = 1 << 16, hook = null } = {})
     kind: 'http', url: 'http://fake/r.git', tracer, parent: null, limits, signal: null, quirks, objects: new Map(), scrub: null,
     frames: (service, body) => serve(service, body),
     // A ref miss asks discover() before it classifies the miss. No `unborn` feature: no second ls-refs, HEAD stays head_absent.
-    advertise: async () => unwrap(pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n'])),
+    advertise: async () => pkts(['version 2\n', 'ls-refs\n', 'fetch\n', 'object-format=sha1\n']),
   });
   return { objects, refs, log, put, commit, transport, fetches: () => log.filter(r => r.command === 'fetch'), pushes: () => log.filter(r => r.service === 'git-receive-pack') };
 }
@@ -956,7 +956,7 @@ test('resolveCommit: HEAD\'s symref, a detached HEAD, tags over branches, peeled
 
 test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwise', async () => {
   const target = 'refs/heads/main';
-  const advertise = async () => unwrap(pkts(['version 2\n', 'ls-refs=unborn\n', 'fetch\n', 'object-format=sha1\n']));
+  const advertise = async () => pkts(['version 2\n', 'ls-refs=unborn\n', 'fetch\n', 'object-format=sha1\n']);
   const unbornLine = (text) => [dataFrame(text), { kind: 'flush' }];
   const server = (text) => {
     // an unborn answer that is not prefixed HEAD is the server's ordinary listing: the second ls-refs must ask for HEAD

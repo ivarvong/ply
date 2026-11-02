@@ -9,9 +9,12 @@ import { Sha1, fromHex } from '../src/sha1.js';
 import { te } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
-import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish } from '../src/edit.js';
+import { spInit, spStep as spStepR, spFinish as spFinishR, scanInit, scanStep, scanFinish } from '../src/edit.js';
 import { unwrap } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const spStep = (...a) => unwrap(spStepR(...a));
+const spFinish = (...a) => unwrap(spFinishR(...a));
 export async function prepare({ url, ref = 'refs/heads/main', path, find, replace, author = { name: 'ply', email: 'ply@edge' }, message = 'ply edit', auth, fetchImpl, head: hint = null }) {
   const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
   const root = tracer.start('git.edit.prepare', { attrs: { 'git.edit.path': path } });

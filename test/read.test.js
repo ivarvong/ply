@@ -10,12 +10,17 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
 import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit, openBlob, readBlob, resolveCommit, resolveAbbrev } from '../src/read.js';
-import { lsRefs } from '../src/lsrefs.js';
-import { createTransport } from '../src/http.js';
-import { fetchObject } from '../src/fetch.js';
+import { lsRefs as lsRefsR } from '../src/lsrefs.js';
+import { createTransport as createTransportR } from '../src/http.js';
+import { fetchObject as fetchObjectR } from '../src/fetch.js';
 import { parseIdent, TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
+import { unwrap, unwrapAsync } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
 let root, cleanup, srv, R;
 const tracer = () => new Tracer();
 const drain = async stream => { const parts = []; for await (const c of stream) parts.push(Buffer.from(c)); return Buffer.concat(parts); };

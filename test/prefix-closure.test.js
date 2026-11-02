@@ -18,9 +18,9 @@ import { pkt, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.j
 import { encodeObjHeader, buildPack, spliceDelta } from '../src/pack.js';
 import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packresolve.js';
 import { inflate } from '../src/inflate.js';
-import { parseSideband, spInit, spStep, spFinish, v2Init, v2Step } from '../src/fetch.js';
-import { parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
-import { parseCapabilitiesV2 } from '../src/discover.js';
+import { parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, v2Init, v2Step as v2StepR } from '../src/fetch.js';
+import { parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
+import { parseCapabilitiesV2 as parseCapabilitiesV2R } from '../src/discover.js';
 import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseLine, parseFile } from '../src/attributes.js';
@@ -31,6 +31,13 @@ import { parseRefname, parseBranchName, parseTagName } from '../src/refname.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const parseSideband = (...a) => unwrap(parseSidebandR(...a));
+const spStep = (...a) => unwrap(spStepR(...a));
+const spFinish = (...a) => unwrap(spFinishR(...a));
+const v2Step = (...a) => unwrap(v2StepR(...a));
+const parseLsRefLine = (...a) => unwrap(parseLsRefLineR(...a));
+const parseCapabilitiesV2 = (...a) => unwrap(parseCapabilitiesV2R(...a));
 const covered = new Set();
 const property = (id, name, fn) => { covered.add(id); test(name, fn); };
 const oid = n => n.toString(16).padStart(OID_HEX_CHARS, '0');

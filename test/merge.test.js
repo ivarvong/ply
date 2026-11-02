@@ -16,10 +16,13 @@ import { rebaseBranch } from '../src/rebase.js';
 import { mergeBranch, deleteBranch, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { attributesFor } from '../src/attributes.js';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
+import { unwrap } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 // the empty tree as attr.tree: git reads no .gitattributes (our default) whatever its version's bare-repo default is
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 let root, cleanup, srv, n = 0;
