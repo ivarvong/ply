@@ -254,14 +254,14 @@ const unbornState = (r: Result<Resolved, PlyError>): Option<EmptyCommit> => {
 export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: ReadOptions = {}): Promise<CommitResult | EmptyCommit> {
   const { ref } = withDefaults<RefConfig>(spec, { ref: null });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } } as OperationOpts), async ({ t, outcome }) => {
+  return orThrow(await operation<EmptyCommit | CommitResult>('read_commit', url, ({ ...opts, attrs: { 'git.read_commit.ref': ref === null ? 'HEAD' : ref } } as OperationOpts), async ({ t, outcome }) => {
     const resolved = await resolveCommitResult(t, ref);
     const empty = unbornState(resolved);
     if (empty.tag === 'some') return outcome('ok', empty.value);
     const { name, commit } = orThrow(resolved);
     const view = commitView(orThrow(await fetchCommit(t, commit)).data, t.limits);
     return outcome('ok', { ref: name, oid: commit, ...view }, { 'git.read_commit.oid': commit, 'git.read_commit.parents': view.parents.length, 'git.read_commit.signed': view.signed });
-  });
+  }));
 }
 
 // Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
@@ -350,7 +350,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
   const { cache, limits } = treeReadConfig(options);
   const comps = orThrow(pathComps(path, limits, { allowRoot: true }));
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('ls_tree', url, ({ ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+  return orThrow(await operation('ls_tree', url, ({ ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
     const { name, commit } = orThrow(await resolveCommitResult(t, ref));
     // the tracer operation() started the root span on (opts.tracer)
     const walked = orThrow(await walk(t, root, { commit, comps, cache, limits }));
@@ -359,7 +359,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
     const data = cached.tag === 'some' ? cached.value : orThrow(await fetchTree(t, cache, oid));
     const entries: readonly TreeEntry[] = orThrow(parseTree(data, limits));
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
-  });
+  }));
 }
 
 export type FileResult = {
@@ -385,7 +385,7 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
   const { cache, limits } = treeReadConfig(options);
   const comps = orThrow(pathComps(path, limits, { allowRoot: false }));
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read', url, ({ ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
+  return orThrow(await operation('read', url, ({ ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } } as OperationOpts), async ({ t, root, outcome }) => {
     const { name, commit } = orThrow(await resolveCommitResult(t, ref));
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
@@ -393,7 +393,7 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
     const opened = orThrow(await openBlob(t, entry.oid, { follows: root }));
     return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size: opened.size, stream: opened.stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': opened.size, 'git.read.blob.mode': entry.mode });
-  });
+  }));
 }
 
 export type BlobStream = { readonly kind: 'stream'; readonly size: number; readonly stream: ReadableStream<Uint8Array> };

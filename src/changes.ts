@@ -36,7 +36,7 @@ import {
 import type { BlobMode, Dir, Mem } from './memtree.js';
 import { MODE_TREE } from './format.js';
 import { assertNever, err, getOrElse, mapOption, none, ok, some } from './result.js';
-import type { Err, Option, Result } from './result.js';
+import type { Err, Ok, Option, Result } from './result.js';
 import { thrownCodeIs, thrownCodeOr } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import type { Transport } from './transport.js';
@@ -562,7 +562,7 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
   if (!branded.ok) return branded;
   try {
     const pushed = await push(t, { ref: branded.value, oldOid, newOid: oid, objects });
-    if (verify) await verifyRef(t, root, 'git.commit', target.ref, oid);
+    if (verify) orThrow(await verifyRef(t, root, 'git.commit', target.ref, oid));
     return ok({ retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid, pushBytes: pushed.packBytes, outcome: 'commit' }) });
   } catch (e) {
     // the push (or its read-back) throws: a lost race is redone once, or reported against a fresh read; the rest passes on
@@ -594,7 +594,7 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
   const opts: StreamOpts = { rest: options, limits, verify, signer, allowLfs: allowLfsPointer, pinned };
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- tracer is optional on EntryOptions and required by operation(), as editFile
   const out = await operation('commit', url, { ...options, limits, attrs } as OperationOpts, async ({ t, root, outcome }) => {
-    const finish = (done: CommitChangesResult, objects: number): CommitChangesResult => outcome(done.outcome, done, {
+    const finish = (done: CommitChangesResult, objects: number): Ok<CommitChangesResult> => outcome(done.outcome, done, {
       'git.commit.tree': done.tree, 'git.commit.oid': done.oid, 'git.commit.push.bytes': done.pushBytes, ...(objects > 0 ? { 'git.commit.objects': objects } : {}),
     });
     const run = async (attempt: number): Promise<Result<CommitChangesResult, PlyError>> => {
@@ -609,13 +609,14 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
       root.set({ 'git.commit.creating': parent.value.creating, 'git.commit.parent': parent.value.oid === null ? '' : parent.value.oid });
       const streamed = await streamIfEdit(url, t, root, { plan, target: tip, parent: parent.value, opts });
       if (!streamed.ok) return streamed;
-      if (streamed.value.tag === 'some') return ok(finish(streamed.value.value, 0));
+      if (streamed.value.tag === 'some') return finish(streamed.value.value, 0);
       const wrote = await writeMem({ t, root, plan, target: tip, parent: parent.value, limits, verify, signer, allowLfs: allowLfsPointer, pinned, attempt });
       if (!wrote.ok) return wrote;
       if (wrote.value.retry) return run(1);
-      return ok(finish(wrote.value.done, wrote.value.objects));
+      return finish(wrote.value.done, wrote.value.objects);
     };
-    return orThrow(await run(0));
+    const done = await run(0);
+    return done;
   });
-  return out;
+  return orThrow(out);
 }

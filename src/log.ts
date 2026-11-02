@@ -187,12 +187,12 @@ function logArgs(spec: LogSpec, opts: ReadOptions): Result<{ readonly ref: strin
 export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<LogResult> {
   const { ref, limit } = orThrow(logArgs(spec, opts));
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
+  return orThrow(await operation('read_log', url, ({ ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } } as OperationOpts), async ({ t, outcome }) => {
     const { name, commit } = orThrow(await resolveCommitResult(t, ref));
     const got = orThrow(await logOn(t, { commit, limit }));
     return outcome('ok', { ref: name, oid: commit, commits: got.commits, truncated: got.truncated }, {
       'git.read_log.oid': commit, 'git.read_log.commits': got.commits.length, 'git.read_log.truncated': got.truncated, 'git.read_log.cut': got.cut,
       'git.read_log.window.commits': got.window.commits, 'git.read_log.window.shallow': got.window.shallow, 'git.read_log.filter': got.filter,
     });
-  });
+  }));
 }

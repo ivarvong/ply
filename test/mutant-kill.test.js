@@ -37,7 +37,7 @@ import {
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, errOf } from './unwrap.js';
 
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
 const oidBytes = n => Uint8Array.from({ length: OID_BYTES }, () => n);
@@ -2092,7 +2092,8 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   const root = { set() {} };
   const ref = 'refs/heads/main';
   const expected = 'a'.repeat(40);
-  const readBack = async (thrown) => verifyRef({ get limits() { throw thrown; } }, root, 'git.edit', ref, expected).then(() => null, e => e);
+  // verifyRef returns its refusal as a value (the I25 rule: any read-back failure is ambiguous)
+  const readBack = async (thrown) => errOf(await verifyRef({ get limits() { throw thrown; } }, root, 'git.edit', ref, expected));
   const eNull = await readBack(null);
   assert.equal(eNull.code, 'ambiguous');
   assert.equal(eNull.message, 'push reported ok but the verification read-back failed: null');

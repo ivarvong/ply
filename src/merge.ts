@@ -21,7 +21,7 @@ import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
-import type { Option, Result } from './result.js';
+import type { Ok, Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import type { LsRefsResult } from './lsrefs.js';
 import type { OperationOpts, Outcome } from './operation.js';
@@ -669,7 +669,7 @@ const peeledOf = (refs: LsRefsResult['refs'], ref: string): Option<string> => {
 
 // Effect: a landing that writes no merge commit: nothing to do, or the fast-forward push.
 type Quick = Exclude<Landing, { readonly kind: 'three_way' }>;
-async function landWithoutMerge(t: Transport, outcome: Outcome, land: Quick, { ref, ours, theirs }: { readonly ref: string; readonly ours: string; readonly theirs: string }): Promise<MergeOutcome> {
+async function landWithoutMerge(t: Transport, outcome: Outcome, land: Quick, { ref, ours, theirs }: { readonly ref: string; readonly ours: string; readonly theirs: string }): Promise<Ok<MergeOutcome>> {
   switch (land.kind) {
     case 'up_to_date': return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base: land.base });
     case 'fast_forward': {
@@ -693,7 +693,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
   const committerPerson: ValidatedIdent | null = committer ? stamp(committer, time) : person;
   if (message !== null && message !== '') orThrow(validateMessage(message));
   const attributes = orThrow(validateAttributes(attributesGiven));
-  return operation('merge', url, operationOpts(options, { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward }), async ({ t, root, outcome }: OpContext): Promise<MergeOutcome> => orThrow(await (async (): Promise<Result<MergeOutcome, PlyError>> => {
+  return orThrow(await operation('merge', url, operationOpts(options, { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward }), async ({ t, root, outcome }: OpContext): Promise<Result<MergeOutcome, PlyError>> => (async (): Promise<Result<MergeOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]);
     const oursAt = refOid(refs, ref);
     const theirsAt = isSome(fromOid) ? fromOid : refOid(refs, from);
@@ -706,8 +706,8 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     for (const r of [ref, from]) { const peeled = peeledOf(refs, r); if (peeled.tag === 'some') return fail('unsupported', `${r} is an annotated tag (git merge writes a mergetag header ply does not); merge its commit ${peeled.value}`, { what: r === ref ? 'ref' : 'from' }); }
     if (fromOid.tag === 'some') { const c = await assertCommit(t, fromOid.value, 'from'); if (!c.ok) return c; }
     root.set({ 'git.merge.ours': ours, 'git.merge.theirs': theirs });
-    const upToDate = (base: string): MergeOutcome => outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
-    if (ours === theirs) return ok(upToDate(ours));
+    const upToDate = (base: string): Ok<MergeOutcome> => outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
+    if (ours === theirs) return upToDate(ours);
     const found = await mergeBaseResult(t, ours, theirs);
     if (!found.ok) return found;
     const { base: one, bases, depth, verdict } = found.value;
@@ -715,7 +715,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const landing = decideMerge(verdict, ours, theirs, { ref, from, fastForwardOnly, noFastForward });
     if (!landing.ok) return landing;
     const land = landing.value;
-    if (land.kind !== 'three_way') return ok(await landWithoutMerge(t, outcome, land, { ref, ours, theirs }));
+    if (land.kind !== 'three_way') return landWithoutMerge(t, outcome, land, { ref, ours, theirs });
     const { base } = land;
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     const [cB, cO, cT] = await Promise.all([commitBytesAt(t, base), commitBytesAt(t, ours), commitBytesAt(t, theirs)]);
@@ -741,8 +741,8 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const objects = uniqueObjects([{ type: TYPE.COMMIT, data: commitData, oid }, ...(merged.oid === null ? [{ type: TYPE.TREE, data: orThrow(encodeTree([])), oid: treeOid }] : []), ...merged.objects]).map(o => ({ type: o.type, data: o.data }));
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
     const r = await (push as unknown as Push)(t, { ref, oldOid: ours, newOid: oid, objects });
-    if (verify) await verifyRef(t, root, 'git.merge', ref, oid);
-    return ok(outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes }));
+    if (verify) { const seen = await verifyRef(t, root, 'git.merge', ref, oid); if (!seen.ok) return seen; }
+    return outcome('merge', { outcome: 'merge', ref, oid, tree: treeOid, ours, theirs, base, pushBytes: r.packBytes, newTrees, contentMerged: merged.contentMerged }, { 'git.merge.commit': oid, 'git.merge.tree': treeOid, 'git.merge.push.bytes': r.packBytes });
   })()));
 }
 /* oxlint-enable eslint/complexity */

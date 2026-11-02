@@ -469,7 +469,7 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
   const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint === null ? '' : hint, ...memAttrs({ objects: held, ...streamed }), ...fetchCounters(options) });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('edit', url, ({ ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
+  return orThrow(await operation('edit', url, ({ ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
     const getObject = async (oid: string, expectType: number, deepen: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
@@ -546,11 +546,11 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
     const pushed = await push(t, { ref: s.ref, oldOid: creating ? ZERO_OID : oldCommit, newOid: built.newCommit, objects: built.objects });
     // report-status is the only receipt git offers, and a middlebox can forge it. verify: re-read the ref (one ~100 B
     // roundtrip) and require it to be our commit; a mismatch is 'ambiguous' (the push was acknowledged but not observed).
-    if (verify) await verifyRef(t, root, 'git.edit', s.ref, built.newCommit);
+    if (verify) orThrow(await verifyRef(t, root, 'git.edit', s.ref, built.newCommit));
     return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt }, { newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: pushed.packBytes }), { 'git.edit.push.bytes': pushed.packBytes, 'git.edit.push.ratio': pushed.packBytes / Math.max(1, blob.newLen) });
     // a thrown object gets the attempt's fields, as before, and leaves through operation(), which records it on the root
     } catch (e) { tagAttempt(e, attempt, hint); throw e; }
-  });
+  }));
 }
 
 // `head`: an oid the caller believes `ref` points at (e.g. its last newCommit). ls-refs and the hinted commit fetch run

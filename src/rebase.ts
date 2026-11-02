@@ -171,7 +171,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
   const committerPerson: ValidatedIdent = stamp(committer, time);
   const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
   if (message !== null) orThrow(validateMessage(message));
-  return operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<RebaseOutcome> => orThrow(await (async (): Promise<Result<RebaseOutcome, PlyError>> => {
+  return orThrow(await operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<Result<RebaseOutcome, PlyError>> => (async (): Promise<Result<RebaseOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]);
     const tipAt = refOid(refs, ref);
     const targetAt = ontoOid.tag === 'some' ? ontoOid : refOid(refs, onto);
@@ -196,11 +196,11 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     }
     const { base } = verdict;
     root.set({ 'git.rebase.base': base });
-    if (base === target) return ok(outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 }));
+    if (base === target) return outcome('up_to_date', { outcome: 'up_to_date', ref, oid: tip, commits: 0 });
     if (base === tip) { // the branch is behind: rebasing nothing onto target makes the branch equal to target
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
       await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: target, objects: [] });
-      return ok(outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 }));
+      return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 });
     }
     const maxCommits = readLimit(limits, 'maxRebaseCommits');
     if (!maxCommits.ok) return maxCommits;
@@ -241,7 +241,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     root.set({ 'git.rebase.trees.fetched': out.fetched, 'git.rebase.objects': objects.length, 'git.rebase.dropped': dropped.length });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
-    return ok(outcome(squash ? 'squash' : 'rebase', { outcome: squash ? 'squash' : 'rebase', ref, oid: cur, oldTip: tip, onto: target, base, commits: chain.length, replayed, dropped, pushBytes: pushed.packBytes }, { 'git.rebase.new_tip': cur, 'git.rebase.push.bytes': pushed.packBytes }));
+    return outcome(squash ? 'squash' : 'rebase', { outcome: squash ? 'squash' : 'rebase', ref, oid: cur, oldTip: tip, onto: target, base, commits: chain.length, replayed, dropped, pushBytes: pushed.packBytes }, { 'git.rebase.new_tip': cur, 'git.rebase.push.bytes': pushed.packBytes });
   })()));
 }
 /* oxlint-enable eslint/complexity */
@@ -323,7 +323,7 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
   orThrow(isOid(commit) ? ok(commit) : fail('bad_request', 'commit must be a 40-hex oid'));
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
-  return operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<PickOutcome> => orThrow(await (async (): Promise<Result<PickOutcome, PlyError>> => {
+  return orThrow(await operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<Result<PickOutcome, PlyError>> => (async (): Promise<Result<PickOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, [ref]);
     const targetAt = refOid(refs, ref); if (targetAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const target = targetAt.value;
@@ -344,10 +344,10 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
     const w = r.value;
     if (w.kind === 'conflict') return fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);
     const kind = writtenKind(w.treeOid === tInfo.tree, empty);
-    if (kind === 'empty') return ok(outcome('empty', { outcome: 'empty', ref, oid: target }));
+    if (kind === 'empty') return outcome('empty', { outcome: 'empty', ref, oid: target });
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: w.oid, objects: uniqueObjects(w.objects) });
-    return ok(outcome(kind, { outcome: kind, ref, oid: w.oid, tree: w.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: w.oid, [`${name}.tree`]: w.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes }));
+    return outcome(kind, { outcome: kind, ref, oid: w.oid, tree: w.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: w.oid, [`${name}.tree`]: w.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
   })()));
 }
 type CherrySpec = Omit<PickSpec, 'revert'>;

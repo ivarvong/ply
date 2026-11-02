@@ -299,7 +299,7 @@ export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options
   const limits = getOrElse(fromNullish(options.limits), DEFAULT_LIMITS);
   const comps = orThrow(checkoutArgs(path, batch, limits));
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the options' tracer, required at run time: EntryOptions (boundary.ts)
-  return operation('checkout', url, ({ ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
+  return orThrow(await operation('checkout', url, ({ ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } } as OperationOpts), async ({ t, root, outcome }) => {
     const { name, commit } = orThrow(await resolveCommitResult(t, ref));
     const trees = orThrow(await fetchTrees(t, commit, limits));
     const oid = orThrow(subtree(trees.tree, trees.root, comps));
@@ -310,5 +310,5 @@ export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options
       'git.checkout.commit': commit, 'git.checkout.tree': oid, 'git.checkout.entries': entries.length,
       'git.checkout.pack.objects': trees.objects, 'git.checkout.pack.trees': trees.trees,
     });
-  });
+  }));
 }

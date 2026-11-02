@@ -340,7 +340,7 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head === null ? '' : head, 'git.push_tree.attempt': attempt };
   // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
-  return operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
+  return orThrow(await operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
     // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
     const commitOf = (oid: string): Promise<Fetched> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     try {
@@ -377,11 +377,11 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     root.set({ 'git.push_tree.commit.new': newCommit, 'git.push_tree.send.trees': sel.trees.length, 'git.push_tree.send.tree_deltas': sel.deltas, 'git.push_tree.send.blobs': sel.blobs.length });
     const pushed = await push(t, { ref: s.ref, oldOid: s.create || parent === null ? ZERO_OID : parent, newOid: newCommit, objects });
     for (const tr of s.built.trees.values()) cache.set(tr.oid, tr.data);
-    if (verify) await verifyRef(t, root, 'git.push_tree', s.ref, newCommit);
+    if (verify) orThrow(await verifyRef(t, root, 'git.push_tree', s.ref, newCommit));
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt }, { newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });
     // a thrown object gets the attempt's fields, as before, and leaves through operation(), which records it on the root
     } catch (e) { tagAttempt(e, attempt, hint); throw e; }
-  });
+  }));
 }
 
 // Same contract as editFile: `head` overlaps ls-refs with a speculative fetch of the hinted commit (ls-refs wins); a
