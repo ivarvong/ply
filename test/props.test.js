@@ -14,7 +14,7 @@ import { spInit, spStep as spStepR, spFinish as spFinishR, scanInit, scanStep, s
 import { v2Init, v2Step as v2StepR } from '../src/client.js';
 import { concat, indexOfBytes } from '../src/bytes.js';
 import { assertBytes } from './bytes-assert.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 // Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
 const spStep = (...a) => unwrap(spStepR(...a));
@@ -245,6 +245,6 @@ test('ls-refs: sha256 object ids are rejected as unsupported before any fetch', 
   const body = concat([unwrap(pkt(te2.encode(`${'ab'.repeat(32)} refs/heads/main\n`))), FLUSH]);
   const { GitHttp } = await import('../src/client.js');
   const { Tracer } = await import('../src/otel.js');
-  const c = new GitHttp('http://x.invalid/r.git', { tracer: new Tracer(), fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) });
-  await assert.rejects(c.lsRefs(['refs/heads/main']), e => e.code === 'unsupported');
+  const c = unwrap(GitHttp.create('http://x.invalid/r.git', { tracer: new Tracer(), fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) }));
+  await assert.rejects(unwrapAsync(c.lsRefs(['refs/heads/main'])), e => e.code === 'unsupported');
 });

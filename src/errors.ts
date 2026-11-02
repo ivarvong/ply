@@ -7,7 +7,7 @@
 //        'no'    — retrying the same request cannot succeed
 //        'read'  — do not retry blindly: the server MAY have applied the change; read the ref back first
 import type { ObjectTypeName } from './format.js';
-import type { Err, Result } from './result.js';
+import type { Err } from './result.js';
 import { err, getOrElse } from './result.js';
 import type { Input } from './absent.js';
 import { field } from './absent.js';
@@ -135,11 +135,6 @@ export const fail = <C extends Code>(code: C, message: string, ...detail: Payloa
 
 // plyError's untyped signature: an Error carrying one of ply's codes.
 export type Thrown = Error & { readonly code: Code };
-// Transitional: the last throwing call sites (client.ts's GitHttp) until they return Result; then deleted.
-export const orThrow = <T>(r: Result<T, PlyError>): T => {
-  if (r.ok) return r.value;
-  throw r.error;
-};
 
 // After a push body is on the wire, any failure to obtain a trustworthy report means the ref MAY have moved.
 // That includes our own limits: a report too large to read says nothing about whether the ref moved.

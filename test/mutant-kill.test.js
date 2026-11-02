@@ -1493,14 +1493,14 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const adv = feature => concat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=git/2.50.0\n')), unwrap(pkt(`ls-refs${feature}\n`)), unwrap(pkt('fetch=filter\n')), unwrap(pkt('object-format=sha1\n')), FLUSH]);
   for (const [feature, asked, sends] of [['=unborn', true, true], ['', true, false], ['=other', true, false], ['=unborn', false, false]]) {
     const r = recording(listing, adv(feature));
-    const res = await lsRefsAsked(r.t, [], asked ? { unborn: true } : {});
+    const res = await unwrapAsync(lsRefsAsked(r.t, [], asked ? { unborn: true } : {}));
     assert.equal(/unborn/.test(r.sent[0]), sends, `${feature} asked=${asked}`);
     assert.deepEqual(res.unborn, sends ? { name: 'HEAD', target: 'refs/heads/b' } : null, `${feature} asked=${asked}`);
     assert.equal(r.ads.length, asked ? 1 : 0, 'the advertisement is fetched only when asked');
   }
   for (const lsRefsUnborn of [true, false]) {
     const r = recording(listing, null);
-    const res = await lsRefsAsked(r.t, [], { unborn: true, info: { lsRefsUnborn } });
+    const res = await unwrapAsync(lsRefsAsked(r.t, [], { unborn: true, info: { lsRefsUnborn } }));
     assert.equal(r.ads.length, 0, 'info in hand: no advertisement');
     assert.equal(/unborn/.test(r.sent[0]), lsRefsUnborn);
     assert.equal(res.unborn !== null, lsRefsUnborn);

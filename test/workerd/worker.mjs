@@ -2,13 +2,12 @@
 // (sequentially, or concurrently with ?concurrent=1) and reports results, spans summary, and timing.
 import { editFile } from '../../src/edit.js';
 import { readFile } from '../../src/read.js';
-import { unwrapAsync } from '../unwrap.js';
+import { unwrapAsync, unwrap } from '../unwrap.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
-import { unwrapAsync } from '../unwrap.js';
 
 // module-scoped: survives across requests within the isolate, like a real worker would hold it
 const packCache = typeof caches !== 'undefined' ? caches.default : null;
@@ -33,18 +32,18 @@ export default {
     if (u.pathname === '/fetchpack') {
       const body = await req.json();
       const exporter = arrayExporter();
-      const c = new GitHttp(body.url, { tracer: new Tracer({ exporter }) });
+      const c = unwrap(GitHttp.create(body.url, { tracer: new Tracer({ exporter }) }));
       const t0 = Date.now();
       try {
-        const r = await c.fetchPack(body.req);
+        const r = await unwrapAsync(c.fetchPack(body.req));
         return Response.json({ ok: true, objects: r.parsed?.stats.count ?? 0, ms: Date.now() - t0, spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, ms: s.durationMs, attrs: pick(s.attrs) })) });
       } catch (e) { return Response.json({ ok: false, code: e.code, message: e.message, ms: Date.now() - t0 }); }
     }
     if (u.pathname === '/redirect') { // ply against a redirecting server; plus what workerd's own `follow` does with Authorization
       const body = await req.json();
-      const c = new GitHttp(body.url, { tracer: new Tracer(), auth: body.auth });
+      const c = unwrap(GitHttp.create(body.url, { tracer: new Tracer(), auth: body.auth }));
       const res = {};
-      for (const [k, op] of [['get', () => c.discover()], ['post', () => c.lsRefs()]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
+      for (const [k, op] of [['get', () => unwrapAsync(c.discover())], ['post', () => unwrapAsync(c.lsRefs())]]) { try { await op(); res[k] = { ok: true }; } catch (e) { res[k] = { code: e.code, status: e.status, message: e.message }; } }
       try { const r = await fetch(`${body.url}/info/refs?service=git-upload-pack`, { headers: { Authorization: 'Bearer workerd-follow-probe' } }); res.follow = { status: r.status, url: r.url }; await r.body?.cancel(); } catch (e) { res.follow = { error: e.message }; }
       return Response.json(res);
     }

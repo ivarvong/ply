@@ -51,7 +51,7 @@ const ops = {
     return { n: r.commits.length, truncated: r.truncated };
   },
   async lsRefs() {
-    const r = await new GitHttp(cell.url, opts).lsRefs(cell.prefixes ?? []);
+    const r = await unwrapAsync(unwrap(GitHttp.create(cell.url, opts)).lsRefs(cell.prefixes ?? []));
     return { n: r.refs.size, head: r.head };
   },
   async editFile() {

@@ -10,7 +10,7 @@ import { te } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
 import { spInit, spStep as spStepR, spFinish as spFinishR, scanInit, scanStep, scanFinish } from '../src/edit.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 // Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
 const spStep = (...a) => unwrap(spStepR(...a));
@@ -18,15 +18,15 @@ const spFinish = (...a) => unwrap(spFinishR(...a));
 export async function prepare({ url, ref = 'refs/heads/main', path, find, replace, author = { name: 'ply', email: 'ply@edge' }, message = 'ply edit', auth, fetchImpl, head: hint = null }) {
   const exporter = arrayExporter(); const tracer = new Tracer({ exporter });
   const root = tracer.start('git.edit.prepare', { attrs: { 'git.edit.path': path } });
-  const client = new GitHttp(url, { tracer, parent: root, limits: withLimits({ requestTimeoutMs: 25000 }), auth, fetchImpl });
+  const client = unwrap(GitHttp.create(url, { tracer, parent: root, limits: withLimits({ requestTimeoutMs: 25000 }), auth, fetchImpl }));
   const t0 = Date.now();
   let oldCommit = hint;
-  if (!oldCommit) { const { refs, head } = await client.lsRefs([ref, 'HEAD']); oldCommit = refs.get(ref)?.oid; if (!oldCommit) throw Object.assign(new Error(`no ${ref} (HEAD→${head})`), { code: 'not_found' }); }
-  const cf = await client.fetchPack({ wants: [oldCommit], filter: 'tree:0', deepen: 1 });
+  if (!oldCommit) { const { refs, head } = await unwrapAsync(client.lsRefs([ref, 'HEAD'])); oldCommit = refs.get(ref)?.oid; if (!oldCommit) throw Object.assign(new Error(`no ${ref} (HEAD→${head})`), { code: 'not_found' }); }
+  const cf = await unwrapAsync(client.fetchPack({ wants: [oldCommit], filter: 'tree:0', deepen: 1 }));
   const commit = unwrap(parseCommit(cf.objects.get(oldCommit).data));
   const comps = path.split('/'); const levels = []; let treeOid = commit.tree;
   for (let d = 0; d < comps.length; d++) {
-    const tf = await client.fetchPack({ wants: [treeOid], filter: 'tree:0' });
+    const tf = await unwrapAsync(client.fetchPack({ wants: [treeOid], filter: 'tree:0' }));
     const data = tf.objects.get(treeOid).data; const entry = unwrap(parseTree(data)).find(e => e.name === comps[d]);
     if (!entry) throw Object.assign(new Error(`${comps[d]} not in ${treeOid}`), { code: 'not_found' });
     levels.push({ treeOid, data, entry }); treeOid = entry.oid;

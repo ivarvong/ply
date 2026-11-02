@@ -116,11 +116,11 @@ function plyClient(url, { follow, auth, max, allowUrl, fetchImpl, exporter }) {
   const opts = { tracer, followRedirects: follow === 'off' ? 'never' : follow, allowUrl, fetchImpl };
   if (max !== undefined) opts.maxRedirects = max;
   if (auth) opts.auth = { token: TOK };
-  return new GitHttp(url, opts);
+  return unwrap(GitHttp.create(url, opts));
 }
 async function plyLs(url, spec) {
   const c = plyClient(url, spec);
-  try { const r = await c.lsRefs(); return { ok: true, refs: r.refs, url: c.url, error: null }; }
+  try { const r = await unwrapAsync(c.lsRefs()); return { ok: true, refs: r.refs, url: c.url, error: null }; }
   catch (error) { return { ok: false, refs: null, url: c.url, error }; }
 }
 
@@ -202,7 +202,7 @@ test('git oracle: origin × auth × follow × kind', async () => {
         const git = await gitLs(`${front.url}/old.git`, follow, auth);
         hits.length = 0; gateHits.length = 0;
         const ply = follow === 'off' && kind !== 'post'
-          ? await (async () => { const c = plyClient(`${front.url}/old.git`, { follow, auth }); try { await c.discover(); return { ok: true, refs: null, url: c.url, error: null }; } catch (error) { return { ok: false, refs: null, url: c.url, error }; } })()
+          ? await (async () => { const c = plyClient(`${front.url}/old.git`, { follow, auth }); try { await unwrapAsync(c.discover()); return { ok: true, refs: null, url: c.url, error: null }; } catch (error) { return { ok: false, refs: null, url: c.url, error }; } })()
           : await plyLs(`${front.url}/old.git`, { follow, auth });
         const seen = hits.concat(kind === 'keep' && cross ? gateHits : []);
         const plyView = seen.map(h => ({ method: h.method, path: h.path, host: h.host, auth: h.auth !== null }));
@@ -359,7 +359,7 @@ test('a two-hop chain matches git, and the span records the original base once',
     const git = await gitLs(`${front.url}/old.git`, 'initial', true);
     hits.length = 0; gateHits.length = 0;
     const c = plyClient(`${front.url}/old.git`, { follow: 'initial', auth: true, exporter: ex });
-    const refs = await c.lsRefs();
+    const refs = await unwrapAsync(c.lsRefs());
     assert.equal(git.status, 0, git.stderr);
     assert.deepEqual(plyLines(refs.refs), refLines(git.stdout));
     const seen = hits.concat(gateHits).map(h => ({ method: h.method, path: h.path, host: h.host, auth: h.auth !== null }));
@@ -370,7 +370,7 @@ test('a two-hop chain matches git, and the span records the original base once',
     assert.equal(span.attrs['git.remote.rebased_from'], `${front.url}/old.git`);
     gateHits.length = 0;
     hits.length = 0;
-    await c.lsRefs();
+    await unwrapAsync(c.lsRefs());
     assert.deepEqual(hits, [], 'a settled transport advertised at the original host again');
     assert.deepEqual(gateHits.map(h => `${h.method} ${h.path.split('?')[0]}`), [`POST /new.git/${SERVICE}`]);
   } finally { await front.close(); }
@@ -385,9 +385,9 @@ test('discover then lsRefs advertises once; the default never follows and never 
   });
   try {
     const c = plyClient(`${front.url}/old.git`, { follow: 'initial', auth: false });
-    await c.discover();
+    await unwrapAsync(c.discover());
     const afterDiscover = hits.slice();
-    await c.lsRefs();
+    await unwrapAsync(c.lsRefs());
     assert.deepEqual(afterDiscover, ['GET /old.git/info/refs', 'GET /new.git/info/refs']);
     assert.deepEqual(hits, [...afterDiscover, 'POST /new.git/git-upload-pack']);
     assert.equal(c.url, `${front.url}/new.git`);
@@ -401,7 +401,7 @@ test('discover then lsRefs advertises once; the default never follows and never 
       assert.deepEqual(plain, [`POST /old.git/${SERVICE}`]);
       const ex = arrayExporter();
       const d = plyClient(`${once.url}/old.git`, { follow: 'off', auth: false, exporter: ex });
-      await d.discover().catch(() => {});
+      await unwrapAsync(d.discover()).catch(() => {});
       const attrs = ex.lines.flatMap(flattenLine).flatMap(s => Object.keys(s.attrs));
       assert.ok(!attrs.includes('http.redirect.count') && !attrs.includes('git.remote.rebased_from'));
     } finally { await once.close(); }
@@ -481,10 +481,10 @@ test('a network failure before a response does not settle the initial exchange',
       return fetch(url, init);
     };
     const c = plyClient(`${front.url}/old.git`, { follow: 'initial', auth: false, fetchImpl });
-    const first = await c.lsRefs().catch(e => e);
+    const first = await unwrapAsync(c.lsRefs()).catch(e => e);
     assert.equal(first.code, 'network');
     assert.deepEqual(hits, []);
-    const refs = await c.lsRefs();
+    const refs = await unwrapAsync(c.lsRefs());
     assert.ok(refs.refs.has('refs/heads/main'));
     assert.deepEqual(hits, ['GET /old.git/info/refs', 'GET /new.git/info/refs', `POST /new.git/${SERVICE}`]);
     assert.equal(c.url, `${front.url}/new.git`);

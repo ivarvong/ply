@@ -32,7 +32,6 @@ import { unwrapAsync } from './unwrap.js';
 import { mergeBranch } from '../src/merge.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
-import { unwrapAsync } from './unwrap.js';
 
 const L = 10; // maxTreeEntries; every "over" directory holds L + 1 entries, the issue's core cell (limit = size − 1)
 const LIMITS = withLimits({ maxTreeEntries: L });
