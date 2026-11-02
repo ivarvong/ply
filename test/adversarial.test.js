@@ -41,7 +41,7 @@ import zlib from 'node:zlib';
 import { adler32 } from '../src/inflate.js';
 import { zlibBound } from '../src/format.js';
 import { pkt, FLUSH } from '../src/pktline.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 const AUTHOR = { name: 'adv', email: 'adv@x' };
@@ -244,19 +244,19 @@ test('I5 every operation rejects a bad ident field before any fetch', async () =
   };
   for (const [field, person, what, time] of fields) {
     await once(`editFile ${field}`, what, fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: person, message: 'm', time }, { fetchImpl }));
-    await once(`mergeBranch ${field}`, what, fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: person, message: 'm', time }, { fetchImpl }));
-    await once(`rebaseBranch ${field}`, what, fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: person, author: person, time }, { fetchImpl }));
-    await once(`cherryPick ${field}`, what, fetchImpl => cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: person, time }, { fetchImpl }));
-    await once(`revertCommit ${field}`, what, fetchImpl => revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'b'.repeat(40), committer: person, time }, { fetchImpl }));
+    await once(`mergeBranch ${field}`, what, fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: person, message: 'm', time }, { fetchImpl })));
+    await once(`rebaseBranch ${field}`, what, fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer: person, author: person, time }, { fetchImpl })));
+    await once(`cherryPick ${field}`, what, fetchImpl => unwrapAsync(cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: person, time }, { fetchImpl })));
+    await once(`revertCommit ${field}`, what, fetchImpl => unwrapAsync(revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'b'.repeat(40), committer: person, time }, { fetchImpl })));
   }
   await once('edit message', 'message', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'x\0y' }, { fetchImpl }));
   await once('edit ref', 'ref', fetchImpl => editFile('http://127.0.0.1:1/x.git', { path: FILE, find: FIND, replace: REPL, author: good, message: 'm', ref: 'refs/heads/main\n' }, { fetchImpl }));
-  await once('merge ref', 'ref', fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', from: 'refs/heads/other', author: good, message: 'm' }, { fetchImpl }));
-  await once('merge message', 'message', fetchImpl => mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: good, message: 'x\0y' }, { fetchImpl }));
-  await once('rebase ref', 'ref', fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic\n', committer: good }, { fetchImpl }));
-  await once('rebase message', 'message', fetchImpl => rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', committer: good, message: 'x\0y' }, { fetchImpl }));
-  await once('cherryPick message', 'message', fetchImpl => cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: good, message: 'x\0y' }, { fetchImpl }));
-  await once('revertCommit ref', 'ref', fetchImpl => revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', commit: 'b'.repeat(40), committer: good }, { fetchImpl }));
+  await once('merge ref', 'ref', fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', from: 'refs/heads/other', author: good, message: 'm' }, { fetchImpl })));
+  await once('merge message', 'message', fetchImpl => unwrapAsync(mergeBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', from: 'refs/heads/other', author: good, message: 'x\0y' }, { fetchImpl })));
+  await once('rebase ref', 'ref', fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic\n', committer: good }, { fetchImpl })));
+  await once('rebase message', 'message', fetchImpl => unwrapAsync(rebaseBranch('http://127.0.0.1:1/x.git', { ref: 'refs/heads/topic', committer: good, message: 'x\0y' }, { fetchImpl })));
+  await once('cherryPick message', 'message', fetchImpl => unwrapAsync(cherryPick('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main', commit: 'a'.repeat(40), committer: good, message: 'x\0y' }, { fetchImpl })));
+  await once('revertCommit ref', 'ref', fetchImpl => unwrapAsync(revertCommit('http://127.0.0.1:1/x.git', { ref: 'refs/heads/main\n', commit: 'b'.repeat(40), committer: good }, { fetchImpl })));
 });
 
 test('I6 secrets never reach telemetry: token in auth, token in URL userinfo', async () => {
@@ -717,7 +717,7 @@ async function mergeVia(R, fault, op = 'merge') {
   const proxy = await startProxy(srv.url, fault);
   const url = `${proxy.url}/${R.name}.git`, opts = { tracer: new Tracer(), limits: withLimits({ requestTimeoutMs: 3000 }) };
   let result = null, error = null;
-  try { result = op === 'merge' ? await mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: AUTHOR, message: 'm', time: 1 }, opts) : await rebaseBranch(url, { ref: 'refs/heads/lin', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts); }
+  try { result = op === 'merge' ? await unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: AUTHOR, message: 'm', time: 1 }, opts)) : await unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/lin', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts)); }
   catch (e) { error = e; }
   await proxy.close();
   return { result, error, counts: { ...proxy.counts }, main: git(R.bare, ['rev-parse', 'main']).trim(), lin: git(R.bare, ['rev-parse', 'lin']).trim() };
@@ -826,11 +826,11 @@ test('#34 a tree naming `d` twice (file and directory, apart) is pack_corrupt on
     'checkoutTree d': () => checkoutTree(url, { path: 'd' }, opts()).then(drain),
     ...Object.fromEntries(['d', 'd/f', 'd.x', 'ok.txt', 'nope'].map(path => [`editFile ${path}`, () => editFile(url, { path, find: 'MARK', replace: 'XX', author: AUTHOR, message: 'e' }, opts())])),
     'pushTree': () => pushTree(url, { files: { 'new.txt': 'n\n' }, author: AUTHOR, message: 'p' }, opts()),
-    'mergeBranch main<-other': () => mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/other', author: AUTHOR, message: 'm', time: 1 }, opts()),
-    'mergeBranch other<-main': () => mergeBranch(url, { ref: 'refs/heads/other', from: 'refs/heads/main', author: AUTHOR, message: 'm', time: 1 }, opts()),
-    'rebaseBranch other onto main': () => rebaseBranch(url, { ref: 'refs/heads/other', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts()),
-    'cherryPick other onto main': () => cherryPick(url, { ref: 'refs/heads/main', commit: R.c2, committer: who, time: 1 }, opts()),
-    'revertCommit main': () => revertCommit(url, { ref: 'refs/heads/main', commit: R.c1, committer: who, time: 1 }, opts()),
+    'mergeBranch main<-other': () => unwrapAsync(mergeBranch(url, { ref: 'refs/heads/main', from: 'refs/heads/other', author: AUTHOR, message: 'm', time: 1 }, opts())),
+    'mergeBranch other<-main': () => unwrapAsync(mergeBranch(url, { ref: 'refs/heads/other', from: 'refs/heads/main', author: AUTHOR, message: 'm', time: 1 }, opts())),
+    'rebaseBranch other onto main': () => unwrapAsync(rebaseBranch(url, { ref: 'refs/heads/other', onto: 'refs/heads/main', committer: AUTHOR, time: 1 }, opts())),
+    'cherryPick other onto main': () => unwrapAsync(cherryPick(url, { ref: 'refs/heads/main', commit: R.c2, committer: who, time: 1 }, opts())),
+    'revertCommit main': () => unwrapAsync(revertCommit(url, { ref: 'refs/heads/main', commit: R.c1, committer: who, time: 1 }, opts())),
     'fetchObject tree': () => fetchObject(createTransport(url, opts()), { oid: R.tree, expectType: TYPE.TREE }),
     'fetchPackTree0 harvest': () => fetchPackTree0(createTransport(url, { ...opts(), quirks: { treeFilter: 'blob:none' } }), { wants: [R.c1], filter: 'tree:0', deepen: 1 }),
   };

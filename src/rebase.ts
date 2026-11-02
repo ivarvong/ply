@@ -10,8 +10,8 @@
 //   revert      commit tree          target      commit's parent tree parent [target]
 //               (a root's parent is the empty tree)
 //
-// Inside, a step that can fail returns a Result; the exported entry points (rebaseBranch, pickCommit, cherryPick,
-// revertCommit, linearChain) throw it at the public boundary.
+// Every step that can fail returns a Result, the entry points (rebaseBranch, pickCommit, cherryPick, revertCommit,
+// linearChain) included.
 /* oxlint-disable import/max-dependencies -- a replay drives ls-refs, the merge-base search, the tree merge, the object codecs and push */
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
@@ -20,13 +20,13 @@ import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import type { Rediff } from './linemerge.js';
 import type { AttributeSource, Author, Commit, MergeBlob, OpContext, PackObject, PushObject, PushResult, Signer, Transport, TreeCache, Trees } from './merge.js';
-import { fail, orThrow } from './errors.js';
-import { assertNever, err, getOrElse, mapOption, none, ok, some } from './result.js';
+import { fail } from './errors.js';
+import { assertNever, err, getOrElse, map, mapOption, none, ok, some } from './result.js';
 import { at, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
-import { mergeBaseResult, mergeTrees, blobMerger, uniqueObjects, attributeTreeResult, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
+import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
 import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
@@ -50,8 +50,7 @@ export function carriedExtra(extra: readonly string[]): string[] {
 
 export type ChainCommit = Commit & { readonly oid: string };
 // Pure: the linear chain of commits from `base` (exclusive) to `tip`, oldest first; a merge commit in it is not_linear.
-// The linear chain from base to tip, as a Result. linearChain is its throwing form for callers outside the cluster.
-export function linearChainResult(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): Result<ChainCommit[], PlyError> {
+export function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): Result<ChainCommit[], PlyError> {
   const chain: ChainCommit[] = [];
   // a commit in the chain has exactly one parent: the '' never stands
   for (let c = tip; c !== base;) {
@@ -64,10 +63,6 @@ export function linearChainResult(commits: ReadonlyMap<string, Commit>, tip: str
     c = getOrElse(at(parents, 0), '');
   }
   return ok(chain.toReversed());
-}
-// The throwing form (the package's linearChain).
-export function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): ChainCommit[] {
-  return orThrow(linearChainResult(commits, tip, base, max));
 }
 
 // What one rebase or pick shares across its transplants: the trees fetched, the attribute tree of a fixed source (a ref
@@ -91,9 +86,9 @@ type Transplant =
 // a ref or an oid resolves once per replay.
 async function attributeTreeFor(t: Transport, out: Replay, trees: Trees): Promise<Result<string | null, PlyError>> {
   const fixed = out.attributes !== null && !['ours', 'theirs', 'base'].includes(out.attributes);
-  if (!fixed) return attributeTreeResult(t, out.attributes, trees);
+  if (!fixed) return attributeTree(t, out.attributes, trees);
   if (out.attrTree.tag === 'some') return ok(out.attrTree.value);
-  const r = await attributeTreeResult(t, out.attributes, NO_TREES);
+  const r = await attributeTree(t, out.attributes, NO_TREES);
   if (r.ok) out.attrTree = some(r.value);
   return r;
 }
@@ -114,11 +109,15 @@ async function transplant(t: Transport, cache: TreeCache, trees: Trees, { parent
   if (!attrTree.ok) return attrTree;
   const mergeBlob = mergerFor(t, out);
   if (!mergeBlob.ok) return mergeBlob;
-  const m = await mergeTrees(t, cache, { ...trees, mergeBlob: mergeBlob.value, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
+  const merged = await mergeTrees(t, cache, { ...trees, mergeBlob: mergeBlob.value, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
+  if (!merged.ok) return merged;
+  const m = merged.value;
   out.fetched += m.fetched;
   if (m.conflicts.length > 0) return ok({ kind: 'conflict', conflicts: m.conflicts, reasons: m.reasons });
   const treeOid: string = m.oid === null ? hashObject('tree', new Uint8Array(0)) : m.oid;
-  let data = orThrow(encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra }));
+  const encoded = encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
+  if (!encoded.ok) return encoded;
+  let data = encoded.value;
   if (signer) data = await signCommit(data, signer);
   const oid: string = hashObject('commit', data);
   out.contentMerged += m.contentMerged;
@@ -160,18 +159,24 @@ export type RebaseOutcome =
     readonly pushBytes: number;
   };
 // Rebase `ref` onto `onto`'s head (or squash it into one commit). The branch is force-updated (CAS on its old tip).
-// The body runs as one Result-returning step inside the operation (an Err is thrown there, so the operation records its
-// code on the root span); its refusals keep the names the decision inventory knows them by (rebaseBranch#…).
+// The inputs are checked before any I/O; a refusal returns before the operation starts. The body's refusals keep the
+// names the decision inventory knows them by (rebaseBranch#…), and the operation records an Err's code on the root span.
 /* oxlint-disable eslint/complexity -- one operation's steps in order: refs, merge base, chain, replay, push */
-export async function rebaseBranch(url: string, spec: RebaseSpec, options: RebaseOptions = {}): Promise<RebaseOutcome> {
+export async function rebaseBranch(url: string, spec: RebaseSpec, options: RebaseOptions = {}): Promise<Result<RebaseOutcome, PlyError>> {
   const { onto, committer, author, time, squash, message } = withDefaults(spec, rebaseSpecDefaults());
   const { ref } = spec;
   const { cache, signer, rediff, attributes: attributesGiven } = withDefaults(options, rebaseDefaults());
-  const attributes = orThrow(validateAttributes(attributesGiven)); orThrow(validatePushRef(ref, false)); const ontoOid = orThrow(givenOid(onto, 'onto'));
-  const committerPerson: ValidatedIdent = stamp(committer, time);
-  const authorPerson: ValidatedIdent | null = author ? stamp(author, time) : null;
-  if (message !== null) orThrow(validateMessage(message));
-  return orThrow(await operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<Result<RebaseOutcome, PlyError>> => (async (): Promise<Result<RebaseOutcome, PlyError>> => {
+  const attributesChecked = validateAttributes(attributesGiven); if (!attributesChecked.ok) return attributesChecked;
+  const attributes = attributesChecked.value;
+  const pushRef = validatePushRef(ref, false); if (!pushRef.ok) return pushRef;
+  const given = givenOid(onto, 'onto'); if (!given.ok) return given;
+  const ontoOid = given.value;
+  const committerStamp = stamp(committer, time); if (!committerStamp.ok) return committerStamp;
+  const committerPerson: ValidatedIdent = committerStamp.value;
+  const authorStamp = author === null ? ok(none) : map(stamp(author, time), some); if (!authorStamp.ok) return authorStamp;
+  const authorPerson: Option<ValidatedIdent> = authorStamp.value;
+  if (message !== null) { const checked = validateMessage(message); if (!checked.ok) return checked; }
+  return operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<Result<RebaseOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]);
     const tipAt = refOid(refs, ref);
     const targetAt = ontoOid.tag === 'some' ? ontoOid : refOid(refs, onto);
@@ -181,7 +186,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const target = targetAt.value;
     if (ontoOid.tag === 'some') { const c = await assertCommit(t, ontoOid.value, 'onto'); if (!c.ok) return c; }
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
-    const found = await mergeBaseResult(t, tip, target);
+    const found = await mergeBase(t, tip, target);
     if (!found.ok) return found;
     const { bases, commits, verdict } = found.value;
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
@@ -204,15 +209,17 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     }
     const maxCommits = readLimit(limits, 'maxRebaseCommits');
     if (!maxCommits.ok) return maxCommits;
-    const chained = linearChainResult(commits, tip, base, maxCommits.value);
+    const chained = linearChain(commits, tip, base, maxCommits.value);
     if (!chained.ok) return chained;
     const chain = chained.value;
     root.set({ 'git.rebase.commits': chain.length });
     // The base may sit exactly at the window's cut: named by its children on both sides, never fetched (mergeBase needs
     // no more than that; #41). Its tree is the first replay's base, so fetch it; every chain commit is above it and in hand.
-    if (!commits.has(base)) commits.set(base, await commitAt(t, base));
-    const targetTree: string = (await commitAt(t, target)).tree;
-    const who: string = orThrow(ident(committerPerson));
+    if (!commits.has(base)) { const b = await commitAt(t, base); if (!b.ok) return b; commits.set(base, b.value); }
+    const targetCommit = await commitAt(t, target); if (!targetCommit.ok) return targetCommit;
+    const targetTree: string = targetCommit.value.tree;
+    const committerLine = ident(committerPerson); if (!committerLine.ok) return committerLine;
+    const who: string = committerLine.value;
     // a commit's tree by oid, among those in hand; a chain commit's one parent is in hand (linearChain)
     const treeOf = (oid: string): string | null => getOrElse(mapOption(mapGet(commits, oid), c => c.tree), null);
     const parentTree = (c: Commit): string | null => treeOf(getOrElse(at(c.parents, 0), ''));
@@ -221,7 +228,8 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const first = at(chain, 0);
     const last = at(chain, chain.length - 1);
     if (squash && first.tag === 'some' && last.tag === 'some') {
-      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorPerson ? orThrow(ident(authorPerson)) : first.value.author, committer: who, message: message === null ? `${chain.map(c => (c.message === null ? '' : c.message).replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n` : message, encoding: null, extra: [] }, signer, out);
+      const authorLine = authorPerson.tag === 'some' ? ident(authorPerson.value) : ok(first.value.author); if (!authorLine.ok) return authorLine;
+      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorLine.value, committer: who, message: message === null ? `${chain.map(c => (c.message === null ? '' : c.message).replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n` : message, encoding: null, extra: [] }, signer, out);
       if (!r.ok) return r;
       const w = r.value;
       if (w.kind === 'conflict') return fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);
@@ -242,7 +250,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: tip, newOid: cur, objects: uniqueObjects(objects) }); // non-fast-forward: the old tip is the CAS
     return outcome(squash ? 'squash' : 'rebase', { outcome: squash ? 'squash' : 'rebase', ref, oid: cur, oldTip: tip, onto: target, base, commits: chain.length, replayed, dropped, pushBytes: pushed.packBytes }, { 'git.rebase.new_tip': cur, 'git.rebase.push.bytes': pushed.packBytes });
-  })()));
+  });
 }
 /* oxlint-enable eslint/complexity */
 
@@ -291,10 +299,10 @@ function emptyPolicy(value: unknown): Result<EmptyPolicy, ErrorOf<'bad_request'>
 }
 
 // A root's missing parent is the empty tree (mergeTrees' null). git's first parent of a parentless commit.
-async function parentTreeAt(t: Transport, parents: readonly string[]): Promise<string | null> {
+async function parentTreeAt(t: Transport, parents: readonly string[]): Promise<Result<string | null, PlyError>> {
   const parentOid = at(parents, 0);
-  if (parentOid.tag === 'none') return null;
-  return (await commitAt(t, parentOid.value)).tree;
+  if (parentOid.tag === 'none') return ok(null);
+  return map(await commitAt(t, parentOid.value), c => c.tree);
 }
 
 // 'stop' reports empty and writes nothing. 'keep' writes that same tree (`kept_empty`). A different tree is `ok`.
@@ -307,39 +315,49 @@ function writtenKind(sameTree: boolean, empty: EmptyPolicy): 'empty' | 'kept_emp
 // Cherry-pick (`revert: false`) or revert (`revert: true`) one commit onto `ref`'s head.
 // A root commit has no parent: git diffs it against the empty tree (mergeTrees' null), and revert does the same in
 // reverse. A merge commit is refused; git cherry-picks one only with `-m` (a mainline ply does not take).
-// The body runs as one Result-returning step inside the operation, as rebaseBranch's does.
-export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep' }, ...options: [] | [RebaseOptions]): Promise<PickKept | PickOk>;
-export function pickCommit(url: string, spec: Stopping<PickSpec>, ...options: [] | [RebaseOptions]): Promise<PickEmpty | PickOk>;
-export function pickCommit(url: string, spec: PickSpec, ...options: [] | [RebaseOptions]): Promise<PickOutcome>;
-export async function pickCommit(url: string, spec: PickSpec, options: RebaseOptions = {}): Promise<PickOutcome> {
+// The inputs are checked before any I/O, as rebaseBranch's are.
+export function pickCommit(url: string, spec: PickSpec & { readonly empty: 'keep' }, ...options: [] | [RebaseOptions]): Promise<Result<PickKept | PickOk, PlyError>>;
+export function pickCommit(url: string, spec: Stopping<PickSpec>, ...options: [] | [RebaseOptions]): Promise<Result<PickEmpty | PickOk, PlyError>>;
+export function pickCommit(url: string, spec: PickSpec, ...options: [] | [RebaseOptions]): Promise<Result<PickOutcome, PlyError>>;
+export async function pickCommit(url: string, spec: PickSpec, options: RebaseOptions = {}): Promise<Result<PickOutcome, PlyError>> {
   const { ref, committer, author, time, revert, message, empty: emptyGiven } = withDefaults(spec, pickSpecDefaults());
   const { commit } = spec;
   const { cache, signer, rediff, attributes: attributesGiven } = withDefaults(options, rebaseDefaults());
-  const attributes = orThrow(validateAttributes(attributesGiven)); orThrow(validatePushRef(ref, false));
-  const empty = orThrow(emptyPolicy(emptyGiven));
-  const committerPerson: ValidatedIdent = stamp(committer, time);
-  const revertAuthor: ValidatedIdent = author ? stamp(author, time) : committerPerson;
-  if (message !== null) orThrow(validateMessage(message));
-  orThrow(isOid(commit) ? ok(commit) : fail('bad_request', 'commit must be a 40-hex oid'));
+  const attributesChecked = validateAttributes(attributesGiven); if (!attributesChecked.ok) return attributesChecked;
+  const attributes = attributesChecked.value;
+  const pushRef = validatePushRef(ref, false); if (!pushRef.ok) return pushRef;
+  const policy = emptyPolicy(emptyGiven); if (!policy.ok) return policy;
+  const empty = policy.value;
+  const committerStamp = stamp(committer, time); if (!committerStamp.ok) return committerStamp;
+  const committerPerson: ValidatedIdent = committerStamp.value;
+  const authorStamp = author === null ? ok(committerPerson) : stamp(author, time); if (!authorStamp.ok) return authorStamp;
+  const revertAuthor: ValidatedIdent = authorStamp.value;
+  if (message !== null) { const checked = validateMessage(message); if (!checked.ok) return checked; }
+  if (!isOid(commit)) return fail('bad_request', 'commit must be a 40-hex oid');
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
-  return orThrow(await operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<Result<PickOutcome, PlyError>> => (async (): Promise<Result<PickOutcome, PlyError>> => {
+  return operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<Result<PickOutcome, PlyError>> => {
     const { refs } = await lsRefs(t, [ref]);
     const targetAt = refOid(refs, ref); if (targetAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const target = targetAt.value;
     const [cT, cC] = await Promise.all([commitBytesAt(t, target), commitBytesAt(t, commit)]);
-    const tInfo: Commit = orThrow(parseCommit(cT.data, t.limits));
-    const c: Commit = orThrow(parseCommit(cC.data, t.limits));
+    const targetCommit = parseCommit(cT.data, t.limits); if (!targetCommit.ok) return targetCommit;
+    const picked = parseCommit(cC.data, t.limits); if (!picked.ok) return picked;
+    const tInfo: Commit = targetCommit.value;
+    const c: Commit = picked.value;
     if (c.parents.length > 1) return fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);
-    const parentTree = await parentTreeAt(t, c.parents);
-    const who: string = orThrow(ident(committerPerson));
+    const parentTreeR = await parentTreeAt(t, c.parents); if (!parentTreeR.ok) return parentTreeR;
+    const parentTree = parentTreeR.value;
+    const committerLine = ident(committerPerson); if (!committerLine.ok) return committerLine;
+    const who: string = committerLine.value;
     const out = replay(rediff, attributes);
     const subject = getOrElse(at((c.message === null ? '' : c.message).split('\n'), 0), '');
     // the message git writes when none is given: revert's, or the picked commit's own
     const ownMessage = revert ? `Revert "${subject}"\n\nThis reverts commit ${commit}.\n` : c.message;
+    const authorLine = revert ? ident(revertAuthor) : ok(c.author); if (!authorLine.ok) return authorLine;
     const r = await transplant(t, cache,
       revert ? { base: c.tree, ours: tInfo.tree, theirs: parentTree } : { base: parentTree, ours: tInfo.tree, theirs: c.tree },
-      { parent: target, author: revert ? orThrow(ident(revertAuthor)) : c.author, committer: who, message: message === null ? ownMessage : message, encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
+      { parent: target, author: authorLine.value, committer: who, message: message === null ? ownMessage : message, encoding: revert ? null : c.encoding, extra: revert ? [] : carriedExtra(c.extra) }, signer, out);
     if (!r.ok) return r;
     const w = r.value;
     if (w.kind === 'conflict') return fail('merge_conflict', `${revert ? 'revert' : 'cherry-pick'} of ${commit.slice(0, 8)} onto ${short(ref)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);
@@ -348,18 +366,18 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a validated ref as push's Refname (see Push)
     const pushed = await (push as unknown as Push)(t, { ref, oldOid: target, newOid: w.oid, objects: uniqueObjects(w.objects) });
     return outcome(kind, { outcome: kind, ref, oid: w.oid, tree: w.treeOid, onto: target, pushBytes: pushed.packBytes }, { [`${name}.new`]: w.oid, [`${name}.tree`]: w.treeOid, [`${name}.trees.fetched`]: out.fetched, [`${name}.push.bytes`]: pushed.packBytes });
-  })()));
+  });
 }
 type CherrySpec = Omit<PickSpec, 'revert'>;
-export function cherryPick(url: string, spec: CherrySpec & { readonly empty: 'keep' }, ...options: [] | [RebaseOptions]): Promise<PickKept | PickOk>;
-export function cherryPick(url: string, spec: Stopping<CherrySpec>, ...options: [] | [RebaseOptions]): Promise<PickEmpty | PickOk>;
-export function cherryPick(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<PickOutcome>;
-export function cherryPick(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<PickOutcome> {
+export function cherryPick(url: string, spec: CherrySpec & { readonly empty: 'keep' }, ...options: [] | [RebaseOptions]): Promise<Result<PickKept | PickOk, PlyError>>;
+export function cherryPick(url: string, spec: Stopping<CherrySpec>, ...options: [] | [RebaseOptions]): Promise<Result<PickEmpty | PickOk, PlyError>>;
+export function cherryPick(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<Result<PickOutcome, PlyError>>;
+export function cherryPick(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<Result<PickOutcome, PlyError>> {
   return pickCommit(url, { ...spec, revert: false }, ...options);
 }
-export function revertCommit(url: string, spec: CherrySpec & { readonly empty: 'keep' }, ...options: [] | [RebaseOptions]): Promise<PickKept | PickOk>;
-export function revertCommit(url: string, spec: Stopping<CherrySpec>, ...options: [] | [RebaseOptions]): Promise<PickEmpty | PickOk>;
-export function revertCommit(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<PickOutcome>;
-export function revertCommit(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<PickOutcome> {
+export function revertCommit(url: string, spec: CherrySpec & { readonly empty: 'keep' }, ...options: [] | [RebaseOptions]): Promise<Result<PickKept | PickOk, PlyError>>;
+export function revertCommit(url: string, spec: Stopping<CherrySpec>, ...options: [] | [RebaseOptions]): Promise<Result<PickEmpty | PickOk, PlyError>>;
+export function revertCommit(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<Result<PickOutcome, PlyError>>;
+export function revertCommit(url: string, spec: CherrySpec, ...options: [] | [RebaseOptions]): Promise<Result<PickOutcome, PlyError>> {
   return pickCommit(url, { ...spec, revert: true }, ...options);
 }

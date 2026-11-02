@@ -7,26 +7,26 @@ import type { ValidatedIdent } from './validate.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import type { FetchedCommit } from './commit.js';
 import type { Option, Result } from './result.js';
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import { fetchObject } from './fetch.js';
 import { fetchCommit } from './commit.js';
 import { parseCommit, TYPE } from './objects.js';
 import { validateIdent, validateRef } from './validate.js';
 import { parseOid, ZERO_OID } from './oid.js';
-import { getOrElse, none, ok, some } from './result.js';
+import { getOrElse, map, none, ok, some } from './result.js';
 import { fromNullish } from './absent.js';
 
 // a branch name as git's messages print it
 export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 // Effect: one commit by oid (deepen 1: the commit alone), as bytes or parsed
 export const commitBytesAt = async (t: Transport, oid: string): Promise<{ readonly data: Uint8Array }> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
-export const commitAt = async (t: Transport, oid: string): Promise<Commit> => orThrow(parseCommit((await commitBytesAt(t, oid)).data, t.limits));
+export const commitAt = async (t: Transport, oid: string): Promise<Result<Commit, PlyError>> => parseCommit((await commitBytesAt(t, oid)).data, t.limits);
 
 export const isOid = (s: string): boolean => parseOid(s).ok;
 // A merge `from` or rebase `onto`, as read.js's resolveCommit takes a name (#103 item 4): a 40-hex commit id is taken as
 // given (Some; the all-zero id names nothing), anything else is a ref name (validated; None: ask ls-refs).
 export const givenOid = (name: string, what: string): Result<Option<string>, ErrorOf<'bad_request'>> => {
-  if (!isOid(name)) { orThrow(validateRef(name)); return ok(none); }
+  if (!isOid(name)) return map(validateRef(name), () => none);
   if (name === ZERO_OID) return fail('bad_request', `${what} must not be the zero oid`, { what });
   return ok(some(name));
 };
@@ -41,5 +41,5 @@ export const assertCommit = async (t: Transport, oid: string, what: string): Pro
 };
 // A commit stamp: who and when, each stamp with its own time and zone (#103 item 4). `time` is the operation's, for a
 // stamp that gives none (or null); an omitted zone is +0000. No stamp at all (null) is refused by validateIdent.
-export const stamp = (p: Author | null, time: number): ValidatedIdent =>
-  orThrow(validateIdent(p === null ? { time } : { name: p.name, email: p.email, time: getOrElse(fromNullish(p.time), time), tz: p.tz }));
+export const stamp = (p: Author | null, time: number): Result<ValidatedIdent, ErrorOf<'bad_request'>> =>
+  validateIdent(p === null ? { time } : { name: p.name, email: p.email, time: getOrElse(fromNullish(p.time), time), tz: p.tz });

@@ -9,6 +9,7 @@ import { createTransport } from '../../src/http.js';
 import { mergeBase } from '../../src/merge.js';
 import { Tracer } from '../../src/otel.js';
 import { cells, expectCap } from './merge-depth.space.js';
+import { unwrapAsync } from '../unwrap.js';
 
 const ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
@@ -79,7 +80,7 @@ test('merge-base cap: every relation × length × cap against git merge-base --a
     const gitAnswer = gitBases(a, b);
     let result = null;
     let err = null;
-    try { result = await mergeBase(t, a, b, { maxDepth: c.cap }); }
+    try { result = await unwrapAsync(mergeBase(t, a, b, { maxDepth: c.cap })); }
     catch (e) { err = e; }
     if (want.tag === 'fit') {
       assert.equal(err, null, `${c.id}: ${err?.code} ${err?.message}`);
