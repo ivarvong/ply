@@ -41,6 +41,7 @@ import zlib from 'node:zlib';
 import { adler32 } from '../src/inflate.js';
 import { zlibBound } from '../src/format.js';
 import { pkt, FLUSH } from '../src/pktline.js';
+import { unwrap } from './unwrap.js';
 
 const CODES = new Set(['pack_corrupt', 'protocol', 'network', 'timeout', 'aborted', 'not_git', 'auth', 'not_found', 'rate_limited', 'upstream_5xx', 'http', 'limit_exceeded', 'remote_error', 'match_count', 'cas_conflict', 'push_rejected', 'bad_request', 'unsupported', 'ambiguous']);
 const AUTHOR = { name: 'adv', email: 'adv@x' };
@@ -153,14 +154,14 @@ test('I4 limits: hostile sizes are rejected before allocation; memory does not g
   const rssBefore = process.memoryUsage().rss;
   // object claims 2^40 bytes
   const p1 = sign(concat([hdr(1), encodeObjHeader(3, 2 ** 40), Uint8Array.from([0x78, 0x9c, 3, 0, 0, 0, 0, 1])]));
-  assert.throws(() => parsePack(p1), e => e.code === 'limit_exceeded');
+  assert.throws(() => unwrap(parsePack(p1)), e => e.code === 'limit_exceeded');
   // delta claims 2^40 result
-  assert.throws(() => applyDelta(new Uint8Array(1), Uint8Array.from([1, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00])), e => e.code === 'limit_exceeded');
+  assert.throws(() => unwrap(applyDelta(new Uint8Array(1), Uint8Array.from([1, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x00]))), e => e.code === 'limit_exceeded');
   // honest-looking object whose declared size is small but zlib expands past it (bomb): must stop at the declared size
   const zlib = await import('node:zlib');
   const bomb = new Uint8Array(zlib.deflateSync(Buffer.alloc(8 << 20)));
   const p2 = sign(concat([hdr(1), encodeObjHeader(3, 100), bomb]));
-  assert.throws(() => parsePack(p2), e => e.code === 'pack_corrupt' && /exceeds expected/.test(e.message));
+  assert.throws(() => unwrap(parsePack(p2)), e => e.code === 'pack_corrupt' && /exceeds expected/.test(e.message));
   assert.ok(process.memoryUsage().rss - rssBefore < 64 * 1024 * 1024, 'rss grew');
 
   // over the wire: tree fetch answered with the bomb → streaming path stops early; metadata path rejects
@@ -216,7 +217,7 @@ test('I5 caller input validation happens before any I/O', async () => {
   // encodeCommit refuses the injected header itself. The same bytes, written without that helper, are still
   // rejected by receive.fsckObjects: defense in depth if a caller pushes raw objects.
   const { encodeCommit } = await import('../src/objects.js');
-  assert.throws(() => encodeCommit({ tree: 'a'.repeat(40), parents: ['b'.repeat(40)], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' }), e => e.code === 'bad_request');
+  assert.throws(() => unwrap(encodeCommit({ tree: 'a'.repeat(40), parents: ['b'.repeat(40)], author: 'x <a@x> 1 +0000', committer: 'y\nparent 0000000000000000000000000000000000000000 <a@x> 1 +0000', message: 'm' })), e => e.code === 'bad_request');
   const repo = freshRepo();
   const c = new GitHttp(`${srv.url}/${repo.name}.git`, { tracer: new Tracer() });
   const tree = git(repo.bare, ['rev-parse', 'main^{tree}']).trim();
@@ -298,22 +299,22 @@ const AUTHS = [
   { name: 'header Basic', auth: { header: `Basic ${btoa(`${USER}:${PASS}`)}` }, secrets: [PASS, USER, btoa(`${USER}:${PASS}`)] },
   { name: 'bearer', auth: { bearer: TOK }, secrets: [TOK] },
 ];
-const band = (n, text) => pkt(concat([new Uint8Array([n]), typeof text === 'string' ? te.encode(text) : text]));
+const band = (n, text) => unwrap(pkt(concat([new Uint8Array([n]), typeof text === 'string' ? te.encode(text) : text])));
 const once = (stage, k, make) => ctx => (ctx.stage === stage && ctx.n === k && ctx.phase === 'request' ? { type: 'bytes', noForward: true, name: 'echo', bytes: make() } : null);
 // A v2 fetch answer whose band-2 progress carries `text` split across two frames, spliced after the packfile header.
 const withProgress = text => ctx => {
   if (ctx.stage !== 'fetch' || ctx.n !== 0 || ctx.phase === 'request') return { type: 'pass' };
-  const hdr = Buffer.from(pkt('packfile\n')); const b = Buffer.from(ctx.bytes); const at = b.indexOf(hdr) + hdr.length;
+  const hdr = Buffer.from(unwrap(pkt('packfile\n'))); const b = Buffer.from(ctx.bytes); const at = b.indexOf(hdr) + hdr.length;
   const half = text.length >> 1;
   return { type: 'bytes', name: 'progress-echo', bytes: concat([b.subarray(0, at), band(2, text.slice(0, half)), band(2, text.slice(half)), b.subarray(at)]) };
 };
-const report = (...lines) => concat([band(1, concat([...lines.map(l => pkt(`${l}\n`)), FLUSH]))]);
+const report = (...lines) => concat([band(1, concat([...lines.map(l => unwrap(pkt(`${l}\n`))), FLUSH]))]);
 const ECHOES = [
-  { name: 'ls-refs ERR', code: 'remote_error', fault: s => once('ls-refs', 0, () => concat([pkt(`ERR access denied for ${s}\n`), FLUSH])) },
-  { name: 'ls-refs malformed line (quoted, cut at 60)', code: 'protocol', fault: s => once('ls-refs', 0, () => concat([pkt(`bogus-${s}\n`), FLUSH])) },
-  { name: 'fetch ERR', code: 'remote_error', fault: s => once('fetch', 0, () => concat([pkt(`ERR upload-pack: ${s}\n`), FLUSH])) },
-  { name: 'fetch band 3 (commit)', code: 'remote_error', fault: s => once('fetch', 0, () => concat([pkt('packfile\n'), band(3, `fatal: ${s}\n`), FLUSH])) },
-  { name: 'fetch band 3 (streamed blob)', code: 'remote_error', fault: s => once('fetch', 4, () => concat([pkt('packfile\n'), band(3, `fatal: ${s}\n`), FLUSH])) },
+  { name: 'ls-refs ERR', code: 'remote_error', fault: s => once('ls-refs', 0, () => concat([unwrap(pkt(`ERR access denied for ${s}\n`)), FLUSH])) },
+  { name: 'ls-refs malformed line (quoted, cut at 60)', code: 'protocol', fault: s => once('ls-refs', 0, () => concat([unwrap(pkt(`bogus-${s}\n`)), FLUSH])) },
+  { name: 'fetch ERR', code: 'remote_error', fault: s => once('fetch', 0, () => concat([unwrap(pkt(`ERR upload-pack: ${s}\n`)), FLUSH])) },
+  { name: 'fetch band 3 (commit)', code: 'remote_error', fault: s => once('fetch', 0, () => concat([unwrap(pkt('packfile\n')), band(3, `fatal: ${s}\n`), FLUSH])) },
+  { name: 'fetch band 3 (streamed blob)', code: 'remote_error', fault: s => once('fetch', 4, () => concat([unwrap(pkt('packfile\n')), band(3, `fatal: ${s}\n`), FLUSH])) },
   { name: 'push ng reason + band-2 hook output', code: 'push_rejected', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: hook saw ${s}\n`), report('unpack ok', `ng refs/heads/main pre-receive hook declined: ${s}`), FLUSH])) },
   { name: 'push band-2 tail cut through the secret', code: 'push_rejected', fault: s => once('receive-pack', 0, () => concat([band(2, `remote: ${s}`), band(2, `${'x'.repeat(4096 - 20)}\n`), report('unpack ok', 'ng refs/heads/main pre-receive hook declined'), FLUSH])) },
   { name: 'push band 3', code: 'ambiguous', fault: s => once('receive-pack', 0, () => concat([band(3, `error: ${s}\n`), FLUSH])) },
@@ -346,7 +347,7 @@ test('I6b a credential echoed by the server reaches no error (any field) and no 
 });
 
 test('I6b auth.user is scrubbed only when secret-shaped: a conventional user name in server text survives', async () => {
-  const r = await run(once('ls-refs', 0, () => concat([pkt(`ERR denied to x-access-token and git (token ${TOK})\n`), FLUSH])), { opts: { auth: { user: 'x-access-token', token: TOK } } });
+  const r = await run(once('ls-refs', 0, () => concat([unwrap(pkt(`ERR denied to x-access-token and git (token ${TOK})\n`)), FLUSH])), { opts: { auth: { user: 'x-access-token', token: TOK } } });
   assert.equal(r.error.code, 'remote_error');
   assert.match(r.error.message, /denied to x-access-token and git \(token \[redacted\]\)/);
   assert.ok(!JSON.stringify(r.exporter.lines).includes(TOK));
@@ -414,7 +415,7 @@ const appendLsRefAttrs = (bytes, extra) => {
   while (o < bytes.length) {
     const len = parseInt(new TextDecoder().decode(bytes.subarray(o, o + 4)), 16);
     if (len < 4) { out.push(bytes.subarray(o, o + 4)); o += 4; continue; }
-    out.push(pkt(`${new TextDecoder().decode(bytes.subarray(o + 4, o + len)).replace(/\n$/, '')} ${extra}\n`)); o += len;
+    out.push(unwrap(pkt(`${new TextDecoder().decode(bytes.subarray(o + 4, o + len)).replace(/\n$/, '')} ${extra}\n`))); o += len;
   }
   return concat(out);
 };
@@ -702,7 +703,7 @@ function splitFetch(bytes) { // v2 fetch response → { shallow, objects: Map oi
     if (inPack) { if (body[0] === 1) parts.push(body.subarray(1)); continue; }
     const line = td.decode(body); if (line.startsWith('shallow ')) shallow.push(line.slice(8).trim()); if (line === 'packfile\n') inPack = true;
   }
-  return { shallow, objects: resolvePack(parsePack(concat(parts), packParseOpts())).objects };
+  return { shallow, objects: unwrap(resolvePack(unwrap(parsePack(concat(parts), unwrap(packParseOpts()))))).objects };
 }
 async function fetchReply(objects, shallow) {
   const { pack } = await buildPack([...objects.values()].map(o => ({ type: o.type, data: o.data })));
@@ -879,7 +880,7 @@ test('I4 six objects at the per-object cap exceed the inflated aggregate', { tim
   new DataView(hdr.buffer).setUint32(8, 6);
   const body = concat([hdr, entry, entry, entry, entry, entry]);
   const pack = concat([body, new Sha1().update(body).digest()]);
-  assert.throws(() => parsePack(pack, packParseOpts(DEFAULT_LIMITS)), e => {
+  assert.throws(() => unwrap(parsePack(pack, unwrap(packParseOpts(DEFAULT_LIMITS)))), e => {
     assert.equal(e.code, 'limit_exceeded');
     assert.equal(e.what, 'pack inflated bytes');
     assert.equal(e.got, per * 5);
@@ -896,9 +897,9 @@ test('I4 many ref-deltas resolve in linear lookups', { timeout: 30_000 }, async 
   const objects = [{ type: TYPE.BLOB, data: base }];
   for (let i = 0; i < n; i++) objects.push({ type: TYPE.BLOB, data: delta, baseOid });
   const { pack } = await buildPack(objects);
-  const parsed = parsePack(pack, packParseOpts());
+  const parsed = unwrap(parsePack(pack, unwrap(packParseOpts())));
   const t0 = Date.now();
-  const resolved = resolvePack(parsed);
+  const resolved = unwrap(resolvePack(parsed));
   const dt = Date.now() - t0;
   assert.equal(resolved.stats.baseLookups, n);
   assert.ok(dt < 3_000, `resolvePack took ${dt}ms`);
@@ -908,7 +909,7 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   for (let n = 1; n <= 4; n++) {
     const objects = Array.from({ length: n }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(String(i + 1)) }));
     const { pack } = await buildPack(objects);
-    const parsed = parsePack(pack, packParseOpts());
+    const parsed = unwrap(parsePack(pack, unwrap(packParseOpts())));
     assert.ok(parsed.stats.inflated <= DEFAULT_LIMITS.maxInflatedTotal);
     assert.ok(parsed.stats.inflated <= parsed.objects.reduce((s, o) => s + o.size, 0));
   }
@@ -919,7 +920,7 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   new DataView(hdr.buffer).setUint32(8, 1);
   const body = concat([hdr, encodeObjHeader(3, declared), Uint8Array.of(0)]);
   const pack = concat([body, new Sha1().update(body).digest()]);
-  assert.throws(() => parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 }), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
+  assert.throws(() => unwrap(parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 })), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
 });
 
 const pktLine = s => { const b = te.encode(s); return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); };

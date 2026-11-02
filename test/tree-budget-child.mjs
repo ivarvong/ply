@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseTree } from '../src/objects.js';
+import { unwrap } from './unwrap.js';
 
 const file = process.argv[2];
 const stride = Number(process.argv[3]);
@@ -10,7 +11,7 @@ const count = Number(process.argv[4]);
 const data = new Uint8Array(readFileSync(file)).subarray(0, stride * count);
 const rss = () => Math.round(process.resourceUsage().maxRSS / 1024);
 try {
-  const entries = parseTree(data);
+  const entries = unwrap(parseTree(data));
   const hash = createHash('sha256');
   const mapped = entries.map(e => {
     hash.update(e.name);

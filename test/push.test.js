@@ -10,6 +10,7 @@ import { GitHttp, ZERO_OID } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 import { makeDelta } from '../src/pack.js';
+import { unwrap } from './unwrap.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -149,8 +150,8 @@ test('push default: side-band-64k is requested unless disabled, and band 2 lands
   const ex = arrayExporter();
   const c = new GitHttp(`${srv.url}/sbdef.git`, { tracer: new Tracer({ exporter: ex }) });
   const blob = new TextEncoder().encode('y\n');
-  const treeData = (await import('../src/objects.js')).encodeTree([{ mode: '100644', name: 'f.txt', oid: (await import('../src/objects.js')).hashObject('blob', blob) }]);
-  const commitData = (await import('../src/objects.js')).encodeCommit({ tree: (await import('../src/objects.js')).hashObject('tree', treeData), parents: [head], author: 'a <a@x> 1 +0000', message: 'm\n' });
+  const treeData = unwrap((await import('../src/objects.js')).encodeTree([{ mode: '100644', name: 'f.txt', oid: (await import('../src/objects.js')).hashObject('blob', blob) }]));
+  const commitData = unwrap((await import('../src/objects.js')).encodeCommit({ tree: (await import('../src/objects.js')).hashObject('tree', treeData), parents: [head], author: 'a <a@x> 1 +0000', message: 'm\n' }));
   const newOid = (await import('../src/objects.js')).hashObject('commit', commitData);
   const r = await c.push({ ref: 'refs/heads/main', oldOid: head, newOid, objects: [{ type: TYPE.COMMIT, data: commitData }, { type: TYPE.TREE, data: treeData }, { type: TYPE.BLOB, data: blob }] });
   assert.equal(r.hookOutput.trim(), 'from hook');

@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { gitBuf } from '../server.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { effectiveHaves } from './dag.js';
+import { unwrap } from '../unwrap.js';
 
 // Git 2.56 moved the argv out of upload-pack.c create_pack_file into
 // odb/source-files.c odb_source_files_generate_pack. --thin follows --stdout, and
@@ -34,8 +35,8 @@ export function packObjectsOracle(bare, model, req, { shallowSet, unshallowed = 
   const { args, stdin } = reconstructInvocation({ wants, known, shallows, extraEdges, thinPack, ofsDelta, filter });
   const pack = new Uint8Array(gitBuf(bare, ['pack-objects', ...args, '-q'], stdin));
   if (pack.length === 0) return { objects: new Map(), count: 0 };
-  const parsed = parsePack(pack);
-  const r = resolvePack(parsed, external);
+  const parsed = unwrap(parsePack(pack));
+  const r = unwrap(resolvePack(parsed, external));
   return { objects: r.objects, count: parsed.stats.count, parsed };
 }
 

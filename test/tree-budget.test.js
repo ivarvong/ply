@@ -15,6 +15,7 @@ import { LIMIT_TREE_ENTRIES } from '../src/limits.js';
 import { OID_BYTES, TREE_ENTRY_MIN } from '../src/format.js';
 import { te } from '../src/bytes.js';
 import { git, gitBuf, tmpRoot } from './server.js';
+import { unwrap } from './unwrap.js';
 
 const MODE = '100644 ';
 const NAME = 8;
@@ -80,22 +81,22 @@ test('a framed entry past the cap is limit_exceeded, and a bad prefix is still p
     for (const part of parts) { out.set(part, p); p += part.length; }
     return out;
   };
-  throws(() => parseTree(data(raw('100644 a\0'), raw('100644 b\0')), { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  throws(() => unwrap(parseTree(data(raw('100644 a\0'), raw('100644 b\0')), { maxTreeEntries: 1 })), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
   // Bytes after the cap are not parsed: a broken mode there does not become pack_corrupt.
-  throws(() => parseTree(data(raw('100644 a\0'), te.encode('nope')), { maxTreeEntries: 1 }), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
-  throws(() => parseTree(raw('100644 .\0'), { maxTreeEntries: 1 }), 'pack_corrupt', 'tree: bad name');
+  throws(() => unwrap(parseTree(data(raw('100644 a\0'), te.encode('nope')), { maxTreeEntries: 1 })), 'limit_exceeded', 'tree entries 2 exceeds limit 1');
+  throws(() => unwrap(parseTree(raw('100644 .\0'), { maxTreeEntries: 1 })), 'pack_corrupt', 'tree: bad name');
   // The duplicate sits inside the cap, so it is reported even though another entry follows.
   throws(
-    () => parseTree(data(raw('100644 a\0'), raw('100644 a\0', Uint8Array.of(2, ...new Uint8Array(OID_BYTES - 1))), raw('100644 b\0')), { maxTreeEntries: 2 }),
+    () => unwrap(parseTree(data(raw('100644 a\0'), raw('100644 a\0', Uint8Array.of(2, ...new Uint8Array(OID_BYTES - 1))), raw('100644 b\0')), { maxTreeEntries: 2 })),
     'pack_corrupt',
     'tree: duplicate entry "a"',
   );
-  const parsed = parseTree(raw('100644 a\0'));
+  const parsed = unwrap(parseTree(raw('100644 a\0')));
   assert.equal(parsed.length, 1);
   assert.equal(Object.hasOwn(parsed[0], 'oid'), false);
   assert.deepEqual(Object.keys(parsed[0]).sort(), ['entryOffset', 'mode', 'name', 'oidOffset']);
   assert.equal(parsed[0].oid, toHex(oid));
-  assert.ok(encodeTree(parsed).length >= TREE_ENTRY_MIN);
+  assert.ok(unwrap(encodeTree(parsed)).length >= TREE_ENTRY_MIN);
 });
 
 test('199999 and 200000 list under a 128 MiB heap; 200001 is a typed refusal and git agrees at the cap', async () => {

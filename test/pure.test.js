@@ -15,6 +15,7 @@ import { encodeTree, hashObject, parseCommit, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { thrown as fail, scrubError } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap } from './unwrap.js';
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40);
 
@@ -35,7 +36,7 @@ test('validateSpec: rejects before any I/O, freezes the plan', () => {
 });
 
 test('lookupEntry: found/dir/file/mode rules and the entries limit, with attrs on every outcome', () => {
-  const tree = encodeTree([{ mode: '40000', name: 'dir', oid: A }, { mode: '100644', name: 'f', oid: B }, { mode: '120000', name: 'link', oid: A }, { mode: '160000', name: 'sub', oid: B }, { mode: '100755', name: 'x', oid: A }]);
+  const tree = unwrap(encodeTree([{ mode: '40000', name: 'dir', oid: A }, { mode: '100644', name: 'f', oid: B }, { mode: '120000', name: 'link', oid: A }, { mode: '160000', name: 'sub', oid: B }, { mode: '100755', name: 'x', oid: A }]));
   assert.equal(lookupEntry(tree, 'dir', false, DEFAULT_LIMITS).entry.oid, A);
   assert.equal(lookupEntry(tree, 'f', true, DEFAULT_LIMITS).entry.oid, B);
   assert.equal(lookupEntry(tree, 'x', true, DEFAULT_LIMITS).entry.mode, '100755');
@@ -52,10 +53,10 @@ test('buildCommitObjects ≡ git: trees and commit hash to what git computes, de
     git(['init', '-q', '--bare']);
     const oldBlob = git(['hash-object', '-w', '--stdin'], 'hello MARK\n'), newBlob = git(['hash-object', '-w', '--stdin'], 'hello DONE\n');
     const other = git(['hash-object', '-w', '--stdin'], 'other\n');
-    const leafData = encodeTree([{ mode: '100644', name: 'file.txt', oid: oldBlob }, { mode: '100644', name: 'z', oid: other }]);
+    const leafData = unwrap(encodeTree([{ mode: '100644', name: 'file.txt', oid: oldBlob }, { mode: '100644', name: 'z', oid: other }]));
     const leafOid = git(['mktree'], `100644 blob ${oldBlob}\tfile.txt\n100644 blob ${other}\tz\n`);
     assert.equal(hashObject('tree', leafData), leafOid);
-    const rootData = encodeTree([{ mode: '40000', name: 'd', oid: leafOid }]);
+    const rootData = unwrap(encodeTree([{ mode: '40000', name: 'd', oid: leafOid }]));
     const rootOid = git(['mktree'], `040000 tree ${leafOid}\td\n`);
     const levels = [{ treeOid: rootOid, data: rootData, entry: lookupEntry(rootData, 'd', false, DEFAULT_LIMITS).entry }, { treeOid: leafOid, data: leafData, entry: lookupEntry(leafData, 'file.txt', true, DEFAULT_LIMITS).entry }];
     const base = 'hello MARK\n';
@@ -68,7 +69,7 @@ test('buildCommitObjects ≡ git: trees and commit hash to what git computes, de
     const env = { GIT_AUTHOR_NAME: 'n', GIT_AUTHOR_EMAIL: 'e@x', GIT_COMMITTER_NAME: 'n', GIT_COMMITTER_EMAIL: 'e@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000' };
     const gitCommit = execFileSync('git', ['-C', dir, 'commit-tree', gitRoot, '-p', parent, '-m', 'm'], { encoding: 'utf8', env: { ...process.env, ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' } }).trim();
     assert.equal(built.newCommit, gitCommit);
-    assert.equal(parseCommit(built.commitData).parents[0], parent);
+    assert.equal(unwrap(parseCommit(built.commitData)).parents[0], parent);
     // object list: commit (full) + one REF_DELTA per tree + blob REF_DELTA
     assert.deepEqual(built.objects.map(o => [o.type, !!o.baseOid]), [[TYPE.COMMIT, false], [TYPE.TREE, true], [TYPE.TREE, true], [TYPE.BLOB, true]]);
     assert.deepEqual(built.objects.slice(1).map(o => o.baseOid), [rootOid, leafOid, oldBlob]);
@@ -87,7 +88,7 @@ test('deflate only: a stored-block zlib stream never beats CompressionStream (th
     const data = rng.int(0, 1) ? rng.bytes(n) : new Uint8Array(n).fill(0x61);
     const zs = stored(data), zd = await zlibDeflate(data);
     assert.deepEqual(new Uint8Array(zlib.inflateSync(zs)), data);
-    assert.deepEqual(inflate(zs, 0, { expectedSize: n }).out, data, 'our inflate handles multi-block stored streams');
+    assert.deepEqual(unwrap(inflate(zs, 0, { expectedSize: n })).out, data, 'our inflate handles multi-block stored streams');
     // zlib's own stored blocks are ~16 KiB, ours 64 KiB: deflate can lose by ≤5 bytes per 16 KiB on incompressible input, nothing more
     assert.ok(zd.length <= zs.length + 5 * Math.ceil(n / 16384), `n=${n}: deflate ${zd.length} vs stored ${zs.length}`);
   }
@@ -170,7 +171,7 @@ test('inflate: an incomplete huffman table with a hole is rejected (invalid huff
   put(0, 1);                                              // the one distance symbol: length 0
   for (let i = 0; i < 16; i++) put(1, 1);                 // data: 1111…, which is not the EOB code (00000000)
   const raw = Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
-  assert.throws(() => inflate(raw, 0, { raw: true, maxOutput: 1024 }), e => e.code === 'pack_corrupt' && /invalid huffman code/.test(e.message));
+  assert.throws(() => unwrap(inflate(raw, 0, { raw: true, maxOutput: 1024 })), e => e.code === 'pack_corrupt' && /invalid huffman code/.test(e.message));
   assert.throws(() => zlib.inflateRawSync(raw), /invalid|incomplete|Z_DATA_ERROR/i, 'node zlib rejects it too');
 });
 
@@ -183,7 +184,7 @@ test('parsePack: reserved object types 0 and 5 are rejected', async () => {
     const hdr = new Uint8Array(12); hdr.set([0x50, 0x41, 0x43, 0x4b]); new DataView(hdr.buffer).setUint32(4, 2); new DataView(hdr.buffer).setUint32(8, 1);
     const body = concat([hdr, encodeObjHeader(type, 3), await zlibDeflate(new Uint8Array([1, 2, 3]))]);
     const pack = concat([body, new Sha1().update(body).digest()]);
-    assert.throws(() => parsePack(pack), e => e.code === 'pack_corrupt' && /bad object type/.test(e.message), `type ${type}`);
+    assert.throws(() => unwrap(parsePack(pack)), e => e.code === 'pack_corrupt' && /bad object type/.test(e.message), `type ${type}`);
   }
 });
 

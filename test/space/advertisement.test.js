@@ -24,6 +24,7 @@ const { lsRefs } = await import(`${SRC}/lsrefs.js`);
 import { pktInit, pktStep } from '../../src/pktline.js';
 import { Tracer } from '../../src/otel.js';
 import { td } from '../../src/bytes.js';
+import { unwrap } from '../unwrap.js';
 
 const spanStub = { set() {}, event() {}, end() {} };
 const tracer = { span: async (_n, _o, fn) => fn(spanStub) };
@@ -142,7 +143,7 @@ const gitIn = async (args, cwd) => gitAsync(cwd ?? root, ['-c', 'protocol.versio
 const freshRepo = name => { const d = join(root, `c-${name}-${keyN}`); rmSync(d, { recursive: true, force: true }); git(root, ['init', '-q', d]); return d; };
 // the request lines of a v2 command body, after the delim (capabilities before it: command, agent, object-format)
 const requestArgs = body => {
-  const { frames } = pktStep(pktInit(), new Uint8Array(body));
+  const { frames } = unwrap(pktStep(pktInit(), new Uint8Array(body)));
   const out = { caps: [], args: [] };
   let after = false;
   for (const f of frames) { if (f.kind === 'delim') after = true; else if (f.kind === 'data') (after ? out.args : out.caps).push(td.decode(f.payload).replace(/\n$/, '')); }
@@ -192,7 +193,7 @@ const capsCell = over => {
 // the advertisement as lines, with the run's agent and session id normalized; a capability the model has no axis for (a
 // newer git's) is dropped and reported, and so are fetch features beyond the five
 const MODELLED = /^(version 2|agent|ls-refs|fetch|server-option|object-format|session-id)(=|\n|$)/;
-const advLines = (body, extra = []) => pktStep(pktInit(), new Uint8Array(body)).frames
+const advLines = (body, extra = []) => unwrap(pktStep(pktInit(), new Uint8Array(body))).frames
   .map(f => (f.kind === 'data' ? td.decode(f.payload) : `<${f.kind}>`))
   .filter(l => l.startsWith('<') || MODELLED.test(l) || (extra.push(l.trim()), false))
   .map(l => l.replace(/^agent=git\/.*\n$/, `agent=${S.AGENT}\n`).replace(/^session-id=.*\n$/, 'session-id=sid-1\n')

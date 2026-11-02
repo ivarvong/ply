@@ -1,6 +1,6 @@
 // Byte helpers.
 import type { ErrorOf } from './errors.js';
-import { fail, plyError, orThrow } from './errors.js';
+import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok, err } from './result.js';
 import { BYTE_VALUES, PKT_HEX_BASE } from './format.js';
@@ -80,7 +80,7 @@ export function concat(parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-export function encodeBytesResult(s: unknown, what = 'string'): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
+export function encodeBytes(s: unknown, what = 'string'): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> {
   if (typeof s !== 'string') return fail('bad_request', `${what} must be a string`, { what });
   // Stryker disable next-line ConditionalExpression: the fast path; the loop below writes the same bytes for a well-formed string
   if (s.isWellFormed()) return ok(te.encode(s));
@@ -102,8 +102,6 @@ export function encodeBytesResult(s: unknown, what = 'string'): Result<Uint8Arra
   if (decodeBytes(bytes) !== s) return fail('bad_request', `${what}: escaped bytes spell well-formed UTF-8; pass the characters`, { what });
   return ok(bytes);
 }
-// The throwing form, for callers not yet on Result (docs/STACK.md, migration path step 2).
-export const encodeBytes = (s: unknown, what = 'string'): Uint8Array<ArrayBuffer> => orThrow(encodeBytesResult(s, what));
 
 // Text that arrives in pieces (sideband band 2): a sequence cut by a frame boundary waits in `carry` for its
 // tail instead of decoding as two U+FFFD. Pure: returns { text, carry }.
@@ -125,7 +123,7 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
 
 /**
  * Bounded read. `subarray` / `slice` clamp a range that runs past the end and return a short view; parsers that
- * trusted that view accepted truncated fields (the tree-oid off-by-one). `takeResult` returns the typed short read
+ * trusted that view accepted truncated fields (the tree-oid off-by-one). `take` returns the typed short read
  * instead, so the length is the bound. The error carries `reason: 'short_read'`: a stream parser that may get more
  * bytes switches on that, never on the message (#76). No buffer (null, or a JavaScript caller's missing argument) is a
  * short read of an empty one.
@@ -143,14 +141,8 @@ const inBounds = (buf: Uint8Array | null, off: number, n: number): buf is Uint8A
   isBuffer(buf) && Number.isInteger(off) && Number.isInteger(n) && off >= 0 && n >= 0 && off + n <= buf.length;
 // an omitted code is C's default, 'pack_corrupt'; the compiler cannot tie a default value to a type parameter
 // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-export function takeResult<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null, off: number, n: number, code: C = 'pack_corrupt' as C): Result<Uint8Array, ErrorOf<C>> {
+export function take<C extends ShortReadCode = 'pack_corrupt'>(buf: Uint8Array | null, off: number, n: number, code: C = 'pack_corrupt' as C): Result<Uint8Array, ErrorOf<C>> {
   return inBounds(buf, off, n) ? ok(buf.subarray(off, off + n)) : err(shortRead(code, off, n, haveOf(buf)));
-}
-// The throwing form (docs/STACK.md, migration path step 2). Its own plyError, with the code its caller picks, so the
-// decision-point inventory (scripts/decision-points.mjs) sees every take() call as a site, as before.
-export function take(buf: Uint8Array | null, off: number, n: number, code: ShortReadCode = 'pack_corrupt'): Uint8Array {
-  if (!inBounds(buf, off, n)) throw plyError(code, shortReadMessage(off, n, haveOf(buf)), { reason: 'short_read' });
-  return buf.subarray(off, off + n);
 }
 
 // Hex digit value of each byte value, either case; -1 for a byte that is not a hex digit. The one hex table: the

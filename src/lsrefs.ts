@@ -98,7 +98,7 @@ export type LsRefsBodyConfig = { readonly peel: boolean; readonly symrefs: boole
 export type LsRefsBodyOptions = Input<LsRefsBodyConfig>;
 export const lsRefsBody = (prefixes: readonly string[] = [], options: LsRefsBodyOptions = {}): Uint8Array<ArrayBuffer> => {
   const { peel, symrefs, unborn } = withDefaults(options, { peel: true, symrefs: true, unborn: false });
-  return pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n', unborn && 'unborn\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
+  return orThrow(pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n', unborn && 'unborn\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 }));
 };
 
 // The listing as it is read: `open` until the flush that ends it, then `ended` (any frame after that is refused).
@@ -168,7 +168,7 @@ export function lsRefsEnd(st: LsListing): Result<LsRefsResult, PlyError> {
 // async: a synchronous failure (a bad prefix, a missing limit) is a rejection, as it always was
 // oxlint-disable-next-line require-await -- see above
 export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: Input<{ readonly unborn: UnbornReader }> = {}): Promise<LsRefsResult> {
-  for (const p of prefixes) validateWire(p, 'ref prefix');
+  for (const p of prefixes) orThrow(validateWire(p, 'ref prefix'));
   const maxBytes = orThrow(readLimit(t.limits, 'maxLsRefsBytes'));
   const maxRefs = orThrow(readLimit(t.limits, 'maxRefs'));
   // a reader given as null still asks, and reads nothing (as before)

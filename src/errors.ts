@@ -90,7 +90,7 @@ export type ExtraFields = {
   // receivecaps.ts: the capabilities the server advertised, beside an `unsupported` push
   readonly caps: readonly string[];
   // A machine-readable sub-reason a caller switches on instead of matching the message (#76). Closed: a new reason is
-  // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts takeResult), so more bytes may complete it.
+  // a member here. 'short_read': a bounded read ran past the buffer (bytes.ts take), so more bytes may complete it.
   // 'not_our_ref': upload-pack's ERR or band 3 said the wanted oid is not its ref (v2Step). Any other remote_error has none.
   readonly reason: Reason;
 };

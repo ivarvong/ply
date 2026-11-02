@@ -13,6 +13,7 @@ import { git, gitBuf, tmpRoot, fsck } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
 
 let root, cleanup, repo, emptyTree, blob;
 before(() => { ({ root, cleanup } = tmpRoot()); repo = join(root, 'r'); mkdirSync(repo); git(repo, ['init', '-q']); emptyTree = git(repo, ['hash-object', '-t', 'tree', '--stdin', '-w'], { input: '' }).trim(); blob = git(repo, ['hash-object', '-w', '--stdin'], { input: 'x' }).trim(); });
@@ -51,7 +52,7 @@ test('ident validation == git fsck --strict (exhaustive over an alphabet, name a
   const alpha = ['a', ' ', '<', '>', '\n', '\0', '.', '\t', '\r', '"', "'", '@', ','];
   const cases = [];
   const check = (name, email) => {
-    let ours; try { validateIdent({ name, email, time: 1700000000, tz: '+0000' }); ours = 'ok'; } catch { ours = 'reject'; }
+    let ours; try { unwrap(validateIdent({ name, email, time: 1700000000, tz: '+0000' })); ours = 'ok'; } catch { ours = 'reject'; }
     const data = Buffer.from(`tree ${emptyTree}\nauthor ${name} <${email}> 1700000000 +0000\ncommitter ${name} <${email}> 1700000000 +0000\n\nm\n`, 'utf8');
     cases.push({ name, email, ours, data });
   };
@@ -75,7 +76,7 @@ test('ref validation == git check-ref-format (exhaustive over an alphabet)', () 
   for (const t of tails) for (const ref of [`refs/heads/${t}`, `refs/${t}`, t]) {
     if (ref.includes('\n') || ref.includes('\0')) continue; // cannot be passed as an argv string; we reject both regardless
     n++;
-    let ours; try { validateRef(ref); ours = 'ok'; } catch { ours = 'reject'; }
+    let ours; try { unwrap(validateRef(ref)); ours = 'ok'; } catch { ours = 'reject'; }
     let theirs; try { execFileSync('git', ['check-ref-format', ref], { stdio: 'pipe' }); theirs = 'ok'; } catch { theirs = 'reject'; }
     // we additionally require a full refs/ name (bare "main" is rejected by us, accepted by check-ref-format)
     if (!ref.startsWith('refs/')) { if (ours !== 'reject') disagree.push({ ref, ours, theirs: 'n/a (we require refs/)' }); continue; }
@@ -91,7 +92,7 @@ test('path validation == git tree acceptance + fsck --strict (components over an
   const cases = [];
   for (const c of comps) {
     const path = `d/${c}`;
-    let ours; try { validatePath(path, DEFAULT_LIMITS); ours = 'ok'; } catch { ours = 'reject'; }
+    const ours = validatePath(path, DEFAULT_LIMITS).ok ? 'ok' : 'reject';
     // git side: build the tree object directly (bypassing index normalization) and fsck it
     const data = Buffer.concat([Buffer.from(`100644 ${c}\0`, 'utf8'), Buffer.from(blob, 'hex')]);
     cases.push({ c, ours, data, writable: !c.includes('\0') && !c.includes('/') });
@@ -115,8 +116,8 @@ test('tree encoding == git write-tree over all name pairs × {file, dir} (sort o
     const entries = [[names[i], mi], [names[j], mj]].map(([name, mode]) => ({ mode, name, oid: mode === '40000' ? emptyTreeIn(sub) : blobIn(sub, name) }));
     // git: mktree with entries (any order) → oid
     const mk = git(sub, ['mktree'], { input: entries.map(e => `${e.mode.padStart(6, '0')} ${e.mode === '40000' ? 'tree' : 'blob'} ${e.oid}\t${e.name}`).join('\n') + '\n' }).trim();
-    assert.equal(hashObject('tree', encodeTree(entries)), mk, `${names[i]}(${mi}) vs ${names[j]}(${mj})`);
-    assert.equal(hashObject('tree', encodeTree([entries[1], entries[0]])), mk, 'order-independent');
+    assert.equal(hashObject('tree', unwrap(encodeTree(entries))), mk, `${names[i]}(${mi}) vs ${names[j]}(${mj})`);
+    assert.equal(hashObject('tree', unwrap(encodeTree([entries[1], entries[0]]))), mk, 'order-independent');
   }
   console.log(`  trees: ${n} pairs, all equal to git mktree`);
 });
@@ -143,7 +144,7 @@ test('parseCommit recovers tree/parents/author/committer/message from every comm
   const all = [...git(sub, ['rev-list', '--all']).trim().split('\n'), ...shapes.map(s => gitBuf(sub, ['hash-object', '-t', 'commit', '-w', '--stdin', '--literally'], Buffer.from(s)).toString().trim())];
   for (const oid of all) {
     const data = new Uint8Array(gitBuf(sub, ['cat-file', 'commit', oid]));
-    const c = parseCommit(data);
+    const c = unwrap(parseCommit(data));
     const [t, ...parents] = git(sub, ['rev-list', '--parents', '-n1', oid]).trim().split(' ').slice(1).length ? [git(sub, ['rev-parse', `${oid}^{tree}`]).trim(), ...git(sub, ['rev-list', '--parents', '-n1', oid]).trim().split(' ').slice(1)] : [git(sub, ['rev-parse', `${oid}^{tree}`]).trim()];
     assert.equal(c.tree, t, oid); assert.deepEqual(c.parents, parents, oid);
     assert.equal(c.author, git(sub, ['log', '-1', '--format=%an <%ae> %at %ai', oid]).trim().replace(/ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d /, ' '), oid);
@@ -159,7 +160,7 @@ test('parseCommit recovers tree/parents/author/committer/message from every comm
     else assert.equal(message.replace(/\n+$/, ''), git(sub, ['log', '-1', '--format=%B', oid]).replace(/\n+$/, ''), oid); // %B appends newlines of its own
     // re-encoding a commit we did not write must be byte-identical when it has only standard headers
     // parse ∘ encode is the identity for every shape, including multi-line continuation headers (gpgsig, mergetag)
-    assert.deepEqual([...encodeCommit(c)], [...data], `roundtrip ${oid}`);
+    assert.deepEqual([...unwrap(encodeCommit(c))], [...data], `roundtrip ${oid}`);
   }
   console.log(`  commits: ${all.length} shapes parsed consistently with git log`);
 });

@@ -23,11 +23,11 @@
 import { mkdir, readdir, lstat, open, symlink, unlink } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a checkout path throughout this file
 import { join } from 'node:path';
-import { fail, isPlyError, plyError } from './errors.js';
+import { fail, isPlyError, plyError, orThrow } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { err, ok } from './result.js';
+import { err, getOrElse, ok } from './result.js';
 import type { Err, Result } from './result.js';
-import { limitError, requireLimit } from './limits.js';
+import { limitError, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePath, checkoutPathRefusal } from './validate.js';
 import { concat, encodeBytes } from './bytes.js';
@@ -53,7 +53,7 @@ export const CHECKOUT_BATCH = 1000;
 // A tree name is bytes (#43): one that is not UTF-8 arrives with escaped bytes (bytes.js decodeBytes) and is written as
 // those bytes through a Buffer path, as git writes it. A filesystem that refuses the bytes (APFS: EILSEQ) is a typed
 // refusal naming the path, never a file under a U+FFFD name.
-const fsPath = (dir: string, rel: string): string | Buffer => { const p = join(dir, rel); return p.isWellFormed() ? p : Buffer.from(encodeBytes(p, 'checkout path')); };
+const fsPath = (dir: string, rel: string): string | Buffer => { const p = join(dir, rel); return p.isWellFormed() ? p : Buffer.from(orThrow(encodeBytes(p, 'checkout path'))); };
 // A wrapper: the call site is the decision point (`refused(path, e)`), so the body stays the `fail()` itself.
 const refused = (path: string, e: unknown) =>
   (thrownCodeIs(e, 'EILSEQ') ? fail('unsupported', `checkout: the filesystem refuses the name bytes of ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }) : e);
@@ -73,7 +73,7 @@ const filesystem = (path: string, e: unknown): Err<WithKind<ErrorOf<'unsupported
   kinded(plyError('unsupported', `checkout: the filesystem refused ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }), 'filesystem');
 const caught = (e: unknown, path: string): Err<WriteFilesError> => (isPlyError(e) ? err(e) : filesystem(path, e));
 
-// The refusals writeFiles itself builds. A PlyError from validatePath, encodeBytes, requireLimit, or a blob stream
+// The refusals writeFiles itself builds. A PlyError from validatePath, encodeBytes, readLimit, or a blob stream
 // is returned as that error (its own code and miss); it is not re-tagged.
 export type WriteFilesError =
   | WithKind<ErrorOf<'bad_request'>, 'not_empty'>
@@ -134,7 +134,7 @@ export type WriteFilesOptions = { readonly limits: Limits; readonly platform: st
 export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>, options: WriteFilesOptions): Promise<Result<Written, WriteFilesError>> {
   const { limits, platform } = options;
   let maxObject: number;
-  try { maxObject = requireLimit(limits, 'maxObjectSize'); }
+  try { maxObject = orThrow(readLimit(limits, 'maxObjectSize')); }
   catch (e) { return caught(e, dir); }
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;
@@ -150,9 +150,9 @@ export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>
     catch (e) { return caught(e, dir); }
     if (next.done === true) break;
     const f = next.value;
-    try { validatePath(f.path, limits); }
+    try { orThrow(validatePath(f.path, limits)); }
     catch (e) { return stop(caught(e, f.path)); }
-    const why = checkoutPathRefusal(f.path, f.mode, platform);
+    const why = getOrElse<string | null>(orThrow(checkoutPathRefusal(f.path, f.mode, platform)), null);
     if (why !== null) {
       // a gitlink has no stream; every other entry does (CheckoutFile)
       if (f.mode !== MODE_COMMIT) await f.stream.cancel().catch(() => { /* refusing: the stream is not read */ });

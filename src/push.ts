@@ -57,7 +57,7 @@ export type CheckedCaps = { readonly atomic: boolean; readonly pushOptions: read
 // pack. The wire encoder: `caps` is sent as given (push builds it with requestCaps).
 export const pushBody = ({ commands, caps = ['report-status', `agent=${UA.replace(/ .*/u, '')}`] }: { readonly commands: readonly Command[] } & Input<{ readonly caps: readonly string[] }>, pack: Uint8Array | null = null): Uint8Array<ArrayBuffer> => {
   const lines = commands.map((c, i) => `${c.oldOid} ${c.newOid} ${c.ref}${i === 0 ? `\0${caps.join(' ')}` : ''}\n`);
-  return concat([...lines.map(l => pkt(l)), FLUSH, ...(pack ? [pack] : [])]);
+  return concat([...lines.map(l => orThrow(pkt(l))), FLUSH, ...(pack ? [pack] : [])]);
 };
 
 // ---- the push outcome (pure): wire → stream shape → report shape → outcome → Result, each a tagged union ----
@@ -110,7 +110,7 @@ export function streamStep(st: StreamState, f: Frame): StreamState {
   if (body.length === 0) return st;
   // Stryker disable next-line ConditionalExpression: without it, band-1 bytes after the report's flush still break it (the loop below, or the carry at the outer flush)
   if (st.phase !== 'report') return broken('band 1 after the report');
-  const r = pktStep(st.inner, body);
+  const r = orThrow(pktStep(st.inner, body));
   let phase: Reading['phase'] = st.phase;
   for (const g of r.frames) {
     if (phase !== 'report') return broken('band 1 after the report');
@@ -429,12 +429,12 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
   if (!maxRefs.ok) return maxRefs;
   if (commands.length > maxRefs.value) return err(limitExceeded('push commands', commands.length, maxRefs.value));
   for (const c of commands) {
-    const ref = validated(() => validatePushRef(c.ref, c.newOid === ZERO_OID));
+    const ref = validated(() => orThrow(validatePushRef(c.ref, c.newOid === ZERO_OID)));
     if (!ref.ok) return ref;
     if (!OID.test(c.oldOid) || !OID.test(c.newOid)) return fail('bad_request', 'push: oids must be 40-hex');
   }
   for (const p of cfg.checked === null ? [] : cfg.checked.pushOptions) {
-    const option = validated(() => validateWire(p, 'push option'));
+    const option = validated(() => orThrow(validateWire(p, 'push option')));
     if (!option.ok) return option;
   }
   // read once, before anything is built or sent: the same values bound the pack and the report
@@ -448,7 +448,7 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Uint8Array<ArrayBuffer> => {
   const options = plan.checked === null ? [] : plan.checked.pushOptions;
   if (options.length === 0) return pushBody(plan, pack);
-  return concat([pushBody(plan), ...options.map(p => pkt(`${p}\n`)), FLUSH, ...(pack ? [pack] : [])]);
+  return concat([pushBody(plan), ...options.map(p => orThrow(pkt(`${p}\n`))), FLUSH, ...(pack ? [pack] : [])]);
 };
 
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the

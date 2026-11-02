@@ -23,6 +23,10 @@ import * as space from './fsck-tree.space.js';
 import { checkoutPathRefusal } from '../../src/validate.js';
 import { attributesFor, bytesToStr } from '../../src/attributes.js';
 import { encodeBytes, decodeBytes } from '../../src/bytes.js';
+import { unwrap } from '../unwrap.js';
+
+// The reason git refuses the checkout of a path, or null when it accepts it.
+const refusalOf = (path, mode, platform) => { const why = unwrap(checkoutPathRefusal(path, mode, platform)); return why.tag === 'some' ? why.value : null; };
 
 const SRC = process.env.FSCK_TREE_SRC ?? new URL('../../src', import.meta.url).pathname;
 // an absolute specifier: the .js -> .ts resolve hook maps relative ones only (objects is TypeScript since T2; an older src copy is .js)
@@ -162,7 +166,7 @@ const classify = ls => ({
 });
 
 function plyOutcome(bytes) {
-  try { return { ply: 'accept', entries: parseTree(new Uint8Array(bytes)) }; } catch (e) {
+  try { return { ply: 'accept', entries: unwrap(parseTree(new Uint8Array(bytes))) }; } catch (e) {
     if (e?.code !== 'pack_corrupt') return { ply: 'other', message: `${e?.code}: ${e?.message}` };
     return { ply: 'refuse', message: e.message, msgIds: space.msgIdsOfPly(e.message) };
   }
@@ -223,7 +227,7 @@ test('fsck tree space: ply refuses exactly what git errors on (naming one of its
     if (got.ply !== x.want.ply) why = `${x.want.ply} -> ${got.ply}${got.message ? ` (${got.message.replace(/".*"/, '"…"')})` : ''}`;
     else if (got.ply === 'refuse' && !(got.msgIds ?? []).some(m => x.git.errors.includes(m))) why = `refused as ${got.message.replace(/".*"/, '"…"')}, git said ${x.git.errors}`;
     else if (got.ply === 'accept') {
-      const modes = got.entries.map(e => e.mode), names = got.entries.map(e => Buffer.from(encodeBytes(e.name)).toString('hex'));
+      const modes = got.entries.map(e => e.mode), names = got.entries.map(e => Buffer.from(unwrap(encodeBytes(e.name))).toString('hex'));
       const wantModes = x.entries.map(e => space.canon(space.parseMode(e.mode))), wantNames = x.entries.map(e => e.name.toString('hex'));
       if (JSON.stringify(modes) !== JSON.stringify(wantModes)) why = `modes ${modes} != canon_mode ${wantModes}`;
       else if (JSON.stringify(names) !== JSON.stringify(wantNames)) why = 'names do not round-trip to their bytes';
@@ -294,7 +298,7 @@ test('fsck tree space: every entry ply accepts is a path git read-tree checks ou
         if (gitRefuses !== p.refuse) wrong.push(`${p.mode} ${JSON.stringify(p.name.toString('latin1'))}: git read-tree ${gitRefuses ? 'refuses' : 'accepts'}`);
         const name = bytesName(p.name);
         for (const platform of ['linux', 'darwin']) {
-          const why = checkoutPathRefusal(`d/${name}`, p.canon, platform);
+          const why = refusalOf(`d/${name}`, p.canon, platform);
           if (!!why !== p.refuse) wrong.push(`${p.mode} ${JSON.stringify(p.name.toString('latin1'))} on ${platform}: checkoutPathRefusal ${why}`);
         }
       }
@@ -308,9 +312,9 @@ test('fsck tree space: every entry ply accepts is a path git read-tree checks ou
 test('fsck tree space: on Windows, checkoutPathRefusal refuses what git for Windows refuses (compat/mingw.c, derived)', () => {
   const wrong = [];
   for (const [name, refused] of space.WIN32) {
-    const why = checkoutPathRefusal(`d/${name}`, '100644', 'win32');
+    const why = refusalOf(`d/${name}`, '100644', 'win32');
     if (!!why !== refused) wrong.push(`${JSON.stringify(name)}: ${why ?? 'allowed'}, mingw.c ${refused ? 'refuses' : 'allows'}`);
-    if (!/[\\:]/.test(name) && !/^(con|aux|prn|nul|com|lpt)/i.test(name) && !/[ .]$/.test(name) && !/[<>"|?*\x01]/.test(name)) assert.equal(checkoutPathRefusal(`d/${name}`, '100644', 'linux'), null, name);
+    if (!/[\\:]/.test(name) && !/^(con|aux|prn|nul|com|lpt)/i.test(name) && !/[ .]$/.test(name) && !/[<>"|?*\x01]/.test(name)) assert.equal(refusalOf(`d/${name}`, '100644', 'linux'), null, name);
   }
   assert.deepEqual(wrong, []);
 });

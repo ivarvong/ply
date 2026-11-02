@@ -68,8 +68,8 @@ export function refCandidatesResult(ref: unknown): Result<string[], PlyError> {
   if (isNothing(ref) || ref === '' || ref === 'HEAD') return ok(['HEAD']);
   if (typeof ref !== 'string') return fail('bad_request', 'ref must be a string');
   if (OID.test(ref)) return ok([]);
-  if (ref.startsWith('refs/')) return attemptSync(() => [validateRef(ref)]);
-  return attemptSync(() => [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`].map(r => validateRef(r)));
+  if (ref.startsWith('refs/')) return attemptSync(() => [orThrow(validateRef(ref))]);
+  return attemptSync(() => [`refs/${ref}`, `refs/tags/${ref}`, `refs/heads/${ref}`].map(r => orThrow(validateRef(r))));
 }
 // The throwing entry (public API until the Result cut-over).
 export const refCandidates = (ref: unknown): string[] => orThrow(refCandidatesResult(ref));
@@ -231,7 +231,7 @@ export type CommitView = {
 };
 // Pure: a commit object's view. parseCommit (objects.ts) throws on a malformed commit; this is public API that throws.
 export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): CommitView {
-  const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = parseCommit(data, limits);
+  const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = orThrow(parseCommit(data, limits));
   return { tree: c.tree, parents: c.parents, author: identView(c.author), committer: identView(c.committer), message: c.message === null ? '' : c.message, signed: c.extra.some(l => /^gpgsig(-sha256)? /.test(l)) };
 }
 
@@ -291,7 +291,7 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
       span.set({ 'git.read.tree.cache_hit': isSome(cached) });
       const tree = cached.tag === 'some' ? ok(cached.value) : await fetchTree(t, cache, here);
       if (!tree.ok) return spanErr(span, tree);
-      const entries = attemptSync(() => parseTree(tree.value, t.limits));
+      const entries = attemptSync(() => orThrow(parseTree(tree.value, t.limits)));
       if (!entries.ok) return spanErr(span, entries);
       const found = fromNullable(entries.value.find(x => x.name === name));
       span.set({ 'git.read.tree.entries': entries.value.length, 'git.read.tree.entry.found': found.tag === 'some', 'git.read.tree.entry.mode': getOrElse(mapOption(found, f => f.mode), '') });
@@ -310,7 +310,7 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
 async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Result<Walked, PlyError>> {
   const fetched = await fetchCommit(t, commit);
   if (!fetched.ok) return fetched;
-  const info = attemptSync(() => parseCommit(fetched.value.data, limits));
+  const info = attemptSync(() => orThrow(parseCommit(fetched.value.data, limits)));
   if (!info.ok) return info;
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
   const walked = await walkPath(t, info.value.tree, comps, { cache });
@@ -321,7 +321,7 @@ async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: 
 // A path as the entries take it: validated components. With `allowRoot`, a missing, null, empty or '/' path is the root.
 export const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): Result<string[], PlyError> => {
   if (allowRoot && (isNothing(path) || path === '' || path === '/')) return ok([]);
-  return attemptSync(() => validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits));
+  return attemptSync(() => orThrow(validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits)).components);
 };
 
 // What listTree and readFile take as their second argument. `path: null` is the root for listTree, and refused by readFile.
@@ -357,7 +357,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
     const oid = orThrow(listedDir(walked, comps));
     const cached = mapGet(cache, oid);
     const data = cached.tag === 'some' ? cached.value : orThrow(await fetchTree(t, cache, oid));
-    const entries: readonly TreeEntry[] = parseTree(data, limits);
+    const entries: readonly TreeEntry[] = orThrow(parseTree(data, limits));
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
   });
 }

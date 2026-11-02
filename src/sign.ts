@@ -65,7 +65,7 @@ export function gpgsigSplice(commitBytes: Uint8Array, signatureText: string): Re
   if (atOr(headers, i + 1, '').startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
   // the gpgsig header: the armored signature, its continuation lines prefixed by a space
   headers.splice(i + 1, 0, `gpgsig ${signatureText.replace(/\n$/u, '').split('\n').join('\n ')}`);
-  return ok(encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit'));
+  return ok(orThrow(encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit')));
 }
 // The throwing form the public API and unconverted callers use until the Result cut-over (docs/STACK.md).
 export const withGpgsig = (commitBytes: Uint8Array, signatureText: string): Uint8Array<ArrayBuffer> => orThrow(gpgsigSplice(commitBytes, signatureText));

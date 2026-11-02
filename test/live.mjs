@@ -5,6 +5,7 @@ import { editFile } from '../src/edit.js';
 import {Tracer,  flattenLine} from '../src/otel.js';
 import { jsonlExporter } from './jsonl.mjs';
 import { parseCommit, parseTree, TYPE } from '../src/objects.js';
+import { unwrap } from './unwrap.js';
 
 const [url, ref = 'refs/heads/main', path, flag, find, replace] = process.argv.slice(2);
 const auth = process.env.PLY_TOKEN ? { token: process.env.PLY_TOKEN } : undefined;
@@ -15,12 +16,12 @@ const c = new GitHttp(url, { auth, tracer });
 const { refs } = await c.lsRefs([ref]);
 const head = refs.get(ref)?.oid; if (!head) throw new Error(`no ${ref}`);
 const cf = await c.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
-const commit = parseCommit(cf.objects.get(head).data);
+const commit = unwrap(parseCommit(cf.objects.get(head).data));
 console.log('head', head, 'tree', commit.tree, 'parents', commit.parents.length);
 let tree = commit.tree;
 for (const name of (path ?? '').split('/').filter(Boolean)) {
   const t = (await c.fetchPack({ wants: [tree], filter: 'tree:0' })).objects.get(tree);
-  const e = parseTree(t.data).find(x => x.name === name); if (!e) throw new Error(`no ${name}`);
+  const e = unwrap(parseTree(t.data)).find(x => x.name === name); if (!e) throw new Error(`no ${name}`);
   console.log(' ', e.mode, e.oid, name, `(${t.data.length}B tree)`);
   tree = e.oid;
 }

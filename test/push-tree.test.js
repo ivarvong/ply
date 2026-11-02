@@ -16,6 +16,7 @@ import { concat, te } from '../src/bytes.js';
 import { fromHex } from '../src/sha1.js';
 import { withLimits } from '../src/limits.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap } from './unwrap.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -211,8 +212,8 @@ test('a pack over maxPackBytes is refused with its measured size before receive-
 
 test('duplicate names: encodeTree refuses them (git fsck duplicateEntries); pushTree refuses before any I/O; case-only twins are git-valid', async () => {
   const oid = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391';
-  assert.throws(() => encodeTree([{ mode: '100644', name: 'a', oid }, { mode: '100644', name: 'a', oid }]), e => e.code === 'bad_request' && e.entry === 'a');
-  assert.throws(() => encodeTree([{ mode: '100644', name: 'a', oid }, { mode: '100644', name: 'a.b', oid }, { mode: '40000', name: 'a', oid: '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }]), e => e.code === 'bad_request' && e.entry === 'a', 'file a and dir a are not neighbours in tree order');
+  assert.throws(() => unwrap(encodeTree([{ mode: '100644', name: 'a', oid }, { mode: '100644', name: 'a', oid }])), e => e.code === 'bad_request' && e.entry === 'a');
+  assert.throws(() => unwrap(encodeTree([{ mode: '100644', name: 'a', oid }, { mode: '100644', name: 'a.b', oid }, { mode: '40000', name: 'a', oid: '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }])), e => e.code === 'bad_request' && e.entry === 'a', 'file a and dir a are not neighbours in tree order');
   // git's verdict on the bytes encodeTree no longer produces: a file `a` twice, and a file `a` beside a directory `a`
   const dir = join(root, `dup${n++}`); git(root, ['init', '-q', '--bare', dir]);
   const entry = (mode, name, o) => concat([te.encode(`${mode} ${name}\0`), fromHex(o)]);

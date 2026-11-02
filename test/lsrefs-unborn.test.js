@@ -17,6 +17,7 @@ import { Tracer } from '../src/otel.js';
 import { lsRefs, discover, GitHttp } from '../src/client.js';
 import { lsRefs as lsRefsWire, parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
 import { pkts } from '../src/pktline.js';
+import { unwrap } from './unwrap.js';
 
 const td = new TextDecoder();
 const createTransport = (u, opts = {}) => rawTransport(u, { tracer: new Tracer(), ...opts });
@@ -185,7 +186,7 @@ test('lsRefs: not asked, an unborn line a server sends anyway is skipped; the wi
   assert.ok(!seen[0].request.includes('unborn'));
   // a hand-built response with unborn lines and no request for them: git's process_ref_v2 records them only into a
   // target its caller supplied; ply with no reader skips them
-  const body = pkts(['unborn HEAD symref-target:refs/heads/x\n', `${oid} refs/heads/main\n`]);
+  const body = unwrap(pkts(['unborn HEAD symref-target:refs/heads/x\n', `${oid} refs/heads/main\n`]));
   const fake = createTransport('http://fake.invalid/r.git', { fetchImpl: async () => new Response(body, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }) });
   const r2 = await lsRefsWire(fake, []);
   assert.equal(r2.unborn, null);

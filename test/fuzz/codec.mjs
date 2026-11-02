@@ -14,6 +14,7 @@ import { applyDelta, spliceDelta, makeDelta, buildPack, parsePack, resolvePack }
 import { pktInit, pktStep, pkt } from '../../src/pktline.js';
 import { concat } from '../../src/bytes.js';
 import { zlibBound } from '../../src/format.js';
+import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200000', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
@@ -55,13 +56,13 @@ for (let i = 0; i < N; i++) {
       const buf = concat([pre, z, post]);
       if (z.length > zlibBound(d.length)) throw new Error(`zlib emitted ${z.length} B for ${d.length} B, over zlibBound ${zlibBound(d.length)} (level ${level}, strategy ${strategy}, memLevel ${memLevel}, windowBits ${windowBits})`);
       tick('inflate.under_zlib_bound');
-      const r = inflate(buf, pre.length, rng.bool() ? { expectedSize: d.length } : {});
+      const r = unwrap(inflate(buf, pre.length, rng.bool() ? { expectedSize: d.length } : {}));
       if (r.consumed !== z.length) throw new Error(`consumed ${r.consumed} != ${z.length}`);
       if (r.out.length !== d.length || !Buffer.from(r.out).equals(Buffer.from(d))) throw new Error('content mismatch');
       // truncation at a random point must throw (never return success, never hang)
-      if (z.length > 2 && rng.bool(0.3)) { const cut = rng.int(1, z.length - 1); let ok = false; try { inflate(z.subarray(0, cut)); ok = true; } catch { } if (ok) throw new Error(`truncated at ${cut}/${z.length} returned success`); tick('inflate.truncated'); }
+      if (z.length > 2 && rng.bool(0.3)) { const cut = rng.int(1, z.length - 1); let ok = false; try { unwrap(inflate(z.subarray(0, cut))); ok = true; } catch { } if (ok) throw new Error(`truncated at ${cut}/${z.length} returned success`); tick('inflate.truncated'); }
       // single bit flip in the body must throw or produce a different output (adler catches) — never silently equal output with wrong consumed
-      if (z.length > 8 && rng.bool(0.2)) { const m = z.slice(); const at = rng.int(2, z.length - 5); m[at] ^= 1 << rng.int(0, 7); let r2 = null; try { r2 = inflate(m); } catch { tick('inflate.flip.rejected'); } if (r2 && Buffer.from(r2.out).equals(Buffer.from(d)) && r2.consumed === z.length) tick('inflate.flip.benign'); else if (r2) throw new Error('bit flip accepted with different output (adler should catch)'); }
+      if (z.length > 8 && rng.bool(0.2)) { const m = z.slice(); const at = rng.int(2, z.length - 5); m[at] ^= 1 << rng.int(0, 7); let r2 = null; try { r2 = unwrap(inflate(m)); } catch { tick('inflate.flip.rejected'); } if (r2 && Buffer.from(r2.out).equals(Buffer.from(d)) && r2.consumed === z.length) tick('inflate.flip.benign'); else if (r2) throw new Error('bit flip accepted with different output (adler should catch)'); }
     } else if (which === 'sha1') {
       const d = gen(); const h = new Sha1(); for (const c of splitRandom(rng, d, { maxChunks: 50 })) h.update(c);
       if (h.hex() !== crypto.createHash('sha1').update(d).digest('hex')) throw new Error('sha1 mismatch');
@@ -74,7 +75,7 @@ for (let i = 0; i < N; i++) {
       const d1 = spliceDelta({ baseLen: base.length, off, oldLen, insert: ins }).delta, d2 = makeDelta(base, target).delta;
       for (const [name, delta] of [['splice', d1], ['make', d2]]) {
         if (delta.length < 4) { tick('delta.min-size'); continue; }
-        const r = applyDelta(base, delta); if (!Buffer.from(r.out).equals(Buffer.from(target))) throw new Error(`${name} apply mismatch`);
+        const r = unwrap(applyDelta(base, delta)); if (!Buffer.from(r.out).equals(Buffer.from(target))) throw new Error(`${name} apply mismatch`);
         if (which === 'delta-git' && base.length > 0) {
           const baseOid = gitHash(base);
           const { pack } = await buildPack([{ type: 3, data: delta, baseOid }]);
@@ -89,9 +90,9 @@ for (let i = 0; i < N; i++) {
       tick(`delta.copyops.${Math.min(5, Math.ceil(off / 65536) + Math.ceil((base.length - off - oldLen) / 65536))}`);
     } else if (which === 'pkt') {
       const frames = Array.from({ length: rng.int(0, 40) }, () => rng.weighted([[{ kind: 'data', payload: rng.bytes(rng.pick([0, 1, 100, 65516, rng.int(0, 65516)])) }, 6], [{ kind: 'flush' }, 2], [{ kind: 'delim' }, 1], [{ kind: 'end' }, 1]]));
-      const enc = concat(frames.map(f => f.kind === 'data' ? pkt(f.payload) : new TextEncoder().encode(f.kind === 'flush' ? '0000' : f.kind === 'delim' ? '0001' : '0002')));
+      const enc = concat(frames.map(f => f.kind === 'data' ? unwrap(pkt(f.payload)) : new TextEncoder().encode(f.kind === 'flush' ? '0000' : f.kind === 'delim' ? '0001' : '0002')));
       let st = pktInit(); const got = [];
-      for (const c of splitRandom(rng, enc, { maxChunks: 64 })) { const r = pktStep(st, c); st = r.state; got.push(...r.frames); }
+      for (const c of splitRandom(rng, enc, { maxChunks: 64 })) { const r = unwrap(pktStep(st, c)); st = r.state; got.push(...r.frames); }
       if (got.length !== frames.length || got.some((g, k) => g.kind !== frames[k].kind || (g.kind === 'data' && !Buffer.from(g.payload).equals(Buffer.from(frames[k].payload))))) throw new Error('pkt mismatch');
     }
   } catch (e) {

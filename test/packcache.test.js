@@ -10,6 +10,7 @@ import { editFile } from '../src/edit.js';
 import { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from '../src/packcache.js';
 import { fetchBody, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrap } from './unwrap.js';
 
 let root, cleanup, srv, proxy, bare, work, url;
 // commit on top of whatever main is now (as another writer would)
@@ -233,8 +234,8 @@ test('buffered fetchPack (general client): poisoned cache entry → one bust →
   try {
     const { encodeTree, encodeCommit, hashObject } = await import('../src/objects.js');
     const { TYPE } = await import('../src/objects.js');
-    const blob = new TextEncoder().encode('po\n'); const tree = encodeTree([{ mode: '100644', name: 'po.txt', oid: hashObject('blob', blob) }]);
-    const commit = encodeCommit({ tree: hashObject('tree', tree), parents: [head], author: 'a <a@x> 1 +0000', message: 'po\n' });
+    const blob = new TextEncoder().encode('po\n'); const tree = unwrap(encodeTree([{ mode: '100644', name: 'po.txt', oid: hashObject('blob', blob) }]));
+    const commit = unwrap(encodeCommit({ tree: hashObject('tree', tree), parents: [head], author: 'a <a@x> 1 +0000', message: 'po\n' }));
     const r = await c.push({ ref: 'refs/heads/main', oldOid: head, newOid: hashObject('commit', commit), objects: [{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tree }, { type: TYPE.BLOB, data: blob }], pushOptions: ['ci.skip'] });
     assert.match(r.hookOutput, /opts=1:ci.skip/);
     git(bare, ['update-ref', 'refs/heads/main', head]);

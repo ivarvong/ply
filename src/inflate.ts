@@ -1,16 +1,15 @@
 // zlib (RFC 1950) + deflate (RFC 1951) inflate that reports bytes consumed.
-// Pure: inflateResult(buf, pos, opts) -> Result<{ out, consumed, stats }>, every step of its block loop a Result too;
-// inflate is its throwing form.
+// Pure: inflate(buf, pos, opts) -> Result<{ out, consumed, stats }>, every step of its block loop a Result too.
 // Pack objects are concatenated zlib streams with no length prefix; `consumed`
 // is what positions the pack parser at the next object header.
 
 import type { ErrorOf } from './errors.js';
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, assertNever, getOrElse } from './result.js';
 import { fromNullable, fromNullish, type Input } from './absent.js';
 import { DEFAULT_LIMITS, checkLimit } from './limits.js';
-import { takeResult } from './bytes.js';
+import { take } from './bytes.js';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ADLER_BYTES, ADLER_MOD,
   DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC,
@@ -108,9 +107,9 @@ const NO_CODE = -2; // no code of any length matched
 const ended = (): Err<Corrupt> => corrupt('inflate: unexpected end of input');
 const unread = (v: number): Err<Corrupt> => (v === NO_CODE ? corrupt('inflate: invalid huffman code') : ended());
 
-// @decoder inflateResult prefix=inflate
+// @decoder inflate prefix=inflate
 // oxlint-disable-next-line eslint/complexity -- one decoder (header, blocks by exhaustive block type, trailer)
-export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Result<Inflated, InflateError> {
+export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Result<Inflated, InflateError> {
   const { verifyAdler = true, raw = false } = opts;
   const expected = fromNullish(opts.expectedSize);
   // Omitted means the object cap. An explicit Infinity used to disable the check (`n > Infinity` is false).
@@ -129,7 +128,7 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
   let bitbuf = 0;
   let bitcnt = 0;
   if (!raw) {
-    const hdr = takeResult(buf, p, ZLIB_HEADER_BYTES);
+    const hdr = take(buf, p, ZLIB_HEADER_BYTES);
     if (!hdr.ok) return hdr;
     const cmf = hdr.value[0] as number;
     const flg = hdr.value[1] as number;
@@ -328,5 +327,3 @@ export function inflateResult(buf: Uint8Array, pos = 0, opts: InflateOptions = {
   if (p - start > maxInput) return tooLong(p - start);
   return ok({ out: result, consumed: p - start, stats });
 }
-// @decoder inflate prefix=inflate
-export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Inflated { return orThrow(inflateResult(buf, pos, opts)); }

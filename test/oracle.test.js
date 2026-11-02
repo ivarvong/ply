@@ -11,6 +11,7 @@ import { parsePack, resolvePack, buildPack, makeDelta } from '../src/pack.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter } from '../src/otel.js';
 import { toHex } from '../src/sha1.js';
+import { unwrap } from './unwrap.js';
 
 const SEED = parseInt(process.env.SEED ?? '7', 10);
 let root, cleanup, srv, bare, work;
@@ -42,11 +43,11 @@ test('tree encoding: our tree oid == git write-tree for sort-edge names, modes, 
     if (rng.bool(0.5) && !files.lnk) stage('120000', 'lnk', 'a');
     const treeOid = git(sub, ['write-tree']).trim();
     const raw = gitBuf(sub, ['cat-file', 'tree', treeOid]);
-    const entries = parseTree(new Uint8Array(raw));
-    assert.equal(hashObject('tree', encodeTree(entries)), treeOid, `round ${round}`);
+    const entries = unwrap(parseTree(new Uint8Array(raw)));
+    assert.equal(hashObject('tree', unwrap(encodeTree(entries))), treeOid, `round ${round}`);
     // shuffle then re-encode must still match (sort is ours, not git's order)
     const shuffled = [...entries].sort(() => rng.float() - 0.5);
-    assert.equal(hashObject('tree', encodeTree(shuffled)), treeOid);
+    assert.equal(hashObject('tree', unwrap(encodeTree(shuffled))), treeOid);
     // git ls-tree agreement on modes
     const ls = git(sub, ['ls-tree', treeOid]).trim().split('\n').map(l => l.split(/\s+/)[0]);
     assert.deepEqual(entries.map(e => e.mode.padStart(6, '0')), ls);
@@ -76,9 +77,9 @@ test('git pack-objects (ofs-delta, varied window/depth/compression) parses and r
   const truth = new Map(git(sub, ['cat-file', '--batch-check', '--batch-all-objects']).trim().split('\n').map(l => { const [oid, type, size] = l.split(' '); return [oid, { type, size: +size }]; }));
   for (const [window, depth, comp] of [[10, 50, 0], [1, 1, 1], [250, 50, 9], [0, 0, 6], [5, 2, -1]]) {
     const pack = new Uint8Array(gitBuf(sub, ['-c', `pack.compression=${comp}`, 'pack-objects', '--delta-base-offset', `--window=${window}`, `--depth=${depth}`, '--all', '--stdout', '--revs'], 'HEAD\n'));
-    const parsed = parsePack(pack);
+    const parsed = unwrap(parsePack(pack));
     assert.equal(parsed.stats.count, truth.size, `all objects (w${window} d${depth} c${comp})`);
-    const r = resolvePack(parsed);
+    const r = unwrap(resolvePack(parsed));
     for (const [oid, t] of truth) {
       const o = r.objects.get(oid);
       assert.ok(o, `missing ${oid}`);

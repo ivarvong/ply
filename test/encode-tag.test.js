@@ -15,6 +15,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { git, tmpRoot } from './server.js';
 import { encodeTag, hashObject } from '../src/index.js';
 import { decodeBytes } from '../src/bytes.js';
+import { unwrap } from './unwrap.js';
 
 let root, cleanup, work;
 const targets = {};
@@ -65,7 +66,7 @@ test('encodeTag: git hash-object stores its bytes under hashObject\'s oid, and r
             const fields = { object, type, tag: b.name, tagger: withTagger ? b.tagger : null, extra, message: b.msg(message0) };
             const want = gitHash(handBytes(fields));
             let got;
-            try { got = encodeTag({ ...fields, tagger: fields.tagger ?? undefined }); } catch (e) { got = e; }
+            try { got = unwrap(encodeTag({ ...fields, tagger: fields.tagger ?? undefined })); } catch (e) { got = e; }
             if (want.refused) {
               assert.ok(got instanceof Error && got.code === 'bad_request', `${cell}: git refuses (${want.refused}), encodeTag returned bytes`);
               refused++;
@@ -102,7 +103,7 @@ test('encodeTag: byte-equal to the tag `git tag -a` writes, for every cell git\'
         const r = spawnSync('git', ['tag', '-a', '--cleanup=verbatim', '-F', file, name, object], { cwd: work, env, encoding: 'utf8' });
         assert.equal(r.status, 0, r.stderr);
         const written = git(work, ['cat-file', 'tag', `refs/tags/${name}`], { encoding: 'buffer' });
-        const bytes = encodeTag({ object, type, tag: name, tagger: 'Ada Lovelace <ada@x> 1700000000 -0700', message: decodeBytes(body) });
+        const bytes = unwrap(encodeTag({ object, type, tag: name, tagger: 'Ada Lovelace <ada@x> 1700000000 -0700', message: decodeBytes(body) }));
         assert.deepEqual(Buffer.from(bytes), written, name);
         assert.equal(hashObject('tag', bytes), git(work, ['rev-parse', `refs/tags/${name}`]).trim(), name);
         cells++;
@@ -141,7 +142,7 @@ test('encodeTag refuses what git hash-object refuses: fsck_tag_standalone, cell 
   for (const [what, change] of refusedCells) {
     const fields = { object, type: 'commit', tag: 'v1', tagger, extra: [], message: 'm\n', ...change };
     assert.ok(gitHash(handBytes(fields)).refused, `${what}: git refuses`);
-    assert.throws(() => encodeTag(fields), e => e.code === 'bad_request' && e.what !== undefined, what);
+    assert.throws(() => unwrap(encodeTag(fields)), e => e.code === 'bad_request' && e.what !== undefined, what);
   }
   // accepted by both: what fsck lets through
   const storedCells = [
@@ -158,13 +159,13 @@ test('encodeTag refuses what git hash-object refuses: fsck_tag_standalone, cell 
     const fields = { object, type: 'commit', tag: 'v1', tagger, extra: [], message: 'm\n', ...change };
     const want = gitHash(handBytes(fields));
     assert.ok(want.oid, `${what}: git stores it (${want.refused})`);
-    assert.equal(hashObject('tag', encodeTag(fields)), want.oid, what);
+    assert.equal(hashObject('tag', unwrap(encodeTag(fields))), want.oid, what);
   }
   // ply is stricter than hash-object in two places, both already ply's reader rules: a NUL in the message (fsck
   // never reads a tag body) and an extra header that would shadow one of the four (parseTag's typed refusal)
   for (const [what, change] of [['NUL in the message', { message: 'a\0b\n' }], ['extra header shadowing tagger', { extra: [`tagger ${tagger}`] }]]) {
     const fields = { object, type: 'commit', tag: 'v1', tagger, extra: [], message: 'm\n', ...change };
     assert.ok(gitHash(handBytes(fields)).oid, `${what}: git stores it`);
-    assert.throws(() => encodeTag(fields), e => e.code === 'bad_request', what);
+    assert.throws(() => unwrap(encodeTag(fields)), e => e.code === 'bad_request', what);
   }
 });

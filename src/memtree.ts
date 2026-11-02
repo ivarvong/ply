@@ -2,7 +2,7 @@
 // a directory is expanded only when a change walks into it. Encoding writes the directories this call rebuilt;
 // a lazy node contributes its oid and no bytes. Empty directories are pruned; only the root may be empty.
 // Every refusal is a value (Result): the commit path (changes.ts) returns it, and nothing here throws.
-import { fail } from './errors.js';
+import { fail, orThrow } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { err, ok } from './result.js';
 import type { Result } from './result.js';
@@ -203,7 +203,7 @@ function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<string
       entries.push({ mode: MODE_TREE, name, oid: sub.value });
     } else entries.push({ mode: child.mode, name, oid: child.oid });
   }
-  const data = encodeTree(entries);
+  const data = orThrow(encodeTree(entries));
   const oid = hashObject('tree', data);
   trees.push({ oid, data });
   return ok(oid);

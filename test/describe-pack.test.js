@@ -11,6 +11,7 @@ import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES,
   OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE,
 } from '../src/format.js';
+import { unwrap } from './unwrap.js';
 
 const refused = (r, code, what) => {
   assert.equal(r.ok, false, what);
@@ -99,7 +100,7 @@ test('size is the inflated header, and an in-pack REF or OFS base is that object
   assert.equal(ref.objects[1].depth, 1);
   assert.deepEqual(ref.objects[1].base, { oid: baseOid });
   assert.deepEqual(ref.missingBases, []);
-  const parsed = parsePack(refPack);
+  const parsed = unwrap(parsePack(refPack));
   assert.equal(ref.objects[1].headerBytes + ref.objects[1].compressed, parsed.objects[1].headerBytes + parsed.objects[1].compressed);
 
   const ofsPack = await packOf([
@@ -138,7 +139,7 @@ test('a thin REF base is missingBases, in pack order, and resolvePack still refu
     assert.equal(o.size, o === layout.objects[1] ? deltaB.length : delta.length);
   }
   assert.deepEqual(layout.objects[0].base, { oid: idA });
-  assert.throws(() => resolvePack(parsePack(pack)), e => e.code === 'pack_corrupt' && e.message === `pack: ref delta base ${idA} not found`);
+  assert.throws(() => unwrap(resolvePack(unwrap(parsePack(pack)))), e => e.code === 'pack_corrupt' && e.message === `pack: ref delta base ${idA} not found`);
 
   const chained = await packOf([
     { data: delta, baseOid: idA },

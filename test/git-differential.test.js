@@ -10,14 +10,15 @@ import { te } from '../src/bytes.js';
 import { parseCommit, parseTag, parseTree, encodeCommit, ident } from '../src/objects.js';
 import { validateIdent } from '../src/validate.js';
 import { fsck, fsckProblemsOf } from './server.js';
+import { unwrap } from './unwrap.js';
 
 const env = {
   ...process.env,
   GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false',
   GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@b.c', GIT_COMMITTER_NAME: 'C', GIT_COMMITTER_EMAIL: 'c@b.c',
 };
-const author = ident(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }));
-const other = ident(validateIdent({ name: 'B', email: 'b@b.c', time: 1700000001 }));
+const author = unwrap(ident(unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }))));
+const other = unwrap(ident(unwrap(validateIdent({ name: 'B', email: 'b@b.c', time: 1700000001 }))));
 
 function git(dir, args, input) {
   const r = spawnSync('git', ['-C', dir, ...args], { input, encoding: 'utf8', env });
@@ -57,7 +58,7 @@ test('a second tree header is fsck-clean and git shows the first; ply rejects it
     const shown = git(dir, ['log', '-1', '--no-walk', '--format=%T', oid]);
     assert.equal(shown.code, 0, shown.err);
     assert.equal(shown.out.trim(), empty);
-    assert.throws(() => parseCommit(te.encode(text)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate tree');
+    assert.throws(() => unwrap(parseCommit(te.encode(text))), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate tree');
   });
 });
 
@@ -68,14 +69,14 @@ test('duplicate encoding, duplicate committer, and a parent after committer', ()
     assert.deepEqual(fsckProblemsOf(dir, encOid), []);
     const encLog = git(dir, ['log', '-1', '--no-walk', '--format=%e', encOid]);
     assert.equal(encLog.out.trim(), 'ISO-8859-1');
-    assert.throws(() => parseCommit(te.encode(enc)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate encoding');
+    assert.throws(() => unwrap(parseCommit(te.encode(enc))), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate encoding');
 
     const com = `tree ${empty}\nauthor ${author}\ncommitter ${author}\ncommitter ${other}\n\nmsg\n`;
     const comOid = literally(dir, 'commit', com);
     assert.deepEqual(fsckProblemsOf(dir, comOid), []);
     const comLog = git(dir, ['log', '-1', '--no-walk', '--format=%cn', comOid]);
     assert.equal(comLog.out.trim(), 'B');
-    assert.throws(() => parseCommit(te.encode(com)), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate committer');
+    assert.throws(() => unwrap(parseCommit(te.encode(com))), e => e.code === 'pack_corrupt' && e.message === 'commit: duplicate committer');
 
     const parent = 'b'.repeat(40);
     const late = `tree ${empty}\nauthor ${author}\ncommitter ${author}\nparent ${parent}\n\nmsg\n`;
@@ -83,7 +84,7 @@ test('duplicate encoding, duplicate committer, and a parent after committer', ()
     assert.deepEqual(fsckProblemsOf(dir, lateOid), []);
     const parents = git(dir, ['log', '-1', '--no-walk', '--format=%P', lateOid]);
     assert.equal(parents.out.trim(), '');
-    assert.throws(() => parseCommit(te.encode(late)), e => e.code === 'pack_corrupt' && e.message === 'commit: bad header order');
+    assert.throws(() => unwrap(parseCommit(te.encode(late))), e => e.code === 'pack_corrupt' && e.message === 'commit: bad header order');
   });
 });
 
@@ -94,13 +95,13 @@ test('a commit git writes round-trips, and a duplicate tagger is fsck-clean firs
     const log = git(dir, ['log', '-1', '--no-walk', '--date=raw', '--format=%T%x00%P%x00%an <%ae> %ad%x00%cn <%ce> %cd%x00%e', oid]);
     assert.equal(log.code, 0, log.err);
     const [tree, parents, who, committer, encoding] = log.out.trim().split('\0');
-    const c = parseCommit(te.encode(text));
+    const c = unwrap(parseCommit(te.encode(text)));
     assert.equal(c.tree, tree);
     assert.equal(c.parents.join(' '), parents);
     assert.equal(c.author, who);
     assert.equal(c.committer, committer);
     assert.equal(c.encoding, encoding);
-    assert.deepEqual([...encodeCommit(c)], [...te.encode(text)]);
+    assert.deepEqual([...unwrap(encodeCommit(c))], [...te.encode(text)]);
 
     const tag = `object ${oid}\ntype commit\ntag v1\ntagger ${author}\ntagger ${other}\n\nrel\n`;
     const tagOid = literally(dir, 'tag', tag);
@@ -108,7 +109,7 @@ test('a commit git writes round-trips, and a duplicate tagger is fsck-clean firs
     assert.deepEqual(fsckProblemsOf(dir, tagOid), []);
     const shown = git(dir, ['for-each-ref', '--format=%(tagger)', 'refs/tags/v1']);
     assert.equal(shown.out.trim(), author);
-    assert.throws(() => parseTag(te.encode(tag)), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger');
+    assert.throws(() => unwrap(parseTag(te.encode(tag))), e => e.code === 'pack_corrupt' && e.message === 'tag: duplicate tagger');
   });
 });
 
@@ -175,7 +176,7 @@ export function cells34() {
 }
 
 export function plyVerdict34(bytes) {
-  try { parseTree(new Uint8Array(bytes)); return 'accept'; } catch (e) {
+  try { unwrap(parseTree(new Uint8Array(bytes))); return 'accept'; } catch (e) {
     assert.equal(e.code, 'pack_corrupt', e.message);
     if (e.message.startsWith('tree: duplicate entry ')) return 'duplicateEntries';
     if (e.message === 'tree: not strictly sorted') return 'treeNotSorted';

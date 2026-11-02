@@ -13,6 +13,7 @@ import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
+import { unwrap } from '../unwrap.js';
 
 const cell = JSON.parse(process.argv[2]);
 const opts = { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) };
@@ -70,8 +71,8 @@ const ops = {
   },
   async pack() {
     const buf = new Uint8Array(readFileSync(cell.pack));
-    const parsed = parsePack(buf, { limits: opts.limits });
-    const resolved = resolvePack(parsed, () => null, opts.limits);
+    const parsed = unwrap(parsePack(buf, { limits: opts.limits }));
+    const resolved = unwrap(resolvePack(parsed, () => null, opts.limits));
     const hash = createHash('sha1');
     for (const oid of [...resolved.objects.keys()].sort()) hash.update(oid);
     return { n: resolved.objects.size, maxChain: resolved.stats.maxChain, oidsHash: hash.digest('hex') };

@@ -33,6 +33,7 @@ import { push } from '../../src/push.js';
 import { pushWithOptions } from '../../src/receivecaps.js';
 import { transport, outcome, outcomeSync, cat, enc, band, FLUSH, DELIM } from './wire.js';
 import { git } from './pack-fixtures.js';
+import { unwrap } from '../unwrap.js';
 
 const LARGE_PACKET_MAX = 65520; // pkt-line.h
 const OID = 'a'.repeat(40);
@@ -106,9 +107,9 @@ function plyRead(bytes, bytewise) {
   const frames = [];
   const o = outcomeSync(() => {
     let st = pktInit();
-    if (bytewise) for (let i = 0; i < bytes.length; i++) { const r = pktStep(st, bytes.subarray(i, i + 1)); st = r.state; frames.push(...r.frames); }
-    else { const r = pktStep(st, bytes); st = r.state; frames.push(...r.frames); }
-    pktFinish(st);
+    if (bytewise) for (let i = 0; i < bytes.length; i++) { const r = unwrap(pktStep(st, bytes.subarray(i, i + 1))); st = r.state; frames.push(...r.frames); }
+    else { const r = unwrap(pktStep(st, bytes)); st = r.state; frames.push(...r.frames); }
+    unwrap(pktFinish(st));
   });
   return { frames, o };
 }
@@ -118,7 +119,7 @@ const sameFrames = (a, b) => a.length === b.length && a.every((f, i) => f.kind =
 const census = { framing: 0, gitObserved: 0, positions: 0, outcomes: {}, writer: 0 };
 
 test('framing: the model is git (upload-pack reads every cell with GIT_TRACE_PACKET), and ply is the model', () => {
-  const lead = pkt('command=ls-refs\n');
+  const lead = unwrap(pkt('command=ls-refs\n'));
   const wrong = [];
   for (const { L, rel } of cells()) {
     const cell = cellBytes(L, rel, agentPayload);
@@ -176,7 +177,7 @@ const POS = {
     // "server doesn't support"); anything after it is refused (judgment: git's
     // remote-curl hands the whole buffer to the client, which would read the rest as the next response)
     payload: n => filler(n - 4), neutral: () => true, refuse: 'protocol', flush: { exact: 'protocol', last: 'unsupported' },
-    render: () => ({ kind: 'advertise', before: pkt('version 2\n'), after: cat([pkt('agent=git/2.50.0\n'), pkt('ls-refs=unborn\n'), pkt('fetch=shallow filter\n'), pkt('object-format=sha1\n'), FLUSH]) }),
+    render: () => ({ kind: 'advertise', before: unwrap(pkt('version 2\n')), after: cat([unwrap(pkt('agent=git/2.50.0\n')), unwrap(pkt('ls-refs=unborn\n')), unwrap(pkt('fetch=shallow filter\n')), unwrap(pkt('object-format=sha1\n')), FLUSH]) }),
     run: t => discover(t),
   },
   'adv-v0': {
@@ -184,7 +185,7 @@ const POS = {
     payload: n => (n - 4 >= 54 ? enc(`${OID} refs/heads/${'a'.repeat(n - 4 - 53)}\n`) : filler(n - 4)), neutral: n => n - 4 >= 54, refuse: 'protocol',
     // get_remote_heads reads to the first flush and no further: what follows a flush is never read
     flush: { exact: 'ok', last: 'ok' },
-    render: () => ({ kind: 'advertise', before: cat([pkt('# service=git-receive-pack\n'), FLUSH, pkt(`${OID} refs/heads/main\0report-status delete-refs push-options\n`)]), after: cat([pkt(`${OID} refs/tags/v1\n`), FLUSH]) }),
+    render: () => ({ kind: 'advertise', before: cat([unwrap(pkt('# service=git-receive-pack\n')), FLUSH, unwrap(pkt(`${OID} refs/heads/main\0report-status delete-refs push-options\n`))]), after: cat([unwrap(pkt(`${OID} refs/tags/v1\n`)), FLUSH]) }),
     run: t => receiveCaps(t),
   },
   'ls-refs': {
@@ -192,35 +193,35 @@ const POS = {
     payload: n => (n - 4 >= 64 ? enc(`${OID} refs/heads/pad x-pad:${'a'.repeat(n - 4 - 63)}\n`) : filler(n - 4)), neutral: n => n - 4 >= 64, refuse: 'protocol',
     // the flush ends the listing: on its own a valid one; a line after it is refused ("after the terminating flush-pkt")
     flush: { exact: 'protocol', last: 'ok' },
-    render: () => ({ kind: 'post', before: pkt(`${OID} HEAD symref-target:refs/heads/main\n`), after: cat([pkt(`${OID} refs/heads/main\n`), FLUSH]) }),
+    render: () => ({ kind: 'post', before: unwrap(pkt(`${OID} HEAD symref-target:refs/heads/main\n`)), after: cat([unwrap(pkt(`${OID} refs/heads/main\n`)), FLUSH]) }),
     run: t => lsRefs(t),
   },
   band1: {
     payload: n => (n < 5 ? new Uint8Array(0) : cat([Uint8Array.of(1), BIG.pack.subarray(1000, 1000 + n - 5)])), neutral: n => n >= 5, refuse: 'protocol', flush: BAND_FLUSH,
     render: L => {
       const used = !L.control && L.tag !== 'len3' && L.n >= 5 ? L.n - 5 : 0; // a data cell carries pack bytes 1000..1000+used
-      return { kind: 'post', before: cat([pkt('packfile\n'), band(1, BIG.pack.subarray(0, 1000))]), after: cat([...chunks(BIG.pack.subarray(1000 + used), 60000).map(c => band(1, c)), FLUSH]) };
+      return { kind: 'post', before: cat([unwrap(pkt('packfile\n')), band(1, BIG.pack.subarray(0, 1000))]), after: cat([...chunks(BIG.pack.subarray(1000 + used), 60000).map(c => band(1, c)), FLUSH]) };
     },
     run: t => fetchObject(t, { oid: BIG.oid }),
   },
   band2: {
     payload: n => (n < 5 ? new Uint8Array(0) : cat([Uint8Array.of(2), filler(n - 5)])), neutral: n => n >= 5, refuse: 'protocol', flush: BAND_FLUSH,
-    render: () => ({ kind: 'post', before: cat([pkt('packfile\n'), band(1, BIG.pack.subarray(0, 1000))]), after: cat([...chunks(BIG.pack.subarray(1000), 60000).map(c => band(1, c)), FLUSH]) }),
+    render: () => ({ kind: 'post', before: cat([unwrap(pkt('packfile\n')), band(1, BIG.pack.subarray(0, 1000))]), after: cat([...chunks(BIG.pack.subarray(1000), 60000).map(c => band(1, c)), FLUSH]) }),
     run: t => fetchObject(t, { oid: BIG.oid }),
   },
   band3: {
     payload: n => (n < 5 ? new Uint8Array(0) : cat([Uint8Array.of(3), filler(n - 5)])), neutral: () => false, refuse: 'protocol', remote: true, flush: BAND_FLUSH,
-    render: () => ({ kind: 'post', before: cat([pkt('packfile\n'), band(1, BIG.pack.subarray(0, 1000))]), after: cat([...chunks(BIG.pack.subarray(1000), 60000).map(c => band(1, c)), FLUSH]) }),
+    render: () => ({ kind: 'post', before: cat([unwrap(pkt('packfile\n')), band(1, BIG.pack.subarray(0, 1000))]), after: cat([...chunks(BIG.pack.subarray(1000), 60000).map(c => band(1, c)), FLUSH]) }),
     run: t => fetchObject(t, { oid: BIG.oid }),
   },
   'push-report': {
     payload: n => filler(n - 4), neutral: () => false, refuse: 'ambiguous', push: true,
-    render: () => ({ kind: 'post', before: pkt('unpack ok\n'), after: cat([pkt('ok refs/heads/r0\n'), FLUSH]) }),
+    render: () => ({ kind: 'post', before: unwrap(pkt('unpack ok\n')), after: cat([unwrap(pkt('ok refs/heads/r0\n')), FLUSH]) }),
     run: t => push(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], sideband: false }),
   },
   'push-sideband': {
     payload: n => (n < 5 ? new Uint8Array(0) : cat([Uint8Array.of(2), filler(n - 5)])), neutral: n => n >= 5, refuse: 'ambiguous', push: true,
-    render: () => ({ kind: 'post', before: band(1, pkt('unpack ok\n')), after: cat([band(1, cat([pkt('ok refs/heads/r0\n'), FLUSH])), FLUSH]) }),
+    render: () => ({ kind: 'post', before: band(1, unwrap(pkt('unpack ok\n'))), after: cat([band(1, cat([unwrap(pkt('ok refs/heads/r0\n')), FLUSH])), FLUSH]) }),
     run: t => push(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], sideband: true }),
   },
 };
@@ -275,16 +276,16 @@ test('positions: every length × relation × position cell through ply\'s real c
 test('service header: absent | flush | metadata then flush | delim | cut, on both advertisements', async () => {
   const wrong = [];
   const bodies = {
-    'adv-v2': { run: t => discover(t), rest: cat([pkt('version 2\n'), pkt('agent=git/2.50.0\n'), pkt('ls-refs\n'), pkt('fetch=shallow filter\n'), FLUSH]) },
-    'adv-v0': { run: t => receiveCaps(t), rest: cat([pkt(`${OID} refs/heads/main\0report-status\n`), FLUSH]) },
+    'adv-v2': { run: t => discover(t), rest: cat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=git/2.50.0\n')), unwrap(pkt('ls-refs\n')), unwrap(pkt('fetch=shallow filter\n')), FLUSH]) },
+    'adv-v0': { run: t => receiveCaps(t), rest: cat([unwrap(pkt(`${OID} refs/heads/main\0report-status\n`)), FLUSH]) },
     // a receive-pack GET answered in v2 (Cloudflare Artifacts, asked with Git-Protocol: version=2): no v0 capabilities
-    'adv-v0 as v2': { run: t => receiveCaps(t), rest: cat([pkt('version 2\n'), pkt('agent=x\n'), FLUSH]) },
+    'adv-v0 as v2': { run: t => receiveCaps(t), rest: cat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=x\n')), FLUSH]) },
   };
   const svc = { 'adv-v2': 'git-upload-pack', 'adv-v0': 'git-receive-pack', 'adv-v0 as v2': 'git-receive-pack' };
   for (const [name, b] of Object.entries(bodies)) {
-    const head = pkt(`# service=${svc[name]}\n`);
+    const head = unwrap(pkt(`# service=${svc[name]}\n`));
     for (const [form, bytes, ok] of [
-      ['absent', b.rest, true], ['flush', cat([head, FLUSH, b.rest]), true], ['metadata', cat([head, pkt('x-meta\n'), FLUSH, b.rest]), true],
+      ['absent', b.rest, true], ['flush', cat([head, FLUSH, b.rest]), true], ['metadata', cat([head, unwrap(pkt('x-meta\n')), FLUSH, b.rest]), true],
       ['delim', cat([head, DELIM, b.rest]), false], ['cut', head, false],
       ['rest cut before its flush', cat([head, FLUSH, b.rest.subarray(0, b.rest.length - 4)]), false],
     ]) {
@@ -315,7 +316,7 @@ test('writer: a field that frames past LARGE_PACKET_MAX is bad_request before an
     census.writer++;
     const c = mk(n);
     let requests = 0;
-    const t = transport((kind, service) => { requests++; if (kind === 'advertise') return { bytes: cat([pkt('# service=git-receive-pack\n'), FLUSH, pkt(`${OID} refs/heads/r0\0report-status delete-refs push-options\n`), FLUSH]) }; return { bytes: service === 'git-upload-pack' ? FLUSH : cat([pkt('unpack ok\n'), pkt('ok refs/heads/r0\n'), FLUSH]) }; });
+    const t = transport((kind, service) => { requests++; if (kind === 'advertise') return { bytes: cat([unwrap(pkt('# service=git-receive-pack\n')), FLUSH, unwrap(pkt(`${OID} refs/heads/r0\0report-status delete-refs push-options\n`)), FLUSH]) }; return { bytes: service === 'git-upload-pack' ? FLUSH : cat([unwrap(pkt('unpack ok\n')), unwrap(pkt('ok refs/heads/r0\n')), FLUSH]) }; });
     const got = await outcome(() => c.call(t));
     const over = n > LARGE_PACKET_MAX - 4;
     if (over) {
@@ -328,8 +329,8 @@ test('writer: a field that frames past LARGE_PACKET_MAX is bad_request before an
     }
   }
   // pkt() itself, the one writer: every length to the bound frames back exactly; one past it is bad_request
-  for (const n of [0, 1, LARGE_PACKET_MAX - 4]) { const f = gitRead(pkt(new Uint8Array(n))); if (f.end !== 'eof' || f.frames[0].payload.length !== n) wrong.push(`pkt(${n})`); }
-  const over = outcomeSync(() => pkt(new Uint8Array(LARGE_PACKET_MAX - 3)));
+  for (const n of [0, 1, LARGE_PACKET_MAX - 4]) { const f = gitRead(unwrap(pkt(new Uint8Array(n)))); if (f.end !== 'eof' || f.frames[0].payload.length !== n) wrong.push(`pkt(${n})`); }
+  const over = outcomeSync(() => unwrap(pkt(new Uint8Array(LARGE_PACKET_MAX - 3))));
   if (over.tag !== 'typed' || over.code !== 'bad_request') wrong.push(`pkt(${LARGE_PACKET_MAX - 3}): ${JSON.stringify(over)}`);
   assert.deepEqual(wrong, []);
 });

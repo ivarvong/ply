@@ -161,14 +161,4 @@ export const readLimit = (limits: Input<Limits> | null, key: LimitKey): Result<n
 export const limitExceeded = (what: string, got: number, max: number): ErrorOf<'limit_exceeded'> =>
   plyError('limit_exceeded', `${what} ${got} exceeds limit ${max}`, { what, got, max });
 
-// Migration boundary: the throwing forms unconverted modules call. finiteLimit repeats checkLimit's test rather than
-// calling it, so a bundle of unconverted callers carries no Result plumbing (bundle budgets); it goes away, with the
-// repetition, when the last caller converts.
-export const finiteLimit = (value: unknown, what: string): number => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    throw plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value });
-  }
-  return value;
-};
-export const requireLimit = (limits: Input<Limits> | null, key: LimitKey): number => finiteLimit(given(limits)[key], key);
 export { limitExceeded as limitError };

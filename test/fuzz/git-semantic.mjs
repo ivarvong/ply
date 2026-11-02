@@ -13,6 +13,7 @@ import { hashObject, parseCommit, parseTag, parseTree, encodeCommit, encodeTag, 
 import { validateIdent } from '../../src/validate.js';
 import { Rng } from './prng.js';
 import { OID_BYTES } from '../../src/format.js';
+import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '20', 10);
@@ -23,8 +24,8 @@ const env = {
   GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false',
   GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@b.c', GIT_COMMITTER_NAME: 'C', GIT_COMMITTER_EMAIL: 'c@b.c',
 };
-const AUTHOR = ident(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }));
-const COMMITTER = ident(validateIdent({ name: 'C', email: 'c@b.c', time: 1700000001 }));
+const AUTHOR = unwrap(ident(unwrap(validateIdent({ name: 'A', email: 'a@b.c', time: 1700000000 }))));
+const COMMITTER = unwrap(ident(unwrap(validateIdent({ name: 'C', email: 'c@b.c', time: 1700000001 }))));
 
 function git(dir, argv, input) {
   const r = spawnSync('git', ['-C', dir, ...argv], { input, encoding: 'utf8', env });
@@ -61,9 +62,9 @@ function literally(type, data) {
 
 function parseOrThrow(type, data) {
   const bytes = typeof data === 'string' ? te.encode(data) : data;
-  if (type === 'commit') return parseCommit(bytes);
-  if (type === 'tag') return parseTag(bytes);
-  return parseTree(bytes);
+  if (type === 'commit') return unwrap(parseCommit(bytes));
+  if (type === 'tag') return unwrap(parseTag(bytes));
+  return unwrap(parseTree(bytes));
 }
 
 function norm(s) { return (s ?? '').replace(/\n+$/, ''); }
@@ -184,8 +185,8 @@ function treeData(rng) {
 
 const cases = [];
 cases.push({ name: 'dup-tree', type: 'commit', data: `tree ${empty}\nauthor ${AUTHOR}\ncommitter ${COMMITTER}\ntree ${blob}\n\nmsg\n` });
-cases.push({ name: 'legal-commit', type: 'commit', data: encodeCommit({ tree: empty, parents: [commitOid], author: AUTHOR, committer: COMMITTER, encoding: 'UTF-8', message: 'msg\n' }) });
-cases.push({ name: 'legal-tag', type: 'tag', data: encodeTag({ object: commitOid, type: 'commit', tag: 'v1', tagger: AUTHOR, message: 'rel\n' }) });
+cases.push({ name: 'legal-commit', type: 'commit', data: unwrap(encodeCommit({ tree: empty, parents: [commitOid], author: AUTHOR, committer: COMMITTER, encoding: 'UTF-8', message: 'msg\n' })) });
+cases.push({ name: 'legal-tag', type: 'tag', data: unwrap(encodeTag({ object: commitOid, type: 'commit', tag: 'v1', tagger: AUTHOR, message: 'rel\n' })) });
 cases.push({ name: 'legal-tree', type: 'tree', data: treeBytes });
 for (let i = 0; i < N; i++) {
   const seed = (SEED * 1000003 + i) >>> 0;

@@ -1,11 +1,10 @@
-// Git object encoding/decoding. All pure. Every function that can refuse returns a Result (`…Result`); the names
-// without the suffix are its throwing form, for callers not yet on Result (docs/STACK.md, migration path step 2).
-import { fail, orThrow } from './errors.js';
+// Git object encoding/decoding. All pure. Every function that can refuse returns a Result.
+import { fail } from './errors.js';
 import type { Err, Ok, Result } from './result.js';
-import { ok, err, assertNever } from './result.js';
+import { ok, err, map, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
-import { te, td, concat, takeResult, decodeBytes, encodeBytes, encodeBytesResult } from './bytes.js';
+import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
@@ -205,9 +204,9 @@ const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number
 // distinct bytes are distinct names, so the set holds that name and not a second hex copy of the bytes.
 // A tree that cannot fit in maxTreeEntries is counted before any entry object exists. The cap still fires as
 // `tree entries <max+1>`, and bytes past it are not validated: a bad mode there stays limit_exceeded.
-// @decoder parseTreeResult prefix=tree
+// @decoder parseTree prefix=tree
 // oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, inline: a helper costs bytes on every entry
-export function parseTreeResult(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<TreeEntry[], ObjectError> {
+export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<TreeEntry[], ObjectError> {
   const cap = readLimit(limits, 'maxTreeEntries');
   if (!cap.ok) return cap;
   const maxEntries = cap.value;
@@ -235,9 +234,9 @@ export function parseTreeResult(data: Uint8Array, limits: Partial<Limits> = DEFA
     // The name is bytes to git: decodeBytes keeps a leading BOM and escapes ill-formed UTF-8, so the string maps back (#43)
     const nameBytes: Uint8Array = data.subarray(sp + 1, nul);
     const name: string = decodeBytes(nameBytes);
-    // The id starts at nul+1. takeResult demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
+    // The id starts at nul+1. take demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
-    const oid = takeResult(data, nul + 1, OID_BYTES);
+    const oid = take(data, nul + 1, OID_BYTES);
     if (!oid.ok) return oid;
     const oidBytes: Uint8Array = oid.value;
     if (raw.length === 0) return badTree('empty mode');
@@ -273,14 +272,23 @@ export function parseTreeResult(data: Uint8Array, limits: Partial<Limits> = DEFA
   }
   return ok(entries);
 }
-// @decoder parseTree prefix=tree
-export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): TreeEntry[] { return orThrow(parseTreeResult(data, limits)); }
 
 type Sortable = { readonly mode: string; readonly name: string };
 const sortKey = (e: Sortable): string => (e.mode === MODE_TREE ? `${e.name}/` : e.name);
-export function treeSort<T extends Sortable>(entries: Iterable<T>): T[] {
+// git's tree order on the names' bytes. A name with no byte form is refused: the first one the sort compares (a sort
+// of one entry compares none). Once one is refused the rest of the sort is moot; the comparison it is in sees no bytes.
+const NO_BYTES = new Uint8Array(0);
+export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], BadRequest> {
+  let refused: Result<null, BadRequest> = DONE;
+  const keyOf = (e: Sortable): Uint8Array => {
+    const k = encodeBytes(sortKey(e), 'tree entry name');
+    if (k.ok) return k.value;
+    if (refused.ok) refused = k;
+    return NO_BYTES;
+  };
   // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own copy; the spread keeps any iterable a caller passes working
-  return [...entries].sort((a, b) => cmpBytes(encodeBytes(sortKey(a), 'tree entry name'), encodeBytes(sortKey(b), 'tree entry name')));
+  const sorted = [...entries].sort((a, b) => cmpBytes(keyOf(a), keyOf(b)));
+  return refused.ok ? ok(sorted) : refused;
 }
 
 // git fsck `duplicateEntries`: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort
@@ -288,7 +296,7 @@ export function treeSort<T extends Sortable>(entries: Iterable<T>): T[] {
 // `readme`) are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
 // Each entry's line is encoded (in the caller's order) before the sort: a name that is no byte sequence is refused there,
 // and the sort's own encoding of the same name cannot fail.
-export function encodeTreeResult(entries: readonly TreeEntryInput[]): Result<Uint8Array, BadRequest> {
+export function encodeTree(entries: readonly TreeEntryInput[]): Result<Uint8Array, BadRequest> {
   const names = new Set<string>();
   for (const e of entries) {
     if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
@@ -296,13 +304,12 @@ export function encodeTreeResult(entries: readonly TreeEntryInput[]): Result<Uin
   }
   const lines: Array<TreeEntryInput & { readonly line: Uint8Array }> = [];
   for (const e of entries) {
-    const line = encodeBytesResult(`${e.mode} ${e.name}\0`, 'tree entry name');
+    const line = encodeBytes(`${e.mode} ${e.name}\0`, 'tree entry name');
     if (!line.ok) return line;
     lines.push({ mode: e.mode, name: e.name, oid: e.oid, line: line.value });
   }
-  return ok(concat(treeSort(lines).flatMap(e => [e.line, fromHex(e.oid)])));
+  return map(treeSort(lines), sorted => concat(sorted.flatMap(e => [e.line, fromHex(e.oid)])));
 }
-export function encodeTree(entries: readonly TreeEntryInput[]): Uint8Array { return orThrow(encodeTreeResult(entries)); }
 
 // Replace the oid of one entry in place; returns new bytes + coordinates for a structural delta.
 export function treeReplaceOid(data: Uint8Array, entry: { readonly oidOffset: number }, newOidHex: string): Uint8Array {
@@ -411,8 +418,8 @@ export type Commit = {
   readonly tree: string; readonly parents: string[]; readonly author: string; readonly committer: string;
   readonly encoding: string | null; readonly extra: string[]; readonly message: string | null;
 };
-// @decoder parseCommitResult prefix=commit
-export function parseCommitResult(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<Commit, ObjectError> {
+// @decoder parseCommit prefix=commit
+export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<Commit, ObjectError> {
   const cap = readLimit(limits, 'maxCommitParents');
   if (!cap.ok) return cap;
   const maxParents = cap.value;
@@ -461,14 +468,11 @@ export function parseCommitResult(data: Uint8Array, limits: Partial<Limits> = DE
   if (extra.some(l => l.startsWith(`${COMMIT_HEADER_ENCODING} `))) return duplicate('commit', COMMIT_HEADER_ENCODING);
   return ok({ tree: tree.value, parents, author, committer, encoding, extra, message });
 }
-// @decoder parseCommit prefix=commit
-export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Commit { return orThrow(parseCommitResult(data, limits)); }
 
-export function identResult(person: ValidatedIdent): Result<string, BadRequest> {
+export function ident(person: ValidatedIdent): Result<string, BadRequest> {
   if (!isValidatedIdent(person)) return fail('bad_request', 'ident: unvalidated identity', { what: 'ident' });
   return ok(`${person.name} <${person.email}> ${person.time} ${person.tz}`);
 }
-export const ident = (person: ValidatedIdent): string => orThrow(identResult(person));
 
 // The inverse, as git's split_ident_line reads it: name up to the first '<' (trailing spaces trimmed), email up to the
 // next '>', then "<epoch> <tz>" after the last '>'. Fields git would print as empty are '' (time null when the date is missing).
@@ -493,8 +497,8 @@ export type Tag = {
   readonly object: string; readonly type: string; readonly tag: string; readonly tagger: string | null;
   readonly extra: string[]; readonly message: string | null;
 };
-// @decoder parseTagResult prefix=tag
-export function parseTagResult(data: Uint8Array): Result<Tag, Corrupt> {
+// @decoder parseTag prefix=tag
+export function parseTag(data: Uint8Array): Result<Tag, Corrupt> {
   const s: string = decodeBytes(data);
   const headers = verifyHeaders(s, 'tag');
   if (!headers.ok) return headers;
@@ -531,22 +535,20 @@ export function parseTagResult(data: Uint8Array): Result<Tag, Corrupt> {
   if (!shadowed.ok) return shadowed;
   return ok({ object: object.value, type, tag, tagger, extra, message });
 }
-// @decoder parseTag prefix=tag
-export function parseTag(data: Uint8Array): Tag { return orThrow(parseTagResult(data)); }
 
 // Every object fetch passes through here once it hashes to the oid the server advertised (fetchObject, checkWide on a
 // pack before any of it is returned or harvested). It is the same parser every reader calls, so a commit or tag no
 // reader would accept never reaches one.
-export function assertFetchedResult(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<null, ObjectError> {
+export function assertFetched(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<null, ObjectError> {
   const found = wireTypeName(typeName);
   switch (found.tag) {
     case 'invalid': return fail('pack_corrupt', `object: bad type ${typeName}`);
     case 'named': {
       switch (found.name) {
         case 'blob': case 'ofs_delta': case 'ref_delta': return DONE;
-        case 'tree': { const r = parseTreeResult(data, limits); return r.ok ? DONE : r; }
-        case 'commit': { const r = parseCommitResult(data, limits); return r.ok ? DONE : r; }
-        case 'tag': { const r = parseTagResult(data); return r.ok ? DONE : r; }
+        case 'tree': { const r = parseTree(data, limits); return r.ok ? DONE : r; }
+        case 'commit': { const r = parseCommit(data, limits); return r.ok ? DONE : r; }
+        case 'tag': { const r = parseTag(data); return r.ok ? DONE : r; }
       }
       // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
       return assertNever(found.name);
@@ -555,7 +557,6 @@ export function assertFetchedResult(typeName: string, data: Uint8Array, limits: 
   // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(found);
 }
-export function assertFetched(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): void { orThrow(assertFetchedResult(typeName, data, limits)); }
 
 // A header value is one line. LF or NUL, from any caller, would open a new header. The message is the body: LF is
 // legal there, NUL is not. withGpgsig splices signature continuation lines after this returns, so those bytes are
@@ -581,7 +582,7 @@ export type CommitConfig = {
   readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[];
 };
 export type CommitInput = { readonly tree: string; readonly author: string } & Input<Omit<CommitConfig, 'tree' | 'author'>>;
-export function encodeCommitResult({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const values: Array<readonly [unknown, string]> = [[tree, 'tree']];
   for (const p of parents) values.push([p, 'parent']);
   values.push([author, 'author'], [committer, 'committer']);
@@ -599,9 +600,8 @@ export function encodeCommitResult({ tree, parents = [], author, committer = aut
   ];
   if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
   lines.push(...extra);
-  return encodeBytesResult(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
+  return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
 }
-export const encodeCommit = (input: CommitInput): Uint8Array<ArrayBuffer> => orThrow(encodeCommitResult(input));
 
 // The four types a tag can name (git's type_from_string_gently: object_type_strings, nothing else).
 export type TagTargetType = keyof typeof TYPE_ID;
@@ -619,7 +619,7 @@ export type TagInput = Pick<TagConfig, 'object' | 'type' | 'tag' | 'tagger'> & I
 // message an error: a bad object id, a type outside the four, a tag name that is not a refname under refs/tags/
 // (check_refname_format), a bad tagger ident; and a NUL or newline in a header value or a NUL in the message. So the
 // bytes hash (hashObject('tag', …)) to an object git stores as is.
-export function encodeTagResult({ object, type, tag, tagger, message = null, extra = [] }: TagInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+export function encodeTag({ object, type, tag, tagger, message = null, extra = [] }: TagInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const values: Array<readonly [unknown, string]> = [[object, 'object'], [type, 'type'], [tag, 'tag'], [tagger, 'tagger']];
   for (const line of extra) values.push([line, 'extra']);
   const headed = headerValues(values);
@@ -630,14 +630,12 @@ export function encodeTagResult({ object, type, tag, tagger, message = null, ext
     `${TAG_HEADER_OBJECT} ${object}`, `${TAG_HEADER_TYPE} ${type}`, `${TAG_HEADER_TAG} ${tag}`, `${TAG_HEADER_TAGGER} ${tagger}`,
     ...extra,
   ];
-  const bytes = encodeBytesResult(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'tag');
+  const bytes = encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'tag');
   if (!bytes.ok) return bytes;
   // fsck_tag_standalone's badTagName is check_refname_format("refs/tags/<tag>", 0), validateRef's rule; the rest
   // (badObjectSha1, badType, the tagger's fsck_ident) is parseTag's. Either refusal is the caller's bad request.
-  // validateRef is the validate module's throwing check (not yet on Result): its refusal is caught here, at that edge.
-  try { validateRef(`refs/tags/${tag}`); } catch { return fail('bad_request', "tag: badTagName: invalid 'tag' name", { what: 'tag' }); }
-  const parsed = parseTagResult(bytes.value);
+  if (!validateRef(`refs/tags/${tag}`).ok) return fail('bad_request', "tag: badTagName: invalid 'tag' name", { what: 'tag' });
+  const parsed = parseTag(bytes.value);
   if (!parsed.ok) return fail('bad_request', parsed.error.message, { what: 'tag' });
   return bytes;
 }
-export const encodeTag = (input: TagInput): Uint8Array<ArrayBuffer> => orThrow(encodeTagResult(input));

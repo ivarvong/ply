@@ -152,7 +152,7 @@ export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Resul
   const parsed = new Map<string, Parents>();
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT) continue;
-    const c = attemptSync(() => parseCommit(o.data, t.limits));
+    const c = attemptSync(() => orThrow(parseCommit(o.data, t.limits)));
     if (!c.ok) return c;
     parsed.set(oid, c.value);
   }
