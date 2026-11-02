@@ -1500,3 +1500,26 @@ test('resolveAbbrev: advertised oids and peeled targets; resolveCommit asks once
   // nothing advertised starts with it
   await rejects(unwrapAsync(resolveCommit(two.t, 'ffff', { abbrev: 'advertised' })), 'not_found', 'ref ffff not found');
 });
+
+test('commitChanges: one edit of an existing file is streamed through editFile; a HEAD naming no refname is refused before it', async () => {
+  const { commitChanges } = await import('../src/changes.js');
+  const r = remote();
+  const base = r.commit(FILES());
+  const e = env(r);
+  const done = await unwrapAsync(commitChanges('http://fake/r.git', { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'src/a.js', find: 'a', replace: 'A' }], author: A, message: 'deploy', time: T0 }, e.opts));
+  // git's own tree and commit for src/a.js → 'A\n' on `commit`
+  assert.equal(base, GIT.commit);
+  assert.deepEqual(done, { outcome: 'commit', ref: 'refs/heads/main', oid: GIT.commit2, tree: GIT.root2, parent: GIT.commit, oldOid: GIT.commit, pushBytes: done.pushBytes, created: false });
+  assert.ok(done.pushBytes > 0);
+  assert.equal(r.refs.get('refs/heads/main'), GIT.commit2);
+  assert.equal(e.span('git.commit').attrs['git.commit.stream'], true);
+  // the remote's HEAD names a target that is not a refname: the streamed edit refuses it as a ref, and pushes nothing
+  const bad = remote({ hook: async req => (req.command === 'ls-refs' ? [dataFrame(`${GIT.commit} HEAD symref-target:main\n`), { kind: 'flush' }] : undefined) });
+  bad.commit(FILES());
+  const b = env(bad);
+  const refused = await commitChanges('http://fake/r.git', { changes: [{ kind: 'edit', path: 'src/a.js', find: 'a', replace: 'A' }], author: A, message: 'deploy', time: T0 }, b.opts);
+  const x = errOf(refused);
+  assert.deepEqual([x.code, x.message, x.what], ['bad_request', 'invalid ref: must be a full ref name starting with refs/', 'ref']);
+  assert.equal(x.cause.message, 'invalid ref: must be a full ref name starting with refs/');
+  assert.equal(bad.pushes().length, 0);
+});
