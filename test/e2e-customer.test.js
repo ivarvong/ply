@@ -397,6 +397,24 @@ for (const kind of ['default', 'stock']) {
       assert.equal(absent.miss.kind, 'ref');
       clean(bare);
     });
+    test('#116: deleteBranch loses a race between ls-refs and receive-pack: cas_conflict naming the winner\'s tip, or null when it was deleted', async () => {
+      const racing = (...args) => async (input, init) => {
+        if (String(input).endsWith('/git-receive-pack')) git(bare, args);
+        return fetch(input, init);
+      };
+      git(bare, ['update-ref', 'refs/heads/del-race', c2]);
+      const moved = errOf(await ply.deleteBranch(url, { ref: 'refs/heads/del-race' }, { ...opts(), fetchImpl: racing('update-ref', 'refs/heads/del-race', c1) }));
+      assert.equal(moved.code, 'cas_conflict', moved.message);
+      assert.equal(moved.expected, c2, 'the tip ls-refs reported');
+      assert.equal(moved.actual, c1, 'the tip the winner left, read back');
+      assert.equal(rev(bare, 'refs/heads/del-race'), c1, 'untouched');
+      const gone = errOf(await ply.deleteBranch(url, { ref: 'refs/heads/del-race' }, { ...opts(), fetchImpl: racing('update-ref', '-d', 'refs/heads/del-race') }));
+      assert.equal(gone.code, 'cas_conflict', gone.message);
+      assert.equal(gone.expected, c1);
+      assert.equal(gone.actual, null, 'deleted by the winner: absent');
+      assert.equal(has(bare, 'refs/heads/del-race'), false);
+      clean(bare);
+    });
     test('createTag: lightweight and annotated (as git tag -a writes it), refusals', async () => {
       const light = await ply.createTag(url, { name: 'refs/tags/l1', target: 'main' }, { ...opts(), verify: true });
       assert.ok(light.ok, light.ok || light.error.message);

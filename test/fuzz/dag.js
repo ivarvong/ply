@@ -186,8 +186,9 @@ export function expectedObjects(model, { wants, haves = [], deepen, deepenSince,
     const dropped = mode === 'bitmap' ? haveObjects.has(w) : (haves.includes(w) || [...nonCommitHaves].some(h => h === w || (model.type.get(h) === 'tree' && treeClosure(model, [h]).has(w))));
     if (dropped) continue;
     // a user-given want is unfiltered and its tree entries count from depth 0 (tree:N omits depth > N); a want that git has
-    // already flagged NOT_USER_GIVEN is filtered like any tree (see userGiven)
-    const given = userGiven(model, w, wants, included, filter), off = given ? 1 : 0;
+    // already flagged NOT_USER_GIVEN is filtered like any tree (see userGiven). With bitmaps every wanted object is a tip that
+    // filter_bitmap_exclude_type keeps whatever the walk flagged (pack-bitmap.c find_tip_objects); its contents are filtered.
+    const given = mode === 'bitmap' || userGiven(model, w, wants, included, filter), off = given ? 1 : 0;
     if (given || f(info(w, 0), model)) out.add(w);
     if (t === 'tree' && (given || f(info(w, 0), model))) for (const [o, d] of treeClosure(model, [w])) if (!haveObjects.has(o) && f(info(o, Math.max(0, d - off)), model)) out.add(o);
   }
@@ -228,8 +229,10 @@ export function userGiven(model, w, wants, walkedCommits, filter) {
 // ---- the two-sided bound any correct server must satisfy, independent of git's traversal heuristics ----
 // required: reachable(wants) \ reachable(haves) exactly (haves cut at the request's shallow set), after the filter.
 // had:      everything reachable from haves (same cut) — any extra the server sends must be in here.
-export function requiredAndHad(model, { wants, haves = [], deepen, deepenSince, deepenNot = [], filter, shallow = [] }) {
+// bitmap:   the server answers from a bitmap index when it can; then a wanted tree/blob no have reaches is required unfiltered.
+export function requiredAndHad(model, { wants, haves = [], deepen, deepenSince, deepenNot = [], filter, shallow = [], bitmap = false }) {
   const exp = expectedObjects(model, { wants, haves, deepen, deepenSince, deepenNot, filter, shallow, bitmap: true });
+  const bitmapMode = bitmap && exp.mode === 'bitmap';
   // expectedObjects in bitmap mode == precise set, except deepen forces traversal mode; recompute precisely here
   const peel = o => (model.tags.has(o) ? model.tags.get(o) : o);
   const exclude = new Set();
@@ -260,7 +263,7 @@ export function requiredAndHad(model, { wants, haves = [], deepen, deepenSince, 
   for (const [o, d] of treeClosure(model, included.map(c => model.commits.get(c).tree))) if (!had.has(o) && f(info(o, d), model)) required.add(o);
   for (const w of wants) {
     if (!model.type.has(w) || model.commits.has(w) || had.has(w)) continue;
-    const given = model.tags.has(w) || userGiven(model, w, wants, included, filter), off = given ? 1 : 0;
+    const given = model.tags.has(w) || bitmapMode || userGiven(model, w, wants, included, filter), off = given ? 1 : 0;
     if (given || f(info(w, 0), model)) required.add(w);
     if (model.tags.has(w)) { const c = model.tags.get(w); if (!hadCommits.has(c)) required.add(c); }
     if (model.type.get(w) === 'tree' && (given || f(info(w, 0), model))) for (const [o, d] of treeClosure(model, [w])) if (!had.has(o) && f(info(o, Math.max(0, d - off)), model)) required.add(o);

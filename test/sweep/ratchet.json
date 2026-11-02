@@ -13,40 +13,10 @@
       "why": "parseTree allocates every entry before the cap can fire, so 200000 entries exhaust a 128 MiB heap"
     },
     {
-      "id": "tree.listTree.200001",
+      "id": "push.total.100000x8",
       "heap": "128",
       "actual": { "status": "oom" },
-      "why": "the 200001 refusal allocates the capped entry array first, so a 128 MiB heap dies before the typed error"
-    },
-    {
-      "id": "tree.listTree.262144",
-      "heap": "128",
-      "actual": { "status": "oom" },
-      "why": "the 262144 tree hits the entry cap only after the capped array exists, and a 128 MiB heap dies first"
-    },
-    {
-      "id": "tree.readFile.200000",
-      "heap": "128",
-      "actual": { "status": "oom" },
-      "why": "readFile parses the same entry array listTree does, so 200000 entries exhaust a 128 MiB heap"
-    },
-    {
-      "id": "tree.readFile.200001",
-      "heap": "128",
-      "actual": { "status": "oom" },
-      "why": "readFile parses the tree before the entry cap is reported, so a 128 MiB heap dies before the typed error"
-    },
-    {
-      "id": "push.total.3x50331648",
-      "heap": "default",
-      "actual": { "status": "ok" },
-      "why": "validateTreeSpec has no total-bytes cap, so 3 × 48 MiB (144 MiB) is pushed; RSS about 440 MiB"
-    },
-    {
-      "id": "push.total.3x50331648",
-      "heap": "128",
-      "actual": { "status": "ok" },
-      "why": "the file bytes are ArrayBuffers, outside the 128 MiB heap cap, and there is no total-bytes check to refuse them"
+      "why": "maxPushBytes counts file payload only (800 KB here), not per-object overhead, so 100000 tiny files exhaust a 128 MiB heap: the push side of #142"
     }
   ]
 }
