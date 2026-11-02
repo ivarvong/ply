@@ -13,7 +13,7 @@
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 /* oxlint-disable unicorn/explicit-length-check, require-unicode-regexp -- bundle budget: the JS's truthy length checks and non-unicode regexes, byte for byte (no behaviour change) */
 // Decisions and the public functions (fileEntries, buildTree, validateTreeSpec, pushTree) return Result.
-import { fail, isPlyError, orThrow } from './errors.js';
+import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
@@ -37,7 +37,6 @@ import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCodeOr } from './boundary.js';
 import type { Input } from './absent.js';
 import { fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { err, getOrElse, map, mapOption, matchOption, ok } from './result.js';
@@ -290,15 +289,18 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
   const k = { have, old, read: 0, hits: 0 };
   if (oldTree === null) return ok(k);
   have.add(oldTree);
-  const read = async (oid: string): Promise<Uint8Array> => {
+  const read = async (oid: string): Promise<Result<Uint8Array, PlyError>> => {
     const cached = mapGet(cache, oid);
-    if (cached.tag === 'some') { k.hits++; return cached.value; }
-    const data = orThrow(await fetchObject(t, { oid, expectType: TYPE.TREE })).data;
-    cache.set(oid, data); k.read++;
-    return data;
+    if (cached.tag === 'some') { k.hits++; return ok(cached.value); }
+    const got = await fetchObject(t, { oid, expectType: TYPE.TREE });
+    if (!got.ok) return got;
+    cache.set(oid, got.value.data); k.read++;
+    return ok(got.value.data);
   };
   const visit = async (dir: string, oid: string): Promise<Result<null, PlyError>> => {
-    const data = await read(oid);
+    const got = await read(oid);
+    if (!got.ok) return got;
+    const data = got.value;
     old.set(dir, { oid, data });
     const parsed = parseTree(data, limits);
     if (!parsed.ok) return parsed;
@@ -342,14 +344,16 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head === null ? '' : head, 'git.push_tree.attempt': attempt };
   // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
   return operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
-    const commitOf = async (oid: string): Promise<Fetched> => orThrow(await fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 }));
+    // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
+    const commitOf = (oid: string): Promise<Result<Fetched, PlyError>> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
     // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.
     // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
     const done = await (async (): Promise<Result<PushTreeResult, PlyError>> => {
-    try {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(orThrow).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => getOrElse<string | null>(mapOption(mapGet(refs, s.base), r => r.oid), null)), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
+    const [resolvedR, speculative] = await Promise.all([lsRefs(t, [s.base]).then(r => map(r, ({ refs }) => getOrElse<string | null>(mapOption(mapGet(refs, s.base), x => x.oid), null))), head ? commitOf(head) : null]);
+    if (!resolvedR.ok) return resolvedR;
+    const resolved = resolvedR.value;
     const found = baseFound(s, resolved);
     if (!found.ok) return found;
     const decided = decideHead({ hint: head, resolved });
@@ -357,11 +361,12 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     const parent = decided.oldCommit;
     const strict = strictParent(strictHead, decided, s.base, head);
     if (!strict.ok) return strict;
-    if (speculative instanceof Error) root.set({ 'git.push_tree.head.speculative_error': thrownCodeOr(speculative, 'error') });
+    if (speculative !== null && !speculative.ok) root.set({ 'git.push_tree.head.speculative_error': speculative.error.code });
     let oldTree: string | null = null;
     if (parent !== null) {
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is commitOf's value (the rejection branch is the Error above)
-      const parsed = parseCommit((decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await commitOf(parent)).data, limits);
+      const commitGot = decided.hint === 'used' && speculative !== null && speculative.ok ? speculative : await commitOf(parent);
+      if (!commitGot.ok) return commitGot;
+      const parsed = parseCommit(commitGot.value.data, limits);
       if (!parsed.ok) return parsed;
       oldTree = parsed.value.tree;
     }
@@ -401,8 +406,6 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     for (const tr of s.built.trees.values()) cache.set(tr.oid, tr.data);
     if (verify) { const seen = await verifyRef(t, root, 'git.push_tree', s.ref, newCommit); if (!seen.ok) return seen; }
     return outcome('ok', summarize({ s, parent, oldTree, hint, attempt }, { newCommit, sel, pushed, treesRead: known.read }), { 'git.push_tree.push.bytes': pushed.packBytes, 'git.push_tree.push.objects': pushed.entries.length });
-    // Transitional (the wire layer still raises): a thrown object gets the attempt's fields and leaves through operation().
-    } catch (e) { tagAttempt(e, attempt, hint); throw e; }
     })();
     if (!done.ok) tagAttempt(done.error, attempt, hint);
     return done;

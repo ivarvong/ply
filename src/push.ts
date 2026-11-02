@@ -1,7 +1,7 @@
 // v0 receive-pack: commands + thin pack in, report-status out. Planning the request, reading the response stream,
 // classifying the report and deciding the outcome are pure; `push` is the one effect. Any failure after the body is on
 // the wire is 'ambiguous' (the ref may have moved).
-import { fail, orThrow, ambiguousAfterPush, isPlyError } from './errors.js';
+import { fail, ambiguousAfterPush } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
 import type { Result } from './result.js';
@@ -529,24 +529,21 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
 
 // The request under its span (push, below, is the entry).
 // oxlint-disable-next-line eslint/require-await -- async, as push was
-async function receivePack(t: PushTransport, plan: PushPlan): Promise<PushResult> {
+async function receivePack(t: PushTransport, plan: PushPlan): Promise<Result<PushResult, PlyError>> {
   const { commands, caps } = plan;
   // an empty list from an untyped caller has no first command: the TypeError below is coded 'protocol', as before
   const [first] = commands;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
-  return orThrow(await coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), (span: Span) => send(t, plan, span))));
+  return coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), (span: Span) => send(t, plan, span)));
 
 }
 
 // The effect. A refusal before the request (planPush) is an Err with no span; everything after is under the span, whose
 // error is the PlyError the Result carries.
-export async function push(t: PushTransport, opts: PushOptions): Promise<Result<PushResult, PlyError>> {
+// oxlint-disable-next-line typescript/promise-function-async -- receivePack's promise, returned as is
+export function push(t: PushTransport, opts: PushOptions): Promise<Result<PushResult, PlyError>> {
   const plan = planPush(opts, t.limits);
-  if (!plan.ok) return plan;
-  // Transitional: the span and the transport still raise (the wire layer's round); what they raise is this push's Err.
-  try { return ok(await receivePack(t, plan.value)); } catch (e) {
-    if (isPlyError(e)) return err(e);
-    throw e;
-  }
+  if (!plan.ok) return Promise.resolve(plan);
+  return receivePack(t, plan.value);
 }
 

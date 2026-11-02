@@ -20,7 +20,7 @@ import { ZERO_OID } from '../src/push.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { thrown as fail } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { unwrap, unwrapAsync } from './unwrap.js';
+import { errOf, unwrap, unwrapAsync } from './unwrap.js';
 import { ok } from '../src/result.js';
 
 const GITLINK = 'c0ffee'.padEnd(40, '0');
@@ -1326,9 +1326,9 @@ test('openBlob: maxBytes is the declared size, and a cap does not pull the rest 
       assert.equal(bad.error.what, 'maxBytes');
     }
   }
-  // a thrown value that already carries a ply code, and is not an Error, is rethrown: it is not a Result
+  // a thrown value that already carries a ply code, and is not an Error, is the Err as it was thrown (not rewrapped)
   const bare = { code: 'network', message: 'reset' };
-  await assert.rejects(openBlob(remote({ hook: async () => { throw bare; } }).transport({ tracer: new Tracer() }), oid), e => e === bare);
+  assert.equal(errOf(await openBlob(remote({ hook: async () => { throw bare; } }).transport({ tracer: new Tracer() }), oid)), bare);
   const buffered = await readBlob(serve().t, oid, { maxBytes: text.length });
   assert.equal(buffered.ok, true);
   assert.equal(buffered.ok && buffered.value.kind, 'bytes');
@@ -1359,12 +1359,12 @@ test('openBlob: maxBytes is the declared size, and a cap does not pull the rest 
   const lied = await readBlob(remote({ hook: async () => packFrames(torn, 8) }).transport({ tracer: new Tracer() }), oid);
   assert.equal(lied.ok, false);
   if (!lied.ok) { assert.equal(lied.error.code, 'pack_corrupt'); assert.equal(lied.value, undefined); }
-  // a body failure that is not an Error is rethrown; a ply Error from the stream is the Result
+  // a body failure that is not an Error is the Err as it was thrown, like a ply Error from the stream
   const cut = async function* () {
     const all = packFrames(await onePack(TYPE.BLOB, text.length, text), 25);
     yield all[0]; yield all[1]; throw bare;
   };
-  await assert.rejects(readBlob(remote({ hook: async () => cut() }).transport({ tracer: new Tracer() }), oid), e => e === bare);
+  assert.equal(errOf(await readBlob(remote({ hook: async () => cut() }).transport({ tracer: new Tracer() }), oid)), bare);
 });
 
 test('the details each operation stamps: prefixes, filters, nested paths, caller limits, error-code gates', async () => {

@@ -6,7 +6,7 @@
 // Decisions and the public entries (editFile, validateSpec, lookupEntry) return Result; inside the operation each step's
 // Err is the operation's, which operation() records on its span.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { fail, isPlyError, orThrow } from './errors.js';
+import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
@@ -30,7 +30,7 @@ import type { PackObject } from './push.js';
 import type { Signer } from './sign.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
+import { isPlyThrown, thrownText } from './boundary.js';
 import type { EntryOptions } from './boundary.js';
 import type { Input } from './absent.js';
 import { atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
@@ -373,16 +373,23 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
     let cpuMs = 0;
     const ds = new DecompressionStream('deflate');
     const writer = ds.writable.getWriter();
-    const pump = (async () => {
+    // The pump's failure reaches the inflate side through the stream protocol: aborting the writer errors ds.readable,
+    // which inflate() reads, so the pump itself never rejects.
+    const abortWith = async (e: unknown): Promise<void> => { fetchSpan.error(e).end(); await writer.abort(e).catch(ignore); };
+    const pump = (async (): Promise<void> => {
       try {
         for await (const chunk of packStream(t, { wants: [blobOid] }, fetchSpan)) {
-          const r = orThrow(spStep(sp, chunk)); sp = r.state;
-          for (const z of r.zlib) await writer.write(bufferSource(z));
+          const r = spStep(sp, chunk);
+          if (!r.ok) { await abortWith(r.error); return; }
+          sp = r.value.state;
+          for (const z of r.value.zlib) await writer.write(bufferSource(z));
         }
-        sp = orThrow(spFinish(sp));
+        const finished = spFinish(sp);
+        if (!finished.ok) { await abortWith(finished.error); return; }
+        sp = finished.value;
         await writer.close();
         fetchSpan.end();
-      } catch (e) { fetchSpan.error(e).end(); await writer.abort(e).catch(ignore); throw e; }
+      } catch (e) { await abortWith(e); }
     })();
     const partial = (): Span => span.set({ 'git.edit.blob.base_len': sp.size, 'git.edit.blob.new_len': newLen, 'git.edit.blob.inflated': inflated, 'git.edit.blob.zlib.bytes': sp.zlibBytes, 'git.edit.blob.pack.bytes': sp.bytes, 'git.edit.blob.pack.trailer': getOrElse(fromNullish(sp.trailer), ''), 'git.edit.blob.cpu_ms': cpuMs, ...scanAttrs(scan) });
     // the hasher, once the declared size is known and checked: it has hashed the object header
@@ -470,11 +477,10 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
   return operation('edit', url, ({ ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
-    const getObject = async (oid: string, expectType: number, deepen: number): Promise<Fetched> => { const o = orThrow(await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType })); held.push(o.size); return o; };
+    const getObject = async (oid: string, expectType: number, deepen: number): Promise<Result<Fetched, PlyError>> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); if (o.ok) held.push(o.value.size); return o; };
     // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.
     // oxlint-disable-next-line complexity -- the edit is one sequence of protocol steps
     const done = await (async (): Promise<Result<EditResult, PlyError>> => {
-    try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // A ref base keeps the original chain. A 40-hex base is that commit; the ref is listed, and a tip that is some
     // other commit is refuseRebase (the ref is not moved off its tip). A missing ref is not_found with miss.kind 'ref'.
@@ -492,7 +498,7 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
       return ok(found.value.oid);
     };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolvedTo, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1).then(o => o, (e: unknown) => e) : null]);
+    const [resolvedTo, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1) : null]);
     if (!resolvedTo.ok) return resolvedTo;
     const resolved = resolvedTo.value;
     root.set({ 'git.edit.create': creating });
@@ -501,10 +507,10 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
     const { oldCommit } = decided;
     const strict = strictParent(strictHead, decided, s.base, head);
     if (!strict.ok) return strict;
-    if (speculative instanceof Error) root.set({ 'git.edit.head.speculative_error': thrownCodeOr(speculative, 'error') });
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a fulfilled speculative fetch is getObject's value (the rejection branch is the Error above)
-    const commitObj = decided.hint === 'used' && !(speculative instanceof Error) ? speculative as Fetched : await getObject(oldCommit, TYPE.COMMIT, 1);
-    const parsed = parseCommit(commitObj.data, limits);
+    if (speculative !== null && !speculative.ok) root.set({ 'git.edit.head.speculative_error': speculative.error.code });
+    const commitGot = decided.hint === 'used' && speculative !== null && speculative.ok ? speculative : await getObject(oldCommit, TYPE.COMMIT, 1);
+    if (!commitGot.ok) return commitGot;
+    const parsed = parseCommit(commitGot.value.data, limits);
     if (!parsed.ok) return parsed;
     const commit: { readonly tree: string; readonly parents: readonly string[] } = parsed.value;
     root.set({ 'git.edit.commit.old': oldCommit, 'git.edit.tree.root': commit.tree, 'git.edit.commit.old.parents': commit.parents.length });
@@ -519,7 +525,7 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
       const lvl = await inSpan(tracer, 'git.edit.tree', { parent: root, attrs: { 'git.edit.tree.depth': depth, 'git.edit.tree.oid': treeOid, 'git.edit.tree.lookup': name } }, async span => {
         const cached = mapGet(cache, treeOid);
         let data: Uint8Array;
-        if (cached.tag === 'some') { data = cached.value; cacheHits++; } else { data = (await getObject(treeOid, TYPE.TREE, 0)).data; cache.set(treeOid, data); }
+        if (cached.tag === 'some') { data = cached.value; cacheHits++; } else { const got = await getObject(treeOid, TYPE.TREE, 0); if (!got.ok) return got; data = got.value.data; cache.set(treeOid, data); }
         span.set({ 'git.edit.tree.cache_hit': cached.tag === 'some' });
         const found = lookupEntry(data, name, last, limits);
         if (!found.ok) {
@@ -565,8 +571,6 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
     if (verify) { const seen = await verifyRef(t, root, 'git.edit', s.ref, built.newCommit); if (!seen.ok) return seen; }
     const { packBytes } = pushed.value;
     return outcome('ok', summarize({ oldCommit, commit, blob, hint, attempt }, { newCommit: built.newCommit, newTree: built.newTree, trees: built.trees, pushBytes: packBytes }), { 'git.edit.push.bytes': packBytes, 'git.edit.push.ratio': packBytes / Math.max(1, blob.newLen) });
-    // Transitional (the wire layer still raises): a thrown object gets the attempt's fields and leaves through operation().
-    } catch (e) { tagAttempt(e, attempt, hint); throw e; }
     })();
     if (!done.ok) tagAttempt(done.error, attempt, hint);
     return done;

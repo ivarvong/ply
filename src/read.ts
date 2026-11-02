@@ -46,9 +46,10 @@ import { validateRef, validatePath } from './validate.js';
 import type { OperationOpts } from './operation.js';
 import type { SpState, SpStepped } from './fetch.js';
 import type { Transport } from './transport.js';
+import { raised } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
-import { caughtErr, fetchCommit } from './commit.js';
+import { fetchCommit } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
@@ -242,9 +243,6 @@ export type ReadOptions = EntryOptions;
 export type TreeCache = Map<string, Uint8Array>;
 export type CommitResult = CommitView & { readonly ref: string; readonly oid: string };
 // An unborn HEAD (or that branch by name): git log's "does not have any commits yet". Not a not_found.
-// The stream protocol is the blob stream's one raise (docs/STACK.md): a corrupt frame or trailer errors the inflate side via pump.catch.
-const must = <T>(r: Result<T, PlyError>): T => { if (r.ok) return r.value; throw r.error; };
-
 export type EmptyCommit = { readonly empty: true; readonly ref: string };
 
 // What readCommit, listTree and readFile take as their second argument. `ref: null` is the remote's HEAD.
@@ -506,8 +504,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const header = await blobHeader(it, early);
   if (!header.ok) {
     await close();
-    const e = header.error;
-    return caughtErr(failHere(e));
+    return err(raised('pack_corrupt', failHere(header.error)));
   }
   let sp: SpState = header.value;
   const size = header.value.size;
@@ -522,22 +519,27 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   }
   const ds = new DecompressionStream('deflate');
   const writer = ds.writable.getWriter();
-  const pump = (async () => {
+  // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
+  // verify transform's flush never runs then (its catch is unreachable), so the failure is recorded here.
+  const abortWith = async (e: unknown): Promise<void> => { const failed = failHere(e); await writer.abort(failed).catch(() => { /* already failing */ }); await close(); };
+  const pump = (async (): Promise<void> => {
     for (const z of early) await writer.write(bufferSource(z));
     for (;;) {
       const { value, done } = await it.next();
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) break;
-      const r: SpStepped = must(spStep(sp, value)); sp = r.state;
+      const stepped = spStep(sp, value);
+      if (!stepped.ok) { await abortWith(stepped.error); return; }
+      const r: SpStepped = stepped.value; sp = r.state;
       for (const z of r.zlib) await writer.write(bufferSource(z));
     }
-    sp = must(spFinish(sp)); // pack trailer checksum
+    const finished = spFinish(sp); // pack trailer checksum
+    if (!finished.ok) { await abortWith(finished.error); return; }
+    sp = finished.value;
     fetchSpan.end();
     await writer.close();
   })();
-  // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
-  // verify transform's flush never runs then (its catch is unreachable), so the failure is recorded here.
-  pump.catch(async (e: unknown) => { const failed = failHere(e); await writer.abort(failed).catch(() => { /* already failing */ }); await close(); });
+  pump.catch(abortWith);
   const sha = streamingSha1();
   await sha.update(objectHeader('blob', size));
   let seen = 0;
@@ -599,7 +601,8 @@ export async function readBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
     case 'stream': {
       const parts: Uint8Array[] = [];
       try { for await (const chunk of opened.value.stream) parts.push(chunk); }
-      catch (e) { return caughtErr(e); }
+      // the stream's error, as the consumer of readFile's stream sees it; a value that is not ply's is coded here
+      catch (e) { return err(raised('pack_corrupt', e)); }
       return ok({ kind: 'bytes', data: concat(parts) });
     }
   }
