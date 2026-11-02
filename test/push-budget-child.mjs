@@ -1,6 +1,7 @@
 // One pushTree under the heap the parent asks for. Prints one JSON line.
 import { validateTreeSpec } from '../src/tree.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT, LIMIT_PUSH_BYTES } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
 
 const kind = process.argv[2];
 const MIB = 1024 * 1024;
@@ -16,7 +17,7 @@ try {
   if (kind === 'one') {
     const data = new Uint8Array(LIMIT_OBJECT);
     data.fill(7);
-    const plan = validateTreeSpec(specOf({ 'big.bin': data }), DEFAULT_LIMITS);
+    const plan = unwrap(validateTreeSpec(specOf({ 'big.bin': data }), DEFAULT_LIMITS));
     const blob = [...plan.built.blobs.keys()];
     report({ status: 'ok', root: plan.built.root, blob: blob[0], files: plan.files });
   } else if (kind === 'three') {
@@ -29,7 +30,7 @@ try {
     files['a.bin'].fill(1);
     files['b.bin'].fill(2);
     files['c.bin'].fill(3);
-    validateTreeSpec(specOf(files), DEFAULT_LIMITS);
+    unwrap(validateTreeSpec(specOf(files), DEFAULT_LIMITS));
     report({ status: 'ok', unexpected: true });
   } else {
     report({ status: 'err', message: `unknown kind ${kind}` });

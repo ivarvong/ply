@@ -17,10 +17,11 @@ import { withLimits } from '../src/limits.js';
 import { generateSigner } from '../src/sign.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { spawnSync } from 'node:child_process';
+import { unwrapAsync } from './unwrap.js';
 
 const ZERO = '0'.repeat(40);
-const commit = (url, spec, opts = {}) => commitChanges(url, spec, { tracer: new Tracer(), ...opts });
-const edit = (url, spec, opts = {}) => editFile(url, spec, { tracer: new Tracer(), ...opts });
+const commit = (url, spec, opts = {}) => unwrapAsync(commitChanges(url, spec, { tracer: new Tracer(), ...opts }));
+const edit = (url, spec, opts = {}) => unwrapAsync(editFile(url, spec, { tracer: new Tracer(), ...opts }));
 const AUTHOR = { name: 'Ada', email: 'ada@x', tz: '+0000', time: 1700000000 };
 const STAMP = {
   GIT_AUTHOR_NAME: 'Ada', GIT_AUTHOR_EMAIL: 'ada@x', GIT_AUTHOR_DATE: '1700000000 +0000',

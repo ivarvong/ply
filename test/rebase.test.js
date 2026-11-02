@@ -14,6 +14,7 @@ import { editFile } from '../src/edit.js';
 import { generateSigner } from '../src/sign.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { oracleRediff } from './gitversion.js';
+import { unwrapAsync } from './unwrap.js';
 const rediff = oracleRediff();
 
 let root, cleanup, srv, n = 0;
@@ -198,7 +199,7 @@ test('attributes in cherry-pick and rebase: \'ours\' is the tree being built on,
 test('end to end: edit on a branch, main moves, rebase, fast-forward land, delete — all git operations', async () => {
   const r = repo();
   commitFiles(r.work, r.bare, { 'README.md': 'hello MARK\n', 'other.txt': 'o\n' }, 'base');
-  const e = await editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'WORLD', ref: 'refs/heads/ply/x', base: 'refs/heads/main', author: committer, message: 'edit' }, T());
+  const e = await unwrapAsync(editFile(r.url, { path: 'README.md', find: 'MARK', replace: 'WORLD', ref: 'refs/heads/ply/x', base: 'refs/heads/main', author: committer, message: 'edit' }, T()));
   commitOn(r, 'main', 'main', { 'other.txt': 'o2\n' }, 'main moved');
   const rb = await rebaseBranch(r.url, { ref: 'refs/heads/ply/x', onto: 'refs/heads/main', committer }, T());
   assert.equal(rb.outcome, 'rebase'); assert.equal(rb.commits, 1);

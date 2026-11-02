@@ -38,7 +38,9 @@ export async function runPush(rendered, response = rendered.response) {
   try {
     const { atomic = false, pushOptions = [], ...opts } = rendered.opts ?? {};
     const checked = checkPushCaps && (atomic || pushOptions.length > 0) ? checkPushCaps(new Set(['atomic', 'push-options']), { atomic, pushOptions }).value : undefined;
-    await push(t, { commands: rendered.commands, objects: [], ...(checkPushCaps ? { ...opts, ...(checked ? { checked } : {}) } : rendered.opts) });
+    // push returns a Result (an older src/ threw): an Err is read below as the throw was
+    const r = await push(t, { commands: rendered.commands, objects: [], ...(checkPushCaps ? { ...opts, ...(checked ? { checked } : {}) } : rendered.opts) });
+    if (r?.ok === false) throw r.error;
     return { tag: 'landed', refs: rendered.commands.map(c => c.ref) };
   } catch (e) {
     if (t.sent === 0 && (e.code === 'bad_request' || e.code === 'limit_exceeded')) return { tag: 'preSend', code: e.code, what: e.what };

@@ -9,26 +9,27 @@ import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { withLimits } from '../src/limits.js';
 import { TYPE_NAME } from '../src/objects.js';
+import { unwrapAsync } from './unwrap.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
 after(async () => { await srv.close(); cleanup(); });
 const A = { name: 'e', email: 'e@x' };
 const repo = () => { const name = `e${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']); return { name, bare, work, url: `${srv.url}/${name}.git` }; };
-const edit = (r, p, extra = {}, opts = {}) => editFile(r.url, { path: p, find: 'MARK', replace: 'OK', author: A, message: 'e', ...extra }, { tracer: new Tracer(), ...opts });
+const edit = (r, p, extra = {}, opts = {}) => unwrapAsync(editFile(r.url, { path: p, find: 'MARK', replace: 'OK', author: A, message: 'e', ...extra }, { tracer: new Tracer(), ...opts }));
 
 test('path depth 100 (limit 128): one tree fetch per level, push = commit + 100 tree deltas + blob delta', async () => {
   const r = repo();
   const path = Array.from({ length: 99 }, (_, i) => `d${i}`).join('/') + '/f.txt';
   commitFiles(r.work, r.bare, { [path]: 'MARK' }, 's');
   const ex = arrayExporter();
-  const res = await editFile(r.url, { path, find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) });
+  const res = await unwrapAsync(editFile(r.url, { path, find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }));
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', `main:${path}`]).toString(), 'OK');
   const spans = ex.lines.flatMap(flattenLine);
   assert.equal(spans.filter(s => s.name === 'git.edit.tree').length, 100);
   assert.equal(spans.find(s => s.name === 'git.receive-pack').attrs['git.push.pack.objects'], 102);
   assert.ok(res.pushBytes < 102 * 80 + 400, `push ${res.pushBytes}`);
-  await assert.rejects(editFile(r.url, { path: 'x/'.repeat(129) + 'f', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'bad_request');
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'x/'.repeat(129) + 'f', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer() })), e => e.code === 'bad_request');
 });
 
 test('wide tree: 20k siblings (tree ≈ 700 KB, multi-pkt, multi-block zlib) and maxTreeEntries enforcement', async () => {
@@ -37,7 +38,7 @@ test('wide tree: 20k siblings (tree ≈ 700 KB, multi-pkt, multi-block zlib) and
   for (let i = 0; i < 20000; i++) files[`wide/f${String(i).padStart(5, '0')}.txt`] = '';
   commitFiles(r.work, r.bare, files, 's');
   const ex = arrayExporter();
-  await editFile(r.url, { path: 'wide/target.txt', find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) });
+  await unwrapAsync(editFile(r.url, { path: 'wide/target.txt', find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }));
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:wide/target.txt']).toString(), 'OK');
   const t = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit.tree' && s.attrs['git.edit.tree.depth'] === 1);
   assert.equal(t.attrs['git.edit.tree.entries'], 20001);
@@ -114,7 +115,7 @@ test('large blob (24 MB): max single allocation stays at one inflate chunk; push
   commitFiles(r.work, r.bare, { 'big.bin': big }, 's');
   const ex = arrayExporter();
   const t0 = performance.now();
-  const res = await editFile(r.url, { path: 'big.bin', find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) });
+  const res = await unwrapAsync(editFile(r.url, { path: 'big.bin', find: 'MARK', replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }));
   const ms = performance.now() - t0;
   const root = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.edit');
   assert.ok(root.attrs['mem.alloc.max_single'] <= 65536, `max single alloc ${root.attrs['mem.alloc.max_single']}`);
@@ -140,7 +141,7 @@ test('find at exact chunk boundaries of a 16384-aligned stream and a find longer
   const longFind = 'L'.repeat(40000); const lb = Buffer.alloc(200000, 46); lb.write(longFind, 70000); files.long = lb; cases.push(['long', 70000, longFind]);
   commitFiles(r.work, r.bare, files, 's');
   for (const [p, off, find] of cases) {
-    const res = await editFile(r.url, { path: p, find, replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer() });
+    const res = await unwrapAsync(editFile(r.url, { path: p, find, replace: 'OK', author: A, message: 'e' }, { tracer: new Tracer() }));
     assert.equal(res.matchOffset, off, p);
     const got = gitBuf(r.bare, ['cat-file', 'blob', `main:${p}`]);
     assert.equal(got.subarray(off, off + 2).toString(), 'OK'); assert.equal(got.length, files[p].length - find.length + 2);
@@ -150,26 +151,26 @@ test('find at exact chunk boundaries of a 16384-aligned stream and a find longer
 test('whole-file replace, replace with empty on 1-byte file, and empty find rejected', async () => {
   const r = repo();
   commitFiles(r.work, r.bare, { 'w': 'MARK', 'one': 'M' }, 's');
-  await editFile(r.url, { path: 'w', find: 'MARK', replace: 'completely new content\n', author: A, message: 'e' }, { tracer: new Tracer() });
+  await unwrapAsync(editFile(r.url, { path: 'w', find: 'MARK', replace: 'completely new content\n', author: A, message: 'e' }, { tracer: new Tracer() }));
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:w']).toString(), 'completely new content\n');
-  await editFile(r.url, { path: 'one', find: 'M', replace: '', author: A, message: 'e' }, { tracer: new Tracer() });
+  await unwrapAsync(editFile(r.url, { path: 'one', find: 'M', replace: '', author: A, message: 'e' }, { tracer: new Tracer() }));
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:one']).length, 0);
   assert.equal(git(r.bare, ['rev-parse', 'main:one']).trim(), 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391');
-  await assert.rejects(editFile(r.url, { path: 'one', find: '', replace: 'x', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'bad_request');
-  await assert.rejects(editFile(r.url, { path: 'one', find: 'x', replace: 'y', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'match_count');
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'one', find: '', replace: 'x', author: A, message: 'e' }, { tracer: new Tracer() })), e => e.code === 'bad_request');
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'one', find: 'x', replace: 'y', author: A, message: 'e' }, { tracer: new Tracer() })), e => e.code === 'match_count');
 });
 
 test('empty blob: find on a 0-byte file is match_count (0 matches), never a push; edit the empty→nonempty neighbour works', async () => {
   const r = repo();
   commitFiles(r.work, r.bare, { 'empty.txt': '', 'one.txt': 'M' }, 's');
   const head = git(r.bare, ['rev-parse', 'main']).trim();
-  await assert.rejects(editFile(r.url, { path: 'empty.txt', find: 'x', replace: 'y', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'match_count' && e.matches === 0);
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'empty.txt', find: 'x', replace: 'y', author: A, message: 'e' }, { tracer: new Tracer() })), e => e.code === 'match_count' && e.matches === 0);
   assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), head, 'ref untouched');
   // the blob fetch for an empty object is a 1-object pack whose zlib stream inflates to nothing: the scanner must still finish cleanly
-  await assert.rejects(editFile(r.url, { path: 'empty.txt', find: 'longer than the file', replace: '', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'match_count');
-  await editFile(r.url, { path: 'one.txt', find: 'M', replace: '', author: A, message: 'e' }, { tracer: new Tracer() });
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'empty.txt', find: 'longer than the file', replace: '', author: A, message: 'e' }, { tracer: new Tracer() })), e => e.code === 'match_count');
+  await unwrapAsync(editFile(r.url, { path: 'one.txt', find: 'M', replace: '', author: A, message: 'e' }, { tracer: new Tracer() }));
   assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:one.txt']).length, 0);
-  await assert.rejects(editFile(r.url, { path: 'one.txt', find: 'M', replace: 'back', author: A, message: 'e' }, { tracer: new Tracer() }), e => e.code === 'match_count');
+  await assert.rejects(unwrapAsync(editFile(r.url, { path: 'one.txt', find: 'M', replace: 'back', author: A, message: 'e' }, { tracer: new Tracer() })), e => e.code === 'match_count');
 });
 
 test('a one-byte find over 128 KiB of that byte (#13): match_count with the full count in linear time, never a push', { timeout: 60_000 }, async () => {
@@ -182,7 +183,7 @@ test('a one-byte find over 128 KiB of that byte (#13): match_count with the full
   const small = repo();
   commitFiles(small.work, small.bare, { 'run.txt': 'a'.repeat(16 << 10) }, 's');
   const cpuMs = async f => { const t = process.cpuUsage(); const v = await f(); const d = process.cpuUsage(t); return { v, ms: (d.user + d.system) / 1000 }; };
-  const run = (u, ex = arrayExporter()) => cpuMs(() => editFile(u, { path: 'run.txt', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) }).then(() => null, e => e));
+  const run = (u, ex = arrayExporter()) => cpuMs(() => unwrapAsync(editFile(u, { path: 'run.txt', find: 'a', replace: 'b', author: A, message: 'e' }, { tracer: new Tracer({ exporter: ex }) })).then(() => null, e => e));
   await run(small.url); // warm-up, discarded
   const base = [(await run(small.url)).ms, (await run(small.url)).ms, (await run(small.url)).ms].sort((a, b) => a - b)[1];
   const ex = arrayExporter();

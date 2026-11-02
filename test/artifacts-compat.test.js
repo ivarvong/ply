@@ -17,7 +17,7 @@ import { classifyReport, decideOutcome } from '../src/push.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const filterOf = body => /filter ([^\n]+)\n/.exec(Buffer.from(body).toString('latin1'))?.[1] ?? null;
@@ -58,7 +58,7 @@ test('editFile: a stale-ref rejection on the first push is retried from a fresh 
   };
   const r = await repo({ 'f.txt': 'MARK\n' }, artifactsFault(staleOnce));
   try {
-    const res = await editFile(r.url, { path: 'f.txt', find: 'MARK', replace: 'DONE', author: A, message: 'm' }, { tracer: new Tracer() });
+    const res = await unwrapAsync(editFile(r.url, { path: 'f.txt', find: 'MARK', replace: 'DONE', author: A, message: 'm' }, { tracer: new Tracer() }));
     assert.equal(res.attempt, 1, 'retried once');
     assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), res.newCommit);
     assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:f.txt']).toString(), 'DONE\n');
@@ -71,7 +71,7 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
   const r = await repo(files);
   try {
     const quirks = {}; const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex });
-    const res = await editFile(r.url, { path: 'a/b/c/d/deep.txt', find: 'MARK', replace: 'EDITED', author: A, message: 'm' }, { tracer, quirks, verify: true });
+    const res = await unwrapAsync(editFile(r.url, { path: 'a/b/c/d/deep.txt', find: 'MARK', replace: 'EDITED', author: A, message: 'm' }, { tracer, quirks, verify: true }));
     assert.equal(quirks.treeFilter, 'blob:none');
     assert.equal(git(r.bare, ['rev-parse', 'main']).trim(), res.newCommit);
     assert.equal(gitBuf(r.bare, ['cat-file', 'blob', 'main:a/b/c/d/deep.txt']).toString(), 'deep EDITED\n');
@@ -133,7 +133,7 @@ test('git-default server: no fallback attributes, tree:0 throughout (the fallbac
   const r = await repo({ 'a/b.txt': 'MARK\n' }, () => ({ type: 'pass' }));
   try {
     const ex = arrayExporter(); const quirks = {};
-    await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: A, message: 'm' }, { tracer: new Tracer({ exporter: ex }), quirks });
+    await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'X', author: A, message: 'm' }, { tracer: new Tracer({ exporter: ex }), quirks }));
     assert.equal(quirks.treeFilter, 'tree:0'); // the caller's record states what the server took
     for (const s of spansOf(ex).filter(s => s.name === 'git.upload-pack fetch')) assert.ok(!('git.fetch.filter.fallback' in s.attrs));
   } finally { await r.proxy.close(); }

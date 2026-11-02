@@ -8,6 +8,7 @@ import { startGitServer } from './server.js';
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { unwrapAsync } from './unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const COMMITS = +(args.commits ?? 1000), HEAD_MB = +(args.headMB ?? 50), TOTAL_GB = +(args.totalGB ?? 10), DIR = args.dir ?? '/tmp/bigrepo';
@@ -66,7 +67,7 @@ const head = git(['rev-parse', 'main']).trim();
 const run = async (label, fn) => { const ex = arrayExporter(); const tracer = new Tracer({ exporter: ex }); const t0 = Date.now(); let r, err; try { r = await fn(tracer); } catch (e) { err = e; } const ms = Date.now() - t0; const spans = ex.lines.flatMap(flattenLine); const root = spans.find(s => s.name === 'git.edit') ?? spans[spans.length - 1]; const http = spans.filter(s => s.attrs['http.response.body.size'] !== undefined); console.log(`${label.padEnd(44)} ${String(ms).padStart(6)}ms  rtt=${http.length}  wire_in=${http.reduce((n, s) => n + s.attrs['http.response.body.size'], 0)}B  wire_out=${http.reduce((n, s) => n + (s.attrs['http.request.body.size'] ?? 0), 0)}B  max_alloc=${root?.attrs['mem.alloc.max_single'] ?? '-'}  alloc=${root?.attrs['mem.alloc.bytes'] ?? '-'}${err ? '  ERR ' + err.code + ' ' + err.message.slice(0, 60) : ''}`); return { r, spans, ms, http }; };
 
 const cache = new Map();
-const edit = (tracer, rev, c = new Map()) => editFile(url, { path: 'src/mod17/file9.ts', find: `MARK_${rev}`, replace: `EDITED_${rev}`, author: { name: 'e', email: 'e@x' }, message: 'edit' }, { tracer, cache: c });
+const edit = (tracer, rev, c = new Map()) => unwrapAsync(editFile(url, { path: 'src/mod17/file9.ts', find: `MARK_${rev}`, replace: `EDITED_${rev}`, author: { name: 'e', email: 'e@x' }, message: 'edit' }, { tracer, cache: c }));
 const lastRev = Math.floor((COMMITS - 1) / 50) * 50;
 console.log('\n--- edit src/mod17/file9.ts (depth 3, 40-wide src dir, 25-wide leaf)');
 const a = await run('cold (ls-refs + commit + 3 trees + blob + push)', t => edit(t, lastRev, cache));

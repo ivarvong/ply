@@ -7,6 +7,7 @@ import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
+import { unwrapAsync } from '../unwrap.js';
 
 // module-scoped: survives across requests within the isolate, like a real worker would hold it
 const packCache = typeof caches !== 'undefined' ? caches.default : null;
@@ -70,7 +71,7 @@ export default {
       const one = async i => {
         const t0 = Date.now();
         try {
-          const r = await editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: `wd ${i}` }, { tracer, cache, limits, auth: body.auth, fetchImpl, head: body.head ?? null, signer: signing?.signer ?? null });
+          const r = await unwrapAsync(editFile(body.url, { path: body.path, find: body.find, replace: body.replace, author: { name: 'wd', email: 'wd@x' }, message: `wd ${i}` }, { tracer, cache, limits, auth: body.auth, fetchImpl, head: body.head ?? null, signer: signing?.signer ?? null }));
           return { ok: true, ms: Date.now() - t0, newCommit: r.newCommit, oldCommit: r.oldCommit, pushBytes: r.pushBytes, noop: !!r.noop, hint: r.hint, packCache: fetchImpl.stats ?? null };
         } catch (e) { return { ok: false, ms: Date.now() - t0, code: e.code, message: e.message }; }
       };

@@ -33,7 +33,7 @@ import { push } from '../../src/push.js';
 import { pushWithOptions } from '../../src/receivecaps.js';
 import { transport, outcome, outcomeSync, cat, enc, band, FLUSH, DELIM } from './wire.js';
 import { git } from './pack-fixtures.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
 const LARGE_PACKET_MAX = 65520; // pkt-line.h
 const OID = 'a'.repeat(40);
@@ -217,12 +217,12 @@ const POS = {
   'push-report': {
     payload: n => filler(n - 4), neutral: () => false, refuse: 'ambiguous', push: true,
     render: () => ({ kind: 'post', before: unwrap(pkt('unpack ok\n')), after: cat([unwrap(pkt('ok refs/heads/r0\n')), FLUSH]) }),
-    run: t => push(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], sideband: false }),
+    run: t => unwrapAsync(push(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], sideband: false })),
   },
   'push-sideband': {
     payload: n => (n < 5 ? new Uint8Array(0) : cat([Uint8Array.of(2), filler(n - 5)])), neutral: n => n >= 5, refuse: 'ambiguous', push: true,
     render: () => ({ kind: 'post', before: band(1, unwrap(pkt('unpack ok\n'))), after: cat([band(1, cat([unwrap(pkt('ok refs/heads/r0\n')), FLUSH])), FLUSH]) }),
-    run: t => push(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], sideband: true }),
+    run: t => unwrapAsync(push(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], sideband: true })),
   },
 };
 function chunks(b, n) { const out = []; for (let i = 0; i < b.length; i += n) out.push(b.subarray(i, i + n)); return out; }

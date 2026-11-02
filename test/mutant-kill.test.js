@@ -37,7 +37,7 @@ import {
   DELTA_COPY, DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
   DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3, DELTA_SIZE_MIN, SIDEBAND_PACK, SIDEBAND_PROGRESS, zlibBound,
 } from '../src/format.js';
-import { unwrap, errOf } from './unwrap.js';
+import { unwrap, errOf, unwrapAsync } from './unwrap.js';
 
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
 const oidBytes = n => Uint8Array.from({ length: OID_BYTES }, () => n);
@@ -334,18 +334,18 @@ test('headers after the committer and the tagger are kept, not judged, except a 
   const enc = unwrap(encodeCommit({ tree, author, encoding: 'ISO-8859-1', message: 'hi\n' }));
   assert.equal(unwrap(parseCommit(enc)).encoding, 'ISO-8859-1');
   assert.deepEqual([...unwrap(encodeCommit(unwrap(parseCommit(enc))))], [...enc]);
-  const signed = withGpgsig(enc, '-----BEGIN SSH SIGNATURE-----\nAAA\n-----END SSH SIGNATURE-----\n');
+  const signed = unwrap(withGpgsig(enc, '-----BEGIN SSH SIGNATURE-----\nAAA\n-----END SSH SIGNATURE-----\n'));
   const parsedSig = unwrap(parseCommit(signed));
   assert.equal(parsedSig.encoding, 'ISO-8859-1');
   assert.equal(parsedSig.extra[0].startsWith('gpgsig '), true);
   assert.equal(unwrap(parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, 'gpgsig x']))).extra[0], 'gpgsig x');
   const plain = unwrap(encodeCommit({ tree, author, message: 'hi\n', extra: ['x-custom v'] }));
-  const signedPlain = td.decode(withGpgsig(plain, 'SIG\n'));
+  const signedPlain = td.decode(unwrap(withGpgsig(plain, 'SIG\n')));
   const plainHeaders = signedPlain.split('\n\n')[0].split('\n');
   const ci = plainHeaders.findIndex(l => l.startsWith('committer '));
   assert.equal(plainHeaders[ci + 1].startsWith('gpgsig '), true);
   assert.equal(plainHeaders[ci + 2], 'x-custom v');
-  assert.equal(unwrap(parseCommit(withGpgsig(bare, 'SIG\n'))).extra[0].startsWith('gpgsig '), true);
+  assert.equal(unwrap(parseCommit(unwrap(withGpgsig(bare, 'SIG\n')))).extra[0].startsWith('gpgsig '), true);
   // after the committer fsck reads nothing, but a second tree, parent, author, committer or encoding is a copy git's
   // views disagree on (pretty's %an/%cn read the last, %T and the date the first): refused, typed (PR #7)
   const after = (...lines) => unwrap(parseCommit(body([`tree ${tree}`, `author ${author}`, `committer ${committer}`, ...lines])));
@@ -1505,14 +1505,14 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     { ref: 'refs/heads/b', oldOid: ZERO_OID, newOid: ZERO_OID },
   ];
   const all = new Set(['atomic', 'push-options']);
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: true })) }), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
+  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: true })) })), e => e.code === 'ambiguous' && /atomic push split/.test(e.message));
   // atomic and push options only as checked capabilities: an untyped caller's raw fields are refused before anything is sent
-  for (const raw of [{ atomic: true }, { pushOptions: ['x'] }]) await assert.rejects(push(receipt(), { commands: deletes, sideband: false, ...raw }), e => e.code === 'bad_request' && e.message === 'push: unchecked atomic or push options');
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, atomic: false, pushOptions: [] }), e => e.code === 'push_partial');
-  await assert.rejects(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: false })) }), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
-  await assert.rejects(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false }), e => e.code === 'bad_request' && e.what === 'ref');
-  await assert.rejects(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, checked: orThrow(checkPushCaps(all, { pushOptions: ['a\nb'] })) }), e => e.code === 'bad_request' && e.what === 'push option');
-  await assert.rejects(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push commands');
+  for (const raw of [{ atomic: true }, { pushOptions: ['x'] }]) await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, ...raw })), e => e.code === 'bad_request' && e.message === 'push: unchecked atomic or push options');
+  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, atomic: false, pushOptions: [] })), e => e.code === 'push_partial');
+  await assert.rejects(unwrapAsync(push(receipt(), { commands: deletes, sideband: false, checked: orThrow(checkPushCaps(all, { atomic: false })) })), e => e.code === 'push_partial' && e.message === 'push partially applied: refs/heads/a updated; refs/heads/b (failed to lock) refused' && e.landed.join() === 'refs/heads/a' && e.rejected[0].reason === 'failed to lock');
+  await assert.rejects(unwrapAsync(push(receipt(), { commands: [{ ref: 'refs/heads/a\n', oldOid: ZERO_OID, newOid: ZERO_OID }], sideband: false })), e => e.code === 'bad_request' && e.what === 'ref');
+  await assert.rejects(unwrapAsync(push(receipt(), { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: ZERO_OID, sideband: false, checked: orThrow(checkPushCaps(all, { pushOptions: ['a\nb'] })) })), e => e.code === 'bad_request' && e.what === 'push option');
+  await assert.rejects(unwrapAsync(push({ ...receipt(), limits: withLimits({ maxRefs: 1 }) }, { commands: deletes, sideband: false })), e => e.code === 'limit_exceeded' && e.what === 'push commands');
 
   const fetchImpl = (_url, init) => new Promise((_resolve, reject) => {
     // The request timer is unref'd, so a live socket (here, an interval) has to keep the loop awake.
@@ -1570,10 +1570,10 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
   let sent = 0;
   const t = { limits: withLimits({ maxPackBytes: 40 }), tracer: tracerStub, parent: null, async *frames() { sent++; for (const f of []) yield f; } };
   const objects = [{ type: TYPE.BLOB, data: te.encode('x'.repeat(64)) }];
-  await assert.rejects(push(t, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'limit_exceeded' && e.what === 'push pack bytes' && e.max === 40 && e.got > 40);
+  await assert.rejects(unwrapAsync(push(t, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false })), e => e.code === 'limit_exceeded' && e.what === 'push pack bytes' && e.max === 40 && e.got > 40);
   assert.equal(sent, 0, 'nothing reached the transport');
   const fits = { ...t, limits: withLimits({ maxPackBytes: 1 << 20 }) };
-  await assert.rejects(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false }), e => e.code === 'ambiguous');
+  await assert.rejects(unwrapAsync(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false })), e => e.code === 'ambiguous');
   assert.equal(sent, 1, 'under the cap the body is sent');
 });
 
@@ -1720,14 +1720,14 @@ test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const fl = [band(SIDEBAND_PROGRESS, 30), band(SIDEBAND_PROGRESS, 20), report, { kind: 'flush' }];
   const total = fl.reduce((n, f) => n + (f.payload?.length ?? 0), 0);
   const pushT = (frames, max) => ({ limits: withLimits({ maxPackBytes: max }), tracer: tracerStub, parent: null, async *frames() { yield* frames; } });
-  const fits = await push(pushT(fl, total), { commands: del, sideband: true });
+  const fits = await unwrapAsync(push(pushT(fl, total), { commands: del, sideband: true }));
   assert.equal(fits.report.tag, "statuses"); assert.equal(fits.hookOutput.length, 50);
-  await assert.rejects(push(pushT(fl, total - 1), { commands: del, sideband: true }),
+  await assert.rejects(unwrapAsync(push(pushT(fl, total - 1), { commands: del, sideband: true })),
     e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.got === total && e.cause.max === total - 1);
   // an endless band 2 is cut at the cap, not read until the timer: reading stops on the frame that crosses it
   let pulled = 0;
   const flood = { limits: withLimits({ maxPackBytes: 10_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) { pulled++; yield band(SIDEBAND_PROGRESS, 999); } } };
-  await assert.rejects(push(flood, { commands: del, sideband: true }), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
+  await assert.rejects(unwrapAsync(push(flood, { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
   assert.equal(pulled, 11, 'ten 1,000-byte frames fit, the eleventh crosses the cap');
 });
 
@@ -1879,7 +1879,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   // band 2 is kept as a 4096-character tail, counted per frame
   let st = streamInit(true);
   assert.equal(st.band2, '');
-  for (const n of [3000, 2000]) st = streamStep(st, { kind: 'data', payload: data(Uint8Array.of(2), 'x'.repeat(n - 1) + 'y') });
+  for (const n of [3000, 2000]) st = unwrap(streamStep(st, { kind: 'data', payload: data(Uint8Array.of(2), 'x'.repeat(n - 1) + 'y') }));
   assert.equal(st.band2.length, 4096); assert.ok(st.band2.endsWith('xy')); assert.equal(st.band2Frames, 2);
 
   // through push(): the error a caller sees
@@ -1887,16 +1887,16 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   const band = (b, ...parts) => data(Uint8Array.of(b), ...parts);
   const report = (...lines) => band(1, ...lines.map(l => unwrap(pkt(l))), FLUSH);
   const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
-  await assert.rejects(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
-  await assert.rejects(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
-  await assert.rejects(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
-  await assert.rejects(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
+  await assert.rejects(unwrapAsync(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
+  await assert.rejects(unwrapAsync(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
+  await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
+  await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del)), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
   const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
-  await assert.rejects(push(many, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
+  await assert.rejects(unwrapAsync(push(many, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
   const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
-  await assert.rejects(push(big, del), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
+  await assert.rejects(unwrapAsync(push(big, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
   const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes
-  const ok = await push(fits, del);
+  const ok = await unwrapAsync(push(fits, del));
   assert.deepEqual(ok.report, { tag: 'statuses', refs: [{ ref: 'refs/heads/a', ok: true, reason: '' }] }); assert.equal(ok.hookOutput, '');
 });
 

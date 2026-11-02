@@ -32,6 +32,7 @@ import { lsRefs } from '../src/lsrefs.js';
 import { fetchPack } from '../src/fetchpack.js';
 import { discover } from '../src/discover.js';
 import { receiveCaps } from '../src/receivecaps.js';
+import { unwrapAsync } from './unwrap.js';
 
 const SNAPSHOT = new URL('./span-contract.json', import.meta.url);
 const UPDATE = process.env.UPDATE_SPAN_CONTRACT === '1';
@@ -153,13 +154,13 @@ const traced = () => { const ex = arrayExporter(); return { tracer: new Tracer({
 
 // one entry per public operation (and the wire layer): name → async ({ tracer }) => void, every stream drained
 const SCENARIOS = {
-  editFile: async ({ tracer }) => { const r = seeded(); await editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true }); },
+  editFile: async ({ tracer }) => { const r = seeded(); await unwrapAsync(editFile(r.url, { path: 'a/b.txt', find: 'MARK', replace: 'DONE', author, message: 'edit' }, { tracer, verify: true })); },
   commitChanges: async ({ tracer }) => {
     const r = seeded();
-    await commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: 'n\n' }], author, message: 'add', time: 1700000000 }, { tracer, verify: true });
-    await commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'MARK', replace: 'DONE' }], author, message: 'edit', time: 1700000000 }, { tracer, verify: true });
+    await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'create', path: 'n.txt', content: 'n\n' }], author, message: 'add', time: 1700000000 }, { tracer, verify: true }));
+    await unwrapAsync(commitChanges(r.url, { ref: 'refs/heads/main', changes: [{ kind: 'edit', path: 'a/b.txt', find: 'MARK', replace: 'DONE' }], author, message: 'edit', time: 1700000000 }, { tracer, verify: true }));
   },
-  pushTree: async ({ tracer }) => { const r = seeded(); await pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true }); },
+  pushTree: async ({ tracer }) => { const r = seeded(); await unwrapAsync(pushTree(r.url, { files: { 'a/b.txt': 'NEW\n', 'a/c.txt': 'c\n', 'x/y.txt': 'y\n' }, author, message: 'deploy' }, { tracer, verify: true })); },
   checkoutTree: async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, {}, { tracer }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
   'checkoutTree(batch=1)': async ({ tracer }) => { const r = seeded(); const res = await checkoutTree(r.url, { path: 'a' }, { tracer, batch: 1 }); for await (const f of res.files) if (f.stream) await drain(f.stream); },
   readFile: async ({ tracer }) => { const r = seeded(); const res = await readFile(r.url, { path: 'a/b.txt' }, { tracer }); await drain(res.stream); },
