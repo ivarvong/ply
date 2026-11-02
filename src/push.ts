@@ -500,12 +500,15 @@ const outcomeAttrs = (done: Broken | StreamReport, report: PushReport | null, ou
   };
 };
 
+// git.object.type for a built entry: its name, or the type id in decimal for an id a caller passed that names no type
+// (pack.ts typeNameOf), so the attribute is never otel.ts's null-as-empty-string.
+const objectTypeAttr = (e: PackEntry): string => getOrElse(fromNullish(e.typeName), String(e.type));
 // The send, inside the span: build the pack, refuse an oversized one before the first byte, send, read, decide.
 async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
   const { pack, entries }: { readonly pack: Uint8Array | null; readonly entries: readonly PackEntry[] } = plan.needPack ? await buildPack(plan.objects) : { pack: null, entries: [] };
   const packBytes = pack === null ? 0 : pack.length;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
-  for (const [i, e] of entries.entries()) span.event('git.push.object', { 'git.object.index': i, 'git.object.type': e.typeName, 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': getOrElse(fromNullish(e.baseOid), ''), 'git.object.bytes': e.bytes });
+  for (const [i, e] of entries.entries()) span.event('git.push.object', { 'git.object.index': i, 'git.object.type': objectTypeAttr(e), 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': getOrElse(fromNullish(e.baseOid), ''), 'git.object.bytes': e.bytes });
   // Refuse before the first byte is sent: a host with a push cap (Artifacts: 62–93 MiB) would otherwise take the whole
   // upload and answer 4xx. The measured size is the pack as built, so `got` is what the server would have received.
   if (pack && pack.length > plan.maxPack) return err(limitExceeded('push pack bytes', pack.length, plan.maxPack));
