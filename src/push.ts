@@ -427,6 +427,14 @@ const unchecked = (o: unknown): boolean => {
   const options = flatMapOption(field(o, 'pushOptions'), p => field(p, 'length'));
   return (atomic.tag === 'some' && atomic.value === true) || (options.tag === 'some' && Number(options.value) > 0);
 };
+// An OFS_DELTA's base is an earlier object of the same pack (pack.ts buildPack does not check it).
+function checkBaseIndexes(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_request'>> {
+  for (const [i, obj] of objects.entries()) {
+    const b = getOrElse<unknown>(field(obj, 'baseIndex'), null);
+    if (b !== null && !(typeof b === 'number' && Number.isInteger(b) && b >= 0 && b < i)) return fail('bad_request', 'push: baseIndex must name an earlier object', { what: 'baseIndex', got: b });
+  }
+  return ok(null);
+}
 export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result<PushPlan, PlyError> {
   const cfg = withDefaults(o, pushDefaults());
   if (cfg.checked === null && unchecked(o)) return fail('bad_request', 'push: unchecked atomic or push options');
@@ -440,6 +448,8 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
     if (!ref.ok) return ref;
     if (!OID.test(c.oldOid) || !OID.test(c.newOid)) return fail('bad_request', 'push: oids must be 40-hex');
   }
+  const bases = checkBaseIndexes(cfg.objects);
+  if (!bases.ok) return bases;
   for (const p of cfg.checked === null ? [] : cfg.checked.pushOptions) {
     const option = validateWire(p, 'push option');
     if (!option.ok) return option;

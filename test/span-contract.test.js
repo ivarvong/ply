@@ -29,6 +29,7 @@ import { readFile, listTree, readCommit } from '../src/read.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { createBranch, deleteBranch, createTag } from '../src/refops.js';
+import { pushRepo } from '../src/repo-node.js';
 import { lsRefs as lsRefsR } from '../src/lsrefs.js';
 import { fetchPack as fetchPackR } from '../src/fetchpack.js';
 import { discover as discoverR } from '../src/discover.js';
@@ -192,6 +193,10 @@ const SCENARIOS = {
   createBranch: async ({ tracer }) => { const r = seeded(); await unwrapAsync(createBranch(r.url, { ref: 'refs/heads/b', from: 'main' }, { tracer, verify: true })); },
   deleteBranch: async ({ tracer }) => { const r = seeded(); commitOn(r, 'gone', { 'g.txt': 'g\n' }, 'gone', 'main'); await unwrapAsync(deleteBranch(r.url, { ref: 'refs/heads/gone' }, { tracer })); },
   createTag: async ({ tracer }) => { const r = seeded(); await unwrapAsync(createTag(r.url, { name: 'v1', target: r.base, message: 'v1', tagger: author }, { tracer, verify: true })); },
+  pushRepo: async ({ tracer }) => {
+    const r = seeded(); writeFileSync(join(r.work, 'a/c.txt'), 'c2\n'); git(r.work, ['add', '-A']); git(r.work, [...G, 'commit', '-q', '-m', 'local']);
+    await unwrapAsync(pushRepo(r.work, r.url, { refspecs: ['main'] }, { tracer }));
+  },
   // the wire spans on their own, under a harness span that is not part of the contract
   wire: async ({ tracer }) => {
     const r = seeded(); const holder = tracer.start('contract.harness');

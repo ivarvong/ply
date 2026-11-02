@@ -2,10 +2,10 @@
 import { Sha1, fromHex } from './sha1.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { bufferSource, concat } from './bytes.js';
-import { fromNullish, readKey, type Input } from './absent.js';
+import { at, fromNullish, readKey, type Input } from './absent.js';
 import { getOrElse } from './result.js';
 import {
-  PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, OID_BYTES, BYTE_MASK,
+  PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, BYTE_MASK,
   OBJ_TYPE_SHIFT, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
   OBJ_SIZE_FIRST_BASE, OBJ_SIZE_NEXT_BASE, BE32_SHIFTS,
   DELTA_COPY, DELTA_COPY_MAX, DELTA_INSERT_MAX, DELTA_OFF_SHIFT,
@@ -79,8 +79,10 @@ export async function zlibDeflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBu
   return new Uint8Array(ab);
 }
 
-// objects: [{ type (1-4), data, baseOid? }] — baseOid makes it a REF_DELTA whose `data` is the delta.
-export type PackInput = { readonly type: number; readonly data: Uint8Array } & Input<{ readonly baseOid: string | null }>;
+// objects: [{ type (1-4), data, baseOid?, baseIndex? }] — baseOid makes it a REF_DELTA whose `data` is the delta;
+// baseIndex (the index of an earlier object in the same list) an OFS_DELTA. buildPack is the encoder and checks neither:
+// push's planPush refuses a baseIndex that names no earlier object before anything is built.
+export type PackInput = { readonly type: number; readonly data: Uint8Array } & Input<{ readonly baseOid: string | null; readonly baseIndex: number | null }>;
 // typeName: the type's name for the five types a pack holds (TYPE_NAME), null for any other id a caller passed.
 export type BuiltEntry = {
   readonly type: number; readonly typeName: string | null; readonly size: number; readonly compressed: number;
@@ -91,6 +93,14 @@ const typeNameOf = (type: number): string | null => {
   return named.tag === 'some' ? named.value : null;
 };
 export type BuiltPack = { readonly pack: Uint8Array; readonly entries: BuiltEntry[] };
+// An OFS_DELTA's distance back to its base (gitformat-pack "offset encoding"): big-endian 7-bit groups, each group but
+// the last with the high bit set, and every group after the first offset by one (pack-objects write_no_reuse_object).
+export function encodeOfsDistance(distance: number): Uint8Array {
+  const out: number[] = [distance & OBJ_SIZE_NEXT_MASK];
+  let rest = Math.floor(distance / OBJ_SIZE_NEXT_BASE);
+  while (rest > 0) { rest -= 1; out.unshift(OBJ_CONTINUE | (rest & OBJ_SIZE_NEXT_MASK)); rest = Math.floor(rest / OBJ_SIZE_NEXT_BASE); }
+  return Uint8Array.from(out);
+}
 // Measured (test/pure.test.js history): hand-rolled stored-block zlib never beats CompressionStream's output — zlib
 // already emits stored blocks for incompressible input and ties at ≥32 bytes, and loses by 3 bytes below. So: deflate only.
 export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPack> {
@@ -101,18 +111,29 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
   new DataView(hdr.buffer).setUint32(PACK_SIGNATURE.length + BE32_SHIFTS.length, objects.length);
   parts.push(hdr);
   const entries: BuiltEntry[] = [];
+  // each object's offset in the pack, for an OFS_DELTA's distance back
+  const offsets: number[] = [];
+  let offset = PACK_HEADER_BYTES;
   for (const o of objects) {
     const given = getOrElse<string | null>(fromNullish(o.baseOid), null);
     const baseOid = given === null ? '' : given; // truthiness, as before: an empty baseOid is no base
-    const type: number = baseOid ? TYPE.REF_DELTA : o.type;
+    const baseIndex = getOrElse<number | null>(fromNullish(o.baseIndex), null);
+    const ofs = baseIndex === null ? null : encodeOfsDistance(offset - getOrElse(at(offsets, baseIndex), offset));
+    const ref = ofs === null && baseOid ? fromHex(baseOid) : null;
+    let type: number = ref === null ? o.type : TYPE.REF_DELTA;
+    if (ofs !== null) type = TYPE.OFS_DELTA;
     // one at a time, in pack order: the pack is a sequence (parallel deflate is a perf change, not this one)
     // oxlint-disable-next-line no-await-in-loop -- see above
     const z = await zlibDeflate(o.data);
     const h = encodeObjHeader(type, o.data.length);
     parts.push(h);
-    if (baseOid) parts.push(fromHex(baseOid));
+    const base = ofs === null ? ref : ofs;
+    if (base !== null) parts.push(base);
     parts.push(z);
-    entries.push({ type, typeName: typeNameOf(type), size: o.data.length, compressed: z.length, baseOid: given, bytes: h.length + (baseOid ? OID_BYTES : 0) + z.length });
+    const bytes = h.length + (base === null ? 0 : base.length) + z.length;
+    offsets.push(offset);
+    offset += bytes;
+    entries.push({ type, typeName: typeNameOf(type), size: o.data.length, compressed: z.length, baseOid: ofs === null ? given : null, bytes });
   }
   const body = concat(parts);
   const pack = concat([body, new Sha1().update(body).digest()]);
