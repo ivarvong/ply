@@ -5,12 +5,11 @@
 // same blocks as TypeScript (generated from the README; this file fails when it drifts: UPDATE_README_TYPETEST=1).
 //
 // Two server configurations:
-//   default  makeBareRepo: uploadpack.allowFilter, allowAnySHA1InWant, fsckObjects (the fixture every suite uses)
-//   stock    `git init --bare` + `http.receivepack true` and nothing else: what a self-hosted customer has
-// On the stock server each step runs from a copy of the default run's repository just before that step (with the
-// default run's variables), so each step is judged on its own. STOCK_SERVER_SUPPORTED says whether ply's filtered fetches
-// fall back on a server that does not advertise `filter`; while false, the steps that need one are expected to fail
-// (STOCK_NEEDS_FILTER), and the continuous stock lifecycle is skipped. Flip it with the fetch fallback.
+//   default  makeBareRepo: uploadpack.allowFilter, allowAnySHA1InWant, protocol.version 2 (the fixture every suite uses)
+//   stock    makeBareRepo { stock: true }: upload-pack at git's defaults (no filter, no any-SHA-1 wants), as a
+//            `git init --bare` behind `git http-backend` with `http.receivepack true` serves it
+// The stock server runs the whole lifecycle on one repository, and again step by step, each step from a copy of the
+// default run's repository just before it (with the default run's variables), so each step is judged on its own too.
 import { test, describe, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -19,11 +18,6 @@ import { spawnSync } from 'node:child_process';
 import * as ply from '../src/index.js';
 import * as plyCheckoutNode from '../src/checkout-node.js';
 import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems, commitFiles } from './server.js';
-
-const STOCK_SERVER_SUPPORTED = false;
-// The quick-start steps that need a filtered fetch (or a want of a non-tip commit) and fail on a stock server today.
-const STOCK_NEEDS_FILTER = new Set(['read', 'edit', 'commit-changes', 'branch-merge', 'tag', 'rebase-pick-revert', 'history', 'checkout', 'errors']);
-const stockFails = step => !STOCK_SERVER_SUPPORTED && STOCK_NEEDS_FILTER.has(step);
 
 const ZERO = '0'.repeat(40);
 const README_PATH = new URL('../README.md', import.meta.url);
@@ -201,21 +195,16 @@ const author = { name: 'Release Bot', email: 'bot@example.com' };
 // The setup block's names, bound to this server instead of the README's placeholders.
 const setupScope = name => ({ url: `${srv.url}/${name}.git`, opts: { tracer: new ply.Tracer() }, author, outDir: join(root, `${name}-out`), console: quietConsole() });
 
-// A repository as the default fixture has it, or as `git init --bare` + http.receivepack leaves it.
+// A repository as the default fixture has it, or with upload-pack at git's defaults.
 const defaultRepo = name => makeBareRepo(root, name);
-function stockRepo(name) {
-  const dir = join(root, `${name}.git`);
-  git(root, ['init', '--bare', '-q', '-b', 'main', dir]);
-  git(dir, ['config', 'http.receivepack', 'true']);
-  return dir;
-}
-// A copy of `bare` reconfigured as stock: every key makeBareRepo set is unset again, http.receivepack stays.
+const stockRepo = name => makeBareRepo(root, name, { stock: true });
+// A copy of `bare` reconfigured as makeBareRepo's stock: the upload-pack keys unset again.
 function stockCopy(bare, name) {
   const dir = join(root, `${name}.git`);
   cpSync(bare, dir, { recursive: true });
-  for (const k of ['uploadpack.allowFilter', 'uploadpack.allowAnySHA1InWant', 'receive.fsckObjects', 'transfer.fsckObjects', 'protocol.version']) spawnSync('git', ['config', '--unset', k], { cwd: dir });
-  const left = spawnSync('git', ['config', '--get-regexp', '^(uploadpack|transfer|receive|protocol)\\.'], { cwd: dir, encoding: 'utf8' });
-  assert.equal(left.stdout, '', 'stock: no upload-pack, transfer, receive or protocol keys');
+  for (const k of ['uploadpack.allowFilter', 'uploadpack.allowAnySHA1InWant', 'protocol.version']) spawnSync('git', ['config', '--unset', k], { cwd: dir });
+  const left = spawnSync('git', ['config', '--get-regexp', '^(uploadpack|protocol)\\.'], { cwd: dir, encoding: 'utf8' });
+  assert.equal(left.stdout, '', 'stock: no upload-pack or protocol keys');
   return dir;
 }
 
@@ -268,9 +257,9 @@ describe('lifecycle, default server (allowFilter on)', () => {
 });
 
 // Each step on a stock server, from the default run's state just before it.
-describe('lifecycle, stock server (http.receivepack only), step by step', () => {
+describe('lifecycle, stock server (upload-pack defaults), step by step', () => {
   for (const step of STEPS) {
-    (stockFails(step) ? test.fails : test)(step, async () => {
+    test(step, async () => {
       const from = before_.get(step);
       assert.ok(from, `the default run reached ${step}`);
       const name = `stock-${step}-${n++}`;
@@ -282,8 +271,8 @@ describe('lifecycle, stock server (http.receivepack only), step by step', () => 
   }
 });
 
-// The whole lifecycle on one stock repository, once ply serves it.
-describe.runIf(STOCK_SERVER_SUPPORTED)('lifecycle, stock server, continuous', () => {
+// The whole lifecycle on one stock repository.
+describe('lifecycle, stock server (upload-pack defaults), continuous', () => {
   let bare, scope;
   test.each(STEPS)('%s', async step => {
     if (step === STEPS[0]) { bare = stockRepo('main-stock'); scope = setupScope('main-stock'); }
@@ -319,7 +308,7 @@ for (const kind of ['default', 'stock']) {
       }
       clean(bare);
     });
-    (kind === 'stock' && !STOCK_SERVER_SUPPORTED ? test.fails : test)('createBranch from a 40-hex commit id that is not a tip', async () => {
+    test('createBranch from a 40-hex commit id that is not a tip', async () => {
       const r = await ply.createBranch(url, { ref: 'refs/heads/b-oid', from: c1 }, opts());
       assert.ok(r.ok, r.ok || r.error.message);
       assert.equal(rev(bare, 'refs/heads/b-oid'), c1);

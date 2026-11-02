@@ -4,13 +4,13 @@
 // Reading the received pack (readPack), fetchPack and its fallbacks return Result.
 import type { Span } from './otel.js';
 import type { Attrs, Transport } from './transport.js';
-import type { FetchOpts, PackObject, V2State } from './fetch.js';
+import type { FetchOpts, PackObject, V2State, WideFilter } from './fetch.js';
 import type { Input } from './absent.js';
 import { concat } from './bytes.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import type { ParsedPack, ResolvedPack } from './packresolve.js';
-import { packStream, isFilterRejection, harvest, checkWide, skippedAttrs, fetchExchange } from './fetch.js';
+import { packStream, isFilterRejection, filterUnadvertised, fallbackName, harvest, checkWide, skippedAttrs, fetchExchange } from './fetch.js';
 import { fail } from './errors.js';
 import type { PlyError } from './errors.js';
 import { fromNullable, fromNullish, withDefaults } from './absent.js';
@@ -113,31 +113,38 @@ export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackE
 // so a malformed object fails the fetch (`pack_corrupt`) instead of reaching a caller or the harvest. On the tree:0
 // path all of it is what was asked for. On the blob:none path the trees are extras a tree:0 server would not have sent
 // (the walk reads commits only): checkWide drops one that is over a limit instead of failing the walk (#46; see there).
-// The result carries `filter` (the one the answered request used) and `learned` (true only on the request that
-// discovered the refusal; a later call on the same quirks asks for blob:none directly and reports learned false).
+// A server whose advertisement has no `filter` (git's default, fetch.js filterUnadvertised) gets no filter: the pack then
+// carries every tree and blob of the window too, held to the same limits; the trees are checked and harvested the same
+// way, the blobs are hash-checked by the resolver and dropped (the walk reads commits only).
+// The result carries `filter` (the one the answered request used; null for none) and `learned` (true only on the
+// request that discovered the refusal; a later call on the same quirks asks for the fallback directly and reports
+// learned false).
 const commitsAndTags = (_oid: string, o: PackObject): boolean => o.type !== TYPE.TREE;
 export type Tree0Pack = FetchPackResult & { readonly filter: string | null; readonly learned: boolean };
 export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Result<Tree0Pack, PlyError>> {
-  const wide = async (learned: boolean): Promise<Result<Tree0Pack, PlyError>> => {
+  const wide = async (filter: WideFilter, learned: boolean): Promise<Result<Tree0Pack, PlyError>> => {
     const check = (objects: Map<string, PackObject>): Result<Attrs, PlyError> => { const c = checkWide(objects, commitsAndTags, t.limits); return c.ok ? ok(skippedAttrs(c.value)) : c; };
-    const r = await fetchPack(t, { ...opts, filter: 'blob:none' }, { check, attrs: { 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
+    const r = await fetchPack(t, { ...opts, filter }, { check, attrs: { 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
     if (!r.ok) return r;
     if (r.value.objects) {
       const h = harvest(t, r.value.objects);
       if (!h.ok) return h;
     }
-    return ok({ ...r.value, filter: 'blob:none', learned });
+    return ok({ ...r.value, filter: filter === '' ? null : filter, learned });
   };
-  if (t.quirks.treeFilter === 'blob:none') return wide(false);
+  if (t.quirks.treeFilter === 'none') return wide('', false);
+  if (t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
   const base = await fetchPack(t, opts, { check: (objects): Result<Attrs, PlyError> => { const c = checkWide(objects, () => true, t.limits); return c.ok ? ok({}) : c; } });
   if (base.ok) {
     const f = fromNullable(opts.filter);
     const filterVal = f.tag === 'some' ? f.value : null;
     return ok({ ...base.value, filter: filterVal, learned: false });
   }
-  if (!isFilterRejection(base.error)) return base;
-  t.quirks.treeFilter = 'blob:none';
-  return wide(true);
+  if (isFilterRejection(base.error)) {
+    t.quirks.treeFilter = 'blob:none';
+    return wide('blob:none', true);
+  }
+  return (await filterUnadvertised(t, base.error)) ? wide('', true) : base;
 }
 
 // The two filters a history walk asks for. Anything else is the caller's bug, refused before a request.
@@ -145,10 +152,12 @@ export type PackFilter = 'tree:0' | 'blob:none';
 const isPackFilter = (f: unknown): f is PackFilter => f === 'tree:0' || f === 'blob:none';
 export type FilteredWantConfig = { readonly wants: readonly string[]; readonly filter: PackFilter; readonly deepen: number };
 export type FilteredWant = Input<FilteredWantConfig>;
+// `filter` is the one the answered request used: the asked one, blob:none (a host that refuses tree:0), or null (a host
+// that does not take a filter at all: the pack is unfiltered).
 export type FilteredPack = {
   readonly objects: Map<string, PackObject> | null;
   readonly shallow: readonly string[];
-  readonly filter: PackFilter;
+  readonly filter: PackFilter | null;
   readonly learned: boolean;
 };
 // A caller's value, quoted: a primitive as JSON, anything else (the platform's missing value included) by its typeof.
@@ -163,7 +172,9 @@ export async function fetchPackFiltered(t: Transport, opts: FilteredWant | null)
   if (wants.length === 0) return fail('bad_request', 'fetchPackFiltered: wants must name at least one object', { what: 'wants' });
   const r = await fetchPackTree0(t, { wants, filter, deepen: opts.deepen });
   if (!r.ok) return r;
-  // Success echoes the filter we just checked, or the fallback's blob:none. Both are PackFilter.
-  const echoed: PackFilter = r.value.filter === 'blob:none' ? 'blob:none' : filter;
+  // Success echoes the filter we just checked, the fallback's blob:none, or null for none.
+  const answered = fromNullable(r.value.filter);
+  let echoed: PackFilter | null = null;
+  if (answered.tag === 'some') echoed = answered.value === 'blob:none' ? 'blob:none' : filter;
   return ok({ objects: r.value.objects, shallow: r.value.shallow, filter: echoed, learned: r.value.learned });
 }

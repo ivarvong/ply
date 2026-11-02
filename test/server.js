@@ -180,11 +180,14 @@ export async function gitUserinfoCred(cwd, url) {
   return { cred: null, config: [['http.extraHeader', `Authorization: Basic ${Buffer.concat([user, Buffer.from(':'), pass]).toString('base64')}`]] };
 }
 
-// A bare repo configured for v2 partial fetch of arbitrary objects + push.
-export function makeBareRepo(root, name) {
+// A bare repo configured for v2 partial fetch of arbitrary objects + push. `stock: true` leaves upload-pack at git's
+// defaults: no uploadpack.allowFilter (so `fetch=` advertises no `filter`, and upload-pack dies on one) and no
+// allowAnySHA1InWant, as a `git init --bare` behind `git http-backend` serves it; push and fsck-on-receive stay on.
+export function makeBareRepo(root, name, { stock = false } = {}) {
   const dir = join(root, `${name}.git`);
   git(root, ['init', '--bare', '-q', '-b', 'main', dir]);
-  for (const [k, v] of [['uploadpack.allowFilter', 'true'], ['uploadpack.allowAnySHA1InWant', 'true'], ['http.receivepack', 'true'], ['receive.fsckObjects', 'true'], ['transfer.fsckObjects', 'true'], ['protocol.version', '2']]) git(dir, ['config', k, v]);
+  const upload = stock ? [] : [['uploadpack.allowFilter', 'true'], ['uploadpack.allowAnySHA1InWant', 'true'], ['protocol.version', '2']];
+  for (const [k, v] of [...upload, ['http.receivepack', 'true'], ['receive.fsckObjects', 'true'], ['transfer.fsckObjects', 'true']]) git(dir, ['config', k, v]);
   return dir;
 }
 

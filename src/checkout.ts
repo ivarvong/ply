@@ -38,6 +38,8 @@ import type { Result } from './result.js';
 import type { OperationOpts } from './operation.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
+import { filterUnadvertised, fallbackName, packName } from './fetch.js';
+import type { WideFilter } from './fetch.js';
 import { resolveCommit, openBlob, pathComps } from './read.js';
 import type { ReadOptions, RefSpec } from './read.js';
 import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
@@ -116,11 +118,25 @@ export function treeFiles(tree: TreeLookup, oid: string, options: TreeFilesOptio
   return ok(out);
 }
 
-type Trees = { readonly root: string; readonly tree: TreeLookup; readonly objects: number; readonly trees: number };
-// Effect: the commit and every tree under it, as one blob:none pack (deepen 1). Returns { root, tree } where tree(oid)
-// parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
+// `blobs`: the blobs the pack brought, by oid (hash-checked by the resolver): none under blob:none; every blob of the
+// commit from a server that takes no filter, so the files iterator reads them from here instead of fetching them again.
+type Trees = { readonly root: string; readonly tree: TreeLookup; readonly objects: number; readonly trees: number; readonly blobs: ReadonlyMap<string, Uint8Array> };
+// The pack: blob:none, or no filter for a host whose advertisement does not list `filter` (fetch.ts filterUnadvertised:
+// learned from the empty answer git's upload-pack gives one, then asked again without it).
+async function treesPack(t: Transport, commit: string): Promise<Result<FetchedPack & { readonly filter: WideFilter }, PlyError>> {
+  // oxlint-disable-next-line typescript/promise-function-async -- fetchPack's promise, passed through
+  const get = (filter: WideFilter, learned: boolean): Promise<Result<FetchedPack, PlyError>> => fetchPack(t, { wants: [commit], filter, deepen: 1 }, filter === '' ? { attrs: { 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': 'blob:none', 'git.fetch.filter.learned': learned } } : {});
+  const filter: WideFilter = t.quirks.treeFilter === 'none' ? '' : 'blob:none';
+  const got = await get(filter, false);
+  if (got.ok) return ok({ ...got.value, filter });
+  if (filter === '' || !(await filterUnadvertised(t, got.error))) return got;
+  const again = await get('', true);
+  return again.ok ? ok({ ...again.value, filter: '' }) : again;
+}
+// Effect: the commit and every tree under it, as one pack (deepen 1). Returns { root, tree } where tree(oid) parses a
+// tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Result<Trees, PlyError>> {
-  const got = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 });
+  const got = await treesPack(t, commit);
   if (!got.ok) {
     if (got.error.code === 'remote_error' && thrownReasonIs(got.error, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
     return got;
@@ -128,7 +144,8 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   const r = got.value;
   const objects: PackObjects = r.objects === null ? new Map() : r.objects;
   const wanted = mapGet(objects, commit);
-  if (wanted.tag === 'none') return fail('pack_corrupt', `commit ${commit} not in the blob:none pack (${objects.size} objects)`);
+  const name = packName(r.filter);
+  if (wanted.tag === 'none') return fail('pack_corrupt', `commit ${commit} not in the ${name} pack (${objects.size} objects)`);
   const c = wanted.value;
   if (c.type !== TYPE.COMMIT) {
     const found = nonCommitType(c.type);
@@ -148,13 +165,14 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
   }
   const tree = (oid: string): Result<readonly TreeEntry[], PlyError> => {
     const o = mapGet(objects, oid);
-    if (o.tag === 'none' || o.value.type !== TYPE.TREE) return fail('pack_corrupt', `tree ${oid} not in the blob:none pack`);
+    if (o.tag === 'none' || o.value.type !== TYPE.TREE) return fail('pack_corrupt', `tree ${oid} not in the ${name} pack`);
     return parseTree(o.value.data, limits);
   };
-  let trees = 0; for (const o of objects.values()) if (o.type === TYPE.TREE) trees++;
+  let trees = 0; const blobs = new Map<string, Uint8Array>();
+  for (const [oid, o] of objects) { if (o.type === TYPE.TREE) trees++; else if (o.type === TYPE.BLOB) blobs.set(oid, o.data); }
   const parsed = parseCommit(c.data, limits);
   if (!parsed.ok) return parsed;
-  return ok({ root: parsed.value.tree, tree, objects: objects.size, trees });
+  return ok({ root: parsed.value.tree, tree, objects: objects.size, trees, blobs });
 }
 
 // Effect: walk `comps` from `root` to the subtree's oid (not_found for a missing component or a non-directory).
@@ -199,7 +217,9 @@ const bytesStream = (data: Uint8Array): ReadableStream<Uint8Array> => new Readab
 // iteration does, both after the checkout root has ended: it is the root of its own trace with a follows_from link to
 // the checkout root (README "Span lifetimes"), and each streamed blob's git.read.blob follows it in turn. A failure is
 // the iterator's: next() rejects with the PlyError (the async iterator's edge).
-async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, entries: readonly CheckoutEntry[], batch: number): AsyncGenerator<CheckoutFile, void, void> {
+// `held`: the blobs the trees pack already brought (fetchTrees), read from there instead of fetched.
+type BlobPlan = { readonly batch: number; readonly held: ReadonlyMap<string, Uint8Array> };
+async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, entries: readonly CheckoutEntry[], { batch, held }: BlobPlan): AsyncGenerator<CheckoutFile, void, void> {
   const span = tracer.start('git.checkout.blobs', { follows: opener });
   const t: Transport = withParent(transport, span);
   const byOid = new Map<string, CheckoutEntry[]>();
@@ -230,12 +250,23 @@ async function* blobFiles(transport: Transport, tracer: Tracer, opener: Span, en
     stat.fetches++;
     for (const oid of oids) yield [oid, getOrElse(mapOption(mapGet(got.value, oid), o => o.data), null)];
   }
+  // group() over the oids the trees pack did not already bring, in order: a held blob is yielded where it stands.
+  async function* fetched(oids: readonly string[]): AsyncGenerator<readonly [string, Uint8Array | null], void, void> {
+    let run: string[] = [];
+    for (const oid of oids) {
+      const h = mapGet(held, oid);
+      if (h.tag === 'none') { run.push(oid); continue; }
+      if (run.length > 0) { yield* group(run); run = []; }
+      yield [oid, h.value];
+    }
+    if (run.length > 0) yield* group(run);
+  }
   let done = false;
   try {
     for (const e of entries) if (e.mode === MODE_COMMIT) yield { path: e.path, oid: e.oid, mode: e.mode, size: 0, stream: null };
     const oids = [...byOid.keys()];
     for (let i = 0; i < oids.length; i += batch) {
-      for await (const [oid, data] of group(oids.slice(i, i + batch))) {
+      for await (const [oid, data] of fetched(oids.slice(i, i + batch))) {
         // every oid in a group is a key of byOid
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)
         for (const e of byOid.get(oid) as CheckoutEntry[]) {
@@ -319,7 +350,7 @@ export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options
     if (!listed.ok) return listed;
     const entries = listed.value;
     // the tracer operation() started the root span on (opts.tracer)
-    const files = blobFiles(t, root.tracer, root, entries, batch);
+    const files = blobFiles(t, root.tracer, root, entries, { batch, held: trees.blobs });
     return outcome('ok', { ref: name, commit, tree: oid, path: comps.join('/'), entries, files }, {
       'git.checkout.commit': commit, 'git.checkout.tree': oid, 'git.checkout.entries': entries.length,
       'git.checkout.pack.objects': trees.objects, 'git.checkout.pack.trees': trees.trees,
