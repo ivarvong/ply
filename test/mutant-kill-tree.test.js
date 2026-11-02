@@ -979,6 +979,10 @@ test('an advertised unborn HEAD is empty for readCommit and head_unborn otherwis
   const plain = { code: 'not_found', miss: { kind: 'head_unborn', target } };
   const liar = remote({ hook: async req => { if (req.command === 'ls-refs') throw plain; } });
   await assert.rejects(unwrapAsync(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...liar.transport({ tracer: new Tracer() }), advertise } })), e => e === plain);
+  // a primitive a transport raises is no object to code: coded() builds the exchange's error around it
+  const raw = remote({ hook: async req => { if (req.command === 'ls-refs') throw 'reset'; } });
+  const rawErr = errOf(await readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...raw.transport({ tracer: new Tracer() }), advertise } }));
+  assert.deepEqual([rawErr.code, rawErr.message, rawErr.cause], ['protocol', 'reset', 'reset']);
   const typed = remote({ hook: async req => { if (req.command === 'ls-refs') throw fail('pack_corrupt', 'odd', { miss: { kind: 'head_unborn', target } }); } });
   await rejects(unwrapAsync(readCommit('http://fake/r.git', {}, { tracer: new Tracer(), transport: { ...typed.transport({ tracer: new Tracer() }), advertise } })), 'pack_corrupt', 'odd');
   const blank = server('unborn HEAD symref-target:\n');

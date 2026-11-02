@@ -14,6 +14,7 @@ import type { ErrorOf, PlyError } from './errors.js';
 import type { OperationOpts } from './operation.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
+import type { LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
 import { fetchObject } from './fetch.js';
 import { fetchCommit } from './commit.js';
@@ -468,11 +469,10 @@ type StreamOpts = {
 
 // Only ply's own cas_conflict is a lost race: a look-alike object a transport raises is returned as it is.
 const lostRace = (e: PlyError): boolean => isPlyError(e) && e.code === 'cas_conflict';
-// A lost race, reported against a fresh read of the ref (that read's own Err when it fails).
-async function lostNow(t: Transport, ref: string, expected: string, cause: unknown): Promise<Err<PlyError>> {
-  const listed = await lsRefs(t, [ref]);
-  return listed.ok ? lost(ref, expected, tipOf(listed.value.refs, ref), cause) : listed;
-}
+// A lost race, reported against a fresh read of the ref (`listed`; that read's own Err when it failed). Synchronous,
+// so the cas_conflict is built in its caller's frame.
+const lostAt = (listed: Result<LsRefsResult, PlyError>, ref: string, expected: string, cause: unknown): Err<PlyError> =>
+  (listed.ok ? lost(ref, expected, tipOf(listed.value.refs, ref), cause) : listed);
 
 type StreamJob = {
   readonly plan: Plan;
@@ -510,7 +510,7 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
     const rebase = creating && e.code === 'bad_request' && whatIs(e, 'rebase');
     if (e.code !== 'cas_conflict' && !rebase) return result;
     if (e.code === 'cas_conflict' && !creating && actualKnown(e)) return result;
-    return lostNow(t, target.ref, creating ? ZERO_OID : parent.oid, e);
+    return lostAt(await lsRefs(t, [target.ref]), target.ref, creating ? ZERO_OID : parent.oid, e);
   }
   const edited = result.value;
   if (edited.noop) {
@@ -579,7 +579,7 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
     // a lost race is redone once, or reported against a fresh read; any other Err is the commit's
     if (!lostRace(pushed.error)) return pushed;
     if (attempt === 0 && !pinned && !parent.creating) return ok({ retry: true });
-    return lostNow(t, target.ref, oldOid, pushed.error);
+    return lostAt(await lsRefs(t, [target.ref]), target.ref, oldOid, pushed.error);
   }
   // the read-back's Err (ambiguous) is the commit's
   if (verify) { const seen = await verifyRef(t, root, 'git.commit', target.ref, oid); if (!seen.ok) return seen; }
