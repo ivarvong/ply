@@ -3,10 +3,10 @@
 import type { Transport } from './transport.js';
 import type { FetchOpts } from './fetch.js';
 import type { FetchPackExtra, FetchPackResult } from './fetchpack.js';
-import type { ErrorOf } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
 import type { Input } from './absent.js';
 import type { Result } from './result.js';
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import { checkLimit } from './limits.js';
 import { fetchPack } from './fetchpack.js';
 import { getOrElse, ok } from './result.js';
@@ -33,24 +33,28 @@ function negotiateCaps(maxRounds: unknown, batch: unknown): Result<Caps, ErrorOf
   return ok({ rounds: rounds.value, batch: size.value });
 }
 
-export async function negotiate(t: Transport, opts: NegotiateOpts, extra: Pick<FetchPackExtra, 'external' | 'resolve'> = {}): Promise<NegotiateResult> {
+export async function negotiate(t: Transport, opts: NegotiateOpts, extra: Pick<FetchPackExtra, 'external' | 'resolve'> = {}): Promise<Result<NegotiateResult, PlyError>> {
   const { wants, haves: givenHaves, batch: _batch, maxRounds: _maxRounds, ...rest } = opts;
   const { batch, maxRounds } = withDefaults(opts, { batch: NEGOTIATE_BATCH, maxRounds: NEGOTIATE_ROUNDS });
   const haves = getOrElse(fromNullable(givenHaves), []);
   const { external, resolve } = extra;
-  const caps = orThrow(negotiateCaps(maxRounds, batch));
+  const checked = negotiateCaps(maxRounds, batch);
+  if (!checked.ok) return checked;
+  const caps = checked.value;
   const acked = new Set<string>();
   const rounds: Round[] = [];
   let i = 0, ready = false;
   for (let round = 0; round < caps.rounds && i < haves.length && !ready; round++) {
     const sent = haves.slice(i, i + caps.batch); i += caps.batch;
     // oxlint-disable-next-line no-await-in-loop -- each round's haves depend on the last round's acks
-    const r = await fetchPack(t, { ...rest, wants, haves: [...acked, ...sent], done: false }, { external, resolve });
+    const fetched = await fetchPack(t, { ...rest, wants, haves: [...acked, ...sent], done: false }, { external, resolve });
+    if (!fetched.ok) return fetched;
+    const r = fetched.value;
     for (const a of r.acks) acked.add(a);
     rounds.push({ sent: sent.length, acks: r.acks, nak: r.nak, ready: r.ready, pack: Boolean(r.parsed) });
     ready = r.ready;
-    if (r.parsed) return { ...r, rounds, common: [...acked] }; // server went straight to packfile
+    if (r.parsed) return ok({ ...r, rounds, common: [...acked] }); // server went straight to packfile
   }
   const r = await fetchPack(t, { ...rest, wants, haves: [...acked], done: true }, { external, resolve });
-  return { ...r, rounds, common: [...acked] };
+  return r.ok ? ok({ ...r.value, rounds, common: [...acked] }) : r;
 }

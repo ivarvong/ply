@@ -298,7 +298,7 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
   const read = async (oid: string): Promise<Uint8Array> => {
     const cached = mapGet(cache, oid);
     if (cached.tag === 'some') { k.hits++; return cached.value; }
-    const data = (await fetchObject(t, { oid, expectType: TYPE.TREE })).data;
+    const data = orThrow(await fetchObject(t, { oid, expectType: TYPE.TREE })).data;
     cache.set(oid, data); k.read++;
     return data;
   };
@@ -341,12 +341,11 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head === null ? '' : head, 'git.push_tree.attempt': attempt };
   // oxlint-disable-next-line complexity, typescript/no-unsafe-type-assertion -- the push is one sequence of protocol steps; the options' tracer: EntryOptions (boundary.ts)
   return orThrow(await operation('push_tree', url, ({ ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
-    // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
-    const commitOf = (oid: string): Promise<Fetched> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
+    const commitOf = async (oid: string): Promise<Fetched> => orThrow(await fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 }));
     try {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => getOrElse<string | null>(mapOption(mapGet(refs, s.base), r => r.oid), null)), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
+    const [resolved, speculative] = await Promise.all([lsRefs(t, [s.base]).then(orThrow).then(({ refs }: { readonly refs: ReadonlyMap<string, { readonly oid: string }> }) => getOrElse<string | null>(mapOption(mapGet(refs, s.base), r => r.oid), null)), head ? commitOf(head).then(o => o, (e: unknown) => e) : null]);
     orThrow(baseFound(s, resolved));
     const decided = decideHead({ hint: head, resolved });
     hint = hintWas === null ? decided.hint : hintWas;

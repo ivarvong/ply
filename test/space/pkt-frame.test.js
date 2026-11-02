@@ -25,16 +25,24 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pkt, pktInit, pktStep, pktFinish } from '../../src/pktline.js';
-import { discover } from '../../src/discover.js';
-import { receiveCaps } from '../../src/receivecaps.js';
-import { lsRefs, lsRefsBody } from '../../src/lsrefs.js';
-import { fetchObject, fetchBody } from '../../src/fetch.js';
+import { discover as discoverR } from '../../src/discover.js';
+import { receiveCaps as receiveCapsR } from '../../src/receivecaps.js';
+import { lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../../src/lsrefs.js';
+import { fetchObject as fetchObjectR, fetchBody as fetchBodyR } from '../../src/fetch.js';
 import { push } from '../../src/push.js';
-import { pushWithOptions } from '../../src/receivecaps.js';
+import { pushWithOptions as pushWithOptionsR } from '../../src/receivecaps.js';
 import { transport, outcome, outcomeSync, cat, enc, band, FLUSH, DELIM } from './wire.js';
 import { git } from './pack-fixtures.js';
-import { unwrap } from '../unwrap.js';
+import { unwrap, unwrapAsync } from '../unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const discover = (...a) => unwrapAsync(discoverR(...a));
+const receiveCaps = (...a) => unwrapAsync(receiveCapsR(...a));
+const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
+const lsRefsBody = (...a) => unwrap(lsRefsBodyR(...a));
+const fetchObject = (...a) => unwrapAsync(fetchObjectR(...a));
+const fetchBody = (...a) => unwrap(fetchBodyR(...a));
+const pushWithOptions = (...a) => unwrapAsync(pushWithOptionsR(...a));
 const LARGE_PACKET_MAX = 65520; // pkt-line.h
 const OID = 'a'.repeat(40);
 

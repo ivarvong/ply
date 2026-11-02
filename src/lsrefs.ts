@@ -1,17 +1,17 @@
 // v2 ls-refs: the ref namespace, filtered by prefix. The one request that cannot be cached (it is the freshness source).
-// The listing is read by a step function over frames (lsRefsStep, Result); lsRefs is the I/O edge and throws.
+// The listing is read by a step function over frames (lsRefsStep, Result); lsRefs is the exchange, also a Result.
 /* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal */
 import type { PlyError } from './errors.js';
 import type { Span } from './otel.js';
 import type { Frame, Transport } from './transport.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
-import { fail, orThrow } from './errors.js';
+import { fail } from './errors.js';
 import { pkts } from './pktline.js';
 import { decodeBytes } from './bytes.js';
 import { limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { frames, coded, clientSpan, proto } from './transport.js';
+import { frames, coded, clientSpan, proto, spanned } from './transport.js';
 import { OID_HEX_CHARS, SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 import { assertNever, err, ok } from './result.js';
 // oxlint-disable-next-line import/max-dependencies -- the exchange joins the frame reader, the limits and the caller's options
@@ -43,8 +43,8 @@ export type LsRefsUnborn = { readonly name: 'HEAD'; readonly target: string };
 // unborn: the unborn HEAD, when the server listed one (it does only when the request says `unborn`); null otherwise.
 export type LsRefsResult = { readonly refs: Map<string, LsRef>; readonly head: string | null; readonly unborn: LsRefsUnborn | null };
 
-// @decoder parseLsRefLineResult prefix=ls-ref
-export function parseLsRefLineResult(line: string): Result<LsRef | null, PlyError> {
+// @decoder parseLsRefLine prefix=ls-ref
+export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   if (line.startsWith(ERR)) return fail('remote_error', `remote: ${line.slice(ERR.length)}`);
   const sp = line.indexOf(' ');
   // Stryker disable next-line EqualityOperator: a leading space still fails the oid check with this same malformed-line error
@@ -74,8 +74,6 @@ export function parseLsRefLineResult(line: string): Result<LsRef | null, PlyErro
   }
   return ok(rec);
 }
-// @decoder parseLsRefLine prefix=ls-ref
-export const parseLsRefLine = (line: string): LsRef | null => orThrow(parseLsRefLineResult(line));
 
 // An `unborn <name> …` line (the first field is `unborn`), as connect.c process_ref_v2 reads it: only a line naming HEAD
 // counts, and its first `symref-target:` attribute is the target git records, replacing any earlier one (the last wins).
@@ -96,9 +94,9 @@ export type UnbornReader = typeof parseUnbornLine;
 // only to a server whose advertisement lists `ls-refs=unborn` (git: server_supports_feature("ls-refs", "unborn")).
 export type LsRefsBodyConfig = { readonly peel: boolean; readonly symrefs: boolean; readonly unborn: boolean };
 export type LsRefsBodyOptions = Input<LsRefsBodyConfig>;
-export const lsRefsBody = (prefixes: readonly string[] = [], options: LsRefsBodyOptions = {}): Uint8Array<ArrayBuffer> => {
+export const lsRefsBody = (prefixes: readonly string[] = [], options: LsRefsBodyOptions = {}): Result<Uint8Array<ArrayBuffer>, PlyError> => {
   const { peel, symrefs, unborn } = withDefaults(options, { peel: true, symrefs: true, unborn: false });
-  return orThrow(pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n', unborn && 'unborn\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 }));
+  return pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n', unborn && 'unborn\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
 };
 
 // The listing as it is read: `open` until the flush that ends it, then `ended` (any frame after that is refused).
@@ -127,7 +125,7 @@ export function lsRefsStep(st: LsListing, f: Frame, caps: LsCaps): Result<LsList
       // A ref name is bytes (check-ref-format allows any byte >= 0x80): decodeBytes keeps them distinct and writable back,
       // and only the LF comes off, as connect.c's packet reader chomps it. trim() also ate a trailing U+FEFF or U+00A0 (#43).
       const line = decodeBytes(f.payload).replace(/\n$/, '');
-      const parsed = parseLsRefLineResult(line);
+      const parsed = parseLsRefLine(line);
       if (!parsed.ok) return parsed;
       const rec = parsed.value;
       if (rec === null) {
@@ -165,20 +163,32 @@ export function lsRefsEnd(st: LsListing): Result<LsRefsResult, PlyError> {
 // The ls-refs exchange. `unborn` asks for the unborn HEAD and reads each unborn line (parseUnbornLine): the caller has
 // checked the server advertises it (the public lsRefs in client.ts does, from the advertisement). Passed in, not
 // imported, so a bundle that never asks (edit, read) carries no unborn reader. Without it an unborn line is skipped.
-// async: a synchronous failure (a bad prefix, a missing limit) is a rejection, as it always was
-// oxlint-disable-next-line require-await -- see above
-export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: Input<{ readonly unborn: UnbornReader }> = {}): Promise<LsRefsResult> {
-  for (const p of prefixes) orThrow(validateWire(p, 'ref prefix'));
-  const maxBytes = orThrow(readLimit(t.limits, 'maxLsRefsBytes'));
-  const maxRefs = orThrow(readLimit(t.limits, 'maxRefs'));
+// oxlint-disable-next-line require-await -- async: a synchronous failure (an unusable transport) is a rejection, as it always was
+export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: Input<{ readonly unborn: UnbornReader }> = {}): Promise<Result<LsRefsResult, PlyError>> {
+  for (const p of prefixes) {
+    const valid = validateWire(p, 'ref prefix');
+    if (!valid.ok) return valid;
+  }
+  const maxBytes = readLimit(t.limits, 'maxLsRefsBytes');
+  if (!maxBytes.ok) return maxBytes;
+  const maxRefs = readLimit(t.limits, 'maxRefs');
+  if (!maxRefs.ok) return maxRefs;
   // a reader given as null still asks, and reads nothing (as before)
-  const caps: LsCaps = { maxBytes, maxRefs, unborn: readKey(options, 'unborn') };
-  // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
-  return coded('protocol', () => t.tracer.span('git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<LsRefsResult> => {
+  const caps: LsCaps = { maxBytes: maxBytes.value, maxRefs: maxRefs.value, unborn: readKey(options, 'unborn') };
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
+  return coded('protocol', () => spanned(t, 'git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<Result<LsRefsResult, PlyError>> => {
+    const body = lsRefsBody(prefixes, { unborn: caps.unborn.tag === 'some' });
+    if (!body.ok) return body;
     let st = lsInit();
-    for await (const f of frames(t, 'git-upload-pack', lsRefsBody(prefixes, { unborn: caps.unborn.tag === 'some' }), span)) st = orThrow(lsRefsStep(st, f, caps));
-    const listed = orThrow(lsRefsEnd(st));
-    span.set({ 'git.ls_refs.count': listed.refs.size, 'git.ls_refs.refs': [...listed.refs.values()].slice(0, SPAN_REFS).map(r => `${r.oid} ${r.name}`), 'git.ls_refs.head': listed.head === null ? '' : listed.head });
+    for await (const f of frames(t, 'git-upload-pack', body.value, span)) {
+      const next = lsRefsStep(st, f, caps);
+      if (!next.ok) return next;
+      st = next.value;
+    }
+    const listed = lsRefsEnd(st);
+    if (!listed.ok) return listed;
+    const { refs, head } = listed.value;
+    span.set({ 'git.ls_refs.count': refs.size, 'git.ls_refs.refs': [...refs.values()].slice(0, SPAN_REFS).map(r => `${r.oid} ${r.name}`), 'git.ls_refs.head': head === null ? '' : head });
     return listed;
   }));
 }

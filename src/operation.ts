@@ -16,6 +16,7 @@ import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
 import { asTransport, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
+import type { LsRefsResult } from './lsrefs.js';
 import { fail, isPlyError } from './errors.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { Input } from './absent.js';
@@ -66,7 +67,9 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   try {
     // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
     // error recorded, like any other failure, instead of leaving it open and missing from the trace.
-    const t = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits, signal, ...(quirks === null ? {} : { quirks }) }) : withParent(asTransport(transport), root);
+    const made: Result<Transport, PlyError> = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits, signal, ...(quirks === null ? {} : { quirks }) }) : ok(withParent(asTransport(transport), root));
+    if (!made.ok) return failed(made.error);
+    const t = made.value;
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub !== null) root.scrub = t.scrub;
     r = await body({ t, root, outcome, limits });
@@ -89,14 +92,16 @@ const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrown
 // After an acknowledged push: read `ref` back and require `expected`. A transport error here, or any other value, is
 // 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root` (empty when the ref is absent).
 export async function verifyRef(t: Transport, root: Span, prefix: string, ref: string, expected: string): Promise<Result<string, ErrorOf<'ambiguous'>>> {
-  let seen: Option<string>;
-  try { seen = mapOption(mapGet((await lsRefs(t, [ref])).refs, ref), r => r.oid); }
-  catch (e) {
+  // An Err, or anything a broken transport throws: either is a failed read-back.
+  const read: Result<LsRefsResult, unknown> = await lsRefs(t, [ref]).then(r => r, (e: unknown) => err(e));
+  if (!read.ok) {
+    const e = read.error;
     // A thrown null has no `.message`: any failure to read the ref back is `ambiguous` (I25), whatever was thrown.
     const message = String(getOrElse<unknown>(thrownMessage(e), e));
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- expected is an ad-hoc error field (errors.ts Extra); A3 moves it into Detail
     return fail('ambiguous', `push reported ok but the verification read-back failed: ${message}`, { cause: e, ...originalCode(e), expected } as Extra);
   }
+  const seen: Option<string> = mapOption(mapGet(read.value.refs, ref), r => r.oid);
   root.set({ [`${prefix}.verify.ref`]: getOrElse(seen, '') });
   if (seen.tag === 'some' && seen.value === expected) return ok(seen.value);
   // `seen` is null on the error when the ref is absent, as the wire says it.

@@ -380,10 +380,10 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
     const pump = (async () => {
       try {
         for await (const chunk of packStream(t, { wants: [blobOid] }, fetchSpan)) {
-          const r = spStep(sp, chunk); sp = r.state;
+          const r = orThrow(spStep(sp, chunk)); sp = r.state;
           for (const z of r.zlib) await writer.write(bufferSource(z));
         }
-        sp = spFinish(sp);
+        sp = orThrow(spFinish(sp));
         await writer.close();
         fetchSpan.end();
       } catch (e) { fetchSpan.error(e).end(); await writer.abort(e).catch(ignore); throw e; }
@@ -472,20 +472,20 @@ async function editOnce(url: string, spec: EditSpec, options: EditOptions, cfg: 
   return orThrow(await operation('edit', url, ({ ...options, attrs, onFinish, link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } } as OperationOpts), async ({ t, root, outcome }) => {
     // the tracer operation() started the root span on (opts.tracer)
     const tracer = root.tracer;
-    const getObject = async (oid: string, expectType: number, deepen: number): Promise<Fetched> => { const o = await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType }); held.push(o.size); return o; };
+    const getObject = async (oid: string, expectType: number, deepen: number): Promise<Fetched> => { const o = orThrow(await fetchObject(t, { oid, filter: 'tree:0', deepen, expectType })); held.push(o.size); return o; };
     try {
     // 1+2. parent commit: ls-refs, overlapped with a speculative fetch of the hinted commit when there is a hint.
     // A ref base keeps the original chain. A 40-hex base is that commit; the ref is listed, and a tip that is some
     // other commit is refuseRebase (the ref is not moved off its tip). A missing ref is not_found with miss.kind 'ref'.
     const resolve = async (): Promise<Result<string, PlyError>> => {
       if (s.baseOid) {
-        const { refs } = await lsRefs(t, [s.ref]);
+        const { refs } = orThrow(await lsRefs(t, [s.ref]));
         const tip = mapOption(mapGet(refs, s.ref), r => r.oid);
         if (tip.tag === 'some' && tip.value !== s.base) return refuseRebase(s.ref, s.base, tip.value);
         creating = tip.tag === 'none';
         return ok(s.base);
       }
-      const { refs } = await lsRefs(t, [s.base]);
+      const { refs } = orThrow(await lsRefs(t, [s.base]));
       const found = mapGet(refs, s.base);
       if (found.tag === 'none') return fail('not_found', `ref ${s.base} not found`, { miss: { kind: 'ref', ref: s.base, candidates: [s.base] } });
       return ok(found.value.oid);

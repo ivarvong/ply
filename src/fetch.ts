@@ -1,8 +1,8 @@
 // v2 fetch: request body (pure), response state machine (pure step), the streamed band-1 pack, and fetchObject — one
 // object by oid through the single-object pack parser, hash-verified. The buffered multi-object fetch with delta
 // resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
-// The step functions and checks return Result (`…Result`); the names callers already use (v2Step, spStep, spFinish,
-// parseSideband, fetchBody) are their throwing forms. packStream and fetchObject are the I/O edge: their errors are thrown.
+// The step functions, the checks and fetchObject return Result. packStream is a stream: it fails through the stream
+// protocol (its iterator rejects with the PlyError), and the exchanges that drain it catch that once (coded).
 /* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { ErrorOf, Extra, PlyError } from './errors.js';
 import type { Limits } from './limits.js';
@@ -10,7 +10,7 @@ import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import type { Result } from './result.js';
 import type { Attrs, Frame, Transport } from './transport.js';
-import { fail, orThrow, scrubError } from './errors.js';
+import { fail, scrubError } from './errors.js';
 import { pkts } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -20,11 +20,11 @@ import { corruptCacheHit } from './cachestatus.js';
 import { assertNever, err, getOrElse, none, ok } from './result.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
-import { atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
+import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { frames, coded, clientSpan, proto, harvestBytes } from './transport.js';
+import { frames, coded, clientSpan, proto, harvestBytes, spanned } from './transport.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
 
 /* oxlint-disable no-magic-numbers -- span tails are diagnostics, not wire-format facts */
@@ -42,8 +42,6 @@ export type PackObject = { readonly type: number; readonly data: Uint8Array };
 // ---- request body (pure) ----
 type BadRequest = ErrorOf<'bad_request'>;
 const UNIT: Result<null, never> = ok(null);
-// validateWire (validate.ts) throws until its cluster converts.
-const wireField = (value: string, what: string): unknown => orThrow(validateWire(value, what));
 const countField = (value: number, what: string): Result<null, BadRequest> => {
   if (!Number.isSafeInteger(value) || value < 0) return fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
   return UNIT;
@@ -51,8 +49,8 @@ const countField = (value: number, what: string): Result<null, BadRequest> => {
 // deepen-since is a unix timestamp on the wire (a number from callers, or a digit string). Either way it is one token.
 const sinceField = (value: number | string, what: string): Result<null, BadRequest> => {
   if (typeof value === 'number') return countField(value, what);
-  wireField(value, what);
-  return UNIT;
+  const valid = validateWire(value, what);
+  return valid.ok ? UNIT : valid;
 };
 
 // The arguments of one v2 fetch command. An empty filter, a zero deepen and a zero deepen-since are absent.
@@ -78,14 +76,15 @@ const fetchDefaults = (): FetchConfig => ({
 });
 
 // oxlint-disable-next-line complexity -- one optional line per fetch argument
-export function fetchBodyResult(opts: FetchOpts): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+export function fetchBody(opts: FetchOpts): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const { haves, filter, deepen, deepenSince, deepenNot, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done, shallows } = withDefaults(opts, fetchDefaults());
   const { wants } = opts;
-  for (const w of wants) wireField(w, 'want');
-  for (const h of haves) wireField(h, 'have');
-  for (const s of shallows) wireField(s, 'shallow');
-  for (const r of deepenNot) wireField(r, 'deepen-not');
-  if (filter) wireField(filter, 'filter');
+  // Each line is one wire token, checked in this order: wants, haves, shallows, deepen-nots, the filter.
+  const lines: ReadonlyArray<readonly [readonly string[], string]> = [[wants, 'want'], [haves, 'have'], [shallows, 'shallow'], [deepenNot, 'deepen-not'], [filter ? [filter] : [], 'filter']];
+  for (const [values, what] of lines) for (const v of values) {
+    const valid = validateWire(v, what);
+    if (!valid.ok) return valid;
+  }
   if (deepen) { const c = countField(deepen, 'deepen'); if (!c.ok) return c; }
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- 0, '' and NaN mean no deepen-since, as they always have
   if (deepenSince) { const c = sinceField(deepenSince, 'deepen-since'); if (!c.ok) return c; }
@@ -105,15 +104,14 @@ export function fetchBodyResult(opts: FetchOpts): Result<Uint8Array<ArrayBuffer>
     ...(noProgress ? ['no-progress\n'] : []),
     ...(done ? ['done\n'] : []),
   ];
-  return ok(orThrow(pkts(['command=fetch\n', ...args], { delimAfter: 0 })));
+  return pkts(['command=fetch\n', ...args], { delimAfter: 0 });
 }
-export const fetchBody = (opts: FetchOpts): Uint8Array<ArrayBuffer> => orThrow(fetchBodyResult(opts));
 
 // ---- v2 fetch response state machine (pure step over frames) ----
 // One sideband frame: the band byte and its payload.
 export type Sideband = { readonly band: number; readonly body: Uint8Array };
-// @decoder parseSidebandResult prefix=sideband
-export function parseSidebandResult(payload: Uint8Array): Result<Sideband, ErrorOf<'protocol'>> {
+// @decoder parseSideband prefix=sideband
+export function parseSideband(payload: Uint8Array): Result<Sideband, ErrorOf<'protocol'>> {
   // an empty payload (0004) has no band byte: git's demultiplex_sideband "missing sideband designator"
   // take returns exactly SIDEBAND_CHANNEL_BYTES bytes or the short read, so the fallback never applies
   const head = take(payload, 0, SIDEBAND_CHANNEL_BYTES, 'protocol');
@@ -122,8 +120,6 @@ export function parseSidebandResult(payload: Uint8Array): Result<Sideband, Error
   const body = payload.subarray(SIDEBAND_CHANNEL_BYTES);
   return ok({ band, body });
 }
-// @decoder parseSideband prefix=sideband
-export const parseSideband = (payload: Uint8Array): Sideband => orThrow(parseSidebandResult(payload));
 
 // The response's two phases: section lines up to `packfile`, then sideband frames. `section` is the open section
 // (null between a delim and the next header); its line count is `sectionLines` (shallow-info) or `otherLines` (a
@@ -187,9 +183,9 @@ export const v2Init = (limits: Limits = DEFAULT_LIMITS): V2State => Object.freez
   sectionLines: 0, otherLines: 0,
 });
 const stepped = (state: V2State, pack: Uint8Array | null = null): Result<V2Step, never> => ok({ state, pack });
-// @decoder v2StepResult prefix=v2
+// @decoder v2Step prefix=v2
 // oxlint-disable-next-line complexity -- a step function is one transition table
-export function v2StepResult(st: V2State, frame: Frame): Result<V2Step, PlyError> {
+export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   // Every section line, including ones this client does not interpret, counts against the same cap. A missing
   // maxSectionLines used to make `n >= <missing>` false and disable the check.
   const linesCap = readLimit(st.limits, 'maxSectionLines');
@@ -209,7 +205,7 @@ export function v2StepResult(st: V2State, frame: Frame): Result<V2Step, PlyError
       // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
       // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
       if (frame.kind !== 'data') return proto(`v2: ${frame.kind} inside the packfile section`);
-      const sb = parseSidebandResult(frame.payload);
+      const sb = parseSideband(frame.payload);
       if (!sb.ok) return sb;
       const band = sb.value;
       if (band.band === SIDEBAND_PACK) {
@@ -265,8 +261,6 @@ export function v2StepResult(st: V2State, frame: Frame): Result<V2Step, PlyError
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st.phase);
 }
-// @decoder v2Step prefix=v2
-export const v2Step = (st: V2State, frame: Frame): V2Step => orThrow(v2StepResult(st, frame));
 // The response is over: it ended with its flush, and it had a packfile section or (negotiation) acknowledgments.
 export function v2End(st: V2State): Result<V2State, ErrorOf<'protocol'>> {
   if (!st.done) return proto('v2: response ended without flush');
@@ -289,20 +283,30 @@ export const fetchAttrs = (opts: FetchOpts): Attrs => ({
 
 // Band-1 pack bytes as they arrive; the v2 state is the generator's return value.
 export type PackFetch = AsyncGenerator<Uint8Array, V2State, unknown>;
-// Stream band-1 pack bytes. Consumer drives it; the v2 state is the generator's return value. The stream edge: a
-// step's Err is thrown here.
+// The response read frame by frame: band-1 bytes yielded as they arrive, the v2 state or the first Err returned. A
+// caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too, and so is
+// whatever the transport's stream raised (it is re-raised, scrubbed).
+async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
+  const body = fetchBody(opts);
+  if (!body.ok) return body;
+  let st = v2Init(t.limits);
+  try { for await (const f of frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) })) {
+    const r = v2Step(st, f);
+    if (!r.ok) { scrubError(r.error, t.scrub); return r; }
+    st = r.value.state;
+    if (r.value.pack) yield r.value.pack;
+  } } catch (e) { throw scrubError(e, t.scrub); }
+  return ok(st);
+}
+// Stream band-1 pack bytes. Consumer drives it; the v2 state is the generator's return value. A stream: a failure is
+// raised through it (the iterator rejects with the PlyError).
 export async function* packStream(t: Transport, opts: FetchOpts, span: Span): PackFetch {
   span.set(fetchAttrs(opts));
-  let st = v2Init(t.limits);
-  // A caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too.
-  try { for await (const f of frames(t, 'git-upload-pack', fetchBody(opts), span, { bypassCache: Boolean(opts.bypassCache) })) {
-    const r = orThrow(v2StepResult(st, f));
-    st = r.state;
-    if (r.pack) yield r.pack;
-  } } catch (e) { throw scrubError(e, t.scrub); }
-  const end = orThrow(v2End(st));
-  span.set(v2Attrs(end));
-  return end;
+  const read = yield* v2Frames(t, opts, span);
+  const end = read.ok ? v2End(read.value) : read;
+  if (!end.ok) throw end.error;
+  span.set(v2Attrs(end.value));
+  return end.value;
 }
 
 // ---- single-object pack stream parser (pure step) ----
@@ -363,8 +367,8 @@ function spEnter(st: SpState, chunk: Uint8Array): Result<SpEntry, Corrupt> {
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st);
 }
-// @decoder spStepResult prefix=sp-header
-export function spStepResult(st: SpState, chunk: Uint8Array): Result<SpStepped, Corrupt> {
+// @decoder spStep prefix=sp-header
+export function spStep(st: SpState, chunk: Uint8Array): Result<SpStepped, Corrupt> {
   const entered = spEnter({ ...st, bytes: st.bytes + chunk.length }, chunk);
   if (!entered.ok) return entered;
   const entry = entered.value;
@@ -389,16 +393,13 @@ export function spStepResult(st: SpState, chunk: Uint8Array): Result<SpStepped, 
   if (emitLen) s.sha.update(emit);
   return ok({ state: { ...s, lag, zlibBytes }, zlib: emitLen ? [emit] : [] });
 }
-// @decoder spStep prefix=sp-header
-export const spStep = (st: SpState, chunk: Uint8Array): SpStepped => orThrow(spStepResult(st, chunk));
-export function spFinishResult(st: SpState): Result<SpFinished, Corrupt> {
+export function spFinish(st: SpState): Result<SpFinished, Corrupt> {
   if (st.phase !== 'body') return fail('pack_corrupt', 'pack: truncated before object header');
   if (st.lag.length !== PACK_TRAILER_BYTES) return fail('pack_corrupt', 'pack: missing trailer');
   const got = st.sha.hex(), want = toHex(st.lag);
   if (want !== got) return fail('pack_corrupt', `pack: trailer ${want} != ${got}`);
   return ok({ ...st, trailer: want });
 }
-export const spFinish = (st: SpState): SpFinished => orThrow(spFinishResult(st));
 const trailerOf = (st: SpState): string => (st.trailer === null ? '' : st.trailer);
 export const spAttrs = (st: SpState, prefix = 'git.pack'): Attrs => ({ [`${prefix}.objects`]: 1, [`${prefix}.bytes`]: st.bytes, [`${prefix}.trailer`]: trailerOf(st), [`${prefix}.compressed.bytes`]: st.zlibBytes, [`${prefix}.type.${typeText(st.type)}`]: 1 });
 
@@ -449,43 +450,61 @@ export const isFilterRejection = (e: unknown): boolean => {
 //   - pack_corrupt (malformed; git fsck would refuse it): the fetch fails, as #18 decided. This server sent bytes no
 //     honest git server holds, hash-verified or not, so nothing from this response is trusted, including its other
 //     objects; pack_corrupt is retryable (and a cached response is refetched once past the cache).
-// maxPackBytes, maxPackObjects and maxInflatedTotal have already bounded the whole pack. Returns the skipped extras.
-// assertFetched (objects.ts) throws until its cluster converts: a failure that is not a skipped extra is rethrown.
+// maxPackBytes, maxPackObjects and maxInflatedTotal have already bounded the whole pack. Returns the skipped extras,
+// or the first failure that is not one (nothing is dropped then).
 export type Skipped = { readonly oid: string; readonly what: unknown; readonly bytes: number };
-export function checkWide(objects: Map<string, PackObject>, wanted: (oid: string, o: PackObject) => boolean, limits: Limits): Skipped[] {
+export function checkWide(objects: Map<string, PackObject>, wanted: (oid: string, o: PackObject) => boolean, limits: Limits): Result<Skipped[], PlyError> {
   const skipped: Skipped[] = [];
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE && o.type !== TYPE.TAG) continue;
-    try { orThrow(assertFetched(typeText(o.type), o.data, limits)); } catch (e) {
-      if (!thrownCodeIs(e, 'limit_exceeded') || wanted(oid, o)) throw e;
-      // a limit_exceeded error carries `what` (limits.ts)
-      skipped.push({ oid, what: getOrElse(field(e, 'what'), ''), bytes: o.data.length });
-    }
+    const checked = assertFetched(typeText(o.type), o.data, limits);
+    if (checked.ok) continue;
+    if (checked.error.code !== 'limit_exceeded' || wanted(oid, o)) return checked;
+    // a limit_exceeded error carries `what` (limits.ts)
+    skipped.push({ oid, what: checked.error.what, bytes: o.data.length });
   }
   for (const s of skipped) objects.delete(s.oid);
-  return skipped;
+  return ok(skipped);
 }
 export const skippedAttrs = (skipped: readonly Skipped[]): Attrs => ({ 'git.fetch.wide.skipped': skipped.length, 'git.fetch.wide.skipped_reason': [...new Set(skipped.map(s => s.what))].join(',') });
 
 // Keep commits and trees from a wide pack for later tree:0 wants. Every entry's key is its computed hash (resolvePack);
 // every caller has run checkWide over the pack first (what is left passed assertFetched under the transport's limits),
 // since fetchObject serves the harvest without another look.
-export function harvest(t: Transport, objects: ReadonlyMap<string, PackObject>, skip: string | null = null): { readonly kept: number; readonly bytes: number } {
+export function harvest(t: Transport, objects: ReadonlyMap<string, PackObject>, skip: string | null = null): Result<{ readonly kept: number; readonly bytes: number }, PlyError> {
   const store = t.objects;
-  const cap = orThrow(readLimit(t.limits, 'maxHarvestBytes'));
+  const limit = readLimit(t.limits, 'maxHarvestBytes');
+  if (!limit.ok) return limit;
+  const cap = limit.value;
   let bytes = 0, held = harvestBytes(store), kept = 0;
   for (const [oid, o] of objects) {
     if (oid === skip || store.has(oid) || (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE)) continue;
     if (held + o.data.length > cap) break;
     store.set(oid, { type: o.type, data: o.data }); held += o.data.length; kept++; bytes += o.data.length;
   }
-  return { kept, bytes };
+  return ok({ kept, bytes });
 }
 
-// Any thrown object carries the cache status of the response it came from (fetchPack and the retry read it back).
+// A failed fetch's error carries the cache status of the response it came from (fetchPack and the retry read it back).
 export function stampCacheStatus(e: unknown, span: Span): void {
   if (e === null || typeof e !== 'object') return;
   Reflect.set(e, 'cacheStatus', getOrElse(fromNullish(span.attrs['git.response.cache']), ''));
+}
+
+// One upload-pack fetch under its span. What the stream raised is caught (coded: an uncoded value is pack_corrupt), and
+// a failure is stamped with the response's cache status for the retry rule (corruptCacheHit).
+export async function fetchExchange<T>(t: Transport, attrs: Attrs, fn: (span: Span) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> {
+  const held: { span: Span | null } = { span: null };
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
+  const r = await coded('pack_corrupt', () => spanned(t, 'git.upload-pack fetch', clientSpan(t, attrs), (span: Span): Promise<Result<T, PlyError>> => { held.span = span; return fn(span); }));
+  if (!r.ok && held.span !== null) stampCacheStatus(r.error, held.span);
+  return r;
+}
+// A verification failure after a cache HIT is retried once past the cache (packcache.ts); a corrupt live response is not.
+async function onceMore<T>(once: (bust: boolean) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> {
+  const first = await once(false);
+  if (first.ok || !corruptCacheHit(first.error)) return first;
+  return once(true);
 }
 
 // One object wanted by oid. `expectType` (a TYPE id) is checked against what arrives; null takes any type.
@@ -514,7 +533,9 @@ function declaredPackCount(pack: Uint8Array): number | null {
 function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
   const count = declaredPackCount(pack);
   if (count === null || count === 1) return ok(null);
-  const parsed = parsePack(pack, orThrow(packParseOpts(t.limits)));
+  const opts = packParseOpts(t.limits);
+  if (!opts.ok) return opts;
+  const parsed = parsePack(pack, opts.value);
   if (!parsed.ok) return parsed;
   const resolved = resolvePack(parsed.value, () => null, t.limits);
   if (!resolved.ok) return resolved;
@@ -526,7 +547,8 @@ function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span,
   const refused = refuseNonCommit(TYPE.COMMIT, want.type, oid);
   if (!refused.ok) return refused;
   if (want.type !== TYPE.COMMIT) return ok(null);
-  orThrow(assertFetched('commit', want.data, t.limits));
+  const checked = assertFetched('commit', want.data, t.limits);
+  if (!checked.ok) return checked;
   return ok({ type: want.type, data: want.data, oid, size: want.data.length, bust });
 }
 // The single object's zlib bytes, read: inflated within maxObject, hashed against the want, its type checked.
@@ -540,56 +562,62 @@ function singleObject(t: Transport, { sp, zlib, want, span, bust, maxObject }: R
   const got = hashObject(typeText(sp.type), out);
   span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': typeText(sp.type) });
   if (got !== oid) return fail('pack_corrupt', `object ${got} served for want ${oid}`);
-  orThrow(assertFetched(typeText(sp.type), out, t.limits));
+  const checked = assertFetched(typeText(sp.type), out, t.limits);
+  if (!checked.ok) return checked;
   const refused = refuseNonCommit(expectType, sp.type, oid);
   if (!refused.ok) return refused;
   if (expectType !== null && sp.type !== expectType) return fail('pack_corrupt', `expected ${typeText(expectType)}, got ${typeText(sp.type)}`);
   return ok({ type: sp.type, data: out, oid, size: out.length, bust });
 }
-async function fetchSingle(t: Transport, want: Single): Promise<FetchedObject> {
+// oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
+function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, PlyError>> {
   const { oid, filter, deepen, expectType } = want;
-  // The span is where the transport says whether the response came from a cache; a verification failure after a HIT is
-  // retried once past the cache (packcache.js), a corrupt live response is not.
-  // oxlint-disable-next-line typescript/promise-function-async -- coded() and the span are the promise; an async wrapper adds bytes, not behaviour
-  const once = (bust: boolean): Promise<FetchedObject> => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust }), async (span: Span): Promise<FetchedObject> => {
-    try {
-      const maxObject = orThrow(readLimit(t.limits, 'maxObjectSize'));
-      // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
-      // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
-      let sp = spInit(); const zlibParts: Uint8Array[] = [];
-      const feed = (chunk: Uint8Array): void => {
-        const r = orThrow(spStepResult(sp, chunk)); sp = r.state;
-        for (const z of r.zlib) zlibParts.push(z);
-      };
-      const wire = packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span);
-      let oversized = false;
-      // A commit id may arrive as the tag object plus the commit it peels to. The single-object parser refuses that
-      // count; the wanted object's type is still the not_commit answer. Other wants stay a stream, and stop at the
-      // declared size before the rest of the pack is read.
-      if (expectType === TYPE.COMMIT) {
-        const parts: Uint8Array[] = [];
-        for await (const chunk of wire) parts.push(chunk);
-        const pack = concat(parts);
-        const found = orThrow(commitFromPack(t, oid, pack, span, bust));
-        if (found) return found;
-        feed(pack);
+  // The span is where the transport says whether the response came from a cache (fetchExchange, onceMore).
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
+  const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
+    const limit = readLimit(t.limits, 'maxObjectSize');
+    if (!limit.ok) return limit;
+    const maxObject = limit.value;
+    // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
+    // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
+    let sp = spInit(); const zlibParts: Uint8Array[] = [];
+    const feed = (chunk: Uint8Array): Result<null, PlyError> => {
+      const r = spStep(sp, chunk);
+      if (!r.ok) return r;
+      sp = r.value.state;
+      for (const z of r.value.zlib) zlibParts.push(z);
+      return UNIT;
+    };
+    const wire = packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span);
+    let oversized = false;
+    // A commit id may arrive as the tag object plus the commit it peels to. The single-object parser refuses that
+    // count; the wanted object's type is still the not_commit answer. Other wants stay a stream, and stop at the
+    // declared size before the rest of the pack is read.
+    if (expectType === TYPE.COMMIT) {
+      const parts: Uint8Array[] = [];
+      for await (const chunk of wire) parts.push(chunk);
+      const pack = concat(parts);
+      const found = commitFromPack(t, oid, pack, span, bust);
+      if (!found.ok) return found;
+      if (found.value !== null) return ok(found.value);
+      const fed = feed(pack);
+      if (!fed.ok) return fed;
+      oversized = sp.phase === 'body' && sp.size > maxObject;
+    } else {
+      for await (const chunk of wire) {
+        const fed = feed(chunk);
+        if (!fed.ok) return fed;
         oversized = sp.phase === 'body' && sp.size > maxObject;
-      } else {
-        for await (const chunk of wire) {
-          feed(chunk);
-          oversized = sp.phase === 'body' && sp.size > maxObject;
-          if (oversized) break;
-        }
+        if (oversized) break;
       }
-      // One size check, in `once`: a nested function that failed would be a different fail site than this one.
-      if (oversized) return orThrow<FetchedObject>(err(limitExceeded('object size', sp.size, maxObject)));
-      return orThrow(singleObject(t, { sp: orThrow(spFinishResult(sp)), zlib: concat(zlibParts), want, span, bust, maxObject }));
-    } catch (e) { stampCacheStatus(e, span); throw e; }
-  }));
-  try { return await once(false); } catch (e) {
-    if (!corruptCacheHit(e)) throw e;
-    return once(true);
-  }
+    }
+    // One size check, in `once`: a nested function that failed would be a different fail site than this one.
+    if (oversized) return err(limitExceeded('object size', sp.size, maxObject));
+    const finished = spFinish(sp);
+    if (!finished.ok) return finished;
+    return singleObject(t, { sp: finished.value, zlib: concat(zlibParts), want, span, bust, maxObject });
+  });
+  return onceMore(once);
 }
 
 // The blob:none form of a tree:0 single-object fetch (see fetchObject). Bounded by limits.maxPackBytes (v2Step).
@@ -599,12 +627,16 @@ function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust
   const { oid, expectType } = want;
   const maxObject = readLimit(t.limits, 'maxObjectSize');
   if (!maxObject.ok) return maxObject;
-  const parsed = parsePack(pack, orThrow(packParseOpts(t.limits)));
+  const opts = packParseOpts(t.limits);
+  if (!opts.ok) return opts;
+  const parsed = parsePack(pack, opts.value);
   if (!parsed.ok) return parsed;
   const resolved = resolvePack(parsed.value, () => null, t.limits);
   if (!resolved.ok) return resolved;
   const objects: Map<string, PackObject> = resolved.value.objects;
-  const skipped = checkWide(objects, k => k === oid, t.limits);
+  const checked = checkWide(objects, k => k === oid, t.limits);
+  if (!checked.ok) return checked;
+  const skipped = checked.value;
   const found = mapGet(objects, oid);
   if (found.tag === 'none') return fail('pack_corrupt', `object ${oid} not in the blob:none pack (${objects.size} objects)`);
   const wanted = found.value;
@@ -613,41 +645,39 @@ function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust
   if (!refused.ok) return refused;
   if (expectType !== null && wanted.type !== expectType) return fail('pack_corrupt', `expected ${typeText(expectType)}, got ${typeText(wanted.type)}`);
   let blobs = 0, extraBytes = skipped.reduce((n, x) => n + x.bytes, 0); for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
-  const h = harvest(t, objects, oid);
+  const harvested = harvest(t, objects, oid);
+  if (!harvested.ok) return harvested;
+  const h = harvested.value;
   span.set({ 'git.pack.objects': parsed.value.stats.count, 'git.pack.bytes': pack.length, 'git.object.oid': oid, 'git.object.type': typeText(wanted.type), 'git.fetch.wide.objects': objects.size + skipped.length, 'git.fetch.wide.extra_objects': objects.size + skipped.length - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes, ...skippedAttrs(skipped) });
   return ok({ type: wanted.type, data: wanted.data, oid, size: wanted.data.length, bust, wide: true });
 }
-async function fetchWide(t: Transport, want: Wide): Promise<FetchedObject> {
+// oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
+function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyError>> {
   const { oid, deepen, learned } = want;
-  // oxlint-disable-next-line typescript/promise-function-async -- coded() and the span are the promise; an async wrapper adds bytes, not behaviour
-  const once = (bust: boolean): Promise<FetchedObject> => coded('pack_corrupt', () => t.tracer.span('git.upload-pack fetch', clientSpan(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': 'tree:0', 'git.fetch.filter.learned': learned }), async (span: Span): Promise<FetchedObject> => {
-    try {
-      orThrow(readLimit(t.limits, 'maxObjectSize'));
-      const parts: Uint8Array[] = [];
-      for await (const chunk of packStream(t, { wants: [oid], filter: 'blob:none', deepen, bypassCache: bust }, span)) parts.push(chunk);
-      return orThrow(wideObject(t, concat(parts), want, span, bust));
-    } catch (e) { stampCacheStatus(e, span); throw e; }
-  }));
-  try { return await once(false); } catch (e) {
-    if (!corruptCacheHit(e)) throw e;
-    return once(true);
-  }
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
+  const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': 'blob:none', 'git.fetch.filter.requested': 'tree:0', 'git.fetch.filter.learned': learned }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
+    const limit = readLimit(t.limits, 'maxObjectSize');
+    if (!limit.ok) return limit;
+    const parts: Uint8Array[] = [];
+    for await (const chunk of packStream(t, { wants: [oid], filter: 'blob:none', deepen, bypassCache: bust }, span)) parts.push(chunk);
+    return wideObject(t, concat(parts), want, span, bust);
+  });
+  return onceMore(once);
 }
 
-// The I/O edge: a bad oid, a fetch failure, a verification failure are thrown.
-export async function fetchObject(t: Transport, want: ObjectWant): Promise<FetchedObject> {
+// One object by oid: a bad oid, a fetch failure, a verification failure are the Err.
+export async function fetchObject(t: Transport, want: ObjectWant): Promise<Result<FetchedObject, PlyError>> {
   const { oid } = want;
   // A JS caller may pass anything for the oid: it is checked as String() renders it (none as ''), and quoted the same way.
   // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- see above
-  if (!OID_RE.test(String(getOrElse(fromNullish<unknown>(oid), '')))) return orThrow(fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`));
+  if (!OID_RE.test(String(getOrElse(fromNullish<unknown>(oid), '')))) return fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`);
   const { filter, deepen, expectType } = withDefaults(want, objectWantDefaults());
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
-  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return { type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true };
+  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true });
   if (narrow && t.quirks.treeFilter === 'blob:none') return fetchWide(t, { oid, deepen, expectType, learned: false });
-  try { return await fetchSingle(t, { oid, filter, deepen, expectType }); } catch (e) {
-    if (!narrow || !isFilterRejection(e)) throw e;
-    t.quirks.treeFilter = 'blob:none';
-    return fetchWide(t, { oid, deepen, expectType, learned: true });
-  }
+  const single = await fetchSingle(t, { oid, filter, deepen, expectType });
+  if (single.ok || !narrow || !isFilterRejection(single.error)) return single;
+  t.quirks.treeFilter = 'blob:none';
+  return fetchWide(t, { oid, deepen, expectType, learned: true });
 }

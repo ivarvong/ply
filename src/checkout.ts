@@ -49,9 +49,8 @@ import type { Span, Tracer } from './otel.js';
 import type { FetchPackResult as FetchedPack } from './fetchpack.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
-import { thrownCodeIs, thrownCodeOr, thrownReasonIs } from './boundary.js';
+import { thrownCodeOr, thrownReasonIs } from './boundary.js';
 import type { TypeNames } from './boundary.js';
-import { attempt, caughtErr } from './commit.js';
 import { fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 
@@ -121,11 +120,12 @@ type Trees = { readonly root: string; readonly tree: TreeLookup; readonly object
 // Effect: the commit and every tree under it, as one blob:none pack (deepen 1). Returns { root, tree } where tree(oid)
 // parses a tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
 async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Result<Trees, PlyError>> {
-  let r: FetchedPack;
-  try { r = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 }); } catch (e) {
-    if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
-    return caughtErr(e);
+  const got = await fetchPack(t, { wants: [commit], filter: 'blob:none', deepen: 1 });
+  if (!got.ok) {
+    if (got.error.code === 'remote_error' && thrownReasonIs(got.error, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+    return got;
   }
+  const r = got.value;
   const objects: PackObjects = r.objects === null ? new Map() : r.objects;
   const wanted = mapGet(objects, commit);
   if (wanted.tag === 'none') return fail('pack_corrupt', `commit ${commit} not in the blob:none pack (${objects.size} objects)`);
@@ -175,8 +175,7 @@ const subtree = (tree: TreeLookup, root: string, comps: readonly string[]): Resu
 // that was not asked for, or is not a blob, is pack_corrupt. A wanted blob the pack leaves out is simply absent.
 async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<Result<PackObjects, PlyError>> {
   const want = new Set(oids);
-  // oxlint-disable-next-line require-await -- async so that attempt() sees any failure as a rejection
-  const fetched = await attempt(async () => fetchPack(t, { wants: oids }));
+  const fetched = await fetchPack(t, { wants: oids });
   if (!fetched.ok) return fetched;
   const objects: PackObjects = fetched.value.objects === null ? new Map() : fetched.value.objects;
   for (const [oid, o] of objects) {

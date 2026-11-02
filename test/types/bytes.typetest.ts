@@ -21,7 +21,9 @@ declare const shared: Uint8Array<SharedArrayBuffer>;
 
 // fetchPack → push: fetched objects go straight into a push.
 const consumerFetchThenPush = async (): Promise<void> => {
-  const r = await fetchPack(t, { wants: ['0'.repeat(40)] });
+  const fetched = await fetchPack(t, { wants: ['0'.repeat(40)] });
+  if (!fetched.ok) return;
+  const r = fetched.value;
   const objects: PackObject[] = [...(r.objects?.values() ?? [])].map(o => ({ type: o.type, data: o.data }));
   const ref = ((): import('../../src/refname.js').Refname => { const p = parseRefname('refs/heads/x'); if (!p.ok) throw p.error; return p.value; })();
   await push(t, { ref, oldOid: '0'.repeat(40), newOid: '1'.repeat(40), objects });

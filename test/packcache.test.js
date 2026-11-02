@@ -8,10 +8,12 @@ import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems }
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from '../src/packcache.js';
-import { fetchBody, GitHttp } from '../src/client.js';
+import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const fetchBody = (...a) => unwrap(fetchBodyR(...a));
 let root, cleanup, srv, proxy, bare, work, url;
 // commit on top of whatever main is now (as another writer would)
 const otherWriter = (files, msg) => { git(work, ['fetch', '-q', bare, 'refs/heads/main']); git(work, ['reset', '-q', '--hard', 'FETCH_HEAD']); return commitFiles(work, bare, files, msg); };

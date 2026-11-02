@@ -27,7 +27,7 @@
 // Errors are values: every function here returns a Result (docs/STACK.md "Public API policy"). The blob stream errors
 // as a stream does: its pull, transform and flush raise the PlyError the consumer reads.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
-import { fail, isPlyCode, plyError } from './errors.js';
+import { fail, isPlyCode, isPlyError, plyError } from './errors.js';
 import type { Miss, PlyError } from './errors.js';
 import { assertNever, err, getOrElse, isSome, mapOption, none, ok, some } from './result.js';
 import type { Err, Option, Result } from './result.js';
@@ -44,11 +44,11 @@ import { DEFAULT_LIMITS } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
 import type { OperationOpts } from './operation.js';
-import type { SpState } from './fetch.js';
+import type { SpState, SpStepped } from './fetch.js';
 import type { Transport } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
-import { attempt, caughtErr, fetchCommit } from './commit.js';
+import { caughtErr, fetchCommit } from './commit.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
@@ -96,10 +96,10 @@ const sameBranch = (requested: unknown, full: string): boolean => {
 // Effect: the unborn HEAD's target, or None when the server does not advertise ls-refs=unborn or lists no unborn line
 // (a deleted branch, a born HEAD). discover runs only on a ref miss; the happy path never asks.
 async function unbornTarget(t: Transport): Promise<Result<Option<string>, PlyError>> {
-  const info = await attempt(async () => discover(t));
+  const info = await discover(t);
   if (!info.ok) return info;
   if (!info.value.lsRefsUnborn) return ok(none);
-  const listed = await attempt(async () => lsRefs(t, ['HEAD'], { unborn: parseUnbornLine }));
+  const listed = await lsRefs(t, ['HEAD'], { unborn: parseUnbornLine });
   if (!listed.ok) return listed;
   const target = mapOption(fromNullish(listed.value.unborn), u => u.target);
   return ok(getOrElse(target, '') === '' ? none : target);
@@ -164,7 +164,7 @@ async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promis
   if (cands.length === 0 && typeof ref === 'string') return ok({ kind: 'hit', resolved: { name: ref, commit: ref } });
   // null: this call is a name. A string: the prefix, and the listing is wide enough to answer it.
   const prefix = abbrev === 'advertised' && typeof ref === 'string' && ABBREV.test(ref) ? ref : null;
-  const listing = await attempt(async () => lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']));
+  const listing = await lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']);
   if (!listing.ok) return listing;
   const listed = listing.value;
   for (const name of cands) {
@@ -242,6 +242,9 @@ export type ReadOptions = EntryOptions;
 export type TreeCache = Map<string, Uint8Array>;
 export type CommitResult = CommitView & { readonly ref: string; readonly oid: string };
 // An unborn HEAD (or that branch by name): git log's "does not have any commits yet". Not a not_found.
+// The stream protocol is the blob stream's one raise (docs/STACK.md): a corrupt frame or trailer errors the inflate side via pump.catch.
+const must = <T>(r: Result<T, PlyError>): T => { if (r.ok) return r.value; throw r.error; };
+
 export type EmptyCommit = { readonly empty: true; readonly ref: string };
 
 // What readCommit, listTree and readFile take as their second argument. `ref: null` is the remote's HEAD.
@@ -249,7 +252,8 @@ export type RefConfig = { readonly ref: RefSpec };
 export type ReadCommitSpec = Input<RefConfig>;
 // An unborn HEAD the caller named is a state (EmptyCommit), not a failure. Every other answer is the resolution's own.
 const unbornState = (r: Result<Resolved, PlyError>): Option<EmptyCommit> => {
-  if (r.ok || r.error.code !== 'not_found' || r.error.miss.kind !== 'head_unborn') return none;
+  // Only ply's own error is believed: a transport that raises a look-alike object is not the server saying HEAD is unborn.
+  if (r.ok || !isPlyError(r.error) || r.error.code !== 'not_found' || r.error.miss.kind !== 'head_unborn') return none;
   return some({ empty: true, ref: r.error.miss.target });
 };
 export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: ReadOptions = {}): Promise<Result<CommitResult | EmptyCommit, PlyError>> {
@@ -272,7 +276,7 @@ export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: R
 
 // Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
 async function fetchTree(t: Transport, cache: TreeCache, oid: string): Promise<Result<Uint8Array, PlyError>> {
-  const fetched = await attempt(async () => fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE }));
+  const fetched = await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE });
   if (!fetched.ok) return fetched;
   cache.set(oid, fetched.value.data);
   return ok(fetched.value.data);
@@ -443,9 +447,7 @@ type BodyState = Extract<SpState, { readonly phase: 'body' }>;
 const nextChunk = async (it: AsyncIterator<Uint8Array>): Promise<Result<IteratorResult<Uint8Array>, unknown>> => {
   try { return ok(await it.next()); } catch (e) { return err(e); }
 };
-const stepHeader = (sp: SpState, chunk: Uint8Array): Result<ReturnType<typeof spStep>, unknown> => {
-  try { return ok(spStep(sp, chunk)); } catch (e) { return err(e); }
-};
+const stepHeader = (sp: SpState, chunk: Uint8Array): ReturnType<typeof spStep> => spStep(sp, chunk);
 // Effect: pull until the object header is read (→ type and size). The zlib bytes after it go to `early`.
 async function blobHeader(it: AsyncIterator<Uint8Array>, early: Uint8Array[]): Promise<Result<BodyState, unknown>> {
   let sp: SpState = spInit();
@@ -526,10 +528,10 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       const { value, done } = await it.next();
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
       if (done) break;
-      const r = spStep(sp, value); sp = r.state;
+      const r: SpStepped = must(spStep(sp, value)); sp = r.state;
       for (const z of r.zlib) await writer.write(bufferSource(z));
     }
-    sp = spFinish(sp); // pack trailer checksum
+    sp = must(spFinish(sp)); // pack trailer checksum
     fetchSpan.end();
     await writer.close();
   })();

@@ -21,12 +21,12 @@ import type { ValidatedIdent } from './validate.js';
 import type { Limits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
-import type { Ok, Option, Result } from './result.js';
+import type { Err, Ok, Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import type { LsRefsResult } from './lsrefs.js';
 import type { OperationOpts, Outcome } from './operation.js';
 import { fail } from './errors.js';
-import { assertNever, err, getOrElse, isNone, isSome, map, mapOption, none, ok, some } from './result.js';
+import { andThen, assertNever, err, getOrElse, isNone, isSome, map, mapOption, none, ok, some } from './result.js';
 import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
@@ -40,7 +40,6 @@ import { mergeLines } from './linemerge.js';
 import { attributeOf, attributesFor, bytesToStr, popLast, utf8ToStr } from './attributes.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { checkLimit, limitError, readLimit } from './limits.js';
-import { thrownCodeIs } from './boundary.js';
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons and bases are extras (errors.ts is shared; additive
 // detail is the steward's call).
@@ -208,7 +207,9 @@ export function bestBases(commits: ReadonlyMap<string, Parents>, a: string, b: s
 // bestBases answer over a cut graph that looks whole (#18), so that is `pack_corrupt` here. git's upload-pack keeps the
 // contract (the boundary of the depth and of a shallow server repository are both reported).
 export async function ancestors(t: Transport, head: string, depth: number): Promise<Result<Map<string, Commit>, PlyError>> {
-  const r = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
+  const got = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
+  if (!got.ok) return got;
+  const r = got.value;
   const commits = new Map<string, Commit>();
   const objects = fromNullish(r.objects);
   if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) { const c = parseCommit(o.data, t.limits); if (!c.ok) return c; commits.set(oid, c.value); }
@@ -291,7 +292,9 @@ const NO_COUNT = (): void => { /* not counted */ };
 const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: () => void = NO_COUNT): Promise<Result<TreeEntry[], PlyError>> => {
   const held = mapGet(cache, oid);
   if (held.tag === 'some') return parseTree(held.value, t.limits);
-  const { data } = await fetchObject(t, { oid, expectType: TYPE.TREE });
+  const got = await fetchObject(t, { oid, expectType: TYPE.TREE });
+  if (!got.ok) return got;
+  const { data } = got.value;
   cache.set(oid, data); onFetch();
   return parseTree(data, t.limits);
 };
@@ -508,16 +511,16 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
     return map(await entryIn(p.value.value, e => e.name === dir.slice(cut + 1) && e.mode === '40000'), found => mapOption(found, e => e.oid));
   });
   // a .gitattributes entry's text
-  const textOf = async (e: Option<TreeEntry>): Promise<Option<string>> => {
-    if (e.tag === 'none') return none;
-    return some(bytesToStr((await fetchObject(t, { oid: e.value.oid, expectType: TYPE.BLOB })).data));
+  const textOf = async (e: Option<TreeEntry>): Promise<Result<Option<string>, PlyError>> => {
+    if (e.tag === 'none') return ok(none);
+    return map(await fetchObject(t, { oid: e.value.oid, expectType: TYPE.BLOB }), b => some(bytesToStr(b.data)));
   };
   const fileOf = (dir: string): Look => once(dir, async () => {
     const oid = await treeOf(dir);
     if (!oid.ok || oid.value.tag === 'none') return oid;
     const e = await entryIn(oid.value.value, x => x.name === '.gitattributes' && x.mode !== '40000' && x.mode !== '160000');
     if (!e.ok) return e;
-    return ok(await textOf(e.value));
+    return textOf(e.value);
   });
   return async path => {
     const dirs = ['']; for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) dirs.push(path.slice(0, i));
@@ -542,6 +545,8 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
 }
 
 const refused = (reason: ContentReason): Ok<BlobMerge> => ok({ kind: 'conflict', reason });
+// A blob that could not be read: too large is a refusal (the merge goes on), anything else fails it.
+const lost = (r: Err<PlyError>): Result<BlobMerge, PlyError> => (r.error.code === 'limit_exceeded' ? refused('too large to merge') : r);
 
 // Effect: the content half of a both-sides-changed file — git's shortcuts first (one side equal to base or both equal),
 // then the three blobs (bounded by maxMergeBlobBytes) through the ported xdiff merge. Shared by merge, rebase,
@@ -559,7 +564,7 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
-  const get = async (oid: string): Promise<Uint8Array> => { const held = mapGet(made, oid); return held.tag === 'some' ? held.value : (await fetchObject(bounded, { oid, expectType: TYPE.BLOB })).data; };
+  const get = async (oid: string): Promise<Result<Uint8Array, PlyError>> => { const held = mapGet(made, oid); return held.tag === 'some' ? ok(held.value) : map(await fetchObject(bounded, { oid, expectType: TYPE.BLOB }), b => b.data); };
   const f = async ({ base, ours, theirs, path, driverFor }: BlobSpec): Promise<Result<BlobMerge, PlyError>> => {
     if (ours === theirs || theirs === base) return ok({ kind: 'existing', oid: ours });
     if (ours === base) return ok({ kind: 'existing', oid: theirs });
@@ -568,14 +573,11 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
     if (!driven.ok) return driven;
     const driver = driven.value;
     if (driver === 'binary') { stats.attrBinary++; return refused('binary (merge attribute)'); }
-    let B: Uint8Array;
-    let O: Uint8Array;
-    let T: Uint8Array;
-    try { [B, O, T] = await Promise.all([get(base), get(ours), get(theirs)]); }
-    catch (error) {
-      if (thrownCodeIs(error, 'limit_exceeded')) return refused('too large to merge');
-      throw error;
-    }
+    const [rB, rO, rT] = await Promise.all([get(base), get(ours), get(theirs)]);
+    if (!rB.ok) return lost(rB);
+    if (!rO.ok) return lost(rO);
+    if (!rT.ok) return lost(rT);
+    const [B, O, T] = [rB.value, rO.value, rT.value];
     const m = mergeLines(B, O, T, { maxBytes: blobCap, rediff, driver });
     if (!m.clean) {
       if (m.reason === 'undecided') { stats.undecided++; return refused('content (git would decide this with a classic-diff fallback ply does not implement)'); }
@@ -623,7 +625,8 @@ export async function attributeTree(t: Transport, attributes: AttributeSource, g
   if (!isOid(attributes)) {
     const named = validateRef(attributes);
     if (!named.ok) return named;
-    const found = refOid((await lsRefs(t, [attributes])).refs, attributes);
+    const listed = await lsRefs(t, [attributes]); if (!listed.ok) return listed;
+    const found = refOid(listed.value.refs, attributes);
     if (found.tag === 'none') return fail('not_found', `attributes ref ${attributes} not found`, { miss: { kind: 'ref', ref: attributes, candidates: [attributes] } });
     oid = found.value;
   }
@@ -740,7 +743,8 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
   const attributesChecked = validateAttributes(attributesGiven); if (!attributesChecked.ok) return attributesChecked;
   const attributes = attributesChecked.value;
   return operation('merge', url, operationOpts(options, { 'git.merge.ref': ref, 'git.merge.from': from, 'git.merge.ff_only': fastForwardOnly, 'git.merge.no_ff': noFastForward }), async ({ t, root, outcome }: OpContext): Promise<Result<MergeOutcome, PlyError>> => {
-    const { refs } = await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]);
+    const listed = await lsRefs(t, isNone(fromOid) ? [ref, from] : [ref]); if (!listed.ok) return listed;
+    const { refs } = listed.value;
     const oursAt = refOid(refs, ref);
     const theirsAt = isSome(fromOid) ? fromOid : refOid(refs, from);
     if (oursAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
@@ -765,7 +769,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const { base } = land;
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     const [cB, cO, cT] = await Promise.all([commitBytesAt(t, base), commitBytesAt(t, ours), commitBytesAt(t, theirs)]);
-    const tree = (c: { readonly data: Uint8Array }): Result<string, PlyError> => map(parseCommit(c.data, t.limits), x => x.tree);
+    const tree = (c: Result<{ readonly data: Uint8Array }, PlyError>): Result<string, PlyError> => andThen(c, b => map(parseCommit(b.data, t.limits), x => x.tree));
     const tB = tree(cB); if (!tB.ok) return tB;
     const tO = tree(cO); if (!tO.ok) return tO;
     const tT = tree(cT); if (!tT.ok) return tT;

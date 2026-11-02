@@ -27,10 +27,10 @@ import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
 import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
-import { parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
+import { encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
-import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
+import { short, commitAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, readLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
@@ -177,7 +177,8 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
   const authorPerson: Option<ValidatedIdent> = authorStamp.value;
   if (message !== null) { const checked = validateMessage(message); if (!checked.ok) return checked; }
   return operation('rebase', url, operationOpts(options, { 'git.rebase.ref': ref, 'git.rebase.onto': onto, 'git.rebase.squash': squash }), async ({ t, root, outcome, limits }: OpContext): Promise<Result<RebaseOutcome, PlyError>> => {
-    const { refs } = await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]);
+    const listed = await lsRefs(t, ontoOid.tag === 'none' ? [ref, onto] : [ref]); if (!listed.ok) return listed;
+    const { refs } = listed.value;
     const tipAt = refOid(refs, ref);
     const targetAt = ontoOid.tag === 'some' ? ontoOid : refOid(refs, onto);
     if (tipAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
@@ -337,12 +338,13 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   return operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<Result<PickOutcome, PlyError>> => {
-    const { refs } = await lsRefs(t, [ref]);
+    const listed = await lsRefs(t, [ref]); if (!listed.ok) return listed;
+    const { refs } = listed.value;
     const targetAt = refOid(refs, ref); if (targetAt.tag === 'none') return fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
     const target = targetAt.value;
-    const [cT, cC] = await Promise.all([commitBytesAt(t, target), commitBytesAt(t, commit)]);
-    const targetCommit = parseCommit(cT.data, t.limits); if (!targetCommit.ok) return targetCommit;
-    const picked = parseCommit(cC.data, t.limits); if (!picked.ok) return picked;
+    const [targetCommit, picked] = await Promise.all([commitAt(t, target), commitAt(t, commit)]);
+    if (!targetCommit.ok) return targetCommit;
+    if (!picked.ok) return picked;
     const tInfo: Commit = targetCommit.value;
     const c: Commit = picked.value;
     if (c.parents.length > 1) return fail('not_linear', `${commit} has ${c.parents.length} parents; only single-parent commits are picked`);

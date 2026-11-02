@@ -20,7 +20,7 @@ import { readLog, logWindow, logOn } from '../src/log.js';
 import { fetchPackFiltered } from '../src/fetchpack.js';
 import { isFilterRefusal, isFilterRejection } from '../src/fetch.js';
 import { listTree } from '../src/read.js';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { pkt } from '../src/pktline.js';
@@ -28,6 +28,8 @@ import { concat } from '../src/bytes.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 const REJECT = 'Unsupported Git fetch filter; only blob:none is supported.';
 const N = 5, BIG = 64;
 const LIMITS = { 1: 1, n: N, big: BIG };

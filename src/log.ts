@@ -42,9 +42,8 @@ import { DEFAULT_LIMITS, readLimit } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
-import { thrownCodeIs, thrownReasonIs } from './boundary.js';
+import { thrownReasonIs } from './boundary.js';
 // oxlint-disable-next-line import/max-dependencies -- the read path's edge to the modules not yet converted to Result
-import { caughtErr } from './commit.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | null };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
@@ -84,11 +83,12 @@ export function logWindow(commits: ReadonlyMap<string, Parents>, shallow: Iterab
 
 // Effect: the window's pack, with a want that is not a commit (or not on the server) as the caller's not_found.
 async function fetchWindow(t: Transport, commit: string, limit: number): Promise<Result<FetchedPack, PlyError>> {
-  let r: FetchedPack;
-  try { r = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit }); } catch (e) {
-    if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
-    return caughtErr(e);
+  const got = await fetchPackTree0(t, { wants: [commit], filter: 'tree:0', deepen: limit });
+  if (!got.ok) {
+    if (got.error.code === 'remote_error' && thrownReasonIs(got.error, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
+    return got;
   }
+  const r = got.value;
   const want = flatMapOption(fromNullish(r.objects), objects => mapGet(objects, commit));
   if (want.tag === 'some' && want.value.type !== TYPE.COMMIT) {
     const wantType = want.value.type;

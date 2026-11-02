@@ -36,12 +36,15 @@ import { MERGE_LIES, mergeLie } from './fuzz/mergelies.js';
 import { oracleRediff } from './gitversion.js';
 import { mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { withLimits } from '../src/limits.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 import { unwrapAsync } from './unwrap.js';
 
+import { unwrap } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 const rediff = oracleRediff();
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
 const sh = (cwd, args, input) => { const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: ENV, input, maxBuffer: 1 << 26 }); if (r.status !== 0 && !args.includes('merge-tree')) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); return r; };

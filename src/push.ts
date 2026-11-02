@@ -9,7 +9,7 @@ import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS, ZERO_OID } from './format.js';
 import { buildPack } from './pack.js';
-import { frames, coded, clientSpan, UA } from './transport.js';
+import { frames, coded, clientSpan, spanned, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePushRef, validateWire } from './validate.js';
@@ -521,8 +521,8 @@ export async function push(t: PushTransport, opts: PushOptions): Promise<PushRes
   const { commands, caps } = plan;
   // an empty list from an untyped caller has no first command: the TypeError below is coded 'protocol', as before
   const [first] = commands;
-  // oxlint-disable-next-line typescript/promise-function-async -- coded awaits it; async adds a wrapper and bytes
-  return coded('protocol', () => t.tracer.span('git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), async (span: Span): Promise<PushResult> => orThrow(await send(t, plan, span))));
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
+  return orThrow(await coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), (span: Span) => send(t, plan, span))));
 
 }
 

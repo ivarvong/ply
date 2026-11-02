@@ -26,14 +26,17 @@ import { Tracer } from '../../src/otel.js';
 import { td } from '../../src/bytes.js';
 import { unwrap } from '../unwrap.js';
 
-const spanStub = { set() {}, event() {}, end() {} };
+const spanStub = { set() {}, event() {}, end() {}, error() {} };
 const tracer = { span: async (_n, _o, fn) => fn(spanStub) };
 const FX = { main: '1'.repeat(40), tag: '2'.repeat(40), peeled: '3'.repeat(40), other: '4'.repeat(40) };
 const INFO_KEYS = ['agent', 'objectFormat', 'fetch', 'filter', 'shallow', 'waitForDone', 'refInWant', 'sidebandAll', 'lsRefs', 'lsRefsUnborn', 'serverOption', 'sessionId'];
 const pick = (o, keys) => Object.fromEntries(keys.map(k => [k, o[k]]));
 const WHY_MESSAGE = { protocol: /did not answer protocol v2/, 'ls-refs': /advertise ls-refs/, fetch: /advertise fetch/, 'object-format': /object-format/, 'pkt length': /bad pkt-line length/, 'advertisement framing': /^advertisement:/, record: /^ls-refs: malformed line/, 'listing framing': /^ls-refs: (response ended|delim|unexpected|data after)/ };
 
-const outcomeOf = async (fn, okMap) => { try { return { tag: 'ok', ...okMap(await fn()) }; } catch (e) { return { tag: e.code ?? 'untyped', message: e.message }; } };
+// A Result (0.2.0) or, from another src (ADV_SPACE_SRC), the value or the throw it replaced.
+const isResult = v => v !== null && typeof v === 'object' && typeof v.ok === 'boolean' && ('value' in v || 'error' in v);
+const valueOf = v => (isResult(v) ? unwrap(v) : v);
+const outcomeOf = async (fn, okMap) => { try { return { tag: 'ok', ...okMap(valueOf(await fn())) }; } catch (e) { return { tag: e.code ?? 'untyped', message: e.message }; } };
 // against another src (ADV_SPACE_SRC), only the info fields that src reports are compared (lsRefs, sidebandAll, sessionId are new)
 const capsOk = info => ({ info: pick(info, process.env.ADV_SPACE_SRC ? INFO_KEYS.filter(k => info[k] !== undefined) : INFO_KEYS) });
 const refsOk = ({ refs, head }) => ({ refs: [...refs.values()].map(r => [r.name, r.oid, r.peeled ?? null, r['symref-target'] ?? null]), head });
@@ -58,7 +61,7 @@ function stubTransport(serve) {
     if (r.reset) throw new TypeError('fetch failed');
     return new Response(r.body, { status: r.status ?? 200, headers: { 'content-type': r.contentType } });
   };
-  return createTransport('http://cell.invalid/r.git', { tracer, fetchImpl });
+  return valueOf(createTransport('http://cell.invalid/r.git', { tracer, fetchImpl }));
 }
 const lsRefsReply = body => ({ status: 200, contentType: 'application/x-git-upload-pack-result', body });
 

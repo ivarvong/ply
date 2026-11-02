@@ -5,12 +5,15 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { tmpRoot, makeBareRepo, startGitServer } from '../server.js';
-import { createTransport } from '../../src/http.js';
+import { createTransport as createTransportR } from '../../src/http.js';
 import { mergeBase } from '../../src/merge.js';
 import { Tracer } from '../../src/otel.js';
 import { cells, expectCap } from './merge-depth.space.js';
 import { unwrapAsync } from '../unwrap.js';
 
+import { unwrap } from '../unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 const ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
   GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',

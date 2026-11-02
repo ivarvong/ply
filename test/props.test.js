@@ -10,12 +10,16 @@ import { inflate } from '../src/inflate.js';
 import { Sha1, toHex } from '../src/sha1.js';
 import { encodeObjHeader, applyDelta, spliceDelta, makeDelta, parsePack, resolvePack, buildPack } from '../src/pack.js';
 import { parseTree, encodeTree, treeSort, hashObject, parseCommit, encodeCommit } from '../src/objects.js';
-import { spInit, spStep, spFinish, scanInit, scanStep, scanFinish, MATCH_OFFSETS_KEPT } from '../src/edit.js';
-import { v2Init, v2Step } from '../src/client.js';
+import { spInit, spStep as spStepR, spFinish as spFinishR, scanInit, scanStep, scanFinish, MATCH_OFFSETS_KEPT } from '../src/edit.js';
+import { v2Init, v2Step as v2StepR } from '../src/client.js';
 import { concat, indexOfBytes } from '../src/bytes.js';
 import { assertBytes } from './bytes-assert.js';
 import { unwrap } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const spStep = (...a) => unwrap(spStepR(...a));
+const spFinish = (...a) => unwrap(spFinishR(...a));
+const v2Step = (...a) => unwrap(v2StepR(...a));
 const N = parseInt(process.env.PROP_N ?? '200', 10);
 const SEED = parseInt(process.env.SEED ?? '1', 10);
 const forAll = (name, fn, n = N) => test(name, async () => { for (let i = 0; i < n; i++) { const rng = new Rng(SEED * 1000003 + i); try { await fn(rng, i); } catch (e) { e.message = `[case ${i} seed ${SEED}] ${e.message}`; throw e; } } });

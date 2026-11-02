@@ -12,13 +12,18 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
-import { createTransport as rawTransport } from '../src/http.js';
+import { createTransport as rawTransportR } from '../src/http.js';
 import { Tracer } from '../src/otel.js';
-import { lsRefs, discover, GitHttp } from '../src/client.js';
-import { lsRefs as lsRefsWire, parseLsRefLine, parseUnbornLine } from '../src/lsrefs.js';
+import { lsRefs, discover as discoverR, GitHttp } from '../src/client.js';
+import { lsRefs as lsRefsWireR, parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
 import { pkts } from '../src/pktline.js';
-import { unwrap } from './unwrap.js';
+import { unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const rawTransport = (...a) => unwrap(rawTransportR(...a));
+const discover = (...a) => unwrapAsync(discoverR(...a));
+const lsRefsWire = (...a) => unwrapAsync(lsRefsWireR(...a));
+const parseLsRefLine = (...a) => unwrap(parseLsRefLineR(...a));
 const td = new TextDecoder();
 const createTransport = (u, opts = {}) => rawTransport(u, { tracer: new Tracer(), ...opts });
 const DEFAULT_BRANCH = 'zz-default';

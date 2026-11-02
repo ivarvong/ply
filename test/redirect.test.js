@@ -26,12 +26,17 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { git, gitAsync, tmpRoot, makeBareRepo, commitFiles, startGitServer } from './server.js';
 import { GitHttp } from '../src/client.js';
-import { lsRefs } from '../src/lsrefs.js';
-import { createTransport, baseFromRedirect, redirectPolicy } from '../src/http.js';
+import { lsRefs as lsRefsR } from '../src/lsrefs.js';
+import { createTransport as createTransportR, baseFromRedirect, redirectPolicy as redirectPolicyR } from '../src/http.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { ok } from '../src/result.js';
 import { fail } from '../src/errors.js';
 
+import { unwrap, unwrapAsync } from './unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const redirectPolicy = (...a) => unwrap(redirectPolicyR(...a));
 const TOK = 's3cret-token';
 const BASIC = `Basic ${Buffer.from(`x-access-token:${TOK}`).toString('base64')}`;
 const EVIL = `Basic ${Buffer.from('evil:s3cret').toString('base64')}`;

@@ -34,7 +34,7 @@ export type FetchedCommit = { readonly oid: string; readonly data: Uint8Array; r
 // is not_found `{ kind: 'commit', miss: { kind: 'not_commit' } }`. A corrupt pack stays pack_corrupt.
 export async function fetchCommit(t: Transport, oid: string): Promise<Result<FetchedCommit, PlyError>> {
   try {
-    const c = await fetchObject(t, { oid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
+    const c = orThrow(await fetchObject(t, { oid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT }));
     return ok({ oid, data: c.data, commit: orThrow(parseCommit(c.data, t.limits)) });
   } catch (e) {
     if (thrownCodeIs(e, 'remote_error') && thrownReasonIs(e, 'not_our_ref')) return fail('not_found', `commit ${oid} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid } } });

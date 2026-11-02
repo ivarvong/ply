@@ -15,22 +15,22 @@ import {
 } from '../src/packresolve.js';
 import { encodeObjHeader, encodeVarint, buildPack, zlibDeflate, copyOp } from '../src/pack.js';
 import { inflate, huffBuild, adler32 } from '../src/inflate.js';
-import { v2Init, v2Step, parseSideband, spInit, spStep, spFinish, fetchBody, isShortRead } from '../src/fetch.js';
+import { v2Init, v2Step as v2StepR, parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, fetchBody as fetchBodyR, isShortRead } from '../src/fetch.js';
 import { attributeTree, bestBases, mergeBase, mergeBranch } from '../src/merge.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
-import { parseLsRefLine, parseUnbornLine, lsRefs, lsRefsBody } from '../src/lsrefs.js';
+import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
 import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
-import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions } from '../src/receivecaps.js';
+import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
 import { orThrow } from '../src/errors.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
 import { withLimits, DEFAULT_LIMITS, readLimit, checkLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
-import { createTransport } from '../src/http.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { verifyRef } from '../src/operation.js';
-import { negotiate } from '../src/negotiate.js';
+import { negotiate as negotiateR } from '../src/negotiate.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import {
   OID_BYTES, OID_HEX_CHARS, HEX_DIGIT_MIN, HEX_DIGIT_MAX, HEX_LOWER_MIN, HEX_LOWER_MAX, PACK_SIGNATURE, PACK_HEADER_BYTES, PACK_VERSION,
@@ -39,6 +39,18 @@ import {
 } from '../src/format.js';
 import { errOf, unwrap, unwrapAsync } from './unwrap.js';
 
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const v2Step = (...a) => unwrap(v2StepR(...a));
+const parseSideband = (...a) => unwrap(parseSidebandR(...a));
+const spStep = (...a) => unwrap(spStepR(...a));
+const spFinish = (...a) => unwrap(spFinishR(...a));
+const fetchBody = (...a) => unwrap(fetchBodyR(...a));
+const parseLsRefLine = (...a) => unwrap(parseLsRefLineR(...a));
+const lsRefs = (...a) => unwrapAsync(lsRefsR(...a));
+const lsRefsBody = (...a) => unwrap(lsRefsBodyR(...a));
+const pushWithOptions = (...a) => unwrapAsync(pushWithOptionsR(...a));
+const createTransport = (...a) => unwrap(createTransportR(...a));
+const negotiate = (...a) => unwrapAsync(negotiateR(...a));
 const oid = n => (n.toString(16).padStart(2, '0').repeat(OID_BYTES));
 const oidBytes = n => Uint8Array.from({ length: OID_BYTES }, () => n);
 const throws = (fn, code, message) => assert.throws(fn, e => {
@@ -1296,7 +1308,7 @@ function packBits(bits) {
   return Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
 }
 
-const spanStub = { set() {}, event() {} };
+const spanStub = { set() {}, event() {}, error() {} };
 const tracerStub = { span: async (_name, _opts, fn) => fn(spanStub) };
 
 test('every DEFAULT_LIMITS key is read outside limits.js', () => {
@@ -1467,7 +1479,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   const unbornFrames = [te.encode('unborn HEAD symref-target:refs/heads/a\n'), te.encode('unborn HEAD symref-target:refs/heads/b\n'), te.encode('unborn HEAD\n'), te.encode(refLine)];
   const recording = (list, adv = null) => {
     const sent = [], ads = [];
-    return { sent, ads, t: { ...framesOf(list), url: 'http://x/r.git', kind: 'http', async *frames(_svc, body) { sent.push(td.decode(body)); for (const f of list) yield f; }, async advertise() { ads.push(1); return adv; } } };
+    return { sent, ads, t: { ...framesOf(list), url: 'http://x/r.git', kind: 'http', async *frames(_svc, body) { sent.push(td.decode(body)); for (const f of list) yield f; }, async advertise() { ads.push(1); return { ok: true, value: adv }; } } };
   };
   const listing = [...unbornFrames.map(p => ({ kind: 'data', payload: p })), { kind: 'flush' }];
   const withReader = recording(listing);
@@ -1532,7 +1544,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     fetchImpl: async () => new Response(advBody, { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } }),
     limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
   });
-  await assert.rejects(advHttp.advertise('git-upload-pack', spanStub), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got > 2500);
+  await assert.rejects(unwrapAsync(advHttp.advertise('git-upload-pack', spanStub)), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got > 2500);
   assert.ok(pulls <= 4, `advertisement kept reading (${pulls} chunks)`);
   const declared = createTransport('http://127.0.0.1:9/r.git', {
     fetchImpl: async () => ({
@@ -1542,7 +1554,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     }),
     limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
   });
-  await assert.rejects(declared.advertise('git-upload-pack', spanStub), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got === 999999999);
+  await assert.rejects(unwrapAsync(declared.advertise('git-upload-pack', spanStub)), e => e.code === 'limit_exceeded' && e.what === 'advertisement bytes' && e.got === 999999999);
   let errPulls = 0;
   const errBody = new ReadableStream({ pull(controller) { errPulls++; controller.enqueue(te.encode('x'.repeat(3000))); if (errPulls > 6) controller.close(); } });
   const errHttp = createTransport('http://127.0.0.1:9/r.git', {
@@ -1557,7 +1569,7 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
     tracer: tracerStub,
   });
   // the advertisement names the status and the miss; it does not quote the body
-  await assert.rejects(missingRepo.advertise('git-upload-pack', spanStub), e => e.code === 'not_found' && e.message === 'HTTP 404 git-upload-pack advertisement' && e.miss?.kind === 'repository');
+  await assert.rejects(unwrapAsync(missingRepo.advertise('git-upload-pack', spanStub)), e => e.code === 'not_found' && e.message === 'HTTP 404 git-upload-pack advertisement' && e.miss?.kind === 'repository');
   // the POST quotes a prefix of the page and stops: a dropped slice would keep the whole page
   await assert.rejects((async () => { for await (const frame of missingRepo.frames('git-upload-pack', new Uint8Array(0), spanStub)) void frame; })(), e => e.code === 'not_found' && e.miss?.kind === 'repository' && e.message.includes('yyyy') && !e.message.includes('y'.repeat(250)));
 });
@@ -1839,7 +1851,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
   let adverts = 0;
   const advertised = advertCaps => ({ limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
-    async advertise() { adverts++; return concat([unwrap(pkt(`${oid(1)} refs/heads/a\0${advertCaps}\n`)), FLUSH]); },
+    async advertise() { adverts++; return { ok: true, value: concat([unwrap(pkt(`${oid(1)} refs/heads/a\0${advertCaps}\n`)), FLUSH]) }; },
     async *frames() { yield { kind: 'data', payload: te.encode('unpack ok\n') }; yield { kind: 'data', payload: te.encode('ok refs/heads/a\n') }; yield { kind: 'flush' }; } });
   const del1 = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: false };
   assert.equal((await pushWithOptions(advertised('report-status'), del1)).report.tag, 'statuses'); assert.equal(adverts, 0);
@@ -2157,7 +2169,7 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
       limits: withLimits({ maxPackBytes: 2500 }), tracer: tracerStub,
     });
     let advSettled = false;
-    const advPending = declared.advertise('git-upload-pack', spanStub);
+    const advPending = unwrapAsync(declared.advertise('git-upload-pack', spanStub));
     advPending.then(() => { advSettled = true; }, () => { advSettled = true; });
     await advHold.startedP;
     assert.equal(advSettled, false, 'an over-cap advertisement waits until body.cancel() settles');
@@ -2187,10 +2199,10 @@ test('T3 transport: null read-back is ambiguous, cancel is awaited, a 2xx with n
   let frames = 0;
   for await (const _frame of reply(200, 'application/x-git-upload-pack-result', empty).frames('git-upload-pack', new Uint8Array(0), spanStub)) frames++;
   assert.equal(frames, 0, 'an empty body is bytes, not a missing body');
-  const advNull = await reply(200, 'application/x-git-upload-pack-advertisement', null).advertise('git-upload-pack', spanStub).then(() => null, e => e);
+  const advNull = await reply(200, 'application/x-git-upload-pack-advertisement', null).advertise('git-upload-pack', spanStub).then(r => (r.ok ? null : r.error), e => e);
   assert.equal(advNull.code, 'protocol');
   assert.equal(advNull.message, 'git-upload-pack advertisement: HTTP 200 response has no body');
-  const advEmpty = await reply(200, 'application/x-git-upload-pack-advertisement', new ReadableStream({ start(c) { c.close(); } })).advertise('git-upload-pack', spanStub);
+  const advEmpty = await unwrapAsync(reply(200, 'application/x-git-upload-pack-advertisement', new ReadableStream({ start(c) { c.close(); } })).advertise('git-upload-pack', spanStub));
   assert.equal(advEmpty.length, 0);
 
   const shaped = (message, reason, code = 'pack_corrupt') => Object.assign(new Error(message), { code, reason });

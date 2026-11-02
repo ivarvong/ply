@@ -1,11 +1,14 @@
 // Shared wire helpers for the framing and pack spaces: a real http transport (src/http.js createTransport) over a fake
 // fetch that answers with exactly the bytes a cell renders, so every cell goes through ply's own pkt-line reader
 // (pktStep/pktFinish in the transport), its own consumers and its own error typing. No network, no server process.
-import { createTransport } from '../../src/http.js';
+import { createTransport as createTransportR } from '../../src/http.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { isPlyCode } from '../../src/errors.js';
 
+import { unwrap } from '../unwrap.js';
+// Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
+const createTransport = (...a) => unwrap(createTransportR(...a));
 const te = new TextEncoder();
 export const enc = s => (typeof s === 'string' ? te.encode(s) : s);
 export const cat = parts => { let n = 0; for (const p of parts) n += p.length; const o = new Uint8Array(n); let i = 0; for (const p of parts) { o.set(p, i); i += p.length; } return o; };

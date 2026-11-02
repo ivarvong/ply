@@ -13,14 +13,14 @@ import { fetchCommit } from './commit.js';
 import { parseCommit, TYPE } from './objects.js';
 import { validateIdent, validateRef } from './validate.js';
 import { parseOid, ZERO_OID } from './oid.js';
-import { getOrElse, map, none, ok, some } from './result.js';
+import { andThen, getOrElse, map, none, ok, some } from './result.js';
 import { fromNullish } from './absent.js';
 
 // a branch name as git's messages print it
 export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 // Effect: one commit by oid (deepen 1: the commit alone), as bytes or parsed
-export const commitBytesAt = async (t: Transport, oid: string): Promise<{ readonly data: Uint8Array }> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
-export const commitAt = async (t: Transport, oid: string): Promise<Result<Commit, PlyError>> => parseCommit((await commitBytesAt(t, oid)).data, t.limits);
+export const commitBytesAt = async (t: Transport, oid: string): Promise<Result<{ readonly data: Uint8Array }, PlyError>> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
+export const commitAt = async (t: Transport, oid: string): Promise<Result<Commit, PlyError>> => andThen(await commitBytesAt(t, oid), b => parseCommit(b.data, t.limits));
 
 export const isOid = (s: string): boolean => parseOid(s).ok;
 // A merge `from` or rebase `onto`, as read.js's resolveCommit takes a name (#103 item 4): a 40-hex commit id is taken as

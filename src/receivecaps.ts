@@ -1,16 +1,16 @@
 // v0 receive-pack capability advertisement (GET info/refs). Only needed to check optional capabilities (atomic,
 // push-options) before relying on them; the v2 fetch path never needs it. Parsing the advertisement and checking a
 // push against it are pure; receiveCaps is the one effect.
-import { fail, orThrow } from './errors.js';
-import type { ErrorOf } from './errors.js';
+import { fail } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
 import { ok, assertNever, getOrElse, mapOption } from './result.js';
 import { decideObjectFormat } from './closed.js';
 import type { Option, Result } from './result.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
-import { parseCapabilitiesV2Result } from './discover.js';
+import { parseCapabilitiesV2 } from './discover.js';
 import type { CapsV2Error } from './discover.js';
-import { coded, clientSpan, advertise } from './transport.js';
+import { coded, clientSpan, advertise, spanned } from './transport.js';
 import { push } from './push.js';
 import type { CheckedCaps, PushOptions, PushResult, PushTransport } from './push.js';
 import type { Input } from './absent.js';
@@ -69,7 +69,7 @@ export function parseReceiveAdvert(frames: readonly Frame[]): Result<Set<string>
   // (Cloudflare Artifacts does): it is held to the v2 shape (discover.ts) and, as before, names no v0 capabilities.
   const opening = dataAt(frames, start);
   if (opening !== null && td.decode(opening.payload).replace(/\n$/u, '') === 'version 2') {
-    const v2 = parseCapabilitiesV2Result(frames);
+    const v2 = parseCapabilitiesV2(frames);
     return v2.ok ? ok(caps) : v2;
   }
   let hex = SHA1_HEX;
@@ -93,15 +93,20 @@ export function parseReceiveAdvert(frames: readonly Frame[]): Result<Set<string>
   return ok(caps);
 }
 
-// The I/O edge: an advertisement that does not read is thrown.
-// oxlint-disable-next-line eslint/require-await -- async so a synchronous throw rejects, as before
-export async function receiveCaps(t: CapsTransport): Promise<Set<string>> {
-  // oxlint-disable-next-line typescript/promise-function-async -- coded awaits it; async adds a wrapper and bytes
-  return coded('protocol', () => t.tracer.span('git.receive-pack advertise', clientSpan(t, { 'git.command': 'advertise', 'git.protocol.version': 0 }), async (span: Span): Promise<Set<string>> => {
-    const { frames, state } = orThrow(pktStep(pktInit(), await advertise(t, 'git-receive-pack', span)));
-    orThrow(pktFinish(state));
-    const caps = orThrow(parseReceiveAdvert(frames));
-    span.set({ 'git.receive.caps': [...caps] });
+// The exchange: the advertisement, read.
+// oxlint-disable-next-line require-await -- async: a synchronous failure (an unusable transport) is a rejection, as it always was
+export async function receiveCaps(t: CapsTransport): Promise<Result<Set<string>, PlyError>> {
+  // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
+  return coded('protocol', () => spanned(t, 'git.receive-pack advertise', clientSpan(t, { 'git.command': 'advertise', 'git.protocol.version': 0 }), async (span: Span): Promise<Result<Set<string>, PlyError>> => {
+    const buf = await advertise(t, 'git-receive-pack', span);
+    if (!buf.ok) return buf;
+    const stepped = pktStep(pktInit(), buf.value);
+    if (!stepped.ok) return stepped;
+    const { frames, state } = stepped.value;
+    const finished = pktFinish(state);
+    if (!finished.ok) return finished;
+    const caps = parseReceiveAdvert(frames);
+    if (caps.ok) span.set({ 'git.receive.caps': [...caps.value] });
     return caps;
   }));
 }
@@ -162,9 +167,13 @@ export function checkPushCaps(caps: ReadonlySet<string>, want: PushWants = {}): 
 
 // push(), after reading the advertisement when the push needs a capability (atomic, push-options): one extra GET, only then.
 export type CheckedPushOptions = Omit<PushOptions, 'checked'> & PushWants;
-export async function pushWithOptions(t: CapsTransport, options: CheckedPushOptions): Promise<PushResult> {
+export async function pushWithOptions(t: CapsTransport, options: CheckedPushOptions): Promise<Result<PushResult, PlyError>> {
   const { atomic: _atomic, pushOptions: _pushOptions, ...opts } = options;
   const { atomic, pushOptions } = withDefaults(options, noWants());
-  if (!atomic && pushOptions.length === 0) return push(t, opts);
-  return push(t, { ...opts, checked: orThrow(checkPushCaps(await receiveCaps(t), { atomic, pushOptions })) });
+  if (!atomic && pushOptions.length === 0) return ok(await push(t, opts));
+  const caps = await receiveCaps(t);
+  if (!caps.ok) return caps;
+  const checked = checkPushCaps(caps.value, { atomic, pushOptions });
+  if (!checked.ok) return checked;
+  return ok(await push(t, { ...opts, checked: checked.value }));
 }

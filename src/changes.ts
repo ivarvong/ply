@@ -253,8 +253,8 @@ const tipOf = (refs: ReadonlyMap<string, { readonly oid: string }>, ref: string)
 
 async function resolveTarget(t: Transport, ref: string | null): Promise<Result<Tip, PlyError>> {
   if (ref === null) {
-    const info = await discover(t);
-    const listed = await lsRefs(t, ['HEAD'], info.lsRefsUnborn ? { unborn: parseUnbornLine } : {});
+    const info = orThrow(await discover(t));
+    const listed = orThrow(await lsRefs(t, ['HEAD'], info.lsRefsUnborn ? { unborn: parseUnbornLine } : {}));
     const headLine = mapGet(listed.refs, 'HEAD');
     const unborn = listed.unborn;
     if (unborn !== null) {
@@ -266,7 +266,7 @@ async function resolveTarget(t: Transport, ref: string | null): Promise<Result<T
     if (headLine.tag === 'some') return fail('bad_request', 'remote HEAD is detached; pass ref explicitly');
     return fail('not_found', 'remote HEAD is absent; pass ref explicitly', { miss: { kind: 'head_absent' } });
   }
-  const { refs } = await lsRefs(t, [ref]);
+  const { refs } = orThrow(await lsRefs(t, [ref]));
   return ok({ ref, oid: tipOf(refs, ref) });
 }
 
@@ -279,7 +279,7 @@ async function mustCommit(t: Transport, oid: string): Promise<Result<{ readonly 
 async function resolveParent(t: Transport, target: Tip, base: BasePlan): Promise<Result<Parent, PlyError>> {
   if (base.kind === 'ref' && base.ref !== target.ref) {
     if (target.oid !== null) return lost(target.ref, ZERO_OID, target.oid);
-    const { refs } = await lsRefs(t, [base.ref]);
+    const { refs } = orThrow(await lsRefs(t, [base.ref]));
     const rec = mapGet(refs, base.ref);
     if (rec.tag === 'none') return fail('not_found', `ref ${base.ref} not found`, { what: 'ref', path: base.ref, miss: { kind: 'ref', ref: base.ref, candidates: [base.ref] } });
     const oid = getOrElse(fromNullish(rec.value.peeled), rec.value.oid);
@@ -310,7 +310,7 @@ type Walk = {
 async function loadTree(walk: Walk, oid: string): Promise<Dir> {
   const hit = mapGet(walk.cache, oid);
   if (hit.tag === 'some') return hit.value;
-  const obj = await fetchObject(walk.t, { oid, filter: 'tree:0', expectType: TYPE.TREE });
+  const obj = orThrow(await fetchObject(walk.t, { oid, filter: 'tree:0', expectType: TYPE.TREE }));
   const dir = emptyDir();
   for (const entry of orThrow(parseTree(obj.data, walk.limits))) {
     dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
@@ -388,7 +388,7 @@ async function applyEdit(walk: Walk, root: Dir, change: Extract<Norm, { readonly
     return fail('not_found', `${change.path} is not a regular file (mode ${shown})`, { what: 'path', path: change.path, miss });
   }
   walk.have.add(node.oid);
-  const blob = await fetchObject(walk.t, { oid: node.oid, filter: '', expectType: TYPE.BLOB });
+  const blob = orThrow(await fetchObject(walk.t, { oid: node.oid, filter: '', expectType: TYPE.BLOB }));
   if (isLfsPointerPrefix(blob.data) && !walk.allowLfs) return fail('lfs_pointer', `${node.oid} is a Git LFS pointer (${blob.data.length} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`);
   const next = replaceOnce(blob.data, change.find, change.replace);
   if (!next.ok) return next;
@@ -461,7 +461,7 @@ type StreamOpts = {
 };
 
 async function readTip(t: Transport, ref: string): Promise<string | null> {
-  return tipOf((await lsRefs(t, [ref])).refs, ref);
+  return tipOf(orThrow(await lsRefs(t, [ref])).refs, ref);
 }
 
 type StreamJob = {
