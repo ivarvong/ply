@@ -101,7 +101,7 @@ export { parsePath } from './path.js';
 export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
-export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, encodeTag, ident, TYPE, TYPE_NAME } from './objects.js';
+export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, parseTag, encodeTag, ident, TYPE, TYPE_NAME, TYPE_ID } from './objects.js';
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny, cpuNow, cpuSince } from './otel.js';
 export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';

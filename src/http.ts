@@ -10,7 +10,8 @@ import { field, fillIn, fromNullable, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 import { assertNever, err, ok } from './result.js';
 import type { Limits } from './limits.js';
-import type { Span, Tracer } from './otel.js';
+import type { Span } from './otel.js';
+import { Tracer } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
 import { fail, plyError } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
@@ -558,9 +559,9 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
-    // A transport without a tracer fails on its first span, as it always has. A3: require it.
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above
-    kind: 'http', get url(): string { return base; }, tracer: tracer as Tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
+    // tracer: a transport made without one gets a Tracer with no exporter (its spans are dropped), as every entry does
+    // (operation.ts); the low-level calls (lsRefs, fetchPack, push on this transport) span on it unconditionally.
+    kind: 'http', get url(): string { return base; }, tracer: tracer === null ? new Tracer() : tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     // The stream: a failure (the request's, a frame's) is raised through the iterator, as a stream signals one.
     async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
       let st: PktState = pktInit();

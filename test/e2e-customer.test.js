@@ -250,6 +250,24 @@ describe('README quick start', () => {
       assert.match(r.error.message, /opts\.tracer must be a Tracer/);
     }
   });
+  test('#186: the low-level calls work on a transport made without a tracer; parseTag and TYPE_ID are exported', async () => {
+    defaultRepo('low-level');
+    const url = `${srv.url}/low-level.git`;
+    const first = await ply.pushTree(url, { ref: 'refs/heads/main', files: { 'a.txt': 'a\n' }, author, message: 'first' });
+    assert.equal(first.ok, true);
+    const t = ply.createTransport(url, {});
+    assert.equal(t.ok, true);
+    const listed = await ply.lsRefs(t.value, ['refs/heads/']);
+    assert.equal(listed.ok ? listed.value.refs.get('refs/heads/main').oid : listed.error.message, first.value.newCommit);
+    const pushed = await ply.push(t.value, { ref: 'refs/heads/copy', oldOid: ply.ZERO_OID, newOid: first.value.newCommit, objects: [] });
+    assert.equal(pushed.ok, true, pushed.ok ? '' : pushed.error.message);
+    assert.equal(rev(join(root, 'low-level.git'), 'refs/heads/copy'), first.value.newCommit);
+    assert.equal(typeof ply.parseTag, 'function');
+    assert.deepEqual([ply.TYPE_ID.commit, ply.TYPE_ID.tree, ply.TYPE_ID.blob, ply.TYPE_ID.tag], [1, 2, 3, 4]);
+    const tag = ply.encodeTag({ object: first.value.newCommit, type: 'commit', tag: 'v1', tagger: ply.ident(ply.validateIdent({ ...author, time: 1, tz: '+0000' }).value).value, message: 'm\n' });
+    const parsed = ply.parseTag(tag.value);
+    assert.equal(parsed.ok ? parsed.value.object : parsed.error.message, first.value.newCommit);
+  });
   test('test/types/readme.typetest.ts is the README blocks (UPDATE_README_TYPETEST=1 regenerates it)', () => {
     const want = typetestOf(BLOCKS);
     if (process.env.UPDATE_README_TYPETEST) writeFileSync(TYPETEST_PATH, want);
