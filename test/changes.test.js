@@ -13,7 +13,7 @@ import { editFile } from '../src/edit.js';
 import {
   emptyDir, lazyNode, fileLeaf, putAt, removeAt, renameAt, replaceOnce, encodeMem, insertChild, requireDir,
 } from '../src/memtree.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits, LIMIT_OBJECT_OVERHEAD as OV } from '../src/limits.js';
 import { generateSigner } from '../src/sign.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { spawnSync } from 'node:child_process';
@@ -343,6 +343,29 @@ test('commitChanges rejects a bad list before any fetch', async () => {
   const e = await caught(commit(repo.url, { ref: 'refs/heads/main', changes: [one], author, message }, { fetchImpl, head: 'not-an-oid' }));
   assert.equal(e.code, 'bad_request');
   assert.match(e.message, /lowercase hex|40/);
+  assert.equal(c.upload + c.receive, 0);
+});
+
+// #142: each change charges its new bytes (content, replacement; none for a delete or rename) plus LIMIT_OBJECT_OVERHEAD
+// against maxPushBytes, before any fetch. Exactly the cap commits; one byte under it is limit_exceeded with no request.
+test('commitChanges charges bytes plus the per-object overhead against maxPushBytes', async () => {
+  const changes = [{ kind: 'create', path: 'a.txt', content: 'abcd' }, { kind: 'create', path: 'b.txt', content: 'xy' }];
+  const cap = 6 + 2 * OV;
+  const at = copy(emptyBare);
+  const res = await commit(at.url, { ref: 'refs/heads/main', changes, author: AUTHOR, message: 'c' }, { limits: withLimits({ maxPushBytes: cap }) });
+  assert.equal(git(at.bare, ['cat-file', '-p', `${res.oid}:b.txt`]), 'xy');
+  const { c, fetchImpl } = counts();
+  const e = await caught(commit(copy(emptyBare).url, { ref: 'refs/heads/main', changes, author: AUTHOR, message: 'c' }, { fetchImpl, limits: withLimits({ maxPushBytes: cap - 1 }) }));
+  assert.equal(e.code, 'limit_exceeded');
+  assert.equal(e.what, 'push bytes');
+  assert.equal(e.got, cap);
+  assert.equal(e.max, cap - 1);
+  assert.equal(c.upload + c.receive, 0);
+  // an edit charges its replacement, a delete and a rename the overhead alone
+  const mixed = [{ kind: 'edit', path: 'a.txt', find: 'a', replace: 'xyz' }, { kind: 'delete', path: 'b.txt' }, { kind: 'rename', from: 'c', to: 'd' }];
+  const m = await caught(commit(copy(emptyBare).url, { ref: 'refs/heads/main', changes: mixed, author: AUTHOR, message: 'c' }, { fetchImpl, limits: withLimits({ maxPushBytes: 3 + 3 * OV - 1 }) }));
+  assert.equal(m.what, 'push bytes');
+  assert.equal(m.got, 3 + 3 * OV);
   assert.equal(c.upload + c.receive, 0);
 });
 

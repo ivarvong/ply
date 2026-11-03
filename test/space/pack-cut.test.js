@@ -28,7 +28,7 @@ import { fetchObject as fetchObjectR, spInit, spStep as spStepR, spFinish as spF
 import { fetchPack as fetchPackR } from '../../src/fetchpack.js';
 import { inflate } from '../../src/inflate.js';
 import { hashObject, TYPE_NAME } from '../../src/objects.js';
-import { DEFAULT_LIMITS } from '../../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD } from '../../src/limits.js';
 import { encodeObjHeader, encodeVarint } from '../../src/pack.js';
 import { unwrap, unwrapAsync } from '../unwrap.js';
 
@@ -275,7 +275,8 @@ test('caps: maxObjectSize, maxInflatedTotal, maxDeltaChain at, and one under, wh
   const check = (id, o, ok) => { tally('caps', o); if (ok ? o.tag !== 'ok' : !(o.tag === 'typed' && o.code === 'limit_exceeded')) wrong.push(`${id}: ${JSON.stringify(o).slice(0, 160)}`); };
   for (const p of MULTI) {
     const parsed = unwrap(parsePack(p.bytes, unwrap(packParseOpts())));
-    const big = Math.max(...parsed.objects.map(o => o.size)), total = parsed.stats.inflated;
+    // the aggregate charges each object's declared size plus LIMIT_OBJECT_OVERHEAD (#142)
+    const big = Math.max(...parsed.objects.map(o => o.size)), total = parsed.stats.inflated + parsed.objects.length * LIMIT_OBJECT_OVERHEAD;
     const res = p.external ? external : undefined;
     for (const [d, ok] of [[0, true], [1, false]]) {
       check(`${p.name} maxObjectSize=${big - d}`, outcomeSync(() => unwrap(parsePack(p.bytes, { ...unwrap(packParseOpts({ ...DEFAULT_LIMITS, maxObjectSize: big - d })) }))), ok);

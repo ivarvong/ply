@@ -14,7 +14,7 @@ import { Sha1, toHex } from './sha1.js';
 import { TYPE, hashObject, nameOfTypeId } from './objects.js';
 import type { ObjType } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
-import { DEFAULT_LIMITS, limitError, checkLimit, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitError, checkLimit, readLimit } from './limits.js';
 // pack.js re-exports this module's parsers: a cycle of a re-export and one function, which ES modules resolve
 // oxlint-disable-next-line import/no-cycle -- see above
 import { spliceDelta } from './pack.js';
@@ -222,6 +222,9 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<
   // A hostile count must fail before the loop allocates one object record.
   if (count > maxObjects) return err(limitError('pack objects', count, maxObjects));
   const objects: PackObject[] = [];
+  // What the objects held so far cost: declared bytes plus LIMIT_OBJECT_OVERHEAD each (the record, its views, its
+  // resolved form), so a pack of many tiny objects meets maxInflatedTotal too (#142). stats.inflated stays git's sum.
+  let charged = 0;
   const stats: PackStats = { version, count, full: 0, ofsDelta: 0, refDelta: 0, byType: {}, compressed: 0, inflated: 0, inflate: { blocks: 0, stored: 0, fixed: 0, dynamic: 0 } };
   let p = PACK_HEADER_BYTES;
   for (let i = 0; i < count; i++) {
@@ -264,11 +267,12 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<
     const kind = kindResult.value;
     if (size > maxObjectSize) return err(limitError('pack object size', size, maxObjectSize));
     // Declared inflated size is known before zlib runs, so an inflate bomb is refused before the output buffer exists.
-    if (stats.inflated + size > maxInflatedTotal) return err(limitError('pack inflated bytes', stats.inflated + size, maxInflatedTotal));
+    const cost = size + LIMIT_OBJECT_OVERHEAD;
+    if (charged + cost > maxInflatedTotal) return err(limitError('pack inflated bytes', charged + cost, maxInflatedTotal));
     const z = inflate(buf, p, { expectedSize: size, maxOutput: maxObjectSize });
     if (!z.ok) return z;
     const { out, consumed, stats: is } = z.value;
-    stats.compressed += consumed; stats.inflated += size;
+    stats.compressed += consumed; stats.inflated += size; charged += cost;
     stats.inflate.blocks += is.blocks; stats.inflate.stored += is.stored; stats.inflate.fixed += is.fixed; stats.inflate.dynamic += is.dynamic;
     stats.byType[kind] = getOrElse(readKey(stats.byType, kind), 0) + 1;
     objects.push({ offset, headerBytes: p - offset, type, size, compressed: consumed, data: out, baseOffset, baseOid, inflate: is });
@@ -431,10 +435,12 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limit
   const resolved = new Map<string, ResolvedObject>();
   const memo = new Map<number, ResolvedObject>();
   const stats = { maxChain: 0, externalBases: 0, baseLookups: 0 };
-  // Bytes already held (inflated instructions and bases) plus each delta result, which is a new buffer.
+  // Bytes already held (inflated instructions and bases) plus each delta result, which is a new buffer, and
+  // LIMIT_OBJECT_OVERHEAD per object, as parsePack charged it. That one charge covers the object's resolved form too
+  // (measured: resolving adds 0.65 KiB per object, delta or not), so a delta result adds its bytes only.
   // fromNullish on data: a hand-built pack may leave it out (the parsed type says it is there)
   const given = flatMapOption(fromNullish(parsed.stats), s => fromNullish(s.inflated));
-  let held = given.tag === 'some' ? given.value : parsed.objects.reduce((n, o) => n + getOrElse(mapOption(fromNullish(o.data), d => d.length), 0), 0);
+  let held = (given.tag === 'some' ? given.value : parsed.objects.reduce((n, o) => n + getOrElse(mapOption(fromNullish(o.data), d => d.length), 0), 0)) + parsed.objects.length * LIMIT_OBJECT_OVERHEAD;
   let phase: Phase = 'in_pack';
   const failed = (error: PackError): Step => ({ tag: 'failed', error });
   // The base: none (a full object), the object at baseOffset (OFS_DELTA), or the object named baseOid (REF_DELTA).

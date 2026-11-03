@@ -105,7 +105,7 @@ export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, parseTag, encodeTag, ident, TYPE, TYPE_NAME, TYPE_ID } from './objects.js';
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny, cpuNow, cpuSince } from './otel.js';
-export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';
+export { DEFAULT_LIMITS, WORKER_LIMITS, LIMIT_OBJECT_OVERHEAD, withLimits, limitError } from './limits.js';
 export { CODES, RETRY, fail, plyError, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';

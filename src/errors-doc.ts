@@ -18,7 +18,7 @@ export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   protocol: { where: 'remote', what: 'malformed pkt-line / v2 framing from the server; reason empty_response for a fetch answer with nothing in it' },
   pack_corrupt: { where: 'remote', what: 'a pack or object failed verification (hash, size, zlib, delta; an unwanted object; a tree naming one entry twice)' },
   remote_error: { where: 'remote', what: 'the server said ERR / band 3; reason not_our_ref when the text is upload-pack\'s not-our-ref' },
-  limit_exceeded: { where: 'local', what: 'a limits.* bound was hit before allocation' },
+  limit_exceeded: { where: 'local', what: 'a limits.* bound was hit before allocation (what, got, max; a byte budget charges LIMIT_OBJECT_OVERHEAD per object on top of its bytes)' },
   match_count: { where: 'content', what: 'find matched 0 or >1 times (exactly-one-match contract)' },
   lfs_pointer: { where: 'content', what: 'the blob is a Git LFS pointer (pass allowLfsPointer to edit it)' },
   cas_conflict: { where: 'remote', what: 'the ref moved under us (receive-pack compare-and-swap lost)' },

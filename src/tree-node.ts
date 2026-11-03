@@ -9,13 +9,13 @@
 // one disappears, as in git). `.git` is skipped at every level. Anything else (FIFO, socket, device) is `bad_request`,
 // not a silent skip. `filter(path, { directory, symlink })` → false leaves a path out (`.gitignore` is not read).
 // Bounds: each file by maxObjectSize (checked on lstat, before the read), the count by maxPackObjects, the bytes held
-// by maxInflatedTotal — the resident set ply already accepts for one buffered pack.
+// by maxInflatedTotal — the resident set ply already accepts for one buffered pack, LIMIT_OBJECT_OVERHEAD per file included.
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a file's path in the tree throughout this file
 import { join } from 'node:path';
 import { fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
 import { err, getOrElse, ok } from './result.js';
@@ -52,7 +52,8 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
   let total = 0;
   const keep = (data: Uint8Array, path: string, mode: string): Result<null, DirError> => {
     if (out.length >= maxFiles.value) return err(limitExceeded('files', out.length + 1, maxFiles.value));
-    total += data.length;
+    // each file costs LIMIT_OBJECT_OVERHEAD beyond its bytes (#142)
+    total += data.length + LIMIT_OBJECT_OVERHEAD;
     if (total > maxTotal.value) return err(limitExceeded('directory bytes', total, maxTotal.value));
     out.push({ path, mode, data: new Uint8Array(data.buffer, data.byteOffset, data.length) });
     return ok(null);

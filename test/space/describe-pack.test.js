@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { describePack } from '../../src/pack.js';
 import { TYPE, TYPE_ID } from '../../src/objects.js';
 import { toHex } from '../../src/sha1.js';
-import { DEFAULT_LIMITS, withLimits } from '../../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, withLimits } from '../../src/limits.js';
 import { PACK_TRAILER_BYTES, PACK_VERSION } from '../../src/format.js';
 import { CONTENTS, COMPRESSION, OFS, DEPTH, THIN, PACK_CELLS, LIMIT_PROBES, CELL_COUNT, REPRESENTATIVE } from './describe-pack.space.js';
 
@@ -219,7 +219,7 @@ test('describePack matches git verify-pack over the pack product and at every li
     const bounds = [
       ['maxPackObjects', rep.rows.length, 'pack objects'],
       ['maxObjectSize', maxHeader, 'pack object size'],
-      ['maxInflatedTotal', headerSum + deltaSizes.reduce((n, s) => n + s, 0), 'delta result size'],
+      ['maxInflatedTotal', headerSum + rep.rows.length * LIMIT_OBJECT_OVERHEAD + deltaSizes.reduce((n, s) => n + s, 0), 'delta result size'],
       ['maxDeltaChain', maxDepth, 'delta chain depth'],
       ['maxDeltaResult', maxDelta, 'delta result size'],
     ];

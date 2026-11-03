@@ -1,6 +1,6 @@
 // Bare repos and packs for the cells that are about to run. A repo whose stamp matches is left in place, so a
 // second sweep does not rebuild a 16 MiB blob. The oracle file is git's own measurements: the pack a blob
-// fetches as, the longest delta chain verify-pack reports, and the inflated sum of the small pack.
+// fetches as, the longest delta chain verify-pack reports, and each pack's object count and inflated sum.
 import { spawn } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -107,13 +107,14 @@ function chainLength(text) {
 /** @param {string} text */
 function inflatedSum(text) {
   // verify-pack pads the type column, so a single space after the type only matches `commit`. Split instead.
-  let sum = 0;
+  let inflated = 0;
+  let objects = 0;
   for (const line of text.split('\n')) {
     const parts = line.trim().split(/\s+/);
     const size = parts[2];
-    if (parts.length >= 3 && /^[0-9a-f]{40}$/.test(parts[0] ?? '') && size !== undefined && /^\d+$/.test(size)) sum += Number(size);
+    if (parts.length >= 3 && /^[0-9a-f]{40}$/.test(parts[0] ?? '') && size !== undefined && /^\d+$/.test(size)) { inflated += Number(size); objects++; }
   }
-  return sum;
+  return { inflated, objects };
 }
 
 /**
@@ -132,7 +133,7 @@ async function writePack(repoGit, packPath, depth, kind, window) {
   const idx = packPath.replace(/\.pack$/, '.idx');
   await git(['index-pack', '-o', idx, packPath]);
   const verified = (await git(['verify-pack', '-v', idx])).toString();
-  return { chain: chainLength(verified), inflated: inflatedSum(verified) };
+  return { chain: chainLength(verified), sum: inflatedSum(verified) };
 }
 
 /** @param {string} root @param {string} name @param {Record<string, number>} wires */
@@ -209,6 +210,16 @@ function repoStream(name) {
     for (let i = 0; i < 6; i++) ops.push(inline(`b${i}.bin`, Buffer.alloc(1000, 0x30 + i)));
     return commit('refs/heads/main', WHEN, 'inflate', ops);
   }
+  if (name.startsWith('tiny-')) {
+    // n distinct 7-byte blobs, 1000 to a directory
+    const n = Number(name.slice('tiny-'.length));
+    const parts = [];
+    for (let i = 0; i < n; i++) parts.push(Buffer.from(`blob\nmark :${i + 1}\ndata 7\n${String(i).padStart(7, '0')}\n`));
+    const ops = [];
+    for (let i = 0; i < n; i++) ops.push(Buffer.from(`M 100644 :${i + 1} d${Math.floor(i / 1000)}/f${i}\n`));
+    parts.push(commit('refs/heads/main', WHEN, 'tiny', ops));
+    return Buffer.concat(parts);
+  }
   if (name === 'chain-src') return chainStream(80, 80);
   if (name === 'chain-long') return chainStream(300, 1000);
   throw new Error(`no fixture builder for ${name}`);
@@ -256,22 +267,24 @@ function mergeTrio(size) {
 export async function ensureFixtures(root, cells) {
   mkdirSync(root, { recursive: true });
   const oraclePath = join(root, 'oracle.json');
-  /** @type {{ wires: Record<string, number>, chains: Record<string, number>, inflated: number }} */
-  const oracle = existsSync(oraclePath) ? JSON.parse(readFileSync(oraclePath, 'utf8')) : { wires: {}, chains: {}, inflated: 0 };
+  /** @type {{ wires: Record<string, number>, chains: Record<string, number>, sums: Record<string, { inflated: number, objects: number }> }} */
+  const oracle = { wires: {}, chains: {}, sums: {}, ...(existsSync(oraclePath) ? JSON.parse(readFileSync(oraclePath, 'utf8')) : {}) };
   const repos = [...new Set(cells.map(c => c.repo).filter(Boolean))];
   for (const name of repos) await buildRepo(root, name, oracle.wires);
   const packs = [...new Set(cells.map(c => c.pack).filter(Boolean))];
   if (packs.length > 0) {
     mkdirSync(join(root, 'packs'), { recursive: true });
-    if (packs.some(id => !id.startsWith('long-') && id !== 'inflate')) await buildRepo(root, 'chain-src', oracle.wires);
+    if (packs.some(id => !id.startsWith('long-') && !id.startsWith('tiny-') && id !== 'inflate')) await buildRepo(root, 'chain-src', oracle.wires);
+    for (const id of packs.filter(p => p.startsWith('tiny-'))) await buildRepo(root, id, oracle.wires);
     if (packs.some(id => id.startsWith('long-'))) await buildRepo(root, 'chain-long', oracle.wires);
     if (packs.includes('inflate')) await buildRepo(root, 'inflate', oracle.wires);
     for (const id of packs) {
       const packPath = join(root, 'packs', `${id}.pack`);
-      if (existsSync(packPath) && oracle.chains[id] !== undefined && (id !== 'inflate' || oracle.inflated > 0)) continue;
+      if (existsSync(packPath) && oracle.chains[id] !== undefined && oracle.sums[id] !== undefined) continue;
+      // writePack runs git index-pack on the pack: git accepts every pack a cell parses
       const built = await buildOnePack(root, id, packPath);
       oracle.chains[id] = built.chain;
-      if (id === 'inflate') oracle.inflated = built.inflated;
+      oracle.sums[id] = built.sum;
     }
   }
   writeFileSync(oraclePath, `${JSON.stringify(oracle)}\n`);
@@ -280,7 +293,7 @@ export async function ensureFixtures(root, cells) {
 
 /** @param {string} root @param {string} id @param {string} packPath */
 async function buildOnePack(root, id, packPath) {
-  if (id === 'inflate') return writePack(join(root, 'inflate.git'), packPath, 0, 'ofs', 0);
+  if (id === 'inflate' || id.startsWith('tiny-')) return writePack(join(root, `${id}.git`), packPath, 0, 'ofs', 0);
   const long = id.startsWith('long-');
   const rest = long ? id.slice('long-'.length) : id;
   const m = /^d(\d+)-(ofs|ref)$/.exec(rest);

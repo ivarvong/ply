@@ -478,6 +478,19 @@ Two entry points, one codebase. `ply/edit` is the pipeline and imports only the 
 
 `edit.js` is pure decisions between thin effects: `validateSpec`, `decideHead`, `lookupEntry`, `buildCommitObjects`, `memFromScan` are functions of their arguments and unit-tested against git without a server (`test/pure.test.js`); ls-refs, fetch, the blob stream, push and verify are the only places the client is touched.
 
+## Limits
+
+Every bound is a field of `limits` (`opts.limits`, any call). `DEFAULT_LIMITS` is sized for a git client's heap: one object up to 64 MiB (`maxObjectSize`), 128 MiB of pack per fetch or push (`maxPackBytes`), 128 MiB of files per `pushTree` or `commitChanges` (`maxPushBytes`), 256 MiB held from one buffered pack (`maxInflatedTotal`), 100 000 objects per pack (`maxPackObjects`), 200 000 entries per tree (`maxTreeEntries`). `withLimits({ ... })` overrides some of them; a field that is missing, `NaN`, infinite or negative is `bad_request`, never an open cap. A bound hit is `limit_exceeded` with `what` (the budget), `got` and `max`.
+
+The byte budgets count what an object costs, not only its bytes: each object parsed from a pack (`parsePack`, and the room `resolvePack` has left; so every fetch, `checkoutTree`, and `pushRepo`'s local packs), each local object `pushRepo` holds, each file `filesFromDir` reads, and each file or change `pushTree`/`commitChanges` takes is charged its bytes plus `LIMIT_OBJECT_OVERHEAD` (3 KiB, above the 1.0 to 2.4 KiB of heap and RSS one tiny object was measured to cost; the method is in `src/limits.ts`). So a pack of 100 000 three-byte blobs (1.4 MB on the wire, which `git index-pack` accepts) is `limit_exceeded` (`what: 'pack inflated bytes'`) under the defaults, and 100 000 eight-byte files are `limit_exceeded` (`what: 'push bytes'`), where counting bytes alone let both run a 128 MiB heap out of memory. On the defaults that is about 87 000 tiny objects per pack and 43 000 tiny files per push; `got` includes the overhead. `stats.inflated` is still the declared sum git reports.
+
+`WORKER_LIMITS` is the preset for a 128 MiB isolate (a Cloudflare Worker): `maxObjectSize` and `maxDeltaResult` 16 MiB (one object peaks near twice its size), `maxPackBytes`, `maxPushBytes` and `maxLsRefsBytes` 32 MiB, `maxInflatedTotal` 64 MiB (about 21 000 tiny objects), `maxHarvestBytes` 8 MiB, `maxMergeBlobBytes` 2 MiB, `maxTreeEntries` 32 768; the rest are the defaults. The limit sweep (`npm run sweep -- --full`, nightly) runs it at `--max-old-space-size=128`: every `worker.*` cell refuses or succeeds, none runs out of memory.
+
+```js
+import { pushTree, WORKER_LIMITS, withLimits } from 'ply';
+const r = await pushTree(url, spec, { limits: withLimits({ ...WORKER_LIMITS, maxPackBytes: 62 * 1024 * 1024 }) });
+```
+
 ## Memory
 
 Peak per invocation is one pkt-line (≤ 64 KB) + one inflate chunk (16 KB) + `|find|−1` carry + the replacement bytes. Measured over 446 fuzzed edits including 1.4 MB blobs: `mem.alloc.max_single` max = 16384. The blob is never resident; the delta is three ops computed from the match offset, and the new blob's oid comes from a streaming SHA-1 over the transformed stream (the exactly-one-match contract makes `newLen` known up front).
