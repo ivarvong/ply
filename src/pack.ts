@@ -84,9 +84,10 @@ export async function zlibDeflate(bytes: Uint8Array): Promise<Uint8Array<ArrayBu
 // push's planPush refuses a baseIndex that names no earlier object before anything is built.
 export type PackInput = { readonly type: number; readonly data: Uint8Array } & Input<{ readonly baseOid: string | null; readonly baseIndex: number | null }>;
 // typeName: the type's name for the five types a pack holds (TYPE_NAME), null for any other id a caller passed.
+// offset: where the entry starts in the pack (its header), as an index names it (packindex.ts encodePackIndex).
 export type BuiltEntry = {
   readonly type: number; readonly typeName: string | null; readonly size: number; readonly compressed: number;
-  readonly baseOid: string | null; readonly bytes: number;
+  readonly baseOid: string | null; readonly bytes: number; readonly offset: number;
 };
 const typeNameOf = (type: number): string | null => {
   const named = readKey(TYPE_NAME as Readonly<Record<number, string>>, type);
@@ -131,9 +132,9 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
     if (base !== null) parts.push(base);
     parts.push(z);
     const bytes = h.length + (base === null ? 0 : base.length) + z.length;
+    entries.push({ type, typeName: typeNameOf(type), size: o.data.length, compressed: z.length, baseOid: ofs === null ? given : null, bytes, offset });
     offsets.push(offset);
     offset += bytes;
-    entries.push({ type, typeName: typeNameOf(type), size: o.data.length, compressed: z.length, baseOid: ofs === null ? given : null, bytes });
   }
   const body = concat(parts);
   const pack = concat([body, new Sha1().update(body).digest()]);

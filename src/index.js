@@ -100,6 +100,8 @@ export { parsePath } from './path.js';
  */
 export { spliceDelta, buildPack, encodeOfsDistance, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
 export { encodeDelta, planDeltas, DELTA_WINDOW, DELTA_DEPTH, DELTA_MAX_BYTES } from './delta.js'; // pushing a local repository is 'ply/repo-node'
+export { objectsForPack, reachableObjects, mapStore } from './packwalk.js';
+export { encodePackIndex, indexPack, layoutPackIndex } from './packindex.js';
 export { inflate, adler32 } from './inflate.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, parseTag, encodeTag, ident, TYPE, TYPE_NAME, TYPE_ID } from './objects.js';

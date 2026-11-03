@@ -43,8 +43,8 @@ import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from 
 import type { Limits } from './limits.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack } from './packresolve.js';
-import { hashObject, parseCommit, parseTag, parseTree, TYPE, TYPE_ID } from './objects.js';
-import { MODE_COMMIT, MODE_TREE, ZERO_OID } from './format.js';
+import { hashObject, parseCommit, parseTag, TYPE, TYPE_ID } from './objects.js';
+import { ZERO_OID } from './format.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import type { Command, Commands } from './push.js';
@@ -54,10 +54,12 @@ import type { ReadOptions } from './read.js';
 import { validatePushRef } from './validate.js';
 import { planDeltas } from './delta.js';
 import type { DeltaCandidate, DeltaPlan, ThinBase } from './delta.js';
+import { children, missing, popped, reachable } from './packwalk.js';
+import type { Walk as PackWalk } from './packwalk.js';
 import type { Span } from './otel.js';
 import { decodeBytes } from './bytes.js';
 import type { Input } from './absent.js';
-import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
+import { at, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Option, Result } from './result.js';
 
@@ -81,8 +83,6 @@ type Repo = {
 };
 
 const mapOrNone = <T>(v: T | null): Option<T> => (v === null ? { tag: 'none' } : { tag: 'some', value: v });
-// The next item of a work stack (none when it is empty).
-const popped = <T>(stack: T[]): Option<T> => (stack.length === 0 ? { tag: 'none' } : fromNullable(stack.pop()));
 // A file's bytes, or null when it cannot be read (absent, a directory): for the files a repository may lack.
 // oxlint-disable-next-line typescript/promise-function-async -- the read's own promise, its failure mapped to null
 const maybeRead = (path: string): Promise<Buffer | null> => readFile(path).then(b => b, () => null);
@@ -374,121 +374,7 @@ function wantedRefs(repo: Repo, remote: RemoteRefs, cfg: PushRepoConfig): Result
 }
 
 // ---- the walks ----
-type Walk = { readonly store: Store; readonly limits: Limits };
-const TYPE_NAMES: Readonly<Record<number, string>> = { [TYPE.COMMIT]: 'commit', [TYPE.TREE]: 'tree', [TYPE.BLOB]: 'blob', [TYPE.TAG]: 'tag' };
-const typeName = (type: number): string => getOrElse(readKey(TYPE_NAMES, type), String(type));
-const wrongType = (oid: string, type: number, want: number): Result<never, PlyError> =>
-  fail('pack_corrupt', `${oid} is a ${typeName(type)}, not a ${typeName(want)}`, { what: 'object', path: oid });
-
-type Child = { readonly oid: string; readonly type: number; readonly name: string };
-// The objects one object names: a commit's tree and parents, a tree's entries (not gitlinks), a tag's object.
-function children(o: Obj, limits: Limits): Result<Child[], PlyError> {
-  switch (o.type) {
-    case TYPE.COMMIT: {
-      const c = parseCommit(o.data, limits);
-      if (!c.ok) return c;
-      return ok([...c.value.parents.map(p => ({ oid: p, type: TYPE.COMMIT, name: '' })), { oid: c.value.tree, type: TYPE.TREE, name: '' }]);
-    }
-    case TYPE.TREE: {
-      const t = parseTree(o.data, limits);
-      if (!t.ok) return t;
-      return ok(t.value.filter(e => e.mode !== MODE_COMMIT).map(e => ({ oid: e.oid, type: e.mode === MODE_TREE ? TYPE.TREE : TYPE.BLOB, name: e.name })));
-    }
-    case TYPE.TAG: {
-      const t = parseTag(o.data);
-      if (!t.ok) return t;
-      return ok([{ oid: t.value.object, type: getOrElse(readKey(TYPE_IDS, t.value.type), TYPE.COMMIT), name: '' }]);
-    }
-    default: return ok([]);
-  }
-}
-
-// An object the local repository must have (the push sends it, or decides with it).
-async function need(w: Walk, oid: string, type: number | null, where: string): Promise<Result<Obj, PlyError>> {
-  const got = await w.store.get(oid);
-  if (!got.ok) return got;
-  if (got.value === null) return fail('bad_request', `${oid} (${where}) is missing from the local repository`, { what: 'object', path: oid });
-  if (type !== null && got.value.type !== type) return wrongType(oid, got.value.type, type);
-  return ok(got.value);
-}
-
-// Everything reachable from `tips` that the local repository has: what the remote has. Blobs are marked from their
-// tree entries and never read; an object the local repository lacks is skipped (the remote has it, ply does not).
-async function reachable(w: Walk, tips: readonly string[]): Promise<Result<Set<string>, PlyError>> {
-  const seen = new Set<string>();
-  const stack = [...tips];
-  for (let next = popped(stack); next.tag === 'some'; next = popped(stack)) {
-    const oid = next.value;
-    if (seen.has(oid)) continue;
-    const got = await w.store.get(oid);
-    if (!got.ok) return got;
-    if (got.value === null) continue;
-    seen.add(oid);
-    const kids = children(got.value, w.limits);
-    if (!kids.ok) return kids;
-    for (const k of kids.value) if (k.type === TYPE.BLOB) seen.add(k.oid); else stack.push(k.oid);
-  }
-  return ok(seen);
-}
-// What the remote lacks, in pack order: commits parents-first, then tags, then each commit's new trees and blobs in
-// tree order with their paths (delta candidates: the previous version of a path is earlier in the pack).
-async function missing(w: Walk, tips: readonly string[], have: ReadonlySet<string>): Promise<Result<DeltaCandidate[], PlyError>> {
-  const seen = new Set<string>(have);
-  const commits: Array<{ readonly oid: string; readonly tree: string; readonly data: Uint8Array }> = [];
-  const tags: DeltaCandidate[] = [];
-  const rootObjects: Array<{ readonly oid: string; readonly type: number }> = [];
-  // tips: peel tags (sent), then commits in post-order (parents first) by an explicit stack
-  const stack: Array<{ readonly oid: string; readonly done: boolean }> = tips.map(oid => ({ oid, done: false })).toReversed();
-  const parsed = new Map<string, { readonly tree: string; readonly data: Uint8Array }>();
-  for (let next = popped(stack); next.tag === 'some'; next = popped(stack)) {
-    const { oid, done } = next.value;
-    if (done) { const c = mapGet(parsed, oid); if (c.tag === 'some') commits.push({ oid, ...c.value }); continue; }
-    if (seen.has(oid)) continue;
-    seen.add(oid);
-    const got = await need(w, oid, null, 'a tip or an ancestor');
-    if (!got.ok) return got;
-    if (got.value.type === TYPE.TAG) {
-      tags.push({ type: TYPE.TAG, data: got.value.data, path: null });
-      const kids = children(got.value, w.limits);
-      if (!kids.ok) return kids;
-      for (const k of kids.value) stack.push({ oid: k.oid, done: false });
-      continue;
-    }
-    if (got.value.type !== TYPE.COMMIT) { seen.delete(oid); rootObjects.push({ oid, type: got.value.type }); continue; }
-    const c = parseCommit(got.value.data, w.limits);
-    if (!c.ok) return c;
-    parsed.set(oid, { tree: c.value.tree, data: got.value.data });
-    stack.push({ oid, done: true });
-    for (const p of c.value.parents.toReversed()) stack.push({ oid: p, done: false });
-  }
-  const out: DeltaCandidate[] = [...commits.map(c => ({ type: TYPE.COMMIT, data: c.data, path: null })), ...tags];
-  // trees and blobs, depth first in tree order, each with the path it first appears at
-  const walkTree = async (oid: string, type: number, path: string): Promise<Result<null, PlyError>> => {
-    if (seen.has(oid)) return ok(null);
-    seen.add(oid);
-    const got = await need(w, oid, type, path === '' ? 'a root tree' : path);
-    if (!got.ok) return got;
-    out.push({ type, data: got.value.data, path });
-    if (type !== TYPE.TREE) return ok(null);
-    const kids = children(got.value, w.limits);
-    if (!kids.ok) return kids;
-    for (const k of kids.value) {
-      const r = await walkTree(k.oid, k.type, path === '' ? k.name : `${path}/${k.name}`);
-      if (!r.ok) return r;
-    }
-    return ok(null);
-  };
-  for (const c of commits) {
-    const r = await walkTree(c.tree, TYPE.TREE, '');
-    if (!r.ok) return r;
-  }
-  // a tag of a tree or a blob: that object and (for a tree) what it names
-  for (const o of rootObjects) {
-    const r = await walkTree(o.oid, o.type, '');
-    if (!r.ok) return r;
-  }
-  return ok(out);
-}
+type Walk = PackWalk;
 
 // Is `old` an ancestor of (or equal to) `tip`? Both peeled to commits; false when either is not one the local
 // repository has.
@@ -676,7 +562,7 @@ export async function pushRepo(dir: string, url: string, spec: PushRepoSpec = {}
       return s;
     });
     if (!store.ok) return store;
-    const w: Walk = { store: store.value, limits };
+    const w: Walk = { store: store.value, limits, source: 'the local repository' };
     const updates = await decideUpdates(w, changes, remote);
     if (!updates.ok) return updates;
     const planned = await step(root, 'git.push_repo.plan', async span => { const p = await planPack(w, span, { thin: cfg.thin, remote, updates: updates.value }); return p; });
