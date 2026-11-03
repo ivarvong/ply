@@ -6,7 +6,7 @@ import { describePack, parsePack, resolvePack, buildPack, makeDelta, encodeObjHe
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1, fromHex } from '../src/sha1.js';
 import { concat, te } from '../src/bytes.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, withLimits } from '../src/limits.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES,
   OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK, OBJ_SIZE_NEXT_BASE,
@@ -165,7 +165,8 @@ test('limits: the boundary accepts and one past it refuses, and a cap that bound
     { type: TYPE.BLOB, data: delta, baseOid: hashObject('blob', base) },
   ]);
   const headerSum = base.length + delta.length;
-  const inflated = headerSum + target.length;
+  // two objects, each charged LIMIT_OBJECT_OVERHEAD beyond its bytes (#142), and the delta result's bytes
+  const inflated = headerSum + 2 * LIMIT_OBJECT_OVERHEAD + target.length;
   const maxHeader = Math.max(base.length, delta.length);
   assert.equal(describePack(pack, withLimits({ maxPackObjects: 2 })).ok, true);
   refused(describePack(pack, withLimits({ maxPackObjects: 1 })), 'limit_exceeded', 'pack objects');

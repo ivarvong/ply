@@ -2,7 +2,7 @@
 // Heaps are not an axis here. The driver runs every selected cell twice (default heap, then 128 MiB).
 // `bytes` and `entries` are the fixture sizes the CI filter reads. A cell over 16 MiB or 65_536 entries,
 // or one marked nightly, waits for `npm run sweep -- --full`.
-import { DEFAULT_LIMITS } from '../../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, WORKER_LIMITS } from '../../src/limits.js';
 import { boundaryValues } from './boundary.mjs';
 
 const MiB = 1024 * 1024;
@@ -198,15 +198,49 @@ function build() {
       expect: S > objCap ? refused('limit_exceeded', { what: 'object size' }) : ok,
     });
   }
-  // The sum of the file bytes, refused in validateTreeSpec before the blobs are copied. 3 × 48 MiB is 144 MiB, past the cap.
-  // 100000 × 8 is under it, but the cap counts payload only, not per-object overhead (ratchet, #142).
+  // The sum of the file bytes plus LIMIT_OBJECT_OVERHEAD per file, refused in fileEntries before the blobs are hashed.
+  // 3 × 48 MiB is 144 MiB, past the cap. 100000 × 8 is 800 KB of payload, but 300 MB once each file pays its
+  // overhead: refused, where counting payload only ran a 128 MiB heap out of memory (#142).
   const pushCap = DEFAULT_LIMITS.maxPushBytes;
   for (const [n, s] of [[1, MiB], [1, 16 * MiB], [10000, 64], [3, 48 * MiB], [100000, 8]]) {
-    const total = n * s;
+    const total = n * (s + LIMIT_OBJECT_OVERHEAD);
     add({
       id: `push.total.${n}x${s}`, param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', writes: true,
       nfiles: n, size: s, bytes: total, entries: n,
       expect: total > pushCap ? refused('limit_exceeded', { what: 'push bytes' }) : (s > objCap ? refused('limit_exceeded', { what: 'object size' }) : ok),
+    });
+  }
+
+  // ---- WORKER_LIMITS (src/limits.ts), the preset for a 128 MiB isolate. Every cell runs at 128 MiB too: each one
+  // refuses or succeeds, none runs out of memory. The wire edge is the plyweb cells above (the same 32 MiB).
+  const worker = { ...WORKER_LIMITS };
+  const wPush = WORKER_LIMITS.maxPushBytes;
+  for (const [n, s] of [[1, 16 * MiB], [10000, 64], [100000, 8]]) {
+    const total = n * (s + LIMIT_OBJECT_OVERHEAD);
+    add({
+      id: `worker.push.total.${n}x${s}`, param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', writes: true,
+      nfiles: n, size: s, bytes: n * s, entries: n, limits: worker,
+      expect: total > wPush ? refused('limit_exceeded', { what: 'push bytes' }) : ok,
+    });
+  }
+  add({
+    id: 'worker.push.object.16777217', param: 'maxObjectSize', op: 'pushTree', repo: 'push-empty', writes: true,
+    nfiles: 1, size: 16 * MiB + 1, bytes: 16 * MiB + 1, entries: 1, nightly: true, limits: worker,
+    expect: refused('limit_exceeded', { what: 'object size' }),
+  });
+  for (const E of [WORKER_LIMITS.maxTreeEntries, WORKER_LIMITS.maxTreeEntries + 1]) {
+    add({
+      id: `worker.tree.listTree.${E}`, param: 'maxTreeEntries', op: 'listTree', repo: `tree-${E}`, path: '',
+      bytes: E, entries: E, limits: worker,
+      expect: E > WORKER_LIMITS.maxTreeEntries ? refused('limit_exceeded', { what: 'tree entries' }) : ok,
+    });
+  }
+  // Many tiny objects: git index-pack accepts each pack (the fixture runs it); ply charges the overhead per object and
+  // refuses past the budget, typed, where git accepts. The driver fills the expectation from verify-pack's count and sum.
+  for (const [id, limits] of [['tiny-90000', undefined], ['tiny-20000', worker], ['tiny-90000', worker]]) {
+    add({
+      id: `${limits ? 'worker.' : ''}inflate.${id}`, param: 'maxInflatedTotal', op: 'pack', pack: id,
+      bytes: Number(id.slice('tiny-'.length)) * 8, entries: Number(id.slice('tiny-'.length)), nightly: true, limits, expectFrom: 'charged',
     });
   }
 

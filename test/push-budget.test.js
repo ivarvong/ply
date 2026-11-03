@@ -4,7 +4,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { LIMIT_OBJECT, LIMIT_PUSH_BYTES } from '../src/limits.js';
+import { LIMIT_OBJECT, LIMIT_OBJECT_OVERHEAD, LIMIT_PUSH_BYTES } from '../src/limits.js';
 import { gitBuf, tmpRoot } from './server.js';
 
 const MIB = 1024 * 1024;
@@ -50,7 +50,8 @@ test('one 64 MiB blob matches git mktree; three 48 MiB blobs are limit_exceeded 
     assert.equal(three.parsed?.status, 'err', three.text || three.err);
     assert.equal(three.parsed.code, 'limit_exceeded');
     assert.equal(three.parsed.what, 'push bytes');
-    assert.equal(three.parsed.got, THREE * 3);
+    // each file charges LIMIT_OBJECT_OVERHEAD beyond its bytes (#142)
+    assert.equal(three.parsed.got, (THREE + LIMIT_OBJECT_OVERHEAD) * 3);
     assert.equal(three.parsed.max, LIMIT_PUSH_BYTES);
     assert.ok(THREE * 3 > LIMIT_PUSH_BYTES);
     assert.ok(three.parsed.rss < RSS_BOUND_MB, `three rss ${three.parsed.rss}`);

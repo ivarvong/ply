@@ -22,7 +22,7 @@ import type { PackObject } from './push.js';
 import { parseOid, parseCommitId } from './oid.js';
 import { parseTree, hashObject, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
-import { limitExceeded, readLimit } from './limits.js';
+import { LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import type { IdentInput, ValidatedIdent } from './validate.js';
@@ -172,6 +172,17 @@ function normalize(raw: unknown, limits: Limits): Result<Norm, PlyError> {
   }
   return fail('bad_request', `unknown change kind ${JSON.stringify(kind)}`, { what: 'change', got: kind });
 }
+// The bytes a change adds before its blob is built: the content written, the replacement spliced in, none for a delete
+// or rename (the blob is the server's already).
+function newBytes(n: Norm): number {
+  switch (n.kind) {
+    case 'create': case 'write': return n.data.length;
+    case 'edit': return n.replace.length;
+    case 'delete': case 'rename': return 0;
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(n);
+}
 function validateBase(base: string | null): Result<BasePlan, PlyError> {
   if (base === null) return ok({ kind: 'tip' });
   if (HEX40.test(base)) {
@@ -210,10 +221,17 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
   const max = readLimit(limits, 'maxPackObjects');
   if (!max.ok) return max;
   if (list.length > max.value) return err(limitExceeded('changes', list.length, max.value));
+  const maxPush = readLimit(limits, 'maxPushBytes');
+  if (!maxPush.ok) return maxPush;
+  // As pushTree's files (tree.ts fileEntries): each change's new bytes plus LIMIT_OBJECT_OVERHEAD, so a list of many
+  // tiny changes is refused before its blobs and tree entries exist (#142). Exactly the cap is allowed.
+  let pushBytes = 0;
   const changes: Norm[] = [];
   for (const c of list) {
     const norm = normalize(c, limits);
     if (!norm.ok) return norm;
+    pushBytes += newBytes(norm.value) + LIMIT_OBJECT_OVERHEAD;
+    if (pushBytes > maxPush.value) return err(limitExceeded('push bytes', pushBytes, maxPush.value));
     changes.push(norm.value);
   }
   const author = fromNullish<Author>(spec.author);

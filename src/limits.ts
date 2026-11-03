@@ -48,6 +48,7 @@ export const LIMIT_DELTA_CHAIN = 64;
  * How many maximum-sized objects a buffered pack may inflate at once, including delta results resolvePack
  * allocates on top of the inflated instructions. Four covers a merge-base triple (base, ours, theirs) plus
  * the commit that names them. Issue #9's 6 × 64 MiB pack is 384 MiB and must fail before that resident set exists.
+ * Each object also pays LIMIT_OBJECT_OVERHEAD (below), so the four are three maximum objects and a small one.
  */
 export const LIMIT_INFLATED_OBJECTS = 4;
 export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECTS;
@@ -92,6 +93,20 @@ export const LIMIT_COMMIT_PARENTS: number = LIMIT_REFS;
 export const LIMIT_LS_REFS_BYTES: number = LIMIT_PACK_WIRE;
 /** Per HTTP exchange, including a stalled body. The timer that enforces this owns the AbortSignal. */
 export const LIMIT_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * What one held object costs beyond its bytes, charged against the byte budget that holds it: each parsed pack object
+ * against maxInflatedTotal (parsePack, and resolvePack's room), each local object against it (pushRepo), each file or
+ * change against maxPushBytes (fileEntries, commitChanges), each walked file against maxInflatedTotal (filesFromDir).
+ * Without it 100 000 three-byte blobs (1.4 MB of pack) pass every byte cap and exhaust a 128 MiB heap (#142).
+ * Measured on node 22 (`--expose-gc`, heapUsed after two gc() calls, the result held; scratch scripts in #142):
+ * parsePack + resolvePack of N tiny blobs retains 1.05 KiB per object (0.40 parse, 0.65 resolve), fetchPack with a
+ * tracer 1.15 KiB, and at --max-old-space-size=128 fetchPack survives 90 000 and dies at 99 000 (≥ 1.3 KiB live per
+ * object at the peak); RSS grows 2.0 to 2.3 KiB per object. pushTree of 8-byte files: RSS grows 2.4 KiB per file, and at
+ * 128 MiB it survives 75 000 and dies at 100 000 (≥ 1.3 KiB per file). 3 KiB is above every one of those numbers, so
+ * a byte budget sized for a heap stays inside it however the bytes are split; on DEFAULT_LIMITS that is about 87 000
+ * tiny objects in one pack and 43 000 tiny files in one push. Not a Limits key: it is a property of this code, not a policy.
+ */
+export const LIMIT_OBJECT_OVERHEAD: number = 3 * KIB;
 
 /* oxlint-enable no-magic-numbers */
 
@@ -141,6 +156,31 @@ export const DEFAULT_LIMITS: Limits = Object.freeze({
   maxLsRefsBytes: LIMIT_LS_REFS_BYTES,
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,
 });
+
+/**
+ * Limits for a 128 MiB isolate (a Cloudflare Worker), where DEFAULT_LIMITS are sized for a git client's heap. One object
+ * peaks near twice its size (the inflate output and the buffer the caller holds), so the object and delta caps are
+ * 16 MiB and the inflated total, which also pays LIMIT_OBJECT_OVERHEAD per object, is 64 MiB: half the isolate, about
+ * 21 000 tiny objects. The wire caps (pack, push, ls-refs) are two objects, as in the defaults. maxHarvestBytes is half an
+ * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), and maxTreeEntries 32 768
+ * (parseTree of 199 999 entries exhausts 128 MiB: test/sweep/ratchet.json). Every other cap is the default. The limit
+ * sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells): each refuses or succeeds,
+ * none runs out of memory.
+ */
+/* oxlint-disable no-magic-numbers -- the preset's cap definitions, as above */
+export const WORKER_LIMITS: Limits = Object.freeze({
+  ...DEFAULT_LIMITS,
+  maxObjectSize: 16 * MIB,
+  maxPackBytes: 32 * MIB,
+  maxPushBytes: 32 * MIB,
+  maxLsRefsBytes: 32 * MIB,
+  maxInflatedTotal: 64 * MIB,
+  maxDeltaResult: 16 * MIB,
+  maxHarvestBytes: 8 * MIB,
+  maxMergeBlobBytes: 2 * MIB,
+  maxTreeEntries: 32_768,
+});
+/* oxlint-enable no-magic-numbers */
 
 // A caller's overrides on top of the defaults. Values are checked where they are used (checkLimit), not here: a
 // caller may pass a field this version does not read.

@@ -38,7 +38,7 @@ export { mergeBranch, fastForward, deleteRef, mergeTrees, mergeBase, threeWay, b
 export { createBranch, deleteBranch, createTag, deleteTag, listRefs } from './refops.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
-export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody } from './client.js';
+export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
 /**
  * 40 lowercase hex characters. git also accepts abbreviations, ref names, and uppercase hex; this type does not.
  * @typedef {import('./oid.js').Oid} Oid
@@ -105,7 +105,7 @@ export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, parseTag, encodeTag, ident, TYPE, TYPE_NAME, TYPE_ID } from './objects.js';
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny, cpuNow, cpuSince } from './otel.js';
-export { DEFAULT_LIMITS, withLimits, limitError } from './limits.js';
+export { DEFAULT_LIMITS, WORKER_LIMITS, LIMIT_OBJECT_OVERHEAD, withLimits, limitError } from './limits.js';
 export { CODES, RETRY, fail, plyError, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';

@@ -592,6 +592,7 @@ export const DECISIONS = [
   { match: "src/tree.ts#fileEntries:bad_request:…: mode … is not 100644, 100755, 120000 or 160000", space: 'push-tree', axisTag: 'case' },
   { match: "src/tree.ts#fileEntries:bad_request:…: data must be a string or Uint8Array", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/tree.ts#fileEntries:limit_exceeded:object size", space: 'push-tree', axisTag: 'case' },
+  { match: "src/tree.ts#charge:limit_exceeded:push bytes", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/tree.ts#fileEntries:bad_request:…: a symlink target must be non-empty and contain no NUL", space: 'push-tree', axisTag: 'case' },
   { match: "src/tree.ts#buildTree:*", space: 'push-tree', axisTag: 'case' },
   { match: "src/tree.ts#validateTreeSpec:*", space: 'mutant-kill', axisTag: 'case' },

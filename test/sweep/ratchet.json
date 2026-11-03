@@ -11,12 +11,6 @@
       "heap": "128",
       "actual": { "status": "oom" },
       "why": "parseTree allocates every entry before the cap can fire, so 200000 entries exhaust a 128 MiB heap"
-    },
-    {
-      "id": "push.total.100000x8",
-      "heap": "128",
-      "actual": { "status": "oom" },
-      "why": "maxPushBytes counts file payload only (800 KB here), not per-object overhead, so 100000 tiny files exhaust a 128 MiB heap: the push side of #142"
     }
   ]
 }

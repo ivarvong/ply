@@ -29,7 +29,7 @@ import { createTransport as createTransportR } from '../src/http.js';
 import { fetchObject as fetchObjectR } from '../src/fetch.js';
 import { fetchPack as fetchPackR, fetchPackTree0 as fetchPackTree0R } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1 } from '../src/sha1.js';
@@ -888,7 +888,8 @@ test('I4 six objects at the per-object cap exceed the inflated aggregate', { tim
   assert.throws(() => unwrap(parsePack(pack, unwrap(packParseOpts(DEFAULT_LIMITS)))), e => {
     assert.equal(e.code, 'limit_exceeded');
     assert.equal(e.what, 'pack inflated bytes');
-    assert.equal(e.got, per * 5);
+    // each object charges LIMIT_OBJECT_OVERHEAD beyond its bytes (#142): three maximum objects and a small one fit, a fourth maximum one does not
+    assert.equal(e.got, (per + LIMIT_OBJECT_OVERHEAD) * 4);
     assert.equal(e.max, DEFAULT_LIMITS.maxInflatedTotal);
     return true;
   });
@@ -915,7 +916,7 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
     const objects = Array.from({ length: n }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(String(i + 1)) }));
     const { pack } = await buildPack(objects);
     const parsed = unwrap(parsePack(pack, unwrap(packParseOpts())));
-    assert.ok(parsed.stats.inflated <= DEFAULT_LIMITS.maxInflatedTotal);
+    assert.ok(parsed.stats.inflated + n * LIMIT_OBJECT_OVERHEAD <= DEFAULT_LIMITS.maxInflatedTotal);
     assert.ok(parsed.stats.inflated <= parsed.objects.reduce((s, o) => s + o.size, 0));
   }
   const declared = 1_000;
@@ -925,7 +926,7 @@ test('I4 parsePack keeps inflated bytes within the cap', async () => {
   new DataView(hdr.buffer).setUint32(8, 1);
   const body = concat([hdr, encodeObjHeader(3, declared), Uint8Array.of(0)]);
   const pack = concat([body, new Sha1().update(body).digest()]);
-  assert.throws(() => unwrap(parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 })), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared);
+  assert.throws(() => unwrap(parsePack(pack, { limits: withLimits({ maxInflatedTotal: declared - 1, maxObjectSize: declared }), maxInflatedTotal: declared - 1 })), e => e.code === 'limit_exceeded' && e.what === 'pack inflated bytes' && e.got === declared + LIMIT_OBJECT_OVERHEAD);
 });
 
 const pktLine = s => { const b = te.encode(s); return concat([te.encode((b.length + 4).toString(16).padStart(4, '0')), b]); };

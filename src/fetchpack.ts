@@ -12,6 +12,7 @@ import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
 import type { ParsedPack, ResolvedPack } from './packresolve.js';
 import { packStream, isFilterRejection, filterUnadvertised, fallbackName, harvest, checkWide, skippedAttrs, fetchExchange } from './fetch.js';
 import { fail } from './errors.js';
+import { probing } from './transport.js';
 import type { PlyError } from './errors.js';
 import { fromNullable, fromNullish, withDefaults } from './absent.js';
 import { ok, getOrElse } from './result.js';
@@ -121,7 +122,8 @@ export async function fetchPack(t: Transport, opts: FetchOpts, extra: FetchPackE
 // learned false).
 const commitsAndTags = (_oid: string, o: PackObject): boolean => o.type !== TYPE.TREE;
 export type Tree0Pack = FetchPackResult & { readonly filter: string | null; readonly learned: boolean };
-export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Result<Tree0Pack, PlyError>> {
+// oxlint-disable-next-line typescript/promise-function-async -- probing's promise, passed through
+export function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Result<Tree0Pack, PlyError>> {
   const wide = async (filter: WideFilter, learned: boolean): Promise<Result<Tree0Pack, PlyError>> => {
     const check = (objects: Map<string, PackObject>): Result<Attrs, PlyError> => { const c = checkWide(objects, commitsAndTags, t.limits); return c.ok ? ok(skippedAttrs(c.value)) : c; };
     const r = await fetchPack(t, { ...opts, filter }, { check, attrs: { 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': opts.filter, 'git.fetch.filter.learned': learned } });
@@ -132,19 +134,22 @@ export async function fetchPackTree0(t: Transport, opts: FetchOpts): Promise<Res
     }
     return ok({ ...r.value, filter: filter === '' ? null : filter, learned });
   };
-  if (t.quirks.treeFilter === 'none') return wide('', false);
-  if (t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
-  const base = await fetchPack(t, opts, { check: (objects): Result<Attrs, PlyError> => { const c = checkWide(objects, () => true, t.limits); return c.ok ? ok({}) : c; } });
-  if (base.ok) {
-    const f = fromNullable(opts.filter);
-    const filterVal = f.tag === 'some' ? f.value : null;
-    return ok({ ...base.value, filter: filterVal, learned: false });
-  }
-  if (isFilterRejection(base.error)) {
-    t.quirks.treeFilter = 'blob:none';
-    return wide('blob:none', true);
-  }
-  return (await filterUnadvertised(t, base.error)) ? wide('', true) : base;
+  // one probe at a time per quirks record (transport.ts probing): the checks below read it after any wait
+  return probing(t.quirks, opts.filter === 'tree:0' ? 'tree:0' : 'filter', async (): Promise<Result<Tree0Pack, PlyError>> => {
+    if (t.quirks.treeFilter === 'none') return wide('', false);
+    if (t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
+    const base = await fetchPack(t, opts, { check: (objects): Result<Attrs, PlyError> => { const c = checkWide(objects, () => true, t.limits); return c.ok ? ok({}) : c; } });
+    if (base.ok) {
+      const f = fromNullable(opts.filter);
+      const filterVal = f.tag === 'some' ? f.value : null;
+      return ok({ ...base.value, filter: filterVal, learned: false });
+    }
+    if (isFilterRejection(base.error)) {
+      t.quirks.treeFilter = 'blob:none';
+      return wide('blob:none', true);
+    }
+    return (await filterUnadvertised(t, base.error)) ? wide('', true) : base;
+  });
 }
 
 // The two filters a history walk asks for. Anything else is the caller's bug, refused before a request.

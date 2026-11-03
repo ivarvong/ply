@@ -39,7 +39,7 @@ import { readFile, readdir, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fail } from './errors.js';
 import type { PlyError } from './errors.js';
-import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack } from './packresolve.js';
@@ -213,11 +213,14 @@ async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyE
   const objectsDir = join(repo.commonDir, 'objects');
   const held = new Map<string, Obj>();
   const stats = { packs: 0, packed: 0, loose: 0, resident: 0 };
+  // resident: the bytes held; charged: those plus LIMIT_OBJECT_OVERHEAD per object, what maxInflatedTotal bounds (#142)
+  let charged = 0;
   const hold = (oid: string, o: Obj): Result<null, PlyError> => {
     if (held.has(oid)) return ok(null);
     held.set(oid, o);
     stats.resident += o.data.length;
-    if (stats.resident > maxTotal.value) return err(limitExceeded('local objects bytes', stats.resident, maxTotal.value));
+    charged += o.data.length + LIMIT_OBJECT_OVERHEAD;
+    if (charged > maxTotal.value) return err(limitExceeded('local objects bytes', charged, maxTotal.value));
     if (held.size > maxObjects.value) return err(limitExceeded('local objects', held.size, maxObjects.value));
     return ok(null);
   };
@@ -226,7 +229,7 @@ async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyE
   for (const name of packs) {
     const buf = await readFile(join(packDir, name));
     // the room the packs and objects held so far leave: a pack that would pass the bound fails while it is parsed
-    const room = { ...limits, maxInflatedTotal: Math.max(0, maxTotal.value - stats.resident), maxPackObjects: Math.max(0, maxObjects.value - held.size) };
+    const room = { ...limits, maxInflatedTotal: Math.max(0, maxTotal.value - charged), maxPackObjects: Math.max(0, maxObjects.value - held.size) };
     const parsed = parsePack(buf, { limits: room });
     if (!parsed.ok) return parsed;
     const resolved = resolvePack(parsed.value, () => null, room);

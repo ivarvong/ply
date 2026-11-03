@@ -24,7 +24,7 @@ import type { Refname } from './refname.js';
 import { makeDelta } from './packresolve.js';
 import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
-import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import { decideHead, inSpan, limitsOf, needsHead, retryLink, strictParent, tagAttempt } from './edit.js';
@@ -68,8 +68,11 @@ const specOf = (f: unknown): Input<FileSpec> => {
 //   iterable of { path, mode?, data?, oid? }
 // Modes are git's tree modes: 100644 file, 100755 executable, 120000 symlink (data = the link target, as git stores
 // it), 160000 gitlink (oid = the submodule commit; no data — the server does not need that commit). Every path goes
-// through validatePath (no `.git`, `..`, empty component); each blob is bounded by maxObjectSize and the count by
-// maxPackObjects before anything is hashed.
+// through validatePath (no `.git`, `..`, empty component); each blob is bounded by maxObjectSize, the count by
+// maxPackObjects, and the running total by maxPushBytes, before anything is hashed. The total is each blob's bytes plus
+// LIMIT_OBJECT_OVERHEAD per entry (a gitlink too): a file's entry, its tree entry and its pack entry cost that much heap
+// whatever its size, so 100 000 tiny files are refused here instead of exhausting a Worker (#142). got is the running
+// total, including the entry that crossed the cap; exactly the cap is allowed.
 // oxlint-disable-next-line complexity -- one check per field, in the order git would refuse them
 export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Result<FileEntry[], PlyError> {
   if (files === null || typeof files !== 'object') return fail('bad_request', 'files must be an object or an iterable of { path, mode, data }', { what: 'files' });
@@ -77,6 +80,15 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
   if (!maxFiles.ok) return maxFiles;
   const maxObject = readLimit(limits, 'maxObjectSize');
   if (!maxObject.ok) return maxObject;
+  const maxPush = readLimit(limits, 'maxPushBytes');
+  if (!maxPush.ok) return maxPush;
+  let pushBytes = 0;
+  const charge = (bytes: number): Result<null, PlyError> => {
+    const next = pushBytes + bytes + LIMIT_OBJECT_OVERHEAD;
+    if (next > maxPush.value) return err(limitExceeded('push bytes', next, maxPush.value));
+    pushBytes = next;
+    return ok(null);
+  };
   // the caller's values: each is checked below (validatePath refuses a missing entry or path)
   /* oxlint-disable typescript/no-unsafe-type-assertion -- see above */
   // oxlint-disable-next-line no-nested-ternary -- bundle budget: the JS's expression, byte for byte
@@ -96,6 +108,8 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
     if (mode === MODE_COMMIT) {
       const oid = getOrElse(fromNullish(spec.oid), '');
       if (!OID.test(oid) || fromNullable(spec.data).tag === 'some') return fail('bad_request', `${path}: a gitlink (160000) takes a 40-hex oid and no data`, { what: 'gitlink', path });
+      const charged = charge(0);
+      if (!charged.ok) return charged;
       out.push({ path, comps: comps.value, mode, oid });
       continue;
     }
@@ -106,6 +120,8 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
     if (data.length > maxObject.value) return err(limitExceeded('object size', data.length, maxObject.value));
     // a symlink target is a path: git cannot check out an empty one, and a NUL ends it on every platform
     if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) return fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
+    const charged = charge(data.length);
+    if (!charged.ok) return charged;
     out.push({ path, comps: comps.value, mode, data, oid: hashObject('blob', data) });
   }
   return ok(out);
@@ -226,18 +242,9 @@ export function validateTreeSpec(spec: TreeSpec, limits: Limits, head: string | 
   const checkedMessage = validateMessage(message);
   if (!checkedMessage.ok) return checkedMessage;
   if (head !== null && !OID.test(head)) return fail('bad_request', 'head must be a 40-hex oid');
+  // maxPushBytes is charged per entry as fileEntries reads them, before buildTree retains the blobs
   const entries = fileEntries(files, limits);
   if (!entries.ok) return entries;
-  // Before buildTree retains the blobs. got is the running total, including the file that crossed the cap.
-  // Exactly the cap is allowed. A gitlink has no bytes. A single file over maxObjectSize already failed above.
-  const maxPush = readLimit(limits, 'maxPushBytes');
-  if (!maxPush.ok) return maxPush;
-  let pushBytes = 0;
-  for (const e of entries.value) {
-    const next = pushBytes + (isBlobEntry(e) ? e.data.length : 0);
-    if (next > maxPush.value) return err(limitExceeded('push bytes', next, maxPush.value));
-    pushBytes = next;
-  }
   const built = buildTree(entries.value, limits);
   if (!built.ok) return built;
   // validatePushRef passed, so the ref is a refname

@@ -17,7 +17,7 @@ import { pkts } from '../src/pktline.js';
 import { te, td, concat, bytesOf } from '../src/bytes.js';
 import { Sha1 } from '../src/sha1.js';
 import { ZERO_OID } from '../src/push.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV, withLimits } from '../src/limits.js';
 import { plyError as fail } from '../src/errors.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
@@ -330,12 +330,16 @@ test('validateTreeSpec: defaults, create, head, and each field checked before I/
   throws(() => unwrap(validateTreeSpec({ ...ok, message: 'a\0' }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'message' });
   throws(() => unwrap(validateTreeSpec({ ...ok, files: null }, DEFAULT_LIMITS)), 'bad_request', undefined, { what: 'files' });
   throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: '1', 'a/b': '2' } }, DEFAULT_LIMITS)), 'bad_request', 'a is both a file and a directory');
-  // the total is the sum of blob bytes. Exactly the cap is kept; the next byte is limit_exceeded before buildTree.
-  const cap = withLimits({ maxPushBytes: 4 });
+  // the total is the sum of blob bytes plus LIMIT_OBJECT_OVERHEAD per entry (#142). Exactly the cap is kept; the next
+  // byte is limit_exceeded, in fileEntries, before buildTree.
+  const cap = withLimits({ maxPushBytes: 4 + 2 * OV });
   assert.equal(unwrap(validateTreeSpec({ ...ok, files: { a: 'ab', b: 'cd' } }, cap)).built.root, unwrap(buildTree(unwrap(fileEntries({ a: 'ab', b: 'cd' }, cap)))).root);
-  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'abc', b: 'de' } }, cap)), 'limit_exceeded', 'push bytes 5 exceeds limit 4', { what: 'push bytes', got: 5, max: 4 });
-  assert.equal(unwrap(validateTreeSpec({ ...ok, files: { g: { mode: '160000', oid: GITLINK } } }, withLimits({ maxPushBytes: 0 }))).files, 1);
-  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'x' } }, withLimits({ maxPushBytes: 0 }))), 'limit_exceeded', 'push bytes 1 exceeds limit 0', { what: 'push bytes', got: 1, max: 0 });
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'abc', b: 'de' } }, cap)), 'limit_exceeded', `push bytes ${5 + 2 * OV} exceeds limit ${4 + 2 * OV}`, { what: 'push bytes', got: 5 + 2 * OV, max: 4 + 2 * OV });
+  throws(() => unwrap(fileEntries({ a: 'abc', b: 'de' }, cap)), 'limit_exceeded', undefined, { what: 'push bytes', got: 5 + 2 * OV });
+  // a gitlink has no bytes but is an entry: it costs the overhead
+  assert.equal(unwrap(validateTreeSpec({ ...ok, files: { g: { mode: '160000', oid: GITLINK } } }, withLimits({ maxPushBytes: OV }))).files, 1);
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { g: { mode: '160000', oid: GITLINK } } }, withLimits({ maxPushBytes: OV - 1 }))), 'limit_exceeded', undefined, { what: 'push bytes', got: OV, max: OV - 1 });
+  throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'x' } }, withLimits({ maxPushBytes: OV }))), 'limit_exceeded', `push bytes ${OV + 1} exceeds limit ${OV}`, { what: 'push bytes', got: OV + 1, max: OV });
   // a file over maxObjectSize is still that error, from fileEntries, not the total
   throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'abcd' } }, withLimits({ maxObjectSize: 2, maxPushBytes: 1 }))), 'limit_exceeded', 'object size 4 exceeds limit 2');
   throws(() => unwrap(validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: undefined })), 'bad_request', 'limits.maxPushBytes must be a finite non-negative number');

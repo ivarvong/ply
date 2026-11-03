@@ -26,7 +26,7 @@ import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, ou
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits, DEFAULT_LIMITS, readLimit, checkLimit } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV, readLimit, checkLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport as createTransportR } from '../src/http.js';
 import { verifyRef } from '../src/operation.js';
@@ -1265,14 +1265,17 @@ test('parsePack caps reject a hostile count and inflated total on the boundary',
   const emptyBody = Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 0);
   const { Sha1 } = await import('../src/sha1.js');
   const emptyPack = concat([emptyBody, new Sha1().update(emptyBody).digest()]);
-  const total = blob.length + other.length;
+  // each object charges its declared bytes plus LIMIT_OBJECT_OVERHEAD (#142)
+  const total = blob.length + other.length + 2 * OV;
 
-  assert.equal(unwrap(parsePack(pack, { maxObjects: 1, maxInflatedTotal: blob.length })).objects.length, 1);
+  assert.equal(unwrap(parsePack(pack, { maxObjects: 1, maxInflatedTotal: blob.length + OV })).objects.length, 1);
   assert.equal(unwrap(parsePack(emptyPack, { maxObjects: 0, maxInflatedTotal: 0 })).stats.count, 0);
   assert.equal(unwrap(parsePack(two, { maxObjects: 2, maxInflatedTotal: total })).objects.length, 2);
   throws(() => unwrap(parsePack(pack, { maxObjects: 0 })), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
   throws(() => unwrap(parsePack(two, { maxObjects: 1 })), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
-  throws(() => unwrap(parsePack(pack, { maxInflatedTotal: blob.length - 1 })), 'limit_exceeded', `pack inflated bytes ${blob.length} exceeds limit ${blob.length - 1}`);
+  throws(() => unwrap(parsePack(pack, { maxInflatedTotal: blob.length + OV - 1 })), 'limit_exceeded', `pack inflated bytes ${blob.length + OV} exceeds limit ${blob.length + OV - 1}`);
+  // the overhead alone is charged: a pack that holds its bytes but not its objects' records is refused
+  throws(() => unwrap(parsePack(pack, { maxInflatedTotal: blob.length })), 'limit_exceeded', `pack inflated bytes ${blob.length + OV} exceeds limit ${blob.length}`);
   throws(() => unwrap(parsePack(two, { maxInflatedTotal: total - 1 })), 'limit_exceeded', `pack inflated bytes ${total} exceeds limit ${total - 1}`);
 
   const zero = unwrap(packParseOpts(withLimits({ maxPackObjects: 0, maxInflatedTotal: 0 })));
@@ -1281,9 +1284,9 @@ test('parsePack caps reject a hostile count and inflated total on the boundary',
   assert.equal(zero.limits.maxObjectSize, withLimits({}).maxObjectSize);
   throws(() => unwrap(parsePack(pack, zero)), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
 
-  const positive = unwrap(packParseOpts({ maxPackObjects: 1, maxInflatedTotal: blob.length, maxObjectSize: blob.length + blob.length }));
+  const positive = unwrap(packParseOpts({ maxPackObjects: 1, maxInflatedTotal: blob.length + OV, maxObjectSize: blob.length + blob.length }));
   assert.equal(positive.maxObjects, 1);
-  assert.equal(positive.maxInflatedTotal, blob.length);
+  assert.equal(positive.maxInflatedTotal, blob.length + OV);
   assert.equal(positive.limits.maxObjectSize, blob.length + blob.length);
   assert.equal(unwrap(parsePack(pack, positive)).objects.length, 1);
 
@@ -1293,7 +1296,7 @@ test('parsePack caps reject a hostile count and inflated total on the boundary',
   assert.equal(unwrap(parsePack(pack, open)).stats.inflated, blob.length);
   throws(() => unwrap(packParseOpts({ maxObjectSize: 1 })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   throws(() => unwrap(parsePack(two, { limits: withLimits({ maxPackObjects: 1 }) })), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
-  throws(() => unwrap(parsePack(pack, { maxObjects: Infinity, maxInflatedTotal: blob.length })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => unwrap(parsePack(pack, { maxObjects: Infinity, maxInflatedTotal: blob.length + OV })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
 });
 
 function huffCodes(h) {
@@ -1391,7 +1394,7 @@ test('aggregate caps fail closed before allocation', async () => {
   ]);
   const parsed = unwrap(parsePack(pack));
   assert.equal(unwrap(resolvePack(parsed)).stats.baseLookups, 3);
-  assert.throws(() => unwrap(resolvePack(parsed, undefined, withLimits({ maxInflatedTotal: parsed.stats.inflated + te.encode('abXY').length }))), e => e.code === 'limit_exceeded');
+  assert.throws(() => unwrap(resolvePack(parsed, undefined, withLimits({ maxInflatedTotal: parsed.stats.inflated + 4 * OV + te.encode('abXY').length }))), e => e.code === 'limit_exceeded');
   throws(() => unwrap(applyDelta(base, makeDelta(base, base).delta, { maxResult: Infinity })), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
 });
 

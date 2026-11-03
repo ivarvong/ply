@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_LIMITS } from '../../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD } from '../../src/limits.js';
 import { startGitServer } from '../server.js';
 import { ensureFixtures } from './fixtures.mjs';
 import { allCells, selectCells } from './matrix.mjs';
@@ -58,7 +58,7 @@ function viewOf(result) {
   return view;
 }
 
-/** @param {import('./matrix.mjs').Cell} cell @param {{ wires: Record<string, number>, chains: Record<string, number>, inflated: number }} oracle */
+/** @param {import('./matrix.mjs').Cell} cell @param {{ wires: Record<string, number>, chains: Record<string, number>, sums: Record<string, { inflated: number, objects: number }> }} oracle */
 function decorate(cell, oracle) {
   const next = { ...cell, limits: cell.limits ? { ...cell.limits } : undefined, expect: cell.expect ? { ...cell.expect } : undefined };
   if (cell.expectFrom === 'wire') {
@@ -77,9 +77,19 @@ function decorate(cell, oracle) {
     next.expect = chain > cap
       ? { status: 'refused', code: 'limit_exceeded', what: 'delta chain depth' }
       : { status: 'ok' };
+  } else if (cell.expectFrom === 'charged') {
+    // what parsePack charges: verify-pack's inflated sum plus LIMIT_OBJECT_OVERHEAD per object it lists
+    const m = oracle.sums?.[cell.pack];
+    if (!m) throw new Error(`${cell.id}: no verify-pack sum for ${cell.pack}`);
+    const charged = m.inflated + m.objects * LIMIT_OBJECT_OVERHEAD;
+    const cap = cell.limits?.maxInflatedTotal ?? DEFAULT_LIMITS.maxInflatedTotal;
+    next.inflated = charged;
+    next.expect = charged > cap ? { status: 'refused', code: 'limit_exceeded', what: 'pack inflated bytes' } : { status: 'ok' };
   } else if (cell.expectFrom === 'inflated-at' || cell.expectFrom === 'inflated-under') {
-    const sum = oracle.inflated;
-    if (!sum) throw new Error(`${cell.id}: inflated sum was not measured`);
+    // the aggregate is the inflated sum plus LIMIT_OBJECT_OVERHEAD per object (#142)
+    const m = oracle.sums?.[cell.pack];
+    if (!m) throw new Error(`${cell.id}: inflated sum was not measured`);
+    const sum = m.inflated + m.objects * LIMIT_OBJECT_OVERHEAD;
     const max = cell.expectFrom === 'inflated-at' ? sum : sum - 1;
     next.limits = { ...cell.limits, maxInflatedTotal: max };
     next.expect = cell.expectFrom === 'inflated-under'
