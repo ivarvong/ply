@@ -31,8 +31,10 @@ export function fakeFetch(responder) {
   };
 }
 
+// Each fake is its own server at one URL: its own quirks record, not the remote's remembered one (#136), so a test that
+// sets treeFilter on one transport does not change the next.
 export function transport(responder, limits = {}, extra = {}) {
-  return createTransport('https://git.example/repo.git', { tracer: new Tracer(), fetchImpl: fakeFetch(responder), limits: withLimits(limits), ...extra });
+  return createTransport('https://git.example/repo.git', { tracer: new Tracer(), fetchImpl: fakeFetch(responder), limits: withLimits(limits), quirks: {}, ...extra });
 }
 
 // The outcome of an operation as a tagged union. `typed` holds only an error ply built with fail() (a code from its

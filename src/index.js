@@ -38,7 +38,7 @@ export { mergeBranch, fastForward, deleteRef, mergeTrees, mergeBase, threeWay, b
 export { createBranch, deleteBranch, createTag, deleteTag, listRefs } from './refops.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
-export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody } from './client.js';
+export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
 /**
  * 40 lowercase hex characters. git also accepts abbreviations, ref names, and uppercase hex; this type does not.
  * @typedef {import('./oid.js').Oid} Oid

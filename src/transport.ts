@@ -30,7 +30,7 @@ import type { Limits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import { KIND } from './otel.js';
 import type { Input } from './absent.js';
-import { field, fillIn, readKey } from './absent.js';
+import { field, fillIn, fromNullable, mapGet, readKey } from './absent.js';
 import { isPlyThrown, thrownText } from './boundary.js';
 
 // One pkt-line frame as pktline.js yields it.
@@ -48,6 +48,11 @@ export type Scrub = (s: string) => string;
 // uploadpack.allowFilter unset), learned from that advertisement (learnFilter): no filter is sent and the fetch takes
 // the unfiltered pack. blobWants: 'single' for a host that refuses a multi-blob want list (checkout). A caller passes
 // one record to every call on a server; ply fills it (absent.fillIn).
+// The record stays two string enums rather than an ADT with a reason and a time (#136 asked for `refused{reason, at}`):
+// each value already names what was learned (tree:0 = unknown or taken, blob:none = tree:0 refused, none = no filter
+// advertised), the reason and the request that learned it are on that request's span (git.fetch.filter.fallback,
+// .requested, .learned, error.kind), and a time would only serve expiry, which a stale value does not need (see the memo
+// below). Callers persist and compare it as plain JSON; a richer shape would break that for no decision ply makes.
 export type TreeFilter = 'tree:0' | 'blob:none' | 'none';
 export type Quirks = { treeFilter: TreeFilter; blobWants: 'many' | 'single' };
 export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'many' });
@@ -56,6 +61,73 @@ export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'ma
 export function learnFilter(t: Transport, advertised: boolean): void {
   if (!advertised) t.quirks.treeFilter = 'none';
   else if (t.quirks.treeFilter === 'none') t.quirks.treeFilter = 'tree:0';
+}
+// The default memo (#136): what a remote was found to need, kept per remote for a transport made without a `quirks`
+// record (createTransport, every operation), so a later operation on the same remote does not pay the refusal again
+// (Artifacts' 400 on tree:0 is 100-900 ms; a stock server's empty answer is a request plus an advertisement read).
+// Keyed by origin and path (query, fragment, userinfo and a trailing slash dropped: the credential is never part of the
+// key). Bounded: the least recently used remote is dropped past QUIRKS_MEMO_MAX. Module state, so per process, or per
+// isolate on Workers. A record the caller passes wins (and is filled in place, as before); passing a fresh one (`{}`)
+// opts that call out; forgetQuirks() clears one remote or all of them (a server reconfigured, a test faking several
+// servers at one URL). A stale entry costs bytes, never correctness: blob:none and the unfiltered pack are wider answers
+// to the same question, and a server that stops taking a filter is relearned from its empty answer.
+export const QUIRKS_MEMO_MAX = 256;
+const quirksMemo = new Map<string, Quirks>();
+// The memo key of a parsed remote URL: origin and path, nothing else.
+// oxlint-disable-next-line require-unicode-regexp -- ASCII
+export const quirksKeyOf = (u: URL): string => `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+// The memo key of a remote URL, or null for a URL that does not parse (createTransport refuses it first).
+export function quirksKey(url: string | URL): string | null {
+  try { return quirksKeyOf(new URL(url)); } catch { return null; }
+}
+// The remembered record for `key`, made (fresh) on first use and marked most recently used.
+export function rememberedQuirks(key: string): Quirks {
+  const hit = mapGet(quirksMemo, key);
+  const q = hit.tag === 'some' ? hit.value : freshQuirks();
+  quirksMemo.delete(key);
+  quirksMemo.set(key, q);
+  for (const oldest of quirksMemo.keys()) {
+    if (quirksMemo.size <= QUIRKS_MEMO_MAX) break;
+    quirksMemo.delete(oldest);
+  }
+  return q;
+}
+// Forget what was learned about `url` (as quirksKey normalizes it), or about every remote when no url is given.
+// Transports already made keep their record; the next one made for that remote starts fresh.
+export function forgetQuirks(url: string | URL | null = null): void {
+  if (url === null) { quirksMemo.clear(); return; }
+  const key = quirksKey(url);
+  if (key !== null) quirksMemo.delete(key);
+}
+// One probe at a time per record (#136). Until a server has answered a filtered request, two concurrent ones (merge
+// walks both sides at once; two operations on one remembered record) would each pay the refusal or the empty answer.
+// So the first filtered request on a record whose treeFilter is still tree:0 is the probe: a filtered request that
+// arrives while it runs waits for it, then reads the record again (it may now say blob:none or none). An answer that
+// was not a refusal settles the record for what was sent (`filter`: some filter is taken, so a blob:none request needs
+// no probe; `tree:0`: tree:0 itself is taken, nothing does); a failure for another reason (a network error, a missing
+// object) settles nothing and the next request probes. `run` reads the record itself, after any wait.
+export type Probe = 'filter' | 'tree:0';
+const probes = new WeakMap<Quirks, Promise<null>>();
+const settled = new WeakMap<Quirks, Probe>();
+const ignore = (): null => null;
+export async function probing<T extends { readonly ok: boolean }>(q: Quirks, sends: Probe, run: () => Promise<T>): Promise<T> {
+  // read and claimed with no await between them: two callers cannot both see no probe and both start one
+  const pending = fromNullable(probes.get(q));
+  if (pending.tag === 'some') {
+    await pending.value;
+    return probing(q, sends, run);
+  }
+  const known = fromNullable(settled.get(q));
+  if (q.treeFilter !== 'tree:0' || (known.tag === 'some' && (known.value === 'tree:0' || sends === 'filter'))) return run();
+  const running = run();
+  probes.set(q, running.then(ignore, ignore));
+  try {
+    const out = await running;
+    if (out.ok && q.treeFilter === 'tree:0' && (sends === 'tree:0' || known.tag === 'none')) settled.set(q, sends);
+    return out;
+  } finally {
+    probes.delete(q);
+  }
 }
 // Commits and trees harvested from over-wide packs (fetch.js), keyed by oid; `bytes` is their running total.
 export type HeldObject = { readonly type: number; readonly data: Uint8Array };

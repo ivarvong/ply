@@ -56,7 +56,8 @@ export default defineConfig({
     transform: (code: string, id: string) => (id === ERRORS ? { code: instrument(code), map: null } : null),
   }] : [],
   test: {
-    setupFiles: failsites ? ['test/space/failsite-setup.js'] : [],
+    // quirks-reset: no remembered per-remote quirks leak between tests (#136)
+    setupFiles: failsites ? ['test/quirks-reset.js', 'test/space/failsite-setup.js'] : ['test/quirks-reset.js'],
     include: ['test/**/*.test.js'],
     exclude: ['**/node_modules/**'],
     // node:test had no default timeout and the space/oracle tests run for minutes; a test that needs a bound states it

@@ -22,6 +22,7 @@ import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
 import { discover } from '../src/discover.js';
 import { createTransport } from '../src/http.js';
+import { forgetQuirks } from '../src/transport.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
@@ -241,4 +242,44 @@ test('an advertisement the probe cannot read (cut inside a pkt) decides nothing:
     assert.equal(probe[0].attrs['error.type'], 'protocol');
     assert.equal(probe[0].status.message, 'trailing 2 bytes after last pkt-line');
   } finally { await proxy.close(); }
+});
+
+// #136: with no quirks passed, the no-filter learning is remembered per remote too: across any order of
+// edit/read/checkout/log/merge, at most one filtered request (the one the stock server dies on: empty_response) and one
+// advertisement probe per remote. Counted at the fetchImpl. A fresh `quirks: {}` per call (ply before #136) pays per call.
+const OPS = ['edit', 'read', 'checkout', 'log', 'merge'];
+const orders = [...OPS.map((_, i) => [...OPS.slice(i), ...OPS.slice(0, i)]), [...OPS].reverse()];
+async function sweep(order, perCall) {
+  const { stock } = twins();
+  let filtered = 0, probes = 0;
+  const fetchImpl = (url, init) => {
+    const u = String(url);
+    if (u.endsWith('/git-upload-pack') && init?.body && Buffer.from(init.body).toString('latin1').includes('filter ')) filtered++;
+    if (u.includes('/info/refs?service=git-upload-pack')) probes++;
+    return globalThis.fetch(url, init);
+  };
+  const ex = arrayExporter();
+  const o = () => ({ tracer: new Tracer({ exporter: ex }), fetchImpl, ...(perCall ? { quirks: {} } : {}) });
+  const run = {
+    edit: async () => unwrap(await editFile(stock.url, { path: 'a/b/c.txt', find: 'MARK', replace: 'EDITED', author: A, message: 'edit', time: T }, { ...o(), verify: true })),
+    read: async () => drain(unwrap(await readFile(stock.url, { path: 'big.bin' }, o())).stream),
+    checkout: async () => plain(unwrap(await checkoutTree(stock.url, { ref: 'main' }, o()))),
+    log: async () => unwrap(await readLog(stock.url, { ref: 'main', limit: 3 }, o())),
+    merge: async () => unwrap(await mergeBranch(stock.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'merge feat', time: T }, o())),
+  };
+  for (const op of order) await run[op]();
+  assert.deepEqual(fsckProblems(stock.bare), []);
+  const empties = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch' && s.attrs['error.kind'] === 'empty_response').length;
+  return { filtered, probes, empties };
+}
+test('#136: no quirks passed, any order: one empty_response and one advertisement probe per stock remote', async () => {
+  forgetQuirks();
+  for (const order of orders) {
+    const { filtered, probes, empties } = await sweep(order, false);
+    assert.equal(filtered, 1, `${order}: one filtered request`);
+    assert.equal(empties, 1, `${order}: one empty_response`);
+    assert.equal(probes, 1, `${order}: one advertisement read`);
+  }
+  const before = await sweep(OPS, true);
+  assert.ok(before.empties >= 4 && before.probes === before.empties, JSON.stringify(before));
 });

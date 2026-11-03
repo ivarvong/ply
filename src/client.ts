@@ -28,7 +28,7 @@ import type { Result } from './result.js';
 
 // A3: the audit deletes the unused re-exports below; they are public API until then.
 export { createTransport, redactUrl } from './http.js';
-export { UA, withParent } from './transport.js';
+export { UA, withParent, forgetQuirks } from './transport.js';
 export { lsRefsBody, parseUnbornLine } from './lsrefs.js';
 export type { LsRef, LsRefsResult, LsRefsUnborn } from './lsrefs.js';
 export { fetchBody, v2Init, v2Step, v2Attrs, packStream, fetchObject, spInit, spStep, spFinish, isFilterRejection, isFilterRefusal } from './fetch.js';

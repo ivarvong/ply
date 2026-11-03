@@ -44,7 +44,7 @@ import type { ReadOptions, RefSpec } from './read.js';
 import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
 import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
-import { withParent } from './transport.js';
+import { probing, withParent } from './transport.js';
 import { MODE_TREE, MODE_COMMIT } from './format.js';
 import type { Span, Tracer } from './otel.js';
 import type { FetchPackResult as FetchedPack } from './fetchpack.js';
@@ -122,15 +122,19 @@ export function treeFiles(tree: TreeLookup, oid: string, options: TreeFilesOptio
 type Trees = { readonly root: string; readonly tree: TreeLookup; readonly objects: number; readonly trees: number; readonly blobs: ReadonlyMap<string, Uint8Array> };
 // The pack: blob:none, or no filter for a host whose advertisement does not list `filter` (fetch.ts filterUnadvertised:
 // learned from the empty answer git's upload-pack gives one, then asked again without it).
-async function treesPack(t: Transport, commit: string): Promise<Result<FetchedPack & { readonly filter: WideFilter }, PlyError>> {
+// oxlint-disable-next-line typescript/promise-function-async -- probing's promise, passed through
+function treesPack(t: Transport, commit: string): Promise<Result<FetchedPack & { readonly filter: WideFilter }, PlyError>> {
   // oxlint-disable-next-line typescript/promise-function-async -- fetchPack's promise, passed through
   const get = (filter: WideFilter, learned: boolean): Promise<Result<FetchedPack, PlyError>> => fetchPack(t, { wants: [commit], filter, deepen: 1 }, filter === '' ? { attrs: { 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': 'blob:none', 'git.fetch.filter.learned': learned } } : {});
-  const filter: WideFilter = t.quirks.treeFilter === 'none' ? '' : 'blob:none';
-  const got = await get(filter, false);
-  if (got.ok) return ok({ ...got.value, filter });
-  if (filter === '' || !(await filterUnadvertised(t, got.error))) return got;
-  const again = await get('', true);
-  return again.ok ? ok({ ...again.value, filter: '' }) : again;
+  // one probe at a time per quirks record (transport.ts probing): the filter is read after any wait
+  return probing(t.quirks, 'filter', async (): Promise<Result<FetchedPack & { readonly filter: WideFilter }, PlyError>> => {
+    const filter: WideFilter = t.quirks.treeFilter === 'none' ? '' : 'blob:none';
+    const got = await get(filter, false);
+    if (got.ok) return ok({ ...got.value, filter });
+    if (filter === '' || !(await filterUnadvertised(t, got.error))) return got;
+    const again = await get('', true);
+    return again.ok ? ok({ ...again.value, filter: '' }) : again;
+  });
 }
 // Effect: the commit and every tree under it, as one pack (deepen 1). Returns { root, tree } where tree(oid) parses a
 // tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.

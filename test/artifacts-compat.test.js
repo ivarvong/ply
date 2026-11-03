@@ -13,6 +13,9 @@ import { editFile } from '../src/edit.js';
 import { readFile, listTree } from '../src/read.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
+import { readLog } from '../src/log.js';
+import { checkoutTree } from '../src/checkout.js';
+import { forgetQuirks } from '../src/transport.js';
 import { classifyReport, decideOutcome } from '../src/push.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
@@ -92,10 +95,18 @@ test('blob:none fallback: edit (deep path) and read match git; learned once, rem
     const ls = await unwrapAsync(listTree(r.url, { path: 'many' }, { tracer: new Tracer(), quirks }));
     assert.equal(ls.entries.length, 40); assert.equal(ls.tree, git(r.bare, ['rev-parse', 'main:many']).trim());
     assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400, 'no further 400s');
-    // a fresh transport without the quirks object learns it again (one more 400) and still answers correctly
-    const rd2 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() }));
-    for await (const _ of rd2.stream); // eslint-disable-line no-unused-vars
-    assert.equal(r.proxy.log.filter(l => l.spec === 'status').length, before400 + 1);
+    // without a quirks object: the remote's remembered record (#136). The calls above kept theirs in the caller's
+    // object, so the remote's record learns it once (one more 400), and every later call without one pays none
+    const statuses = () => r.proxy.log.filter(l => l.spec === 'status').length;
+    for (const want of [before400 + 1, before400 + 1]) {
+      const rd2 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer() }));
+      for await (const _ of rd2.stream); // eslint-disable-line no-unused-vars
+      assert.equal(statuses(), want, 'remembered per remote');
+    }
+    // a caller's own fresh record opts out: it learns again (one more 400)
+    const rd3 = await unwrapAsync(readFile(r.url, { path: 'README.md' }, { tracer: new Tracer(), quirks: {} }));
+    for await (const _ of rd3.stream); // eslint-disable-line no-unused-vars
+    assert.equal(statuses(), before400 + 2);
   } finally { await r.proxy.close(); }
 });
 
@@ -137,4 +148,57 @@ test('git-default server: no fallback attributes, tree:0 throughout (the fallbac
     assert.equal(quirks.treeFilter, 'tree:0'); // the caller's record states what the server took
     for (const s of spansOf(ex).filter(s => s.name === 'git.upload-pack fetch')) assert.ok(!('git.fetch.filter.fallback' in s.attrs));
   } finally { await r.proxy.close(); }
+});
+
+// #136: with no quirks passed, the refused filter is asked for at most once per remote, whatever the order of the
+// operations. Counted at the fetchImpl: every upload-pack request that carries `filter tree:0` (Artifacts' 400).
+// The contrast: a fresh `quirks: {}` per operation (each call its own record, ply before #136) pays one per operation.
+const OPS = ['edit', 'read', 'checkout', 'log', 'merge'];
+const orders = [...OPS.map((_, i) => [...OPS.slice(i), ...OPS.slice(0, i)]), [...OPS].reverse()];
+async function sweep(order, perCall) {
+  const r = await repo({ 'a/f.txt': 'MARK\n', 'README.md': '# hi\n' });
+  git(r.work, ['checkout', '-q', '-b', 'feat']); git(r.work, ['rm', '-q', 'README.md']);
+  git(r.work, ['-c', 'user.name=s', '-c', 'user.email=s@x', 'commit', '-q', '-m', 'feat']); git(r.work, ['push', '-q', r.bare, 'HEAD:refs/heads/feat']);
+  let refused = 0;
+  const fetchImpl = (url, init) => {
+    if (String(url).endsWith('/git-upload-pack') && init?.body && Buffer.from(init.body).toString('latin1').includes('filter tree:0')) refused++;
+    return globalThis.fetch(url, init);
+  };
+  const o = () => ({ tracer: new Tracer(), fetchImpl, ...(perCall ? { quirks: {} } : {}) });
+  const run = {
+    edit: async () => assert.ok((await unwrapAsync(editFile(r.url, { path: 'a/f.txt', find: 'MARK', replace: 'DONE', author: A, message: 'e' }, { ...o(), verify: true }))).newCommit),
+    read: async () => { const rd = await unwrapAsync(readFile(r.url, { path: 'a/f.txt' }, o())); for await (const _ of rd.stream); }, // eslint-disable-line no-unused-vars
+    checkout: async () => { const co = await unwrapAsync(checkoutTree(r.url, { ref: 'main' }, o())); for await (const f of co.files) if (f.stream) for await (const _ of f.stream); }, // eslint-disable-line no-unused-vars
+    log: async () => assert.ok((await unwrapAsync(readLog(r.url, { ref: 'main', limit: 5 }, o()))).commits.length >= 1),
+    merge: async () => assert.ok((await unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author: A, message: 'm' }, o()))).outcome),
+  };
+  try {
+    for (const op of order) await run[op]();
+    assert.deepEqual(fsckProblems(r.bare), []);
+    return { refused, status: r.proxy.log.filter(l => l.spec === 'status').length };
+  } finally { await r.proxy.close(); }
+}
+test('#136: no quirks passed, any order of edit/read/checkout/log/merge: tree:0 is refused at most once per remote', async () => {
+  forgetQuirks();
+  for (const order of orders) {
+    const { refused, status } = await sweep(order, false);
+    assert.equal(refused, 1, `${order}: one tree:0 request for the remote`);
+    assert.equal(status, 1, `${order}: one 400`);
+  }
+  const before = await sweep(OPS, true);
+  assert.ok(before.refused >= 4, `a fresh record per call pays per operation: ${before.refused}`);
+  assert.equal(before.status, before.refused);
+});
+
+test('#136: forgetQuirks clears one remote or all; the key never holds the credential', async () => {
+  const { quirksKey, rememberedQuirks } = await import('../src/transport.js');
+  assert.equal(quirksKey('https://user:tok@h.example/o/r.git/?x=1#y'), 'https://h.example/o/r.git');
+  assert.equal(quirksKey('not a url'), null);
+  const q = rememberedQuirks(quirksKey('https://h.example/o/r.git'));
+  q.treeFilter = 'blob:none';
+  assert.equal(rememberedQuirks(quirksKey('https://other:x@h.example/o/r.git/')), q, 'same remote, other credential: same record');
+  forgetQuirks('https://h.example/o/r.git');
+  assert.notEqual(rememberedQuirks(quirksKey('https://h.example/o/r.git')), q);
+  assert.equal(rememberedQuirks(quirksKey('https://h.example/o/r.git')).treeFilter, 'tree:0');
+  forgetQuirks();
 });
