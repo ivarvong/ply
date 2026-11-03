@@ -142,9 +142,10 @@ async function gitPair(dir, suffixes, a, b) {
 
 // One git process per pair, so the file is CPU-bound and slows with whatever shares the runner (#155): 168s on a CI
 // shard (durations.json, refreshed from CI run 41493029207); on a 4-core box 113s alone, 177s beside protocol.test.js,
-// 179s beside push-outcome, and no faster with the pool capped at 4. Two runs were stopped at an old 180s bound; this
-// one is twice the shared CI time.
-test('version:refname: two-name git tag -l is versioncmp, and a total listing matches it', { timeout: 360_000 }, async () => {
+// 179s beside push-outcome, and no faster with the pool capped at 4. Two runs were stopped at an old 180s bound. A full
+// local run (every file at once) passed 360s three times, so the bound is 600s: the stall #155 was the shard balance
+// (durations.json), not this file.
+test('version:refname: two-name git tag -l is versioncmp, and a total listing matches it', { timeout: 600_000 }, async () => {
   const ranked = names();
   const paired = pairNames();
   const unicode = unicodeNames();
