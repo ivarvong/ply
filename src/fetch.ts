@@ -24,7 +24,7 @@ import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, spanned } from './transport.js';
+import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, probing, spanned } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
 
@@ -709,25 +709,31 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
 }
 
 // One object by oid: a bad oid, a fetch failure, a verification failure are the Err.
-export async function fetchObject(t: Transport, want: ObjectWant): Promise<Result<FetchedObject, PlyError>> {
+// oxlint-disable-next-line typescript/promise-function-async -- probing's promise (or the harvest's answer), passed through
+export function fetchObject(t: Transport, want: ObjectWant): Promise<Result<FetchedObject, PlyError>> {
   const { oid } = want;
   // A JS caller may pass anything for the oid: it is checked as String() renders it (none as ''), and quoted the same way.
   // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- see above
-  if (!OID_RE.test(String(getOrElse(fromNullish<unknown>(oid), '')))) return fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`);
+  if (!OID_RE.test(String(getOrElse(fromNullish<unknown>(oid), '')))) return Promise.resolve(fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`));
   const { filter, deepen, expectType } = withDefaults(want, objectWantDefaults());
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
-  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true });
+  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true }));
   // oxlint-disable-next-line typescript/promise-function-async -- fetchWide's promise, passed through
   const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter });
-  const filtered = filter !== '';
-  if (filtered && t.quirks.treeFilter === 'none') return wide('', false);
-  if (narrow && t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
-  const single = await fetchSingle(t, { oid, filter, deepen, expectType });
-  if (single.ok || !filtered) return single;
-  if (narrow && isFilterRejection(single.error)) {
-    t.quirks.treeFilter = 'blob:none';
-    return wide('blob:none', true);
-  }
-  return (await filterUnadvertised(t, single.error)) ? wide('', true) : single;
+  if (filter === '') return fetchSingle(t, { oid, filter, deepen, expectType });
+  // one probe at a time per quirks record (transport.ts probing): the checks below read it after any wait
+  return probing(t.quirks, narrow ? 'tree:0' : 'filter', async (): Promise<Result<FetchedObject, PlyError>> => {
+    const harvested = narrow ? mapGet(t.objects, oid) : none;
+    if (harvested.tag === 'some' && (expectType === null || harvested.value.type === expectType)) return ok({ type: harvested.value.type, data: harvested.value.data, oid, size: harvested.value.data.length, bust: false, harvested: true });
+    if (t.quirks.treeFilter === 'none') return wide('', false);
+    if (narrow && t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
+    const single = await fetchSingle(t, { oid, filter, deepen, expectType });
+    if (single.ok) return single;
+    if (narrow && isFilterRejection(single.error)) {
+      t.quirks.treeFilter = 'blob:none';
+      return wide('blob:none', true);
+    }
+    return (await filterUnadvertised(t, single.error)) ? wide('', true) : single;
+  });
 }

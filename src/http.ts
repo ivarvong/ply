@@ -20,7 +20,7 @@ import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { NO_HINTS, UA, freshQuirks, wrapNet } from './transport.js';
+import { NO_HINTS, UA, freshQuirks, quirksKeyOf, rememberedQuirks, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -287,17 +287,18 @@ export type HttpConfig = {
   readonly userAgent: string;
   readonly limits: Limits;
   readonly signal: AbortSignal | null;
-  readonly quirks: Input<Quirks>;
+  // null (the default): the remote's remembered record (transport.ts rememberedQuirks, #136)
+  readonly quirks: Input<Quirks> | null;
   readonly followRedirects: FollowRedirects;
   readonly allowUrl: AllowUrl | null;
   readonly maxRedirects: number;
   readonly recordResponseHeaders: readonly string[];
 };
 export type HttpOptions = Input<HttpConfig>;
-// Fresh per transport: quirks are learned per server and must not leak between transports.
+// quirks: null takes the record remembered for this remote (keyed without the credential); a caller's own record wins.
 const httpDefaults = (): { -readonly [K in keyof HttpConfig]: HttpConfig[K] } => ({
   auth: null, tracer: null, parent: null, fetchImpl: globalThis.fetch, userAgent: UA, limits: DEFAULT_LIMITS, signal: null,
-  quirks: freshQuirks(), followRedirects: 'never', allowUrl: null, maxRedirects: DEFAULT_MAX_REDIRECTS, recordResponseHeaders: [],
+  quirks: null, followRedirects: 'never', allowUrl: null, maxRedirects: DEFAULT_MAX_REDIRECTS, recordResponseHeaders: [],
 });
 export type HttpTransport = Transport & { readonly kind: 'http' };
 
@@ -331,8 +332,6 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
   const checkedPolicy = redirectPolicy(followRedirects, maxRedirects);
   if (!checkedPolicy.ok) return checkedPolicy;
   const policy = checkedPolicy.value;
-  // the caller's record, filled in place: every later call that passes it sees what this transport learns
-  const quirks: Quirks = fillIn(givenQuirks, freshQuirks());
   const agentOk = headerField(userAgent, 'user agent');
   if (!agentOk.ok) return agentOk;
   const names = recordResponseHeaderNames(recordResponseHeaders);
@@ -355,6 +354,9 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
   if (!credential.ok) return credential;
   const fromUrl = credential.value;
   u.username = ''; u.password = ''; u.hash = '';
+  // the caller's record, filled in place: every later call that passes it sees what this transport learns. Without one,
+  // the record remembered for this remote (origin + path, never the credential), shared by every transport made for it.
+  const quirks: Quirks = givenQuirks === null ? rememberedQuirks(quirksKeyOf(u)) : fillIn(givenQuirks, freshQuirks());
   // allowUrl runs before any request, including the base. A different origin does not inherit this transport's credential.
   const offeredOrigin = u.origin;
   const approved = useAllowed(allowUrl, u);
