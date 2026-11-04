@@ -38,7 +38,7 @@ import type { Result } from './result.js';
 import { operation } from './operation.js';
 import { fetchPack } from './fetchpack.js';
 import { filterUnadvertised, fallbackName, packName } from './fetch.js';
-import type { WideFilter } from './fetch.js';
+import type { PackObject, WideFilter } from './fetch.js';
 import { resolveCommit, openBlob, pathComps } from './read.js';
 import type { ReadOptions, RefSpec } from './read.js';
 import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
@@ -145,7 +145,7 @@ async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise
     return got;
   }
   const r = got.value;
-  const objects: PackObjects = r.objects === null ? new Map() : r.objects;
+  const objects: PackObjects = r.objects === null ? new Map<string, PackObject>() : r.objects;
   const wanted = mapGet(objects, commit);
   const name = packName(r.filter);
   if (wanted.tag === 'none') return fail('pack_corrupt', `commit ${commit} not in the ${name} pack (${objects.size} objects)`);
@@ -198,7 +198,7 @@ async function fetchBlobs(t: Transport, oids: readonly string[]): Promise<Result
   const want = new Set(oids);
   const fetched = await fetchPack(t, { wants: oids });
   if (!fetched.ok) return fetched;
-  const objects: PackObjects = fetched.value.objects === null ? new Map() : fetched.value.objects;
+  const objects: PackObjects = fetched.value.objects === null ? new Map<string, PackObject>() : fetched.value.objects;
   for (const [oid, o] of objects) {
     if (!want.has(oid)) return fail('pack_corrupt', `object ${oid} served but not wanted (${oids.length} blobs asked for)`);
     if (o.type !== TYPE.BLOB) return fail('pack_corrupt', `expected blob ${oid}, got ${getOrElse<string | number>(fromNullish((TYPE_NAME as TypeNames)[o.type]), o.type)}`);

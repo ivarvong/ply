@@ -182,7 +182,9 @@ export type ListedRef = { readonly name: string; readonly oid: string; readonly 
 export type ListRefsResult = { readonly head: string | null; readonly refs: readonly ListedRef[] };
 export async function listRefs(url: string, spec: ListRefsSpec = {}, options: ReadOptions = {}): Promise<Result<ListRefsResult, PlyError>> {
   const { prefixes } = withDefaults<ListRefsConfig>(spec, { prefixes: ['refs/heads/', 'refs/tags/'] });
-  if (!Array.isArray(prefixes) || !prefixes.every(p => typeof p === 'string' && p !== '')) return fail('bad_request', 'prefixes must be non-empty strings', { what: 'prefixes' });
+  // A JS caller's value, checked as one: Array.isArray would narrow `prefixes` itself to any[].
+  const given: unknown = prefixes;
+  if (!Array.isArray(given) || !given.every(p => typeof p === 'string' && p !== '')) return fail('bad_request', 'prefixes must be non-empty strings', { what: 'prefixes' });
   return operation('list_refs', url, opOpts(options, { 'git.list_refs.prefixes': prefixes.join(',') }), async ({ t, outcome }: OpContext): Promise<Result<ListRefsResult, PlyError>> => {
     const listed = await lsRefs(t, [...prefixes, 'HEAD']); if (!listed.ok) return listed;
     const refs: ListedRef[] = [];

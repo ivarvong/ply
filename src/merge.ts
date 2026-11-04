@@ -359,6 +359,10 @@ export type MergeTreesConfig = {
   readonly driverFor: DriverFor | null;
 };
 export type MergeTreesSpec = Input<MergeTreesConfig>;
+// A reasons record with no prototype (Object.create's result is `any`). It has no keys, so it is any such record.
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- an empty null-prototype object: no key, no inherited key
+const noProtoReasons = (): Record<string, ConflictReason> => Object.create(null) as Record<string, ConflictReason>;
+
 // The accumulator one merge shares across its recursion. reasons is keyed by path and has no prototype. deletedOne: a
 // modify/delete conflict was seen.
 export type MergeAcc = {
@@ -479,7 +483,7 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
 export async function mergeTrees(t: Transport, cache: TreeCache, spec: MergeTreesSpec, into: MergeAcc | null = null): Promise<Result<MergeTreesResult, PlyError>> {
   const top = into === null;
   // reasons is keyed by path, so it has no prototype: a path named `__proto__` or `constructor` is recorded like any other
-  const out: MergeAcc = into === null ? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: Object.create(null), contentMerged: 0, deletedOne: false } : into;
+  const out: MergeAcc = into === null ? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: noProtoReasons(), contentMerged: 0, deletedOne: false } : into;
   return mergeDir(t, cache, withDefaults(spec, mergeTreesDefaults()), out, top);
 }
 // Effect: the merge driver for a path from the .gitattributes files of one tree (git's attr.tree / --attr-source, or the
@@ -557,7 +561,8 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
   if (!objectCapped.ok) return objectCapped;
   const blobCap = blobCapped.value;
   const stats: MergeStats = { merged: 0, undecided: 0, unioned: 0, attrBinary: 0 };
-  const bounded: Transport = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(objectCapped.value, blobCap) } } });
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; the view is `t` with limits shadowed (as transport.ts withParent)
+  const bounded = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(objectCapped.value, blobCap) } } }) as Transport;
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
@@ -652,7 +657,7 @@ type Landing =
 type LandingFlags = { readonly ref: string; readonly from: string; readonly fastForwardOnly: boolean; readonly noFastForward: boolean };
 function decideMerge(verdict: Verdict, ours: string, theirs: string, { ref, from, fastForwardOnly, noFastForward }: LandingFlags): Result<Landing, PlyError> {
   switch (verdict.tag) {
-    case 'criss-cross': return fail('merge_conflict', `${ref} and ${from} have ${verdict.bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: Object.create(null), bases: verdict.bases } as ConflictDetail);
+    case 'criss-cross': return fail('merge_conflict', `${ref} and ${from} have ${verdict.bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: noProtoReasons(), bases: verdict.bases } as ConflictDetail);
     case 'unrelated': return fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
     case 'found': {
       const { base } = verdict;

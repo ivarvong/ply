@@ -47,10 +47,11 @@ consumers get `dist/` (plain `.js` + `.d.ts`), so `engines.node` stays `>=20`.
 `@ts-expect-error` there must remain an error) + `tsc -p tsconfig.isolated.json` + the TypeScript ratchet + the
 absence ratchet (`scripts/absence-ratchet.mjs`).
 
-Migration-only lint relaxation: `typescript/no-unsafe-{assignment,member-access,return,call,argument}` are off while
-`.js` remains, because a `.ts` file importing an unconverted `.js` module sees `any` (checkJs is off and there is no
-JSDoc) and these rules would block converting in any order. `no-explicit-any` stays an error, so no `any` is written
-by hand. The ratchet refuses to pass once `src/` has no `.js` and these are still off.
+`src/` is all TypeScript (the last file, `src/index.js`, became `src/index.ts`). The migration-only relaxation of
+`typescript/no-unsafe-{assignment,member-access,return,call,argument}` is gone with it: those rules are on, and the
+ratchet refuses a new `.js` under `src/` and refuses the relaxation coming back. An indexed read the compiler cannot
+bound goes through `absent.ts`'s checked read (`atOr`, with a domain fallback) rather than `as number`; the per-byte
+hot loops (inflate, sha1, delta, pkt-line, the pack parsers) keep their block suppressions.
 
 ## Lint
 

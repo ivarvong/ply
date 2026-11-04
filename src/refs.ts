@@ -20,7 +20,7 @@ import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Result } from './result.js';
-import { fromNullish, withDefaults } from './absent.js';
+import { atOr, fromNullish, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 
 /** `versionsort.suffix`, in the order git config lists them. `''` is the release, placed among the suffixes. */
@@ -66,10 +66,9 @@ const RESULT: readonly number[] = Object.freeze([
 
 type ResultKind = -1 | 1 | typeof CMP | typeof LEN;
 
+// Past the end reads as NUL (the C string's terminator). Indices here are never negative.
 function byteAt(bytes: Uint8Array, i: number): number {
-  if (i >= bytes.length) return NUL;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < bytes.length
-  return bytes[i] as number;
+  return atOr(bytes, i, NUL);
 }
 
 // '0' is its own class: a leading zero is fractional, not a longer integer.

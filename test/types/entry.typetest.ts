@@ -1,5 +1,4 @@
-// The package entry (#100): a consumer imports values and types from index.js, with no casts.
-// tsconfig.isolated.json excludes this file (allowJs is false there; index.js is the entry).
+// The package entry (#100): a consumer imports values and types from index, with no casts.
 import {
   fetchPack, push, spliceDelta, zlibDeflate, Tracer, arrayExporter, createTransport, discover, lsRefs,
   fetchObject, packStream, spInit, spStep, spFinish, inflate, commitView, entryType, lsMode, refCandidates,
