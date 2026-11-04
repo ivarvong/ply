@@ -84,7 +84,11 @@ if (!isMainThread) {
     console.log(`  push-outcome: ${obs.length} git scenarios, ${ids.size} distinct cells observed from git; ambiguous cells' truth: ${truth.join('; ')}`);
   });
 
-  test('push outcome: every cell of the space through push(), against the table', { timeout: 600_000 }, async () => {
+  // CPU-bound on 4 workers and shares the runner with push-outcome-boundary.test.js, so it slows with the runner:
+  // 457 s of a 474 s file on main CI run 41908605477, and past the old 600 s bound on run 41920845654 (where the
+  // boundary file beside it was 36% slower too, 823 s vs 605 s, with no src change between). As for version-refname
+  // (#155), the bound is twice the shared CI time.
+  test('push outcome: every cell of the space through push(), against the table', { timeout: 1_200_000 }, async () => {
     // PUSH_SPACE_WORKERS=0: every cell on this thread (the mutation run: Stryker's per-test coverage is recorded by the
     // test process's main thread, so code reached only in a worker would count as uncovered).
     const w = +(process.env.PUSH_SPACE_WORKERS ?? Math.min(4, availableParallelism()));
