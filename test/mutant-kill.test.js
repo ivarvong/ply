@@ -30,6 +30,7 @@ import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV, readLimit, che
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport as createTransportR } from '../src/http.js';
 import { verifyRef } from '../src/operation.js';
+import { syncRef } from '../src/sync.js';
 import { negotiate as negotiateR } from '../src/negotiate.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import {
@@ -2315,4 +2316,88 @@ test('parseCapabilitiesV2: each refusal by its own check, code and message', () 
   refused([d('version 2\n'), FL, FL], 'protocol', "advertisement: flush after the capabilities' flush");
   assert.deepEqual(parseCapabilitiesV2([SVC, FL, d('version 2\n'), d('agent=x\n'), FL]), { ok: true, value: ['agent=x'] });
   assert.deepEqual(parseCapabilitiesV2([d('version 2\n'), FL]), { ok: true, value: [] });
+});
+
+// syncRef's spec and options (parseSync), over two fake transports: the source answers ls-refs and a fetch of one root
+// commit, the destination answers ls-refs (its tip, or none) and receive-pack with `ok`. Every request is logged, so a
+// refusal is seen to send nothing and a default is seen in what was sent.
+test('syncRef: each spec and option refusal before anything is sent, the defaults, and dstRef', async () => {
+  const author = 'Ada <ada@ex> 1700000000 +0000';
+  const tree = unwrap(encodeTree([]));
+  const treeId = hashObject('tree', tree);
+  const commit = unwrap(encodeCommit({ tree: treeId, parents: [], author, message: 'root\n' }));
+  const tip = hashObject('commit', commit);
+  const { pack } = await buildPack([{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tree }]);
+  const dat = s => ({ kind: 'data', payload: typeof s === 'string' ? te.encode(s) : s });
+  const FL = { kind: 'flush' };
+  const fake = (name, log, answer) => ({
+    kind: 'http', url: `http://${name}/r.git`, tracer: new Tracer(), parent: null, limits: DEFAULT_LIMITS, signal: null,
+    async *frames(service, body) {
+      const text = td.decode(body);
+      const what = service === 'git-receive-pack' ? 'receive-pack' : /command=fetch/.test(text) ? 'fetch' : 'ls-refs';
+      log.push(`${name} ${what}${what === 'ls-refs' ? ` ${(text.match(/ref-prefix (\S+)/) ?? [])[1]}` : ''}`);
+      yield* answer(what, text);
+    },
+    async advertise() { log.push(`${name} advertise`); return { ok: false, error: { code: 'http', message: 'no advertisement' } }; },
+  });
+  const pair = ({ dstTip = null } = {}) => {
+    const log = [];
+    const src = fake('src', log, function* (what) {
+      if (what === 'ls-refs') { yield dat(`${tip} refs/heads/main\n`); yield FL; return; }
+      yield dat('packfile\n'); yield dat(concat([Uint8Array.of(SIDEBAND_PACK), pack])); yield FL;
+    });
+    const dst = fake('dst', log, function* (what, text) {
+      if (what === 'ls-refs') {
+        const asked = (text.match(/ref-prefix (\S+)/) ?? [])[1];
+        if (dstTip !== null) yield dat(`${dstTip} ${asked}\n`);
+        yield FL; return;
+      }
+      const ref = (text.match(/ (refs\/\S+?)\0/) ?? [])[1];
+      yield dat(concat([Uint8Array.of(SIDEBAND_PACK), unwrap(pkt('unpack ok\n')), unwrap(pkt(`ok ${ref}\n`)), FLUSH]));
+      yield FL;
+    });
+    return { log, opts: { src: { transport: src }, dst: { transport: dst } } };
+  };
+  const refused = async (spec, extra, what, message) => {
+    const p = pair();
+    const r = await syncRef('http://src/r.git', 'http://dst/r.git', spec, { ...p.opts, ...extra });
+    assert.equal(r.ok, false, message);
+    assert.deepEqual([r.error.code, r.error.what, r.error.message], ['bad_request', what, message]);
+    assert.deepEqual(p.log, [], 'nothing sent');
+  };
+  await refused({ ref: 'main' }, {}, 'ref', 'invalid ref: must be a full ref name starting with refs/');
+  // each side's own check: a bad source ref with a good dstRef, and a one-level name either side (receive-pack's funny
+  // refname: validatePushRef as an update, not a delete)
+  await refused({ ref: 'main', dstRef: 'refs/heads/main' }, {}, 'ref', 'invalid ref: must be a full ref name starting with refs/');
+  await refused({ ref: 'refs/main', dstRef: 'refs/heads/main' }, {}, 'ref', 'invalid ref: receive-pack refuses it (funny refname)');
+  await refused({ ref: 'refs/heads/main', dstRef: 'refs/main' }, {}, 'ref', 'invalid ref: receive-pack refuses it (funny refname)');
+  await refused({ ref: 'refs/heads/main', dstRef: 'refs/heads/a..b' }, {}, 'ref', 'invalid ref: fails check-ref-format');
+  await refused({ ref: 'refs/heads/main', dstRef: 'main' }, {}, 'ref', 'invalid ref: must be a full ref name starting with refs/');
+  await refused({ ref: 'refs/heads/main', force: 'yes' }, {}, 'force', 'syncRef: force must be a boolean');
+  await refused({ ref: 'refs/heads/main' }, { auth: { token: 't' } }, 'auth', 'syncRef: auth belongs to one remote: pass opts.src.auth and opts.dst.auth');
+
+  // the defaults: dstRef is ref, force false, verify false (one ls-refs per side, no re-read after the push)
+  const created = pair();
+  const made = await syncRef('http://src/r.git', 'http://dst/r.git', { ref: 'refs/heads/main' }, created.opts);
+  assert.equal(made.ok, true, made.ok ? '' : `${made.error.code}: ${made.error.message}`);
+  assert.deepEqual(made.value, { outcome: 'created', ref: 'refs/heads/main', dstRef: 'refs/heads/main', from: null, to: tip, forced: false, objects: 2, pushBytes: made.value.pushBytes });
+  assert.deepEqual(created.log.toSorted(), ['dst ls-refs refs/heads/main', 'dst receive-pack', 'src fetch', 'src ls-refs refs/heads/main']);
+  // an explicit null dstRef and force false are the defaults too; a given dstRef is where it lands
+  const renamed = pair();
+  const moved = await syncRef('http://src/r.git', 'http://dst/r.git', { ref: 'refs/heads/main', dstRef: 'refs/heads/mirror', force: false }, renamed.opts);
+  assert.deepEqual([moved.value.outcome, moved.value.ref, moved.value.dstRef], ['created', 'refs/heads/main', 'refs/heads/mirror']);
+  assert.ok(renamed.log.includes('dst ls-refs refs/heads/mirror'), renamed.log.join());
+  // verify: true re-reads the destination after the push (here it still answers no tip, so the check fails)
+  const verified = pair();
+  const checked = await syncRef('http://src/r.git', 'http://dst/r.git', { ref: 'refs/heads/main', dstRef: null }, { ...verified.opts, verify: true });
+  assert.deepEqual([checked.ok, checked.error.code, checked.error.message], [false, 'ambiguous', `push reported ok but refs/heads/main is absent, not ${tip}`]);
+  assert.equal(verified.log.filter(l => l === 'dst ls-refs refs/heads/main').length, 2);
+  // force defaults to false: a destination tip the source does not descend from is refused, nothing pushed
+  const diverged = pair({ dstTip: oid(9) });
+  const nff = await syncRef('http://src/r.git', 'http://dst/r.git', { ref: 'refs/heads/main' }, diverged.opts);
+  assert.deepEqual([nff.ok, nff.error.code, nff.error.what], [false, 'not_fast_forward', 'ref']);
+  assert.equal(diverged.log.includes('dst receive-pack'), false);
+  const forcedPair = pair({ dstTip: oid(9) });
+  const forced = await syncRef('http://src/r.git', 'http://dst/r.git', { ref: 'refs/heads/main', force: true }, forcedPair.opts);
+  assert.deepEqual([forced.value.outcome, forced.value.from, forced.value.forced], ['updated', oid(9), true]);
 });

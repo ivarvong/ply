@@ -295,6 +295,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
     case 'pack': {
       const sb = sidebandStep(st, frame, maxPack);
       if (!sb.ok) return sb;
+      // Stryker disable next-line ConditionalExpression: a progress piece has no body field, and stepped's default parameter makes the missing value the same null
       return stepped(sb.value.state, sb.value.piece.kind === 'pack' ? sb.value.piece.body : null);
     }
     case 'sections': {
