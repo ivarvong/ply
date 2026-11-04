@@ -217,7 +217,7 @@ export function lookupEntry(data: Uint8Array, name: string, last: boolean, limit
   if (!parsed.ok) return parsed;
   const entries: readonly TreeEntry[] = parsed.value;
   const found = fromNullish(entries.find(e => e.name === name));
-  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': found.tag === 'some', 'git.edit.tree.entry.mode': getOrElse(mapOption(found, e => e.mode), ''), 'git.edit.tree.entry.oid': getOrElse(mapOption(found, e => e.oid), ''), 'git.edit.tree.entry.oid_offset': getOrElse(mapOption(found, e => e.oidOffset), -1) };
+  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': found.tag === 'some', 'git.edit.tree.entry.mode': getOrElse(mapOption(found, e => e.mode), ''), 'git.edit.tree.entry.oid': getOrElse(mapOption(found, (e): string => e.oid), ''), 'git.edit.tree.entry.oid_offset': getOrElse(mapOption(found, e => e.oidOffset), -1) };
   if (found.tag === 'none') return fail('not_found', `path component ${name} not found`, { attrs, miss: { kind: 'path', missing: name, existingPath: '' } });
   const entry = found.value;
   if (!last && entry.mode !== '40000') return fail('not_found', `${name} is not a directory`, { attrs, miss: { kind: 'not_directory', path: name, mode: entry.mode } });

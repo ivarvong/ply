@@ -3,7 +3,8 @@ import { fail } from './errors.js';
 import type { Err, Ok, Result } from './result.js';
 import { ok, err, map, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
-import { Sha1, toHex, fromHex } from './sha1.js';
+import { Sha1, toOid, fromHex } from './sha1.js';
+import type { Oid } from './oid.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
@@ -112,7 +113,7 @@ export function nonCommitType(type: number): NonCommit {
 
 export const objectHeader = (typeName: string, len: number): Uint8Array => te.encode(`${typeName} ${len}\0`);
 
-export function hashObject(typeName: string, data: Uint8Array): string {
+export function hashObject(typeName: string, data: Uint8Array): Oid {
   return new Sha1().update(objectHeader(typeName, data.length)).update(data).hex();
 }
 
@@ -144,7 +145,7 @@ export function canonMode(mode: string): Mode {
 }
 const SLASH = Uint8Array.of(TREE_SORT_SLASH);
 
-export type TreeEntry = { readonly mode: Mode; readonly name: string; readonly oid: string; readonly oidOffset: number; readonly entryOffset: number };
+export type TreeEntry = { readonly mode: Mode; readonly name: string; readonly oid: Oid; readonly oidOffset: number; readonly entryOffset: number };
 // What encodeTree and treeSort take: a caller's entries, or parsed ones.
 export type TreeEntryInput = { readonly mode: string; readonly name: string; readonly oid: string };
 
@@ -181,8 +182,8 @@ const completeTreeFrames = (data: Uint8Array, maxEntries: number): number => {
 type TreeEntryState = { readonly bytes: Uint8Array; readonly oidOffset: number };
 const treeEntryProto: TreeEntry = Object.create(null);
 Object.defineProperty(treeEntryProto, 'oid', {
-  get(this: TreeEntryState): string {
-    return toHex(this.bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
+  get(this: TreeEntryState): Oid {
+    return toOid(this.bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
   },
 });
 // One prototype per tree carries the buffer. Entries are ordinary assigned objects: defineProperty on every

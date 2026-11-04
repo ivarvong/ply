@@ -24,6 +24,10 @@ function oidOf(value: string): Oid {
 
 export const ZERO_OID: Oid = oidOf(ZERO_OID_TEXT);
 
+// The id of a SHA-1 digest in hand: sha1.ts toHex of the digest's OID_BYTES bytes, which is OID_HEX_CHARS lowercase hex
+// by construction. The one place an id is made without parseOid; only sha1.ts calls it (Sha1.hex, streamingSha1).
+export const digestOid = (hex: string): Oid => oidOf(hex);
+
 // codePointAt misses past the end; an index inside the string is a code point. -1 (the miss) is not hex.
 function codeAt(value: string, i: number): number {
   return getOrElse(fromNullable(value.codePointAt(i)), -1);

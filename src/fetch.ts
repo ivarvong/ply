@@ -15,6 +15,7 @@ import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
+import type { ObjType } from './objects.js';
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1, cache)
 import { corruptCacheHit } from './cachestatus.js';
 import { assertNever, err, getOrElse, none, ok } from './result.js';
@@ -25,6 +26,7 @@ import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
+import type { WireField } from './validate.js';
 import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, probing, spanned } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
@@ -44,16 +46,24 @@ export type PackObject = { readonly type: number; readonly data: Uint8Array };
 // ---- request body (pure) ----
 type BadRequest = ErrorOf<'bad_request'>;
 const UNIT: Result<null, never> = ok(null);
-const countField = (value: number, what: string): Result<null, BadRequest> => {
+// A count on the wire: a non-negative safe integer (a NaN or a fraction is refused, never written).
+const countField = (value: number, what: string): Result<number, BadRequest> => {
   if (!Number.isSafeInteger(value) || value < 0) return fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
-  return UNIT;
+  return ok(value);
 };
 // deepen-since is a unix timestamp on the wire (a number from callers, or a digit string). Either way it is one token.
-const sinceField = (value: number | string, what: string): Result<null, BadRequest> => {
-  if (typeof value === 'number') return countField(value, what);
-  const valid = validateWire(value, what);
-  return valid.ok ? UNIT : valid;
-};
+const sinceField = (value: number | string, what: string): Result<number | WireField, BadRequest> =>
+  typeof value === 'number' ? countField(value, what) : validateWire(value, what);
+// Every value of a list argument as one wire field, or the first that is not.
+function wireList(values: readonly string[], what: string): Result<WireField[], BadRequest> {
+  const out: WireField[] = [];
+  for (const v of values) {
+    const valid = validateWire(v, what);
+    if (!valid.ok) return valid;
+    out.push(valid.value);
+  }
+  return ok(out);
+}
 
 // The arguments of one v2 fetch command. An empty filter, a zero deepen and a zero deepen-since are absent.
 export type FetchConfig = {
@@ -77,36 +87,73 @@ const fetchDefaults = (): FetchConfig => ({
   includeTag: false, noProgress: true, done: true, shallows: [], bypassCache: false,
 });
 
-// oxlint-disable-next-line complexity -- one optional line per fetch argument
-export function fetchBody(opts: FetchOpts): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+// A fetch command parsed once (fetchRequest): every token is one wire field and every count a checked integer, so
+// encoding it (fetchRequestBody) checks nothing. No filter is null, and no deepen or deepen-since is 0.
+export type FetchRequest = {
+  readonly wants: readonly WireField[];
+  readonly haves: readonly WireField[];
+  readonly shallows: readonly WireField[];
+  readonly deepenNot: readonly WireField[];
+  readonly filter: WireField | null;
+  readonly deepen: number;
+  readonly deepenSince: number | WireField;
+  readonly deepenRelative: boolean;
+  readonly thinPack: boolean;
+  readonly ofsDelta: boolean;
+  readonly includeTag: boolean;
+  readonly noProgress: boolean;
+  readonly done: boolean;
+};
+
+// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since.
+// An empty filter, a zero (or NaN) deepen and a falsy deepen-since are left out, as they always have been.
+// oxlint-disable-next-line complexity -- one check per fetch argument
+export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> {
   const { haves, filter, deepen, deepenSince, deepenNot, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done, shallows } = withDefaults(opts, fetchDefaults());
-  const { wants } = opts;
-  // Each line is one wire token, checked in this order: wants, haves, shallows, deepen-nots, the filter.
-  const lines: ReadonlyArray<readonly [readonly string[], string]> = [[wants, 'want'], [haves, 'have'], [shallows, 'shallow'], [deepenNot, 'deepen-not'], [filter ? [filter] : [], 'filter']];
-  for (const [values, what] of lines) for (const v of values) {
-    const valid = validateWire(v, what);
-    if (!valid.ok) return valid;
-  }
-  if (deepen) { const c = countField(deepen, 'deepen'); if (!c.ok) return c; }
+  const w = wireList(opts.wants, 'want');
+  if (!w.ok) return w;
+  const h = wireList(haves, 'have');
+  if (!h.ok) return h;
+  const sh = wireList(shallows, 'shallow');
+  if (!sh.ok) return sh;
+  const dn = wireList(deepenNot, 'deepen-not');
+  if (!dn.ok) return dn;
+  let f: WireField | null = null;
+  if (filter) { const c = validateWire(filter, 'filter'); if (!c.ok) return c; f = c.value; }
+  let d = 0;
+  if (deepen) { const c = countField(deepen, 'deepen'); if (!c.ok) return c; d = c.value; }
+  let since: number | WireField = 0;
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- 0, '' and NaN mean no deepen-since, as they always have
-  if (deepenSince) { const c = sinceField(deepenSince, 'deepen-since'); if (!c.ok) return c; }
+  if (deepenSince) { const c = sinceField(deepenSince, 'deepen-since'); if (!c.ok) return c; since = c.value; }
+  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done });
+}
+
+// The command=fetch body of a parsed request.
+// oxlint-disable-next-line complexity -- one optional line per fetch argument
+export function fetchRequestBody(req: FetchRequest): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const args = [
-    ...wants.map(w => `want ${w}\n`),
-    ...haves.map(h => `have ${h}\n`),
-    ...shallows.map(s => `shallow ${s}\n`),
-    ...(filter ? [`filter ${filter}\n`] : []),
-    ...(deepen ? [`deepen ${deepen}\n`] : []),
-    // oxlint-disable-next-line typescript/strict-boolean-expressions -- as above
-    ...(deepenSince ? [`deepen-since ${deepenSince}\n`] : []),
-    ...deepenNot.map(r => `deepen-not ${r}\n`),
-    ...(deepenRelative ? ['deepen-relative\n'] : []),
-    ...(thinPack ? ['thin-pack\n'] : []),
-    ...(ofsDelta ? ['ofs-delta\n'] : []),
-    ...(includeTag ? ['include-tag\n'] : []),
-    ...(noProgress ? ['no-progress\n'] : []),
-    ...(done ? ['done\n'] : []),
+    ...req.wants.map(w => `want ${w}\n`),
+    ...req.haves.map(h => `have ${h}\n`),
+    ...req.shallows.map(s => `shallow ${s}\n`),
+    ...(req.filter === null ? [] : [`filter ${req.filter}\n`]),
+    ...(req.deepen ? [`deepen ${req.deepen}\n`] : []),
+    // oxlint-disable-next-line typescript/strict-boolean-expressions -- 0 is no deepen-since; a parsed string is never empty
+    ...(req.deepenSince ? [`deepen-since ${req.deepenSince}\n`] : []),
+    ...req.deepenNot.map(r => `deepen-not ${r}\n`),
+    ...(req.deepenRelative ? ['deepen-relative\n'] : []),
+    ...(req.thinPack ? ['thin-pack\n'] : []),
+    ...(req.ofsDelta ? ['ofs-delta\n'] : []),
+    ...(req.includeTag ? ['include-tag\n'] : []),
+    ...(req.noProgress ? ['no-progress\n'] : []),
+    ...(req.done ? ['done\n'] : []),
   ];
   return pkts(['command=fetch\n', ...args], { delimAfter: 0 });
+}
+
+// The caller's options as a command=fetch body: parsed once, then encoded.
+export function fetchBody(opts: FetchOpts): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+  const req = fetchRequest(opts);
+  return req.ok ? fetchRequestBody(req.value) : req;
 }
 
 // ---- v2 fetch response state machine (pure step over frames) ----
@@ -345,7 +392,7 @@ export const isShortRead = (e: unknown): boolean => thrownCodeIs(e, 'pack_corrup
 // trailer withheld (`body`); `trailer` is null until spFinish has checked it, then the trailer it checked.
 type SpCommon = { readonly head: Uint8Array; readonly lag: Uint8Array; readonly sha: Sha1; readonly bytes: number; readonly zlibBytes: number; readonly trailer: string | null };
 export type SpHeader = SpCommon & { readonly phase: 'header'; readonly type: number; readonly size: number };
-export type SpBody = SpCommon & { readonly phase: 'body'; readonly type: number; readonly size: number; readonly headerBytes: number };
+export type SpBody = SpCommon & { readonly phase: 'body'; readonly type: ObjType; readonly size: number; readonly headerBytes: number };
 export type SpState = SpHeader | SpBody;
 export type SpFinished = SpBody & { readonly trailer: string };
 export type SpStepped = { readonly state: SpState; readonly zlib: Uint8Array[] };

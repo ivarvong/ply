@@ -10,7 +10,7 @@ import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './res
 import { at, atOr, fromNullable, fromNullish, mapGet, readKey, type Input } from './absent.js';
 import type { InflateStats } from './inflate.js';
 import { inflate } from './inflate.js';
-import { Sha1, toHex } from './sha1.js';
+import { Sha1, toHex, toOid, type Oid } from './sha1.js';
 import { TYPE, hashObject, nameOfTypeId } from './objects.js';
 import type { ObjType } from './objects.js';
 import type { LimitKey, Limits } from './limits.js';
@@ -103,18 +103,41 @@ export function readUint32BE(buf: Uint8Array, off: number): Result<number, Corru
   return r.ok ? ok(be32(buf, off)) : r;
 }
 
-export type ObjHeader = { readonly type: number; readonly size: number; readonly next: number };
+// The header's three type bits as one of the six pack types, or null for 0 and 5 (which name nothing).
+function objTypeOf(n: number): ObjType | null {
+  switch (n) {
+    case TYPE.COMMIT:
+    case TYPE.TREE:
+    case TYPE.BLOB:
+    case TYPE.TAG:
+    case TYPE.OFS_DELTA:
+    case TYPE.REF_DELTA:
+      return n;
+    default:
+      return null;
+  }
+}
+// `type` is parsed here, once: a reader of an ObjHeader sees one of the six pack types and no other number.
+export type ObjHeader = { readonly type: ObjType; readonly size: number; readonly next: number };
 // A header cut by the end of the buffer is a short read (`reason: 'short_read'`): a stream parser waits for more bytes
-// on that reason (fetch.ts spStep), and refuses anything else.
+// on that reason (fetch.ts spStep), and refuses anything else. A whole header whose type is 0 or 5 is
+// `pack: bad object type <n> at <offset>`, after the size (a size varint past 64 bits is refused first, as it always was);
+// `offset` is the header's offset in the pack, which a stream parser's carry buffer does not start at.
 // @decoder readObjHeader prefix=obj-header
-export function readObjHeader(buf: Uint8Array, start: number): Result<ObjHeader, Corrupt> {
+export function readObjHeader(buf: Uint8Array, start: number, offset: number = start): Result<ObjHeader, Corrupt> {
   const c = atOr(buf, start, NO_BYTE);
   if (c === NO_BYTE) return short(buf, start);
-  const type = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
-  if (!(c & OBJ_CONTINUE)) return ok({ type, size: c & OBJ_SIZE_FIRST_MASK, next: start + 1 });
-  const rest = readVarint(buf, start + 1, 'pack', c & OBJ_SIZE_FIRST_MASK, OBJ_TYPE_SHIFT);
-  if (!rest.ok) return rest;
-  return ok({ type, size: rest.value[0], next: rest.value[1] });
+  const bits = (c >> OBJ_TYPE_SHIFT) & OBJ_TYPE_MASK;
+  let size = c & OBJ_SIZE_FIRST_MASK;
+  let next = start + 1;
+  if (c & OBJ_CONTINUE) {
+    const rest = readVarint(buf, start + 1, 'pack', size, OBJ_TYPE_SHIFT);
+    if (!rest.ok) return rest;
+    [size, next] = rest.value;
+  }
+  const type = objTypeOf(bits);
+  if (type === null) return corrupt(`pack: bad object type ${bits} at ${offset}`);
+  return ok({ type, size, next });
 }
 
 export type OfsDelta = { readonly off: number; readonly next: number };
@@ -203,7 +226,10 @@ export type PackStats = {
   inflated: number;
   readonly inflate: { blocks: number; stored: number; fixed: number; dynamic: number };
 };
-export type ParsedPack = { readonly objects: PackObject[]; readonly stats: PackStats; readonly trailer: string; readonly bytes: number };
+// What parsePack read: the type is one of the six and a REF base is an Oid (parsed where the bytes were read). A
+// hand-built PackObject (resolvePack's input) is still checked by the resolver.
+export type ParsedObject = PackObject & { readonly type: ObjType; readonly baseOid: Oid | null };
+export type ParsedPack = { readonly objects: ParsedObject[]; readonly stats: PackStats; readonly trailer: string; readonly bytes: number };
 
 // @decoder parsePack prefix=pack
 export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<ParsedPack, PackError> {
@@ -221,7 +247,7 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<
   if (version !== PACK_VERSION) return corrupt(`pack: unsupported version ${version}`);
   // A hostile count must fail before the loop allocates one object record.
   if (count > maxObjects) return err(limitError('pack objects', count, maxObjects));
-  const objects: PackObject[] = [];
+  const objects: ParsedObject[] = [];
   // What the objects held so far cost: declared bytes plus LIMIT_OBJECT_OVERHEAD each (the record, its views, its
   // resolved form), so a pack of many tiny objects meets maxInflatedTotal too (#142). stats.inflated stays git's sum.
   let charged = 0;
@@ -234,9 +260,9 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<
     const { type, size } = header.value;
     p = header.value.next;
     let baseOffset: number | null = null;
-    let baseOid: string | null = null;
+    let baseOid: Oid | null = null;
     const kindResult = ((): Result<PackKind, PackError> => {
-      const raw = headerType(type);
+      const raw = nameOfTypeId(type);
       switch (raw) {
         case 'commit': case 'tree': case 'blob': case 'tag': stats.full++; return ok(raw);
         case 'ofs_delta': {
@@ -254,11 +280,10 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<
         case 'ref_delta': {
           // a view: the pack's 20-byte trailer is still ahead of p (buf holds minPack bytes, and every object header byte
           // read so far came before the trailer), so OID_BYTES at p are inside buf; the trailer check below places them
-          baseOid = toHex(buf.subarray(p, p + OID_BYTES)); p += OID_BYTES;
+          baseOid = toOid(buf.subarray(p, p + OID_BYTES)); p += OID_BYTES;
           stats.refDelta++;
           return ok('ref_delta');
         }
-        case 'invalid': return corrupt(`pack: bad object type ${type} at ${offset}`);
       }
       // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
       return assertNever(raw);
@@ -370,7 +395,7 @@ export type ResolvedFull = {
   readonly type: number;
   readonly data: Uint8Array;
   readonly chain: number;
-  readonly oid: string;
+  readonly oid: Oid;
   readonly offset: number;
   readonly size: number;
   readonly compressed: number;

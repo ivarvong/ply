@@ -205,14 +205,16 @@ function waitOr(st: PackScan, e: ErrorOf<'pack_corrupt'>): Step {
   return refuse(st, e);
 }
 function stepObject(st: PackScan): Step {
-  const header = readObjHeader(st.carry, st.p);
+  // the carry starts mid-pack: a refused type names the pack offset (st.at), as parsePack does
+  const header = readObjHeader(st.carry, st.p, st.at);
   if (!header.ok) return waitOr(st, header.error);
+  const type = header.value.type;
   st.offset = st.at;
-  st.type = header.value.type;
+  st.type = type;
   st.size = header.value.size;
   st.base = NO_BASE;
   advance(st, header.value.next - st.p);
-  switch (st.type) {
+  switch (type) {
     case OBJ_COMMIT: case OBJ_TREE: case OBJ_BLOB: case OBJ_TAG:
       st.phase = 'gate';
       return CONT;
@@ -222,9 +224,9 @@ function stepObject(st: PackScan): Step {
     case OBJ_REF_DELTA:
       st.phase = 'ref';
       return CONT;
-    default:
-      return refuse(st, plyError('pack_corrupt', `pack: bad object type ${st.type} at ${st.offset}`));
   }
+  // Stryker disable next-line ConditionalExpression: unreachable, readObjHeader parsed the type into one of the six
+  return assertNever(type);
 }
 function stepOfs(st: PackScan): Step {
   const ofs = readOfsDelta(st.carry, st.p);

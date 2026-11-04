@@ -63,7 +63,7 @@ function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: F
   const parsed = read.value;
   for (const o of parsed.objects) span.event('git.pack.object', {
     'git.object.offset': o.offset, 'git.object.type': typeAttr(o.type), 'git.object.size': o.size, 'git.object.compressed': o.compressed,
-    'git.object.header_bytes': o.headerBytes, 'git.object.base.offset': getOrElse(fromNullish(o.baseOffset), -1), 'git.object.base.oid': getOrElse(fromNullish(o.baseOid), ''),
+    'git.object.header_bytes': o.headerBytes, 'git.object.base.offset': getOrElse(fromNullish(o.baseOffset), -1), 'git.object.base.oid': getOrElse<string>(fromNullish(o.baseOid), ''),
     'git.object.inflate.blocks': o.inflate.blocks, 'git.object.inflate.stored': o.inflate.stored, 'git.object.inflate.fixed': o.inflate.fixed,
     'git.object.inflate.dynamic': o.inflate.dynamic, 'git.object.inflate.matches': o.inflate.matches, 'git.object.inflate.max_dist': o.inflate.maxDist,
   });
