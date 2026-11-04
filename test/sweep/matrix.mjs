@@ -44,6 +44,21 @@ const refused = (code, extra = {}) => Object.freeze({ status: 'refused', code, .
  * @property {{ status: string, code?: string, got?: number, max?: number, what?: string }} [expect]
  * @property {string} [expectFrom]  driver fills `expect` (and sometimes `limits`) from the git oracle
  * @property {number} [history]  commits in the log fixture, for the readLog oracle
+ * @property {'workerd'} [runtime]  run once inside workerd (test/workerd/worker.mjs) instead of on the two node heaps
+ * @property {string} [shim]  shim.mjs mode the request goes through (v0, v1, delay-<ms>, stall-<ms>, frame-<L>)
+ * @property {number} [capDelta]  the cap is the oracle's measurement plus this (expectFrom objects, delta-result, harvest)
+ * @property {number} [haveCount]  haves for a fetchPack cell: this many ancestors of main
+ * @property {number} [wantCount]  wants for a fetchPack cell: main and this many minus one of its ancestors
+ * @property {number} [deepen]
+ * @property {boolean} [done]
+ * @property {string} [filter]
+ * @property {string} [local]  pushRepo's source repository (a fixture)
+ * @property {Record<string, unknown>} [spec]  pushRepo's spec
+ * @property {string} [store]  fetchThin's local object store (a fixture)
+ * @property {string} [onto]  rebase target
+ * @property {number} [rebased]  commits git must count from main to the rebased branch
+ * @property {boolean} [thin]  the push must have sent a delta against the remote's objects
+ * @property {number} [timeoutMs]  this cell's own kill timer, in place of SWEEP_TIMEOUT_MS
  */
 
 /** @param {number} limit @param {(n: number) => boolean} [keep] */
@@ -291,8 +306,229 @@ function build() {
   add({ id: 'inflate.under', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, expectFrom: 'inflated-under' });
   add({ id: 'inflate.zero', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, limits: { maxInflatedTotal: 0 }, expect: refused('limit_exceeded', { what: 'pack inflated bytes' }) });
 
+  pass2(add);
   return cells;
 }
+
+// ---- The second pass (#144): the limits the first left `later`, and the wire: thin packs, protocol v0/v1, pkt-line
+// lengths, capabilities, the request timer, and workerd. Override caps put a boundary in CI; the default boundary is
+// a cell too wherever the fixture is affordable (nightly when it is not).
+/** @param {(cell: Cell) => void} add */
+function pass2(add) {
+  const near = /** @type {const} */ ([['under', -1], ['at', 0], ['over', 1]]);
+
+  // ---- maxPackObjects. parsePack refuses on the header's count, before the first object is inflated. The driver sets
+  // the cap from verify-pack's object count (`capDelta` from it), so git's own count is the boundary.
+  for (const [name, d] of near) {
+    add({ id: `objects.pack.tiny-1000.cap-${name}`, param: 'maxPackObjects', op: 'pack', pack: 'tiny-1000', bytes: 8000, entries: 1003, capDelta: d, expectFrom: 'objects' });
+  }
+  // At the default 100 000: tiny-N holds N blobs, one tree per 1000 of them, the root tree and the commit, so
+  // N = 99 897, 99 898, 99 899 are 99 999, 100 000 and 100 001 objects. The byte budget is raised so the count is
+  // the cap that decides (at the default budget the overhead charge refuses first, #142).
+  for (const n of [99897, 99898, 99899]) {
+    add({ id: `objects.pack.tiny-${n}`, param: 'maxPackObjects', op: 'pack', pack: `tiny-${n}`, bytes: n * 8, entries: n, nightly: true, limits: { maxInflatedTotal: 1024 * MiB }, expectFrom: 'objects' });
+  }
+  // pushTree counts files against the same cap, before any blob is hashed.
+  for (const n of [99, 100, 101]) {
+    add({
+      id: `objects.push.cap100.${n}`, param: 'maxPackObjects', op: 'pushTree', repo: 'push-empty', writes: true,
+      nfiles: n, size: 8, bytes: n * 8, entries: n, limits: { maxPackObjects: 100 },
+      expect: n > 100 ? refused('limit_exceeded', { what: 'files', got: 101, max: 100 }) : ok,
+    });
+  }
+  for (const n of [100000, 100001]) {
+    add({
+      id: `objects.push.${n}`, param: 'maxPackObjects', op: 'pushTree', repo: 'push-empty', writes: true,
+      nfiles: n, size: 8, bytes: n * 8, entries: n, nightly: true, limits: { maxPushBytes: 1024 * MiB },
+      expect: n > DEFAULT_LIMITS.maxPackObjects ? refused('limit_exceeded', { what: 'files' }) : ok,
+    });
+  }
+
+  // ---- maxSectionLines. git's upload-pack is the oracle: the driver sends it the same wants, haves and deepen and
+  // counts the lines of each section it answers with (`expectFrom: 'sections'`). acknowledgments: one ACK per common
+  // have, then `ready`; shallow-info: one line per wanted commit at the deepen boundary.
+  const sectionCap = DEFAULT_LIMITS.maxSectionLines;
+  for (const h of [6, 7, 8]) {
+    add({ id: `section.acks.cap8.h${h}`, param: 'maxSectionLines', op: 'fetchPack', repo: 'log-1024', haveCount: h, done: false, bytes: 1024 * 8, entries: 1024, limits: { maxSectionLines: 8 }, expectFrom: 'sections' });
+  }
+  for (const h of [sectionCap - 2, sectionCap - 1, sectionCap]) {
+    // CI keeps the pair that crosses the cap; the line below them is nightly (CI time budget)
+    add({ id: `section.acks.h${h}`, param: 'maxSectionLines', op: 'fetchPack', repo: 'log-1024', haveCount: h, done: false, bytes: 1024 * 8, entries: 1024, nightly: h < sectionCap - 1, expectFrom: 'sections' });
+  }
+  for (const k of [7, 8, 9]) {
+    add({ id: `section.shallow.cap8.k${k}`, param: 'maxSectionLines', op: 'fetchPack', repo: 'log-1024', wantCount: k, deepen: 1, filter: 'tree:0', bytes: 1024 * 8, entries: 1024, limits: { maxSectionLines: 8 }, expectFrom: 'sections' });
+  }
+  for (const k of [sectionCap - 1, sectionCap, sectionCap + 1]) {
+    add({ id: `section.shallow.k${k}`, param: 'maxSectionLines', op: 'fetchPack', repo: 'log-1024', wantCount: k, deepen: 1, filter: 'tree:0', bytes: 1024 * 8, entries: 1024, nightly: k < sectionCap, expectFrom: 'sections' });
+  }
+
+  // ---- maxReportLines. pushRepo of every branch of branches-N to an empty repository: N commands, and receive-pack
+  // answers one unpack line and one status per ref (N + 1 lines). A report over the cap is read no further, and the
+  // push is 'ambiguous': it may have landed. git's refs after the push are the oracle (they must equal the local ones).
+  for (const n of [6, 7, 8]) {
+    add({
+      id: `report.cap8.n${n}`, param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: `branches-${n}`, spec: { all: true }, writes: true,
+      bytes: n * 64, entries: n, limits: { maxReportLines: 8 }, nightly: n === 6,
+      expect: n + 1 > 8 ? refused('ambiguous') : ok,
+    });
+  }
+  // maxRefs allows as many commands as maxReportLines allows lines, and a report is one line more than its commands.
+  add({
+    id: 'report.refs8.n8', param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
+    bytes: 8 * 64, entries: 8, limits: { maxRefs: 8, maxReportLines: 8 }, expect: ok,
+  });
+  // The default cap equals maxRefs, so the largest push maxRefs allows (10 000 commands) has 10 001 report lines.
+  const refCap = DEFAULT_LIMITS.maxRefs;
+  for (const n of [refCap - 1, refCap, refCap + 1]) {
+    add({
+      id: `report.n${n}`, param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: `branches-${n}`, spec: { all: true }, writes: true,
+      bytes: n * 64, entries: n, nightly: true,
+      expect: n > refCap ? refused('limit_exceeded', { what: 'local refs' }) : ok,
+    });
+  }
+
+  // ---- maxCommitParents. One octopus commit with N parents (git writes and walks any number). readLog parses it.
+  for (const cap of [8, 9, 10]) {
+    add({
+      id: `parents.octo-9.cap${cap}`, param: 'maxCommitParents', op: 'readLog', repo: 'octo-9', limit: 1, history: 1,
+      bytes: 9 * 64, entries: 10, limits: { maxCommitParents: cap },
+      expect: 9 > cap ? refused('limit_exceeded', { what: 'commit parents', got: 9, max: cap }) : ok,
+    });
+  }
+  const parentCap = DEFAULT_LIMITS.maxCommitParents;
+  for (const n of [parentCap, parentCap + 1]) {
+    add({
+      id: `parents.octo-${n}`, param: 'maxCommitParents', op: 'readLog', repo: `octo-${n}`, limit: 1, history: 1,
+      bytes: n * 64, entries: n + 1,
+      expect: n > parentCap ? refused('limit_exceeded', { what: 'commit parents', got: n, max: parentCap }) : ok,
+    });
+  }
+
+  // ---- maxRebaseCommits. rebaseBranch of feat (K commits) onto main (K commits) in mb-K. git's rev-list on the copy
+  // is the oracle: K commits from main to feat, and main an ancestor of feat.
+  for (const k of [7, 8, 9]) {
+    add({
+      id: `rebase.cap8.k${k}`, param: 'maxRebaseCommits', op: 'rebase', repo: `mb-${k}`, ref: 'refs/heads/feat', onto: 'refs/heads/main', writes: true,
+      bytes: k * 16, entries: k * 2 + 1, limits: { maxRebaseCommits: 8 }, rebased: k, nightly: k === 7,
+      expect: k > 8 ? refused('limit_exceeded', { what: 'rebase chain', got: 9, max: 8 }) : ok,
+    });
+  }
+  // At the defaults the merge-base search (maxMergeDepth 1024) refuses a branch long before the rebase cap (10 000):
+  // k = 1025 is refused by the search. The cap's own boundary needs a deeper search, so those cells raise it (nightly).
+  for (const k of [DEFAULT_LIMITS.maxMergeDepth, DEFAULT_LIMITS.maxMergeDepth + 1]) {
+    add({
+      id: `rebase.k${k}`, param: 'maxRebaseCommits', op: 'rebase', repo: `mb-${k}`, ref: 'refs/heads/feat', onto: 'refs/heads/main', writes: true,
+      // replaying 1024 commits is ~30 s (7 s of CPU; the rest is one tree fetch per commit), so the success is nightly
+      bytes: k * 16, entries: k * 2 + 1, rebased: k, nightly: k <= DEFAULT_LIMITS.maxMergeDepth,
+      expect: k > DEFAULT_LIMITS.maxMergeDepth ? refused('limit_exceeded', { what: 'merge-base search depth' }) : ok,
+    });
+  }
+  const rebaseCap = DEFAULT_LIMITS.maxRebaseCommits;
+  for (const k of [rebaseCap, rebaseCap + 1]) {
+    add({
+      id: `rebase.deep.k${k}`, param: 'maxRebaseCommits', op: 'rebase', repo: `mb-${k}`, ref: 'refs/heads/feat', onto: 'refs/heads/main', writes: true,
+      // replaying 10 000 commits takes about 200 s on a loaded 4-core machine: past the default cell timeout
+      bytes: k * 16, entries: k * 2 + 1, nightly: true, limits: { maxMergeDepth: 16384 }, rebased: k, timeoutMs: 900_000,
+      expect: k > rebaseCap ? refused('limit_exceeded', { what: 'rebase chain', got: k, max: rebaseCap }) : ok,
+    });
+  }
+
+  // ---- maxDeltaResult. The largest object git stored as a delta in the pack (fixtures read its size with cat-file)
+  // is the boundary; the cap is set around it (`capDelta`).
+  for (const [name, d] of near) {
+    add({ id: `delta.result.d1-ofs.cap-${name}`, param: 'maxDeltaResult', op: 'pack', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, capDelta: d, expectFrom: 'delta-result' });
+    add({ id: `delta.result.d64-ref.cap-${name}`, param: 'maxDeltaResult', op: 'pack', pack: 'd64-ref', bytes: 80 * 2048, entries: 80, capDelta: d, expectFrom: 'delta-result' });
+  }
+
+  // ---- maxHarvestBytes. A server without filters answers readLog's tree:0 with the whole window; ply keeps its
+  // commits and trees up to the cap and drops the rest silently (a later want fetches again). Every cap is ok and
+  // agrees with git; the boundary is the sum git reports for the repository's commits and trees (`capDelta`).
+  for (const max of [0, 1]) {
+    add({ id: `harvest.readLog.${max}`, param: 'maxHarvestBytes', op: 'readLog', repo: 'cap-nofilter--log-64', limit: 64, history: 64, bytes: 64 * 8, entries: 64, limits: { maxHarvestBytes: max }, expect: ok });
+  }
+  for (const [name, d] of near) {
+    add({ id: `harvest.readLog.cap-${name}`, param: 'maxHarvestBytes', op: 'readLog', repo: 'cap-nofilter--log-64', limit: 64, history: 64, bytes: 64 * 8, entries: 64, capDelta: d, nightly: d !== 0, expectFrom: 'harvest' });
+  }
+  add({ id: 'harvest.readLog.default', param: 'maxHarvestBytes', op: 'readLog', repo: 'cap-nofilter--log-64', limit: 64, history: 64, bytes: 64 * 8, entries: 64, expect: ok });
+
+  // ---- requestTimeoutMs, through the slow-server shim (shim.mjs). A cap of 1 s in CI, with the server well inside
+  // and well past it; the default 60 s nightly. A stalled body is the same timer: it covers the whole exchange.
+  const timeout = refused('timeout');
+  for (const [mode, ms, expect] of [['delay', 200, ok], ['delay', 2500, timeout], ['stall', 200, ok], ['stall', 2500, timeout]]) {
+    add({ id: `timeout.cap1000.lsRefs.${mode}-${ms}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `${mode}-${ms}`, bytes: 200, entries: 1, limits: { requestTimeoutMs: 1000 }, expect });
+  }
+  add({ id: 'timeout.cap1000.readFile.stall-2500', param: 'requestTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'stall-2500', bytes: MiB, entries: 2, limits: { requestTimeoutMs: 1000 }, expect: timeout });
+  const tCap = DEFAULT_LIMITS.requestTimeoutMs;
+  for (const [ms, expect] of [[tCap - 5000, ok], [tCap + 5000, timeout]]) {
+    add({ id: `timeout.lsRefs.delay-${ms}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `delay-${ms}`, bytes: 200, entries: 1, nightly: true, expect });
+  }
+  add({ id: `timeout.lsRefs.stall-${tCap + 5000}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${tCap + 5000}`, bytes: 200, entries: 1, nightly: true, expect: timeout });
+
+  // ---- protocol v0 / v1: the server answers without v2 (the shim drops or downgrades Git-Protocol), so upload-pack
+  // reads ply's `command=ls-refs` as a v0 request and answers nothing ply can parse. ply speaks v2 only: the desired
+  // answer is a typed refusal, not a misread advertisement. pushTree reads the ref through ls-refs first, so it is
+  // refused the same way before receive-pack (which has no v2) is reached.
+  for (const v of ['v0', 'v1']) {
+    add({ id: `proto.${v}.lsRefs`, param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', shim: v, bytes: 200, entries: 1, expect: refused('protocol') });
+    add({ id: `proto.${v}.readFile`, param: 'maxPackBytes', op: 'readFile', repo: 'blob-1024', path: 'big.bin', shim: v, bytes: 1024, entries: 2, expect: refused('protocol') });
+    add({ id: `proto.${v}.pushTree`, param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', shim: v, writes: true, nfiles: 1, size: 64, bytes: 64, entries: 1, expect: refused('protocol') });
+  }
+
+  // ---- pkt-line length. The shim re-frames the packfile section so every band-1 pkt-line is L bytes long; git's own
+  // client through the same URL is the oracle (gitprotocol-common: 4 + data, at most 65520). `expectFrom: 'git-clone'`.
+  // gitprotocol-common caps a pkt-line at 65520 bytes; git's client (2.4x) reads past that and refuses a total of 65524
+  // (its buffer is LARGE_PACKET_MAX with room for a NUL). The documented 65520 / 65521 and git's measured 65523 / 65524
+  // are all cells: ply has to agree with the client, not with the document.
+  for (const L of [4096, 65519, 65520, 65521, 65522, 65523, 65524, 65525, 65535]) {
+    add({ id: `pktline.frame-${L}.readFile`, param: 'maxPackBytes', op: 'readFile', repo: 'blob-65536', path: 'big.bin', shim: `frame-${L}`, bytes: 65536, entries: 2, nightly: [4096, 65519, 65522].includes(L), expectFrom: 'git-clone' });
+  }
+  // The smallest frames on a 1 KiB blob in CI (1000 frames). On 16, 32 and 64 KiB (nightly) the time per byte is the
+  // cost of a frame: one byte per frame is 65 536 frames.
+  for (const L of [4, 5, 6, 7]) {
+    add({ id: `pktline.frame-${L}.readFile.1024`, param: 'maxPackBytes', op: 'readFile', repo: 'blob-1024', path: 'big.bin', shim: `frame-${L}`, bytes: 1024, entries: 2, expectFrom: 'git-clone' });
+  }
+  for (const S of [16384, 32768, 65536]) {
+    add({ id: `pktline.frame-6.readFile.${S}`, param: 'maxPackBytes', op: 'readFile', repo: `blob-${S}`, path: 'big.bin', shim: 'frame-6', bytes: S, entries: 2, nightly: true, expectFrom: 'git-clone' });
+  }
+
+  // ---- capabilities: a server with one of ply's features turned off. Content checked against git when ply answers.
+  add({ id: 'caps.nofilter.readFile', param: 'maxPackBytes', op: 'readFile', repo: 'cap-nofilter--blob-1024', path: 'big.bin', bytes: 1024, entries: 2, expect: ok });
+  add({ id: 'caps.nofilter.listTree', param: 'maxTreeEntries', op: 'listTree', repo: 'cap-nofilter--depth-8', path: 'd/d/d', bytes: 64, entries: 8, expect: ok });
+  add({ id: 'caps.nofilter.merge', param: 'maxMergeDepth', op: 'merge', repo: 'cap-nofilter--mb-8', from: 'refs/heads/feat', writes: true, bytes: 128, entries: 17, expect: ok });
+  add({ id: 'caps.nosha.readFile', param: 'maxPathDepth', op: 'readFile', repo: 'cap-nosha--depth-8', path: 'd/d/d/d/d/d/d/f.txt', bytes: 64, entries: 8, expect: ok });
+  add({ id: 'caps.reachable.readFile', param: 'maxPathDepth', op: 'readFile', repo: 'cap-reachable--depth-8', path: 'd/d/d/d/d/d/d/f.txt', bytes: 64, entries: 8, expect: ok });
+  add({ id: 'caps.nopush.pushTree', param: 'maxPushBytes', op: 'pushTree', repo: 'cap-nopush--push-empty', writes: true, nfiles: 1, size: 64, bytes: 64, entries: 1, expect: refused('ambiguous') });
+
+  // ---- thin packs. Push: the remote has v1, the local repository v1 and v2; a thin push sends v2's blob as a
+  // REF_DELTA against v1's, which git's receive-pack completes (index-pack --fix-thin). Fetch: the server deltas
+  // against the haves and ply resolves the external bases from the local store. The oracle is git: refs equal after
+  // the push and fsck clean; the fetched objects are exactly `git rev-list --objects v2 ^v1`.
+  for (const thin of [true, false]) {
+    add({ id: `thin.push.${thin ? 'thin' : 'full'}`, param: 'maxPushBytes', op: 'pushRepo', repo: 'thin-remote', local: 'thin-local', spec: { refspecs: ['main'], thin }, writes: true, bytes: 64 * 1024, entries: 2, thin, expect: ok });
+  }
+  add({ id: 'thin.fetch.external', param: 'maxDeltaChain', op: 'fetchThin', repo: 'thin-local', store: 'thin-remote', bytes: 64 * 1024, entries: 2, expectFrom: 'thin' });
+  // The bases are not in the store: the pack cannot be completed, and that is a typed refusal, not a crash.
+  add({ id: 'thin.fetch.missing-base', param: 'maxDeltaChain', op: 'fetchThin', repo: 'thin-local', store: 'empty', bytes: 64 * 1024, entries: 2, expectFrom: 'thin-missing', expect: refused('pack_corrupt') });
+
+  // ---- workerd. The same operations inside the Workers runtime (test/workerd), one fresh workerd process per cell;
+  // its peak RSS and CPU are the isolate's cost. The cells mirror node cells above, so the two runtimes can be read
+  // side by side in the report.
+  const wd = { runtime: 'workerd' };
+  add({ ...wd, id: 'workerd.readFile.16777216', param: 'maxPackBytes', op: 'readFile', repo: 'blob-16777216', path: 'big.bin', bytes: 16 * MiB, entries: 2, expectFrom: 'wire' });
+  add({ ...wd, id: 'workerd.readFile.cap1MiB.1048577', param: 'maxPackBytes', op: 'readFile', repo: 'blob-1048577', path: 'big.bin', bytes: MiB + 1, entries: 2, limits: { maxPackBytes: MiB }, expectFrom: 'wire' });
+  add({ ...wd, id: 'workerd.listTree.65536', param: 'maxTreeEntries', op: 'listTree', repo: 'tree-65536', path: '', bytes: 65536, entries: 65536, expect: ok });
+  add({ ...wd, id: 'workerd.worker.listTree.32769', param: 'maxTreeEntries', op: 'listTree', repo: `tree-${WORKER_LIMITS.maxTreeEntries + 1}`, path: '', bytes: 32769, entries: 32769, limits: worker(), expect: refused('limit_exceeded', { what: 'tree entries' }) });
+  add({ ...wd, id: 'workerd.lsRefs.10000', param: 'maxRefs', op: 'lsRefs', repo: 'refs-10000', bytes: 400000, entries: 10000, expect: ok });
+  add({ ...wd, id: 'workerd.lsRefs.10001', param: 'maxRefs', op: 'lsRefs', repo: 'refs-10001', bytes: 400040, entries: 10001, expect: refused('limit_exceeded', { what: 'ls-refs lines' }) });
+  add({ ...wd, id: 'workerd.push.object.16777216', param: 'maxObjectSize', op: 'pushTree', repo: 'push-empty', writes: true, nfiles: 1, size: 16 * MiB, bytes: 16 * MiB, entries: 1, limits: worker(), expect: ok });
+  add({ ...wd, id: 'workerd.push.total.10000x64', param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', writes: true, nfiles: 10000, size: 64, bytes: 640000, entries: 10000, limits: worker(), expect: ok });
+  add({ ...wd, id: 'workerd.timeout.cap1000.stall-2500', param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: 'stall-2500', bytes: 200, entries: 1, limits: { requestTimeoutMs: 1000 }, expect: refused('timeout') });
+  add({ ...wd, id: 'workerd.section.shallow.k1001', param: 'maxSectionLines', op: 'fetchPack', repo: 'log-1024', wantCount: 1001, deepen: 1, filter: 'tree:0', bytes: 1024 * 8, entries: 1024, expectFrom: 'sections' });
+  add({ ...wd, id: 'workerd.parents.octo-10001', param: 'maxCommitParents', op: 'readLog', repo: 'octo-10001', limit: 1, history: 1, bytes: 10001 * 64, entries: 10002, expect: refused('limit_exceeded', { what: 'commit parents' }) });
+  add({ ...wd, id: 'workerd.readFile.64MiB', param: 'maxObjectSize', op: 'readFile', repo: `blob-${DEFAULT_LIMITS.maxObjectSize}`, path: 'big.bin', bytes: DEFAULT_LIMITS.maxObjectSize, entries: 2, expectFrom: 'wire' });
+}
+
+const worker = () => ({ ...WORKER_LIMITS });
 
 const CELLS = build();
 
