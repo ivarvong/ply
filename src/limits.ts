@@ -163,9 +163,9 @@ export const DEFAULT_LIMITS: Limits = Object.freeze({
  * 16 MiB and the inflated total, which also pays LIMIT_OBJECT_OVERHEAD per object, is 64 MiB: half the isolate, about
  * 21 000 tiny objects. The wire caps (pack, push, ls-refs) are two objects, as in the defaults. maxHarvestBytes is half an
  * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), and maxTreeEntries 32 768
- * (parseTree of 199 999 entries exhausts 128 MiB: test/sweep/ratchet.json). Every other cap is the default. The limit
- * sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells): each refuses or succeeds,
- * none runs out of memory.
+ * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140). Every other cap
+ * is the default. The limit sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells):
+ * each refuses or succeeds, none runs out of memory.
  */
 /* oxlint-disable no-magic-numbers -- the preset's cap definitions, as above */
 export const WORKER_LIMITS: Limits = Object.freeze({

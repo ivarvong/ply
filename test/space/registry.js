@@ -259,6 +259,7 @@ export const DECISIONS = [
   { match: 'src/refname.ts#parse*:*', space: 'unit', axisTag: 'case' },
   { match: 'src/packresolve.ts#externalBase:*', space: 'thin-base', axisTag: 'claim' },
   { match: 'src/objects.ts#parseTree:decode:replacement:data.subarray(p, sp)', excluded: 'the mode is checked against /^[0-7]+$/ after decoding: a non-ASCII byte fails that check as it fails git\'s mode parse' },
+  { match: 'src/sha1.ts#toHex:decode:replacement:out', excluded: 'the bytes are hex digits toHex wrote itself (ASCII): nothing to replace' },
   { match: 'src/packcache.ts#isCacheableFetch:decode:*', excluded: 'protocol: the request body ply built itself, matched for keywords and hex oids' },
   { match: 'src/push.ts#send:decode:*', excluded: 'display-only: band 2 progress and the band 3 message' },
   { match: 'src/push.ts#outcomeAttrs:decode:*', excluded: 'display-only: the report lines recorded on the span' },
