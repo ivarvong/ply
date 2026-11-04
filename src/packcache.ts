@@ -156,6 +156,7 @@ const headerOf = (given: Option<HeadersInit>, name: string): string | null => {
   const headers = given.value;
   if (headers instanceof Headers) return headers.get(name);
   const hit = Object.entries(headers).find(([k]) => k.toLowerCase() === name.toLowerCase());
+  // oxlint-disable-next-line typescript/no-unsafe-return -- Object.entries of the HeadersInit union is [string, any]: a matching key is a plain bag's, whose values are strings (an array's keys are indices, never a header name)
   return hit ? getOrElse(fromNullish(hit[1]), null) : null;
 };
 const headersOf = (init: RequestInit): Option<HeadersInit> => readKey(init, 'headers');

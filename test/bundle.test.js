@@ -117,7 +117,7 @@ test('log entry: readLog carries no push, merge, pack building or rebase code', 
 });
 
 test('full entry is the superset and still carries no node builtins', async () => {
-  const out = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true });
+  const out = await build({ entryPoints: ['src/index.ts'], bundle: true, format: 'esm', minify: true, write: false, logLevel: 'silent', metafile: true });
   const js = out.outputFiles[0].text;
   assert.ok(!/node:/.test(js));
   for (const f of ['packresolve.js', 'fetchpack.js', 'negotiate.js', 'receivecaps.js', 'discover.js', 'client.js', 'packcache.js', 'edit.js']) assert.ok(retained(out).map(([k]) => k).includes(f), `${f} missing from full bundle`);
@@ -191,7 +191,7 @@ test('tree entry: pushTree is Workers-safe; the directory walk (node:fs) lives o
   size('tree', 'min', min, 70_046);
   // 2026-10-31: 69,763 B / 27,134 B gz. T2 strict TS (see the edit budget).
   size('tree', 'gz', gz, 27_135);
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
+  const full = await build({ entryPoints: ['src/index.ts'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('tree-node.js'), 'the full entry does not carry the Node walk');
   const node = await build({ entryPoints: ['src/tree-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
@@ -234,7 +234,7 @@ test('checkout entry: checkoutTree is Workers-safe and carries no push or merge 
   size('checkout', 'min', min, 52_918);
   // 2026-10-31: 52,604 B / 20,928 B gz. T2 strict TS (see the edit budget).
   size('checkout', 'gz', gz, 20_929);
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
+  const full = await build({ entryPoints: ['src/index.ts'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   assert.ok(!retained(full).map(([k]) => k).includes('checkout-node.js'), 'the full entry does not carry the Node writer');
   const node = await build({ entryPoints: ['src/checkout-node.ts'], bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent' });
   assert.match(node.outputFiles[0].text, /node:fs\/promises/);
@@ -245,7 +245,7 @@ test('repo entry: pushRepo (node:fs) lives only in repo-node.js; the delta gener
     const files = retained(await bundle(entry)).map(([k]) => k);
     for (const f of ['delta.js', 'repo-node.js']) assert.ok(!files.includes(f), `${f} is in the ${entry} bundle`);
   }
-  const full = await build({ entryPoints: ['src/index.js'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
+  const full = await build({ entryPoints: ['src/index.ts'], bundle: true, format: 'esm', write: false, logLevel: 'silent', metafile: true });
   const inFull = retained(full).map(([k]) => k);
   assert.ok(!inFull.includes('repo-node.js'), 'the full entry does not carry the Node repository reader');
   assert.ok(inFull.includes('delta.js'), 'encodeDelta and planDeltas are on the full entry');

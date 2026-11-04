@@ -4,7 +4,7 @@ import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok, err } from './result.js';
 import { BYTE_VALUES, PKT_HEX_BASE } from './format.js';
-import { byteInRange } from './absent.js';
+import { atOr, byteInRange } from './absent.js';
 
 export const te: TextEncoder = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
@@ -36,10 +36,12 @@ const SUR_HI = 0xdf_ff;
 const HIGH_END = 0xdb_ff;
 // A UTF-16 code unit in [lo, hi]. Past the end of a string charCodeAt is NaN, which is in no range.
 const inRange = (c: number, lo: number, hi: number): boolean => c >= lo && c <= hi;
+// A byte read through absent.ts's checked read (atOr). Past the end is NaN, which every byte comparison here finds in no
+// range: the arithmetic meaning of no byte. Every caller below reads in range.
+const byteOrNaN = (b: Uint8Array, i: number): number => atOr(b, i, Number.NaN);
 // Length of the well-formed UTF-8 sequence at i (Unicode Table 3-7), or 0. `i` is always < b.length (both callers).
 function wellFormedAt(b: Uint8Array, i: number): number {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in range, see above
-  const c = b[i] as number;
+  const c = byteOrNaN(b, i);
   if (c < ASCII_END) return 1;
   if (c < LEAD2) return 0;
   if (c < LEAD3) return byteInRange(b, i + 1, CONT, CONT_END) ? 2 : 0;
@@ -58,7 +60,7 @@ export function decodeBytes(b: Uint8Array): string {
   while (i < b.length) {
     const n = wellFormedAt(b, i);
     if (n) { i += n; continue; }
-    s += strict.decode(b.subarray(run, i)) + String.fromCodePoint(ESCAPE + (b[i] as number)); // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < b.length (the loop)
+    s += strict.decode(b.subarray(run, i)) + String.fromCodePoint(ESCAPE + byteOrNaN(b, i)); // i < b.length (the loop)
     run = ++i;
   }
   return s + strict.decode(b.subarray(run));
@@ -111,7 +113,7 @@ export function decodeChunk(carry: Uint8Array, chunk: Uint8Array): { text: strin
   let cut = buf.length;
   // Stryker disable next-line ConditionalExpression,LogicalOperator: past k = 3 a lead needs at most 4 ≤ k bytes (no cut), and past the start a read is no byte (neither branch)
   for (let k = 1; k <= 3 && k <= buf.length; k++) {
-    const c = buf[buf.length - k] as number; // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- k <= buf.length (the loop)
+    const c = byteOrNaN(buf, buf.length - k); // k <= buf.length (the loop)
     if (c < ASCII_END) break;
     // the lead byte's sequence length (Table 3-7) in one expression, as git-facing hot paths keep it small
     // oxlint-disable-next-line no-nested-ternary -- see above

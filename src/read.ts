@@ -529,10 +529,10 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const pump = (async (): Promise<void> => {
     for (const z of early) await writer.write(bufferSource(z));
     for (;;) {
-      const { value, done } = await it.next();
+      const step = await it.next();
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test (an iterator's done is true, false or absent)
-      if (done) break;
-      const stepped = spStep(sp, value);
+      if (step.done) break;
+      const stepped = spStep(sp, step.value);
       if (!stepped.ok) { await abortWith(stepped.error); return; }
       const r: SpStepped = stepped.value; sp = r.state;
       for (const z of r.zlib) await writer.write(bufferSource(z));

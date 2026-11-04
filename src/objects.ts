@@ -179,7 +179,10 @@ const completeTreeFrames = (data: Uint8Array, maxEntries: number): number => {
 // name, which is what exhausted a 128 MiB heap at the cap. `bytes` is not enumerable, so equality and JSON see the
 // mode, the name, and the offsets.
 type TreeEntryState = { readonly bytes: Uint8Array; readonly oidOffset: number };
-const treeEntryProto: TreeEntry = Object.create(null);
+// The one place a tree entry gets its prototype (Object.create's result is `any`); the fields are assigned below.
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the prototype chain carries `oid` and `bytes`; the caller assigns the rest
+const inherit = (proto: TreeEntry | null): TreeEntry => Object.create(proto) as TreeEntry;
+const treeEntryProto: TreeEntry = inherit(null);
 Object.defineProperty(treeEntryProto, 'oid', {
   get(this: TreeEntryState): string {
     return toHex(this.bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
@@ -188,12 +191,12 @@ Object.defineProperty(treeEntryProto, 'oid', {
 // One prototype per tree carries the buffer. Entries are ordinary assigned objects: defineProperty on every
 // entry puts it in dictionary mode, and that is what exhausted a 128 MiB heap at the cap.
 const treeBytes = (bytes: Uint8Array): TreeEntry => {
-  const proto: TreeEntry = Object.create(treeEntryProto);
+  const proto: TreeEntry = inherit(treeEntryProto);
   Object.defineProperty(proto, 'bytes', { value: bytes });
   return proto;
 };
 const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number, entryOffset: number): TreeEntry =>
-  Object.assign(Object.create(proto), { mode, name, oidOffset, entryOffset });
+  Object.assign(inherit(proto), { mode, name, oidOffset, entryOffset });
 
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
 // Duplicates and order are git's rules (fsck duplicateEntries and treeNotSorted, both errors under --strict) on the

@@ -46,6 +46,7 @@ import { thrownReasonIs } from './boundary.js';
 
 type FetchedPack = FetchPackResult & { readonly filter: string | null };
 type PackObjects = NonNullable<FetchPackResult['objects']>;
+type PackObject = PackObjects extends Map<string, infer O> ? O : never;
 
 export const DEFAULT_LOG_LIMIT = 20;
 const isObject = (v: unknown): v is object => v !== null && typeof v === 'object';
@@ -144,7 +145,7 @@ export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Resul
   const fetched = await fetchWindow(t, commit, depth);
   if (!fetched.ok) return fetched;
   const r = fetched.value;
-  const objects: PackObjects = r.objects === null ? new Map() : r.objects;
+  const objects: PackObjects = r.objects === null ? new Map<string, PackObject>() : r.objects;
   const parsed = new Map<string, Parents>();
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT) continue;
