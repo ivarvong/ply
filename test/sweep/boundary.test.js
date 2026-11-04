@@ -29,12 +29,28 @@ test('every Limits key is in the param registry', () => {
   }
 });
 
-test('pass-2 limits are registered and have no cells yet', () => {
-  const later = new Set(PARAMS.filter(p => p.later).map(p => p.key));
-  for (const key of ['maxHarvestBytes', 'maxDeltaResult', 'maxPackObjects', 'maxSectionLines', 'maxRebaseCommits', 'maxReportLines', 'maxCommitParents', 'requestTimeoutMs']) {
-    assert.equal(later.has(key), true, key);
+test('every Limits key has cells, and each limit is crossed in CI: a cell at or under the boundary and one past it', () => {
+  const cells = allCells();
+  assert.deepEqual(PARAMS.filter(p => p.later).map(p => p.key), []);
+  for (const { key } of PARAMS) {
+    const mine = cells.filter(c => c.param === key);
+    assert.ok(mine.length >= 3, `${key}: ${mine.length} cells`);
+    assert.ok(mine.some(c => isCi(c)), `${key}: no CI cell`);
   }
-  for (const cell of allCells()) assert.equal(later.has(cell.param), false, cell.id);
+});
+
+test('second-pass cells (#144) exist: thin packs, protocol v0/v1, pkt-line lengths, caps, timeout, workerd', () => {
+  const ids = new Set(allCells().map(c => c.id));
+  for (const id of [
+    'objects.pack.tiny-99898', 'objects.pack.tiny-99899', 'section.acks.h999', 'section.acks.h1000', 'section.shallow.k1000', 'section.shallow.k1001',
+    'thin.push.thin', 'thin.fetch.external', 'proto.v0.lsRefs', 'proto.v1.readFile', 'pktline.frame-4.readFile.1024', 'pktline.frame-65520.readFile',
+    'pktline.frame-65521.readFile', 'caps.nofilter.readFile', 'timeout.cap1000.lsRefs.stall-2500', 'timeout.lsRefs.delay-65000', 'workerd.readFile.16777216',
+    'delta.ofs.d65', 'parents.octo-10001', 'report.n10000', 'rebase.cap8.k9',
+  ]) assert.equal(ids.has(id), true, id);
+  const wd = allCells().filter(c => c.runtime === 'workerd');
+  assert.ok(wd.length >= 8 && wd.filter(c => isCi(c)).length >= 6, `workerd cells ${wd.length}`);
+  // the slow-server cells at the default 60 s are nightly; CI crosses a 1 s cap
+  for (const c of allCells().filter(c => c.param === 'requestTimeoutMs' && !c.limits?.requestTimeoutMs)) assert.equal(isCi(c), false, c.id);
 });
 
 test('CI keeps cells up to 16 MiB and 65536 entries; the known large boundaries are nightly', () => {
@@ -61,9 +77,11 @@ test('the ratchet names cells the matrix builds, and only goes down by deleting 
   assert.ok(Array.isArray(ratchet.entries));
   for (const entry of ratchet.entries) {
     assert.equal(ids.has(entry.id), true, entry.id);
-    assert.ok(entry.heap === 'default' || entry.heap === '128', entry.heap);
+    const cell = allCells().find(c => c.id === entry.id);
+    assert.ok(cell?.runtime === 'workerd' ? entry.heap === 'workerd' : entry.heap === 'default' || entry.heap === '128', `${entry.id} heap ${entry.heap}`);
     assert.equal(typeof entry.why, 'string');
     assert.ok(entry.why.length > 12, entry.id);
+    assert.match(entry.why, /#\d+/, `${entry.id}: the reason cites an issue`);
     assert.equal(typeof entry.actual?.status, 'string');
   }
 });

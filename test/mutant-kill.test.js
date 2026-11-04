@@ -22,7 +22,7 @@ import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
-import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, refusedBeforeReceivePack, reportLineCap, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
@@ -1451,6 +1451,16 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   });
   await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
   await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }, { kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: data after the terminating flush-pkt');
+  // #144: an answer with no frame at all is what a v0/v1 upload-pack sends a v2 request; the advertisement says which
+  const advertising = (body) => ({ ...framesOf([]), advertise: async () => body });
+  const lsAdv = (...lines) => ({ ok: true, value: concat(lines.map(l => (l === null ? FLUSH : unwrap(pkt(l))))) });
+  const v0 = lsAdv('# service=git-upload-pack\n', null, `${oid(4)} HEAD\0multi_ack side-band-64k\n`, null);
+  await assert.rejects(lsRefs(advertising(v0)), e => e.code === 'unsupported' && e.what === 'protocol version' && e.message === `ls-refs: the server does not speak protocol v2, which ply requires (an empty answer to command=ls-refs; advertisement: server did not answer protocol v2 (first line ${JSON.stringify(`${oid(4)} HEAD\0multi_ack side-band-64k`)}))`);
+  await assert.rejects(lsRefs(advertising(lsAdv('version 1\n', `${oid(4)} HEAD\n`, null))), e => e.code === 'unsupported' && e.what === 'protocol version' && e.message.endsWith('(first line "version 1"))'));
+  for (const body of [lsAdv('version 2\n', 'ls-refs=unborn\n', null), { ok: false, error: { code: 'http', message: 'down' } }, { ok: true, value: te.encode('zzzz') }]) {
+    await assert.rejects(lsRefs(advertising(body)), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
+  }
+  await assert.rejects(lsRefs(framesOf([])), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
   await assert.rejects(lsRefs(framesOf([{ kind: 'delim' }])), e => e.code === 'protocol' && e.message === 'ls-refs: unexpected delim in ref listing');
   const listed = await lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }]));
   assert.equal(listed.refs.get('refs/heads/main').oid, oid(4));
@@ -1917,8 +1927,31 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del)), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
-  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
-  await assert.rejects(unwrapAsync(push(many, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
+  // #144: the cap admits what git sends for the commands pushed (unpack + one status each), whatever maxReportLines says;
+  // a line past that is the cap's
+  const exact = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  assert.equal((await unwrapAsync(push(exact, del))).report.refs.length, 1);
+  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/b\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  await assert.rejects(unwrapAsync(push(many, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 3 && e.cause.max === 2);
+  const over = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/b\n', 'ok refs/heads/c\n'), null), limits: withLimits({ maxReportLines: 3 }) };
+  await assert.rejects(unwrapAsync(push(over, del)), e => e.code === 'ambiguous' && e.cause.what === 'report lines' && e.cause.got === 4 && e.cause.max === 3);
+  assert.deepEqual([1, 2, 5].map(n => reportLineCap({ maxReportLines: 1, commands: Array(n).fill(del.commands[0]), caps: ['report-status'] })), [2, 3, 6]);
+  assert.deepEqual([1, 2].map(n => reportLineCap({ maxReportLines: 1, commands: Array(n).fill(del.commands[0]), caps: ['report-status-v2'] })), [6, 11]);
+  assert.equal(reportLineCap({ maxReportLines: 100, commands: del.commands, caps: ['report-status-v2'] }), 100);
+  // #144: an HTTP refusal at the status line (no frame read) that the service's advertisement repeats is that error:
+  // receive-pack is not there for this caller. An advertisement that answers, refuses otherwise, or cannot be asked,
+  // a refusal after a frame, and every other code stay ambiguous (a middlebox may have forwarded the body).
+  const refusing = (code, advertised, ...before) => ({ ...sb(), advertise: async () => advertised, async *frames() { for (const f of before) yield { kind: 'data', payload: f }; throw Object.assign(new Error(`HTTP ${code}`), { code }); } });
+  const adErr = code => ({ ok: false, error: Object.assign(new Error(`ad ${code}`), { code }) });
+  for (const code of ['auth', 'not_found']) {
+    await assert.rejects(unwrapAsync(push(refusing(code, adErr(code)), del)), e => e.code === code && e.message === `HTTP ${code}`);
+    await assert.rejects(unwrapAsync(push(refusing(code, adErr(code), band(2, 'hi\n')), del)), e => e.code === 'ambiguous' && e.original === code);
+    for (const ad of [{ ok: true, value: new Uint8Array(0) }, adErr(code === 'auth' ? 'not_found' : 'auth'), adErr('network')]) await assert.rejects(unwrapAsync(push(refusing(code, ad), del)), e => e.code === 'ambiguous' && e.original === code);
+    const noAd = { ...refusing(code, null), advertise: undefined };
+    await assert.rejects(unwrapAsync(push(noAd, del)), e => e.code === 'ambiguous' && e.original === code);
+  }
+  for (const code of ['upstream_5xx', 'http', 'rate_limited', 'network', 'timeout']) await assert.rejects(unwrapAsync(push(refusing(code, adErr(code)), del)), e => e.code === 'ambiguous' && e.original === code);
+  assert.deepEqual([refusedBeforeReceivePack({ cause: null, answered: false }), refusedBeforeReceivePack({ cause: { code: 'auth' }, answered: true }), refusedBeforeReceivePack({ cause: { code: 'auth' }, answered: false })], [false, false, true]);
   const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
   await assert.rejects(unwrapAsync(push(big, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
   const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes

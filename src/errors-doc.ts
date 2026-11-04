@@ -5,7 +5,7 @@ import type { Code } from './errors.js';
 export type CodeDoc = { readonly where: 'local' | 'remote' | 'net' | 'content'; readonly what: string };
 export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path; checkout: a non-empty dir, or a path that collides or would pass through a symlink)' },
-  unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, push-options not advertised)' },
+  unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, push-options not advertised, no protocol v2: what "protocol version")' },
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
   timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },
   aborted: { where: 'local', what: 'the caller\'s AbortSignal fired' },

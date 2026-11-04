@@ -7,15 +7,17 @@ import type { Frame, Transport } from './transport.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
 import { fail } from './errors.js';
-import { pkts } from './pktline.js';
+import { pkts, pktInit, pktStep } from './pktline.js';
 import { decodeBytes } from './bytes.js';
 import { limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
-import { frames, coded, clientSpan, proto, spanned } from './transport.js';
+import { advertise, frames, coded, clientSpan, proto, spanned } from './transport.js';
 import { OID_HEX_CHARS, SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 import { assertNever, err, ok } from './result.js';
 // oxlint-disable-next-line import/max-dependencies -- the exchange joins the frame reader, the limits and the caller's options
 import { fromNullable, readKey, withDefaults } from './absent.js';
+// oxlint-disable-next-line import/max-dependencies -- and, for an empty answer, the advertisement's reader
+import { parseCapabilitiesV2 } from './caps.js';
 
 /* oxlint-disable no-magic-numbers -- error previews and the span's ref sample are diagnostics, not wire-format facts */
 const LINE_PREVIEW = 60;
@@ -160,6 +162,24 @@ export function lsRefsEnd(st: LsListing): Result<LsRefsResult, PlyError> {
   return assertNever(st.tag);
 }
 
+// An ls-refs answer with no frame at all, not even its flush, is what a v0/v1 upload-pack sends a v2 request: it reads
+// `command=ls-refs` as a want line and dies having written nothing. The advertisement (GET info/refs, asked for v2) then
+// says which: a first line other than `version 2` is a server that does not speak protocol v2, refused as discover
+// refuses it (`unsupported`; ply speaks only v2, and asking again cannot help). An advertisement that is v2, or that
+// cannot be read, leaves the empty answer the protocol error it is.
+async function v2Refusal(t: Transport, span: Span, empty: PlyError): Promise<PlyError> {
+  let buf: Result<Uint8Array, PlyError>;
+  // a transport that cannot advertise (an untyped caller's) leaves the empty answer as it is
+  try { buf = await advertise(t, 'git-upload-pack', span); } catch { return empty; }
+  if (!buf.ok) return empty;
+  const framed = pktStep(pktInit(), buf.value);
+  if (!framed.ok) return empty;
+  const caps = parseCapabilitiesV2(framed.value.frames);
+  if (caps.ok || caps.error.code !== 'unsupported') return empty;
+  const refused = fail('unsupported', `ls-refs: the server does not speak protocol v2, which ply requires (an empty answer to command=ls-refs; advertisement: ${caps.error.message})`, { what: 'protocol version' });
+  return refused.error;
+}
+
 // The ls-refs exchange. `unborn` asks for the unborn HEAD and reads each unborn line (parseUnbornLine): the caller has
 // checked the server advertises it (the public lsRefs in client.ts does, from the advertisement). Passed in, not
 // imported, so a bundle that never asks (edit, read) carries no unborn reader. Without it an unborn line is skipped.
@@ -180,13 +200,15 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], opt
     const body = lsRefsBody(prefixes, { unborn: caps.unborn.tag === 'some' });
     if (!body.ok) return body;
     let st = lsInit();
+    let seen = 0;
     for await (const f of frames(t, 'git-upload-pack', body.value, span)) {
+      seen += 1;
       const next = lsRefsStep(st, f, caps);
       if (!next.ok) return next;
       st = next.value;
     }
     const listed = lsRefsEnd(st);
-    if (!listed.ok) return listed;
+    if (!listed.ok) return seen === 0 ? err(await v2Refusal(t, span, listed.error)) : listed;
     const { refs, head } = listed.value;
     span.set({ 'git.ls_refs.count': refs.size, 'git.ls_refs.refs': [...refs.values()].slice(0, SPAN_REFS).map(r => `${r.oid} ${r.name}`), 'git.ls_refs.head': head === null ? '' : head });
     return listed;

@@ -5,6 +5,7 @@
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { join } from 'node:path';
@@ -173,4 +174,12 @@ test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob fol
     assert.equal(blob.outcome, cancel ? 'cancelled' : 'ok');
     assert.equal(r.spans.filter(s => s.name === 'git.read.blob').length, 1);
   }
+});
+
+test('workerd: a limit hit inside readFile\'s blob stream reaches the reader as limit_exceeded, as on node (#144)', { skip: !WORKERD }, async () => {
+  const bare = makeBareRepo(root, 'rdcap'); const work = join(root, 'wrdcap'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const big = randomBytes((1 << 20) + 1); // incompressible: the pack is over 1 MiB
+  commitFiles(work, bare, { 'big.bin': big }, 'seed');
+  const r = await post('/read', { url: `${srv.url}/rdcap.git`, path: 'big.bin', limits: { maxPackBytes: 1 << 20 } });
+  assert.deepEqual([r.ok, r.code, r.what, r.blob], [false, 'limit_exceeded', 'pack bytes', ['limit_exceeded']], JSON.stringify(r));
 });

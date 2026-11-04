@@ -129,6 +129,15 @@ test('HTTP-level faults at every stage: statuses, non-git bodies, stall, drop, e
   }
 });
 
+test('receive-pack refused for this caller (403 on its POST and on its advertisement) is auth, and the ref did not move (#144)', async () => {
+  // the proxy answers both receive-pack requests 403 without forwarding: the service is not there for this caller
+  const refuse = ctx => (ctx.stage === 'receive-pack' ? { type: 'bytes', noForward: true, status: 403, contentType: 'text/plain', bytes: new TextEncoder().encode('Forbidden') } : { type: 'pass' });
+  const r = await run(refuse);
+  checkInvariants(r, { stage: 'receive-pack 403', requireError: true, allowMoved: false });
+  assert.equal(r.error.code, 'auth', r.error.message);
+  assert.deepEqual(r.log.filter(l => l.stage === 'receive-pack').map(l => l.n), [0, 1], 'the POST, then the advertisement');
+});
+
 test('byte-level chunking stress: 1-byte and 7-byte chunks at every stage must succeed', async () => {
   for (const [stage, k] of STAGES) for (const chunk of [1, 7]) {
     const r = await run(at(stage, k, { type: 'slow', chunk, delayMs: 0 }), { limits: withLimits({ requestTimeoutMs: 30000 }) });
