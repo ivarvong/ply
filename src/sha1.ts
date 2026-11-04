@@ -4,6 +4,10 @@
 import { HEXV, td, te } from './bytes.js';
 import { atOr, field } from './absent.js';
 import { flatMapOption } from './result.js';
+import { digestOid } from './oid.js';
+import type { Oid } from './oid.js';
+// toOid's and hex()'s result, for a reader of digests that needs no other part of oid.ts
+export type { Oid };
 
 // Workers' crypto.DigestStream: a WritableStream whose `digest` is a promise of the ArrayBuffer. Not in lib.dom, and
 // not on node or in browsers, so it is read as a field of the global (None there), never declared on Crypto.
@@ -24,6 +28,9 @@ export function toHex(bytes: Uint8Array): string {
   }
   return td.decode(out);
 }
+// OID_BYTES bytes in hand (a tree entry's id, a REF_DELTA base) as the Oid they spell: two lowercase digits per byte.
+// The caller holds exactly OID_BYTES (a take or a view the frame check placed).
+export const toOid = (bytes: Uint8Array): Oid => digestOid(toHex(bytes));
 // Table-driven (bytes.ts HEXV): 4.8× faster than parseInt per byte (PR body). A pair that is not two hex digits keeps
 // parseInt's reading, so any string maps to the bytes it always did; fromHex has never validated (callers check oids).
 export function fromHex(hex: string): Uint8Array {
@@ -119,13 +126,14 @@ export class Sha1 {
     return out;
   }
 
-  public hex(): string { return toHex(this.digest()); }
+  // A digest is OID_BYTES bytes: its hex is an Oid (an object id, or a pack trailer, which is the same shape).
+  public hex(): Oid { return digestOid(toHex(this.digest())); }
 }
 
 
 export type StreamingSha1 =
-  | { readonly kind: 'digeststream'; readonly update: (b: Uint8Array) => Promise<void>; readonly hex: () => Promise<string> }
-  | { readonly kind: 'js'; readonly update: (b: Uint8Array) => void; readonly hex: () => Promise<string> };
+  | { readonly kind: 'digeststream'; readonly update: (b: Uint8Array) => Promise<void>; readonly hex: () => Promise<Oid> }
+  | { readonly kind: 'js'; readonly update: (b: Uint8Array) => void; readonly hex: () => Promise<Oid> };
 
 // Streaming hasher with a native fast path: Workers expose crypto.DigestStream (a WritableStream that digests
 // incrementally at native speed); node and browsers do not, so the pure-JS Sha1 above is the fallback. Same interface,
@@ -137,7 +145,7 @@ export function streamingSha1(): StreamingSha1 {
     const w = ds.getWriter();
     // update hands back the writer's own promise (no extra tick per chunk)
     // oxlint-disable-next-line typescript/promise-function-async -- see above
-    return { kind: 'digeststream', update: b => w.write(b), hex: async () => { await w.close(); return toHex(new Uint8Array(await ds.digest)); } };
+    return { kind: 'digeststream', update: b => w.write(b), hex: async () => { await w.close(); return digestOid(toHex(new Uint8Array(await ds.digest))); } };
   }
   const h = new Sha1();
   // async to match the native hasher's interface

@@ -1,7 +1,7 @@
 // v2 ls-refs: the ref namespace, filtered by prefix. The one request that cannot be cached (it is the freshness source).
 // The listing is read by a step function over frames (lsRefsStep, Result); lsRefs is the exchange, also a Result.
 /* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal */
-import type { PlyError } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
 import type { Span } from './otel.js';
 import type { Frame, Transport } from './transport.js';
 import type { Input } from './absent.js';
@@ -10,14 +10,16 @@ import { fail } from './errors.js';
 import { pkts, pktInit, pktStep } from './pktline.js';
 import { decodeBytes } from './bytes.js';
 import { limitExceeded, readLimit } from './limits.js';
-import { validateWire } from './validate.js';
+import { validateWire, type WireField } from './validate.js';
 import { advertise, frames, coded, clientSpan, proto, spanned } from './transport.js';
-import { OID_HEX_CHARS, SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
+import { SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
 import { assertNever, err, ok } from './result.js';
 // oxlint-disable-next-line import/max-dependencies -- the exchange joins the frame reader, the limits and the caller's options
 import { fromNullable, readKey, withDefaults } from './absent.js';
 // oxlint-disable-next-line import/max-dependencies -- and, for an empty answer, the advertisement's reader
 import { parseCapabilitiesV2 } from './caps.js';
+// oxlint-disable-next-line import/max-dependencies -- and the id parser every listed oid goes through once
+import { parseOid, type Oid } from './oid.js';
 
 /* oxlint-disable no-magic-numbers -- error previews and the span's ref sample are diagnostics, not wire-format facts */
 const LINE_PREVIEW = 60;
@@ -27,8 +29,9 @@ const ERR = 'ERR ';
 const PEELED = 'peeled', SYMREF_TARGET = 'symref-target';
 
 // connect.c process_ref_v2 reads an oid with parse_oid_hex_algop, which takes either case (hexval); the oid is kept
-// lowercase, as git stores it in binary and writes it back lowercase.
-const OID_SHA1 = new RegExp(`^[0-9a-fA-F]{${OID_HEX_CHARS}}$`);
+// lowercase, as git stores it in binary and writes it back lowercase. Lowercased, it is parsed once (parseOid): only
+// A-F lowercase to hex digits, so the parse accepts exactly the 40 hex digits of either case.
+const sha1Of = (text: string): Result<Oid, ErrorOf<'bad_request'>> => parseOid(text.toLowerCase());
 const OID_SHA256 = new RegExp(`^[0-9a-fA-F]{${SHA256_HEX_CHARS}}$`);
 const UNBORN = 'unborn';
 
@@ -37,7 +40,7 @@ const UNBORN = 'unborn';
 // reads it).
 // One listed ref. Only `peeled` and `symref-target` are kept from the attributes, and only when the line carries them
 // (a key that is present or not: the readers in changes, merge and read test for it).
-export type LsRef = { readonly oid: string; readonly name: string; readonly peeled: string | null; readonly 'symref-target': string | null };
+export type LsRef = { readonly oid: Oid; readonly name: string; readonly peeled: Oid | null; readonly 'symref-target': string | null };
 // An unborn HEAD: a symref to a branch that has no commit yet (an empty `git init --bare -b main` is
 // `{ name: 'HEAD', target: 'refs/heads/main' }`). Only HEAD is ever reported, as git's client records only HEAD.
 export type LsRefsUnborn = { readonly name: 'HEAD'; readonly target: string };
@@ -61,18 +64,21 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   // Stryker disable next-line ArrayDeclaration: any token injected for a name with no attributes has no `key:` before its colon, so the loop skips it
   const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ');
   if (OID_SHA256.test(oid)) return fail('unsupported', 'unsupported object-format: only sha1 repositories are supported');
-  if (!OID_SHA1.test(oid)) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  const parsed = sha1Of(oid);
+  if (!parsed.ok) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
   // server attribute can never stand in for the parsed oid or name. A bad peeled oid is malformed (git: invalid ls-refs response).
-  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: oid.toLowerCase(), name, [PEELED]: null, [SYMREF_TARGET]: null };
+  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: parsed.value, name, [PEELED]: null, [SYMREF_TARGET]: null };
   for (const a of attrs) {
     const colon = a.indexOf(':');
     // Stryker disable next-line EqualityOperator: a token starting with ':' has the empty key, which is neither kept attribute
     if (colon < 0) continue;
     const key = a.slice(0, colon), value = a.slice(colon + 1);
-    if (key === PEELED && !OID_SHA1.test(value)) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
-    if (key === PEELED) rec[key] = value.toLowerCase();
-    else if (key === SYMREF_TARGET) rec[key] = value;
+    if (key === PEELED) {
+      const peeled = sha1Of(value);
+      if (!peeled.ok) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+      rec[key] = peeled.value;
+    } else if (key === SYMREF_TARGET) rec[key] = value;
   }
   return ok(rec);
 }
@@ -185,9 +191,12 @@ async function v2Refusal(t: Transport, span: Span, empty: PlyError): Promise<Ply
 // imported, so a bundle that never asks (edit, read) carries no unborn reader. Without it an unborn line is skipped.
 // oxlint-disable-next-line require-await -- async: a synchronous failure (an unusable transport) is a rejection, as it always was
 export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: Input<{ readonly unborn: UnbornReader }> = {}): Promise<Result<LsRefsResult, PlyError>> {
+  // each prefix parsed once; the request writes the parsed ones
+  const checked: WireField[] = [];
   for (const p of prefixes) {
     const valid = validateWire(p, 'ref prefix');
     if (!valid.ok) return valid;
+    checked.push(valid.value);
   }
   const maxBytes = readLimit(t.limits, 'maxLsRefsBytes');
   if (!maxBytes.ok) return maxBytes;
@@ -197,7 +206,7 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], opt
   const caps: LsCaps = { maxBytes: maxBytes.value, maxRefs: maxRefs.value, unborn: readKey(options, 'unborn') };
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
   return coded('protocol', () => spanned(t, 'git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<Result<LsRefsResult, PlyError>> => {
-    const body = lsRefsBody(prefixes, { unborn: caps.unborn.tag === 'some' });
+    const body = lsRefsBody(checked, { unborn: caps.unborn.tag === 'some' });
     if (!body.ok) return body;
     let st = lsInit();
     let seen = 0;
