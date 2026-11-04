@@ -397,7 +397,7 @@ export const DECISIONS = [
   { match: "src/push.ts#readResponse:limit_exceeded:report bytes", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/push.ts#readResponse:limit_exceeded:report lines", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/push.ts#outcomeResult:push_partial:push partially applied: … updated; … refused", space: 'push-outcome', axisTag: 'spread' },
-  { match: "src/read.ts#pull:<rethrown or pack_corrupt>:<e>", space: 'streamed-body', axisTag: 'shape' },
+  { match: "src/read.ts#readFailure:<rethrown or pack_corrupt>:<e>", space: 'streamed-body', axisTag: 'shape' },
   { match: "src/checkout.ts#walk:pack_corrupt:tree …: duplicate entry … (git fsck duplicateEntries)", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/objects.ts#bad:pack_corrupt:invalid … line - …", space: 'fsck-commit', axisTag: 'ident' },
   { match: "src/read.ts#transform:pack_corrupt:server streamed more than the … bytes it declared", space: 'streamed-body', axisTag: 'shape' },

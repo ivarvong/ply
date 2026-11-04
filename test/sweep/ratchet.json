@@ -1,13 +1,3 @@
 {
-  "entries": [
-    {
-      "id": "workerd.readFile.cap1MiB.1048577",
-      "heap": "workerd",
-      "why": "#144: under workerd the limit_exceeded raised inside readFile's blob stream reaches the reader as pack_corrupt (message 'blob stream: pack bytes ... exceeds limit'); node keeps limit_exceeded (pack.readFile.cap1MiB.1048577)",
-      "actual": {
-        "status": "refused",
-        "code": "pack_corrupt"
-      }
-    }
-  ]
+  "entries": []
 }

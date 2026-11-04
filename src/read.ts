@@ -517,7 +517,15 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const writer = ds.writable.getWriter();
   // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
   // verify transform's flush never runs then (its catch is unreachable), so the failure is recorded here.
-  const abortWith = async (e: unknown): Promise<void> => { const failed = failHere(e); await writer.abort(failed).catch(() => { /* already failing */ }); await close(); };
+  // The abort's reason is the failure: workerd's DecompressionStream errors its readable with a reason of its own (the
+  // message without the code), node's with the one given, so the reader is handed the failure kept here (#144).
+  let aborted: { readonly e: unknown } | null = null;
+  const readFailure = (e: unknown): unknown => {
+    // Stryker disable next-line ConditionalExpression: node's DecompressionStream keeps the abort reason, so only workerd (test/workerd.test.js) tells the two apart
+    if (aborted !== null) return aborted.e;
+    return isPlyThrown(e) ? e : failHere(e);
+  };
+  const abortWith = async (e: unknown): Promise<void> => { const failed = failHere(e); if (aborted === null) aborted = { e: failed }; await writer.abort(failed).catch(() => { /* already failing */ }); await close(); };
   const pump = (async (): Promise<void> => {
     for (const z of early) await writer.write(bufferSource(z));
     for (;;) {
@@ -570,7 +578,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const stream = new ReadableStream<Uint8Array>({
     async pull(c) {
       let r: ReadableStreamReadResult<Uint8Array>;
-      try { r = await inner.read(); } catch (e) { throw isPlyThrown(e) ? e : failHere(e); }
+      try { r = await inner.read(); } catch (e) { throw readFailure(e); }
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {
