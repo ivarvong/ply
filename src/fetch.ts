@@ -18,7 +18,8 @@ import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './obj
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1, cache)
 import { corruptCacheHit } from './cachestatus.js';
 import { assertNever, err, getOrElse, none, ok } from './result.js';
-import { inflate } from './inflate.js';
+import type { InflateError, InflateStats, InflateStream } from './inflatestream.js';
+import { inflateInit, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, zlibWrap } from './inflatestream.js';
 import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
 import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
@@ -611,14 +612,89 @@ function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span,
   if (!checked.ok) return checked;
   return ok({ type: want.type, data: want.data, oid, size: want.data.length, bust });
 }
-// The single object's zlib bytes, read: inflated within maxObject, hashed against the want, its type checked.
-type Received = { readonly sp: SpFinished; readonly zlib: Uint8Array; readonly want: Single; readonly span: Span; readonly bust: boolean; readonly maxObject: number };
-function singleObject(t: Transport, { sp, zlib, want, span, bust, maxObject }: Received): Result<FetchedObject, PlyError> {
+// The single object's member, inflated as its zlib bytes arrive (issue #172): the object is written into one
+// Uint8Array of its declared size and the zlib bytes are dropped as they are read, so the peak is the object plus the
+// inflate window, one chunk and one frame (streambound.ts), not the member as well. A refusal is held, not returned, until
+// the pack has been read to its trailer: spStep's and spFinish's refusals come first, as they did when the member was
+// inflated whole after spFinish.
+type Member =
+  | { readonly tag: 'header' }
+  | { readonly tag: 'open'; readonly stream: InflateStream; readonly out: Uint8Array<ArrayBuffer>; readonly at: number }
+  | { readonly tag: 'done'; readonly out: Uint8Array<ArrayBuffer>; readonly consumed: number; readonly stats: InflateStats; readonly after: number }
+  | { readonly tag: 'failed'; readonly error: InflateError };
+const MEMBER_HEADER: Member = { tag: 'header' };
+// Pull until the member wants more input, or ends, or is refused.
+function memberDrain(m: Member, end: boolean): Member {
+  if (m.tag !== 'open') return m;
+  let at = m.at;
+  for (;;) {
+    const r = end ? inflateEnd(m.stream) : inflatePull(m.stream);
+    if (!r.ok) return { tag: 'failed', error: r.error };
+    const piece = r.value;
+    switch (piece.kind) {
+      case 'need': return { ...m, at };
+      // a declared bound: the stream never yields past the declared size, which is out's length
+      case 'chunk': m.out.set(piece.bytes, at); at += piece.bytes.length; continue;
+      case 'end': return { tag: 'done', out: m.out, consumed: piece.consumed, stats: piece.stats, after: inflateUnread(m.stream).length };
+    }
+    // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(piece);
+  }
+}
+function memberTake(m: Member, z: Uint8Array): Member {
+  switch (m.tag) {
+    case 'open': inflateFeed(m.stream, z); return memberDrain(m, false);
+    case 'done': return { ...m, after: m.after + z.length };
+    // memberFeed opens a member before it hands it bytes, so 'header' does not reach here; a failed member drops them
+    // Stryker disable next-line StringLiteral: 'header' is unreachable here, see above
+    case 'header':
+    case 'failed': return m;
+  }
+  // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(m);
+}
+// The zlib bytes spStep passed on. The member opens once the object header is read and its size is within maxObject
+// (fetchSingle refuses a larger one before the body); bytes after the member's end are counted, not kept.
+function memberFeed(m: Member, sp: SpState, zlib: readonly Uint8Array[], maxObject: number): Member {
+  let cur = m;
+  if (cur.tag === 'header') {
+    if (sp.phase !== 'body' || sp.size > maxObject) return cur;
+    const opened = inflateInit({ bound: declaredBound(sp.size, maxObject), wrap: zlibWrap(true) });
+    // the size is within maxObject (above), which readLimit checked: the record always opens
+    // Stryker disable next-line all: see above
+    if (!opened.ok) return { tag: 'failed', error: opened.error };
+    cur = { tag: 'open', stream: opened.value, out: new Uint8Array(sp.size), at: 0 };
+  }
+  for (const z of zlib) cur = memberTake(cur, z);
+  return cur;
+}
+type Inflated = { readonly out: Uint8Array<ArrayBuffer>; readonly stats: InflateStats };
+// The member once the pack has been read: its object, or the refusal it held. A member that ended before its zlib
+// bytes did is the trailing-bytes refusal.
+function memberFinish(m: Member): Result<Inflated, PlyError> {
+  const last = memberDrain(m, true);
+  switch (last.tag) {
+    // spFinish passed (so the object header was read) and the size was within maxObject: the member opened. inflateEnd
+    // ends a member or refuses it, so it is not still open.
+    // Stryker disable next-line all: unreachable, see above
+    case 'header': return fail('internal', 'member never opened');
+    // Stryker disable next-line all: unreachable, see above
+    case 'open': return fail('internal', 'member open after inflateEnd');
+    case 'failed': return err(last.error);
+    case 'done':
+      if (last.after !== 0) return fail('pack_corrupt', `pack: ${last.after} trailing bytes after object`);
+      return ok({ out: last.out, stats: last.stats });
+  }
+  // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(last);
+}
+// The single object, inflated: hashed against the want, its type checked.
+type Received = { readonly sp: SpFinished; readonly member: Member; readonly want: Single; readonly span: Span; readonly bust: boolean };
+function singleObject(t: Transport, { sp, member, want, span, bust }: Received): Result<FetchedObject, PlyError> {
   const { oid, expectType } = want;
-  const inflated = inflate(zlib, 0, { expectedSize: sp.size, maxOutput: maxObject });
+  const inflated = memberFinish(member);
   if (!inflated.ok) return inflated;
-  const { out, consumed, stats } = inflated.value;
-  if (consumed !== zlib.length) return fail('pack_corrupt', `pack: ${zlib.length - consumed} trailing bytes after object`);
+  const { out, stats } = inflated.value;
   const got = hashObject(typeText(sp.type), out);
   span.set({ ...spAttrs(sp), 'git.pack.inflated.bytes': out.length, 'git.pack.inflate.blocks': stats.blocks, 'git.pack.inflate.stored': stats.stored, 'git.pack.inflate.fixed': stats.fixed, 'git.pack.inflate.dynamic': stats.dynamic, 'git.object.oid': got, 'git.object.type': typeText(sp.type) });
   if (got !== oid) return fail('pack_corrupt', `object ${got} served for want ${oid}`);
@@ -638,14 +714,15 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
     const limit = readLimit(t.limits, 'maxObjectSize');
     if (!limit.ok) return limit;
     const maxObject = limit.value;
-    // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes held
-    // are bounded by spStep at zlibBound(sp.size), and sp.size by maxObjectSize as soon as the header is read.
-    let sp = spInit(); const zlibParts: Uint8Array[] = [];
+    // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes are
+    // bounded by spStep at zlibBound(sp.size) and inflated as they arrive (memberFeed), sp.size by maxObjectSize as soon
+    // as the header is read.
+    let sp = spInit(); let member = MEMBER_HEADER;
     const feed = (chunk: Uint8Array): Result<null, PlyError> => {
       const r = spStep(sp, chunk);
       if (!r.ok) return r;
       sp = r.value.state;
-      for (const z of r.value.zlib) zlibParts.push(z);
+      member = memberFeed(member, sp, r.value.zlib, maxObject);
       return UNIT;
     };
     const wire = packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span);
@@ -675,7 +752,7 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
     if (oversized) return err(limitExceeded('object size', sp.size, maxObject));
     const finished = spFinish(sp);
     if (!finished.ok) return finished;
-    return singleObject(t, { sp: finished.value, zlib: concat(zlibParts), want, span, bust, maxObject });
+    return singleObject(t, { sp: finished.value, member, want, span, bust });
   });
   return onceMore(once);
 }

@@ -67,6 +67,7 @@
   "test/space/version-refname.test.js": 168,
   "test/span-contract.test.js": 10,
   "test/stamps.test.js": 7,
+  "test/stream-memory.test.js": 25,
   "test/sweep/boundary.test.js": 0,
   "test/tree-budget.test.js": 9,
   "test/version-refname.test.js": 0,
