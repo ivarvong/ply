@@ -21,9 +21,10 @@ import { join } from 'node:path';
 
 const REPORT = 'reports/mutation/mutation.json';
 // A converted decoder keeps its gate: `xResult` is the Result core of the throwing wrapper `x` (docs/STACK.md).
-const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate|huffBuild|adler32|pktStep|pktFinish|pktHeader|spStep|spFinish|v2Step|parseSideband|take|assertFetched|splitHeaders|checkIdent)(Result)?$/;
-// Either extension: a file keeps its gate when it converts to TypeScript.
-const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts']);
+const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate\w*|huffBuild|adler32|pktStep|pktFinish|pktHeader|spStep|spFinish|v2Step|parseSideband|sidebandStep|member[A-Z]\w*|take|assertFetched|splitHeaders|checkIdent)(Result)?$/;
+// Either extension: a file keeps its gate when it converts to TypeScript. The pull codecs (#172) are decoders in every
+// function, their step helpers included: the whole file is gated.
+const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts', 'src/inflatestream.ts', 'src/packstream.ts']);
 const SRC = /\.(?:js|ts)$/;
 // A test file that exits non-zero without reporting a failed test (a mutant that throws while its module loads, or one
 // that trips Stryker's hit limit, an infinite loop, there) is a RuntimeError to the tap runner. The test failed: the

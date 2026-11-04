@@ -72,8 +72,9 @@ export const pktInit = (): PktState => Object.freeze({
 });
 
 // (state, chunk) -> { state, frames: [{kind, payload?}] }. Carry is bounded by one max pkt: a length is checked
-// (pktHeader) before the loop waits for its payload. Every slice below is inside a length the loop has already
-// checked, so it is a view, not a bounded read: nothing here can be short.
+// (pktHeader) before the loop waits for its payload. A data payload is a copy, so a caller that keeps a frame keeps one
+// frame and may drop the chunk it came in (peak: one chunk plus one frame, #172). Every slice below is inside a length
+// the loop has already checked: nothing here can be short.
 export type PktStepped = { frames: PktFrame[]; state: PktState };
 // @decoder pktStep prefix=pkt
 // oxlint-disable-next-line eslint/complexity -- one frame loop, a switch on the length
@@ -104,7 +105,7 @@ export function pktStep(st: PktState, chunk: Uint8Array): Result<PktStepped, Pro
         // so the bound is checked before the loop waits for (and carries) the payload
         if (len - PKT_LEN_HEX > PKT_READ_MAX_PAYLOAD) return proto(`bad pkt-line length ${len - PKT_LEN_HEX}`);
         if (buf.length - p < len) break frame;
-        const payload = buf.subarray(p + PKT_LEN_HEX, p + len);
+        const payload = buf.slice(p + PKT_LEN_HEX, p + len);
         data++;
         // Stryker disable next-line EqualityOperator: a payload equal to the current maximum leaves the maximum unchanged
         if (payload.length > maxPayload) maxPayload = payload.length;

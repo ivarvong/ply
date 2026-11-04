@@ -31,7 +31,7 @@ const DBASE: number[] = [];
 const DEXT: number[] = [];
 for (let base = 3, i = 0; i < 29; i++) { const x = i < 8 || i === 28 ? 0 : (i >> 2) - 1; LEXT.push(x); LBASE.push(i === 28 ? 258 : base); base += 1 << x; }
 for (let base = 1, i = 0; i < 30; i++) { const x = i < 4 ? 0 : (i >> 1) - 1; DEXT.push(x); DBASE.push(base); base += 1 << x; }
-const CLORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+export const CLORDER: readonly number[] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
 export const DEFLATE_TABLES: { readonly LBASE: readonly number[]; readonly LEXT: readonly number[]; readonly DBASE: readonly number[]; readonly DEXT: readonly number[] } = /* @__PURE__ */ Object.freeze({ LBASE, LEXT, DBASE, DEXT });
 
@@ -55,8 +55,8 @@ export function huffBuild(lengths: ArrayLike<number>): Huffman {
 }
 
 // lengths 0-143: 8, 144-255: 9, 256-279: 7, 280-287: 8
-const FIXED_LIT = huffBuild(new Uint8Array(288).fill(8).fill(9, 144, 256).fill(7, 256, 280));
-const FIXED_DIST = huffBuild(new Uint8Array(30).fill(5));
+export const FIXED_LIT: Huffman = huffBuild(new Uint8Array(288).fill(8).fill(9, 144, 256).fill(7, 256, 280));
+export const FIXED_DIST: Huffman = huffBuild(new Uint8Array(30).fill(5));
 /* oxlint-enable no-magic-numbers */
 
 export function adler32(bytes: Uint8Array, a = 1, b = 0): number {
