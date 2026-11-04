@@ -150,3 +150,31 @@ test('199999 and 200000 list under a 128 MiB heap; 200001 is a typed refusal and
     cleanup();
   }
 });
+
+// The rest of #140: listTree's result holds every entry's hex id. toHex built it by appending 20 two-digit pieces, a
+// V8 rope of ~15 cells (~480 B per id, 110 MiB at the cap, the OOM the sweep held). A flat 40-character string is
+// ~57 B. Measured in a child with --expose-gc: the heap freed by dropping many ids, per id (64 B now, 488 B as a rope).
+test('a hex id is a flat string: retaining one costs well under a rope', async () => {
+  const N = 100_000;
+  const script = `
+    import { toHex } from './src/sha1.js';
+    const src = Array.from({ length: ${N} }, (_, i) => Uint8Array.of(1, ...new Uint8Array(15), i >>> 24, (i >>> 16) & 255, (i >>> 8) & 255, i & 255));
+    const heap = () => { gc(); gc(); return process.memoryUsage().heapUsed; };
+    let held = src.map(toHex);
+    const last = held[${N} - 1];
+    const withIds = heap();
+    held = null;
+    const freed = withIds - heap();
+    process.stdout.write(String(freed / ${N}) + ' ' + last);
+  `;
+  const out = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--expose-gc', '--import', './test/ts-resolve.mjs', '--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+    let text = '';
+    child.stdout.on('data', d => { text += d; });
+    child.on('close', status => (status === 0 ? resolve(text) : reject(new Error(`child exit ${status}`))));
+    child.on('error', reject);
+  });
+  const [perId, last] = out.split(' ');
+  assert.equal(last, `01${'00'.repeat(15)}${(N - 1).toString(16).padStart(8, '0')}`);
+  assert.ok(Number(perId) < 160, `${perId} B per retained id`);
+});

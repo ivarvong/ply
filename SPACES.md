@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **561** (493 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 460, by a pending PR 45, excluded 28, unregistered 28. Fail sites no cell reaches: 30 of 493. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 274 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **562** (493 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 460, by a pending PR 45, excluded 29, unregistered 28. Fail sites no cell reaches: 30 of 493. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 274 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -100,7 +100,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (25: lossless 9, strict 3, replacement 13)
+## Decode sites (26: lossless 9, strict 3, replacement 14)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
@@ -130,6 +130,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/receivecaps.ts` parseReceiveAdvert() | replacement | td | excluded: protocol: only the capability list after the NUL is read (ASCII keywords); the ref name before it is ignored |
 | `src/repo-node.ts` get() | lossless | decodeBytes | excluded: protocol: a loose object header is "&lt;type> &lt;size>" in ASCII, which the regex after the decode checks; a non-ASCII byte fails that check as it fails git (and the object hash is checked too) |
+| `src/sha1.ts` toHex() | replacement | td | excluded: the bytes are hex digits toHex wrote itself (ASCII): nothing to replace |
 | `src/sign.ts` withGpgsig() | lossless | decodeBytes | `sign` / case |
 
 ## Holes (58)

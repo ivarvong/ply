@@ -1,16 +1,3 @@
 {
-  "entries": [
-    {
-      "id": "tree.listTree.199999",
-      "heap": "128",
-      "actual": { "status": "oom" },
-      "why": "parseTree allocates every entry before the cap can fire, so 199999 entries exhaust a 128 MiB heap"
-    },
-    {
-      "id": "tree.listTree.200000",
-      "heap": "128",
-      "actual": { "status": "oom" },
-      "why": "parseTree allocates every entry before the cap can fire, so 200000 entries exhaust a 128 MiB heap"
-    }
-  ]
+  "entries": []
 }

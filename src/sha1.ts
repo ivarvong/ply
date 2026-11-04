@@ -1,7 +1,7 @@
 // Streaming SHA-1. Needed because crypto.subtle.digest is whole-buffer only,
 // and pack trailers / object ids must be computed over data we never hold at once.
 
-import { HEXV } from './bytes.js';
+import { HEXV, td, te } from './bytes.js';
 import { atOr, field } from './absent.js';
 import { flatMapOption } from './result.js';
 
@@ -10,12 +10,19 @@ import { flatMapOption } from './result.js';
 type DigestStream = new (algorithm: string) => WritableStream<Uint8Array> & { readonly digest: Promise<ArrayBuffer> };
 const isDigestStream = (ctor: unknown): ctor is DigestStream => typeof ctor === 'function';
 
-const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+// The digits go into one buffer, decoded once: a flat string. Appending 20 two-character pieces built a rope (a V8
+// ConsString, ~15 cells): ~480 B per oid instead of ~57, and a listTree of 200 000 entries keeps one per entry, which
+// was 110 MiB retained and an OOM at a 128 MiB heap (#140).
+const DIGITS = te.encode('0123456789abcdef');
 export function toHex(bytes: Uint8Array): string {
-  let s = '';
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- a byte indexes HEX (256 entries); `as`, not the `!` src/ forbids
-  for (let i = 0; i < bytes.length; i++) s += HEX[bytes[i] as number] as string;
-  return s;
+  const out = new Uint8Array(bytes.length * 2);
+  for (let i = 0; i < bytes.length; i++) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < bytes.length, and a nibble indexes DIGITS (16 entries); `as`, not the `!` src/ forbids
+    const b = bytes[i] as number, hi = DIGITS[b >> 4] as number, lo = DIGITS[b & 15] as number;
+    out[2 * i] = hi;
+    out[2 * i + 1] = lo;
+  }
+  return td.decode(out);
 }
 // Table-driven (bytes.ts HEXV): 4.8× faster than parseInt per byte (PR body). A pair that is not two hex digits keeps
 // parseInt's reading, so any string maps to the bytes it always did; fromHex has never validated (callers check oids).
