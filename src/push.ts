@@ -13,6 +13,7 @@ import { frames, coded, clientSpan, spanned, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
 import { validatePushRef, validateWire } from './validate.js';
+import type { WireField } from './validate.js';
 
 /* oxlint-disable no-magic-numbers -- span tails and the short-oid display width are diagnostics, not wire-format facts */
 const SHORT_OID = 8;
@@ -403,7 +404,7 @@ const pushDefaults = (): { -readonly [K in keyof PushConfig]: PushConfig[K] } =>
 export type PushResult = { readonly report: PushReport | null; readonly packBytes: number; readonly entries: readonly PackEntry[]; readonly hookOutput: string };
 
 // The request, planned before anything is built or sent (pure): every refusal here happens with nothing on the wire.
-export type PushPlan = { readonly commands: Commands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
+export type PushPlan = { readonly commands: Commands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly pushOptions: readonly WireField[]; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
 // The capabilities a push asks for; atomic and push-options only from a CheckedCaps.
 export type PushRequestCap = 'report-status' | 'report-status-v2' | 'side-band-64k' | 'atomic' | 'delete-refs' | 'push-options';
 const requestCap = (cap: PushRequestCap): PushRequestCap => {
@@ -450,20 +451,23 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
   }
   const bases = checkBaseIndexes(cfg.objects);
   if (!bases.ok) return bases;
+  // each option parsed once into the plan; the request body writes the parsed ones
+  const pushOptions: WireField[] = [];
   for (const p of cfg.checked === null ? [] : cfg.checked.pushOptions) {
     const option = validateWire(p, 'push option');
     if (!option.ok) return option;
+    pushOptions.push(option.value);
   }
   // read once, before anything is built or sent: the same values bound the pack and the report
   const maxReportLines = readLimit(limits, 'maxReportLines');
   if (!maxReportLines.ok) return maxReportLines;
   const maxPack = readLimit(limits, 'maxPackBytes');
   if (!maxPack.ok) return maxPack;
-  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value, objects: cfg.objects, sideband: cfg.sideband });
+  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value, objects: cfg.objects, sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {
-  const options = plan.checked === null ? [] : plan.checked.pushOptions;
+  const options = plan.pushOptions;
   if (options.length === 0) return pushBody(plan, pack);
   const head = pushBody(plan);
   if (!head.ok) return head;

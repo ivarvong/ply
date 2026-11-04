@@ -312,7 +312,7 @@ export const DECISIONS = [
   { match: "src/packresolve.ts#parsePack:limit_exceeded:pack objects", space: 'pack-cut', axisTag: 'cap' },
   { match: "src/packresolve.ts#parsePack:pack_corrupt:pack: ofs delta at … is its own base", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#parsePack:pack_corrupt:pack: ofs delta base before pack start at …", space: 'pack-cut', axisTag: 'corrupt' },
-  { match: "src/packresolve.ts#parsePack:pack_corrupt:pack: bad object type … at …", space: 'pack-cut', axisTag: 'corrupt' },
+  { match: "src/packresolve.ts#readObjHeader:pack_corrupt:pack: bad object type … at …", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#objectName:pack_corrupt:pack: bad object type …", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#parsePack:limit_exceeded:pack object size", space: 'pack-cut', axisTag: 'cap' },
   { match: "src/packresolve.ts#parsePack:limit_exceeded:pack inflated bytes", space: 'pack-cut', axisTag: 'cap' },

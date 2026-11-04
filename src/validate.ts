@@ -58,8 +58,13 @@ export function validateIdent(input: IdentInput = {}): Result<ValidatedIdent, Ba
 }
 
 // A pkt-line field. CR, LF, or NUL ends the line or the command the way a header injection does.
-export function validateWire(value: unknown, what: string): Result<string, Bad> {
-  if (typeof value !== 'string' || /[\0\r\n]/u.test(value)) return bad(what, 'must be a string without NUL, CR, or LF');
+declare const wireBrand: unique symbol;
+/** One pkt-line field: a string without NUL, CR, or LF (validateWire grants the brand, and nothing else does). */
+export type WireField = string & { readonly [wireBrand]: typeof wireBrand };
+// The whole check, and the brand it grants.
+const isWireField = (value: unknown): value is WireField => typeof value === 'string' && !/[\0\r\n]/u.test(value);
+export function validateWire(value: unknown, what: string): Result<WireField, Bad> {
+  if (!isWireField(value)) return bad(what, 'must be a string without NUL, CR, or LF');
   return ok(value);
 }
 
