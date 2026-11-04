@@ -22,7 +22,7 @@ import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
-import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, reportLineCap, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, refusedBeforeReceivePack, reportLineCap, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
@@ -1938,6 +1938,20 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   assert.deepEqual([1, 2, 5].map(n => reportLineCap({ maxReportLines: 1, commands: Array(n).fill(del.commands[0]), caps: ['report-status'] })), [2, 3, 6]);
   assert.deepEqual([1, 2].map(n => reportLineCap({ maxReportLines: 1, commands: Array(n).fill(del.commands[0]), caps: ['report-status-v2'] })), [6, 11]);
   assert.equal(reportLineCap({ maxReportLines: 100, commands: del.commands, caps: ['report-status-v2'] }), 100);
+  // #144: an HTTP refusal at the status line (no frame read) that the service's advertisement repeats is that error:
+  // receive-pack is not there for this caller. An advertisement that answers, refuses otherwise, or cannot be asked,
+  // a refusal after a frame, and every other code stay ambiguous (a middlebox may have forwarded the body).
+  const refusing = (code, advertised, ...before) => ({ ...sb(), advertise: async () => advertised, async *frames() { for (const f of before) yield { kind: 'data', payload: f }; throw Object.assign(new Error(`HTTP ${code}`), { code }); } });
+  const adErr = code => ({ ok: false, error: Object.assign(new Error(`ad ${code}`), { code }) });
+  for (const code of ['auth', 'not_found']) {
+    await assert.rejects(unwrapAsync(push(refusing(code, adErr(code)), del)), e => e.code === code && e.message === `HTTP ${code}`);
+    await assert.rejects(unwrapAsync(push(refusing(code, adErr(code), band(2, 'hi\n')), del)), e => e.code === 'ambiguous' && e.original === code);
+    for (const ad of [{ ok: true, value: new Uint8Array(0) }, adErr(code === 'auth' ? 'not_found' : 'auth'), adErr('network')]) await assert.rejects(unwrapAsync(push(refusing(code, ad), del)), e => e.code === 'ambiguous' && e.original === code);
+    const noAd = { ...refusing(code, null), advertise: undefined };
+    await assert.rejects(unwrapAsync(push(noAd, del)), e => e.code === 'ambiguous' && e.original === code);
+  }
+  for (const code of ['upstream_5xx', 'http', 'rate_limited', 'network', 'timeout']) await assert.rejects(unwrapAsync(push(refusing(code, adErr(code)), del)), e => e.code === 'ambiguous' && e.original === code);
+  assert.deepEqual([refusedBeforeReceivePack({ cause: null, answered: false }), refusedBeforeReceivePack({ cause: { code: 'auth' }, answered: true }), refusedBeforeReceivePack({ cause: { code: 'auth' }, answered: false })], [false, false, true]);
   const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
   await assert.rejects(unwrapAsync(push(big, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
   const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes

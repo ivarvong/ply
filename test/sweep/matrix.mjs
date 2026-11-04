@@ -500,7 +500,8 @@ function pass2(add) {
   add({ id: 'caps.nofilter.merge', param: 'maxMergeDepth', op: 'merge', repo: 'cap-nofilter--mb-8', from: 'refs/heads/feat', writes: true, bytes: 128, entries: 17, expect: ok });
   add({ id: 'caps.nosha.readFile', param: 'maxPathDepth', op: 'readFile', repo: 'cap-nosha--depth-8', path: 'd/d/d/d/d/d/d/f.txt', bytes: 64, entries: 8, expect: ok });
   add({ id: 'caps.reachable.readFile', param: 'maxPathDepth', op: 'readFile', repo: 'cap-reachable--depth-8', path: 'd/d/d/d/d/d/d/f.txt', bytes: 64, entries: 8, expect: ok });
-  add({ id: 'caps.nopush.pushTree', param: 'maxPushBytes', op: 'pushTree', repo: 'cap-nopush--push-empty', writes: true, nfiles: 1, size: 64, bytes: 64, entries: 1, expect: refused('ambiguous') });
+  // receive-pack disabled: http-backend answers the POST 403 at its status line, and its advertisement 403 too, so receive-pack never ran: 'auth', never 'ambiguous'
+  add({ id: 'caps.nopush.pushTree', param: 'maxPushBytes', op: 'pushTree', repo: 'cap-nopush--push-empty', writes: true, nfiles: 1, size: 64, bytes: 64, entries: 1, expect: refused('auth') });
 
   // ---- thin packs. Push: the remote has v1, the local repository v1 and v2; a thin push sends v2's blob as a
   // REF_DELTA against v1's, which git's receive-pack completes (index-pack --fix-thin). Fetch: the server deltas
