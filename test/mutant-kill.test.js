@@ -22,7 +22,7 @@ import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine, lsRefs as lsRefsR, lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 } from '../src/discover.js';
 import { lsRefs as lsRefsAsked } from '../src/client.js';
-import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, outcomeResult, ngClass, planPush, reportLineCap, requestCaps, streamInit, streamStep, GIT_UNPACK_ERRORS, push, ZERO_OID } from '../src/push.js';
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
@@ -1917,8 +1917,17 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del)), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
-  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
-  await assert.rejects(unwrapAsync(push(many, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 2);
+  // #144: the cap admits what git sends for the commands pushed (unpack + one status each), whatever maxReportLines says;
+  // a line past that is the cap's
+  const exact = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  assert.equal((await unwrapAsync(push(exact, del))).report.refs.length, 1);
+  const many = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/b\n'), null), limits: withLimits({ maxReportLines: 1 }) };
+  await assert.rejects(unwrapAsync(push(many, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report lines' && e.cause.got === 3 && e.cause.max === 2);
+  const over = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n', 'ok refs/heads/b\n', 'ok refs/heads/c\n'), null), limits: withLimits({ maxReportLines: 3 }) };
+  await assert.rejects(unwrapAsync(push(over, del)), e => e.code === 'ambiguous' && e.cause.what === 'report lines' && e.cause.got === 4 && e.cause.max === 3);
+  assert.deepEqual([1, 2, 5].map(n => reportLineCap({ maxReportLines: 1, commands: Array(n).fill(del.commands[0]), caps: ['report-status'] })), [2, 3, 6]);
+  assert.deepEqual([1, 2].map(n => reportLineCap({ maxReportLines: 1, commands: Array(n).fill(del.commands[0]), caps: ['report-status-v2'] })), [6, 11]);
+  assert.equal(reportLineCap({ maxReportLines: 100, commands: del.commands, caps: ['report-status-v2'] }), 100);
   const big = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 20 }) };
   await assert.rejects(unwrapAsync(push(big, del)), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes');
   const fits = { ...sb(report('unpack ok\n', 'ok refs/heads/a\n'), null), limits: withLimits({ maxPackBytes: 39 }) }; // the report frame's payload is exactly 39 bytes

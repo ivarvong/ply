@@ -471,6 +471,14 @@ const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array
   return framed.ok ? ok(concat([head.value, ...framed.value, FLUSH, ...(pack ? [pack] : [])])) : framed;
 };
 
+// The report's line cap: limits.maxReportLines, but never fewer lines than git sends for the commands pushed (one unpack
+// line, then one status per command; report-status-v2 adds up to four option lines a ref: refname, old-oid, new-oid,
+// forced-update), so a push maxRefs allows is never cut off by its own honest report (#144: maxRefs commands read
+// maxRefs + 1 lines). A larger cap is for a proc-receive hook that reports one command as several refs.
+export const REPORT_V2_OPTION_LINES = 4;
+export const reportLineCap = (plan: Pick<PushPlan, 'maxReportLines' | 'commands' | 'caps'>): number =>
+  Math.max(plan.maxReportLines, 1 + plan.commands.length * (plan.caps.includes('report-status-v2') ? 1 + REPORT_V2_OPTION_LINES : 1));
+
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the
 // response end the read as `lost`; the stream otherwise ends as a report or broken. `reading` is the last reading state.
 type Read = { readonly done: Broken | StreamReport; readonly reading: Reading } | { readonly cause: unknown };
@@ -479,6 +487,7 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: Uint8Array, 
   let reading = streamInit(sideband);
   let st: StreamState = reading;
   let lost: { readonly cause: unknown } | null = null;
+  const maxLines = reportLineCap(plan);
   try {
     for await (const f of frames(t, 'git-receive-pack', body, span)) {
       reportBytes += f.kind === 'data' ? f.payload.length : 0;
@@ -489,7 +498,7 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: Uint8Array, 
       // Stryker disable next-line ConditionalExpression: a broken state has no lines, so reading on fails the read: ambiguous either way
       if (st.tag !== 'reading') break;
       reading = st;
-      if (st.lines.length > plan.maxReportLines) { lost = { cause: limitExceeded('report lines', st.lines.length, plan.maxReportLines) }; break; }
+      if (st.lines.length > maxLines) { lost = { cause: limitExceeded('report lines', st.lines.length, maxLines) }; break; }
     }
   } catch (e) { lost = { cause: e }; }
   return lost === null ? { done: streamFinish(st), reading } : lost;

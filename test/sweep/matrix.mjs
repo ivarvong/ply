@@ -363,16 +363,17 @@ function pass2(add) {
   }
 
   // ---- maxReportLines. pushRepo of every branch of branches-N to an empty repository: N commands, and receive-pack
-  // answers one unpack line and one status per ref (N + 1 lines). A report over the cap is read no further, and the
-  // push is 'ambiguous': it may have landed. git's refs after the push are the oracle (they must equal the local ones).
+  // answers one unpack line and one status per ref (N + 1 lines). The cap admits at least that many lines for the
+  // commands sent (push.ts reportLineCap), so an honest report never trips it: a push of 8 under a cap of 8 lands.
+  // git's refs after the push are the oracle (they must equal the local ones).
   for (const n of [6, 7, 8]) {
     add({
       id: `report.cap8.n${n}`, param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: `branches-${n}`, spec: { all: true }, writes: true,
       bytes: n * 64, entries: n, limits: { maxReportLines: 8 }, nightly: n === 6,
-      expect: n + 1 > 8 ? refused('ambiguous') : ok,
+      expect: ok,
     });
   }
-  // maxRefs allows as many commands as maxReportLines allows lines, and a report is one line more than its commands.
+  // maxRefs allows as many commands as maxReportLines allows lines, and a report is one line more than its commands (#144).
   add({
     id: 'report.refs8.n8', param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
     bytes: 8 * 64, entries: 8, limits: { maxRefs: 8, maxReportLines: 8 }, expect: ok,

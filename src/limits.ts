@@ -78,7 +78,9 @@ export const LIMIT_PATH_COMPONENT = 4096;
 export const LIMIT_MERGE_DEPTH = 1024;
 /**
  * report-status pkt-lines buffered from receive-pack: one unpack line, one status per ref, plus
- * report-status-v2 option lines. The ref cap is the same order.
+ * report-status-v2 option lines. The ref cap is the same order. push reads at least as many lines as git sends for
+ * the commands pushed (1 + N, or 1 + 5N with report-status-v2; push.ts reportLineCap), so a push of N <= maxRefs
+ * commands never trips this cap; a larger value admits a proc-receive hook that reports one command as several refs.
  */
 export const LIMIT_REPORT_LINES: number = LIMIT_REFS;
 /**

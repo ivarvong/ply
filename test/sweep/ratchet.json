@@ -1,48 +1,12 @@
 {
   "entries": [
     {
-      "id": "report.refs8.n8",
-      "heap": "default",
-      "why": "#144: maxReportLines counts the unpack line, so a push of exactly maxRefs commands (allowed) gets maxRefs + 1 report lines and is reported ambiguous although git applied it; at the defaults that is 10 000 refs (report.n10000)",
-      "actual": {
-        "status": "refused",
-        "code": "ambiguous"
-      }
-    },
-    {
-      "id": "report.refs8.n8",
-      "heap": "128",
-      "why": "#144: maxReportLines counts the unpack line, so a push of exactly maxRefs commands (allowed) gets maxRefs + 1 report lines and is reported ambiguous although git applied it; at the defaults that is 10 000 refs (report.n10000)",
-      "actual": {
-        "status": "refused",
-        "code": "ambiguous"
-      }
-    },
-    {
       "id": "workerd.readFile.cap1MiB.1048577",
       "heap": "workerd",
       "why": "#144: under workerd the limit_exceeded raised inside readFile's blob stream reaches the reader as pack_corrupt (message 'blob stream: pack bytes ... exceeds limit'); node keeps limit_exceeded (pack.readFile.cap1MiB.1048577)",
       "actual": {
         "status": "refused",
         "code": "pack_corrupt"
-      }
-    },
-    {
-      "id": "report.n10000",
-      "heap": "default",
-      "why": "#144: maxReportLines (10 000) equals maxRefs, and the report counts the unpack line: the largest push maxRefs allows (10 000 commands, applied by git) reads 10 001 lines and is reported ambiguous (same break as report.refs8.n8)",
-      "actual": {
-        "status": "refused",
-        "code": "ambiguous"
-      }
-    },
-    {
-      "id": "report.n10000",
-      "heap": "128",
-      "why": "#144: maxReportLines (10 000) equals maxRefs, and the report counts the unpack line: the largest push maxRefs allows (10 000 commands, applied by git) reads 10 001 lines and is reported ambiguous (same break as report.refs8.n8)",
-      "actual": {
-        "status": "refused",
-        "code": "ambiguous"
       }
     }
   ]
