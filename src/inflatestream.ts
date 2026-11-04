@@ -234,11 +234,13 @@ function takeChunk(st: InflateStream): Uint8Array<ArrayBuffer> {
 
 // ---- steps: each takes all the input it needs or none of it ----
 function declaredFits(bound: StreamBound, maxOutput: number): Result<null, ErrorOf<'limit_exceeded'>> {
+  // Stryker disable next-line ConditionalExpression: a capped bound has no size, and the missing size is not greater than the cap
   if (bound.kind === 'declared' && bound.size > maxOutput) return fail('limit_exceeded', `inflate: expected size ${bound.size} exceeds limit ${maxOutput}`, { what: 'inflate expected size', got: bound.size, max: maxOutput });
   return ROOM;
 }
 function stepHeader(st: InflateStream): Drive {
-  if (st.carry.length - st.p < ZLIB_HEADER_BYTES) return NEED;
+  // nothing is consumed before the header is whole, so the carry starts at it (p is 0)
+  if (st.carry.length < ZLIB_HEADER_BYTES) return NEED;
   const cmf = st.carry[st.p] as number;
   const flg = st.carry[st.p + 1] as number;
   const method = cmf & ZLIB_CM_MASK;
@@ -453,6 +455,7 @@ function stepAdler(st: InflateStream): Drive {
   const want = (((c[at] as number) << (BE32_SHIFTS[0] as number)) | ((c[at + 1] as number) << (BE32_SHIFTS[1] as number)) | ((c[at + 2] as number) << (BE32_SHIFTS[2] as number)) | (c[at + ADLER_BYTES - 1] as number)) >>> 0;
   sum(st);
   // a raw stream never reaches this phase (endBlock)
+  // Stryker disable next-line ConditionalExpression: a raw stream never reaches this phase, so its kind is always zlib here
   if (st.wrap.kind === 'zlib' && st.wrap.verifyAdler && st.adler !== want) return refuse(st, plyError('pack_corrupt', 'inflate: adler32 mismatch'));
   st.p += ADLER_BYTES;
   return finish(st);
@@ -478,11 +481,14 @@ function dispatch(st: InflateStream): Drive {
 // Input closed inside the member: which truncation it is, by where it stopped (inflate.ts's messages).
 function truncated(st: InflateStream): ErrorOf<'pack_corrupt'> {
   switch (st.phase) {
-    case 'header': return shortRead('pack_corrupt', 0, ZLIB_HEADER_BYTES, st.carry.length - st.p);
+    // nothing is consumed before the header is whole: every byte fed is unread
+    case 'header': return shortRead('pack_corrupt', 0, ZLIB_HEADER_BYTES, st.carry.length);
     case 'stored-header': return plyError('pack_corrupt', 'inflate: truncated stored header');
     case 'stored': return plyError('pack_corrupt', 'inflate: truncated stored block');
     case 'adler': return plyError('pack_corrupt', 'inflate: truncated adler32');
-    case 'block': case 'dyn-header': case 'dyn-clen': case 'dyn-lens': case 'codes': case 'end':
+    // Stryker disable next-line ConditionalExpression,StringLiteral: an ended member never asks for input, so 'end' is never truncated
+    case 'end':
+    case 'block': case 'dyn-header': case 'dyn-clen': case 'dyn-lens': case 'codes':
       return plyError('pack_corrupt', 'inflate: unexpected end of input');
   }
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
@@ -534,11 +540,16 @@ export function inflateUnread(st: InflateStream): Uint8Array {
 }
 
 const freshStats = (): InflateStats => ({ blocks: 0, stored: 0, fixed: 0, dynamic: 0, literals: 0, matches: 0, matchBytes: 0, maxDist: 0, maxLen: 0 });
+// The record's buffers. inflateReset sets every other field a member reads before its first pull (blank's values are
+// placeholders, so Stryker's changes to them are equivalent).
 function blank(): InflateStream {
   return {
+    // Stryker disable next-line all: placeholders, see above
     phase: 'header', halt: RUNNING, bound: cappedBound(), wrap: rawWrap(), maxOutput: 0, declared: 0, maxInput: 0,
+    // Stryker disable next-line all: placeholders, see above
     windowSize: INFLATE_WINDOW, ended: false, carry: EMPTY, p: 0, base: 0, bitbuf: 0, bitcnt: 0, markP: 0, markBuf: 0, markCnt: 0,
     window: new Uint8Array(INFLATE_WINDOW), w: 0, out: new Uint8Array(INFLATE_CHUNK), outLen: 0, summed: 0, adler: 1, emitted: 0,
+    // Stryker disable next-line all: placeholders, see above (a block header sets `final` and the counts before they are read)
     stats: freshStats(), final: false, storedLeft: 0, nlen: 0, ndist: 0, ncode: 0, lensI: 0,
     lengths: new Uint8Array(DEFLATE_HLIT_MAX + DEFLATE_HDIST_MAX), lencode: FIXED_LIT, lit: FIXED_LIT, dist: FIXED_DIST, copyLeft: 0, copyDist: 0,
   };
@@ -574,7 +585,6 @@ export function inflateReset(st: InflateStream, opts: InflateStreamOpts): Result
   st.adler = 1;
   st.emitted = 0;
   st.stats = freshStats();
-  st.final = false;
   st.storedLeft = 0;
   st.copyLeft = 0;
   st.copyDist = 0;

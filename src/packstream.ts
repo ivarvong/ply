@@ -87,6 +87,7 @@ const NEED_PIECE: PackPiece = { kind: 'need' };
 const END_PIECE: PackPiece = { kind: 'end' };
 // A step's answer: go on, a piece, or stopped (the refusal is on the record).
 type Step = { readonly kind: 'cont' } | { readonly kind: 'piece'; readonly piece: PackPiece } | { readonly kind: 'failed' };
+// Stryker disable next-line ObjectLiteral,StringLiteral: the pull loops on anything that is not a piece or a failure
 const CONT: Step = { kind: 'cont' };
 const NEED: Step = { kind: 'piece', piece: NEED_PIECE };
 const FAILED: Step = { kind: 'failed' };
@@ -104,10 +105,14 @@ export function parsePackInit(opts: PackScanOpts): Result<PackScan, PackError> {
   if (!maxInflatedTotal.ok) return maxInflatedTotal;
   const maxObjectSize = readLimit(opts.limits, 'maxObjectSize');
   if (!maxObjectSize.ok) return maxObjectSize;
+  // a declared size of 0 under a cap readLimit has just checked: this record always opens (each member resets it)
+  // Stryker disable next-line all: see above
   const inflate = inflateInit({ bound: declaredBound(0, maxObjectSize.value), wrap: zlibWrap(true) });
+  // Stryker disable next-line all: see above
   if (!inflate.ok) return inflate;
   return ok({
     phase: 'header', halt: RUNNING, maxObjects: maxObjects.value, maxInflatedTotal: maxInflatedTotal.value, maxObjectSize: maxObjectSize.value,
+    // Stryker disable next-line ObjectLiteral,StringLiteral: the hash is read only as kind 'on'; any other record is off
     ended: false, carry: EMPTY, p: 0, at: 0, total: 0, lag: EMPTY, hash: opts.verify ? { kind: 'on', sha: new Sha1() } : { kind: 'off' },
     count: 0, index: 0, charged: 0, offset: 0, headerBytes: 0, type: 0, size: 0, base: NO_BASE, inflate: inflate.value,
   });
@@ -118,6 +123,7 @@ export function parsePackInit(opts: PackScanOpts): Result<PackScan, PackError> {
 function hashLagged(st: PackScan, bytes: Uint8Array): void {
   st.total += bytes.length;
   const lagged = st.lag.length + bytes.length;
+  // Stryker disable next-line EqualityOperator: at exactly PACK_TRAILER_BYTES the other branch hashes nothing and keeps the same lag
   if (lagged <= PACK_TRAILER_BYTES) {
     const lag = new Uint8Array(lagged);
     lag.set(st.lag, 0);
@@ -251,7 +257,9 @@ function stepGate(st: PackScan): Step {
   if (st.charged + cost > st.maxInflatedTotal) return refuse(st, limitExceeded('pack inflated bytes', st.charged + cost, st.maxInflatedTotal));
   st.charged += cost;
   st.headerBytes = st.at - st.offset;
+  // the size passed the cap on the line above, and the cap passed readLimit: the reset cannot refuse
   const opened = inflateReset(st.inflate, { bound: declaredBound(st.size, st.maxObjectSize), wrap: zlibWrap(true) });
+  // Stryker disable next-line all: see above
   if (!opened.ok) return refuse(st, opened.error);
   // the member's bytes are the inflate record's from here; the scan's carry is empty until the member ends
   inflateFeed(st.inflate, st.carry.subarray(st.p));

@@ -9,14 +9,15 @@ import crypto from 'node:crypto';
 import { Rng, splitRandom } from './fuzz/prng.js';
 import { concat, te } from '../src/bytes.js';
 import { pkt, pktInit, pktStep } from '../src/pktline.js';
-import { buildPack, encodeObjHeader, makeDelta } from '../src/pack.js';
+import { buildPack, encodeObjHeader, encodeOfsDistance, makeDelta } from '../src/pack.js';
 import { parsePack } from '../src/packresolve.js';
-import { inflate, huffBuild } from '../src/inflate.js';
+import { inflate, huffBuild, DEFLATE_TABLES } from '../src/inflate.js';
 import {
   inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs,
 } from '../src/inflatestream.js';
 import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts, streamPackAttrs } from '../src/packstream.js';
-import { sidebandStep, v2Init } from '../src/fetch.js';
+import { sidebandStep, v2Init, fetchObject } from '../src/fetch.js';
+import { transport, v2PackResponse } from './space/wire.js';
 import { peakBound } from '../src/streambound.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV } from '../src/limits.js';
@@ -495,6 +496,209 @@ test('sidebandStep: band 1 is pack bytes, band 2 progress, band 3 the remote err
   assert.equal(refusal(sidebandStep(st, frame(4, 'x'), 10)), 'protocol: v2: bad sideband 4');
   assert.equal(refusal(sidebandStep(st, { kind: 'data', payload: new Uint8Array(0) }, 10)), 'protocol: short read: need 1 bytes at 0, have 0');
   assert.equal(refusal(sidebandStep(st, { kind: 'delim' }, 10)), 'protocol: v2: delim inside the packfile section');
+});
+
+// ---- edges: the boundaries and paths the properties above meet only by chance ----
+// A deflate bit writer: fixed-Huffman blocks (literals, matches, end of block) and stored blocks, LSB first.
+const LIT = huffCodes(huffBuild(Array.from({ length: 288 }, (_, i) => (i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8))));
+const DIST = huffCodes(huffBuild(Array.from({ length: 30 }, () => 5)));
+function deflateBits() {
+  const bits = [];
+  const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+  const code = rec => { for (let i = rec.len - 1; i >= 0; i--) bits.push((rec.code >> i) & 1); };
+  const w = {
+    fixed(final, ...ops) {
+      put(final ? 1 : 0, 1); put(1, 2);
+      for (const op of ops) {
+        if (typeof op === 'number') { code(LIT.get(op)); continue; }
+        const li = DEFLATE_TABLES.LBASE.findLastIndex(b => b <= op.len);
+        code(LIT.get(257 + li)); put(op.len - DEFLATE_TABLES.LBASE[li], DEFLATE_TABLES.LEXT[li]);
+        const di = DEFLATE_TABLES.DBASE.findLastIndex(b => b <= op.dist);
+        code(DIST.get(di)); put(op.dist - DEFLATE_TABLES.DBASE[di], DEFLATE_TABLES.DEXT[di]);
+      }
+      code(LIT.get(256));
+      return w;
+    },
+    stored(final, data) {
+      put(final ? 1 : 0, 1); put(0, 2);
+      while (bits.length % 8) bits.push(0);
+      const n = data.length, nlen = (~n) & 0xffff;
+      for (const b of [n & 0xff, n >> 8, nlen & 0xff, nlen >> 8, ...data]) put(b, 8);
+      return w;
+    },
+    bytes: () => packBits(bits),
+  };
+  return w;
+}
+const zlibOf = raw => { const out = inflate(raw, 0, { raw: true }); const a = adler32Of(out.ok ? out.value.out : new Uint8Array(0)); return concat([Uint8Array.of(0x78, 0x01), raw, a]); };
+const adler32Of = d => { let a = 1, b = 0; for (const x of d) { a = (a + x) % 65521; b = (b + a) % 65521; } const t = new Uint8Array(4); new DataView(t.buffer).setUint32(0, ((b << 16) | a) >>> 0); return t; };
+
+test('inflate pull edges: a bit buffer already full, a stored block into a part-filled chunk, the window ring', () => {
+  // 3 + 3 × 9 + 7 = 37 bits: the next block header finds exactly the 3 bits it needs and pulls no byte (a pulled byte
+  // would be dropped with the stored block's alignment)
+  const exact = deflateBits().fixed(false, 200, 201, 202).stored(true, te.encode('xyz')).bytes();
+  assert.deepEqual([...same(exact, { raw: true }).value.out], [200, 201, 202, 120, 121, 122]);
+  // a stored block that starts in a chunk a literal began, and is longer than the chunk's rest
+  const big = crypto.randomBytes(40000);
+  const ring = deflateBits().fixed(false, 7).stored(false, big).fixed(true, { len: 258, dist: 32768 }, { len: 3, dist: 1000 }, { len: 100, dist: 40001 - 32768 }, 9).bytes();
+  const r = same(ring, { raw: true });
+  assert.equal(r.value.out.length, 1 + 40000 + 258 + 3 + 100 + 1);
+  assert.deepEqual(r.value.out.subarray(40001, 40001 + 258), new Uint8Array(r.value.out.subarray(40001 - 32768, 40001 - 32768 + 258)));
+  assert.equal(r.value.stats.maxDist, 32768, 'a match exactly one window back is inside the window');
+  // fed 1000 bytes at a time a partial chunk goes out at each need, so a stored copy runs across the window's end; a
+  // later match reads the bytes written past it (7201 back from 40001 is 32800)
+  const wrap = deflateBits().fixed(false, 7).stored(false, big).fixed(true, { len: 258, dist: 7201 }).bytes();
+  const want = inflate(wrap, 0, { raw: true });
+  const byK = pullMember(Array.from({ length: Math.ceil(wrap.length / 1000) }, (_, i) => wrap.subarray(i * 1000, i * 1000 + 1000)), streamOpts({ raw: true }));
+  assert.deepEqual(byK.value.out, new Uint8Array(want.value.out));
+  same(zlibOf(ring));
+  // a dynamic block with all 30 distance codes, and binary dynamic blocks one after another (each starts its code
+  // length code lengths from zero)
+  const far = new Uint8Array(70000);
+  far.set(crypto.randomBytes(far.length));
+  let at = 33000;
+  for (const d of DEFLATE_TABLES.DBASE) { far.copyWithin(at, at - d, at - d + 40); at += 1000; }
+  assert.equal(same(new Uint8Array(zlib.deflateSync(far, { level: 9 }))).ok, true);
+  // every byte value, skewed so Huffman codes pay: dynamic blocks whose literal lengths are nonzero everywhere
+  const skewed = n => { const a = crypto.randomBytes(n), b = crypto.randomBytes(n); return a.map((x, i) => x & b[i]); };
+  const mixed = concat(Array.from({ length: 400 }, (_, i) => (i % 2 ? skewed(400) : te.encode(`line ${i % 7} of the text `.repeat(4)))));
+  const multi = same(new Uint8Array(zlib.deflateSync(mixed, { memLevel: 3 })));
+  assert.ok(multi.value.stats.dynamic > 1, `${multi.value.stats.dynamic} dynamic blocks`);
+  // where the input ran out: between blocks, in a dynamic header, its code length codes, its code lengths
+  assert.equal(refusal(same(Uint8Array.of(0, 0, 0, 0xff, 0xff), { raw: true })), 'pack_corrupt: inflate: unexpected end of input');
+  const dynamicZ = new Uint8Array(zlib.deflateRawSync(mixed.subarray(0, 3000)));
+  const phases = new Set();
+  for (let cut = 1; cut < 200; cut++) {
+    const r2 = pullMember([dynamicZ.subarray(0, cut)], streamOpts({ raw: true }));
+    assert.equal(refusal(r2), 'pack_corrupt: inflate: unexpected end of input');
+    const st = must(inflateInit(streamOpts({ raw: true })));
+    inflateFeed(st, dynamicZ.subarray(0, cut));
+    while (must(inflatePull(st)).kind !== 'need') { /* to where it stops */ }
+    phases.add(streamInflateAttrs(st)['git.inflate.phase']);
+  }
+  assert.deepEqual([...phases].sort(), ['codes', 'dyn-clen', 'dyn-header', 'dyn-lens']);
+});
+
+test('inflate pull edges: the input bound at its boundary, a capped bound, limit details, no copy of a fed buffer', () => {
+  // empty blocks: F a fixed block (10 bits), S a stored one (aligned, 5 bytes); the last one final, then the Adler-32
+  const empties = (seq, last) => {
+    const w = deflateBits();
+    for (const k of seq) { if (k === 'F') w.fixed(false); else w.stored(false, new Uint8Array(0)); }
+    if (last === 'F') w.fixed(true); else w.stored(true, new Uint8Array(0));
+    return concat([Uint8Array.of(0x78, 0x01), w.bytes(), Uint8Array.of(0, 0, 0, 1)]);
+  };
+  // ends exactly at zlibBound(0): accepted
+  const atBound = empties('S', 'F');
+  assert.equal(atBound.length, zlibBound(0));
+  assert.equal(same(atBound, { expectedSize: 0 }).ok, true);
+  // a block that starts exactly at the bound may start; the member is refused when it ends past it
+  const startsAt = empties('FSS', 'F');
+  assert.equal(refusal(same(startsAt, { expectedSize: 0 })), `pack_corrupt: inflate: zlib stream longer than its declared size allows (${startsAt.length} > ${zlibBound(0)} for 0 bytes)`);
+  // a cap stands in for a declared size
+  const endless = empties('SSSSSS', 'S');
+  assert.equal(refusal(same(endless, { maxOutput: 0 })), `pack_corrupt: inflate: zlib stream longer than its declared size allows (17 > ${zlibBound(0)} for 0 bytes)`);
+  // the limit's details, and a declared size equal to the cap
+  const over = pulled(new Uint8Array(zlib.deflateSync(new Uint8Array(100))), { bound: cappedBound(99), wrap: zlibWrap(true) });
+  assert.deepEqual([over.error.what, over.error.got, over.error.max], ['inflate output', 100, 99]);
+  const big = pulled(Uint8Array.of(0x78, 0x01), { bound: declaredBound(100, 99), wrap: zlibWrap(true) });
+  assert.deepEqual([big.error.what, big.error.got, big.error.max], ['inflate expected size', 100, 99]);
+  assert.equal(pulled(new Uint8Array(zlib.deflateSync(new Uint8Array(100))), { bound: declaredBound(100, 100), wrap: zlibWrap(true) }).ok, true);
+  // a buffer fed to an exhausted record is taken as it is; one fed behind an unread tail is joined once
+  const st = must(inflateInit(streamOpts()));
+  const first = Uint8Array.of(0x78);
+  inflateFeed(st, first);
+  assert.equal(inflateUnread(st).buffer, first.buffer);
+  const second = Uint8Array.of(0x01, 0x01);
+  inflateFeed(st, second);
+  assert.notEqual(inflateUnread(st).buffer, second.buffer);
+  assert.deepEqual([...inflateUnread(st)], [0x78, 0x01, 0x01]);
+  must(inflatePull(st));
+  const third = Uint8Array.of(0, 0, 0xff, 0xff, 0, 0, 0, 1);
+  inflateFeed(st, third);
+  assert.equal(inflateUnread(st).buffer, third.buffer, 'the header and block byte were consumed: no copy');
+});
+
+test('pack scan edges: boundaries of each cap, OFS and REF deltas, refusals before the input closes, input after the end', () => {
+  const base = te.encode('the base object, long enough to be a delta base. '.repeat(4));
+  const target = concat([base, te.encode('and one more line')]);
+  const delta = makeDelta(base, target).delta;
+  const baseObj = concat([encodeObjHeader(TYPE.BLOB, base.length), new Uint8Array(zlib.deflateSync(base))]);
+  const ofsObj = concat([encodeObjHeader(TYPE.OFS_DELTA, delta.length), encodeOfsDistance(baseObj.length), new Uint8Array(zlib.deflateSync(delta))]);
+  const ofsPack = sealed(concat([packHead(2), baseObj, ofsObj]));
+  const ofs = sameScan(ofsPack, {}, packScanOpts());
+  assert.equal(ofs.value.objects[1].baseOffset, 12, 'a base at the first object offset is inside the pack');
+  const refObj = concat([encodeObjHeader(TYPE.REF_DELTA, delta.length), Uint8Array.from(Buffer.from(hashObject('blob', base), 'hex')), new Uint8Array(zlib.deflateSync(delta))]);
+  const refPack = sealed(concat([packHead(2), baseObj, refObj]));
+  assert.equal(sameScan(refPack, {}, packScanOpts()).value.objects[1].baseOid, hashObject('blob', base));
+  // caps at their boundary
+  const at = (limits, buf = ofsPack) => sameScan(buf, { limits: withLimits(limits) }, packScanOpts(withLimits(limits)));
+  assert.equal(at({ maxPackObjects: 2 }).ok, true);
+  assert.equal(at({ maxObjectSize: base.length }).ok, true);
+  const both = base.length + delta.length + 2 * OV;
+  assert.equal(at({ maxInflatedTotal: both }).ok, true);
+  assert.equal(refusal(at({ maxInflatedTotal: both - 1 })), `limit_exceeded: pack inflated bytes ${both} exceeds limit ${both - 1}`);
+  // a whole empty pack is read without waiting for the input to close
+  const empty = must(parsePackInit(packScanOpts()));
+  parsePackFeed(empty, sealed(packHead(0)));
+  assert.equal(must(parsePackPull(empty)).kind, 'header');
+  // a refusal that is not a short read does not wait for the close
+  const bad = must(parsePackInit(packScanOpts()));
+  parsePackFeed(bad, sealed(concat([packHead(1), encodeObjHeader(TYPE.OFS_DELTA, 3), new Uint8Array(12).fill(0x80), new Uint8Array(30)])));
+  assert.equal(must(parsePackPull(bad)).kind, 'header');
+  assert.equal(parsePackPull(bad).ok, false);
+  // input that ends right after a REF_DELTA's base oid: the oid is read, the member is what is short
+  assert.equal(refusal(scan([refPack.subarray(0, 12 + baseObj.length + encodeObjHeader(TYPE.REF_DELTA, delta.length).length + 20)])), 'pack_corrupt: short read: need 2 bytes at 0, have 0');
+  // a full object's base is none
+  assert.deepEqual(must(scan([ofsPack])).objects.map(o => [o.baseOffset, o.baseOid]), [[null, null], [12, null]]);
+  const firstObject = must(parsePackInit(packScanOpts()));
+  parsePackFeed(firstObject, ofsPack);
+  must(parsePackPull(firstObject));
+  assert.deepEqual(must(parsePackPull(firstObject)).base, { kind: 'none' });
+  // a REF_DELTA base oid cut by the chunk waits for the rest
+  const cutRef = must(parsePackInit(packScanOpts()));
+  parsePackFeed(cutRef, refPack.subarray(0, 12 + baseObj.length + 1 + 10));
+  for (let p = must(parsePackPull(cutRef)); ; p = must(parsePackPull(cutRef))) if (p.kind === 'need') break;
+  parsePackFeed(cutRef, refPack.subarray(12 + baseObj.length + 1 + 10));
+  for (let p = must(parsePackEnd(cutRef)); p.kind !== 'end'; p = must(parsePackPull(cutRef))) { /* to the end */ }
+  // a buffer fed to an exhausted scan is taken as it is; input after the end is not kept
+  const st = must(parsePackInit(packScanOpts()));
+  const whole = ofsPack.slice();
+  parsePackFeed(st, whole);
+  assert.equal(st.carry, whole);
+  for (let p = must(parsePackPull(st)); p.kind !== 'need'; p = must(parsePackPull(st))) { /* to the trailer */ }
+  for (let p = must(parsePackEnd(st)); p.kind !== 'end'; p = must(parsePackPull(st))) { /* the trailer */ }
+  const carried = st.carry;
+  parsePackFeed(st, new Uint8Array(100));
+  assert.equal(st.carry, carried);
+});
+
+test('fetchObject streams the member: the blob in one buffer, trailing bytes, a held refusal, the size cap at its boundary', async () => {
+  const blob = crypto.randomBytes(3 * INFLATE_CHUNK + 77);
+  const oid = hashObject('blob', blob);
+  const z = new Uint8Array(zlib.deflateSync(blob));
+  const packOf = (member, size = blob.length) => sealed(concat([packHead(1), encodeObjHeader(TYPE.BLOB, size), member]));
+  const get = async (pack, { chunk = 8192, limits = {} } = {}) => fetchObject(transport(() => ({ bytes: v2PackResponse(pack, { chunk }) }), limits), { oid, filter: '', expectType: TYPE.BLOB });
+  const got = await get(packOf(z));
+  assert.equal(refusal(got), 'ok');
+  assert.deepEqual(got.value.data, new Uint8Array(blob));
+  assert.equal((await get(packOf(z), { limits: { maxObjectSize: blob.length } })).ok, true);
+  assert.equal(refusal(await get(packOf(z), { limits: { maxObjectSize: blob.length - 1 } })), `limit_exceeded: object size ${blob.length} exceeds limit ${blob.length - 1}`);
+  // bytes after the member: in the chunk it ends in, and in later chunks
+  assert.equal(refusal(await get(packOf(concat([z, Uint8Array.of(1, 2, 3)])))), 'pack_corrupt: pack: 3 trailing bytes after object');
+  assert.equal(refusal(await get(packOf(concat([z, new Uint8Array(40)])), { chunk: 7 })), 'pack_corrupt: pack: 40 trailing bytes after object');
+  // an inflate refusal is held until the pack's own checks have run: a bad trailer is reported first
+  const badAdler = z.slice(); badAdler[badAdler.length - 1] ^= 1;
+  assert.equal(refusal(await get(packOf(badAdler))), 'pack_corrupt: inflate: adler32 mismatch');
+  const both = packOf(badAdler); both[both.length - 1] ^= 1;
+  assert.match(refusal(await get(both)), /^pack_corrupt: pack: trailer [0-9a-f]{40} != [0-9a-f]{40}$/);
+  // a member refused at its first byte, its other bytes still arriving
+  const badHead = z.slice(); badHead[0] = 0x79;
+  assert.equal(refusal(await get(packOf(badHead), { chunk: 100 })), 'pack_corrupt: zlib: unsupported method 9');
+  // a declared size past the cap is refused before a buffer of that size exists
+  const huge = sealed(concat([packHead(1), encodeObjHeader(TYPE.BLOB, 2 ** 40), z]));
+  assert.equal(refusal(await get(huge)), `limit_exceeded: object size ${2 ** 40} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
+  // a member cut short inside a pack whose trailer is right: the end of input finishes the member and refuses it
+  assert.equal(refusal(await get(packOf(z.subarray(0, z.length - 2)))), 'pack_corrupt: inflate: truncated adler32');
 });
 
 function huffCodes(h) {
