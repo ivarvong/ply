@@ -113,7 +113,7 @@ export { CODES, RETRY, fail, plyError, isPlyCode, retryPolicy, isRetryable, ambi
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';
 export { createTransport, redactUrl } from './http.js';
-export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcache.js';
+export { cachingFetch, memoryCache, isCacheableFetch, cacheKey, exchangeKind, isPureFetch, verifyFetchAnswer, parseUploadPackRequest } from './packcache.js';
 export { isFilterRejection, isFilterRefusal } from './fetch.js';
 export { fetchPackFiltered } from './fetchpack.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';

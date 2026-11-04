@@ -23,6 +23,9 @@ import { parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsref
 import { parseCapabilitiesV2 as parseCapabilitiesV2R } from '../src/discover.js';
 import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
+import { parseUploadPackRequest } from '../src/uprequest.js';
+import { fetchBody as fetchBodyR } from '../src/fetch.js';
+import { lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
@@ -378,6 +381,18 @@ property('ls-ref', 'an ls-refs line prefix is a typed error or a field prefix', 
     catch (e) { assert.ok(CODES.has(e.code), e.message); continue; }
     assert.equal(got.oid, full.oid);
     assert.ok(full.name.startsWith(got.name));
+  }
+});
+
+property('upload-pack-request', 'an upload-pack request cut anywhere is a typed error: its flush comes last', () => {
+  const bodies = [unwrap(fetchBodyR({ wants: [oid(1), oid(2)], haves: [oid(3)], filter: 'tree:0', deepen: 3, deepenNot: ['refs/heads/x'] })), unwrap(lsRefsBodyR(['refs/heads/', 'HEAD'], { unborn: true }))];
+  for (const body of bodies) {
+    assert.equal(parseUploadPackRequest(body).ok, true);
+    for (let i = 0; i < body.length; i++) {
+      const r = parseUploadPackRequest(body.subarray(0, i));
+      assert.equal(r.ok, false, `${i} of ${body.length} bytes`);
+      assert.ok(CODES.has(r.error.code), r.error.message);
+    }
   }
 });
 

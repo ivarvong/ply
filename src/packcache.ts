@@ -3,22 +3,38 @@
 // arrival, so the response can be cached forever). Wraps a fetch; the cache is anything with the Cache API shape
 // (match/put/delete) — `caches.default` on Workers, an in-memory map in tests.
 //
-// What is cached: POST …/git-upload-pack whose body is a v2 fetch with no `have`, no `want-ref`, no `deepen-since`/
-// `deepen-not` (date/ref relative → not a pure function of the body) and a `filter` line. The filter line is the
-// size guard: ply's tree:0 commit/tree fetches carry one and are small; the streamed blob fetch carries none.
+// What is pure (exchangeKind 'pack'): POST …/git-upload-pack whose body parses (uprequest.ts parseUploadPackRequest) as
+// a v2 fetch of exact oids with `done` and no `have`, `want-ref`, `shallow`, `deepen-since`/`deepen-not`/`deepen-relative`
+// (date/ref/boundary relative → not a pure function of the body), `include-tag` (the tags depend on the refs),
+// `packfile-uris`, `sideband-all` or `server-option`. ls-refs ('refs') and the advertisement ('discover') are the
+// freshness source and never pure.
+// What is cached by default: a pure fetch with a `filter` line (isCacheableFetch). The filter line is the size guard:
+// ply's tree:0 commit/tree fetches carry one and are small; the streamed blob fetch carries none. With
+// `verifyBeforeStore`, every pure fetch is cached, and an answer is stored only after verifyFetchAnswer accepted it (a
+// blob read through openBlob has no retry past a poisoned entry, so the entry must be right when it is written).
 // The key includes the Authorization header so a private repo's pack is never served to a different credential.
 //
 // Poison: a cached body that fails verification is evicted and refetched once (`x-ply-cache: bust` from the
 // client). The response carries `x-ply-pack-cache: HIT|MISS|BUST` so spans can say which tier served it.
-/* oxlint-disable require-unicode-regexp -- ASCII pkt-line text; `u` costs a byte per literal */
+/* oxlint-disable import/max-dependencies -- the cache joins the request parser, the response reader and the pack resolver */
 import type { Attrs } from './transport.js';
 import type { FetchLike } from './http.js';
 import type { Input } from './absent.js';
-import type { Option } from './result.js';
-import { te, td } from './bytes.js';
+import type { Limits } from './limits.js';
+import type { PlyError } from './errors.js';
+import type { FetchRequest } from './uprequest.js';
+import type { Option, Result } from './result.js';
+import { te, concat } from './bytes.js';
+import { fail } from './errors.js';
+import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { pktInit, pktStep, pktFinish } from './pktline.js';
+import { v2Init, v2Step, v2End } from './fetch.js';
+import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
+import { parseUploadPackRequest } from './uprequest.js';
+import { TYPE } from './objects.js';
 import { cacheHeader } from './cachestatus.js';
 import { fromNullish, mapGet, readKey, unwrapOrAbsent, withDefaults } from './absent.js';
-import { getOrElse, mapOption, none } from './result.js';
+import { err, getOrElse, mapOption, none, ok } from './result.js';
 import { thrownText } from './boundary.js';
 
 const CACHE_HEADER = 'x-ply-pack-cache';
@@ -29,11 +45,99 @@ export const CACHE_CONTROL_HEADER = 'x-ply-cache';
 const RECORD_HEADERS_REQUEST = 'x-ply-record-headers';
 const CACHING_FETCH_BRAND = 'plyCachingFetch';
 
+export type { FetchRequest, LsRefsRequest, UploadPackRequest } from './uprequest.js';
+export { parseUploadPackRequest } from './uprequest.js';
+
+// A fetch whose answer is a function of its body: exact oids, no negotiation, nothing relative to the refs or to a
+// shallow boundary the client holds, nothing the server may add from outside the object graph.
+export const isPureFetch = (r: FetchRequest): boolean =>
+  r.wants.length > 0 && r.done && r.haves.length === 0 && r.wantRefs.length === 0 && r.shallows.length === 0 && r.deepenSince === 0 &&
+  r.deepenNot.length === 0 && !r.deepenRelative && !r.includeTag && r.packfileUris === '' && !r.sidebandAll && !r.caps.some(c => c.startsWith('server-option='));
+
+const bodyBytes = (body: string | Uint8Array): Uint8Array => (typeof body === 'string' ? te.encode(body) : body);
+const pureFetchOf = (body: string | Uint8Array): FetchRequest | null => {
+  const r = parseUploadPackRequest(bodyBytes(body));
+  return r.ok && r.value.command === 'fetch' && isPureFetch(r.value) ? r.value : null;
+};
+
+// The default cache rule: a pure fetch with a filter line (the size guard above).
 export function isCacheableFetch(body: string | Uint8Array): boolean {
-  const t: string = typeof body === 'string' ? body : td.decode(body);
-  // pkt-lines: each line is 4 hex + payload; match on payloads, anchored to the hex prefix so "have" inside a message can't fool it
-  const has = (re: RegExp): boolean => re.test(t);
-  return has(/[0-9a-f]{4}command=fetch\n/) && !has(/[0-9a-f]{4}have [0-9a-f]{40}\n/) && !has(/[0-9a-f]{4}want-ref /) && !has(/[0-9a-f]{4}deepen-(since|not) /) && !has(/[0-9a-f]{4}shallow [0-9a-f]{40}\n/) && has(/[0-9a-f]{4}filter /);
+  const r = pureFetchOf(body);
+  return r !== null && r.filter !== '';
+}
+
+// What one smart-HTTP exchange is: 'pack' (a pure fetch: cacheable forever), 'refs' (ls-refs), 'discover' (the
+// upload-pack advertisement), or null (a negotiation, receive-pack, anything else: not classified, never cached).
+export type ExchangeKind = 'pack' | 'refs' | 'discover';
+export function exchangeKind(method: string, url: string | URL, body: string | Uint8Array | null): ExchangeKind | null {
+  const u = String(url);
+  const q = u.indexOf('?');
+  const path = q < 0 ? u : u.slice(0, q);
+  const query = q < 0 ? '' : u.slice(q + 1);
+  const m = method.toUpperCase();
+  if (m === 'GET' && path.endsWith('/info/refs')) return query.split('&').includes('service=git-upload-pack') ? 'discover' : null;
+  if (m !== 'POST' || !path.endsWith('/git-upload-pack') || body === null) return null;
+  const r = parseUploadPackRequest(bodyBytes(body));
+  if (!r.ok) return null;
+  if (r.value.command === 'ls-refs') return 'refs';
+  return isPureFetch(r.value) ? 'pack' : null;
+}
+
+// The whole check a buffered answer to a pure fetch must pass before it is stored as immutable: framed as pkt-lines,
+// read as a v2 fetch response, its pack parsed (trailer SHA-1) and delta-resolved (every object hashed: an object is
+// known only by the oid its bytes hash to), every want present, and the deepen contract kept (no shallow-info without
+// a deepen; every shallow boundary a commit of the pack; no unshallow for a client that sent no shallow).
+const noBase = (): null => null;
+export type VerifiedAnswer = { readonly objects: number };
+// oxlint-disable-next-line complexity -- one check per clause of the contract above
+export function verifyFetchAnswer(request: FetchRequest, answer: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<VerifiedAnswer, PlyError> {
+  const read = pktStep(pktInit(), answer);
+  if (!read.ok) return read;
+  const fin = pktFinish(read.value.state);
+  if (!fin.ok) return fin;
+  let st = v2Init(limits);
+  const parts: Uint8Array[] = [];
+  for (const f of read.value.frames) {
+    const r = v2Step(st, f);
+    if (!r.ok) return r;
+    st = r.value.state;
+    if (r.value.pack) parts.push(r.value.pack);
+  }
+  const end = v2End(st);
+  if (!end.ok) return end;
+  if (st.phase !== 'pack') return fail('protocol', 'answer: no packfile section');
+  const opts = packParseOpts(limits);
+  if (!opts.ok) return opts;
+  const parsed = parsePack(concat(parts), opts.value);
+  if (!parsed.ok) return parsed;
+  const resolved = resolvePack(parsed.value, noBase, limits);
+  if (!resolved.ok) return resolved;
+  const objects = resolved.value.objects;
+  for (const w of request.wants) if (!objects.has(w.toLowerCase())) return fail('pack_corrupt', `answer: want ${w} is not in the pack (${objects.size} objects)`);
+  if (request.deepen === 0 && st.shallow.length > 0) return fail('pack_corrupt', 'answer: shallow-info for a request without deepen');
+  for (const s of st.shallow) {
+    const o = mapGet(objects, s.toLowerCase());
+    if (o.tag === 'none' || o.value.type !== TYPE.COMMIT) return fail('pack_corrupt', `answer: shallow ${s} is not a commit of the pack`);
+  }
+  if (request.shallows.length === 0 && st.unshallow.length > 0) return fail('pack_corrupt', 'answer: unshallow for a request without shallow');
+  return ok({ objects: objects.size });
+}
+
+// The cache branch of a tee, read whole (verifyBeforeStore), or refused once it outgrows what any answer v2Step would
+// accept: maxPackBytes of pack and as much progress, plus framing.
+async function readCapped(body: ReadableStream<Uint8Array>, cap: number): Promise<Result<Uint8Array, PlyError>> {
+  const reader = body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- one stream, read in order
+    const { value, done } = await reader.read();
+    if (done) return ok(concat(parts));
+    total += value.length;
+    // oxlint-disable-next-line no-await-in-loop -- the loop ends here
+    if (total > cap) { await reader.cancel().catch(() => null); return err(limitExceeded('cached answer bytes', total, cap)); }
+    parts.push(value);
+  }
 }
 
 const NAMESPACE = 'https://ply.pack/';
@@ -77,17 +181,39 @@ export type CachingConfig = {
   readonly namespace: string;
   readonly shouldCache: (body: Uint8Array) => boolean;
   readonly maxAge: number;
+  // store an answer only after verifyFetchAnswer accepted it; the default rule then caches every pure fetch
+  readonly verifyBeforeStore: boolean;
+  readonly limits: Limits;
 };
 export type CachingOptions = Input<CachingConfig>;
-const cachingDefaults = (): CachingConfig => ({ waitUntil: null, namespace: NAMESPACE, shouldCache: isCacheableFetch, maxAge: 31_536_000 });
-export type CacheStats = { hit: number; miss: number; bust: number; bypass: number; putOk: number; putFailed: number; putError: string };
+const isPureFetchBody = (body: Uint8Array): boolean => pureFetchOf(body) !== null;
+const cachingDefaults = (verify: boolean): CachingConfig => ({ waitUntil: null, namespace: NAMESPACE, shouldCache: verify ? isPureFetchBody : isCacheableFetch, maxAge: 31_536_000, verifyBeforeStore: verify, limits: DEFAULT_LIMITS });
+// verifyOk / verifyFailed / verifyError: the answers verifyBeforeStore stored and refused (with the last refusal's message).
+export type CacheStats = { hit: number; miss: number; bust: number; bypass: number; putOk: number; putFailed: number; putError: string; verifyOk: number; verifyFailed: number; verifyError: string };
 // The fetch ply's HTTP transport calls (http.ts FetchLike), with the cache's counters. `init` and `prefix` may be left out.
 export type CachingFetch = ((url: string | URL, ...init: [] | [RequestInit]) => Promise<Response>) & { stats: CacheStats; attrs: (...prefix: [] | [string]) => Attrs };
 
+// verifyBeforeStore: the cache branch read whole (capped), verified against the request it answers, and stored only then.
+// A refused answer is counted and dropped: the client's own branch still carries it, and the client's own checks refuse it.
+async function verifiedStore(toCache: ReadableStream<Uint8Array>, body: Uint8Array, limits: Limits, stats: CacheStats, store: (entry: BodyInit) => Promise<void>): Promise<void> {
+  const refuse = (e: PlyError): void => { stats.verifyFailed++; stats.verifyError = e.message.slice(0, 200); };
+  const request = parseUploadPackRequest(body);
+  const maxPack = readLimit(limits, 'maxPackBytes');
+  if (!maxPack.ok) { refuse(maxPack.error); await toCache.cancel().catch(() => null); return; }
+  // pack and progress are each held to maxPackBytes by v2Step; a pkt-line header per 65516-byte frame and the sections
+  // fit in one more maxPackBytes
+  const bytes = await readCapped(toCache, maxPack.value * 3);
+  if (!bytes.ok) { refuse(bytes.error); return; }
+  const verified = request.ok && request.value.command === 'fetch' ? verifyFetchAnswer(request.value, bytes.value, limits) : fail('protocol', 'answer: the request is not a fetch');
+  if (!verified.ok) { refuse(verified.error); return; }
+  stats.verifyOk++;
+  await store(bytes.value.slice());
+}
+
 export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: CachingOptions = {}): CachingFetch {
-  const { waitUntil, namespace, shouldCache, maxAge } = withDefaults(options, cachingDefaults());
+  const { waitUntil, namespace, shouldCache, maxAge, verifyBeforeStore, limits } = withDefaults(options, cachingDefaults(getOrElse(readKey(options, 'verifyBeforeStore'), false)));
   const inner = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
-  const stats: CacheStats = { hit: 0, miss: 0, bust: 0, bypass: 0, putOk: 0, putFailed: 0, putError: '' };
+  const stats: CacheStats = { hit: 0, miss: 0, bust: 0, bypass: 0, putOk: 0, putFailed: 0, putError: '', verifyOk: 0, verifyFailed: 0, verifyError: '' };
   const f = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
     const { init: wire, names } = peelRecordHeaders(init);
     const body = wire.body;
@@ -117,14 +243,17 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
     stored.set('content-type', ct);
     stored.set('cache-control', `public, max-age=${maxAge}, immutable`);
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
-    // oxlint-disable-next-line promise/always-return -- the counters are the outcome; the promise's value is unused (waitUntil)
-    const put = cache.put(key, new Response(toCache, { status: 200, headers: stored })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = thrownText(e).slice(0, 200); });
+    const store = async (entry: BodyInit): Promise<void> => {
+      // oxlint-disable-next-line promise/always-return -- the counters are the outcome; the promise's value is unused (waitUntil)
+      await cache.put(key, new Response(entry, { status: 200, headers: stored })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = thrownText(e).slice(0, 200); });
+    };
+    const put = verifyBeforeStore ? verifiedStore(toCache, body, limits, stats, store) : store(toCache);
     if (waitUntil) waitUntil(put);
     return new Response(toClient, { status: 200, headers: h });
   };
   Object.defineProperty(f, CACHING_FETCH_BRAND, { value: true });
   f.stats = stats;
-  f.attrs = (prefix = 'git.pack.cache') => ({ [`${prefix}.hit`]: stats.hit, [`${prefix}.miss`]: stats.miss, [`${prefix}.bust`]: stats.bust, [`${prefix}.bypass`]: stats.bypass, [`${prefix}.put.ok`]: stats.putOk, [`${prefix}.put.failed`]: stats.putFailed, [`${prefix}.put.error`]: stats.putError });
+  f.attrs = (prefix = 'git.pack.cache') => ({ [`${prefix}.hit`]: stats.hit, [`${prefix}.miss`]: stats.miss, [`${prefix}.bust`]: stats.bust, [`${prefix}.bypass`]: stats.bypass, [`${prefix}.put.ok`]: stats.putOk, [`${prefix}.put.failed`]: stats.putFailed, [`${prefix}.put.error`]: stats.putError, [`${prefix}.verify.ok`]: stats.verifyOk, [`${prefix}.verify.failed`]: stats.verifyFailed, [`${prefix}.verify.error`]: stats.verifyError });
   return f;
 }
 
