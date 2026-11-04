@@ -367,7 +367,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
   if (!explicit.ok) return explicit;
   let base = approvedUrl.toString().replace(/\/$/, '');
   const baseCrossOrigin = approvedUrl.origin !== offeredOrigin;
-  // Workers: fetch is a method of the global and throws "Illegal invocation" when called detached; bind it (found under workerd)
+  // Workers: fetch is a method of the global and throws "Illegal invocation" when its `this` is another object (SAFETY.md); bind it
   const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
   const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};

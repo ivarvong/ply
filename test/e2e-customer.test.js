@@ -1,5 +1,5 @@
 // A new customer's first day, as README.md "Quick start: a repo end to end" writes it: every `// quick-start:` block is
-// read from the README and executed as written (imports from 'ply' bound to the package entry, src/index.js), in order,
+// read from the README and executed as written (imports from 'ply' bound to the package entry, src/index.ts), in order,
 // against `git http-backend`, and after every step real git says the repository is what git would have made (rev-parse,
 // ls-tree, show, merge-tree, rev-list, cat-file, clone + diff -r, fsck --strict). test/types/readme.typetest.ts is the
 // same blocks as TypeScript (generated from the README; this file fails when it drifts: UPDATE_README_TYPETEST=1).
@@ -43,7 +43,7 @@ const STEPS = BLOCKS.map(b => b.step).filter(s => s !== 'setup');
 function typetestOf(blocks) {
   const head = '// GENERATED from README.md "Quick start" by test/e2e-customer.test.js (UPDATE_README_TYPETEST=1 rewrites it).\n'
     + '// The README blocks as a TypeScript consumer writes them, plain strings for refs and paths: `npm run typecheck` compiles\n'
-    + '// it. tsconfig.isolated.json excludes it (it imports the JS entry, src/index.js).\n';
+    + '// it, under tsconfig.isolated.json too.\n';
   return head + blocks.map(b => `\n// ---- ${b.step} ----\n${b.code.replace(IMPORT, (_, names, from) => `import {${names}} from '${TS_SPECIFIER[from] ?? from}';\n`)}`).join('');
 }
 

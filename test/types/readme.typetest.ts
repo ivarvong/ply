@@ -1,6 +1,6 @@
 // GENERATED from README.md "Quick start" by test/e2e-customer.test.js (UPDATE_README_TYPETEST=1 rewrites it).
 // The README blocks as a TypeScript consumer writes them, plain strings for refs and paths: `npm run typecheck` compiles
-// it. tsconfig.isolated.json excludes it (it imports the JS entry, src/index.js).
+// it, under tsconfig.isolated.json too.
 
 // ---- setup ----
 const url = 'https://git.example.com/acme/site.git';  // an existing repository, empty or not
