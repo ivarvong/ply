@@ -69,6 +69,7 @@ export type InflatePhase =
   | 'header' | 'block' | 'stored-header' | 'stored' | 'dyn-header' | 'dyn-clen' | 'dyn-lens' | 'codes' | 'adler' | 'end';
 // Running, or stopped by a refusal that every later pull returns again.
 export type InflateHalt = { readonly tag: 'running' } | { readonly tag: 'failed'; readonly error: InflateError };
+// Stryker disable next-line ObjectLiteral,StringLiteral: halt is read only as tag === 'failed'; any other record runs
 const RUNNING: InflateHalt = { tag: 'running' };
 // What a pull answers: a chunk of output (a copy the caller owns), a request for more input, or the end of the member
 // with the bytes it consumed. After the end every pull answers the end again.

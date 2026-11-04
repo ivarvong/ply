@@ -52,6 +52,7 @@ export type PackPiece =
 export type PackPhase = 'header' | 'object' | 'ofs' | 'ref' | 'gate' | 'body' | 'trailer' | 'end';
 type PackHash = { readonly kind: 'off' } | { readonly kind: 'on'; readonly sha: Sha1 };
 export type PackHalt = { readonly tag: 'running' } | { readonly tag: 'failed'; readonly error: PackError };
+// Stryker disable next-line ObjectLiteral,StringLiteral: halt is read only as tag === 'failed'; any other record runs
 const RUNNING: PackHalt = { tag: 'running' };
 
 // Single owner, mutable so a pull resumes where the last one stopped.
@@ -90,6 +91,7 @@ type Step = { readonly kind: 'cont' } | { readonly kind: 'piece'; readonly piece
 // Stryker disable next-line ObjectLiteral,StringLiteral: the pull loops on anything that is not a piece or a failure
 const CONT: Step = { kind: 'cont' };
 const NEED: Step = { kind: 'piece', piece: NEED_PIECE };
+// Stryker disable next-line ObjectLiteral,StringLiteral: the pull reads a step only as kind === 'piece'; the refusal is on st.halt
 const FAILED: Step = { kind: 'failed' };
 const piece = (p: PackPiece): Step => ({ kind: 'piece', piece: p });
 function refuse(st: PackScan, error: PackError): Step {

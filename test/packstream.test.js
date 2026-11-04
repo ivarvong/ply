@@ -250,6 +250,7 @@ test('inflate pull: chunks, need, the end, what follows the member, a reset reco
     end = p; break;
   }
   assert.deepEqual(sizes, [INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, 5]);
+  assert.equal(sizes[0], 16 * 1024, 'a pull yields at most half the 32 KiB window: 16 KiB');
   assert.equal(end.kind, 'end');
   assert.equal(end.consumed, z.length);
   assert.deepEqual([...inflateUnread(st)], [9, 8, 7]);

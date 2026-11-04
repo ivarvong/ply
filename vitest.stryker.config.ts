@@ -29,6 +29,7 @@ const MUTATION_FILES = [
   'test/result.test.js',
   'test/option.test.js',
   'test/version-refname.test.js',
+  'test/uprequest.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {
