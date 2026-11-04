@@ -367,6 +367,25 @@ The pack is delta-compressed (`planDeltas`, `encodeDelta` in `ply`, a block-hash
 
 Memory: every packfile is resolved in memory (no `.idx` is read), so it suits repositories up to a few hundred MB. It fails closed with `limit_exceeded`: the objects held by `maxInflatedTotal` (256 MiB by default; raise it, and `maxPackObjects`, for a larger repository), their count by `maxPackObjects`, each by `maxObjectSize`, the pack sent by `maxPackBytes`, the refs by `maxRefs`. Refused with `bad_request` and `what`: SHA-256 repositories (`objectFormat`), reftable (`refStorage`), partial clones (`partialClone`), `objects/info/alternates` (`alternates`), shallow repositories (`shallow`), a ref file that is not an id or a symbolic ref (`ref`); a missing object is `bad_request` (`what: 'object'`), a loose object that does not hash to its name `pack_corrupt`.
 
+## Mirror one ref between remotes
+
+`syncRef(srcUrl, dstUrl, { ref, dstRef?, force? }, opts)` keeps `dstRef` (default `ref`) on the destination equal to `ref` on the source: `git fetch <src> <ref>` then `git push --force-with-lease=<dstRef>:<dstTip> <dst>`, with no clone (`src/sync.ts`). One ls-refs on each side; equal tips are `in_sync` and nothing else is sent. Otherwise one fetch from the source with the destination's tip as the `have`, and one receive-pack command whose old id is that tip (zero: a create). The pack pushed is the source's pack as received, delta for delta and never thin, so it holds only what the source computed the destination lacks: nothing reachable from the destination's tip when the source has that commit (a source that does not NAKs the have and sends the whole history, which is still correct). Each remote has its own `auth`, `fetchImpl`, `quirks` and `transport` under `opts.src` and `opts.dst` (a top-level `auth` names neither and is `bad_request`); `tracer`, `parent`, `signal`, `limits` (`maxPackBytes` bounds the pack both ways) and `verify` are shared. Example (run as written by `test/sync-ref.test.js`):
+
+```js
+// sync-ref example
+import { syncRef } from 'ply';
+
+const r = await syncRef(srcUrl, dstUrl, { ref: 'refs/heads/main' }, {
+  src: { auth: { token: process.env['SRC_TOKEN'] } },  // read with one credential
+  dst: { auth: { token: process.env['DST_TOKEN'] } },  // write with another
+});
+if (!r.ok) throw r.error;  // not_fast_forward: the source was rewritten (force: true follows it); cas_conflict: the mirror moved
+if (r.value.outcome === 'in_sync') console.log('in sync at', r.value.oid);
+else console.log(r.value.outcome, r.value.from, '->', r.value.to, `${r.value.objects} objects, ${r.value.pushBytes} B`);
+```
+
+The result is `{ outcome: 'in_sync', ref, dstRef, oid }` or `{ outcome: 'created' | 'updated', ref, dstRef, from, to, forced, objects, pushBytes }`. An update that is not a fast-forward (a rewritten or diverged source, a destination ahead of it) and any change to an existing tag are `not_fast_forward` before anything is pushed, unless `force: true`, which pushes the source's tip with the same compare-and-swap. A push that loses the race to another writer is `cas_conflict` with `expected` the tip ply read and `actual` the destination's tip read back (null: deleted), as `createBranch` and `deleteBranch` report one. Spans: `git.sync_ref` → two `git.upload-pack ls-refs` (one per remote), `git.upload-pack fetch`, `git.receive-pack`.
+
 ## One commit from a change list
 
 `commitChanges(url, { ref?, base?, changes, author, committer?, message, time? }, opts)` writes one commit. `changes` is applied in order: `create` (refuses a path that already exists; `write` overwrites, which is what `git add` does), `edit` (exactly one non-overlapping match, or `match_count`), `delete` (a file or a directory; empty directories are pruned), `rename`. Modes are `100644`, `100755` and `120000`. A single `edit` of an existing blob goes through `editFile`, so a large file stays a stream; every other list is an in-memory tree of the paths it touches.
