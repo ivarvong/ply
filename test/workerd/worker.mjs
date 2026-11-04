@@ -8,6 +8,7 @@ import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
+import { failure, fetchOps } from '../sweep/ops.mjs';
 
 // module-scoped: survives across requests within the isolate, like a real worker would hold it
 const packCache = typeof caches !== 'undefined' ? caches.default : null;
@@ -51,13 +52,19 @@ export default {
       const body = await req.json();
       const exporter = arrayExporter();
       try {
-        const r = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }) }));
+        const r = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }), ...(body.limits ? { limits: withLimits(body.limits) } : {}) }));
         let bytes = 0;
         const rd = r.stream.getReader();
         if (body.cancel) { const { value } = await rd.read(); bytes = value?.length ?? 0; await rd.cancel('enough'); }
         else for (;;) { const { value, done } = await rd.read(); if (done) break; bytes += value.length; }
         return Response.json({ ok: true, size: r.size, bytes, spans: exporter.lines.flatMap(flattenLine).map(s => ({ name: s.name, traceId: s.traceId, spanId: s.spanId, parentSpanId: s.parentSpanId ?? null, links: s.links.map(l => [l.spanId, l.attrs['ply.link']]), outcome: s.attrs[`${s.name}.outcome`] ?? null })) });
-      } catch (e) { return Response.json({ ok: false, code: e.code, message: e.message }); }
+      } catch (e) { return Response.json({ ok: false, code: e.code, what: e.what ?? null, message: e.message, blob: exporter.lines.flatMap(flattenLine).filter(s => s.name === 'git.read.blob').map(s => s.attrs['git.read.blob.outcome'] ?? null) }); }
+    }
+    if (u.pathname === '/sweep') { // one limit-sweep cell (test/sweep): the same operation code the node cell runs
+      const cell = await req.json();
+      const op = fetchOps(cell, { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) })[cell.op];
+      if (!op) return Response.json({ status: 'crash', code: null, msg: `workerd: no op ${cell.op}` });
+      try { return Response.json({ status: 'ok', ...(await op()) }); } catch (e) { return Response.json(failure(e)); }
     }
     if (u.pathname === '/edit') {
       const body = await req.json();

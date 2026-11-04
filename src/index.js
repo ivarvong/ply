@@ -36,6 +36,7 @@ export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbre
 export { readLog, logWindow, logOn } from './log.js';
 export { mergeBranch, fastForward, deleteRef, mergeTrees, mergeBase, threeWay, bestBases } from './merge.js';
 export { createBranch, deleteBranch, createTag, deleteTag, listRefs } from './refops.js';
+export { syncRef } from './sync.js';
 export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain, carriedExtra } from './rebase.js';
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
 export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
@@ -112,7 +113,7 @@ export { CODES, RETRY, fail, plyError, isPlyCode, retryPolicy, isRetryable, ambi
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';
 export { createTransport, redactUrl } from './http.js';
-export { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from './packcache.js';
+export { cachingFetch, memoryCache, isCacheableFetch, cacheKey, exchangeKind, isPureFetch, verifyFetchAnswer, parseUploadPackRequest } from './packcache.js';
 export { isFilterRejection, isFilterRefusal } from './fetch.js';
 export { fetchPackFiltered } from './fetchpack.js';
 export { validateIdent, validateRef, validatePath } from './validate.js';

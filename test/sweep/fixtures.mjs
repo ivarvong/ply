@@ -117,6 +117,18 @@ function inflatedSum(text) {
   return { inflated, objects };
 }
 
+/** The largest object verify-pack lists as a delta (a line with a depth and a base), sized by cat-file. @param {string} repoGit @param {string} text */
+async function deltaResultMax(repoGit, text) {
+  const oids = [];
+  for (const line of text.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 7 && /^[0-9a-f]{40}$/.test(parts[0] ?? '') && /^[0-9a-f]{40}$/.test(parts[6] ?? '')) oids.push(parts[0]);
+  }
+  if (oids.length === 0) return 0;
+  const sizes = (await git(['-C', repoGit, 'cat-file', '--batch-check=%(objectsize)'], { input: `${oids.join('\n')}\n` })).toString().trim().split('\n');
+  return Math.max(...sizes.map(Number));
+}
+
 /**
  * @param {string} repoGit
  * @param {string} packPath
@@ -133,7 +145,7 @@ async function writePack(repoGit, packPath, depth, kind, window) {
   const idx = packPath.replace(/\.pack$/, '.idx');
   await git(['index-pack', '-o', idx, packPath]);
   const verified = (await git(['verify-pack', '-v', idx])).toString();
-  return { chain: chainLength(verified), sum: inflatedSum(verified) };
+  return { chain: chainLength(verified), sum: inflatedSum(verified), deltaMax: await deltaResultMax(repoGit, verified) };
 }
 
 /** @param {string} root @param {string} name @param {Record<string, number>} wires */
@@ -141,15 +153,57 @@ async function buildRepo(root, name, wires) {
   const dir = join(root, `${name}.git`);
   if (!stamped(dir)) {
     await bare(dir);
-    const body = repoStream(name);
+    const caps = /^cap-([a-z]+)--(.+)$/.exec(name);
+    const body = repoStream(caps ? caps[2] : name);
     if (body.length > 0) await fastImport(dir, body);
+    // a server without one capability ply can use; the content is the named fixture's
+    if (caps) for (const [key, value] of CAP_MODES[caps[1]] ?? []) await git(['-C', dir, 'config', key, value]);
   }
   // Measured even when the repo was reused: the oracle file is the only copy of the pack size.
   if (name.startsWith('blob-') && wires[name] === undefined) wires[name] = await blobPackBytes(dir, 'big.bin');
 }
 
+/** @type {Record<string, [string, string][]>} */
+const CAP_MODES = {
+  nofilter: [['uploadpack.allowFilter', 'false']],
+  nosha: [['uploadpack.allowAnySHA1InWant', 'false'], ['uploadpack.allowReachableSHA1InWant', 'false'], ['uploadpack.allowTipSHA1InWant', 'false']],
+  reachable: [['uploadpack.allowAnySHA1InWant', 'false'], ['uploadpack.allowReachableSHA1InWant', 'true']],
+  nopush: [['http.receivepack', 'false']],
+};
+
+/** @param {number} lines @param {number} version */
+function thinText(lines, version) {
+  const out = [];
+  for (let i = 0; i < lines; i++) out.push(i % 97 === version ? `line ${i} edited in v${version}` : `line ${String(i).padStart(5, '0')} ${'t'.repeat(56)}`);
+  return Buffer.from(`${out.join('\n')}\n`);
+}
+
 /** @param {string} name */
 function repoStream(name) {
+  if (name === 'empty') return Buffer.alloc(0);
+  if (name === 'thin-remote' || name === 'thin-local') {
+    // the same first commit in both (same bytes, same time: same oid); the local one has a second that edits the file
+    const parts = [commit('refs/heads/main', WHEN, 'v1', [inline('t.txt', thinText(1024, 1))])];
+    if (name === 'thin-local') parts.push(commit('refs/heads/main', WHEN + 1, 'v2', [inline('t.txt', thinText(1024, 2))]));
+    return Buffer.concat(parts);
+  }
+  if (name.startsWith('octo-')) {
+    // one commit with N parents, each its own root commit (a distinct empty-tree commit), reachable only through it
+    const n = Number(name.slice('octo-'.length));
+    const parts = [];
+    for (let i = 0; i < n; i++) parts.push(Buffer.from(`reset refs/heads/tmp\n`), Buffer.concat([Buffer.from(`commit refs/heads/tmp\nmark :${i + 1}\ncommitter sweep <sweep@example.com> ${WHEN} +0000\ndata ${String(i).length + 1}\nr${i}\n`)]));
+    const merges = Array.from({ length: n - 1 }, (_, i) => `merge :${i + 2}\n`).join('');
+    parts.push(Buffer.from(`commit refs/heads/main\ncommitter sweep <sweep@example.com> ${WHEN + 1} +0000\ndata 4\nocto\nfrom :1\n${merges}`), inline('f.txt', Buffer.from('o\n')));
+    parts.push(Buffer.from('reset refs/heads/tmp\nfrom 0000000000000000000000000000000000000000\n\n'));
+    return Buffer.concat(parts);
+  }
+  if (name.startsWith('branches-')) {
+    // main plus N - 1 more branches at the same commit: a push of all of them is N commands and N + 1 report lines
+    const n = Number(name.slice('branches-'.length));
+    const parts = [commit('refs/heads/main', WHEN, 'branches', [inline('f.txt', Buffer.from('b\n'))])];
+    for (let i = 0; i < n - 1; i++) parts.push(Buffer.from(`reset refs/heads/b${String(i).padStart(6, '0')}\nfrom refs/heads/main\n\n`));
+    return Buffer.concat(parts);
+  }
   if (name.startsWith('blob-')) {
     const size = Number(name.slice('blob-'.length));
     return commit('refs/heads/main', WHEN, 'blob', [inline('big.bin', urandom(size)), inline('small.txt', Buffer.from('hello\n'))]);
@@ -262,14 +316,15 @@ function mergeTrio(size) {
 
 /**
  * @param {string} root
- * @param {{ repo?: string, pack?: string }[]} cells
+ * @param {{ repo?: string, pack?: string, local?: string, store?: string }[]} cells
  */
 export async function ensureFixtures(root, cells) {
   mkdirSync(root, { recursive: true });
   const oraclePath = join(root, 'oracle.json');
-  /** @type {{ wires: Record<string, number>, chains: Record<string, number>, sums: Record<string, { inflated: number, objects: number }> }} */
-  const oracle = { wires: {}, chains: {}, sums: {}, ...(existsSync(oraclePath) ? JSON.parse(readFileSync(oraclePath, 'utf8')) : {}) };
-  const repos = [...new Set(cells.map(c => c.repo).filter(Boolean))];
+  /** @type {{ wires: Record<string, number>, chains: Record<string, number>, sums: Record<string, { inflated: number, objects: number }>, deltaMax: Record<string, number> }} */
+  const oracle = { wires: {}, chains: {}, sums: {}, deltaMax: {}, ...(existsSync(oraclePath) ? JSON.parse(readFileSync(oraclePath, 'utf8')) : {}) };
+  oracle.deltaMax ??= {};
+  const repos = [...new Set(cells.flatMap(c => [c.repo, c.local, c.store]).filter(Boolean))];
   for (const name of repos) await buildRepo(root, name, oracle.wires);
   const packs = [...new Set(cells.map(c => c.pack).filter(Boolean))];
   if (packs.length > 0) {
@@ -280,11 +335,12 @@ export async function ensureFixtures(root, cells) {
     if (packs.includes('inflate')) await buildRepo(root, 'inflate', oracle.wires);
     for (const id of packs) {
       const packPath = join(root, 'packs', `${id}.pack`);
-      if (existsSync(packPath) && oracle.chains[id] !== undefined && oracle.sums[id] !== undefined) continue;
+      if (existsSync(packPath) && oracle.chains[id] !== undefined && oracle.sums[id] !== undefined && oracle.deltaMax[id] !== undefined) continue;
       // writePack runs git index-pack on the pack: git accepts every pack a cell parses
       const built = await buildOnePack(root, id, packPath);
       oracle.chains[id] = built.chain;
       oracle.sums[id] = built.sum;
+      oracle.deltaMax[id] = built.deltaMax;
     }
   }
   writeFileSync(oraclePath, `${JSON.stringify(oracle)}\n`);

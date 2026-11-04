@@ -1,17 +1,21 @@
 // Sweep driver. `npm run sweep` (and `--ci`) runs the cells at or under 16 MiB and 65_536 entries.
 // `npm run sweep -- --full` runs the rest as well: the nightly workflow does that.
-// Each cell is a fresh node process, once on the default heap and once with --max-old-space-size=128.
+// Each cell is a fresh node process, once on the default heap and once with --max-old-space-size=128; a workerd cell
+// is one fresh workerd process instead (heap 'workerd'). Wire cells reach git through shim.mjs (slow, v0/v1, re-framed).
 // Cells that push, edit, or merge copy the bare repo first and the parent deletes the copy.
 // A result that is not the desired one fails the run unless test/sweep/ratchet.json records it. A recorded
 // break that now matches the desired result fails too: the ratchet only goes down, by deleting the line.
-import { execFileSync, spawn } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD } from '../../src/limits.js';
 import { startGitServer } from '../server.js';
 import { ensureFixtures } from './fixtures.mjs';
 import { allCells, selectCells } from './matrix.mjs';
+import { startShim } from './shim.mjs';
+import { build as buildWorker } from '../workerd/build.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
@@ -21,6 +25,7 @@ const RATCHET_PATH = join(HERE, 'ratchet.json');
 const HEAP_FLAG = 128;
 const TIMEOUT_MS = Number(process.env.SWEEP_TIMEOUT_MS ?? 240_000);
 const PAR = Math.max(1, Number(process.env.SWEEP_PAR ?? 2));
+const WORKERD = [process.env.WORKERD, join(ROOT, 'node_modules', '.bin', 'workerd')].filter(Boolean).find(p => existsSync(p)) ?? null;
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
@@ -40,7 +45,7 @@ const listOnly = flag('--list');
 
 const selected = selectCells({ ci: full ? false : true, full, filter });
 if (listOnly) {
-  process.stdout.write(`${selected.length} cells (${selected.length * 2} with both heaps)\n`);
+  process.stdout.write(`${selected.length} cells (${selected.reduce((n, c) => n + (c.runtime === 'workerd' ? 1 : 2), 0)} runs)\n`);
   for (const cell of selected) process.stdout.write(`${cell.id}\n`);
   process.exit(0);
 }
@@ -58,9 +63,48 @@ function viewOf(result) {
   return view;
 }
 
-/** @param {import('./matrix.mjs').Cell} cell @param {{ wires: Record<string, number>, chains: Record<string, number>, sums: Record<string, { inflated: number, objects: number }> }} oracle */
-function decorate(cell, oracle) {
+/** @param {Uint8Array | string} data */
+const pkt = data => {
+  const b = Buffer.from(data);
+  return Buffer.concat([Buffer.from((b.length + 4).toString(16).padStart(4, '0')), b]);
+};
+
+// git's upload-pack, asked the cell's fetch directly: the lines of each section it answers before the packfile.
+/** @param {string} url @param {{ wants: string[], haves?: string[], deepen?: number, done?: boolean, filter?: string }} req */
+async function gitSections(url, req) {
+  const lines = [pkt('command=fetch\n'), Buffer.from('0001'), ...req.wants.map(w => pkt(`want ${w}\n`)), ...(req.haves ?? []).map(h => pkt(`have ${h}\n`))];
+  if (req.filter) lines.push(pkt(`filter ${req.filter}\n`));
+  if (req.deepen) lines.push(pkt(`deepen ${req.deepen}\n`));
+  if (req.done !== false) lines.push(pkt('done\n'));
+  lines.push(Buffer.from('0000'));
+  const res = await fetch(`${url}/git-upload-pack`, { method: 'POST', body: Buffer.concat(lines), headers: { 'Git-Protocol': 'version=2', 'Content-Type': 'application/x-git-upload-pack-request' } });
+  const body = Buffer.from(await res.arrayBuffer());
+  /** @type {Record<string, number>} */
+  const counts = {};
+  let section = null;
+  for (let p = 0; p + 4 <= body.length;) {
+    const len = parseInt(body.subarray(p, p + 4).toString(), 16);
+    if (len < 4) { p += 4; if (len === 1) section = null; if (len === 0) break; continue; }
+    const line = body.subarray(p + 4, p + len).toString().replace(/\n$/, '');
+    p += len;
+    if (section === null) { section = line; if (line === 'packfile') break; counts[line] = 0; continue; }
+    counts[section] += 1;
+  }
+  return counts;
+}
+
+/** @param {string} repo @param {string} rev */
+const revParse = (repo, rev) => gitText(repo, ['rev-parse', rev]);
+
+/**
+ * @param {import('./matrix.mjs').Cell} cell
+ * @param {{ wires: Record<string, number>, chains: Record<string, number>, sums: Record<string, { inflated: number, objects: number }>, deltaMax: Record<string, number> }} oracle
+ * @param {{ root: string, server: string, shim: string }} ctx
+ */
+async function decorate(cell, oracle, ctx) {
   const next = { ...cell, limits: cell.limits ? { ...cell.limits } : undefined, expect: cell.expect ? { ...cell.expect } : undefined };
+  const repoDir = cell.repo ? join(ctx.root, `${cell.repo}.git`) : null;
+  const refusedAs = (/** @type {Record<string, unknown>} */ spec) => ({ status: 'refused', code: 'limit_exceeded', ...spec });
   if (cell.expectFrom === 'wire') {
     const wire = oracle.wires[cell.repo];
     if (typeof wire !== 'number') throw new Error(`${cell.id}: no wire size for ${cell.repo}`);
@@ -85,6 +129,65 @@ function decorate(cell, oracle) {
     const cap = cell.limits?.maxInflatedTotal ?? DEFAULT_LIMITS.maxInflatedTotal;
     next.inflated = charged;
     next.expect = charged > cap ? { status: 'refused', code: 'limit_exceeded', what: 'pack inflated bytes' } : { status: 'ok' };
+  } else if (cell.expectFrom === 'objects') {
+    // verify-pack's object count is the boundary; capDelta sets the cap beside it
+    const count = oracle.sums?.[cell.pack]?.objects;
+    if (typeof count !== 'number') throw new Error(`${cell.id}: no verify-pack count for ${cell.pack}`);
+    if (typeof cell.capDelta === 'number') next.limits = { ...cell.limits, maxPackObjects: count + cell.capDelta };
+    const cap = next.limits?.maxPackObjects ?? DEFAULT_LIMITS.maxPackObjects;
+    next.objects = count;
+    next.expect = count > cap ? refusedAs({ what: 'pack objects', got: count, max: cap }) : { status: 'ok' };
+  } else if (cell.expectFrom === 'delta-result') {
+    const R = oracle.deltaMax?.[cell.pack];
+    if (typeof R !== 'number' || R <= 0) throw new Error(`${cell.id}: no delta in ${cell.pack}`);
+    next.limits = { ...cell.limits, maxDeltaResult: R + (cell.capDelta ?? 0) };
+    next.deltaMax = R;
+    next.expect = R > next.limits.maxDeltaResult ? refusedAs({ what: 'delta result size', got: R }) : { status: 'ok' };
+  } else if (cell.expectFrom === 'harvest') {
+    // what a full window of this repository holds in commits and trees, by git's sizes
+    let sum = 0;
+    for (const line of gitText(repoDir, ['cat-file', '--batch-all-objects', '--batch-check=%(objecttype) %(objectsize)']).split('\n')) {
+      const [type, size] = line.split(' ');
+      if (type === 'commit' || type === 'tree') sum += Number(size);
+    }
+    next.limits = { ...cell.limits, maxHarvestBytes: sum + (cell.capDelta ?? 0) };
+    next.harvest = sum;
+    next.expect = { status: 'ok' };
+  } else if (cell.expectFrom === 'sections') {
+    const revs = gitText(repoDir, ['rev-list', 'main']).split('\n');
+    next.wants = cell.wantCount ? revs.slice(0, cell.wantCount) : [revs[0]];
+    next.haves = cell.haveCount ? revs.slice(1, 1 + cell.haveCount) : [];
+    const counts = await gitSections(`${ctx.server}/${cell.repo}.git`, { wants: next.wants, haves: next.haves, deepen: cell.deepen, done: cell.done, filter: cell.filter });
+    const cap = cell.limits?.maxSectionLines ?? DEFAULT_LIMITS.maxSectionLines;
+    next.gitSections = counts;
+    const acks = counts.acknowledgments ?? 0;
+    const shallow = counts['shallow-info'] ?? 0;
+    if (acks > cap) next.expect = refusedAs({ what: 'acknowledgment lines', got: cap + 1, max: cap });
+    else if (shallow > cap) next.expect = refusedAs({ what: 'shallow-info lines', got: cap + 1, max: cap });
+    else next.expect = { status: 'ok' };
+  } else if (cell.expectFrom === 'git-clone') {
+    // git's client through the same shim URL: what it accepts, ply accepts
+    const dest = join(ctx.root, `clone-${cell.id.replace(/[^a-zA-Z0-9]+/g, '_')}`);
+    rmSync(dest, { recursive: true, force: true });
+    // async: the shim and the server answering this clone run in this process
+    const r = await new Promise(resolve => {
+      const child = spawn('git', ['-c', 'protocol.version=2', 'clone', '-q', '--bare', `${ctx.shim}/~${cell.shim}/${cell.repo}.git`, dest], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+      let stderr = '';
+      child.stderr.on('data', d => { stderr += d; });
+      child.on('close', status => resolve({ status, stderr }));
+    });
+    rmSync(dest, { recursive: true, force: true });
+    next.gitClone = r.status === 0 ? 'ok' : r.stderr.trim().split('\n').at(-1)?.slice(0, 200) ?? `exit ${r.status}`;
+    next.expect = r.status === 0 ? { status: 'ok' } : { status: 'refused', code: 'protocol' };
+  } else if (cell.expectFrom === 'thin' || cell.expectFrom === 'thin-missing') {
+    const remote = join(ctx.root, 'thin-remote.git');
+    next.wants = [revParse(repoDir, 'main')];
+    next.haves = [revParse(remote, 'main')];
+    const list = gitText(repoDir, ['rev-list', '--objects', 'main', `^${next.haves[0]}`]).split('\n').map(l => l.slice(0, 40)).sort();
+    const hash = createHash('sha1');
+    for (const oid of list) hash.update(oid);
+    next.thinOids = hash.digest('hex');
+    if (cell.expectFrom === 'thin') next.expect = { status: 'ok' };
   } else if (cell.expectFrom === 'inflated-at' || cell.expectFrom === 'inflated-under') {
     // the aggregate is the inflated sum plus LIMIT_OBJECT_OVERHEAD per object (#142)
     const m = oracle.sums?.[cell.pack];
@@ -97,6 +200,8 @@ function decorate(cell, oracle) {
       : { status: 'ok' };
     next.inflated = sum;
   }
+  if (cell.local) next.localDir = join(ctx.root, `${cell.local}.git`);
+  if (cell.store) next.storeDir = join(ctx.root, `${cell.store}.git`);
   if (!next.expect) throw new Error(`${cell.id}: no expect`);
   return next;
 }
@@ -139,8 +244,36 @@ function checkOracle(cell, repoDir, result) {
     return result.base === base ? null : `merge-base: ply ${result.base}, git ${base}`;
   }
   if (cell.op === 'pack') {
+    if (typeof cell.objects === 'number' && result.n !== cell.objects) return `pack objects: ply ${result.n}, verify-pack ${cell.objects}`;
     if (typeof cell.chain !== 'number') return null;
     return result.maxChain === cell.chain ? null : `pack chain: ply ${result.maxChain}, verify-pack ${cell.chain}`;
+  }
+  if (cell.op === 'fetchPack') {
+    const g = cell.gitSections ?? {};
+    // git's acknowledgments section is the ACKs then `ready`; ply reports the ACKs and the ready flag
+    const acks = Math.max(0, (g.acknowledgments ?? 0) - (result.ready ? 1 : 0));
+    const shallow = g['shallow-info'] ?? 0;
+    return result.acks === acks && result.shallow === shallow ? null : `sections: ply acks ${result.acks} shallow ${result.shallow}, git ${JSON.stringify(g)}`;
+  }
+  if (cell.op === 'fetchThin') {
+    if (result.refDelta < 1) return `thin fetch: no REF_DELTA in the pack, the external path was not exercised`;
+    return result.oidsHash === cell.thinOids ? null : `thin fetch: ply objects ${result.n} differ from git rev-list --objects`;
+  }
+  if (cell.op === 'pushRepo') {
+    const heads = (/** @type {string} */ dir) => gitText(dir, ['for-each-ref', '--format=%(refname) %(objectname)', ...(cell.spec?.all ? ['refs/heads/'] : ['refs/heads/main'])]);
+    const local = heads(cell.localDir);
+    const remote = heads(repoDir);
+    if (local !== remote) return `pushRepo: remote refs differ from local (${remote.split('\n').length} vs ${local.split('\n').length})`;
+    if (cell.thin === true && !(result.thinDeltas > 0)) return 'pushRepo thin: no delta against the remote was sent';
+    const fsck = execFileSync('git', ['-C', repoDir, 'fsck', '--strict', '--no-dangling'], { encoding: 'utf8' });
+    return fsck.trim() === '' ? null : `fsck: ${fsck.trim().slice(0, 200)}`;
+  }
+  if (cell.op === 'rebase') {
+    const count = Number(gitText(repoDir, ['rev-list', '--count', 'main..feat']));
+    const onMain = spawnSync('git', ['-C', repoDir, 'merge-base', '--is-ancestor', 'main', 'feat']).status === 0;
+    if (count !== cell.rebased || !onMain) return `rebase: git sees ${count} commits main..feat (want ${cell.rebased}), main ${onMain ? 'is' : 'is not'} an ancestor of feat`;
+    const fsck = execFileSync('git', ['-C', repoDir, 'fsck', '--strict', '--no-dangling'], { encoding: 'utf8' });
+    return fsck.trim() === '' ? null : `fsck: ${fsck.trim().slice(0, 200)}`;
   }
   if (cell.op === 'editFile' || cell.op === 'pushTree') {
     const fsck = execFileSync('git', ['-C', repoDir, 'fsck', '--strict', '--no-dangling'], { encoding: 'utf8' });
@@ -149,13 +282,69 @@ function checkOracle(cell, repoDir, result) {
   return null;
 }
 
+/** @param {number} pid */
+function procCost(pid) {
+  try {
+    const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+    const hwm = Number(/VmHWM:\s+(\d+)/.exec(status)?.[1] ?? 0);
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    // utime and stime are fields 14 and 15 of /proc/pid/stat, in clock ticks (100 per second on Linux)
+    const ticks = Number(fields[11]) + Number(fields[12]);
+    return { rssPeakMB: Math.round(hwm / 1024), cpuMs: ticks * 10 };
+  } catch {
+    return { rssPeakMB: null, cpuMs: null };
+  }
+}
+
+let wdPort = 19100 + (process.pid % 200) * 4;
+/** @type {{ dir: string, config: string } | null} */
+let wdBuild = null;
+
+// A workerd cell: a fresh workerd process serving test/workerd/worker.mjs, one POST /sweep, then its peak RSS (VmHWM)
+// and CPU from /proc before it is killed. Those are the isolate's cost: the process holds nothing else.
+/** @param {Record<string, unknown>} payload */
+async function runWorkerd(payload) {
+  if (!WORKERD) return { status: 'crash', code: null, msg: 'workerd not found (node_modules/.bin/workerd or $WORKERD)' };
+  if (!wdBuild) throw new Error('workerd bundle was not built');
+  const port = wdPort++;
+  const config = join(wdBuild.dir, `config-${port}.capnp`);
+  writeFileSync(config, wdBuild.config.replace(/127\.0\.0\.1:\d+/, `127.0.0.1:${port}`));
+  const child = spawn(WORKERD, ['serve', config], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let err = '';
+  child.stderr.on('data', d => { err = (err + d).slice(-2000); });
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    let up = false;
+    for (let i = 0; i < 200 && !up; i++) {
+      try { up = (await fetch(`${base}/ping`)).ok; } catch { await new Promise(r => setTimeout(r, 50)); }
+    }
+    if (!up) return { status: 'crash', code: null, msg: `workerd did not answer: ${err.slice(-300)}` };
+    const t0 = performance.now();
+    const res = await fetch(`${base}/sweep`, { method: 'POST', body: JSON.stringify(payload), signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const out = /** @type {Record<string, unknown>} */ (await res.json());
+    return { ...out, ms: Math.round(performance.now() - t0), ...procCost(child.pid ?? 0) };
+  } catch (e) {
+    return { status: 'crash', code: null, msg: `workerd: ${e instanceof Error ? e.message : String(e)} ${err.slice(-300)}` };
+  } finally {
+    child.kill('SIGKILL');
+    rmSync(config, { force: true });
+  }
+}
+
+/** @param {any} cell @param {string} origin @param {string} shimOrigin @param {string} root */
+function urlOf(cell, repoName, origin, shimOrigin) {
+  if (!repoName) return null;
+  return cell.shim ? `${shimOrigin}/~${cell.shim}/${repoName}.git` : `${origin}/${repoName}.git`;
+}
+
 /**
- * @param {ReturnType<typeof decorate>} cell
- * @param {'default' | '128'} heap
- * @param {string} origin
+ * @param {Awaited<ReturnType<typeof decorate>>} cell
+ * @param {'default' | '128' | 'workerd'} heap
+ * @param {{ server: string, shim: string }} origins
  * @param {string} root
  */
-function runOne(cell, heap, origin, root) {
+function runOne(cell, heap, origins, root) {
   return new Promise(resolve => {
     let repoName = cell.repo ?? null;
     let copyDir = null;
@@ -167,9 +356,15 @@ function runOne(cell, heap, origin, root) {
     }
     const payload = {
       ...cell,
-      url: repoName ? `${origin}/${repoName}.git` : null,
+      url: urlOf(cell, repoName, origins.server, origins.shim),
       pack: cell.pack ? join(root, 'packs', `${cell.pack}.pack`) : null,
+      local: cell.localDir ?? null,
+      store: cell.storeDir ?? null,
     };
+    if (heap === 'workerd') {
+      runWorkerd(payload).then(result => finish(result));
+      return;
+    }
     const args = ['--import', HOOK];
     if (heap === '128') args.push(`--max-old-space-size=${HEAP_FLAG}`);
     args.push(CELL, JSON.stringify(payload));
@@ -177,12 +372,13 @@ function runOne(cell, heap, origin, root) {
     let out = '';
     let err = '';
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, TIMEOUT_MS);
+    const limit = cell.timeoutMs ?? TIMEOUT_MS;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, limit);
     child.stdout.on('data', d => { out += d; });
     child.stderr.on('data', d => { err = (err + d).slice(-4000); });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      /** @type {Record<string, unknown>} */
+      /** @type {Record<string, any>} */
       let result;
       const line = out.trim().split('\n').filter(Boolean).at(-1);
       let parsed = null;
@@ -190,13 +386,17 @@ function runOne(cell, heap, origin, root) {
         try { parsed = JSON.parse(line); } catch { parsed = null; }
       }
       const oom = /JavaScript heap out of memory|Allocation failed|heap limit/i.test(err);
-      if (timedOut) result = { status: 'hang', code: null, msg: `killed after ${TIMEOUT_MS}ms` };
+      if (timedOut) result = { status: 'hang', code: null, msg: `killed after ${limit}ms` };
       else if (parsed && !oom) result = parsed;
       else if (oom) result = { status: 'oom', code: null, msg: err.trim().split('\n').at(-1) ?? 'oom' };
       else result = { status: 'crash', code: null, msg: `exit ${code} signal ${signal}: ${(line ?? err).slice(0, 300)}` };
+      finish(result);
+    });
+    /** @param {Record<string, any>} result */
+    function finish(result) {
       // Merge-base is read on the untouched fixture. A merge writes a merge commit into the copy, and
       // merge-base on that copy is a different question. edit and push are judged by fsck of the copy.
-      const oracleDir = cell.op === 'editFile' || cell.op === 'pushTree' ? copyDir : (cell.repo ? join(root, `${cell.repo}.git`) : null);
+      const oracleDir = ['editFile', 'pushTree', 'pushRepo', 'rebase'].includes(cell.op) ? copyDir : (cell.repo ? join(root, `${cell.repo}.git`) : null);
       if (result.status === 'ok' && (cell.op === 'pack' || oracleDir)) {
         try {
           const problem = checkOracle(cell, cell.op === 'pack' ? root : oracleDir, result);
@@ -212,7 +412,7 @@ function runOne(cell, heap, origin, root) {
       result.op = cell.op;
       result.expect = cell.expect;
       resolve(result);
-    });
+    }
   });
 }
 
@@ -269,20 +469,29 @@ for (const entry of ratchet.entries) {
 const fixtureRoot = join(outDir, 'fixtures');
 process.stderr.write(`sweep: ${selected.length} cells × 2 heaps, fixtures ${fixtureRoot}\n`);
 const oracle = await ensureFixtures(fixtureRoot, selected);
-const cells = selected.map(cell => decorate(cell, oracle));
 const server = await startGitServer(fixtureRoot);
+const shim = await startShim(server.url);
+/** @type {Awaited<ReturnType<typeof decorate>>[]} */
+const cells = [];
+for (const cell of selected) cells.push(await decorate(cell, oracle, { root: fixtureRoot, server: server.url, shim: shim.url }));
+if (WORKERD && cells.some(c => c.runtime === 'workerd')) {
+  const dir = join(fixtureRoot, 'wd');
+  const config = buildWorker({ port: 0, outDir: dir });
+  wdBuild = { dir, config: readFileSync(config, 'utf8') };
+}
 /** @type {Record<string, unknown>[]} */
 const results = [];
 let done = 0;
-const jobs = cells.flatMap(cell => ['default', '128'].map(heap => ({ cell, heap })));
+const jobs = cells.flatMap(cell => (cell.runtime === 'workerd' ? ['workerd'] : ['default', '128']).map(heap => ({ cell, heap })));
 try {
   await pool(jobs, PAR, async ({ cell, heap }) => {
-    const result = await runOne(cell, heap, server.url, fixtureRoot);
+    const result = await runOne(cell, heap, { server: server.url, shim: shim.url }, fixtureRoot);
     results.push(result);
     done += 1;
     process.stderr.write(`[${done}/${jobs.length}] ${heap} ${cell.id} ${result.status}${result.code ? ` ${result.code}` : ''} rss ${result.rssPeakMB ?? '-'}MB\n`);
   });
 } finally {
+  await shim.close();
   await server.close();
 }
 

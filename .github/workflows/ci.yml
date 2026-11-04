@@ -148,7 +148,8 @@ jobs:
       - name: attributes fuzzer
         run: node --import ./test/ts-resolve.mjs test/fuzz/attributes.mjs --n 120 --seed 1
 
-  # Cells at or under 16 MiB and 65_536 entries, each in its own process on the default heap and at 128 MiB.
+  # Cells at or under 16 MiB and 65_536 entries, each in its own process on the default heap and at 128 MiB (workerd
+  # cells once, in their own workerd process: workerd is a devDependency).
   # The full matrix (past those sizes, and the long delta chains) is the nightly job. Not part of the `test` gate:
   # a sweep failure is its own check, and the vitest shards do not run this file.
   sweep:

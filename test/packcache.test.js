@@ -4,10 +4,16 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
-import { cachingFetch, memoryCache, isCacheableFetch, cacheKey } from '../src/packcache.js';
+import { cachingFetch, memoryCache, isCacheableFetch, cacheKey, parseUploadPackRequest, exchangeKind, verifyFetchAnswer } from '../src/packcache.js';
+import { pkt, pktInit, pktStep, FLUSH, DELIM } from '../src/pktline.js';
+import { lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
+import { parsePack, resolvePack } from '../src/packresolve.js';
+import { te, concat } from '../src/bytes.js';
+import { DEFAULT_LIMITS } from '../src/limits.js';
+import { readFileSync } from 'node:fs';
 import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
@@ -283,4 +289,143 @@ test('negotiation, deterministic: haves in rounds — NAK rounds of unknown oids
   assert.ok(r.common.includes(commits[19]), 'the newest shared commit is common');
   const got = new Set(r.objects.keys());
   assert.ok(got.has(commits[29]) && got.has(commits[20]) && !got.has(commits[19]), 'the pack starts after the common commit');
+});
+
+// ---- #120: the request parser against git's own requests, purity, verify-before-store ----
+const UPLOAD = { 'content-type': 'application/x-git-upload-pack-request', 'git-protocol': 'version=2' };
+const post = async (u, body) => { const r = await fetch(`${u}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body }); assert.equal(r.status, 200); return new Uint8Array(await r.arrayBuffer()); };
+const framesOf = bytes => unwrap(pktStep(pktInit(), bytes)).frames;
+const reframe = fs => concat(fs.map(f => (f.kind === 'flush' ? FLUSH : f.kind === 'delim' ? DELIM : unwrap(pkt(f.payload)))));
+const line = s => ({ kind: 'data', payload: te.encode(s) });
+const objectSet = answer => {
+  const pack = concat(framesOf(answer).filter(f => f.kind === 'data' && f.payload[0] === 1).map(f => f.payload.subarray(1)));
+  return [...unwrap(resolvePack(unwrap(parsePack(pack)))).objects.keys()].sort();
+};
+const blobOid = () => git(bare, ['rev-parse', 'main:README.md']).trim();
+
+test('git\'s own v2 requests (GIT_TRACE_PACKET) parse, and classify: ls-refs is refs, a shallow filtered clone is pack, a fetch with haves is not', async () => {
+  const trace = join(root, 'trace-120'); const dst = join(root, 'clone-120');
+  rmSync(trace, { force: true }); rmSync(dst, { recursive: true, force: true });
+  // async git: the server and the proxy run in this process
+  const run = async (cwd, args) => { const r = await gitAsync(cwd, ['-c', 'protocol.version=2', ...args], { GIT_TRACE_PACKET: trace }); assert.equal(r.status, 0, r.stderr); };
+  await run(root, ['clone', '-q', '--depth', '1', '--filter=blob:none', '--no-checkout', url, dst]);
+  otherWriter({ 'more.txt': 'more\n' }, 'more');
+  await run(dst, ['fetch', '-q', '--depth', '2', 'origin']);
+  // the client's writes, request by request: `<label>> <payload>`, a flush ending each request (0000 / 0001 as text)
+  const requests = []; let cur = [];
+  for (const l of readFileSync(trace, 'utf8').split('\n')) {
+    const m = /packet:\s+(\S+)> (.*)$/.exec(l);
+    if (!m || m[1] === 'upload-pack') continue;
+    if (m[2] === 'command=ls-refs' || m[2] === 'command=fetch') cur = [];
+    cur.push(m[2] === '0000' ? FLUSH : m[2] === '0001' ? DELIM : unwrap(pkt(`${m[2]}\n`)));
+    if (m[2] === '0000' && cur.length > 1) { requests.push(concat(cur)); cur = []; }
+  }
+  const parsed = requests.map(b => unwrap(parseUploadPackRequest(b)));
+  const kinds = requests.map(b => exchangeKind('POST', `${url}/git-upload-pack`, b));
+  const ls = parsed.filter(r => r.command === 'ls-refs'), fe = parsed.filter(r => r.command === 'fetch');
+  assert.ok(ls.length >= 2 && fe.length >= 2, `${ls.length} ls-refs, ${fe.length} fetch`);
+  assert.ok(ls[0].caps.some(c => c.startsWith('agent=git/')), ls[0].caps.join(' '));
+  assert.ok(ls[0].prefixes.includes('refs/heads/') && ls[0].peel && ls[0].symrefs);
+  assert.ok(kinds.filter((_, i) => parsed[i].command === 'ls-refs').every(k => k === 'refs'));
+  const clone = fe[0];
+  assert.equal(clone.deepen, 1); assert.equal(clone.filter, 'blob:none'); assert.equal(clone.haves.length, 0); assert.ok(clone.wants.length >= 1);
+  const later = fe.at(-1);
+  assert.ok(later.haves.length + later.shallows.length > 0, 'the second fetch says what it holds');
+  assert.equal(kinds[parsed.indexOf(later)], null, 'a negotiation is not pure');
+});
+
+test('purity oracle: a pack exchange answers the same object set before and after an unrelated ref update', async () => {
+  const head = headOf();
+  for (const opts of [{ wants: [head], filter: 'tree:0', deepen: 1 }, { wants: [blobOid()] }, { wants: [head], deepen: 2 }]) {
+    const body = fetchBody(opts);
+    assert.equal(exchangeKind('POST', `${srv.url}/pc.git/git-upload-pack`, body), 'pack');
+    const a = await post(`${srv.url}/pc.git`, body);
+    git(bare, ['update-ref', 'refs/heads/unrelated-120', git(bare, ['rev-parse', 'main~1']).trim()]);
+    otherWriter({ 'unrelated.txt': `${Math.random()}\n` }, 'unrelated'); git(bare, ['update-ref', 'refs/heads/main', head]);
+    const b = await post(`${srv.url}/pc.git`, body);
+    assert.deepEqual(objectSet(b), objectSet(a), JSON.stringify(opts));
+    git(bare, ['update-ref', '-d', 'refs/heads/unrelated-120']);
+  }
+});
+
+test('verifyFetchAnswer: git\'s answers pass; a flipped byte, a cut, a missing want, a lying shallow-info are refused', async () => {
+  const head = headOf();
+  const req = o => unwrap(parseUploadPackRequest(fetchBody(o)));
+  const commitReq = req({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const commitAns = await post(`${srv.url}/pc.git`, fetchBody({ wants: [head], filter: 'tree:0', deepen: 1 }));
+  assert.deepEqual(unwrap(verifyFetchAnswer(commitReq, commitAns)), { objects: 1 });
+  const blobReq = req({ wants: [blobOid()] });
+  const blobAns = await post(`${srv.url}/pc.git`, fetchBody({ wants: [blobOid()] }));
+  assert.deepEqual(unwrap(verifyFetchAnswer(blobReq, blobAns, DEFAULT_LIMITS)), { objects: 1 });
+  const refused = (r, ans, code, re) => { const v = verifyFetchAnswer(r, ans); assert.equal(v.ok, false, String(re)); assert.equal(v.error.code, code); assert.match(v.error.message, re); };
+  const flipped = blobAns.slice(); flipped[flipped.length - 30] ^= 0xff;
+  refused(blobReq, flipped, 'pack_corrupt', /./);
+  refused(blobReq, blobAns.subarray(0, blobAns.length - 7), 'protocol', /trailing/);
+  refused(blobReq, blobAns.subarray(0, blobAns.length - 4), 'protocol', /without flush/);
+  refused(req({ wants: [blobOid(), head] }), blobAns, 'pack_corrupt', new RegExp(`want ${head} is not in the pack`));
+  refused(req({ wants: [head], filter: 'tree:0' }), commitAns, 'pack_corrupt', /shallow-info for a request without deepen/);
+  const fs = framesOf(commitAns);
+  const at = fs.findIndex(f => f.kind === 'data' && new TextDecoder().decode(f.payload).startsWith('shallow '));
+  assert.ok(at > 0, 'deepen 1 of a commit with parents is answered with shallow-info');
+  refused(commitReq, reframe([...fs.slice(0, at), line(`shallow ${'f'.repeat(40)}\n`), ...fs.slice(at + 1)]), 'pack_corrupt', /shallow f{40} is not a commit of the pack/);
+  refused(commitReq, reframe([...fs.slice(0, at + 1), line(`unshallow ${head}\n`), ...fs.slice(at + 1)]), 'pack_corrupt', /unshallow for a request without shallow/);
+  refused(commitReq, reframe([line('acknowledgments\n'), line('NAK\n'), { kind: 'flush' }]), 'protocol', /no packfile section/);
+  refused(blobReq, reframe([line('ERR nope\n'), { kind: 'flush' }]), 'remote_error', /nope/);
+  assert.equal(verifyFetchAnswer(blobReq, blobAns, { ...DEFAULT_LIMITS, maxPackObjects: Number.NaN }).ok, false, 'a bad limit is refused, not ignored');
+  assert.equal(verifyFetchAnswer(blobReq, blobAns, { ...DEFAULT_LIMITS, maxPackBytes: 10 }).error.code, 'limit_exceeded');
+});
+
+test('cachingFetch verifyBeforeStore: a blob fetch is cached; a tampered answer is never stored; a hit is byte-identical to the stored answer', async () => {
+  const body = fetchBody({ wants: [blobOid()] });
+  const pending = [];
+  const waitUntil = p => { pending.push(p); };
+  const settle = async () => { await Promise.all(pending.splice(0)); };
+  const call = async f => new Uint8Array(await (await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body })).arrayBuffer());
+  // without the option the blob fetch is a bypass, as before
+  const plain = cachingFetch(globalThis.fetch, memoryCache());
+  await call(plain); assert.equal(plain.stats.bypass, 1);
+  // a lying origin: the answer is tampered on the way; the client still gets it (and refuses it itself), the cache does not
+  const tamper = async (u, init) => { const res = await fetch(u, init); const b = new Uint8Array(await res.arrayBuffer()); b[b.length - 30] ^= 0xff; return new Response(b, { status: 200, headers: res.headers }); };
+  const badCache = memoryCache();
+  const lied = cachingFetch(tamper, badCache, { verifyBeforeStore: true, waitUntil });
+  await call(lied); await settle();
+  assert.equal(badCache.entries.size, 0, 'nothing stored');
+  assert.equal(lied.stats.miss, 1); assert.equal(lied.stats.verifyFailed, 1); assert.equal(lied.stats.verifyOk, 0); assert.equal(lied.stats.putOk, 0);
+  assert.ok(lied.stats.verifyError.length > 0);
+  assert.equal(lied.attrs()['git.pack.cache.verify.failed'], 1);
+  // an honest origin: stored once verified; the hit is the origin's answer byte for byte
+  const cache = memoryCache();
+  const f = cachingFetch(globalThis.fetch, cache, { verifyBeforeStore: true, waitUntil });
+  const first = await call(f); await settle();
+  assert.deepEqual(objectSet(first), [blobOid()]);
+  assert.equal(cache.entries.size, 1); assert.equal(f.stats.verifyOk, 1); assert.equal(f.stats.putOk, 1);
+  const hit = await call(f);
+  assert.equal(f.stats.hit, 1);
+  // git may answer the same request with different pack bytes (a loose object, then a packed one): the guarantee is
+  // that a hit replays the very answer that was verified and stored
+  assert.deepEqual(hit, first, 'byte-identical');
+  assert.deepEqual(hit, cache.entries.values().next().value.body);
+  // and a ply read through it: the second read of the blob comes from the cache, hash-checked by the reader
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: f }));
+  const read = async () => new TextDecoder().decode((await unwrapAsync(c.fetchObject({ oid: blobOid() }))).data);
+  assert.equal(await read(), git(bare, ['cat-file', '-p', blobOid()])); await settle();
+  const before = counts();
+  assert.equal(await read(), git(bare, ['cat-file', '-p', blobOid()]));
+  assert.equal(delta(before, counts()).fetch, 0, 'served from the cache');
+  assert.equal(f.stats.verifyOk, 2);
+});
+
+test('cachingFetch verifyBeforeStore: an answer over the cap, a request that is not a fetch, and a bad limit are counted and not stored', async () => {
+  const pending = [];
+  const opts = extra => ({ verifyBeforeStore: true, waitUntil: p => { pending.push(p); }, ...extra });
+  const run = async (f, body) => { await (await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body })).arrayBuffer(); await Promise.all(pending.splice(0)); };
+  const small = memoryCache(); const fs = cachingFetch(globalThis.fetch, small, opts({ limits: { ...DEFAULT_LIMITS, maxPackBytes: 8 } }));
+  await run(fs, fetchBody({ wants: [blobOid()] }));
+  assert.equal(small.entries.size, 0); assert.match(fs.stats.verifyError, /cached answer bytes/);
+  const ls = memoryCache(); const fl = cachingFetch(globalThis.fetch, ls, opts({ shouldCache: () => true }));
+  await run(fl, unwrap(lsRefsBodyR([])));
+  assert.equal(ls.entries.size, 0); assert.match(fl.stats.verifyError, /the request is not a fetch/);
+  const nan = memoryCache(); const fn = cachingFetch(globalThis.fetch, nan, opts({ limits: { ...DEFAULT_LIMITS, maxPackBytes: Number.NaN } }));
+  await run(fn, fetchBody({ wants: [blobOid()] }));
+  assert.equal(nan.entries.size, 0); assert.equal(fn.stats.verifyFailed, 1);
 });

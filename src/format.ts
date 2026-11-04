@@ -203,6 +203,10 @@ export const ZLIB_CM_DEFLATE = 8;
 export const ZLIB_CM_MASK = 0x0f;
 export const ZLIB_FDICT = 0x20;
 export const ZLIB_HEADER_MOD = 31;
+/** RFC 1950 CMF: CINFO is the high nibble, the window is 2^(CINFO + 8) bytes; 7 (32 KiB) is the largest zlib allows. */
+export const ZLIB_CINFO_SHIFT = 4;
+export const ZLIB_CINFO_MAX = 7;
+export const ZLIB_WINDOW_EXPONENT = 8;
 export const ADLER_BYTES = 4;
 export const ADLER_MOD = 65_521;
 /** Adler-32 stores the sum `b` in the high 16 bits. RFC 1950 §2.2. */
@@ -216,6 +220,10 @@ export const DEFLATE_STORED_HEADER_BYTES = 4;
 /** One's complement of the stored-block length is 16 bits. RFC 1951 §3.2.4. */
 export const DEFLATE_STORED_LEN_MASK = 0xff_ff;
 export const DEFLATE_MAX_BITS = 15;
+/** Deflate's largest window (CINFO 7, 2^15 bytes, RFC 1951 §2). A streaming inflater keeps this much output and no more. */
+export const INFLATE_WINDOW: number = 1 << DEFLATE_MAX_BITS;
+/** Bytes one streaming inflate pull yields at most: half a window, so a pull holds one chunk beside the window. */
+export const INFLATE_CHUNK: number = INFLATE_WINDOW / 2;
 export const DEFLATE_BIT_TABLE = 16;
 export const DEFLATE_LITERALS = 256;
 export const DEFLATE_EOB = 256;

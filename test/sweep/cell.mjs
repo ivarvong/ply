@@ -1,24 +1,20 @@
 // One sweep cell, in its own process. The parent passes --max-old-space-size when the cell is the 128 MiB heap.
 // argv[2] is the cell JSON. One JSON line on stdout; exit 0 even on a typed refusal so the parent can tell a
-// refusal from a crash. Peak RSS is the kernel's maxRSS (KiB on Linux). ArrayBuffers are sampled because they
+// refusal from a crash. Peak RSS is the kernel's VmHWM for this process (vmHwmKiB below). ArrayBuffers are sampled because they
 // sit outside the V8 heap the flag caps.
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile, listTree } from '../../src/read.js';
-import { readLog } from '../../src/log.js';
-import { editFile } from '../../src/edit.js';
-import { pushTree } from '../../src/tree.js';
-import { mergeBranch } from '../../src/merge.js';
 import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
+import { pushRepo } from '../../src/repo-node.js';
 import { Tracer } from '../../src/otel.js';
 import { withLimits } from '../../src/limits.js';
 import { unwrap, unwrapAsync } from '../unwrap.js';
+import { failure, fetchOps } from './ops.mjs';
 
 const cell = JSON.parse(process.argv[2]);
 const opts = { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) };
-const author = { name: 'sweep', email: 'sweep@example.com' };
-const when = 1700000000;
 
 let heapPeak = 0;
 let abPeak = 0;
@@ -29,53 +25,54 @@ const sample = setInterval(() => {
 }, 5);
 sample.unref();
 
-/** @param {ReadableStream<Uint8Array>} stream */
-async function drain(stream) {
-  let len = 0;
-  for await (const chunk of stream) len += chunk.byteLength;
-  return len;
+/** @param {Iterable<string>} oids */
+function oidsHash(oids) {
+  const hash = createHash('sha1');
+  for (const oid of [...oids].sort()) hash.update(oid);
+  return hash.digest('hex');
 }
 
+// KiB. /proc/self/status VmHWM is this image's own high-water mark (reset by exec); elsewhere, ru_maxrss.
+function vmHwmKiB() {
+  try {
+    const m = /VmHWM:\s+(\d+)\s+kB/.exec(readFileSync('/proc/self/status', 'utf8'));
+    if (m) return Number(m[1]);
+  } catch {
+    // not Linux
+  }
+  return process.resourceUsage().maxRSS;
+}
+
+const TYPE_ID = { commit: 1, tree: 2, blob: 3, tag: 4 };
+
 const ops = {
-  async readFile() {
-    const r = await unwrapAsync(readFile(cell.url, { ref: cell.ref ?? null, path: cell.path }, opts));
-    const len = await drain(r.stream);
-    return { blob: r.blob, size: r.size, len };
-  },
-  async listTree() {
-    const r = await unwrapAsync(listTree(cell.url, { ref: cell.ref ?? null, path: cell.path ?? '' }, opts));
-    return { tree: r.tree, n: r.entries.length };
-  },
-  async readLog() {
-    const r = await unwrapAsync(readLog(cell.url, { ref: cell.ref ?? 'main', limit: cell.limit }, opts));
-    return { n: r.commits.length, truncated: r.truncated };
-  },
-  async lsRefs() {
-    const r = await unwrapAsync(unwrap(GitHttp.create(cell.url, opts)).lsRefs(cell.prefixes ?? []));
-    return { n: r.refs.size, head: r.head };
-  },
-  async editFile() {
-    const r = await unwrapAsync(editFile(cell.url, { path: cell.path, find: cell.find, replace: cell.replace, author, message: 'sweep', time: when }, opts));
-    return { commit: r.newCommit };
-  },
-  async pushTree() {
-    /** @type {Record<string, Uint8Array>} */
-    const files = {};
-    for (let i = 0; i < cell.nfiles; i++) files[`f/${String(i).padStart(7, '0')}.bin`] = new Uint8Array(cell.size).fill((i + 1) & 255);
-    const r = await unwrapAsync(pushTree(cell.url, { ref: 'refs/heads/main', files, author, message: 'sweep', time: when }, opts));
-    return { commit: r.newCommit, noop: r.noop };
-  },
-  async merge() {
-    const r = await unwrapAsync(mergeBranch(cell.url, { ref: 'refs/heads/main', from: cell.from, author, message: 'sweep merge', time: when }, opts));
-    return { outcome: r.outcome, base: r.base };
-  },
+  ...fetchOps(cell, opts),
   async pack() {
     const buf = new Uint8Array(readFileSync(cell.pack));
     const parsed = unwrap(parsePack(buf, { limits: opts.limits }));
     const resolved = unwrap(resolvePack(parsed, () => null, opts.limits));
-    const hash = createHash('sha1');
-    for (const oid of [...resolved.objects.keys()].sort()) hash.update(oid);
-    return { n: resolved.objects.size, maxChain: resolved.stats.maxChain, oidsHash: hash.digest('hex') };
+    return { n: resolved.objects.size, maxChain: resolved.stats.maxChain, oidsHash: oidsHash(resolved.objects.keys()) };
+  },
+  // A thin fetch: the server deltas against the haves, and the bases come from the local store (`cell.store`, a bare
+  // repo holding the haves) through the external lookup, the way a client with those objects resolves them.
+  async fetchThin() {
+    const external = (/** @type {string} */ oid) => {
+      try {
+        const type = execFileSync('git', ['-C', cell.store, 'cat-file', '-t', oid], { encoding: 'utf8' }).trim();
+        const data = execFileSync('git', ['-C', cell.store, 'cat-file', type, oid], { maxBuffer: 1 << 28 });
+        return { type: TYPE_ID[type], data: new Uint8Array(data) };
+      } catch {
+        return null;
+      }
+    };
+    const c = unwrap(GitHttp.create(cell.url, opts));
+    const r = await unwrapAsync(c.fetchPack({ wants: cell.wants, haves: cell.haves, thinPack: true }, { external }));
+    const objects = r.resolved?.objects ?? r.objects ?? new Map();
+    return { n: objects.size, refDelta: r.parsed?.stats.refDelta ?? 0, oidsHash: oidsHash(objects.keys()) };
+  },
+  async pushRepo() {
+    const r = await unwrapAsync(pushRepo(cell.local, cell.url, cell.spec ?? {}, opts));
+    return { updates: r.updates.length, objects: r.objects, thinDeltas: r.thinDeltas, upToDate: r.upToDate };
   },
 };
 
@@ -88,25 +85,16 @@ try {
   if (!op) throw new Error(`unknown op ${cell.op}`);
   res = { status: 'ok', ...(await op()) };
 } catch (e) {
-  const err = /** @type {{ code?: unknown, name?: string, message?: string, got?: unknown, max?: unknown, what?: unknown }} */ (e);
-  const typed = !!err && typeof err.code === 'string' && err.name !== 'TypeError' && err.name !== 'RangeError';
-  res = {
-    status: typed ? 'refused' : 'crash',
-    code: typeof err?.code === 'string' ? err.code : null,
-    name: err?.name ?? null,
-    what: typeof err?.what === 'string' ? err.what : null,
-    got: typeof err?.got === 'number' ? err.got : null,
-    max: typeof err?.max === 'number' ? err.max : null,
-    msg: String(err?.message ?? e).slice(0, 300),
-  };
+  res = failure(e);
 } finally {
   clearInterval(sample);
 }
 const cpu = process.cpuUsage(cpu0);
 res.ms = Math.round(performance.now() - t0);
 res.cpuMs = Math.round((cpu.user + cpu.system) / 1000);
-// Linux: ru_maxrss is kilobytes. That is the peak the kernel saw, including ArrayBuffers the heap flag does not cap.
-res.rssPeakMB = Math.round(process.resourceUsage().maxRSS / 1024);
+// The peak the kernel saw, including ArrayBuffers the heap flag does not cap. VmHWM, not ru_maxrss: ru_maxrss survives
+// exec, so a cell spawned by a driver that had grown to 500 MB building fixtures reported 500 MB whatever it used.
+res.rssPeakMB = Math.round(vmHwmKiB() / 1024);
 res.heapPeakMB = Math.round(heapPeak / (1024 * 1024));
 res.abPeakMB = Math.round(abPeak / (1024 * 1024));
 process.stdout.write(`${JSON.stringify(res)}\n`);

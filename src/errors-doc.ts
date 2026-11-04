@@ -5,7 +5,7 @@ import type { Code } from './errors.js';
 export type CodeDoc = { readonly where: 'local' | 'remote' | 'net' | 'content'; readonly what: string };
 export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path; checkout: a non-empty dir, or a path that collides or would pass through a symlink)' },
-  unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, push-options not advertised)' },
+  unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, push-options not advertised, no protocol v2: what "protocol version")' },
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
   timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },
   aborted: { where: 'local', what: 'the caller\'s AbortSignal fired' },
@@ -25,7 +25,7 @@ export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   push_rejected: { where: 'remote', what: 'a hook or policy refused the push; see hookOutput / remote messages' },
   push_partial: { where: 'remote', what: 'a non-atomic multi-ref push was partly applied: `landed` lists the refs updated, `rejected` the refs refused with their reasons' },
   merge_conflict: { where: 'content', what: 'both sides changed a path; `conflicts` lists them' },
-  not_fast_forward: { where: 'content', what: 'fastForwardOnly was requested and a merge commit would be needed, or the server refuses non-fast-forward updates (receive.denyNonFastForwards) and the pushed commit does not descend from the old oid' },
+  not_fast_forward: { where: 'content', what: 'fastForwardOnly was requested and a merge commit would be needed, or the server refuses non-fast-forward updates (receive.denyNonFastForwards) and the pushed commit does not descend from the old oid, or pushRepo / syncRef refused one before sending (no force)' },
   unrelated_histories: { where: 'content', what: 'no common ancestor within the search depth' },
   not_linear: { where: 'content', what: 'a merge commit in a chain that must be linear (rebase, pick)' },
   ambiguous: { where: 'remote', what: 'the push was sent and may have been applied, but no trustworthy confirmation was obtained' },

@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **562** (493 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 460, by a pending PR 45, excluded 29, unregistered 28. Fail sites no cell reaches: 30 of 493. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 274 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **639** (564 fail sites, 17 produced codes, 2 untyped throws, 30 exported parse/decode/classify/decide functions). Covered by a merged space 536, by a pending PR 45, excluded 30, unregistered 28. Fail sites no cell reaches: 30 of 564. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 350 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -63,14 +63,16 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `parity` | main | curated | case | cases | — | git clone/fetch over file:// vs ply over HTTP against the same upload-pack | 0 | 4 | ci (`test/parity.test.js`) | — |
 | `push-tree` | main | curated | case | cases | — | git write-tree, ls-tree, rev-list, fsck --strict, clone | 16 | 0 | ci (`test/push-tree.test.js`) | dependent¹ |
 | `push-repo` | main | curated | case | cases | — | a local repository built by git (loose and packed objects, packed and loose refs, an annotated tag, a gitlink) pushed to git http-backend (default and stock): git rev-list --objects is the object set git push would send, git index-pack --strict on the captured pack, git fsck --strict and for-each-ref on the remote, git clone --mirror; git pack-objects for the pack size; git itself for the refusals (shallow, alternates, sha256, a non-fast-forward) | 19 | 0 | ci (`test/push-repo.test.js`) | — |
+| `sync-ref` | main | curated | case | cases | — | two git http-backend bare repositories (default and stock): after every syncRef git rev-parse on the destination equals the source tip and git fsck --strict is clean; the captured pack goes through git index-pack without --fix-thin (never thin) and its object set is git rev-list --objects &lt;new> --not &lt;old dst tip> on the source, disjoint from everything the old tip reaches; request logs per side (in_sync: no fetch, no receive-pack; a refused non-fast-forward: no receive-pack); git update-ref between ls-refs and receive-pack for the lost races (#122) | 5 | 0 | ci (`test/sync-ref.test.js`) | — |
 | `pack-index` | main | curated | case | cases | — | git's own packs (OFS_DELTA from repack, REF_DELTA from pack-objects, the empty pack) and ply's (objectsForPack → planDeltas → buildPack): the idx byte for byte against git index-pack, the 64-bit offset table through git show-index, the object set against git rev-list --objects and paths against ls-tree, git index-pack itself for the thin and duplicate refusals, and a dumb-HTTP clone of the static files with git fsck --strict | 15 | 0 | ci (`test/packindex.test.js`) | — |
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
-| `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
+| `packcache` | main | curated | case | cases | — | the outcome with and without the cache; parseUploadPackRequest of fetchBody/lsRefsBody is the spec, and git's own v2 requests (GIT_TRACE_PACKET) parse; a pack exchange answers the same object set before and after an unrelated ref update (git upload-pack); verifyFetchAnswer refuses a flipped byte, a cut, a missing want and a lying shallow-info in git's answers (#120) | 32 | 0 | ci (`test/packcache.test.js`, `test/uprequest.test.js`) | — |
+| `pack-stream` | main | curated | case | cases | — | the buffered decoders on the same bytes (inflate, parsePack: same bytes, consumed count, stats, objects, trailer, error code) for every chunking of node:zlib members and buildPack packs; git hash-object on a scanned blob; every refusal by a crafted member or pack; peak live arrayBuffers of each cell against streambound.ts under a 64 and a 128 MiB heap (#172) | 42 | 0 | ci (`test/packstream.test.js`, `test/stream-memory.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 22 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
 | `encode-tag` | main | curated | case | cases | — | git hash-object -t tag --stdin (fsck_tag_standalone: same oid, same refusals) and git tag -a byte-for-byte where porcelain can write the cell (#103) | 2 | 0 | ci (`test/encode-tag.test.js`) | — |
 | `redirects` | main | curated | case | cases | — | opt-in redirects (followRedirects: initial), per case against git http.followRedirects=initial: hop counts, the suffix rule, origin change drops the credential, Location userinfo refused (#150) | 4 | 0 | ci (`test/redirect.test.js`) | — |
-| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 66 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
+| `mutant-kill` | main | curated | case | cases | — | stated values chosen to kill Stryker mutants | 67 | 0 | ci (`test/mutant-kill.test.js`, `test/mutant-kill-tree.test.js`, `test/mutant-kill-packs.test.js`) | — |
 | `merge` | main | curated | case | cases | — | git merge-tree --write-tree, git rebase, git cherry-pick, git revert | 11 | 0 | ci (`test/merge.test.js`, `test/rebase.test.js`, `test/linemerge.test.js`, `test/pick-empty.test.js`) | — |
 | `sign` | main | curated | case | cases | — | git verify-commit / ssh-keygen -Y verify | 2 | 0 | ci (`test/sign.test.js`) | — |
 | `refname` | main | enumerated | components(3) × shape(16) × question(3) | 4,622 (4,368 + 254 sweep; 8 wrong on main before #75) | 4,622 / 0 | git check-ref-format, and a real git receive-pack --stateless-rpc per cell (ng &lt;name> funny refname or not) (#73, #75) | 1 | 0 | ci (`test/space/refname.test.js`) | — |
@@ -100,7 +102,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (26: lossless 9, strict 3, replacement 14)
+## Decode sites (26: lossless 10, strict 3, replacement 13)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
@@ -112,7 +114,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/bytes.ts` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
 | `src/bytes.ts` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
 | `src/caps.ts` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
-| `src/fetch.ts` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
+| `src/fetch.ts` sidebandStep() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
 | `src/fetch.ts` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
 | `src/http.ts` utf8() | replacement | td | **HOLE (data path)** |
 | `src/http.ts` statusError() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |
@@ -121,7 +123,6 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/objects.ts` parseTree() | lossless | decodeBytes | `git-bytes` / field |
 | `src/objects.ts` parseCommit() | lossless | decodeBytes | `git-bytes` / field |
 | `src/objects.ts` parseTag() | lossless | decodeBytes | `git-bytes` / field |
-| `src/packcache.ts` isCacheableFetch() | replacement | td | excluded: protocol: the request body ply built itself, matched for keywords and hex oids |
 | `src/push.ts` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
 | `src/push.ts` reportStep() | lossless | decodeBytes | `git-bytes` / field |
 | `src/push.ts` outcomeAttrs() | lossless | decodeBytes | excluded: display-only: the report lines recorded on the span |
@@ -132,6 +133,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/repo-node.ts` get() | lossless | decodeBytes | excluded: protocol: a loose object header is "&lt;type> &lt;size>" in ASCII, which the regex after the decode checks; a non-ASCII byte fails that check as it fails git (and the object hash is checked too) |
 | `src/sha1.ts` toHex() | replacement | td | excluded: the bytes are hex digits toHex wrote itself (ASCII): nothing to replace |
 | `src/sign.ts` withGpgsig() | lossless | decodeBytes | `sign` / case |
+| `src/uprequest.ts` lineOf() | lossless | decodeBytes | `packcache` / case |
 
 ## Holes (58)
 
