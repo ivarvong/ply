@@ -32,6 +32,7 @@
   "test/option.test.js": 0,
   "test/oracle.test.js": 5,
   "test/packcache.test.js": 7,
+  "test/packstream.test.js": 6,
   "test/parity.test.js": 7,
   "test/pick-empty.test.js": 10,
   "test/prefix-closure.test.js": 1,

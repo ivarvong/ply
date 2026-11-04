@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **562** (493 fail sites, 17 produced codes, 2 untyped throws, 24 exported parse/decode/classify/decide functions). Covered by a merged space 460, by a pending PR 45, excluded 29, unregistered 28. Fail sites no cell reaches: 30 of 493. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 274 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **604** (530 fail sites, 17 produced codes, 2 untyped throws, 29 exported parse/decode/classify/decide functions). Covered by a merged space 502, by a pending PR 45, excluded 29, unregistered 28. Fail sites no cell reaches: 30 of 530. Of the registered points, 221 are claimed by an enumerated space, 10 only by a random one and 316 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -66,6 +66,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `pack-index` | main | curated | case | cases | — | git's own packs (OFS_DELTA from repack, REF_DELTA from pack-objects, the empty pack) and ply's (objectsForPack → planDeltas → buildPack): the idx byte for byte against git index-pack, the 64-bit offset table through git show-index, the object set against git rev-list --objects and paths against ls-tree, git index-pack itself for the thin and duplicate refusals, and a dumb-HTTP clone of the static files with git fsck --strict | 15 | 0 | ci (`test/packindex.test.js`) | — |
 | `checkout-tree` | main | curated | case | cases | — | git clone + diff -r | 18 | 0 | ci (`test/checkout-tree.test.js`) | dependent¹ |
 | `packcache` | main | curated | case | cases | — | the outcome with and without the cache | 4 | 0 | ci (`test/packcache.test.js`) | — |
+| `pack-stream` | main | curated | case | cases | — | the buffered decoders on the same bytes (inflate, parsePack: same bytes, consumed count, stats, objects, trailer, error code) for every chunking of node:zlib members and buildPack packs; git hash-object on a scanned blob; every refusal by a crafted member or pack (#172) | 42 | 0 | ci (`test/packstream.test.js`) | — |
 | `unit` | main | curated | case | cases | — | stated values (format facts from git source, delta bounds) | 22 | 0 | ci (`test/pure.test.js`, `test/result.test.js`, `test/format-facts.test.js`, `test/prefix-closure.test.js`, `test/delta-bound.test.js`, `test/bundle.test.js`) | — |
 | `lsrefs-unborn` | main | curated | case | cases | — | git ls-remote (GIT_TRACE_PACKET: when unborn is sent), upload-pack ls-refs.c (the answer, read with connect.c process_ref_v2), git clone of an empty repository (the HEAD it creates) (#103) | 1 | 0 | ci (`test/lsrefs-unborn.test.js`) | — |
 | `encode-tag` | main | curated | case | cases | — | git hash-object -t tag --stdin (fsck_tag_standalone: same oid, same refusals) and git tag -a byte-for-byte where porcelain can write the cell (#103) | 2 | 0 | ci (`test/encode-tag.test.js`) | — |
@@ -112,7 +113,7 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/bytes.ts` encodeBytes() | lossless | decodeBytes | `git-bytes` / content |
 | `src/bytes.ts` decodeChunk() | replacement | td | excluded: display-only: sideband band 2 progress, quoted into a span or an error; a character cut by a frame waits for its tail |
 | `src/caps.ts` text() | replacement | td | excluded: display/protocol: v2 capability lines are ASCII keywords git defines (agent= is recorded, never decided on) |
-| `src/fetch.ts` v2Step() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
+| `src/fetch.ts` sidebandStep() | replacement | td | excluded: display-only: band 2 progress and the band 3 message, quoted into a span or an error |
 | `src/fetch.ts` v2Step() | replacement | td | excluded: protocol: v2 section lines are git keywords and hex oids; a non-ASCII byte fails the same parse it fails in git |
 | `src/http.ts` utf8() | replacement | td | **HOLE (data path)** |
 | `src/http.ts` statusError() | replacement | td | excluded: display-only: the body preview quoted in an HTTP error |

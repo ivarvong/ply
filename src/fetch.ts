@@ -161,6 +161,48 @@ function notOurRefReason(text: string): Extra {
   return {};
 }
 
+// The sideband counters a demultiplexer keeps (V2State carries them): bytes and frames per band, and the progress tail.
+export type SidebandCounters = {
+  readonly band1: number;
+  readonly band2: number;
+  readonly band2Frames: number;
+  readonly packFrames: number;
+  readonly progress: string;
+  readonly progressCarry: Uint8Array;
+};
+// What one frame was: pack bytes (a view into the frame's payload, which pktStep copied out of the chunk), or progress.
+export type SidebandPiece = { readonly kind: 'pack'; readonly body: Uint8Array } | { readonly kind: 'progress'; readonly text: string };
+export type Sidebanded<S> = { readonly state: S; readonly piece: SidebandPiece };
+export type SidebandError = ErrorOf<'protocol'> | ErrorOf<'limit_exceeded'> | ErrorOf<'remote_error'>;
+// One packfile-section frame, demultiplexed (git's demultiplex_sideband): band 1 is pack bytes and band 2 progress, each
+// held to maxPack before the frame is handed on; band 3 is the remote's error, its text the message. Peak is the frame.
+// @decoder sidebandStep prefix=sideband
+export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number): Result<Sidebanded<S>, SidebandError> {
+  // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
+  // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
+  if (frame.kind !== 'data') return proto(`v2: ${frame.kind} inside the packfile section`);
+  const sb = parseSideband(frame.payload);
+  if (!sb.ok) return sb;
+  const band = sb.value;
+  if (band.band === SIDEBAND_PACK) {
+    const band1 = st.band1 + band.body.length;
+    if (band1 > maxPack) return err(limitExceeded('pack bytes', band1, maxPack));
+    return ok({ state: { ...st, band1, packFrames: st.packFrames + 1 }, piece: { kind: 'pack', body: band.body } });
+  }
+  if (band.band === SIDEBAND_PROGRESS) {
+    const band2 = st.band2 + band.body.length;
+    if (band2 > maxPack) return err(limitExceeded('progress bytes', band2, maxPack));
+    // decodeChunk: a character cut by a frame boundary is held for the next frame instead of decoding as two U+FFFD
+    const d = decodeChunk(st.progressCarry, band.body);
+    return ok({ state: { ...st, band2, band2Frames: st.band2Frames + 1, progress: (st.progress + d.text).slice(-PROGRESS_KEEP), progressCarry: d.carry }, piece: { kind: 'progress', text: d.text } });
+  }
+  if (band.band === SIDEBAND_ERROR) {
+    const text = td.decode(band.body).trim();
+    return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+  }
+  return proto(`v2: bad sideband ${band.band}`);
+}
+
 // A commit want whose object is a tree, blob, or tag is not_found, before pack_corrupt is built. Any other mismatch
 // (a blob want, a delta, an unknown type id) stays the caller's pack_corrupt.
 function refuseNonCommit(expectType: number | null, type: number, oid: string): Result<null, ErrorOf<'not_found'>> {
@@ -203,29 +245,9 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   if (frame.kind === 'flush') return stepped({ ...st, done: true });
   switch (st.phase) {
     case 'pack': {
-      // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
-      // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
-      if (frame.kind !== 'data') return proto(`v2: ${frame.kind} inside the packfile section`);
-      const sb = parseSideband(frame.payload);
+      const sb = sidebandStep(st, frame, maxPack);
       if (!sb.ok) return sb;
-      const band = sb.value;
-      if (band.band === SIDEBAND_PACK) {
-        const band1 = st.band1 + band.body.length;
-        if (band1 > maxPack) return err(limitExceeded('pack bytes', band1, maxPack));
-        return stepped({ ...st, band1, packFrames: st.packFrames + 1 }, band.body);
-      }
-      if (band.band === SIDEBAND_PROGRESS) {
-        const band2 = st.band2 + band.body.length;
-        if (band2 > maxPack) return err(limitExceeded('progress bytes', band2, maxPack));
-        // decodeChunk: a character cut by a frame boundary is held for the next frame instead of decoding as two U+FFFD
-        const d = decodeChunk(st.progressCarry, band.body);
-        return stepped({ ...st, band2, band2Frames: st.band2Frames + 1, progress: (st.progress + d.text).slice(-PROGRESS_KEEP), progressCarry: d.carry });
-      }
-      if (band.band === SIDEBAND_ERROR) {
-        const text = td.decode(band.body).trim();
-        return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
-      }
-      return proto(`v2: bad sideband ${band.band}`);
+      return stepped(sb.value.state, sb.value.piece.kind === 'pack' ? sb.value.piece.body : null);
     }
     case 'sections': {
       // A response-end outside the packfile section is skipped.
