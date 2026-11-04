@@ -466,13 +466,15 @@ function pass2(add) {
   add({ id: `timeout.lsRefs.stall-${tCap + 5000}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${tCap + 5000}`, bytes: 200, entries: 1, nightly: true, expect: timeout });
 
   // ---- protocol v0 / v1: the server answers without v2 (the shim drops or downgrades Git-Protocol), so upload-pack
-  // reads ply's `command=ls-refs` as a v0 request and answers nothing ply can parse. ply speaks v2 only: the desired
-  // answer is a typed refusal, not a misread advertisement. pushTree reads the ref through ls-refs first, so it is
-  // refused the same way before receive-pack (which has no v2) is reached.
+  // reads ply's `command=ls-refs` as a v0 request and answers nothing at all. ply speaks v2 only: the desired answer is
+  // a typed refusal that says so (the empty answer sends ply to the advertisement, whose first line is not `version 2`:
+  // `unsupported`, what 'protocol version'), not a misread advertisement. pushTree reads the ref through ls-refs first,
+  // so it is refused the same way before receive-pack (which has no v2) is reached.
+  const notV2 = refused('unsupported', { what: 'protocol version' });
   for (const v of ['v0', 'v1']) {
-    add({ id: `proto.${v}.lsRefs`, param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', shim: v, bytes: 200, entries: 1, expect: refused('protocol') });
-    add({ id: `proto.${v}.readFile`, param: 'maxPackBytes', op: 'readFile', repo: 'blob-1024', path: 'big.bin', shim: v, bytes: 1024, entries: 2, expect: refused('protocol') });
-    add({ id: `proto.${v}.pushTree`, param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', shim: v, writes: true, nfiles: 1, size: 64, bytes: 64, entries: 1, expect: refused('protocol') });
+    add({ id: `proto.${v}.lsRefs`, param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', shim: v, bytes: 200, entries: 1, expect: notV2 });
+    add({ id: `proto.${v}.readFile`, param: 'maxPackBytes', op: 'readFile', repo: 'blob-1024', path: 'big.bin', shim: v, bytes: 1024, entries: 2, expect: notV2 });
+    add({ id: `proto.${v}.pushTree`, param: 'maxPushBytes', op: 'pushTree', repo: 'push-empty', shim: v, writes: true, nfiles: 1, size: 64, bytes: 64, entries: 1, expect: notV2 });
   }
 
   // ---- pkt-line length. The shim re-frames the packfile section so every band-1 pkt-line is L bytes long; git's own

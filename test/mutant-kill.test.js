@@ -1451,6 +1451,16 @@ test('idents are branded, wire fields reject breaks, atomic split is ambiguous, 
   });
   await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
   await assert.rejects(lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }, { kind: 'data', payload: te.encode(refLine) }])), e => e.code === 'protocol' && e.message === 'ls-refs: data after the terminating flush-pkt');
+  // #144: an answer with no frame at all is what a v0/v1 upload-pack sends a v2 request; the advertisement says which
+  const advertising = (body) => ({ ...framesOf([]), advertise: async () => body });
+  const lsAdv = (...lines) => ({ ok: true, value: concat(lines.map(l => (l === null ? FLUSH : unwrap(pkt(l))))) });
+  const v0 = lsAdv('# service=git-upload-pack\n', null, `${oid(4)} HEAD\0multi_ack side-band-64k\n`, null);
+  await assert.rejects(lsRefs(advertising(v0)), e => e.code === 'unsupported' && e.what === 'protocol version' && e.message === `ls-refs: the server does not speak protocol v2, which ply requires (an empty answer to command=ls-refs; advertisement: server did not answer protocol v2 (first line ${JSON.stringify(`${oid(4)} HEAD\0multi_ack side-band-64k`)}))`);
+  await assert.rejects(lsRefs(advertising(lsAdv('version 1\n', `${oid(4)} HEAD\n`, null))), e => e.code === 'unsupported' && e.what === 'protocol version' && e.message.endsWith('(first line "version 1"))'));
+  for (const body of [lsAdv('version 2\n', 'ls-refs=unborn\n', null), { ok: false, error: { code: 'http', message: 'down' } }, { ok: true, value: te.encode('zzzz') }]) {
+    await assert.rejects(lsRefs(advertising(body)), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
+  }
+  await assert.rejects(lsRefs(framesOf([])), e => e.code === 'protocol' && e.message === 'ls-refs: response ended without the terminating flush-pkt');
   await assert.rejects(lsRefs(framesOf([{ kind: 'delim' }])), e => e.code === 'protocol' && e.message === 'ls-refs: unexpected delim in ref listing');
   const listed = await lsRefs(framesOf([{ kind: 'data', payload: te.encode(refLine) }, { kind: 'flush' }]));
   assert.equal(listed.refs.get('refs/heads/main').oid, oid(4));
