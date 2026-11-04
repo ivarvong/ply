@@ -35,8 +35,15 @@ const rev = (dir, r) => git(dir, ['rev-parse', r]).trim();
 const refsOf = dir => new Map(git(dir, ['for-each-ref', '--format=%(refname) %(objectname)']).trim().split('\n').filter(Boolean).map(l => l.split(' ')));
 const objectsOf = (dir, args) => new Set(git(dir, ['rev-list', '--objects', ...args]).trim().split('\n').filter(Boolean).map(l => l.slice(0, 40)));
 const fsck = bare => assert.deepEqual(fsckProblems(bare), []);
-// what git push would send: everything reachable from `tips` that the remote's refs do not reach
-const wouldSend = (local, tips, remoteTips) => objectsOf(local, [...tips, ...(remoteTips.length ? ['--not', ...remoteTips] : [])]);
+// What the remote lacks: everything reachable from `tips` minus everything reachable from the remote's refs, as an exact
+// set difference. `rev-list --objects tips --not remoteTips` is not that: it excludes only the trees of the boundary
+// commits, so a blob an older commit already holds and a newer one brings back is counted again (on this repository's
+// own history, tsconfig.isolated.json at 5ce754b: rev-list 1783, the remote lacks 1782, pushRepo sends 1782).
+const wouldSend = (local, tips, remoteTips) => {
+  const want = objectsOf(local, tips);
+  if (remoteTips.length) for (const o of objectsOf(local, remoteTips)) want.delete(o);
+  return want;
+};
 // requests by service, and every receive-pack body (the pack is what follows the commands' flush)
 const counting = () => {
   const c = { 'git-upload-pack': 0, 'git-receive-pack': 0, packs: [] };
