@@ -553,7 +553,6 @@ export const DECISIONS = [
   { match: "src/objects.ts#treeEntryOf:*", space: 'parse-once', axisTag: 'case' },
   { match: "src/fetch.ts#wantList:*", space: 'parse-once', axisTag: 'case' },
   { match: "src/fetch.ts#objectId:*", space: 'parse-once', axisTag: 'case' },
-  { match: "src/lsrefs.ts#parseLsRefLine:protocol:ls-refs: malformed line …#4", excluded: 'unreachable: the listed name is the field before the first space, so it never holds one (isListedName grants the brand on that split)' },
   { match: "src/objects.ts#encodeTag:*", space: 'encode-tag', axisTag: 'case' },
   { match: 'src/refs.ts#notString:bad_request:… must be a string', space: 'version-refname', axisTag: 'refusal' },
   { match: "src/oid.ts#parseOid:bad_request:oid must be a string", space: 'mutant-kill', axisTag: 'case' },

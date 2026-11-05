@@ -48,8 +48,13 @@ const UNBORN = 'unborn';
 // refuses, such as one past 1024 bytes). A lookup by a caller's name compares it as the string it is.
 declare const listedBrand: unique symbol;
 export type ListedName = string & { readonly [listedBrand]: typeof listedBrand };
-// The brand is the split: the field ends at the first space after the oid, so a field never holds one.
+// The brand's check: a field holds no space.
 const isListedName = (field: string): field is ListedName => !field.includes(' ');
+// The name field of the text after the oid: all of it when it holds no space, else the text before its first space.
+function listedName(text: string): ListedName {
+  if (isListedName(text)) return text;
+  return listedName(text.slice(0, text.indexOf(' ')));
+}
 // One listed ref. Only `peeled` and `symref-target` are kept from the attributes, and only when the line carries them
 // (a key that is present or not: the readers in changes, merge and read test for it).
 export type LsRef = { readonly oid: Oid; readonly name: ListedName; readonly peeled: Oid | null; readonly 'symref-target': string | null };
@@ -71,9 +76,7 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   const rest = line.slice(sp + 1);
   const cut = rest.indexOf(' ');
   // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
-  const name = cut < 0 ? rest : rest.slice(0, cut);
-  // Stryker disable next-line ConditionalExpression,BooleanLiteral,StringLiteral,MethodExpression: unreachable, `name` stops before the first space (above)
-  if (!isListedName(name)) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  const name = listedName(rest);
   // Empty tokens (doubled spaces) need no filter: they have no colon and the loop skips them.
   // Stryker disable next-line ArrayDeclaration: any token injected for a name with no attributes has no `key:` before its colon, so the loop skips it
   const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ');
