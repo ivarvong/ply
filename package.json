@@ -118,6 +118,7 @@
     "fuzz:packgen": "node --import ./test/ts-resolve.mjs test/fuzz/packgen.mjs",
     "fuzz:codec": "node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs",
     "calibrate": "node --import ./test/ts-resolve.mjs test/calibrate.mjs",
+    "bench": "node test/bench.mjs",
     "test:pure": "vitest run test/pure.test.js",
     "test:spans": "vitest run test/span-contract.test.js",
     "test:spans:update": "UPDATE_SPAN_CONTRACT=1 vitest run test/span-contract.test.js",
