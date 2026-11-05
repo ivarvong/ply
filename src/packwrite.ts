@@ -10,7 +10,7 @@
 // input sequence and parameters) writes the same bytes (test/packwrite.test.js, node and workerd). If it ever did not,
 // pass 2 errors its stream before the trailer: the server is never handed a pack that is whole, and push reports it.
 // The bytes are buildPack's (pack.ts) for the same objects: the same headers, bases and zlib streams.
-import { Sha1, toHex } from './sha1.js';
+import { streamingSha1, fromHex, toHex } from './sha1.js';
 import { builtEntry, entryHead, packHeader } from './pack.js';
 import type { BuiltEntry, PackInput } from './pack.js';
 import { bufferSource, concat } from './bytes.js';
@@ -53,11 +53,13 @@ export async function* deflatePull(data: Uint8Array): AsyncGenerator<Uint8Array,
 // What one pass wrote: every entry, the bytes before the trailer, and their SHA-1 (the trailer).
 type Tally = { readonly entries: readonly BuiltEntry[]; readonly body: number; readonly digest: Uint8Array };
 // The pack before its trailer, piece by piece (the header, each object's header and base, its zlib chunks), each
-// hashed as it is yielded. The headers and entries are buildPack's (pack.ts entryHead, builtEntry).
+// hashed as it is yielded. The headers and entries are buildPack's (pack.ts entryHead, builtEntry). The hash is
+// streamingSha1's: Workers' native DigestStream where there is one (each pass hashes the whole pack, so the pure-JS
+// SHA-1 was a pass's largest cost after zlib), the pure-JS Sha1 elsewhere.
 async function* pieces(objects: readonly PackInput[]): AsyncGenerator<Uint8Array, Tally, unknown> {
-  const sha = new Sha1();
+  const sha = streamingSha1();
   const hdr = packHeader(objects.length);
-  sha.update(hdr);
+  await sha.update(hdr);
   yield hdr;
   const entries: BuiltEntry[] = [];
   const offsets: number[] = [];
@@ -65,18 +67,19 @@ async function* pieces(objects: readonly PackInput[]): AsyncGenerator<Uint8Array
   for (const o of objects) {
     // buildPack's header for the entry (pack.ts entryHead): the same type, header and base bytes
     const h = entryHead(o, offset, offsets);
-    sha.update(h.head);
+    // oxlint-disable-next-line no-await-in-loop -- in pack order
+    await sha.update(h.head);
     yield h.head;
     let compressed = 0;
     // one object at a time, in pack order
     // oxlint-disable-next-line no-await-in-loop -- see above
-    for await (const z of deflatePull(o.data)) { sha.update(z); compressed += z.length; yield z; }
+    for await (const z of deflatePull(o.data)) { await sha.update(z); compressed += z.length; yield z; }
     const entry = builtEntry(h, o.data.length, compressed, offset);
     entries.push(entry);
     offsets.push(offset);
     offset += entry.bytes;
   }
-  return { entries, body: offset, digest: sha.digest() };
+  return { entries, body: offset, digest: fromHex(await sha.hex()) };
 }
 
 // Pass 1. `bytes` is the whole pack (trailer included), what the server would receive; `held` is the pack itself when

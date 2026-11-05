@@ -12,11 +12,11 @@ import { concat, te } from '../src/bytes.js';
 import { pkt, pktInit, pktStep } from '../src/pktline.js';
 import { buildPack, encodeObjHeader, encodeOfsDistance, makeDelta, spliceDelta, encodeDeltaOps } from '../src/pack.js';
 import { parsePack } from '../src/packresolve.js';
-import { inflate, huffBuild, DEFLATE_TABLES } from '../src/inflate.js';
+import { inflate, huffBuild, adler32, DEFLATE_TABLES, FIXED_LIT, FIXED_DIST } from '../src/inflate.js';
 import { inflateRef } from './oracle/inflate-ref.js';
 import { parsePackRef } from './oracle/pack-ref.js';
 import {
-  inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs,
+  inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs, huffFast,
 } from '../src/inflatestream.js';
 import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts, streamPackAttrs } from '../src/packstream.js';
 import { sidebandStep, v2Init, fetchObject, spInit, spStep } from '../src/fetch.js';
@@ -64,6 +64,20 @@ function pullMember(pieces, opts) {
     next += 1;
   }
 }
+// The same, feeding the next piece after every answer, a chunk too (not only after a need): the pull must leave every
+// unused byte in its carry whatever it answered.
+function pullEager(pieces, opts) {
+  const st = must(inflateInit(opts));
+  const parts = [];
+  let next = 0;
+  for (;;) {
+    const r = next < pieces.length ? inflatePull(st) : inflateEnd(st);
+    if (!r.ok) return r;
+    if (r.value.kind === 'end') return { ok: true, value: { out: concat(parts), consumed: r.value.consumed, stats: r.value.stats, st } };
+    if (r.value.kind === 'chunk') parts.push(r.value.bytes);
+    if (next < pieces.length) { inflateFeed(st, pieces[next]); next += 1; }
+  }
+}
 const cuts = (buf, rng) => [
   [buf],
   Array.from({ length: buf.length }, (_, i) => buf.subarray(i, i + 1)),
@@ -81,12 +95,13 @@ function same(buf, o = {}, rng = new Rng(7)) {
     assert.deepEqual(whole.value.stats, want.value.stats, 'inflate(): stats');
   }
   for (const pieces of cuts(buf, rng)) {
-    const got = pullMember(pieces, streamOpts(o));
-    assert.equal(refusal(got), refusal(want), `${pieces.length} pieces`);
-    if (!want.ok) continue;
-    assert.deepEqual(got.value.out, new Uint8Array(want.value.out), `${pieces.length} pieces: output`);
-    assert.equal(got.value.consumed, want.value.consumed, `${pieces.length} pieces: consumed`);
-    assert.deepEqual(got.value.stats, want.value.stats, `${pieces.length} pieces: stats`);
+    for (const got of [pullMember(pieces, streamOpts(o)), pullEager(pieces, streamOpts(o))]) {
+      assert.equal(refusal(got), refusal(want), `${pieces.length} pieces`);
+      if (!want.ok) continue;
+      assert.deepEqual(got.value.out, new Uint8Array(want.value.out), `${pieces.length} pieces: output`);
+      assert.equal(got.value.consumed, want.value.consumed, `${pieces.length} pieces: consumed`);
+      assert.deepEqual(got.value.stats, want.value.stats, `${pieces.length} pieces: stats`);
+    }
   }
   return want;
 }
@@ -619,6 +634,118 @@ test('inflate pull edges: a bit buffer already full, a stored block into a part-
   assert.deepEqual([...phases].sort(), ['codes', 'dyn-clen', 'dyn-header', 'dyn-lens']);
 });
 
+// puff's decode of the bits a lookahead holds (the first bit read is bit 0): [length, symbol] within `max` bits, or null.
+function puffDecode(h, look, max) {
+  let code = 0, first = 0, index = 0;
+  for (let len = 1; len <= max; len++) {
+    code |= (look >> (len - 1)) & 1;
+    const c = h.count[len];
+    if (code - first < c) return [len, h.symbol[index + code - first]];
+    index += c; first = (first + c) << 1; code <<= 1;
+  }
+  return null;
+}
+test('the fast table: every 9-bit lookahead decodes as puff does, complete, incomplete and over-subscribed codes', () => {
+  const rng = new Rng(11);
+  const sets = [
+    FIXED_LIT, FIXED_DIST, huffBuild([]), huffBuild([0, 0, 0]), huffBuild([1]), huffBuild([1, 1]), huffBuild([1, 1, 1]),
+    huffBuild([2, 1, 3, 3]), huffBuild([10, 10, 11, 12, 15, 1]), huffBuild([9, 9, 9, 9]), huffBuild(Array.from({ length: 300 }, () => 8)),
+    huffBuild(Array.from({ length: 19 }, () => 7)), huffBuild([...Array.from({ length: 30 }, () => 5), 1]),
+    ...Array.from({ length: 300 }, () => huffBuild(Array.from({ length: rng.int(1, 288) }, () => (rng.bool() ? 0 : rng.int(0, 15))))),
+    ...Array.from({ length: 100 }, () => huffBuild(Array.from({ length: rng.int(1, 30) }, () => rng.int(1, 4)))),
+  ];
+  const reused = new Uint16Array(512).fill(0xffff);
+  let short = 0, long = 0;
+  for (const h of sets) {
+    const t = huffFast(h);
+    assert.equal(t.length, 512);
+    for (let v = 0; v < 512; v++) {
+      const want = puffDecode(h, v, 9);
+      assert.equal(t[v], want === null ? 0 : (want[0] << 9) | want[1], `lookahead ${v}`);
+      if (want === null) long += 1; else short += 1;
+    }
+    // a table built into a buffer that held another is the same table
+    assert.deepEqual(huffFast(h, reused), t);
+  }
+  assert.ok(short > 0 && long > 0);
+});
+
+test('inflate pull: the bytes read ahead are not consumed: a match whose bits are here, a raw stream\'s end, a chunk then a feed', () => {
+  // 3 + 9 + 7 + 5 = 24 bits: a literal and a match whose distance code ends on the third byte's last bit (0 extra bits).
+  // Fed those three bytes, the pull copies the match before it asks for more: one chunk of all four bytes.
+  const z = deflateBits().fixed(true, 200, { len: 3, dist: 1 }).bytes();
+  const st = must(inflateInit(streamOpts({ raw: true })));
+  inflateFeed(st, z.subarray(0, 3));
+  assert.deepEqual([...must(inflatePull(st)).bytes], [200, 200, 200, 200]);
+  assert.equal(must(inflatePull(st)).kind, 'need');
+  inflateFeed(st, z.subarray(3));
+  assert.deepEqual(must(inflateEnd(st)), { kind: 'end', consumed: z.length, stats: must(inflate(z, 0, { raw: true })).stats });
+  // a raw stream followed by other bytes, fed whole: the bytes after it are unread, though the decoder looked at them
+  const raw = new Uint8Array(zlib.deflateRawSync(te.encode('raw stream, then the next thing '.repeat(20))));
+  const tail = Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8, 9);
+  const r = must(inflateInit(streamOpts({ raw: true })));
+  inflateFeed(r, concat([raw, tail]));
+  let p;
+  do p = must(inflatePull(r)); while (p.kind === 'chunk');
+  assert.equal(p.kind, 'end');
+  assert.equal(p.consumed, raw.length);
+  assert.deepEqual([...inflateUnread(r)], [...tail]);
+  assert.equal(streamInflateAttrs(r)['git.inflate.consumed'], raw.length);
+  // the same with no output: the end is the first answer
+  const empty = must(inflateInit(streamOpts({ raw: true })));
+  inflateFeed(empty, concat([deflateBits().fixed(true).bytes(), tail]));
+  assert.deepEqual(must(inflatePull(empty)).consumed, 2);
+  assert.deepEqual([...inflateUnread(empty)], [...tail]);
+  // every cut of members whose last blocks hold a long match, a stored block or the trailer: fed in two pieces, or the
+  // rest a byte at a time, with or without a feed after each chunk, the oracle's answer
+  const lits = Array.from({ length: 16384 }, (_, i) => 97 + (i % 20));
+  const streams = [
+    zlibOf(deflateBits().fixed(true, ...lits, { len: 258, dist: 16000 }, { len: 3, dist: 9000 }).bytes()),
+    zlibOf(deflateBits().fixed(false, ...lits.slice(0, 16383), { len: 4, dist: 16000 }).stored(true, te.encode('stored tail')).bytes()),
+    concat([deflateBits().fixed(false, 1, 2).fixed(true, ...lits.slice(0, 16381), { len: 7, dist: 12345 }).bytes(), tail]),
+    // a dynamic block of one-bit literals filling the chunk to its last byte: the bits read ahead at the chunk hold the
+    // end of block, so the trailer follows bytes the chunk's pull read ahead
+    new Uint8Array(zlib.deflateSync(Uint8Array.from({ length: 16384 }, (_, i) => (i % 97 === 5 ? 98 : 97)), { strategy: zlib.constants.Z_HUFFMAN_ONLY })),
+  ];
+  for (const [k, z2] of streams.entries()) {
+    const o = k === 2 ? { raw: true } : {};
+    const want = inflateRef(z2, 0, o);
+    assert.equal(want.ok, true);
+    for (let cut = z2.length - 40; cut < z2.length; cut++) {
+      const pieces = [z2.subarray(0, cut), z2.subarray(cut)];
+      const bytewise = [z2.subarray(0, cut), ...Array.from(z2.subarray(cut), b => Uint8Array.of(b))];
+      for (const got of [pullMember(pieces, streamOpts(o)), pullEager(pieces, streamOpts(o)), pullEager(bytewise, streamOpts(o))]) {
+        assert.equal(refusal(got), 'ok', `stream ${k} cut ${cut}`);
+        assert.deepEqual(got.value.out, new Uint8Array(want.value.out), `stream ${k} cut ${cut}`);
+        assert.equal(got.value.consumed, want.value.consumed, `stream ${k} cut ${cut}`);
+      }
+    }
+  }
+});
+
+test('adler32: the sums reduced every 5552 bytes are the sums reduced every byte, from any seed', () => {
+  const naive = (d, a, b) => { for (const x of d) { a = (a + x) % 65521; b = (b + a) % 65521; } return ((b << 16) | a) >>> 0; };
+  const rng = new Rng(3);
+  for (const n of [0, 1, 255, 5551, 5552, 5553, 11104, 11105, 40000]) {
+    for (const [a, b] of [[1, 0], [65520, 65520], [0, 0], [rng.int(0, 65520), rng.int(0, 65520)]]) {
+      const d = n === 40000 ? new Uint8Array(n).fill(255) : rng.bytes(n);
+      assert.equal(adler32(d, a, b), naive(d, a, b), `${n} bytes from ${a}, ${b}`);
+    }
+  }
+  // seeds past the modulus (a packed value's halves are below 2^16): reduced as the per-byte sums reduce them
+  assert.equal(adler32(Uint8Array.of(0), 65535, 65535), naive(Uint8Array.of(0), 65535, 65535));
+  assert.equal(adler32(new Uint8Array(0), 65535, 65535), 0xffffffff);
+});
+
+forAll('inflate pull == the oracle on random bits after a block header: dynamic code sets git never writes, every chunking', rng => {
+  // a final or not, fixed or dynamic block header, then random bits: incomplete and over-subscribed code length sets,
+  // codes longer than the fast table, a refusal anywhere; the pull and inflate() must give the oracle's answer
+  const head = rng.int(0, 1) | (rng.pick([1, 2, 2]) << 1);
+  const buf = concat([Uint8Array.of(head | (rng.int(0, 31) << 3)), rng.bytes(rng.int(0, 400))]);
+  same(buf, { raw: true }, rng);
+  same(buf, { raw: true, expectedSize: rng.int(0, 64) }, rng);
+}, Math.min(300, N * 2));
+
 test('inflate pull edges: the input bound at its boundary, a capped bound, limit details, no copy of a fed buffer', () => {
   // empty blocks: F a fixed block (10 bits), S a stored one (aligned, 5 bytes); the last one final, then the Adler-32
   const empties = (seq, last) => {
@@ -634,6 +761,9 @@ test('inflate pull edges: the input bound at its boundary, a capped bound, limit
   // a block that starts exactly at the bound may start; the member is refused when it ends past it
   const startsAt = empties('FSS', 'F');
   assert.equal(refusal(same(startsAt, { expectedSize: 0 })), `pack_corrupt: inflate: zlib stream longer than its declared size allows (${startsAt.length} > ${zlibBound(0)} for 0 bytes)`);
+  // empty fixed blocks without end: refused where a block starts, the bytes read ahead not counted as consumed
+  const fixedRun = empties('F'.repeat(40), 'F');
+  assert.match(refusal(same(fixedRun, { maxOutput: 0 })), /^pack_corrupt: inflate: zlib stream longer than its declared size allows \(1[0-9] > /);
   // a cap stands in for a declared size
   const endless = empties('SSSSSS', 'S');
   assert.equal(refusal(same(endless, { maxOutput: 0 })), `pack_corrupt: inflate: zlib stream longer than its declared size allows (17 > ${zlibBound(0)} for 0 bytes)`);

@@ -211,6 +211,8 @@ export const ADLER_BYTES = 4;
 export const ADLER_MOD = 65_521;
 /** Adler-32 stores the sum `b` in the high 16 bits. RFC 1950 §2.2. */
 export const ADLER_SHIFT = 16;
+/** Bytes summed between two reductions of the Adler sums (zlib's NMAX; any block size gives the same sums in doubles). */
+export const ADLER_NMAX = 5552;
 export const DEFLATE_BFINAL_BITS = 1;
 export const DEFLATE_BTYPE_BITS = 2;
 export const DEFLATE_STORED = 0;
@@ -225,6 +227,12 @@ export const INFLATE_WINDOW: number = 1 << DEFLATE_MAX_BITS;
 /** Bytes one streaming inflate pull yields at most: half a window, so a pull holds one chunk beside the window. */
 export const INFLATE_CHUNK: number = INFLATE_WINDOW / 2;
 export const DEFLATE_BIT_TABLE = 16;
+/** Bits the inflate decoder looks a code up by in one step; a longer code is decoded a bit at a time. */
+export const INFLATE_FAST_BITS = 9;
+/** A fast-table entry is the code's length above the symbol's 9 bits (a symbol is below 288, a length at most 9). */
+export const INFLATE_FAST_SYMBOL_BITS = 9;
+/** The inflate decoder tops its bit buffer up while it holds fewer bits than this: one byte more still fits in 32 bits. */
+export const INFLATE_LOOKAHEAD_BITS = 24;
 export const DEFLATE_LITERALS = 256;
 export const DEFLATE_EOB = 256;
 export const DEFLATE_LENGTH_BASE = 257;
