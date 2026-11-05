@@ -10,7 +10,7 @@
 // input sequence and parameters) writes the same bytes (test/packwrite.test.js, node and workerd). If it ever did not,
 // pass 2 errors its stream before the trailer: the server is never handed a pack that is whole, and push reports it.
 // The bytes are buildPack's (pack.ts) for the same objects: the same headers, bases and zlib streams.
-import { Sha1, fromHex } from './sha1.js';
+import { Sha1, fromHex, toHex } from './sha1.js';
 import { TYPE, TYPE_NAME } from './objects.js';
 import { encodeObjHeader, encodeOfsDistance } from './pack.js';
 import type { BuiltEntry, PackInput } from './pack.js';
@@ -76,8 +76,8 @@ async function* pieces(objects: readonly PackInput[]): AsyncGenerator<Uint8Array
     const given = getOrElse<string | null>(fromNullish(o.baseOid), null);
     const baseIndex = getOrElse<number | null>(fromNullish(o.baseIndex), null);
     const ofs = baseIndex === null ? null : encodeOfsDistance(offset - getOrElse(at(offsets, baseIndex), offset));
-    // truthiness, as buildPack: an empty baseOid is no base
-    const ref = ofs === null && given !== null && given !== '' ? fromHex(given) : null;
+    // truthiness, as buildPack: an empty baseOid is no base; an OFS base (below) wins over it
+    const ref = given !== null && given !== '' ? fromHex(given) : null;
     let type: number = ref === null ? o.type : TYPE.REF_DELTA;
     if (ofs !== null) type = TYPE.OFS_DELTA;
     const base = ofs === null ? ref : ofs;
@@ -104,7 +104,8 @@ export type MeasuredPack = {
 };
 export async function measurePack(objects: readonly PackInput[], keep: number = INFLATE_CHUNK): Promise<MeasuredPack> {
   const it = pieces(objects);
-  let kept: Uint8Array[] | null = [];
+  // the pieces while the pack still fits in `keep` (n only grows: once past it, nothing more is kept)
+  const kept: Uint8Array[] = [];
   let n = 0;
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- pass 1 reads its own pieces in order
@@ -112,15 +113,12 @@ export async function measurePack(objects: readonly PackInput[], keep: number = 
     if (r.done === true) {
       const { entries, body, digest } = r.value;
       const bytes = body + PACK_TRAILER_BYTES;
-      return { objects, entries, bytes, body, digest, held: kept === null ? null : concat([...kept, digest]) };
+      return { objects, entries, bytes, body, digest, held: bytes <= keep ? concat([...kept, digest]) : null };
     }
     n += r.value.length;
-    if (kept !== null && n + PACK_TRAILER_BYTES <= keep) kept.push(r.value);
-    else kept = null;
+    if (n + PACK_TRAILER_BYTES <= keep) kept.push(r.value);
   }
 }
-
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((x, i) => x === getOrElse(at(b, i), -1));
 
 // Pass 2: `prefix` (the commands, and push options) and then the pack, as a stream read at the reader's pace. `failure`
 // is null until this pass refuses to finish the pack (a length or SHA-1 that is not pass 1's) or the deflate fails; the
@@ -142,7 +140,8 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
       let r: IteratorResult<Uint8Array, Tally>;
       try { r = await it.next(); } catch (e) { refuse(c, 'failed', e); return; }
       if (r.done === true) {
-        if (r.value.body !== m.body || !sameBytes(r.value.digest, m.digest)) { refuse(c, 'wrote another pack'); return; }
+        if (r.value.body !== m.body) { refuse(c, 'ran shorter than the first'); return; }
+        if (toHex(r.value.digest) !== toHex(m.digest)) { refuse(c, 'wrote another pack'); return; }
         c.enqueue(r.value.digest);
         c.close();
         return;

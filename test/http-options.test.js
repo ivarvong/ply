@@ -71,3 +71,66 @@ test('the transport reads the parsed timeout: the span carries it and a stalled 
   assert.ok(spans.some(a => a['git.limits.request_timeout_ms'] === 50));
   void tracer;
 });
+
+import { streamRedirect } from '../src/http.js';
+
+test('streamRedirect: error where new Request takes it, manual where it throws (workerd) or reads back another mode', () => {
+  assert.equal(streamRedirect(), 'error');
+  const Real = globalThis.Request;
+  try {
+    globalThis.Request = class { constructor() { throw new TypeError('Invalid redirect value'); } };
+    assert.equal(streamRedirect(), 'manual');
+    globalThis.Request = class { constructor() { this.redirect = 'follow'; } };
+    assert.equal(streamRedirect(), 'manual');
+  } finally { globalThis.Request = Real; }
+});
+
+test('the settings carry the module brand (one symbol key, true), and the base drops one trailing slash', () => {
+  const v = parseHttpOptions('https://h/org/r.git/').value;
+  const keys = Object.getOwnPropertySymbols(v);
+  assert.equal(keys.length, 1);
+  assert.equal(v[keys[0]], true);
+  assert.equal(createTransport('https://h/org/r.git/').value.url, 'https://h/org/r.git');
+  assert.equal(createTransport('https://h/org/r.git').value.url, 'https://h/org/r.git');
+});
+
+// a fetch double: records each request's init and answers a git result (a flush) or an advertisement
+const recorder = (answer = () => new Response(new Uint8Array([0x30, 0x30, 0x30, 0x30]), { status: 200, headers: { 'content-type': 'application/x-git-receive-pack-result' } })) => {
+  const seen = [];
+  const fetchImpl = async (url, init) => { seen.push({ url: String(url), init }); return answer(url, init); };
+  return { seen, fetchImpl };
+};
+const spanOf = () => { const attrs = {}; return { attrs, set: a => Object.assign(attrs, a), event() {}, error() {} }; };
+const drain = async (t, body, span = spanOf()) => { for await (const _ of t.frames('git-receive-pack', body, span, { bypassCache: false })) { /* frames */ } return span; };
+
+test('post: bytes go as a POST body with redirect manual; a stream goes with duplex half and the stream redirect mode', async () => {
+  const r = recorder();
+  const t = createTransport('https://h/r', { fetchImpl: r.fetchImpl }).value;
+  const bytes = Uint8Array.of(1, 2, 3);
+  const span = await drain(t, bytes);
+  const [a] = r.seen;
+  assert.equal(a.url, 'https://h/r/git-receive-pack');
+  assert.deepEqual([a.init.method, a.init.redirect, a.init.duplex, Buffer.from(a.init.body).toString('hex')], ['POST', 'manual', undefined, '010203']);
+  assert.deepEqual([span.attrs['git.transport'], span.attrs['http.request.method'], span.attrs['git.request.bytes'], span.attrs['http.request.body.size']], ['http', 'POST', 3, 3]);
+  const stream = new ReadableStream({ start(c) { c.enqueue(Uint8Array.of(9)); c.close(); } });
+  const span2 = await drain(t, { stream, length: 1 });
+  const b = r.seen[1];
+  assert.deepEqual([b.init.method, b.init.redirect, b.init.duplex, b.init.body === stream], ['POST', 'error', 'half', true]);
+  assert.equal(span2.attrs['git.request.bytes'], 1);
+});
+
+test('a finished exchange clears its timer: the request signal does not fire after it (advertise and post)', async () => {
+  const adv = () => new Response('001e# service=git-upload-pack\n0000', { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
+  const r = recorder((url) => (String(url).includes('info/refs') ? adv() : new Response(new Uint8Array([0x30, 0x30, 0x30, 0x30]), { status: 200, headers: { 'content-type': 'application/x-git-receive-pack-result' } })));
+  const t = createTransport('https://h/r', { fetchImpl: r.fetchImpl, limits: withLimits({ requestTimeoutMs: 60 }) }).value;
+  assert.equal((await t.advertise('git-upload-pack', spanOf())).ok, true);
+  await drain(t, Uint8Array.of(0));
+  await new Promise(res => setTimeout(res, 150));
+  assert.deepEqual(r.seen.map(s => s.init.signal.aborted), [false, false]);
+});
+
+test('a body that fails mid-read is the network error it is', async () => {
+  const failing = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('0008abcd')); }, pull(c) { c.error(new TypeError('socket hang up')); } }), { status: 200, headers: { 'content-type': 'application/x-git-receive-pack-result' } });
+  const t = createTransport('https://h/r', { fetchImpl: recorder(failing).fetchImpl }).value;
+  await assert.rejects(drain(t, Uint8Array.of(0)), e => e.code === 'network');
+});

@@ -72,15 +72,17 @@ test('deltas: OFS (baseIndex) and REF (baseOid) entries as buildPack writes them
     { type: TYPE.BLOB, data: Uint8Array.of(1, 1, 1, 0x61), baseOid: 'ab'.repeat(20) },
     { type: TYPE.BLOB, data: fill(10, 'text'), baseOid: '' }, // empty: no base, as buildPack reads it
     { type: TYPE.BLOB, data: fill(10, 'zero'), baseOid: null, baseIndex: null },
+    // both bases: the OFS one wins, and the entry names no base oid (buildPack)
+    { type: TYPE.BLOB, data: Uint8Array.of(0xb8, 0x17, 0xb8, 0x17, 0x91, 0, 0xb8, 0x17), baseIndex: 0, baseOid: 'cd'.repeat(20) },
   ];
   const built = await buildPack(objects);
   const m = await measurePack(objects, 0);
   assert.deepEqual(m.entries, built.entries);
-  assert.deepEqual(m.entries.map(e => [e.type, e.typeName, e.baseOid]), [[TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null], [TYPE.REF_DELTA, 'ref_delta', 'ab'.repeat(20)], [TYPE.BLOB, 'blob', ''], [TYPE.BLOB, 'blob', null]]);
+  assert.deepEqual(m.entries.map(e => [e.type, e.typeName, e.baseOid]), [[TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null], [TYPE.REF_DELTA, 'ref_delta', 'ab'.repeat(20)], [TYPE.BLOB, 'blob', ''], [TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null]]);
   const got = await readAll(streamPack(m, new Uint8Array(0)).stream);
   assert.deepEqual(got, Buffer.from(built.pack));
   const parsed = unwrap(parsePack(new Uint8Array(got)));
-  assert.equal(parsed.objects.length, 5);
+  assert.equal(parsed.objects.length, 6);
 });
 
 test('an unknown type id is written as given, with no type name (buildPack\'s typeNameOf)', async () => {
@@ -118,6 +120,7 @@ test('pass 2 refuses a pack that is not pass 1\'s, before its trailer and never 
   assert.match(r1.error.message, /second deflate pass wrote another pack; it was not sent whole/);
   assert.equal(r1.bytes.length, prefix.length + m1.body, 'every byte but the trailer');
   assert.deepEqual([r1.error.what, r1.error.got, r1.error.max], ['push pack', m1.body, m1.body]);
+  assert.equal(Object.hasOwn(r1.error, 'cause'), false, 'a refusal of its own has no cause');
 
   // compressible at pass 1, incompressible at pass 2: longer. Refused on the chunk that would pass pass 1's length
   const grows = fill(8 * INFLATE_CHUNK, 'zero');
@@ -134,7 +137,7 @@ test('pass 2 refuses a pack that is not pass 1\'s, before its trailer and never 
   const m3 = await measurePack([{ type: TYPE.BLOB, data: shrinks }], 0);
   shrinks.fill(0);
   const r3 = await readUntilError(streamPack(m3, prefix).stream);
-  assert.match(r3.error.message, /wrote another pack/);
+  assert.match(r3.error.message, /ran shorter than the first/);
   assert.ok(r3.bytes.length < prefix.length + m3.body);
 
   // a pack whose objects did not change is not refused, and the failure stays null
@@ -249,4 +252,81 @@ test('push: the cap is pass 1\'s measured pack, checked before the transport is 
     if (!ok) assert.deepEqual([r.error.code, r.error.got, r.error.max], ['limit_exceeded', m.bytes, max]);
     else assert.equal(r.value.packBytes, m.bytes);
   }
+});
+
+// CompressionStream as a spy: what it was fed (each slice's length), and whether its output was cancelled. pipeThrough
+// takes any { writable, readable } pair, so the real stream does the work.
+const spyDeflate = async (body) => {
+  const Real = globalThis.CompressionStream;
+  const seen = { slices: [], cancelled: 0 };
+  globalThis.CompressionStream = class {
+    constructor(format) {
+      const real = new Real(format);
+      const w = real.writable.getWriter();
+      this.writable = new WritableStream({ write: c => { seen.slices.push(c.length); return w.write(c); }, close: () => w.close(), abort: e => w.abort(e) });
+      const r = real.readable.getReader();
+      this.readable = new ReadableStream({ pull: async c => { const x = await r.read(); if (x.done) c.close(); else c.enqueue(x.value); }, cancel: e => { seen.cancelled++; return r.cancel(e); } }, { highWaterMark: 0 });
+    }
+  };
+  try { await body(seen); } finally { globalThis.CompressionStream = Real; }
+};
+// a Uint8Array that counts the slices taken of it (the writer reads an object only through subarray)
+class Counted extends Uint8Array { constructor(n) { super(n); this.taken = 0; } subarray(a, b) { this.taken++; return new Uint8Array(this.buffer, this.byteOffset + a, (b ?? this.length) - a); } }
+const settle = () => new Promise(r => setTimeout(r, 20));
+
+test('deflatePull feeds CompressionStream slices of at most INFLATE_CHUNK, and stops it when its reader stops', async () => {
+  await spyDeflate(async seen => {
+    const parts = [];
+    for await (const z of deflatePull(fill(5 * INFLATE_CHUNK + 3, 'random'))) parts.push(z);
+    assert.deepEqual(seen.slices, [INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, 3]);
+    assert.equal(seen.cancelled, 0);
+    const it = deflatePull(fill(64 * INFLATE_CHUNK, 'random'));
+    await it.next();
+    await it.return();
+    assert.equal(seen.cancelled, 1, 'the deflate is cancelled');
+  });
+});
+
+test('nothing is read ahead: an object is sliced only when its zlib bytes are asked for', async () => {
+  const data = new Counted(4 * INFLATE_CHUNK);
+  randomFillSync(data);
+  const it = deflatePull(data);
+  await settle();
+  assert.equal(data.taken, 0, 'not before the first read');
+  await it.next();
+  const after = data.taken;
+  await settle();
+  assert.equal(data.taken, after, 'not past what the read needed');
+  await it.return();
+
+  const m = await measurePack([{ type: TYPE.BLOB, data }], 0);
+  data.taken = 0;
+  const reader = streamPack(m, prefix).stream.getReader();
+  for (let i = 0; i < 3; i++) await reader.read(); // the prefix, the pack header, the object's header
+  await settle();
+  assert.equal(data.taken, 0, 'the stream pulled nothing past the object header');
+  await reader.read();
+  assert.ok(data.taken > 0);
+  await reader.cancel();
+});
+
+test('cancelling pass 2 stops its deflate', async () => {
+  await spyDeflate(async seen => {
+    const m = await measurePack([{ type: TYPE.BLOB, data: fill(16 * INFLATE_CHUNK, 'random') }], 0);
+    seen.cancelled = 0;
+    const s = streamPack(m, prefix);
+    const reader = s.stream.getReader();
+    for (let i = 0; i < 4; i++) await reader.read();
+    await reader.cancel();
+    assert.equal(seen.cancelled, 1);
+    assert.equal(s.failure(), null);
+  });
+});
+
+test('push: a delete-only push measures no pack and reports no entries', async () => {
+  const t = doubleTransport();
+  const r = await push(t, { ref: 'refs/heads/main', oldOid: oid('a'), newOid: oid('0'), objects: [], sideband: false });
+  assert.equal(r.ok, true, r.error?.message);
+  assert.deepEqual([r.value.packBytes, r.value.entries], [0, []]);
+  assert.equal(t.got[0].streamed, false);
 });

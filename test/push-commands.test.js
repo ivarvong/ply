@@ -69,3 +69,13 @@ test('the plan carries the parsed commands: the same text, at least one', () => 
   const single = unwrap(planPush({ ref: 'refs/heads/x', oldOid: Z, newOid: A }, withLimits()));
   assert.deepEqual(single.commands.map(c => c.ref), ['refs/heads/x']);
 });
+
+// The one difference from the old check, for untyped callers only: the 40-hex pattern read its argument as a string
+// (RegExp.test), so an array or a String object holding 40 hex passed and was written as its text. parseOid takes only a
+// string. A typed caller cannot pass either (Command's oids are strings). Not run against another src (it differs there).
+test('an oid that is not a string is bad_request (the old pattern read [hex] and new String(hex) as their text)', { skip: Boolean(process.env.PUSH_COMMANDS_SRC) }, async () => {
+  for (const v of [[A], new String(A), 1, null]) {
+    const o = await outcome({ commands: [{ ref: 'refs/heads/main', oldOid: v, newOid: B }] });
+    assert.deepEqual([o.code, o.sent], ['bad_request', 0], String(v));
+  }
+});
