@@ -151,3 +151,14 @@ test('the advertisement: its GET asks redirect manual; a foreign content type is
   const over = await createTransport('https://h/r', { fetchImpl: recorder(adv('application/x-git-upload-pack-advertisement', body)).fetchImpl, limits: withLimits({ maxPackBytes: body - 1 }) }).value.advertise('git-upload-pack', spanOf());
   assert.deepEqual([over.ok, over.error.code, over.error.got, over.error.max], [false, 'limit_exceeded', body, body - 1]);
 });
+
+test('a URL that does not parse, and a NUL, CR or LF in its userinfo, are refused with their own message and what', () => {
+  const bad = createTransport('not a url', {});
+  assert.deepEqual([bad.error.code, bad.error.message, bad.error.what], ['bad_request', 'invalid url: not an absolute URL', 'url']);
+  for (const url of ['https://u%0a:p@h/r.git', 'https://u:p%0d@h/r.git', 'https://u%00@h/r.git']) {
+    const r = parseHttpOptions(url, {});
+    assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'bad_request', 'url userinfo'], url);
+  }
+  // explicit auth wins: the URL's userinfo is not read, so it is not refused either
+  assert.equal(parseHttpOptions('https://u%0a@h/r.git', { auth: { token: 't' } }).ok, true);
+});

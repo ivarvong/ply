@@ -373,7 +373,7 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   const names = recordResponseHeaderNames(recordResponseHeaders);
   if (!names.ok) return names;
   // The explicit forms, total (all null without auth).
-  const given = auth === null ? noAuth() : withDefaults(auth, noAuth());
+  const given = withDefaults(auth, noAuth());
   for (const [value, what] of [[given.header, 'authorization'], [given.token, 'token'], [given.bearer, 'bearer'], [given.user, 'auth user']] as const) {
     const fieldOk = headerField(value, what);
     if (!fieldOk.ok) return fieldOk;
@@ -397,7 +397,8 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   const approved = useAllowed(allowUrl, u);
   if (!approved.ok) return approved;
   // The explicit credential, checked before anything is built from it.
-  const explicit = fromUrl !== null || auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
+  // urlCredential reads the URL only when there is no auth, so a URL credential implies auth === null
+  const explicit = auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
   if (!explicit.ok) return explicit;
   const requestTimeoutMs = readLimit(limits, 'requestTimeoutMs');
   if (!requestTimeoutMs.ok) return requestTimeoutMs;
