@@ -28,8 +28,8 @@ import { fail, isPlyError, plyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { err, getOrElse, mapOption, ok } from './result.js';
 import type { Err, Option, Result } from './result.js';
-import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, limitError, parseLimits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 import { validatePath, checkoutPathRefusal } from './validate.js';
 import { concat, encodeBytes } from './bytes.js';
 import { MODE_EXEC, MODE_LINK, MODE_COMMIT } from './format.js';
@@ -81,7 +81,7 @@ const filesystem = (path: string, e: unknown): Err<WithKind<ErrorOf<'unsupported
   kinded(plyError('unsupported', `checkout: the filesystem refused ${JSON.stringify(path)}`, { what: 'checkout path', path, cause: e }), 'filesystem');
 const caught = (e: unknown, path: string): Err<WriteFilesError> => (isPlyError(e) ? err(e) : filesystem(path, e));
 
-// The refusals writeFiles itself builds. A PlyError from validatePath, encodeBytes, readLimit, or a blob stream
+// The refusals writeFiles itself builds. A PlyError from validatePath, encodeBytes, parseLimits, or a blob stream
 // is returned as that error (its own code and miss); it is not re-tagged.
 export type WriteFilesError =
   | WithKind<ErrorOf<'bad_request'>, 'not_empty'>
@@ -135,15 +135,17 @@ async function ensureDir(dir: string, rel: string, made: Set<string>): Promise<R
   return ok(true);
 }
 
-export type WriteFilesOptions = { readonly limits: Limits; readonly platform: string };
+// limits: any subset (a key left out is the default), parsed once before anything is written.
+export type WriteFilesOptions = { readonly limits: LimitsInput; readonly platform: string };
 // Complexity is the refusal branches. Pulling them into a helper would rename the decision-point function
 // (the id is `writeFiles`, and the registry matches that name).
 // oxlint-disable-next-line eslint/complexity -- see above
 export async function writeFiles(dir: string, files: AsyncIterable<CheckoutFile>, options: WriteFilesOptions): Promise<Result<Written, WriteFilesError>> {
-  const { limits, platform } = options;
-  const cap = readLimit(limits, 'maxObjectSize');
-  if (!cap.ok) return cap;
-  const maxObject = cap.value;
+  const { platform } = options;
+  const checked = parseLimits(options.limits);
+  if (!checked.ok) return checked;
+  const limits = checked.value;
+  const maxObject = limits.maxObjectSize;
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;
   const made = new Set(['']);
@@ -221,7 +223,7 @@ export type CheckoutDirOptionsConfig = {
   readonly auth: HttpAuth | null;
   readonly parent: Span | null;
   readonly fetchImpl: NonNullable<ReadOptions['fetchImpl']> | null;
-  readonly limits: Limits;
+  readonly limits: LimitsInput;
   readonly signal: AbortSignal | null;
   readonly quirks: Quirks | null;
   readonly transport: Transport | null;
@@ -254,12 +256,15 @@ export async function checkoutDir(url: string, request: CheckoutDirRequest, opti
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a caller's tracer, if any: operation() checks it has start()
   const opts: CheckoutDirOptionsTotal = { ...withDefaults(options, dirDefaults()), tracer: mapOption(field(options, 'tracer'), t => t as Tracer) };
   if (typeof dir !== 'string' || dir === '') return kinded(fail('bad_request', 'dir must be a non-empty string', { what: 'dir' }).error, 'dir');
+  // parsed once, for the checkout and the write
+  const limits = parseLimits(opts.limits);
+  if (!limits.ok) return limits;
   const ready = await emptyDir(dir);
   if (!ready.ok) return ready;
-  const checked = await checkoutTree(url, { ref, path }, treeOpts(opts));
+  const checked = await checkoutTree(url, { ref, path }, treeOpts({ ...opts, limits: limits.value }));
   if (!checked.ok) return checked;
   const { files, ...rest } = checked.value;
-  const written = await writeFiles(dir, files, { limits: opts.limits, platform: opts.platform });
+  const written = await writeFiles(dir, files, { limits: limits.value, platform: opts.platform });
   if (!written.ok) return written;
   return ok({ ...rest, written: written.value });
 }

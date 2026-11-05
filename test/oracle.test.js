@@ -107,7 +107,7 @@ test('thin pack from our buildPack is accepted by git index-pack --fix-thin and 
   const base = genBlob(rng, 'text');
   const baseOid = gitBuf(work, ['hash-object', '-w', '--stdin'], base).toString().trim();
   const target = new Uint8Array([...base.subarray(0, 100), ...rng.bytes(300), ...base.subarray(200)]);
-  const { pack } = await buildPack([{ type: 3, data: makeDelta(base, target).delta, baseOid }]);
+  const { pack } = await buildPack([{ type: 3, data: makeDelta(base, target).delta, base: { tag: 'ref', oid: baseOid } }]);
   const out = gitBuf(work, ['index-pack', '--stdin', '--fix-thin', '-v'], pack).toString();
   const targetOid = hashObject('blob', target);
   assert.ok(Buffer.from(gitBuf(work, ['cat-file', 'blob', targetOid])).equals(Buffer.from(target)), out);

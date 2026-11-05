@@ -13,8 +13,8 @@
 /* oxlint-disable no-await-in-loop -- the walks read one object at a time from the store, in pack order (the order is the output) */
 import { fail } from './errors.js';
 import type { PlyError } from './errors.js';
-import { DEFAULT_LIMITS } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, parseLimits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { parseCommit, parseTag, parseTree, TYPE, TYPE_ID } from './objects.js';
 import { MODE_COMMIT, MODE_TREE } from './format.js';
 import type { DeltaCandidate } from './delta.js';
@@ -39,7 +39,7 @@ export function mapStore(objects: ReadonlyMap<string, StoredObject>): ObjectStor
 export const popped = <T>(stack: T[]): Option<T> => (stack.length === 0 ? { tag: 'none' } : fromNullable(stack.pop()));
 const TYPE_IDS: Readonly<Record<string, number>> = TYPE_ID;
 // `source` names the store in a missing-object error ("missing from <source>").
-export type Walk = { readonly store: ObjectStore; readonly limits: Limits; readonly source: string };
+export type Walk = { readonly store: ObjectStore; readonly limits: CheckedLimits; readonly source: string };
 const TYPE_NAMES: Readonly<Record<number, string>> = { [TYPE.COMMIT]: 'commit', [TYPE.TREE]: 'tree', [TYPE.BLOB]: 'blob', [TYPE.TAG]: 'tag' };
 const typeName = (type: number): string => getOrElse(readKey(TYPE_NAMES, type), String(type));
 const wrongType = (oid: string, type: number, want: number): Result<never, PlyError> =>
@@ -47,7 +47,7 @@ const wrongType = (oid: string, type: number, want: number): Result<never, PlyEr
 
 export type Child = { readonly oid: string; readonly type: number; readonly name: string };
 // The objects one object names: a commit's tree and parents, a tree's entries (not gitlinks), a tag's object.
-export function children(o: StoredObject, limits: Limits): Result<Child[], PlyError> {
+export function children(o: StoredObject, limits: CheckedLimits): Result<Child[], PlyError> {
   switch (o.type) {
     case TYPE.COMMIT: {
       const c = parseCommit(o.data, limits);
@@ -157,11 +157,13 @@ export async function missing(w: Walk, tips: readonly string[], have: ReadonlySe
 
 /** Everything reachable from `tips` that `store` has. Blobs are marked from their tree entries and never read. */
 // oxlint-disable-next-line typescript/promise-function-async -- the walk's own promise
-export function reachableObjects(store: ObjectStore, tips: readonly string[], limits: Limits = DEFAULT_LIMITS): Promise<Result<Set<string>, PlyError>> {
-  return reachable({ store, limits, source: 'the object store' }, tips);
+export function reachableObjects(store: ObjectStore, tips: readonly string[], limits: LimitsInput = DEFAULT_LIMITS): Promise<Result<Set<string>, PlyError>> {
+  const checked = parseLimits(limits);
+  return checked.ok ? reachable({ store, limits: checked.value, source: 'the object store' }, tips) : Promise.resolve(checked);
 }
 /** Everything reachable from `tips` and not in `have`, in pack order, each tree and blob with its first path. */
 // oxlint-disable-next-line typescript/promise-function-async -- the walk's own promise
-export function objectsForPack(store: ObjectStore, tips: readonly string[], have: ReadonlySet<string> = new Set(), limits: Limits = DEFAULT_LIMITS): Promise<Result<PackCandidate[], PlyError>> {
-  return missing({ store, limits, source: 'the object store' }, tips, have);
+export function objectsForPack(store: ObjectStore, tips: readonly string[], have: ReadonlySet<string> = new Set(), limits: LimitsInput = DEFAULT_LIMITS): Promise<Result<PackCandidate[], PlyError>> {
+  const checked = parseLimits(limits);
+  return checked.ok ? missing({ store, limits: checked.value, source: 'the object store' }, tips, have) : Promise.resolve(checked);
 }

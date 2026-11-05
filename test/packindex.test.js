@@ -176,7 +176,7 @@ test('refusals: a malformed index request is bad_request, a thin or duplicated p
   // a thin pack (a REF_DELTA whose base is not in it): git index-pack refuses it without --fix-thin, and so does indexPack
   const base = new TextEncoder().encode('base '.repeat(40));
   const target = new TextEncoder().encode(`${'base '.repeat(40)}and more`);
-  const thin = (await buildPack([{ type: TYPE.BLOB, data: ply.encodeDelta(base, target), baseOid: hashObject('blob', base) }])).pack;
+  const thin = (await buildPack([{ type: TYPE.BLOB, data: ply.encodeDelta(base, target), base: { tag: 'ref', oid: hashObject('blob', base) } }])).pack;
   writeFileSync(join(d, 'thin.pack'), thin);
   assert.throws(() => git(d, ['index-pack', '-o', join(d, 'thin.idx'), join(d, 'thin.pack')]), /unresolved deltas|fatal/i);
   assert.match(code(indexPack(thin)), /^pack_corrupt/);

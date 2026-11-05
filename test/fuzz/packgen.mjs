@@ -59,7 +59,7 @@ try {
     if (newBlob !== refBlob) problems.push(`blob oid ${newBlob.slice(0, 8)} != git ${refBlob.slice(0, 8)}`);
     if (child !== refTree) problems.push(`tree oid ${child.slice(0, 8)} != git ${refTree.slice(0, 8)}`);
     if (newCommit !== refCommit) problems.push(`commit oid != git (${newCommit.slice(0, 8)} vs ${refCommit.slice(0, 8)})`);
-    const thinObjs = [{ type: TYPE.COMMIT, data: commitData }, ...treeObjs.map(t => ({ type: TYPE.TREE, data: t.data, baseOid: t.baseOid })), blobDelta.length >= 4 ? { type: TYPE.BLOB, data: blobDelta, baseOid: oldBlob } : { type: TYPE.BLOB, data: new Uint8Array(target) }];
+    const thinObjs = [{ type: TYPE.COMMIT, data: commitData }, ...treeObjs.map(t => ({ type: TYPE.TREE, data: t.data, base: { tag: 'ref', oid: t.baseOid } })), blobDelta.length >= 4 ? { type: TYPE.BLOB, data: blobDelta, base: { tag: 'ref', oid: oldBlob } } : { type: TYPE.BLOB, data: new Uint8Array(target) }];
     const fullObjs = [{ type: TYPE.COMMIT, data: commitData }, ...treeObjs.map(t => ({ type: TYPE.TREE, data: t.full })), { type: TYPE.BLOB, data: new Uint8Array(target) }];
     const { pack: thin } = await buildPack(thinObjs), { pack: full } = await buildPack(fullObjs);
     // git judges: both packs must index strictly in a repo that has only the OLD objects

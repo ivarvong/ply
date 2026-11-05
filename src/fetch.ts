@@ -5,7 +5,7 @@
 // protocol (its iterator rejects with the PlyError), and the exchanges that drain it catch that once (coded).
 /* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
 import type { ErrorOf, Extra, PlyError } from './errors.js';
-import type { Limits } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import type { Result } from './result.js';
@@ -27,7 +27,7 @@ import type { HeaderError, ObjSize } from './packstream.js';
 import { NO_SIZE_CAP } from './packstream.js';
 import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
-import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, limitExceeded } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 import { parseOid, type Oid } from './oid.js';
@@ -69,19 +69,21 @@ function wireList(values: readonly string[], what: string): Result<WireField[], 
   return ok(out);
 }
 
-// A want is an object id: upload-pack.c parse_want reads it with get_oid_hex and dies "expected to get oid, not 'want …'"
-// for anything else (a ref name, an abbreviation, an empty want: ref-in-want is its own `want-ref` line, which ply does
-// not send). get_oid_hex reads either case (hexval), so an upper-case id is the same object to git: it is lowercased,
-// as ls-refs lowercases a listed oid, and parsed once. git reads only the first OID_HEX_CHARS characters and ignores
-// the rest of the line; ply refuses text after the id instead of sending it (test/want-oracle.test.js). A NUL, CR or
-// LF is the wire refusal it always was.
-function wantList(values: readonly string[]): Result<Oid[], BadRequest> {
+// A want, a have and a shallow are object ids. upload-pack.c reads each with get_oid_hex and dies otherwise: parse_want
+// "expected to get oid, not 'want …'" (a ref name, an abbreviation, an empty want: ref-in-want is its own `want-ref`
+// line, which ply does not send), process_haves "expected SHA1 object, got '…'", process_shallow "invalid shallow line".
+// get_oid_hex reads either case (hexval), so an upper-case id is the same object to git: it is lowercased, as ls-refs
+// lowercases a listed oid, and parsed once. git reads only the first OID_HEX_CHARS characters and ignores the rest of the
+// line; ply refuses text after the id instead of sending it (test/want-oracle.test.js). A NUL, CR or LF is the wire
+// refusal it always was.
+type OidArg = 'want' | 'have' | 'shallow';
+function oidList(values: readonly string[], what: OidArg): Result<Oid[], BadRequest> {
   const out: Oid[] = [];
   for (const v of values) {
-    const field = validateWire(v, 'want');
+    const field = validateWire(v, what);
     if (!field.ok) return field;
     const id = parseOid(field.value.toLowerCase());
-    if (!id.ok) return fail('bad_request', `invalid want: must be an object id (${OID_HEX_CHARS} hex digits)`, { what: 'want' });
+    if (!id.ok) return fail('bad_request', `invalid ${what}: must be an object id (${OID_HEX_CHARS} hex digits)`, { what });
     out.push(id.value);
   }
   return ok(out);
@@ -109,12 +111,13 @@ const fetchDefaults = (): FetchConfig => ({
   includeTag: false, noProgress: true, done: true, shallows: [], bypassCache: false,
 });
 
-// A fetch command parsed once (fetchRequest): every want an object id, every other token one wire field and every count
-// a checked integer, so encoding it (fetchRequestBody) checks nothing. No filter is null, and no deepen or deepen-since is 0.
+// A fetch command parsed once (fetchRequest): every want, have and shallow an object id, every other token one wire field
+// and every count a checked integer, so encoding it (fetchRequestBody) checks nothing. No filter is null, and no deepen or
+// deepen-since is 0.
 export type FetchRequest = {
   readonly wants: readonly Oid[];
-  readonly haves: readonly WireField[];
-  readonly shallows: readonly WireField[];
+  readonly haves: readonly Oid[];
+  readonly shallows: readonly Oid[];
   readonly deepenNot: readonly WireField[];
   readonly filter: WireField | null;
   readonly deepen: number;
@@ -132,11 +135,11 @@ export type FetchRequest = {
 // oxlint-disable-next-line complexity -- one check per fetch argument
 export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> {
   const { haves, filter, deepen, deepenSince, deepenNot, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done, shallows } = withDefaults(opts, fetchDefaults());
-  const w = wantList(opts.wants);
+  const w = oidList(opts.wants, 'want');
   if (!w.ok) return w;
-  const h = wireList(haves, 'have');
+  const h = oidList(haves, 'have');
   if (!h.ok) return h;
-  const sh = wireList(shallows, 'shallow');
+  const sh = oidList(shallows, 'shallow');
   if (!sh.ok) return sh;
   const dn = wireList(deepenNot, 'deepen-not');
   if (!dn.ok) return dn;
@@ -197,7 +200,7 @@ export function parseSideband(payload: Uint8Array): Result<Sideband, ErrorOf<'pr
 // section ply does not read). `done` is the flush that ends the response, in either phase.
 export type V2Phase = 'sections' | 'pack';
 export type V2State = {
-  readonly limits: Limits;
+  readonly limits: CheckedLimits;
   readonly phase: V2Phase;
   readonly section: string | null;
   readonly sections: readonly string[];
@@ -290,7 +293,8 @@ function refuseNonCommit(expectType: number | null, type: number, oid: string): 
   return assertNever(found);
 }
 
-export const v2Init = (limits: Limits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
+// limits: a checked record (parseLimits; DEFAULT_LIMITS when none is given): v2Step reads its caps on every frame.
+export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
   band1: 0, band2: 0, band3: 0, band2Frames: 0, progress: '', progressCarry: new Uint8Array(0), error: null, done: false, packFrames: 0,
   sectionLines: 0, otherLines: 0,
@@ -299,18 +303,14 @@ const stepped = (state: V2State, pack: Uint8Array | null = null): Result<V2Step,
 // @decoder v2Step prefix=v2
 // oxlint-disable-next-line complexity -- a step function is one transition table
 export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
-  // Every section line, including ones this client does not interpret, counts against the same cap. A missing
-  // maxSectionLines used to make `n >= <missing>` false and disable the check.
-  const linesCap = readLimit(st.limits, 'maxSectionLines');
-  if (!linesCap.ok) return linesCap;
-  const maxLines = linesCap.value;
+  // Every section line, including ones this client does not interpret, counts against the same cap. The state's limits
+  // are checked (v2Init takes a CheckedLimits): a missing maxSectionLines used to make `n >= <missing>` false.
+  const maxLines = st.limits.maxSectionLines;
   // The one place every consumer of a fetch response passes: band 1 (the pack) and band 2 (progress) are each held to
   // maxPackBytes here, before the frame is yielded, so fetchSingle, fetchWide, fetchPackOnce, the streamed blob (edit,
   // read, checkout) and any new consumer are bounded without a check of their own. Before, only the buffered consumers
   // counted, and a streamed blob body was accepted until the request timer (~5 GiB at the default 60 s).
-  const packCap = readLimit(st.limits, 'maxPackBytes');
-  if (!packCap.ok) return packCap;
-  const maxPack = packCap.value;
+  const maxPack = st.limits.maxPackBytes;
   if (st.done) return proto('v2: frame after flush');
   if (frame.kind === 'flush') return stepped({ ...st, done: true });
   switch (st.phase) {
@@ -586,7 +586,7 @@ export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boo
 // maxPackBytes, maxPackObjects and maxInflatedTotal have already bounded the whole pack. Returns the skipped extras,
 // or the first failure that is not one (nothing is dropped then).
 export type Skipped = { readonly oid: string; readonly what: unknown; readonly bytes: number };
-export function checkWide(objects: Map<string, PackObject>, wanted: (oid: string, o: PackObject) => boolean, limits: Limits): Result<Skipped[], PlyError> {
+export function checkWide(objects: Map<string, PackObject>, wanted: (oid: string, o: PackObject) => boolean, limits: CheckedLimits): Result<Skipped[], PlyError> {
   const skipped: Skipped[] = [];
   for (const [oid, o] of objects) {
     if (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE && o.type !== TYPE.TAG) continue;
@@ -606,9 +606,7 @@ export const skippedAttrs = (skipped: readonly Skipped[]): Attrs => ({ 'git.fetc
 // since fetchObject serves the harvest without another look.
 export function harvest(t: Transport, objects: ReadonlyMap<string, PackObject>, skip: string | null = null): Result<{ readonly kept: number; readonly bytes: number }, PlyError> {
   const store = t.objects;
-  const limit = readLimit(t.limits, 'maxHarvestBytes');
-  if (!limit.ok) return limit;
-  const cap = limit.value;
+  const cap = t.limits.maxHarvestBytes;
   let bytes = 0, held = harvestBytes(store), kept = 0;
   for (const [oid, o] of objects) {
     if (oid === skip || store.has(oid) || (o.type !== TYPE.COMMIT && o.type !== TYPE.TREE)) continue;
@@ -799,7 +797,7 @@ function memberFeed(m: Member, sp: SpState, zlib: readonly Uint8Array[], maxObje
   if (cur.tag === 'header') {
     if (sp.phase !== 'body') return cur;
     const opened = inflateInit({ bound: declaredBound(sp.size, maxObject), wrap: zlibWrap(true) });
-    // the size is within maxObject (spStep), which readLimit checked: the record always opens
+    // the size is within maxObject (spStep), which parseLimits checked: the record always opens
     // Stryker disable next-line all: see above
     if (!opened.ok) return { tag: 'failed', error: opened.error };
     cur = { tag: 'open', stream: opened.value, out: new Uint8Array(sp.size), at: 0 };
@@ -850,9 +848,7 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
   // The span is where the transport says whether the response came from a cache (fetchExchange, onceMore).
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
   const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
-    const limit = readLimit(t.limits, 'maxObjectSize');
-    if (!limit.ok) return limit;
-    const maxObject = limit.value;
+    const maxObject = t.limits.maxObjectSize;
     // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes are
     // bounded by spStep at zlibBound(sp.size) and inflated as they arrive (memberFeed), sp.size by maxObjectSize where
     // the header is read (readObjHeader, through spStep).
@@ -927,8 +923,7 @@ function wideResolve(t: Transport, parsed: ParsedPack, dropped: Dropped): Result
 type WideRead = { readonly parsed: ParsedPack; readonly dropped: Dropped };
 function wideObject(t: Transport, { parsed, dropped }: WideRead, want: Wide, span: Span, bust: boolean): Result<FetchedObject, PlyError> {
   const { oid, expectType } = want;
-  const maxObject = readLimit(t.limits, 'maxObjectSize');
-  if (!maxObject.ok) return maxObject;
+  const maxObject = t.limits.maxObjectSize;
   const resolved = wideResolve(t, parsed, dropped);
   if (!resolved.ok) return resolved;
   const { objects, unresolved } = resolved.value;
@@ -939,7 +934,7 @@ function wideObject(t: Transport, { parsed, dropped }: WideRead, want: Wide, spa
   const left = dropped.offsets.size + unresolved;
   if (found.tag === 'none') return fail('pack_corrupt', `object ${oid} not in the ${packName(want.filter)} pack (${objects.size + left} objects)`);
   const wanted = found.value;
-  if (wanted.data.length > maxObject.value) return err(limitExceeded('object size', wanted.data.length, maxObject.value));
+  if (wanted.data.length > maxObject) return err(limitExceeded('object size', wanted.data.length, maxObject));
   const refused = refuseNonCommit(expectType, wanted.type, oid);
   if (!refused.ok) return refused;
   if (expectType !== null && wanted.type !== expectType) return fail('pack_corrupt', `expected ${typeText(expectType)}, got ${typeText(wanted.type)}`);
@@ -956,8 +951,6 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
   const { oid, deepen, learned, filter, requested } = want;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
   const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': requested, 'git.fetch.filter.learned': learned }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
-    const limit = readLimit(t.limits, 'maxObjectSize');
-    if (!limit.ok) return limit;
     const caps = packCaps({ limits: t.limits });
     if (!caps.ok) return caps;
     // the pack is read through the scan as it arrives: its bytes and every zlib member are dropped once inflated, and

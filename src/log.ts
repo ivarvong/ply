@@ -31,13 +31,14 @@
 import { fail, type CommitMiss, type PlyError } from './errors.js';
 import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
-import { ok, assertNever, flatMapOption, getOrElse, none } from './result.js';
+import { ok, assertNever, flatMapOption, none } from './result.js';
 import type { Option, Result } from './result.js';
 import { operation } from './operation.js';
 import { resolveCommit, commitView } from './read.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { parseCommit, TYPE, nonCommitType } from './objects.js';
-import { DEFAULT_LIMITS, readLimit } from './limits.js';
+import { limitsOf } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import type { CommitView, ReadOptions } from './read.js';
 import type { FetchPackResult } from './fetchpack.js';
 import type { Transport } from './transport.js';
@@ -137,11 +138,10 @@ export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Resul
   const givenLimit = fromNullable(spec.limit);
   const limit = givenLimit.tag === 'none' ? DEFAULT_LOG_LIMIT : givenLimit.value;
   const commit = spec.commit;
-  const cap = readLimit(t.limits, 'maxMergeDepth');
-  if (!cap.ok) return cap;
+  const cap = t.limits.maxMergeDepth;
   // A rejected limit is not a number. Null would pass a bare `< 1` by coercion, so it stays its own case.
   const depth = typeof limit === 'number' && Number.isSafeInteger(limit) ? limit : null;
-  if (depth === null || depth < 1 || depth > cap.value) return fail('bad_request', `logOn: limit must be an integer from 1 to ${cap.value} (limits.maxMergeDepth)`, { what: 'limit' });
+  if (depth === null || depth < 1 || depth > cap) return fail('bad_request', `logOn: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' });
   const fetched = await fetchWindow(t, commit, depth);
   if (!fetched.ok) return fetched;
   const r = fetched.value;
@@ -168,23 +168,24 @@ export async function logOn(t: Transport, spec: LogOnSpec | null): Promise<Resul
 }
 
 // readLog's arguments, checked in the order the entry always checked them. `opts.tracer` is optional (operation()).
-function logArgs(spec: LogSpec, opts: ReadOptions): Result<{ readonly ref: string | null; readonly limit: number }, PlyError> {
+function logArgs(spec: LogSpec, opts: ReadOptions): Result<{ readonly ref: string | null; readonly limit: number; readonly limits: CheckedLimits }, PlyError> {
   if (!isObject(spec)) return fail('bad_request', 'readLog: the second argument must be an object ({ ref, limit })');
   if (!isObject(opts)) return fail('bad_request', 'readLog: the third argument must be an object (options)');
   const { ref, limit, path } = withDefaults<LogConfig>(spec, { ref: null, limit: DEFAULT_LOG_LIMIT, path: null });
   if (path !== null) return fail('bad_request', 'readLog: path filtering is not supported');
-  // A null limits record is the default, as the nullish read had it.
-  const cap = readLimit(getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS), 'maxMergeDepth');
-  if (!cap.ok) return cap;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap.value) return fail('bad_request', `readLog: limit must be an integer from 1 to ${cap.value} (limits.maxMergeDepth)`, { what: 'limit' });
-  return ok({ ref, limit });
+  // A null limits record is the default, as the nullish read had it; the record is parsed once, here.
+  const limits = limitsOf(opts);
+  if (!limits.ok) return limits;
+  const cap = limits.value.maxMergeDepth;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap) return fail('bad_request', `readLog: limit must be an integer from 1 to ${cap} (limits.maxMergeDepth)`, { what: 'limit' });
+  return ok({ ref, limit, limits: limits.value });
 }
 // oxlint-disable-next-line require-await -- async: a refused argument is an Err in a promise, like every other answer
 export async function readLog(url: string, spec: LogSpec = {}, opts: ReadOptions = {}): Promise<Result<LogResult, PlyError>> {
   const args = logArgs(spec, opts);
   if (!args.ok) return args;
-  const { ref, limit } = args.value;
-  return operation('read_log', url, { ...opts, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
+  const { ref, limit, limits } = args.value;
+  return operation('read_log', url, { ...opts, limits, attrs: { 'git.read_log.ref': typeof ref === 'string' ? ref : 'HEAD', 'git.read_log.limit': limit } }, async ({ t, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;

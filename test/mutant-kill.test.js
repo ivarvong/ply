@@ -26,7 +26,7 @@ import { classifyReport, reportInit, reportStep, reportFinish, decideOutcome, ou
 import { checkPushCaps, capsProblem, parseReceiveAdvert, pushWithOptions as pushWithOptionsR } from '../src/receivecaps.js';
 import { parseLine, parseFile, UNSET } from '../src/attributes.js';
 import { withGpgsig } from '../src/sign.js';
-import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV, readLimit, checkLimit } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV, parseLimits, checkLimit } from '../src/limits.js';
 import { validateIdent, isValidatedIdent, validatePushRef } from '../src/validate.js';
 import { createTransport as createTransportR } from '../src/http.js';
 import { verifyRef } from '../src/operation.js';
@@ -780,7 +780,7 @@ test('v2 sections, sideband, and the single-object pack stream', async () => {
   throws(() => spStep(spInit(), ver), 'pack_corrupt', 'pack: bad version');
   const { pack: two } = await buildPack([{ type: TYPE.BLOB, data: blob }, { type: TYPE.BLOB, data: blob }]);
   throws(() => spStep(spInit(), two), 'pack_corrupt', 'pack: expected 1 object, got 2');
-  const { pack: ref } = await buildPack([{ type: TYPE.BLOB, data: blob, baseOid: oid(1) }]);
+  const { pack: ref } = await buildPack([{ type: TYPE.BLOB, data: blob, base: { tag: 'ref', oid: oid(1) } }]);
   throws(() => spStep(spInit(), ref), 'pack_corrupt', 'pack: single-object pack is a delta');
   const torn = bytes.slice();
   torn[torn.length - 1] ^= 1;
@@ -1295,7 +1295,7 @@ test('parsePack caps reject a hostile count and inflated total on the boundary',
   assert.equal(open.maxObjects, DEFAULT_LIMITS.maxPackObjects);
   assert.equal(open.maxInflatedTotal, DEFAULT_LIMITS.maxInflatedTotal);
   assert.equal(unwrap(parsePack(pack, open)).stats.inflated, blob.length);
-  throws(() => unwrap(packParseOpts({ maxObjectSize: 1 })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => unwrap(packParseOpts({ maxObjectSize: 1, maxPackObjects: -1 })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   throws(() => unwrap(parsePack(two, { limits: withLimits({ maxPackObjects: 1 }) })), 'limit_exceeded', 'pack objects 2 exceeds limit 1');
   throws(() => unwrap(parsePack(pack, { maxObjects: Infinity, maxInflatedTotal: blob.length + OV })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
 });
@@ -1328,8 +1328,9 @@ test('every DEFAULT_LIMITS key is read outside limits.js', () => {
   assert.equal(DEFAULT_LIMITS.maxRebaseCommits, DEFAULT_LIMITS.maxRefs);
   throws(() => unwrap(checkLimit(Infinity, 'maxObjectSize')), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
   throws(() => unwrap(checkLimit(-1, 'maxObjectSize')), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
-  throws(() => unwrap(readLimit({}, 'maxInflatedTotal')), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
-  assert.equal(unwrap(readLimit({ maxObjectSize: 0 }, 'maxObjectSize')), 0);
+  throws(() => unwrap(parseLimits({ maxInflatedTotal: null })), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  assert.equal(unwrap(parseLimits({ maxObjectSize: 0 })).maxObjectSize, 0);
+  assert.equal(unwrap(parseLimits({})).maxInflatedTotal, DEFAULT_LIMITS.maxInflatedTotal);
 });
 
 test('aggregate caps fail closed before allocation', async () => {
@@ -1353,7 +1354,8 @@ test('aggregate caps fail closed before allocation', async () => {
   const underCap = unwrap(parseTree(wideTree, { maxTreeEntries: 1 }));
   assert.equal(underCap.length, 1);
   assert.equal(underCap[0].name, longName);
-  throws(() => unwrap(parseTree(twoEntries, {})), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  throws(() => unwrap(parseTree(twoEntries, { maxTreeEntries: -1 })), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  assert.equal(unwrap(parseTree(twoEntries, {})).length, 2);
 
   const tree = oid(1);
   const who = 'A <a@b.c> 1 +0000';
@@ -1361,10 +1363,12 @@ test('aggregate caps fail closed before allocation', async () => {
   const commit = te.encode(`tree ${tree}\n${parents.map(p => `parent ${p}`).join('\n')}\nauthor ${who}\ncommitter ${who}\n\nm\n`);
   assert.equal(unwrap(parseCommit(commit, { maxCommitParents: 2 })).parents.length, 2);
   throws(() => unwrap(parseCommit(commit, { maxCommitParents: 1 })), 'limit_exceeded', 'commit parents 2 exceeds limit 1');
-  throws(() => unwrap(parseCommit(commit, {})), 'bad_request', 'limits.maxCommitParents must be a finite non-negative number');
+  throws(() => unwrap(parseCommit(commit, { maxCommitParents: NaN })), 'bad_request', 'limits.maxCommitParents must be a finite non-negative number');
+  assert.equal(unwrap(parseCommit(commit, {})).parents.length, 2);
 
   const line = s => ({ kind: 'data', payload: te.encode(s) });
-  throws(() => v2Step({ ...v2Init(), limits: {} }, line('packfile')), 'bad_request', 'limits.maxSectionLines must be a finite non-negative number');
+  // v2Init takes a checked record: the caller's is refused where it is parsed, before any frame is read
+  throws(() => unwrap(parseLimits({ maxSectionLines: Infinity })), 'bad_request', 'limits.maxSectionLines must be a finite non-negative number');
   let st = v2Step(v2Init(withLimits({ maxSectionLines: 1 })), line('wanted-refs')).state;
   st = v2Step(st, line('abc')).state;
   throws(() => v2Step(st, line('def')), 'limit_exceeded', 'section lines 2 exceeds limit 1');
@@ -1378,7 +1382,7 @@ test('aggregate caps fail closed before allocation', async () => {
   // the report's line bound is the read's (push: maxReportLines), and every limit push reads is checked before anything is sent
   const delA = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }] };
   for (const key of ['maxRefs', 'maxReportLines', 'maxPackBytes']) {
-    const r = planPush(delA, withLimits({ [key]: undefined }));
+    const r = planPush(delA, withLimits({ [key]: null }));
     assert.equal(r.ok, false); assert.equal(r.error.code, 'bad_request'); assert.equal(r.error.message, `limits.${key} must be a finite non-negative number`);
   }
   const planned = unwrap(planPush(delA, withLimits({ maxReportLines: 1, maxPackBytes: 2 })));
@@ -1388,9 +1392,9 @@ test('aggregate caps fail closed before allocation', async () => {
   const delta = makeDelta(base, te.encode('abXY')).delta;
   const baseOid = hashObject('blob', base);
   const { pack } = await buildPack([
-    { type: TYPE.BLOB, data: delta, baseOid },
-    { type: TYPE.BLOB, data: delta, baseOid },
-    { type: TYPE.BLOB, data: delta, baseOid },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: baseOid } },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: baseOid } },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: baseOid } },
     { type: TYPE.BLOB, data: base },
   ]);
   const parsed = unwrap(parsePack(pack));
@@ -1608,7 +1612,7 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
 test('git.push.object names every entry: a type id with no name is its decimal, not otel\'s null-as-empty', async () => {
   const ex = arrayExporter();
   const t = { limits: DEFAULT_LIMITS, tracer: new Tracer({ exporter: ex }), parent: null, async *frames() { for (const f of []) yield f; } };
-  const objects = [{ type: 5, data: te.encode('x') }, { type: TYPE.BLOB, data: te.encode('y') }, { type: TYPE.BLOB, data: te.encode('z'), baseOid: oid(4) }];
+  const objects = [{ type: 5, data: te.encode('x') }, { type: TYPE.BLOB, data: te.encode('y') }, { type: TYPE.BLOB, data: te.encode('z'), base: { tag: 'ref', oid: oid(4) } }];
   await assert.rejects(unwrapAsync(push(t, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false })), e => e.code === 'ambiguous');
   const span = ex.lines.flatMap(flattenLine).find(s => s.name === 'git.receive-pack');
   assert.deepEqual(span.events.filter(e => e.name === 'git.push.object').map(e => e.attrs['git.object.type']), ['5', 'blob', 'ref_delta']);
@@ -1742,7 +1746,7 @@ test('v2Step holds band 1 and band 2 to maxPackBytes, for every consumer of pack
   assert.throws(() => feed(band(SIDEBAND_PACK, 1)), e => e.code === 'limit_exceeded' && e.message === 'pack bytes 11 exceeds limit 10' && e.what === 'pack bytes' && e.got === 11 && e.max === 10);
   assert.throws(() => feed(band(SIDEBAND_PROGRESS, 1)), e => e.code === 'limit_exceeded' && e.message === 'progress bytes 11 exceeds limit 10' && e.what === 'progress bytes' && e.got === 11 && e.max === 10);
   assert.equal(feed(band(SIDEBAND_PACK, 0)).pack.length, 0, 'an empty frame at the cap is not past it');
-  throws(() => v2Step({ ...v2Init(), limits: { maxSectionLines: 1 } }, line('packfile')), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
+  throws(() => unwrap(parseLimits({ maxSectionLines: 1, maxPackBytes: -1 })), 'bad_request', 'limits.maxPackBytes must be a finite non-negative number');
 });
 
 // receive-pack's band 2 (hook stderr, the host's explanation) is held to maxPackBytes: a flood of it used to be read until

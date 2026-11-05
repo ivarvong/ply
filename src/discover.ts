@@ -75,7 +75,7 @@ export async function discover(t: Transport): Promise<Result<DiscoverInfo, PlyEr
     // The fetch path reads the same bit when a filtered fetch dies (fetch.ts filterUnadvertised); an advertisement in
     // hand answers it first. A host that stops (or starts) advertising `filter` is followed either way. A transport handed
     // in without a quirks record has no memory to keep it in (asTransport gives the view a fresh one).
-    learnFilter(asTransport(t), info.filter);
+    learnFilter(asTransport(t, t.limits), info.filter);
     span.set({ ...pktAttrs(state), 'git.server.agent': info.agent, 'git.server.object_format': info.objectFormat, 'git.server.caps': [...caps.keys()], 'git.server.fetch': fetchFeatures, 'git.server.filter': info.filter, 'git.server.shallow': info.shallow, 'git.server.wait_for_done': info.waitForDone, 'git.server.ref_in_want': info.refInWant, 'git.server.ls_refs.unborn': info.lsRefsUnborn, 'git.server.server_option': info.serverOption, 'git.server.bundle_uri': info.bundleUri });
     return serverFits(info, has);
   }));

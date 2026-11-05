@@ -910,7 +910,7 @@ test('I4 many ref-deltas resolve in linear lookups', { timeout: 30_000 }, async 
   const baseOid = hashObject('blob', base);
   const n = 8_000;
   const objects = [{ type: TYPE.BLOB, data: base }];
-  for (let i = 0; i < n; i++) objects.push({ type: TYPE.BLOB, data: delta, baseOid });
+  for (let i = 0; i < n; i++) objects.push({ type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: baseOid } });
   const { pack } = await buildPack(objects);
   const parsed = unwrap(parsePack(pack, unwrap(packParseOpts())));
   const t0 = Date.now();

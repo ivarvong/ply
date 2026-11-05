@@ -89,7 +89,7 @@ test('size is the inflated header, and an in-pack REF or OFS base is that object
 
   const { pack: refPack } = await buildPack([
     { type: TYPE.BLOB, data: base },
-    { type: TYPE.BLOB, data: delta, baseOid },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: baseOid } },
   ]);
   const ref = layoutOf(refPack);
   assert.equal(ref.objects[1].wireType, TYPE.REF_DELTA);
@@ -125,9 +125,9 @@ test('a thin REF base is missingBases, in pack order, and resolvePack still refu
   const idA = hashObject('blob', base);
   const idB = hashObject('blob', other);
   const { pack } = await buildPack([
-    { type: TYPE.BLOB, data: delta, baseOid: idA },
-    { type: TYPE.BLOB, data: deltaB, baseOid: idB },
-    { type: TYPE.BLOB, data: delta, baseOid: idA },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: idA } },
+    { type: TYPE.BLOB, data: deltaB, base: { tag: 'ref', oid: idB } },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: idA } },
   ]);
   const layout = layoutOf(pack);
   assert.deepEqual(layout.missingBases, [idA, idB]);
@@ -162,7 +162,7 @@ test('limits: the boundary accepts and one past it refuses, and a cap that bound
   const delta = makeDelta(base, target).delta;
   const { pack } = await buildPack([
     { type: TYPE.BLOB, data: base },
-    { type: TYPE.BLOB, data: delta, baseOid: hashObject('blob', base) },
+    { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: hashObject('blob', base) } },
   ]);
   const headerSum = base.length + delta.length;
   // two objects, each charged LIMIT_OBJECT_OVERHEAD beyond its bytes (#142), and the delta result's bytes
@@ -179,9 +179,11 @@ test('limits: the boundary accepts and one past it refuses, and a cap that bound
   assert.equal(describePack(pack, withLimits({ maxDeltaResult: target.length })).ok, true);
   refused(describePack(pack, withLimits({ maxDeltaResult: target.length - 1 })), 'limit_exceeded', 'delta result size');
   refused(describePack(pack, withLimits({ maxPackObjects: Number.NaN })), 'bad_request', 'maxPackObjects');
+  // a key left out is the default (#156 parseLimits): the same layout as under DEFAULT_LIMITS; null is a value, refused
   const missing = { ...DEFAULT_LIMITS };
   delete missing.maxObjectSize;
-  refused(describePack(pack, missing), 'bad_request', 'maxObjectSize');
+  assert.deepEqual(describePack(pack, missing), describePack(pack, DEFAULT_LIMITS));
+  refused(describePack(pack, { ...DEFAULT_LIMITS, maxObjectSize: null }), 'bad_request', 'maxObjectSize');
 
   const badVer = pack.slice();
   badVer[7] = 3;

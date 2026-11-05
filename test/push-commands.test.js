@@ -26,7 +26,7 @@ const outcome = async (opts, limits = {}) => {
 test('the empty list: protocol, nothing sent, no span; every other refusal first', async () => {
   assert.deepEqual(await outcome({ commands: [] }), { code: 'protocol', what: null, sent: 0, spans: 0 });
   assert.deepEqual(await outcome({ commands: [], atomic: true }), { code: 'bad_request', what: null, sent: 0, spans: 0 });
-  assert.deepEqual(await outcome({ commands: [], objects: [{ type: 3, data: new Uint8Array(1), baseIndex: 0 }] }), { code: 'bad_request', what: 'baseIndex', sent: 0, spans: 0 });
+  assert.deepEqual(await outcome({ commands: [], objects: [{ type: 3, data: new Uint8Array(1), base: { tag: 'ofs', index: 0 } }] }), { code: 'bad_request', what: 'base', sent: 0, spans: 0 });
   assert.deepEqual(await outcome({ commands: [] }, { maxPackBytes: NaN }), { code: 'bad_request', what: 'maxPackBytes', sent: 0, spans: 0 });
   assert.deepEqual(await outcome({ commands: [] }, { maxReportLines: -1 }), { code: 'bad_request', what: 'maxReportLines', sent: 0, spans: 0 });
   assert.deepEqual(await outcome({ commands: [] }, { maxRefs: 'x' }), { code: 'bad_request', what: 'maxRefs', sent: 0, spans: 0 });

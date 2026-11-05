@@ -64,25 +64,26 @@ test('pass 2 is the same bytes every time (CompressionStream is deterministic fo
   assert.equal(new Sha1().update(a.subarray(prefix.length, a.length - PACK_TRAILER_BYTES)).hex(), Buffer.from(m.digest).toString('hex'));
 });
 
-test('deltas: OFS (baseIndex) and REF (baseOid) entries as buildPack writes them, and the pack resolves', async () => {
+test('deltas: OFS and REF bases as buildPack writes them (one entry encoder, pack.ts entryHead), and the pack resolves', async () => {
   const base = fill(3000, 'text');
   const objects = [
     { type: TYPE.BLOB, data: base },
-    { type: TYPE.BLOB, data: Uint8Array.of(0xb8, 0x17, 0xb8, 0x17, 0x91, 0, 0xb8, 0x17), baseIndex: 0 }, // copy all 3000 bytes
-    { type: TYPE.BLOB, data: Uint8Array.of(1, 1, 1, 0x61), baseOid: 'ab'.repeat(20) },
-    { type: TYPE.BLOB, data: fill(10, 'text'), baseOid: '' }, // empty: no base, as buildPack reads it
-    { type: TYPE.BLOB, data: fill(10, 'zero'), baseOid: null, baseIndex: null },
-    // both bases: the OFS one wins, and the entry names no base oid (buildPack)
-    { type: TYPE.BLOB, data: Uint8Array.of(0xb8, 0x17, 0xb8, 0x17, 0x91, 0, 0xb8, 0x17), baseIndex: 0, baseOid: 'cd'.repeat(20) },
+    { type: TYPE.BLOB, data: Uint8Array.of(0xb8, 0x17, 0xb8, 0x17, 0x91, 0, 0xb8, 0x17), base: { tag: 'ofs', index: 0 } }, // copy all 3000 bytes
+    { type: TYPE.BLOB, data: Uint8Array.of(1, 1, 1, 0x61), base: { tag: 'ref', oid: 'ab'.repeat(20) } },
+    { type: TYPE.BLOB, data: fill(10, 'text'), base: { tag: 'none' } },
+    { type: TYPE.BLOB, data: fill(10, 'zero'), base: undefined }, // left out: none
+    { type: TYPE.BLOB, data: Uint8Array.of(0xb8, 0x17, 0xb8, 0x17, 0x91, 0, 0xb8, 0x17), base: { tag: 'ofs', index: 1 } },
   ];
   const built = await buildPack(objects);
   const m = await measurePack(objects, 0);
   assert.deepEqual(m.entries, built.entries);
-  assert.deepEqual(m.entries.map(e => [e.type, e.typeName, e.baseOid]), [[TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null], [TYPE.REF_DELTA, 'ref_delta', 'ab'.repeat(20)], [TYPE.BLOB, 'blob', ''], [TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null]]);
+  assert.deepEqual(m.entries.map(e => [e.type, e.typeName, e.baseOid]), [[TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null], [TYPE.REF_DELTA, 'ref_delta', 'ab'.repeat(20)], [TYPE.BLOB, 'blob', null], [TYPE.BLOB, 'blob', null], [TYPE.OFS_DELTA, 'ofs_delta', null]]);
   const got = await readAll(streamPack(m, new Uint8Array(0)).stream);
   assert.deepEqual(got, Buffer.from(built.pack));
   const parsed = unwrap(parsePack(new Uint8Array(got)));
   assert.equal(parsed.objects.length, 6);
+  // each base as the reader reads it back: the OFS distance names the entry it was given, the REF id as given
+  assert.deepEqual(parsed.objects.map(o => o.base), [{ tag: 'none' }, { tag: 'ofs', offset: built.entries[0].offset }, { tag: 'ref', oid: 'ab'.repeat(20) }, { tag: 'none' }, { tag: 'none' }, { tag: 'ofs', offset: built.entries[1].offset }]);
 });
 
 test('an unknown type id is written as given, with no type name (buildPack\'s typeNameOf)', async () => {

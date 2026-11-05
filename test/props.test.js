@@ -179,7 +179,7 @@ forAll('pack: buildPack ∘ parsePack ∘ resolvePack is identity (full + ref-de
   const target = concat([base.subarray(0, base.length >> 1), rng.bytes(rng.int(0, 200)), base.subarray(base.length >> 1)]);
   const baseOid = hashObject('blob', base);
   const inPack = rng.bool();
-  const objs = [...(inPack ? [{ type: 3, data: base }] : []), { type: 3, data: makeDelta(base, target).delta, baseOid }, { type: 2, data: unwrap(encodeTree([{ mode: '100644', name: 'f', oid: baseOid }])) }];
+  const objs = [...(inPack ? [{ type: 3, data: base }] : []), { type: 3, data: makeDelta(base, target).delta, base: { tag: 'ref', oid: baseOid } }, { type: 2, data: unwrap(encodeTree([{ mode: '100644', name: 'f', oid: baseOid }])) }];
   const { pack } = await buildPack(objs);
   const parsed = unwrap(parsePack(pack));
   assert.equal(parsed.stats.count, objs.length); assert.equal(parsed.stats.refDelta, 1);

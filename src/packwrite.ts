@@ -10,16 +10,13 @@
 // input sequence and parameters) writes the same bytes (test/packwrite.test.js, node and workerd). If it ever did not,
 // pass 2 errors its stream before the trailer: the server is never handed a pack that is whole, and push reports it.
 // The bytes are buildPack's (pack.ts) for the same objects: the same headers, bases and zlib streams.
-import { Sha1, fromHex, toHex } from './sha1.js';
-import { TYPE, TYPE_NAME } from './objects.js';
-import { encodeObjHeader, encodeOfsDistance } from './pack.js';
+import { Sha1, toHex } from './sha1.js';
+import { builtEntry, entryHead, packHeader } from './pack.js';
 import type { BuiltEntry, PackInput } from './pack.js';
 import { bufferSource, concat } from './bytes.js';
-import { at, fromNullish, readKey } from './absent.js';
-import { getOrElse } from './result.js';
 import { plyError } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { INFLATE_CHUNK, PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, BE32_SHIFTS } from './format.js';
+import { INFLATE_CHUNK, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from './format.js';
 
 // One object's zlib stream, pulled: the object goes into CompressionStream in INFLATE_CHUNK slices as the output is read
 // (a source with no read-ahead), so nothing but zlib's own state and one output chunk is held.
@@ -53,20 +50,10 @@ export async function* deflatePull(data: Uint8Array): AsyncGenerator<Uint8Array,
   }
 }
 
-const typeNameOf = (type: number): string | null => getOrElse<string | null>(readKey(TYPE_NAME as Readonly<Record<number, string>>, type), null);
-const packHeader = (count: number): Uint8Array<ArrayBuffer> => {
-  const hdr = new Uint8Array(PACK_HEADER_BYTES);
-  hdr.set(PACK_SIGNATURE);
-  const dv = new DataView(hdr.buffer);
-  dv.setUint32(PACK_SIGNATURE.length, PACK_VERSION);
-  dv.setUint32(PACK_SIGNATURE.length + BE32_SHIFTS.length, count);
-  return hdr;
-};
-
 // What one pass wrote: every entry, the bytes before the trailer, and their SHA-1 (the trailer).
 type Tally = { readonly entries: readonly BuiltEntry[]; readonly body: number; readonly digest: Uint8Array };
 // The pack before its trailer, piece by piece (the header, each object's header and base, its zlib chunks), each
-// hashed as it is yielded. The entries are buildPack's: an OFS_DELTA (baseIndex) or a REF_DELTA (a non-empty baseOid).
+// hashed as it is yielded. The headers and entries are buildPack's (pack.ts entryHead, builtEntry).
 async function* pieces(objects: readonly PackInput[]): AsyncGenerator<Uint8Array, Tally, unknown> {
   const sha = new Sha1();
   const hdr = packHeader(objects.length);
@@ -76,25 +63,18 @@ async function* pieces(objects: readonly PackInput[]): AsyncGenerator<Uint8Array
   const offsets: number[] = [];
   let offset = PACK_HEADER_BYTES;
   for (const o of objects) {
-    const given = getOrElse<string | null>(fromNullish(o.baseOid), null);
-    const baseIndex = getOrElse<number | null>(fromNullish(o.baseIndex), null);
-    const ofs = baseIndex === null ? null : encodeOfsDistance(offset - getOrElse(at(offsets, baseIndex), offset));
-    // truthiness, as buildPack: an empty baseOid is no base; an OFS base (below) wins over it
-    const ref = given !== null && given !== '' ? fromHex(given) : null;
-    let type: number = ref === null ? o.type : TYPE.REF_DELTA;
-    if (ofs !== null) type = TYPE.OFS_DELTA;
-    const base = ofs === null ? ref : ofs;
-    const head = concat([encodeObjHeader(type, o.data.length), ...(base === null ? [] : [base])]);
-    sha.update(head);
-    yield head;
+    // buildPack's header for the entry (pack.ts entryHead): the same type, header and base bytes
+    const h = entryHead(o, offset, offsets);
+    sha.update(h.head);
+    yield h.head;
     let compressed = 0;
     // one object at a time, in pack order
     // oxlint-disable-next-line no-await-in-loop -- see above
     for await (const z of deflatePull(o.data)) { sha.update(z); compressed += z.length; yield z; }
-    const bytes = head.length + compressed;
-    entries.push({ type, typeName: typeNameOf(type), size: o.data.length, compressed, baseOid: ofs === null ? given : null, bytes, offset });
+    const entry = builtEntry(h, o.data.length, compressed, offset);
+    entries.push(entry);
     offsets.push(offset);
-    offset += bytes;
+    offset += entry.bytes;
   }
   return { entries, body: offset, digest: sha.digest() };
 }

@@ -12,8 +12,8 @@ import type { ErrorOf } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever } from './result.js';
-import type { Limits } from './limits.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
+import type { LimitsInput } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, parseLimits } from './limits.js';
 import { atOr } from './absent.js';
 import { take, shortRead } from './bytes.js';
 import { Sha1, toHex, toOid } from './sha1.js';
@@ -158,8 +158,9 @@ export type ObjBase =
   | { readonly tag: 'ofs'; readonly offset: number }
   | { readonly tag: 'ref'; readonly oid: Oid };
 export const NO_BASE: ObjBase = Object.freeze({ tag: 'none' });
-export type PackScanOpts = { readonly verify: boolean; readonly limits: Limits };
-export const packScanOpts = (limits: Limits = DEFAULT_LIMITS, verify = true): PackScanOpts => ({ verify, limits });
+// limits: any subset (a key left out is the default), parsed by parsePackInit.
+export type PackScanOpts = { readonly verify: boolean; readonly limits: LimitsInput };
+export const packScanOpts = (limits: LimitsInput = DEFAULT_LIMITS, verify = true): PackScanOpts => ({ verify, limits });
 
 export type PackPiece =
   | { readonly kind: 'need' }
@@ -220,7 +221,7 @@ function refuse(st: PackScan, error: PackError): Step {
   return FAILED;
 }
 
-// The three caps a scan holds, each already checked (readLimit, or parsePack's override checked the same way).
+// The three caps a scan holds, each already checked (parseLimits, or parsePack's override checked the same way).
 export type PackCaps = { readonly maxObjects: number; readonly maxInflatedTotal: number; readonly maxObjectSize: number };
 // A scan under caps in hand: the limits' check is the caller's (parsePackInit, parsePack).
 export function packScanOpen(caps: PackCaps, verify: boolean): Result<PackScan, PackError> {
@@ -239,13 +240,10 @@ export function packScanOpen(caps: PackCaps, verify: boolean): Result<PackScan, 
 }
 // @decoder parsePackInit prefix=pack
 export function parsePackInit(opts: PackScanOpts): Result<PackScan, PackError> {
-  const maxObjects = readLimit(opts.limits, 'maxPackObjects');
-  if (!maxObjects.ok) return maxObjects;
-  const maxInflatedTotal = readLimit(opts.limits, 'maxInflatedTotal');
-  if (!maxInflatedTotal.ok) return maxInflatedTotal;
-  const maxObjectSize = readLimit(opts.limits, 'maxObjectSize');
-  if (!maxObjectSize.ok) return maxObjectSize;
-  return packScanOpen({ maxObjects: maxObjects.value, maxInflatedTotal: maxInflatedTotal.value, maxObjectSize: maxObjectSize.value }, opts.verify);
+  const limits = parseLimits(opts.limits);
+  if (!limits.ok) return limits;
+  const { maxPackObjects: maxObjects, maxInflatedTotal, maxObjectSize } = limits.value;
+  return packScanOpen({ maxObjects, maxInflatedTotal, maxObjectSize }, opts.verify);
 }
 
 // Hash everything but the last PACK_TRAILER_BYTES bytes seen so far (spStep's lag, fetch.ts). The lag is kept with
@@ -386,7 +384,7 @@ function stepGate(st: PackScan): Step {
   if (st.charged + cost > st.maxInflatedTotal) return refuse(st, limitExceeded('pack inflated bytes', st.charged + cost, st.maxInflatedTotal));
   st.charged += cost;
   st.headerBytes = st.at - st.offset;
-  // the size passed the cap on the line above, and the cap passed readLimit: the reset cannot refuse
+  // the size passed the cap on the line above, and the cap passed parseLimits: the reset cannot refuse
   const opened = inflateReset(st.inflate, { bound: declaredBound(st.size, st.maxObjectSize), wrap: zlibWrap(true) });
   // Stryker disable next-line all: see above
   if (!opened.ok) return refuse(st, opened.error);

@@ -68,7 +68,7 @@ test('thin REF base: every claim × byte form against git hash-object and index-
     const packs = {};
     for (const [tag, obj] of Object.entries(made)) {
       assert.equal(hashObject(tag, obj.base), obj.oid, `${tag} base hashes as git stored it`);
-      const { pack } = await buildPack([{ type: cType(tag), data: makeDelta(obj.base, obj.target).delta, baseOid: obj.oid }]);
+      const { pack } = await buildPack([{ type: cType(tag), data: makeDelta(obj.base, obj.target).delta, base: { tag: 'ref', oid: obj.oid } }]);
       packs[tag] = unwrap(parsePack(pack));
       const indexed = git(dir, ['index-pack', '--stdin', '--strict', '--fix-thin'], pack);
       assert.match(indexed.toString(), /^pack\t[0-9a-f]{40}\n$/);
@@ -111,7 +111,7 @@ test('thin REF base: every claim × byte form against git hash-object and index-
     const empty = mkdtempSync(join(tmpdir(), 'ply-thin-empty-'));
     try {
       git(empty, ['init', '-q', '--bare']);
-      const pack = (await buildPack([{ type: 3, data: makeDelta(made.blob.base, made.blob.target).delta, baseOid: made.blob.oid }])).pack;
+      const pack = (await buildPack([{ type: 3, data: makeDelta(made.blob.base, made.blob.target).delta, base: { tag: 'ref', oid: made.blob.oid } }])).pack;
       assert.throws(() => git(empty, ['index-pack', '--stdin', '--strict', '--fix-thin'], pack));
     } finally { rmSync(empty, { recursive: true, force: true }); }
   } finally { rmSync(dir, { recursive: true, force: true }); }

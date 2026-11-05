@@ -9,7 +9,7 @@ import type { Result } from './result.js';
 import { field, fillIn, fromNullable, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
 import { assertNever, err, ok } from './result.js';
-import type { Limits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
@@ -18,7 +18,7 @@ import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
-import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 import { NO_HINTS, UA, freshQuirks, quirksKeyOf, rememberedQuirks, wrapNet } from './transport.js';
@@ -286,7 +286,8 @@ export type HttpConfig = {
   readonly parent: Span | null;
   readonly fetchImpl: FetchLike;
   readonly userAgent: string;
-  readonly limits: Limits;
+  // any subset: a key left out is DEFAULT_LIMITS's (parseLimits, when the transport is made)
+  readonly limits: LimitsInput;
   readonly signal: AbortSignal | null;
   // null (the default): the remote's remembered record (transport.ts rememberedQuirks, #136)
   readonly quirks: Input<Quirks> | null;
@@ -334,9 +335,9 @@ const unref = (timer: unknown): void => {
   if (f.tag === 'some' && typeof f.value === 'function') Reflect.apply(f.value, timer, []);
 };
 
-// HttpOptions parsed once (#156): every check the transport makes of its options, here and nowhere after it. The two
-// limits it reads on every request (requestTimeoutMs, maxPackBytes) are read here too, so a bad one is refused when the
-// transport is made, not at its first request. The brand is a module symbol: only parseHttpOptions writes it.
+// HttpOptions parsed once (#156): every check the transport makes of its options, here and nowhere after it. The limits
+// record is parsed here too (parseLimits), so a bad one is refused when the transport is made, not at its first request
+// or at the read that uses it. The brand is a module symbol: only parseHttpOptions writes it.
 const CHECKED_HTTP: unique symbol = Symbol('checkedHttp');
 export type HttpSettings = {
   readonly [CHECKED_HTTP]: true;
@@ -357,7 +358,7 @@ export type HttpSettings = {
   readonly parent: Span | null;
   readonly signal: AbortSignal | null;
   readonly allowUrl: AllowUrl | null;
-  readonly limits: Limits;
+  readonly limits: CheckedLimits;
   readonly requestTimeoutMs: number;
   readonly maxPackBytes: number;
   readonly streamRedirect: StreamRedirect;
@@ -399,16 +400,14 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   // The explicit credential, checked before anything is built from it.
   const explicit = fromUrl !== null || auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
   if (!explicit.ok) return explicit;
-  const requestTimeoutMs = readLimit(limits, 'requestTimeoutMs');
-  if (!requestTimeoutMs.ok) return requestTimeoutMs;
-  const maxPackBytes = readLimit(limits, 'maxPackBytes');
-  if (!maxPackBytes.ok) return maxPackBytes;
+  const checkedLimits = parseLimits(limits);
+  if (!checkedLimits.ok) return checkedLimits;
   const [authorization, explicitBasic]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : explicit.value;
   return ok({
     [CHECKED_HTTP]: true, url: approved.value, crossOrigin: approved.value.origin !== offeredOrigin, policy: checkedPolicy.value,
     userAgent: agent.value, recordNames: names.value, given, authorization, explicitBasic, quirks,
-    fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, tracer, parent, signal, allowUrl, limits,
-    requestTimeoutMs: requestTimeoutMs.value, maxPackBytes: maxPackBytes.value, streamRedirect: streamRedirect(),
+    fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, tracer, parent, signal, allowUrl, limits: checkedLimits.value,
+    requestTimeoutMs: checkedLimits.value.requestTimeoutMs, maxPackBytes: checkedLimits.value.maxPackBytes, streamRedirect: streamRedirect(),
   });
 }
 

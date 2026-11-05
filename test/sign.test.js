@@ -63,7 +63,7 @@ test('editFile with a signer: git verify-commit accepts the commit; ssh-keygen v
 
 test('withCommitData keeps trees/blob objects and recomputes identity; armor wraps at 70 like ssh-keygen', async () => {
   const commit = unwrap(encodeCommit({ tree: 'a'.repeat(40), parents: [], author: 'n <e@x> 1 +0000', committer: 'n <e@x> 1 +0000', message: 'm\n' }));
-  const built = { commitData: commit, newCommit: hashObject('commit', commit), objects: [{ type: 1, data: commit }, { type: 2, data: new Uint8Array(5), baseOid: 'b'.repeat(40) }], trees: [], newTree: 'a'.repeat(40) };
+  const built = { commitData: commit, newCommit: hashObject('commit', commit), objects: [{ type: 1, data: commit }, { type: 2, data: new Uint8Array(5), base: { tag: 'ref', oid: 'b'.repeat(40) } }], trees: [], newTree: 'a'.repeat(40) };
   const { signer } = await generateSigner();
   const signed = await unwrapAsync(signCommit(commit, signer));
   const w = withCommitData(built, signed);

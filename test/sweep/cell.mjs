@@ -9,12 +9,12 @@ import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
 import { pushRepo } from '../../src/repo-node.js';
 import { Tracer } from '../../src/otel.js';
-import { withLimits } from '../../src/limits.js';
 import { unwrap, unwrapAsync } from '../unwrap.js';
 import { failure, fetchOps } from './ops.mjs';
 
 const cell = JSON.parse(process.argv[2]);
-const opts = { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) };
+// the cell's limits as written: the keys it sets, every other key the default (parseLimits, where the client is made)
+const opts = { tracer: new Tracer(), limits: cell.limits ?? {} };
 
 let heapPeak = 0;
 let abPeak = 0;

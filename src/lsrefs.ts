@@ -9,7 +9,7 @@ import type { Option, Result } from './result.js';
 import { fail } from './errors.js';
 import { pkts, pktInit, pktStep } from './pktline.js';
 import { decodeBytes } from './bytes.js';
-import { limitExceeded, readLimit } from './limits.js';
+import { limitExceeded } from './limits.js';
 import { validateWire, type WireField } from './validate.js';
 import { advertise, frames, coded, clientSpan, proto, spanned } from './transport.js';
 import { SHA256_HEX_CHARS, PROTOCOL_V2 } from './format.js';
@@ -228,12 +228,8 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], opt
   // each prefix parsed once; the request writes the parsed ones
   const checked = refPrefixes(prefixes);
   if (!checked.ok) return checked;
-  const maxBytes = readLimit(t.limits, 'maxLsRefsBytes');
-  if (!maxBytes.ok) return maxBytes;
-  const maxRefs = readLimit(t.limits, 'maxRefs');
-  if (!maxRefs.ok) return maxRefs;
   // a reader given as null still asks, and reads nothing (as before)
-  const caps: LsCaps = { maxBytes: maxBytes.value, maxRefs: maxRefs.value, unborn: readKey(options, 'unborn') };
+  const caps: LsCaps = { maxBytes: t.limits.maxLsRefsBytes, maxRefs: t.limits.maxRefs, unborn: readKey(options, 'unborn') };
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
   return coded('protocol', () => spanned(t, 'git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<Result<LsRefsResult, PlyError>> => {
     const body = lsRefsRequestBody(checked.value, { unborn: caps.unborn.tag === 'some' });

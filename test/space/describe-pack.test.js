@@ -240,9 +240,11 @@ test('describePack matches git verify-pack over the pack product and at every li
       assert.equal(nan.error.code, 'bad_request');
       assert.equal(nan.error.what, 'maxPackObjects');
     }
+    // a key left out is the default (#156 parseLimits); given as null it is refused
     const missing = { ...DEFAULT_LIMITS };
     delete missing.maxDeltaChain;
-    const gone = describePack(rep.bytes, missing);
+    assert.deepEqual(describePack(rep.bytes, missing), describePack(rep.bytes, DEFAULT_LIMITS));
+    const gone = describePack(rep.bytes, { ...DEFAULT_LIMITS, maxDeltaChain: null });
     assert.equal(gone.ok, false);
     if (!gone.ok) {
       assert.equal(gone.error.code, 'bad_request');

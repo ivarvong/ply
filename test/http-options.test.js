@@ -1,7 +1,8 @@
 // HttpOptions are parsed once (#156): parseHttpOptions makes every check the transport makes of its options, and the
-// transport reads only the settings. The two limits it reads on every request (requestTimeoutMs, maxPackBytes) are
-// read there: a bad one is now refused when the transport is made, with no request, and is the same bad_request a
-// request used to fail with. Every refusal keeps its order (the limits come last).
+// transport reads only the settings. The limits record is parsed there (parseLimits): a bad key, among them the two
+// it reads on every request (requestTimeoutMs, maxPackBytes), is refused when the transport is made, with no request,
+// and is the same bad_request a request used to fail with. Every refusal keeps its order (the limits come last; among
+// the limits, DEFAULT_LIMITS order). A key left out is the default.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createTransport, parseHttpOptions } from '../src/http.js';
@@ -23,9 +24,14 @@ test('a bad request timeout or pack cap is refused when the transport is made, b
     assert.deepEqual([op.ok, op.error?.code, op.error?.what], [false, 'bad_request', key]);
     assert.equal(c.n, 0, key);
   }
-  // a limits record missing one of them reads it as missing (got: the missing value)
+  // a key given as null is given, and refused (got: null)
   const partial = createTransport('https://h/r.git', { limits: { ...DEFAULT_LIMITS, requestTimeoutMs: null } });
-  assert.deepEqual([partial.error.code, partial.error.what], ['bad_request', 'requestTimeoutMs']);
+  assert.deepEqual([partial.error.code, partial.error.what, partial.error.got], ['bad_request', 'requestTimeoutMs', null]);
+  // a key left out is the default (#156: it used to be refused at its first read)
+  const { requestTimeoutMs: _left, ...rest } = DEFAULT_LIMITS;
+  const filled = parseHttpOptions('https://h/r.git', { limits: { ...rest, maxPackBytes: 7 } }).value;
+  assert.deepEqual([filled.requestTimeoutMs, filled.maxPackBytes, filled.limits.requestTimeoutMs], [DEFAULT_LIMITS.requestTimeoutMs, 7, DEFAULT_LIMITS.requestTimeoutMs]);
+  assert.deepEqual({ ...parseHttpOptions('https://h/r.git', { limits: {} }).value.limits }, { ...DEFAULT_LIMITS });
 });
 
 test('the limits come after every other refusal, as the first request used to', () => {
@@ -36,8 +42,9 @@ test('the limits come after every other refusal, as the first request used to', 
   assert.equal(createTransport('not a url', { limits: bad }).error.what, 'url');
   assert.equal(createTransport('https://h/r', { auth: { user: 'u' }, limits: bad }).error.what, 'auth');
   assert.equal(createTransport('https://h/r', { allowUrl: () => ({ ok: false, error: { code: 'bad_request', what: 'mine' } }), limits: bad }).error.what, 'mine');
-  // requestTimeoutMs before maxPackBytes
-  assert.equal(createTransport('https://h/r', { limits: withLimits({ requestTimeoutMs: NaN, maxPackBytes: NaN }) }).error.what, 'requestTimeoutMs');
+  // the first bad key in DEFAULT_LIMITS order: maxPackBytes before requestTimeoutMs
+  assert.equal(createTransport('https://h/r', { limits: withLimits({ requestTimeoutMs: NaN, maxPackBytes: NaN }) }).error.what, 'maxPackBytes');
+  assert.equal(createTransport('https://h/r', { limits: withLimits({ requestTimeoutMs: NaN, maxMergeBlobBytes: -1 }) }).error.what, 'maxMergeBlobBytes');
 });
 
 test('the settings: the URL without userinfo, the credential resolved once, the fetch bound, the stream redirect mode', () => {

@@ -212,8 +212,11 @@ test('fileEntries: maxPackObjects and maxObjectSize bound exactly', () => {
   throws(() => unwrap(fileEntries({ a: 'abcde' }, four)), 'limit_exceeded', 'object size 5 exceeds limit 4', { what: 'object size', got: 5, max: 4 });
   // a gitlink has no data, so the size cap never applies to it
   assert.equal(unwrap(fileEntries({ g: { mode: '160000', oid: GITLINK } }, withLimits({ maxObjectSize: 0 }))).length, 1);
-  throws(() => unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxPackObjects: undefined })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
-  throws(() => unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxObjectSize: undefined })), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  throws(() => unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxPackObjects: null })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxObjectSize: null })), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  // a key left out is the default (#156 parseLimits)
+  assert.equal(unwrap(fileEntries({ a: 'x' }, { ...DEFAULT_LIMITS, maxPackObjects: undefined })).length, 1);
+  assert.equal(unwrap(fileEntries({ a: 'x' }, {})).length, 1);
 });
 
 test('buildTree: git\'s tree oids, every directory, blobs by oid', () => {
@@ -253,14 +256,15 @@ test('buildTree: file/directory clashes, duplicates and maxTreeEntries', () => {
   assert.equal(unwrap(buildTree(unwrap(fileEntries({ a: '1', b: '2', 'c/d': '3', 'c/e': '4' })), withLimits({ maxTreeEntries: 3 }))).trees.size, 2);
   assert.equal(unwrap(buildTree(unwrap(fileEntries({ a: '1', b: '2' })), two)).trees.get('').entries.length, 2);
   throws(() => unwrap(buildTree(unwrap(fileEntries({ a: '1', b: '2', c: '3' })), two)), 'limit_exceeded', 'tree entries 3 exceeds limit 2', { what: 'tree entries', got: 3, max: 2 });
-  throws(() => unwrap(buildTree([], {})), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  throws(() => unwrap(buildTree([], { maxTreeEntries: -1 })), 'bad_request', 'limits.maxTreeEntries must be a finite non-negative number');
+  assert.equal(unwrap(buildTree([], {})).root, '4b825dc642cb6eb9a060e54bf8d69288fbee4904');
 });
 
 test('selectObjects: walk order, dedupe, what the server has, gitlinks', () => {
   const built = unwrap(buildTree(unwrap(fileEntries(FILES()))));
   const fresh = selectObjects(built);
   assert.deepEqual(fresh.trees.map(t => hashObject('tree', t.data)), [GIT.root, GIT.src, GIT.lib]);
-  assert.ok(fresh.trees.every(t => t.type === TYPE.TREE && t.baseOid === undefined));
+  assert.ok(fresh.trees.every(t => t.type === TYPE.TREE && t.base === undefined));
   // blobs follow the walk over each directory's entries as given (README, src/a.js, src/lib/b.js, run.sh, link, sub)
   assert.deepEqual(fresh.blobs.map(b => hashObject('blob', b.data)), [GIT.readme, GIT.a, GIT.b, GIT.run, GIT.link]);
   assert.ok(fresh.blobs.every(b => b.type === TYPE.BLOB));
@@ -287,7 +291,7 @@ test('selectObjects: a tree goes as a REF_DELTA only when that is smaller and at
   const old = new Map([['', { oid: GIT.root, data: before.trees.get('').data }], ['src', { oid: GIT.src, data: before.trees.get('src').data }]]);
   const sel = selectObjects(after, { have: new Set([GIT.lib, GIT.readme, GIT.link, GIT.run, GIT.b]), old });
   assert.equal(sel.deltas, 2);
-  assert.deepEqual(sel.trees.map(t => t.baseOid), [GIT.root, GIT.src]);
+  assert.deepEqual(sel.trees.map(t => t.base), [{ tag: 'ref', oid: GIT.root }, { tag: 'ref', oid: GIT.src }]);
   assert.deepEqual([...sel.trees[0].data], [...makeDelta(before.trees.get('').data, after.trees.get('').data).delta]);
   assert.deepEqual([...sel.trees[1].data], [...makeDelta(before.trees.get('src').data, after.trees.get('src').data).delta]);
   assert.deepEqual(sel.blobs.map(b => td.decode(b.data)), ['A\n']);
@@ -298,13 +302,13 @@ test('selectObjects: a tree goes as a REF_DELTA only when that is smaller and at
   assert.deepEqual([...whole.trees[0].data], [...other.trees.get('').data]);
   // identical bytes: header (2) + one copy op (2) is exactly DELTA_SIZE_MIN (4), and smaller than the tree
   const same = selectObjects(before, { old: new Map([['src/lib', { oid: 'f'.repeat(40), data: before.trees.get('src/lib').data }]]) });
-  const lib = same.trees.find(t => t.baseOid);
+  const lib = same.trees.find(t => t.base);
   assert.equal(lib.data.length, 4);
-  assert.equal(lib.baseOid, 'f'.repeat(40));
+  assert.deepEqual(lib.base, { tag: 'ref', oid: 'f'.repeat(40) });
   // the empty tree against itself: a 2-byte delta is under DELTA_SIZE_MIN, so whole (0 bytes)
   const empty = unwrap(buildTree([]));
   const e = selectObjects(empty, { old: new Map([['', { oid: EMPTY_TREE, data: new Uint8Array(0) }]]) });
-  assert.deepEqual([e.deltas, e.trees[0].data.length, e.trees[0].baseOid], [0, 0, undefined]);
+  assert.deepEqual([e.deltas, e.trees[0].data.length, e.trees[0].base], [0, 0, undefined]);
 });
 
 test('validateTreeSpec: defaults, create, head, and each field checked before I/O', () => {
@@ -342,7 +346,8 @@ test('validateTreeSpec: defaults, create, head, and each field checked before I/
   throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'x' } }, withLimits({ maxPushBytes: OV }))), 'limit_exceeded', `push bytes ${OV + 1} exceeds limit ${OV}`, { what: 'push bytes', got: OV + 1, max: OV });
   // a file over maxObjectSize is still that error, from fileEntries, not the total
   throws(() => unwrap(validateTreeSpec({ ...ok, files: { a: 'abcd' } }, withLimits({ maxObjectSize: 2, maxPushBytes: 1 }))), 'limit_exceeded', 'object size 4 exceeds limit 2');
-  throws(() => unwrap(validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: undefined })), 'bad_request', 'limits.maxPushBytes must be a finite non-negative number');
+  throws(() => unwrap(validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: null })), 'bad_request', 'limits.maxPushBytes must be a finite non-negative number');
+  assert.equal(unwrap(validateTreeSpec(ok, { ...DEFAULT_LIMITS, maxPushBytes: undefined })).files, unwrap(validateTreeSpec(ok, DEFAULT_LIMITS)).files);
 });
 
 // ======================================================================================================================
@@ -701,8 +706,10 @@ test('treeFiles: depth-first in tree order, canonical modes, every refusal', () 
   assert.deepEqual(unwrap(treeFiles(o => ok(two.get(o)), 'r')).map(f => f.path), ['a/a', 'b/a']);
   const bad = new Map([['r', [{ mode: '40755', name: 'd', oid: 'd' }]], ['d', [{ mode: '100648', name: 'x', oid: '1' }]]]);
   throws(() => unwrap(treeFiles(o => ok(bad.get(o)), 'r')), 'pack_corrupt', 'tree d: d/x has mode 100648, which git cannot check out');
-  throws(() => unwrap(treeFiles(tree, 'r', { limits: {} })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
-  throws(() => unwrap(treeFiles(tree, 'r', { limits: { maxPackObjects: 9 } })), 'bad_request', 'limits.maxPathDepth must be a finite non-negative number');
+  throws(() => unwrap(treeFiles(tree, 'r', { limits: { maxPackObjects: NaN } })), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  throws(() => unwrap(treeFiles(tree, 'r', { limits: { maxPackObjects: 9, maxPathDepth: -1 } })), 'bad_request', 'limits.maxPathDepth must be a finite non-negative number');
+  // a key left out is the default (#156 parseLimits)
+  assert.deepEqual(unwrap(treeFiles(tree, 'r', { limits: {} })), unwrap(treeFiles(tree, 'r')));
 });
 
 const drain = async files => { const out = []; for await (const f of files) out.push({ path: f.path, mode: f.mode, oid: f.oid, size: f.size, text: f.stream ? await readAll(f.stream) : null }); return out; };

@@ -65,10 +65,20 @@ void forged;
 const wire = validateWire('x', 'field');
 if (wire.ok) { const w: WireField = wire.value; const s: string = w; void s; }
 
-// FetchOpts stays plain strings in; the parsed request is wire fields
-void fetchBody({ wants: ['a'.repeat(40)], filter: 'blob:none', deepen: 1 });
+// FetchOpts stays plain strings in; the parsed request's wants, haves and shallows are Oids, the other tokens wire fields
+void fetchBody({ wants: ['a'.repeat(40)], haves: ['b'.repeat(40)], shallows: ['c'.repeat(40)], filter: 'blob:none', deepen: 1 });
 const req = fetchRequest({ wants: ['a'.repeat(40)] });
-if (req.ok) { const r: FetchRequest = req.value; for (const w of r.wants) { const want: Oid = w; void want; } for (const h of r.haves) { const have: WireField = h; void have; } }
+if (req.ok) {
+  const r: FetchRequest = req.value;
+  for (const w of r.wants) { const want: Oid = w; void want; }
+  for (const h of r.haves) { const have: Oid = h; void have; }
+  for (const s of r.shallows) { const shallow: Oid = s; void shallow; }
+  for (const n of r.deepenNot) { const not: WireField = n; void not; }
+}
+declare const someField: WireField;
+// @ts-expect-error a parsed have is an Oid, not just a wire field
+const haveField: FetchRequest['haves'][number] = someField;
+void haveField;
 // @ts-expect-error a FetchRequest is not built from plain strings
 const forgedReq: FetchRequest = { wants: ['x'], haves: [], shallows: [], deepenNot: [], filter: null, deepen: 0, deepenSince: 0, deepenRelative: false, thinPack: false, ofsDelta: true, includeTag: false, noProgress: true, done: true };
 void forgedReq;

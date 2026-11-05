@@ -1,7 +1,7 @@
 // The full client as one object: every wire operation (ls-refs, fetch, negotiate, push, advertisements) over one
 // transport. Convenience for scripts and tests; bundles that care about size import the free functions directly
 // (transport.js, lsrefs.js, fetch.js, push.js...) — a class cannot be tree-shaken, a function can.
-import type { Limits } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import type { Transport } from './transport.js';
 import type { HttpOptions } from './http.js';
@@ -74,7 +74,7 @@ export class GitHttp {
     return t.ok ? ok(new GitHttp(t.value)) : t;
   }
   public get url(): string { return this.t.url; }
-  public get limits(): Limits { return this.t.limits; }
+  public get limits(): CheckedLimits { return this.t.limits; }
   public get tracer(): Tracer { return this.t.tracer; }
   public get parent(): Span | null { return this.t.parent; }
   // Each omitted argument is the free function's own default; each answer is the free function's Result.

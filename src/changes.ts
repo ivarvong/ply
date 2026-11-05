@@ -22,11 +22,11 @@ import type { PackObject } from './push.js';
 import { parseOid, parseCommitId, type Oid } from './oid.js';
 import { parseTree, hashObject, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
-import { LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import type { IdentInput, ValidatedIdent } from './validate.js';
-import { editFile, inSpan, isLfsPointerPrefix, limitsOf, refuseRebase } from './edit.js';
+import { editFile, inSpan, isLfsPointerPrefix, refuseRebase } from './edit.js';
 import type { Author } from './edit.js';
 import { signCommit } from './sign.js';
 import type { Signer } from './sign.js';
@@ -112,7 +112,7 @@ type Parent = {
   readonly baseRef: string | null;
   readonly baseOid: string | null;
 };
-type Applied = { readonly tree: string; readonly objects: readonly PackObject[] };
+type Applied = { readonly tree: Oid; readonly objects: readonly PackObject[] };
 type BadRequest = ErrorOf<'bad_request'>;
 
 function modeOf(mode: Option<unknown>, path: string): Result<BlobMode, BadRequest> {
@@ -129,8 +129,8 @@ function fields(raw: object): Record<string, unknown> {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a change is an untyped object; each field is checked below
   return raw as Record<string, unknown>;
 }
-const pathOf = (raw: unknown, limits: Limits): Result<string[], PlyError> => map(validatePath(raw, limits), p => p.components);
-function normalize(raw: unknown, limits: Limits): Result<Norm, PlyError> {
+const pathOf = (raw: unknown, limits: CheckedLimits): Result<string[], PlyError> => map(validatePath(raw, limits), p => p.components);
+function normalize(raw: unknown, limits: CheckedLimits): Result<Norm, PlyError> {
   if (raw === null || typeof raw !== 'object') return fail('bad_request', 'change must be an object with a kind', { what: 'change' });
   const rec = fields(raw);
   const kind = rec['kind'];
@@ -209,7 +209,7 @@ function identInput(who: Option<Author>, time: number): IdentInput {
   const tz = fromNullish(who.value.tz);
   return tz.tag === 'some' ? { name, email, time, tz: tz.value } : { name, email, time };
 }
-function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | null): Result<Plan, PlyError> {
+function validatePlan(spec: CommitChangesSpec, limits: CheckedLimits, head: string | null): Result<Plan, PlyError> {
   const given = withDefaults(spec, specDefaults());
   const refIn = given.ref;
   const ref = refIn === null ? ok(null) : validatePushRef(refIn, false);
@@ -218,11 +218,9 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
   if (!base.ok) return base;
   const list: unknown = spec.changes;
   if (!Array.isArray(list) || list.length === 0) return fail('bad_request', 'changes must be a non-empty list', { what: 'changes' });
-  const max = readLimit(limits, 'maxPackObjects');
-  if (!max.ok) return max;
-  if (list.length > max.value) return err(limitExceeded('changes', list.length, max.value));
-  const maxPush = readLimit(limits, 'maxPushBytes');
-  if (!maxPush.ok) return maxPush;
+  const max = limits.maxPackObjects;
+  if (list.length > max) return err(limitExceeded('changes', list.length, max));
+  const maxPush = limits.maxPushBytes;
   // As pushTree's files (tree.ts fileEntries): each change's new bytes plus LIMIT_OBJECT_OVERHEAD, so a list of many
   // tiny changes is refused before its blobs and tree entries exist (#142). Exactly the cap is allowed.
   let pushBytes = 0;
@@ -231,7 +229,7 @@ function validatePlan(spec: CommitChangesSpec, limits: Limits, head: string | nu
     const norm = normalize(c, limits);
     if (!norm.ok) return norm;
     pushBytes += newBytes(norm.value) + LIMIT_OBJECT_OVERHEAD;
-    if (pushBytes > maxPush.value) return err(limitExceeded('push bytes', pushBytes, maxPush.value));
+    if (pushBytes > maxPush) return err(limitExceeded('push bytes', pushBytes, maxPush));
     changes.push(norm.value);
   }
   const author = fromNullish<Author>(spec.author);
@@ -319,7 +317,7 @@ async function resolveParent(t: Transport, target: Tip, base: BasePlan): Promise
 
 type Walk = {
   readonly t: Transport;
-  readonly limits: Limits;
+  readonly limits: CheckedLimits;
   readonly have: Set<string>;
   readonly cache: Map<string, Dir>;
   readonly allowLfs: boolean;
@@ -477,7 +475,7 @@ function resultOf(ref: string, parent: Parent, built: Built): CommitChangesResul
 
 type StreamOpts = {
   readonly rest: EntryOptions;
-  readonly limits: Limits;
+  readonly limits: CheckedLimits;
   readonly verify: boolean;
   readonly signer: Signer | null;
   readonly allowLfs: boolean;
@@ -498,7 +496,7 @@ type StreamJob = {
   readonly edit: Extract<Norm, { readonly kind: 'edit' }>;
   readonly opts: StreamOpts;
 };
-function parseEditInputs(targetRef: string, editPath: string, limits: Limits): Result<{ readonly ref: Refname; readonly path: Path }, BadRequest> {
+function parseEditInputs(targetRef: string, editPath: string, limits: CheckedLimits): Result<{ readonly ref: Refname; readonly path: Path }, BadRequest> {
   const branded = parseRefname(targetRef);
   if (!branded.ok) return branded;
   // editPath is normalize()'s join of the components validatePath took under these limits: parsePath only brands it
@@ -549,7 +547,7 @@ type MemJob = {
   readonly plan: Plan;
   readonly target: Tip;
   readonly parent: Parent;
-  readonly limits: Limits;
+  readonly limits: CheckedLimits;
   readonly verify: boolean;
   readonly signer: Signer | null;
   readonly allowLfs: boolean;
@@ -614,7 +612,9 @@ async function streamIfEdit(url: string, t: Transport, root: Span, job: StreamTr
 // oxlint-disable-next-line require-await -- async, as before: the spec's refusal is an Err the promise resolves with
 export async function commitChanges(url: string, spec: CommitChangesSpec, options: CommitChangesOptions = {}): Promise<Result<CommitChangesResult, PlyError>> {
   const { head, verify, signer, allowLfsPointer } = withDefaults(options, optionDefaults());
-  const limits = limitsOf(options);
+  const checked = limitsOf(options);
+  if (!checked.ok) return checked;
+  const limits = checked.value;
   const planned = validatePlan(spec, limits, head);
   if (!planned.ok) return planned;
   const plan = planned.value;

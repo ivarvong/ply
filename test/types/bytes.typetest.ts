@@ -36,7 +36,9 @@ const consumerDeltaThenDeflate = async (): Promise<void> => {
   const z: Uint8Array<ArrayBuffer> = await zlibDeflate(delta);
   await zlibDeflate(anyBytes);
   await zlibDeflate(shared);
-  await buildPack([{ type: 3, data: z }, { type: 3, data: anyBytes }, { type: 3, data: shared }, { type: 7, data: delta, baseOid: '2'.repeat(40) }]);
+  await buildPack([{ type: 3, data: z }, { type: 3, data: anyBytes }, { type: 3, data: shared }, { type: 3, data: delta, base: { tag: 'ref', oid: '2'.repeat(40) } }, { type: 3, data: delta, base: { tag: 'ofs', index: 0 } }, { type: 3, data: z, base: { tag: 'none' } }]);
+  // @ts-expect-error a base is the tagged union, not the old flag fields
+  await buildPack([{ type: 3, data: delta, baseOid: '2'.repeat(40) }]);
 };
 void consumerDeltaThenDeflate;
 

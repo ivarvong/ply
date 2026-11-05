@@ -13,8 +13,8 @@
 /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- indexed reads of a CRC table and of a sorted array within its checked length say `as number`, as packresolve.ts does */
 import { fail } from './errors.js';
 import type { PlyError } from './errors.js';
-import { DEFAULT_LIMITS } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, parseLimits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 import { Sha1, fromHex, toHex } from './sha1.js';
 import { parsePack, resolvePack } from './packresolve.js';
 import { OID_BYTES, PACK_HEADER_BYTES, PACK_SIGNATURE, PACK_TRAILER_BYTES, PACK_VERSION } from './format.js';
@@ -137,10 +137,12 @@ export function encodePackIndex(pack: Uint8Array, objects: readonly IndexedObjec
  * verified, every object is resolved (a REF_DELTA base outside the pack is pack_corrupt) and hashed. One object twice is
  * pack_corrupt.
  */
-export function indexPack(pack: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<IndexedPack, PlyError> {
-  const parsed = parsePack(pack, { limits });
+export function indexPack(pack: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<IndexedPack, PlyError> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const parsed = parsePack(pack, { limits: checked.value });
   if (!parsed.ok) return parsed;
-  const resolved = resolvePack(parsed.value, () => null, limits);
+  const resolved = resolvePack(parsed.value, () => null, checked.value);
   if (!resolved.ok) return resolved;
   if (resolved.value.objects.size !== parsed.value.objects.length) return fail('pack_corrupt', `pack index: ${parsed.value.objects.length - resolved.value.objects.size} objects appear twice in the pack`, { what: 'object' });
   const objects = [...resolved.value.objects.values()].map(o => ({ oid: o.oid, offset: o.offset }));
