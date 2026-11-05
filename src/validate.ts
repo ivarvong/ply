@@ -90,8 +90,8 @@ export function validateRef(ref: unknown): Result<Refname, Bad> {
 // full name to check_refname_format, so every component passes; what is left is the part after refs/ as a refname of its
 // own: it may not be exactly "@" (refs/@), and a create or update needs two components there (refs/foo can be deleted,
 // never written). Proved cell by cell against git in test/space/refname.test.js.
-// The ref is typed string (push.js's callers pass one); validateRef still refuses a non-string at run time.
-export function validatePushRef(ref: string, deleting: boolean): Result<Refname, Bad> {
+// Any value: validateRef refuses a non-string (push.ts parses a caller's command with it).
+export function validatePushRef(ref: unknown, deleting: boolean): Result<Refname, Bad> {
   const full = validateRef(ref);
   if (!full.ok) return full;
   const name = full.value.slice('refs/'.length);

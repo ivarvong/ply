@@ -7,12 +7,16 @@ import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './res
 import type { Result } from './result.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
-import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS, ZERO_OID } from './format.js';
+import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR } from './format.js';
+import { ZERO_OID, parseOid } from './oid.js';
+import type { Oid } from './oid.js';
+import type { Refname } from './refname.js';
 import { measurePack, streamPack } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
 import { frames, coded, clientSpan, spanned, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
+// oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, the parsed brands, Result
 import { validatePushRef, validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 
@@ -25,21 +29,54 @@ const REPORT_KEEP = 64;
 const UNPACK = 'unpack ';
 const OK_REF = 'ok ';
 const NG_REF = 'ng ';
-const OID = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`, 'u');
 
 export { ZERO_OID };
 
-// One ref update. create: oldOid = zeros; delete: newOid = zeros. `ref` is a plain string: planPush checks every
-// command's ref (validatePushRef) before anything is built or sent.
+// One ref update as a caller writes it. create: oldOid = zeros; delete: newOid = zeros. Plain strings in: planPush parses
+// every command (parseCommand) before anything is built or sent, and the plan carries only the parsed ones.
 export type Command = { readonly ref: string; readonly oldOid: string; readonly newOid: string };
-// At least one: push reads the first command for its span (an empty list is refused there, by a TypeError coded 'protocol').
 export type Commands = readonly [Command, ...Command[]];
+// A command parsed once: the ref is one receive-pack takes (validatePushRef), the oids are 40 lowercase hex (parseOid).
+export type PushCommand = { readonly ref: Refname; readonly oldOid: Oid; readonly newOid: Oid };
+// The parsed list: at least one PushCommand, made only by parseCommands / planPush (the brand is a type).
+declare const PARSED: unique symbol;
+export type ParsedCommands = readonly [PushCommand, ...PushCommand[]] & { readonly [PARSED]: true };
+// The guard is the whole check: every element is already a PushCommand (its type), so what is left is at least one.
+const isParsed = (cs: readonly PushCommand[]): cs is ParsedCommands => cs.length > 0;
+// A command from a typed caller, or an untyped one (or the single-ref form, whose fields may be missing).
+export type RawCommand = { readonly ref: unknown; readonly oldOid: unknown; readonly newOid: unknown };
+// @decoder parseCommand prefix=push-command
+export function parseCommand(c: RawCommand): Result<PushCommand, ErrorOf<'bad_request'>> {
+  const ref = validatePushRef(c.ref, c.newOid === ZERO_OID);
+  if (!ref.ok) return ref;
+  const oldOid = parseOid(c.oldOid);
+  const newOid = parseOid(c.newOid);
+  if (!oldOid.ok || !newOid.ok) return fail('bad_request', 'push: oids must be 40-hex');
+  return ok({ ref: ref.value, oldOid: oldOid.value, newOid: newOid.value });
+}
+// The list's own check, after every command's: none at all is 'protocol' with nothing sent (push read the first command
+// for its span; an empty list was the TypeError that read raised, coded 'protocol', before any request or span).
+const nonEmpty = (cs: readonly PushCommand[]): Result<ParsedCommands, ErrorOf<'protocol'>> => (isParsed(cs) ? ok(cs) : fail('protocol', 'push: no commands'));
+const parseEach = (raw: readonly RawCommand[]): Result<PushCommand[], ErrorOf<'bad_request'>> => {
+  const parsed: PushCommand[] = [];
+  for (const c of raw) {
+    const one = parseCommand(c);
+    if (!one.ok) return one;
+    parsed.push(one.value);
+  }
+  return ok(parsed);
+};
+// The public list, parsed once. planPush runs the same two steps with its own checks between them.
+// @decoder parseCommands prefix=push-command
+export function parseCommands(raw: readonly RawCommand[]): Result<ParsedCommands, ErrorOf<'bad_request' | 'protocol'>> {
+  const each = parseEach(raw);
+  return each.ok ? nonEmpty(each.value) : each;
+}
 // A pkt-line frame as pktStep and the transports' frames() yield it.
 export type { Frame } from './transport.js';
 import type { Frame, RequestBody, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
-// oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, Result
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, withDefaults } from './absent.js';
@@ -405,7 +442,7 @@ const pushDefaults = (): { -readonly [K in keyof PushConfig]: PushConfig[K] } =>
 export type PushResult = { readonly report: PushReport | null; readonly packBytes: number; readonly entries: readonly PackEntry[]; readonly hookOutput: string };
 
 // The request, planned before anything is built or sent (pure): every refusal here happens with nothing on the wire.
-export type PushPlan = { readonly commands: Commands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly pushOptions: readonly WireField[]; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
+export type PushPlan = { readonly commands: ParsedCommands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly pushOptions: readonly WireField[]; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
 // The capabilities a push asks for; atomic and push-options only from a CheckedCaps.
 export type PushRequestCap = 'report-status' | 'report-status-v2' | 'side-band-64k' | 'atomic' | 'delete-refs' | 'push-options';
 const requestCap = (cap: PushRequestCap): PushRequestCap => {
@@ -440,16 +477,13 @@ function checkBaseIndexes(objects: readonly PackObject[]): Result<null, ErrorOf<
 export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result<PushPlan, PlyError> {
   const cfg = withDefaults(o, pushDefaults());
   if (cfg.checked === null && unchecked(o)) return fail('bad_request', 'push: unchecked atomic or push options');
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the single-ref fields are checked just below: validatePushRef and the oid pattern refuse a missing one
-  const commands: Commands = cfg.commands === null ? [{ ref: cfg.ref, oldOid: cfg.oldOid, newOid: cfg.newOid } as Command] : cfg.commands;
+  // the single-ref form's fields may be missing (null ref, '' oids): parseCommand refuses them as it refuses any other
+  const raw: readonly RawCommand[] = cfg.commands === null ? [{ ref: cfg.ref, oldOid: cfg.oldOid, newOid: cfg.newOid }] : cfg.commands;
   const maxRefs = readLimit(limits, 'maxRefs');
   if (!maxRefs.ok) return maxRefs;
-  if (commands.length > maxRefs.value) return err(limitExceeded('push commands', commands.length, maxRefs.value));
-  for (const c of commands) {
-    const ref = validatePushRef(c.ref, c.newOid === ZERO_OID);
-    if (!ref.ok) return ref;
-    if (!OID.test(c.oldOid) || !OID.test(c.newOid)) return fail('bad_request', 'push: oids must be 40-hex');
-  }
+  if (raw.length > maxRefs.value) return err(limitExceeded('push commands', raw.length, maxRefs.value));
+  const parsed = parseEach(raw);
+  if (!parsed.ok) return parsed;
   const bases = checkBaseIndexes(cfg.objects);
   if (!bases.ok) return bases;
   // each option parsed once into the plan; the request body writes the parsed ones
@@ -464,6 +498,10 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
   if (!maxReportLines.ok) return maxReportLines;
   const maxPack = readLimit(limits, 'maxPackBytes');
   if (!maxPack.ok) return maxPack;
+  // last, as before: every other refusal comes first for an empty list
+  const listed = nonEmpty(parsed.value);
+  if (!listed.ok) return listed;
+  const commands = listed.value;
   return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value, objects: cfg.objects, sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
@@ -594,7 +632,6 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
 // oxlint-disable-next-line eslint/require-await -- async, as push was
 async function receivePack(t: PushTransport, plan: PushPlan): Promise<Result<PushResult, PlyError>> {
   const { commands, caps } = plan;
-  // an empty list from an untyped caller has no first command: the TypeError below is coded 'protocol', as before
   const [first] = commands;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
   return coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), (span: Span) => send(t, plan, span)));

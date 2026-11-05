@@ -24,6 +24,7 @@ const MUTATION_FILES = [
   'test/mutant-kill-packs.test.js',
   'test/packstream.test.js',
   'test/packwrite.test.js',
+  'test/push-commands.test.js',
   'test/describe-pack.test.js',
   'test/packindex.test.js',
   'test/space/push-outcome.test.js',
