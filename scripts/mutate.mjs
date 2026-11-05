@@ -1,14 +1,15 @@
-// Mutation gate. A full run on main; on a pull request, only the mutants lying wholly inside the src lines the PR
-// changed (a PR that does not touch src still passes); the full run on every push to main catches the rest. Surviving
-// or uncovered mutants inside a parser or a bounds check fail the build. An equivalent mutant is allowed
-// only as `// Stryker disable next-line <Mutator>: <reason>` on that line — never
-// `Stryker disable all`, and never a parser file dropped from stryker.conf.json.
+// Mutation gate. A full run on main; on a pull request, the mutants lying wholly inside the src lines the PR changed,
+// plus every line the gate judges strictly (gatedRanges: each parser function, each bounds file), whatever the PR
+// changed; the full run on every push to main catches the rest. Surviving or uncovered mutants inside a parser or a
+// bounds check fail the build. An equivalent mutant is allowed only as
+// `// Stryker disable next-line <Mutator>: <reason>` on that line — never `Stryker disable all`, and never a parser file
+// dropped from stryker.conf.json.
 //
 //   node scripts/mutate.mjs                  run and judge in one process (local, or unsharded CI)
 //   node scripts/mutate.mjs --shard i/N      run shard i of N; write reports/mutation/shard-i.json; no verdict
 //   node scripts/mutate.mjs --merge DIR --shards N
 //                                            merge the N shard reports found under DIR and judge them
-//   node scripts/mutate.mjs --plan N         print the N-way partition (files and mutant counts) and exit
+//   node scripts/mutate.mjs --plan N         print the N-way partition (units, planned seconds, mutant counts) and exit
 //   node scripts/mutate.mjs --check          judge an existing reports/mutation/mutation.json
 //   node scripts/mutate.mjs --weights [REPORT...]  rewrite scripts/mutate-weights.json from full-run reports
 //
@@ -69,6 +70,35 @@ function owner(fns, line) {
   return name;
 }
 
+// The mutants summarize() judges strictly, as line ranges: file -> [[from, to], ...] (1-based, inclusive). A bounds
+// file is the whole file; elsewhere a range is a PARSER-named owner from its declaration line up to the line before the
+// next owner's (owner() gives a mutant to the last declaration at or above its first line, so these are exactly the
+// lines a strict mutant can start on). A pull request mutates them all, changed or not: a PR that only moves a parser,
+// or changes a test it relies on, changes no line of it, and its survivors would first show on main (41976594897: five
+// in parseHttpOptions and parseLsRefLine after #198 moved them). Same functions(), owner rule, PARSER and BOUNDS_FILES
+// as the verdict, so the two cannot drift.
+function gatedRanges(files) {
+  const out = new Map();
+  for (const file of files) {
+    const last = readFileSync(file, 'utf8').split('\n').length;
+    if (BOUNDS_FILES.has(file)) { out.set(file, [[1, last]]); continue; }
+    const fns = functions(file);
+    const rs = fns.flatMap((fn, k) => (PARSER.test(fn.name) ? [[fn.line, (fns[k + 1]?.line ?? last + 1) - 1]] : []));
+    if (rs.length) out.set(file, rs);
+  }
+  return out;
+}
+
+// Sorted, overlapping or adjacent ranges joined: each mutant lies inside at most one, so the plan counts it once.
+function mergeRanges(rs) {
+  const merged = [];
+  for (const r of [...rs].sort((x, y) => x[0] - y[0])) {
+    const last = merged.at(-1);
+    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]); else merged.push([...r]);
+  }
+  return merged;
+}
+
 // On a pull request, the src lines it changed: file -> [[from, to], ...] (1-based, inclusive, the PR's side; a pure
 // deletion borders the lines on either side of it). null on a full run (main, nightly, local, or MUTATE_FULL=1).
 function changedRanges() {
@@ -91,18 +121,23 @@ function changedRanges() {
     if (!ranges.has(file)) ranges.set(file, []);
     ranges.get(file).push(r);
   }
-  for (const [f, rs] of ranges) {
-    rs.sort((x, y) => x[0] - y[0]);
-    const merged = [];
-    for (const r of rs) { const last = merged.at(-1); if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]); else merged.push([...r]); }
-    ranges.set(f, merged);
-  }
+  for (const [f, rs] of ranges) ranges.set(f, mergeRanges(rs));
   return ranges;
 }
-const filesToMutate = () => { const r = changedRanges(); return r && [...r.keys()].sort(); };
 
-// Stryker applies `thresholds.break` itself, to whatever it mutated. On a pull request that is the changed files only,
-// so the full-library break would fail any PR touching a file the quick suites do not reach (read.js, checkout.js: 0%).
+// What a pull request mutates: the lines it changed and every strictly gated line (gatedRanges), merged per file.
+// null on a full run.
+function prRanges() {
+  const changed = changedRanges();
+  if (!changed) return null;
+  const out = new Map(changed);
+  for (const [f, rs] of gatedRanges(allSrc())) out.set(f, mergeRanges([...(out.get(f) ?? []), ...rs]));
+  return out;
+}
+
+// Stryker applies `thresholds.break` itself, to whatever it mutated. On a pull request that is the changed and gated
+// lines only, so the full-library break would fail any PR touching a file the quick suites do not reach (read.js,
+// checkout.js: 0%).
 // The PR run gets the same config with the break off; the parser/bounds rule below is its gate. A shard is a subset
 // too, so it gets the same config: the break is applied by verdict() over the merged report of a full run.
 function noBreakConfig(path, extra = {}) {
@@ -150,12 +185,13 @@ function allSrc() {
 
 // Longest-processing-time first: heaviest unit to the lightest shard. Deterministic (ties by name, then by shard index),
 // so every shard and the gate compute the same plan from the same commit. A unit is a whole file on a full run; on a
-// pull request, a range of lines the PR changed (Stryker's --mutate file:a-b mutates the mutants lying wholly inside
-// it). A unit costing more than a shard's share is cut into ranges at lines no mutant inside it spans past (push.js runs
-// the push-outcome space for every mutant it reaches). The plan records how many mutants each file's units hold; the
-// merge checks the reports against that count.
+// pull request, a range of lines the PR changed or the gate judges strictly (prRanges; Stryker's --mutate file:a-b
+// mutates the mutants lying wholly inside it). A unit costing more than a shard's share is cut into ranges at lines no
+// mutant inside it spans past (push.js runs the push-outcome space for every mutant it reaches); a function whose body
+// is one block mutant cannot be cut, so the heaviest gated parser (parseTree) bounds a pull request's shard time. The
+// plan records how many mutants each file's units hold; the merge checks the reports against that count.
 async function plan(n) {
-  const ranges = changedRanges();
+  const ranges = prRanges();
   const files = (ranges ? [...ranges.keys()] : allSrc()).filter(f => existsSync(f)).sort();
   const counts = await mutantCounts(files);
   const cost = costModel();
@@ -184,7 +220,7 @@ async function plan(n) {
     shards[best].weight += weight;
   }
   for (const s of shards) s.files.sort();
-  return { full: ranges === null, changed: ranges && files, files, expected, shards };
+  return { full: ranges === null, files, expected, shards };
 }
 
 // A unit as k ranges of about equal measured cost, each ending on a line none of its mutants spans past. k <= 1, or a
@@ -276,7 +312,7 @@ const shardReport = i => `reports/mutation/shard-${i}.json`;
 async function runShard(i, n) {
   const p = await plan(n);
   const mine = p.shards[i - 1];
-  console.log(`mutate: shard ${i}/${n} of ${p.full ? 'full src/' : `${p.changed.length} changed file(s)`}; planned seconds per shard ${p.shards.map(s => Math.round(s.weight)).join(', ')}`);
+  console.log(`mutate: shard ${i}/${n} of ${p.full ? 'full src/' : `${p.files.length} file(s): changed and gated lines`}; planned seconds per shard ${p.shards.map(s => Math.round(s.weight)).join(', ')}`);
   mkdirSync('reports/mutation', { recursive: true });
   if (mine.files.length === 0) {
     writeFileSync(shardReport(i), JSON.stringify({ shard: { i, n, files: [] }, files: {} }));
@@ -346,7 +382,7 @@ async function mergeReports(dir, n) {
     console.error(`mutate: shard reports do not match the plan\n${bad.join('\n')}`);
     process.exit(1);
   }
-  console.log(`mutate: merged ${n} shard report(s), ${Object.keys(merged.files).length} file(s), every planned mutant once, of ${p.full ? 'full src/' : `the lines ${p.changed.length} changed file(s) changed`}`);
+  console.log(`mutate: merged ${n} shard report(s), ${Object.keys(merged.files).length} file(s), every planned mutant once, of ${p.full ? 'full src/' : `the changed and gated lines of ${p.files.length} file(s)`}`);
   mkdirSync('reports/mutation', { recursive: true });
   writeFileSync(REPORT, JSON.stringify(merged));
   return merged;
@@ -441,7 +477,8 @@ if (process.argv.includes('--weights')) {
     process.exit(2);
   }
   const p = await plan(n);
-  console.log(JSON.stringify({ full: p.full, shards: p.shards }, null, 2));
+  const mutants = [...p.expected.values()].reduce((t, k) => t + k, 0);
+  console.log(JSON.stringify({ full: p.full, mutants, expected: Object.fromEntries(p.expected), shards: p.shards }, null, 2));
 } else if (process.argv.includes('--shard')) {
   const { i, n } = parseShard(argValue('--shard'));
   await runShard(i, n);
@@ -457,12 +494,13 @@ if (process.argv.includes('--weights')) {
   verdict(await mergeReports(dir, n));
 } else {
   if (!process.argv.includes('--check')) {
-    const units = filesToMutate() && (await plan(1)).shards[0].files;
+    const p = await plan(1);
+    const units = p.full ? null : p.shards[0].files;
     if (units && units.length === 0) {
-      console.log('mutate: pull request changes no mutable src/ line; skipping');
+      console.log('mutate: pull request changes no mutable src/ line and no line is gated; skipping');
       process.exit(0);
     }
-    if (units) console.log(`mutate: the lines the pull request changed\n${units.join('\n')}`);
+    if (units) console.log(`mutate: the lines the pull request changed, and every gated line\n${units.join('\n')}`);
     else console.log('mutate: full src/');
     runStryker(units);
   }
