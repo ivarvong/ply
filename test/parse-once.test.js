@@ -145,3 +145,12 @@ test('attributeTree parses an oid attribute once: an id is fetched as a commit, 
   refused(await attributeTree(t, 'refs/heads/a..b', {}), 'ref');
   assert.equal(seen.n, before, 'a bad name is refused before any request');
 });
+
+test('a name with no attributes has none: a name that spells `key:value` past its first byte is still only the name', () => {
+  // the attributes start after the space that ends the name; with no such space there are none, whatever the name holds
+  for (const name of ['xsymref-target:refs/heads/main', `xpeeled:${B}`]) {
+    const r = unwrap(parseLsRefLine(`${A} ${name}`));
+    assert.equal(r.name, name);
+    assert.deepEqual([r['symref-target'], r.peeled], [null, null], name);
+  }
+});
