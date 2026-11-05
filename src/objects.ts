@@ -4,7 +4,7 @@ import type { Err, Ok, Result } from './result.js';
 import { ok, err, map, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toOid, fromHex } from './sha1.js';
-import type { Oid } from './oid.js';
+import { parseOid, type Oid } from './oid.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
@@ -146,8 +146,33 @@ export function canonMode(mode: string): Mode {
 const SLASH = Uint8Array.of(TREE_SORT_SLASH);
 
 export type TreeEntry = { readonly mode: Mode; readonly name: string; readonly oid: Oid; readonly oidOffset: number; readonly entryOffset: number };
-// What encodeTree and treeSort take: a caller's entries, or parsed ones.
+// What encodeTree takes from a caller: plain strings, parsed once (treeEntryOf) into an EntryOf.
 export type TreeEntryInput = { readonly mode: string; readonly name: string; readonly oid: string };
+// An entry to encode, parsed: one of the five modes git writes and a full object id. A parsed TreeEntry is one.
+export type EntryOf = { readonly mode: Mode; readonly name: string; readonly oid: Oid };
+// The five modes git writes in a tree (canon_mode's results), spelled exactly: a mode git would canonicalize first
+// (`100664`, `040000`) is not one of them.
+export function isMode(mode: unknown): mode is Mode {
+  switch (mode) {
+    case MODE_BLOB:
+    case MODE_EXEC:
+    case MODE_LINK:
+    case MODE_TREE:
+    case MODE_COMMIT:
+      return true;
+    default:
+      return false;
+  }
+}
+// A caller's entry, parsed once: the mode is one of the five (`tree: entry "n": invalid mode`, what `mode`) and the oid
+// 40 lowercase hex (parseOid's refusal, what `oid`), each with the entry's name.
+export function treeEntryOf(e: TreeEntryInput): Result<EntryOf, BadRequest> {
+  const { mode, name } = e;
+  if (!isMode(mode)) return fail('bad_request', `tree: entry ${JSON.stringify(name)}: invalid mode ${JSON.stringify(mode)}`, { what: 'mode', entry: name });
+  const oid = parseOid(e.oid);
+  if (!oid.ok) return fail('bad_request', `tree: entry ${JSON.stringify(name)}: ${oid.error.message}`, { what: 'oid', entry: name });
+  return ok({ mode, name, oid: oid.value });
+}
 
 type Corrupt = ErrorOf<'pack_corrupt'>;
 type BadRequest = ErrorOf<'bad_request'>;
@@ -300,13 +325,14 @@ export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], 
 // `readme`) are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
 // Each entry's line is encoded (in the caller's order) before the sort: a name that is no byte sequence is refused there,
 // and the sort's own encoding of the same name cannot fail.
-export function encodeTree(entries: readonly TreeEntryInput[]): Result<Uint8Array, BadRequest> {
+// encodeTree of parsed entries: ply's own trees (merge, memtree, buildTree) start here.
+export function encodeEntries(entries: readonly EntryOf[]): Result<Uint8Array, BadRequest> {
   const names = new Set<string>();
   for (const e of entries) {
     if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
     names.add(e.name);
   }
-  const lines: Array<TreeEntryInput & { readonly line: Uint8Array }> = [];
+  const lines: Array<EntryOf & { readonly line: Uint8Array }> = [];
   for (const e of entries) {
     const line = encodeBytes(`${e.mode} ${e.name}\0`, 'tree entry name');
     if (!line.ok) return line;
@@ -315,8 +341,19 @@ export function encodeTree(entries: readonly TreeEntryInput[]): Result<Uint8Arra
   return map(treeSort(lines), sorted => concat(sorted.flatMap(e => [e.line, fromHex(e.oid)])));
 }
 
+// A caller's entries, each parsed once (treeEntryOf, in the caller's order), then encoded.
+export function encodeTree(entries: readonly TreeEntryInput[]): Result<Uint8Array, BadRequest> {
+  const parsed: EntryOf[] = [];
+  for (const e of entries) {
+    const one = treeEntryOf(e);
+    if (!one.ok) return one;
+    parsed.push(one.value);
+  }
+  return encodeEntries(parsed);
+}
+
 // Replace the oid of one entry in place; returns new bytes + coordinates for a structural delta.
-export function treeReplaceOid(data: Uint8Array, entry: { readonly oidOffset: number }, newOidHex: string): Uint8Array {
+export function treeReplaceOid(data: Uint8Array, entry: { readonly oidOffset: number }, newOidHex: Oid): Uint8Array {
   const out = data.slice();
   out.set(fromHex(newOidHex), entry.oidOffset);
   return out;
@@ -336,7 +373,6 @@ export function treeReplaceOid(data: Uint8Array, entry: { readonly oidOffset: nu
 // so a BOM before `tree` is a missing tree, as in git, and an ill-formed UTF-8 byte becomes an escape (a lone surrogate)
 // that encodeBytes maps back to the same byte, so a Latin-1 message or ident re-encodes to its own bytes. No rule here
 // matches an escape, and an escape can never form a NUL, a newline or any other delimiter.
-const HEX = /^[0-9a-fA-F]$/u;
 const DIGIT = /^[0-9]$/u;
 
 const BLANK_LINE = '\n\n';
@@ -355,12 +391,13 @@ function verifyHeaders(s: string, kind: string): Result<number, Corrupt> {
   return corrupt(kind, 'unterminatedHeader', 'unterminated header');
 }
 
-// parse_oid_hex then '\n': 40 hex digits of either case (git stores the binary id, so it prints lowercase).
-// charAt past the end is '', which is no hex digit.
-function oidLine(s: string, p: number, kind: string, msgId: string, what: string): Result<string, Corrupt> {
-  for (let i = 0; i < OID_HEX_CHARS; i++) if (!HEX.test(s.charAt(p + i))) return corrupt(kind, msgId, `invalid '${what}' line format - bad sha1`);
-  if (s[p + OID_HEX_CHARS] !== '\n') return corrupt(kind, msgId, `invalid '${what}' line format - bad sha1`);
-  return ok(s.slice(p, p + OID_HEX_CHARS).toLowerCase());
+// parse_oid_hex then '\n': 40 hex digits of either case (git stores the binary id, so it prints lowercase). The id is
+// parsed once, lowercased (only A-F lowercase to hex digits, as in lsrefs.ts): a slice cut short by the end of the
+// object is the length refusal, and a non-hex character the digit one; either is git's bad sha1.
+function oidLine(s: string, p: number, kind: string, msgId: string, what: string): Result<Oid, Corrupt> {
+  const id = parseOid(s.slice(p, p + OID_HEX_CHARS).toLowerCase());
+  if (!id.ok || s[p + OID_HEX_CHARS] !== '\n') return corrupt(kind, msgId, `invalid '${what}' line format - bad sha1`);
+  return id;
 }
 
 
@@ -418,8 +455,9 @@ function refuseShadowed(kind: string, extra: readonly string[], keys: readonly s
   return DONE;
 }
 
+// tree and parents are parsed once (oidLine): Oids.
 export type Commit = {
-  readonly tree: string; readonly parents: string[]; readonly author: string; readonly committer: string;
+  readonly tree: Oid; readonly parents: Oid[]; readonly author: string; readonly committer: string;
   readonly encoding: string | null; readonly extra: string[]; readonly message: string | null;
 };
 // @decoder parseCommit prefix=commit
@@ -437,7 +475,7 @@ export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_
   const tree = oidLine(s, p, 'commit', 'badTreeSha1', COMMIT_HEADER_TREE);
   if (!tree.ok) return tree;
   p += OID_HEX_CHARS + 1;
-  const parents: string[] = [];
+  const parents: Oid[] = [];
   while (has(p, COMMIT_HEADER_PARENT)) {
     p += COMMIT_HEADER_PARENT.length + 1;
     const parent = oidLine(s, p, 'commit', 'badParentSha1', COMMIT_HEADER_PARENT);

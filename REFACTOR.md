@@ -69,6 +69,16 @@ tagged unions.
   size in `git.fetch.wide.extra_bytes`.
 - `mergeBase` with `maxDepth: null`, and `inflate` with `expectedSize: null`, mean "not given" (the configured limit,
   no expected size) instead of `bad_request`.
+- Parse once (#156): a fetch want is an object id. A want git's upload-pack refuses ("expected to get oid": a ref name,
+  an abbreviation, an empty want) is `bad_request` (`what: 'want'`) before any request; an upper-case id is sent
+  lowercase (git reads either case as the same object); text after the id, which git ignores, is refused.
+- `lsRefsBody` refuses a prefix with a NUL, CR or LF (`what: 'ref prefix'`, as `lsRefs`) instead of writing it.
+- `encodeTree` refuses a mode other than the five git writes (`what: 'mode'`) and an id that is not 40 lowercase hex
+  (`what: 'oid'`) instead of writing them; `buildCommitObjects` refuses a new blob id that is not one.
+- `mergeBase` refuses an id that is not 40 lowercase hex (`what: 'oid'`) before any fetch; `walkPath` refuses its tree id
+  (fetchObject's refusal) even when there is no path to walk.
+- `validateSpec`'s plan carries `base` as `{ kind: 'ref', ref } | { kind: 'commit', oid }` (no `baseOid` flag);
+  `editFile` parses the spec once, so a retry reuses the first attempt's commit time.
 
 - 0.2.0: every exported function that can fail returns `Result<T, PlyError>`; `GitHttp` is built with
   `GitHttp.create(url, opts)` (a `Result`), and its methods return the free functions' Results.

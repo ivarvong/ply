@@ -26,6 +26,7 @@ import { ok } from './result.js';
 import { withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push, ZERO_OID } from './push.js';
+import { parseOid } from './oid.js';
 import { operation, verifyRef } from './operation.js';
 import { encodeTag, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
@@ -47,10 +48,12 @@ const exists = (ref: string, tip: string): Result<never, PlyError> =>
 // Effect: the commit `from` names. A 40-hex id must be a commit the server has (fetched alone); a name is resolved as
 // readCommit resolves one (full ref, short name, HEAD; an annotated tag is peeled to its commit).
 async function commitOf(t: OpContext['t'], from: string, what: string): Promise<Result<string, PlyError>> {
-  if (isOid(from)) {
-    if (from === ZERO_OID) return fail('bad_request', `${what} must not be the zero oid`, { what });
-    const c = await assertCommit(t, from, what);
-    return c.ok ? ok(from) : c;
+  // a 40-hex id is parsed once, here
+  const id = parseOid(from);
+  if (id.ok) {
+    if (id.value === ZERO_OID) return fail('bad_request', `${what} must not be the zero oid`, { what });
+    const c = await assertCommit(t, id.value, what);
+    return c.ok ? ok(id.value) : c;
   }
   const r = await resolveCommit(t, from);
   return r.ok ? ok(r.value.commit) : r;

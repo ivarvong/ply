@@ -30,7 +30,7 @@ import type { Result } from './result.js';
 export { createTransport, redactUrl } from './http.js';
 export { UA, withParent, forgetQuirks } from './transport.js';
 export { lsRefsBody, parseUnbornLine } from './lsrefs.js';
-export type { LsRef, LsRefsResult, LsRefsUnborn } from './lsrefs.js';
+export type { LsRef, LsRefsResult, LsRefsUnborn, ListedName } from './lsrefs.js';
 export { fetchBody, v2Init, v2Step, v2Attrs, packStream, fetchObject, spInit, spStep, spFinish, isFilterRejection, isFilterRefusal } from './fetch.js';
 export { fetchPack, fetchPackFiltered, packAttrs } from './fetchpack.js';
 export { negotiate } from './negotiate.js';

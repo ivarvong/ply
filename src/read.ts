@@ -34,7 +34,7 @@ import type { Err, Option, Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs, parseUnbornLine, type LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
-import { packStream, fetchObject, spInit, spStep, spFinish } from './fetch.js';
+import { packStream, objectAt, objectId, spInit, spStep, spFinish } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { bufferSource, concat } from './bytes.js';
@@ -48,7 +48,8 @@ import type { Transport } from './transport.js';
 import { raised } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
-import { fetchCommit } from './commit.js';
+import { commitById } from './commit.js';
+import { parseOid, type Oid } from './oid.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
 import type { Input } from './absent.js';
@@ -107,7 +108,7 @@ async function unbornTarget(t: Transport): Promise<Result<Option<string>, PlyErr
 
 // A ref as the caller names it: null or 'HEAD' for the remote's HEAD (as is '' or leaving it out), a name, or a 40-hex oid.
 export type RefSpec = string | null;
-export type Resolved = { readonly name: string; readonly commit: string };
+export type Resolved = { readonly name: string; readonly commit: Oid };
 // How far a short hex string is an object id. `'off'` (the default): it is a ref name. `'advertised'`: after the name
 // misses, it is a prefix of an advertised tip.
 export type AbbrevMode = 'advertised' | 'off';
@@ -116,15 +117,15 @@ const ABBREV = /^[0-9a-f]{4,39}$/;
 // as the oid or as a peeled target). `none`: no advertised oid starts with the prefix. `ambiguous`: more than one oid does.
 // A bad prefix (not 4..39 lowercase hex) is `bad_request`, not a kind.
 export type AbbrevResolution =
-  | { readonly kind: 'unique_among_advertised'; readonly oid: string; readonly refs: readonly string[] }
+  | { readonly kind: 'unique_among_advertised'; readonly oid: Oid; readonly refs: readonly string[] }
   | { readonly kind: 'none' }
-  | { readonly kind: 'ambiguous'; readonly oids: readonly string[] };
+  | { readonly kind: 'ambiguous'; readonly oids: readonly Oid[] };
 export function resolveAbbrev(prefix: string, listed: LsRefsResult): Result<AbbrevResolution, PlyError> {
   if (!ABBREV.test(prefix)) return fail('bad_request', 'abbreviated oid must be 4..39 lowercase hex', { what: 'ref' });
-  const byOid = new Map<string, string[]>();
+  const byOid = new Map<Oid, string[]>();
   for (const rec of listed.refs.values()) {
     const peeled = fromNullish(rec.peeled);
-    const hits: ReadonlyArray<readonly [string, string]> = peeled.tag === 'none' ? [[rec.oid, rec.name]] : [[rec.oid, rec.name], [peeled.value, rec.name]];
+    const hits: ReadonlyArray<readonly [Oid, string]> = peeled.tag === 'none' ? [[rec.oid, rec.name]] : [[rec.oid, rec.name], [peeled.value, rec.name]];
     for (const [oid, name] of hits) {
       if (!oid.startsWith(prefix)) continue;
       const names = mapGet(byOid, oid);
@@ -157,11 +158,12 @@ function advertisedCommit(prefix: string, listed: LsRefsResult): Result<Option<R
 type Lookup = { readonly kind: 'hit'; readonly resolved: Resolved } | { readonly kind: 'miss'; readonly candidates: readonly string[] };
 async function lookupRef(t: Transport, ref: unknown, abbrev: AbbrevMode): Promise<Result<Lookup, PlyError>> {
   if (abbrev !== 'off' && abbrev !== 'advertised') return fail('bad_request', 'abbrev must be "advertised" or "off"', { what: 'abbrev' });
+  // a 40-hex oid is taken as given, parsed once here (refCandidates answers no name for one)
+  const id = parseOid(ref);
+  if (id.ok) return ok({ kind: 'hit', resolved: { name: id.value, commit: id.value } });
   const named = refCandidates(ref);
   if (!named.ok) return named;
   const cands = named.value;
-  // refCandidates answers [] only for a 40-hex oid string (anything else is a name list, or it refused).
-  if (cands.length === 0 && typeof ref === 'string') return ok({ kind: 'hit', resolved: { name: ref, commit: ref } });
   // null: this call is a name. A string: the prefix, and the listing is wide enough to answer it.
   const prefix = abbrev === 'advertised' && typeof ref === 'string' && ABBREV.test(ref) ? ref : null;
   const listing = await lsRefs(t, prefix === null ? cands : [...cands, 'HEAD', 'refs/heads/', 'refs/tags/']);
@@ -261,7 +263,7 @@ export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: R
     if (empty.tag === 'some') return outcome('ok', empty.value);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
-    const fetched = await fetchCommit(t, commit);
+    const fetched = await commitById(t, commit);
     if (!fetched.ok) return fetched;
     const viewed = commitView(fetched.value.data, t.limits);
     if (!viewed.ok) return viewed;
@@ -271,8 +273,8 @@ export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: R
 }
 
 // Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
-async function fetchTree(t: Transport, cache: TreeCache, oid: string): Promise<Result<Uint8Array, PlyError>> {
-  const fetched = await fetchObject(t, { oid, filter: 'tree:0', expectType: TYPE.TREE });
+async function fetchTree(t: Transport, cache: TreeCache, oid: Oid): Promise<Result<Uint8Array, PlyError>> {
+  const fetched = await objectAt(t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
   if (!fetched.ok) return fetched;
   cache.set(oid, fetched.value.data);
   return ok(fetched.value.data);
@@ -280,13 +282,14 @@ async function fetchTree(t: Transport, cache: TreeCache, oid: string): Promise<R
 // A failure inside a span: recorded on it (the span's own end follows), and passed on.
 const spanErr = <E>(span: Span, r: Err<E>): Err<E> => { span.error(r.error); return r; };
 
-export type Walked = { readonly tree: string; readonly entry: TreeEntry | null };
+export type Walked = { readonly tree: Oid; readonly entry: TreeEntry | null };
 export type WalkConfig = { readonly cache: TreeCache };
 export type WalkOptions = Input<WalkConfig>;
 // Effect: walk `comps` from a tree the caller already has. `tree` is that starting oid; `entry` is the last component
 // (null when comps is empty). A missing component or a non-directory along the way is not_found with its miss. Each
 // level is a `git.read.tree` span under the transport's parent, so a readFile/listTree walk stays on that trace.
-export async function walkPath(t: Transport, treeOid: string, comps: readonly string[], options: WalkOptions = {}): Promise<Result<Walked, PlyError>> {
+// walkPath from a parsed tree id: readFile, listTree and ply's other walks start here.
+async function walkFrom(t: Transport, treeOid: Oid, comps: readonly string[], options: WalkOptions = {}): Promise<Result<Walked, PlyError>> {
   const { cache } = withDefaults<WalkConfig>(options, { cache: new Map<string, Uint8Array>() });
   let here = treeOid;
   let entry: TreeEntry | null = null;
@@ -311,15 +314,20 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
   }
   return ok({ tree: treeOid, entry });
 }
+// The caller's tree id is parsed once, before the walk (fetchObject's refusal, as a first fetch of it would give).
+export async function walkPath(t: Transport, treeOid: string, comps: readonly string[], options: WalkOptions = {}): Promise<Result<Walked, PlyError>> {
+  const start = objectId(treeOid);
+  return start.ok ? walkFrom(t, start.value, comps, options) : start;
+}
 
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
-async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: string; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Result<Walked, PlyError>> {
-  const fetched = await fetchCommit(t, commit);
+async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: Oid; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Result<Walked, PlyError>> {
+  const fetched = await commitById(t, commit);
   if (!fetched.ok) return fetched;
   const info = parseCommit(fetched.value.data, limits);
   if (!info.ok) return info;
   root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
-  const walked = await walkPath(t, info.value.tree, comps, { cache });
+  const walked = await walkFrom(t, info.value.tree, comps, { cache });
   if (!walked.ok) return walked;
   return ok({ tree: info.value.tree, entry: walked.value.entry });
 }
@@ -346,7 +354,7 @@ const treeReadConfig = (options: TreeReadOptions): TreeReadConfig => ({
 export type ListEntry = { readonly name: string; readonly mode: string; readonly oid: string; readonly type: EntryType };
 export type ListResult = { readonly ref: string; readonly commit: string; readonly tree: string; readonly entries: readonly ListEntry[] };
 // The listed directory: the walk's last entry when it is a tree, the root when the path was. not_found otherwise.
-function listedDir(walked: Walked, comps: readonly string[]): Result<string, PlyError> {
+function listedDir(walked: Walked, comps: readonly string[]): Result<Oid, PlyError> {
   const { entry } = walked;
   if (entry === null) return ok(walked.tree);
   if (entry.mode !== '40000') return fail('not_found', `${comps.join('/')} is not a directory (mode ${entry.mode})`, { miss: { kind: 'not_directory', path: comps.join('/'), mode: entry.mode } });

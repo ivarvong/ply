@@ -38,9 +38,21 @@ const UNBORN = 'unborn';
 // One ls-refs line, as connect.c process_ref_v2 reads it: split on every space, so a doubled space is an empty field.
 // Returns { oid, name, peeled, symref-target } (null where the line has no such attribute), or null for an `unborn <name> …` line (it is no ref: parseUnbornLine
 // reads it).
+// A listed name: the second field of an ls-refs line, read once by parseLsRefLine (and nothing else grants the brand).
+// What upload-pack writes there is `HEAD` or a name under `refs/` (ls-refs.c: send_possibly_unborn_head, then
+// for_each_namespaced_ref over refs/, each passing check_refname_format in the ref store). Any other field comes only
+// from a server that does not write ls-refs.c's lines: "" from `<oid> ` or a doubled space, `capabilities^{}` (a v0
+// placeholder). git's client (connect.c process_ref_v2) lists each of those as a ref by that name, and so does ply
+// (test/space/advertisement.space.js: emptyName, doubleSpace, capsName). The field is the text between the first space
+// and the next, so it holds no space; it is not a Refname (HEAD is not one, and git's ref store admits names validateRef
+// refuses, such as one past 1024 bytes). A lookup by a caller's name compares it as the string it is.
+declare const listedBrand: unique symbol;
+export type ListedName = string & { readonly [listedBrand]: typeof listedBrand };
+// The brand is the split: the field ends at the first space after the oid, so a field never holds one.
+const isListedName = (field: string): field is ListedName => !field.includes(' ');
 // One listed ref. Only `peeled` and `symref-target` are kept from the attributes, and only when the line carries them
 // (a key that is present or not: the readers in changes, merge and read test for it).
-export type LsRef = { readonly oid: Oid; readonly name: string; readonly peeled: Oid | null; readonly 'symref-target': string | null };
+export type LsRef = { readonly oid: Oid; readonly name: ListedName; readonly peeled: Oid | null; readonly 'symref-target': string | null };
 // An unborn HEAD: a symref to a branch that has no commit yet (an empty `git init --bare -b main` is
 // `{ name: 'HEAD', target: 'refs/heads/main' }`). Only HEAD is ever reported, as git's client records only HEAD.
 export type LsRefsUnborn = { readonly name: 'HEAD'; readonly target: string };
@@ -60,6 +72,8 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   const cut = rest.indexOf(' ');
   // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
   const name = cut < 0 ? rest : rest.slice(0, cut);
+  // Stryker disable next-line ConditionalExpression,BooleanLiteral,StringLiteral,MethodExpression: unreachable, `name` stops before the first space (above)
+  if (!isListedName(name)) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   // Empty tokens (doubled spaces) need no filter: they have no colon and the loop skips them.
   // Stryker disable next-line ArrayDeclaration: any token injected for a name with no attributes has no `key:` before its colon, so the loop skips it
   const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ');
@@ -102,10 +116,27 @@ export type UnbornReader = typeof parseUnbornLine;
 // only to a server whose advertisement lists `ls-refs=unborn` (git: server_supports_feature("ls-refs", "unborn")).
 export type LsRefsBodyConfig = { readonly peel: boolean; readonly symrefs: boolean; readonly unborn: boolean };
 export type LsRefsBodyOptions = Input<LsRefsBodyConfig>;
-export const lsRefsBody = (prefixes: readonly string[] = [], options: LsRefsBodyOptions = {}): Result<Uint8Array<ArrayBuffer>, PlyError> => {
+// The caller's prefixes, each parsed once into one wire field (`invalid ref prefix: …`, bad_request), or the first
+// that is not one.
+export function refPrefixes(prefixes: readonly string[]): Result<WireField[], ErrorOf<'bad_request'>> {
+  const checked: WireField[] = [];
+  for (const p of prefixes) {
+    const valid = validateWire(p, 'ref prefix');
+    if (!valid.ok) return valid;
+    checked.push(valid.value);
+  }
+  return ok(checked);
+}
+// The command=ls-refs body of parsed prefixes: nothing left to check but the pkt-line length.
+export const lsRefsRequestBody = (prefixes: readonly WireField[], options: LsRefsBodyOptions = {}): Result<Uint8Array<ArrayBuffer>, PlyError> => {
   const { peel, symrefs, unborn } = withDefaults(options, { peel: true, symrefs: true, unborn: false });
   return pkts(['command=ls-refs\n', ...[peel && 'peel\n', symrefs && 'symrefs\n', unborn && 'unborn\n'].filter((x): x is string => typeof x === 'string'), ...prefixes.map(p => `ref-prefix ${p}\n`)], { delimAfter: 0 });
 };
+// The caller's prefixes as a command=ls-refs body: parsed once (refPrefixes, as lsRefs parses them), then encoded.
+export function lsRefsBody(prefixes: readonly string[] = [], options: LsRefsBodyOptions = {}): Result<Uint8Array<ArrayBuffer>, PlyError> {
+  const checked = refPrefixes(prefixes);
+  return checked.ok ? lsRefsRequestBody(checked.value, options) : checked;
+}
 
 // The listing as it is read: `open` until the flush that ends it, then `ended` (any frame after that is refused).
 // `refs` grows in place as lines arrive (a copy per line would be quadratic in the ref count); `counted` is the names
@@ -192,12 +223,8 @@ async function v2Refusal(t: Transport, span: Span, empty: PlyError): Promise<Ply
 // oxlint-disable-next-line require-await -- async: a synchronous failure (an unusable transport) is a rejection, as it always was
 export async function lsRefs(t: Transport, prefixes: readonly string[] = [], options: Input<{ readonly unborn: UnbornReader }> = {}): Promise<Result<LsRefsResult, PlyError>> {
   // each prefix parsed once; the request writes the parsed ones
-  const checked: WireField[] = [];
-  for (const p of prefixes) {
-    const valid = validateWire(p, 'ref prefix');
-    if (!valid.ok) return valid;
-    checked.push(valid.value);
-  }
+  const checked = refPrefixes(prefixes);
+  if (!checked.ok) return checked;
   const maxBytes = readLimit(t.limits, 'maxLsRefsBytes');
   if (!maxBytes.ok) return maxBytes;
   const maxRefs = readLimit(t.limits, 'maxRefs');
@@ -206,7 +233,7 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], opt
   const caps: LsCaps = { maxBytes: maxBytes.value, maxRefs: maxRefs.value, unborn: readKey(options, 'unborn') };
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
   return coded('protocol', () => spanned(t, 'git.upload-pack ls-refs', clientSpan(t, { 'git.command': 'ls-refs', 'git.protocol.version': PROTOCOL_V2, 'git.ls_refs.prefixes': prefixes }), async (span: Span): Promise<Result<LsRefsResult, PlyError>> => {
-    const body = lsRefsBody(checked, { unborn: caps.unborn.tag === 'some' });
+    const body = lsRefsRequestBody(checked.value, { unborn: caps.unborn.tag === 'some' });
     if (!body.ok) return body;
     let st = lsInit();
     let seen = 0;

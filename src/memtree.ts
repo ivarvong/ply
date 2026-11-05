@@ -6,7 +6,9 @@ import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import { err, ok } from './result.js';
 import type { Result } from './result.js';
-import { encodeTree, hashObject } from './objects.js';
+import { encodeEntries, hashObject } from './objects.js';
+import type { EntryOf, Mode } from './objects.js';
+import type { Oid } from './oid.js';
 import { indexOfBytes } from './bytes.js';
 import { limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
@@ -17,14 +19,15 @@ export type BlobMode = (typeof BLOB_MODES)[number];
 const BLOB_MODE_SET: ReadonlySet<string> = new Set(BLOB_MODES);
 
 export type Dir = { readonly kind: 'dir'; readonly entries: Map<string, Mem> };
-export type Lazy = { readonly kind: 'lazy'; readonly mode: string; readonly oid: string };
+// An object the server already has: its mode and id as a parsed tree entry carries them.
+export type Lazy = { readonly kind: 'lazy'; readonly mode: Mode; readonly oid: Oid };
 export type Mem = Dir | Lazy;
 
 // What an edit of the memory tree can refuse: a path that is not what the change needs, a bound, a bad limit.
 export type MemError = ErrorOf<'bad_request' | 'not_found' | 'limit_exceeded'>;
 
 export const emptyDir = (): Dir => ({ kind: 'dir', entries: new Map() });
-export const lazyNode = (mode: string, oid: string): Lazy => ({ kind: 'lazy', mode, oid });
+export const lazyNode = (mode: Mode, oid: Oid): Lazy => ({ kind: 'lazy', mode, oid });
 export const isDir = (node: Mem): node is Extract<Mem, { readonly kind: 'dir' }> => node.kind === 'dir';
 
 // The directory's entries, or bad_request when the node is not a directory. Exported so a cell can reach this
@@ -34,7 +37,7 @@ export function requireDir(node: Mem, path: string): Result<Map<string, Mem>, Er
   return ok(node.entries);
 }
 
-export type Leaf = { readonly mode: BlobMode; readonly oid: string; readonly data: Uint8Array };
+export type Leaf = { readonly mode: BlobMode; readonly oid: Oid; readonly data: Uint8Array };
 // Hash one blob the caller is adding. A symlink target is a path: git cannot check out an empty one, and a NUL ends it.
 export function fileLeaf(mode: BlobMode, data: Uint8Array, limits: Limits, path = 'blob'): Result<Leaf, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   const max = readLimit(limits, 'maxObjectSize');
@@ -190,12 +193,12 @@ export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Ar
   return ok(out);
 }
 
-export type EncodedTree = { readonly oid: string; readonly data: Uint8Array };
-export type Encoded = { readonly oid: string; readonly trees: readonly EncodedTree[] };
-function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<string, ErrorOf<'bad_request' | 'limit_exceeded'>> {
+export type EncodedTree = { readonly oid: Oid; readonly data: Uint8Array };
+export type Encoded = { readonly oid: Oid; readonly trees: readonly EncodedTree[] };
+function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<Oid, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   if (node.kind === 'lazy') return ok(node.oid);
   if (node.entries.size > max) return err(limitExceeded('tree entries', node.entries.size, max));
-  const entries: Array<{ readonly mode: string; readonly name: string; readonly oid: string }> = [];
+  const entries: EntryOf[] = [];
   for (const [name, child] of node.entries) {
     if (child.kind === 'dir') {
       const sub = encodeNode(child, max, trees);
@@ -203,7 +206,7 @@ function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<string
       entries.push({ mode: MODE_TREE, name, oid: sub.value });
     } else entries.push({ mode: child.mode, name, oid: child.oid });
   }
-  const encoded = encodeTree(entries);
+  const encoded = encodeEntries(entries);
   if (!encoded.ok) return encoded;
   const data = encoded.value;
   const oid = hashObject('tree', data);

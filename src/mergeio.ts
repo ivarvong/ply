@@ -8,33 +8,35 @@ import type { ErrorOf, PlyError } from './errors.js';
 import type { FetchedCommit } from './commit.js';
 import type { Option, Result } from './result.js';
 import { fail } from './errors.js';
-import { fetchObject } from './fetch.js';
-import { fetchCommit } from './commit.js';
+import { objectAt } from './fetch.js';
+import { commitById } from './commit.js';
 import { parseCommit, TYPE } from './objects.js';
 import { validateIdent, validateRef } from './validate.js';
-import { parseOid, ZERO_OID } from './oid.js';
+import { parseOid, ZERO_OID, type Oid } from './oid.js';
 import { andThen, getOrElse, map, none, ok, some } from './result.js';
 import { fromNullish } from './absent.js';
 
 // a branch name as git's messages print it
 export const short = (r: string): string => r.replace(/^refs\/heads\//u, '');
 // Effect: one commit by oid (deepen 1: the commit alone), as bytes or parsed
-export const commitBytesAt = async (t: Transport, oid: string): Promise<Result<{ readonly data: Uint8Array }, PlyError>> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
-export const commitAt = async (t: Transport, oid: string): Promise<Result<Commit, PlyError>> => andThen(await commitBytesAt(t, oid), b => parseCommit(b.data, t.limits));
+export const commitBytesAt = async (t: Transport, oid: Oid): Promise<Result<{ readonly data: Uint8Array }, PlyError>> => objectAt(t, oid, { expectType: TYPE.COMMIT, deepen: 1 });
+export const commitAt = async (t: Transport, oid: Oid): Promise<Result<Commit, PlyError>> => andThen(await commitBytesAt(t, oid), b => parseCommit(b.data, t.limits));
 
 export const isOid = (s: string): boolean => parseOid(s).ok;
 // A merge `from` or rebase `onto`, as read.js's resolveCommit takes a name (#103 item 4): a 40-hex commit id is taken as
 // given (Some; the all-zero id names nothing), anything else is a ref name (validated; None: ask ls-refs).
-export const givenOid = (name: string, what: string): Result<Option<string>, ErrorOf<'bad_request'>> => {
-  if (!isOid(name)) return map(validateRef(name), () => none);
-  if (name === ZERO_OID) return fail('bad_request', `${what} must not be the zero oid`, { what });
-  return ok(some(name));
+// The id is parsed once, here: Some carries the Oid.
+export const givenOid = (name: string, what: string): Result<Option<Oid>, ErrorOf<'bad_request'>> => {
+  const id = parseOid(name);
+  if (!id.ok) return map(validateRef(name), () => none);
+  if (id.value === ZERO_OID) return fail('bad_request', `${what} must not be the zero oid`, { what });
+  return ok(some(id.value));
 };
 // Effect: a given commit id is a commit on the server, fetched alone (deepen 1). fetchCommit's not_found (a commit
 // miss: absent, or not a commit) is the caller's not_found, with that same miss. Every other code passes through: a
 // corrupt pack stays pack_corrupt (retryable), and is not reported as a missing commit.
-export const assertCommit = async (t: Transport, oid: string, what: string): Promise<Result<FetchedCommit, PlyError>> => {
-  const r = await fetchCommit(t, oid);
+export const assertCommit = async (t: Transport, oid: Oid, what: string): Promise<Result<FetchedCommit, PlyError>> => {
+  const r = await commitById(t, oid);
   if (r.ok) return r;
   if (r.error.code !== 'not_found') return r;
   return fail('not_found', `${what} ${oid} is not a commit on the remote`, { what, miss: r.error.miss });
