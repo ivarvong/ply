@@ -15,11 +15,11 @@ import { operation, verifyRef } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
-import { fetchObject } from './fetch.js';
-import { fetchCommit } from './commit.js';
+import { objectAt } from './fetch.js';
+import { commitById } from './commit.js';
 import { push, ZERO_OID } from './push.js';
 import type { PackObject } from './push.js';
-import { parseOid, parseCommitId } from './oid.js';
+import { parseOid, parseCommitId, type Oid } from './oid.js';
 import { parseTree, hashObject, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
@@ -92,7 +92,7 @@ type Norm =
   | { readonly kind: 'edit'; readonly path: string; readonly comps: readonly string[]; readonly find: Uint8Array; readonly replace: Uint8Array }
   | { readonly kind: 'delete'; readonly path: string; readonly comps: readonly string[] }
   | { readonly kind: 'rename'; readonly from: string; readonly to: string; readonly fromComps: readonly string[]; readonly toComps: readonly string[] };
-type BasePlan = { readonly kind: 'tip' } | { readonly kind: 'ref'; readonly ref: string } | { readonly kind: 'oid'; readonly oid: string };
+type BasePlan = { readonly kind: 'tip' } | { readonly kind: 'ref'; readonly ref: string } | { readonly kind: 'oid'; readonly oid: Oid };
 type Plan = {
   readonly ref: string | null;
   readonly base: BasePlan;
@@ -103,10 +103,10 @@ type Plan = {
   readonly message: string;
   readonly head: string | null;
 };
-type Tip = { readonly ref: string; readonly oid: string | null };
+type Tip = { readonly ref: string; readonly oid: Oid | null };
 type Parent = {
-  readonly oid: string | null;
-  readonly tree: string | null;
+  readonly oid: Oid | null;
+  readonly tree: Oid | null;
   readonly commitParent: string | null;
   readonly creating: boolean;
   readonly baseRef: string | null;
@@ -267,7 +267,7 @@ function person(p: ValidatedIdent): Author {
 // A cas_conflict that says where the ref is (a string: a fresh read is not needed).
 const actualKnown = (e: unknown): boolean => { const actual = field(e, 'actual'); return actual.tag === 'some' && typeof actual.value === 'string'; };
 const whatIs = (e: unknown, what: string): boolean => { const w = field(e, 'what'); return w.tag === 'some' && w.value === what; };
-const tipOf = (refs: ReadonlyMap<string, { readonly oid: string }>, ref: string): string | null => getOrElse<string | null>(mapOption(mapGet(refs, ref), r => r.oid), null);
+const tipOf = (refs: ReadonlyMap<string, { readonly oid: Oid }>, ref: string): Oid | null => getOrElse<Oid | null>(mapOption(mapGet(refs, ref), r => r.oid), null);
 
 async function resolveTarget(t: Transport, ref: string | null): Promise<Result<Tip, PlyError>> {
   if (ref === null) {
@@ -288,8 +288,8 @@ async function resolveTarget(t: Transport, ref: string | null): Promise<Result<T
   return map(await lsRefs(t, [ref]), ({ refs }) => ({ ref, oid: tipOf(refs, ref) }));
 }
 
-async function mustCommit(t: Transport, oid: string): Promise<Result<{ readonly tree: string; readonly parent: string | null }, PlyError>> {
-  const got = await fetchCommit(t, oid);
+async function mustCommit(t: Transport, oid: Oid): Promise<Result<{ readonly tree: Oid; readonly parent: string | null }, PlyError>> {
+  const got = await commitById(t, oid);
   if (!got.ok) return got;
   return ok({ tree: got.value.commit.tree, parent: getOrElse<string | null>(at(got.value.commit.parents, 0), null) });
 }
@@ -325,10 +325,10 @@ type Walk = {
   readonly allowLfs: boolean;
 };
 
-async function loadTree(walk: Walk, oid: string): Promise<Result<Dir, PlyError>> {
+async function loadTree(walk: Walk, oid: Oid): Promise<Result<Dir, PlyError>> {
   const hit = mapGet(walk.cache, oid);
   if (hit.tag === 'some') return ok(hit.value);
-  const got = await fetchObject(walk.t, { oid, filter: 'tree:0', expectType: TYPE.TREE });
+  const got = await objectAt(walk.t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
   if (!got.ok) return got;
   const obj = got.value;
   const dir = emptyDir();
@@ -411,7 +411,7 @@ async function applyEdit(walk: Walk, root: Dir, change: Extract<Norm, { readonly
     return fail('not_found', `${change.path} is not a regular file (mode ${shown})`, { what: 'path', path: change.path, miss });
   }
   walk.have.add(node.oid);
-  const fetched = await fetchObject(walk.t, { oid: node.oid, filter: '', expectType: TYPE.BLOB }); if (!fetched.ok) return fetched;
+  const fetched = await objectAt(walk.t, node.oid, { filter: '', expectType: TYPE.BLOB }); if (!fetched.ok) return fetched;
   const blob = fetched.value;
   if (isLfsPointerPrefix(blob.data) && !walk.allowLfs) return fail('lfs_pointer', `${node.oid} is a Git LFS pointer (${blob.data.length} bytes); the file's content is in the LFS store, not in git. Pass allowLfsPointer to edit the pointer itself.`);
   const next = replaceOnce(blob.data, change.find, change.replace);

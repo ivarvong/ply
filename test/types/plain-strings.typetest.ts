@@ -58,3 +58,29 @@ await push(t, { ref, oldOid: oid, newOid: oid, objects: [] });
 await push(t, { commands: [command] });
 const client = GitHttp.create(url);
 if (client.ok) await client.value.push({ ref, oldOid: oid, newOid: oid, objects: [], atomic: false });
+
+// HttpOptions in, HttpSettings out (#156): settings come only from parseHttpOptions
+import { parseHttpOptions, type HttpSettings } from '../../src/http.js';
+const settings = parseHttpOptions(url, { userAgent: 'x', limits: DEFAULT_LIMITS });
+if (settings.ok) { const s: HttpSettings = settings.value; const n: number = s.requestTimeoutMs; void n; }
+// @ts-expect-error a plain record is not HttpSettings (the brand)
+const forgedSettings: HttpSettings = { requestTimeoutMs: 1 };
+void forgedSettings;
+// Ids, prefixes and tree entries are plain strings too, parsed at each entry (#156, part 2)
+import { fetchObject } from '../../src/fetch.js';
+import { fetchCommit } from '../../src/commit.js';
+import { mergeBase, bestBases } from '../../src/merge.js';
+import { walkPath } from '../../src/read.js';
+import { lsRefsBody } from '../../src/lsrefs.js';
+import { encodeTree } from '../../src/objects.js';
+import { fetchBody } from '../../src/fetch.js';
+declare const mode: string;
+await fetchObject(t, { oid, filter: 'tree:0' });
+await fetchCommit(t, oid);
+await mergeBase(t, oid, oid);
+await walkPath(t, oid, [path]);
+void lsRefsBody([ref]);
+void encodeTree([{ mode, name: path, oid }]);
+void fetchBody({ wants: [oid], haves: [oid] });
+// a caller's own graph names its nodes with any strings
+void bestBases(new Map<string, { readonly parents: readonly string[] }>([['a', { parents: [] }]]), 'a', 'a');

@@ -114,11 +114,11 @@ function eqRow(o, row, label) {
     assert.equal(o.oid, row.oid, `${label} oid`);
     assert.equal(TYPE_ID[row.type], o.type, `${label} type`);
   }
-  if (row.base === null) assert.equal(o.base, null, `${label} base`);
-  else if (o.base && 'offset' in o.base) {
+  if (row.base === null) assert.deepEqual(o.base, { tag: 'none' }, `${label} base`);
+  else if (o.base.tag === 'ofs') {
     if (o.base.oid !== null) assert.equal(o.base.oid, row.base, `${label} ofs base`);
     else assert.equal(o.oid, null, label);
-  } else assert.equal(o.base?.oid, row.base, `${label} ref base`);
+  } else assert.equal(o.base.tag === 'ref' ? o.base.oid : null, row.base, `${label} ref base`);
 }
 
 const hashOf = text => {

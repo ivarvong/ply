@@ -42,12 +42,21 @@ export { parseRefname, parseBranchName, parseTagName } from './refname.js';
 export { parsePath } from './path.js';
 
 // ---- objects and packs ----
-export type { PackLayout, PackLayoutObject, PackBase } from './packresolve.js';
-export { spliceDelta, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, makeDelta, packParseOpts } from './pack.js';
+export type { PackLayout, PackLayoutObject, PackBase, ObjBase, ObjSize, DeltaProgram, PackObjectInput, ParsedObject, ParsedPack, ResolvedObjType } from './packresolve.js';
+export type { DeltaOp } from './pack.js';
+export { spliceDelta, encodeDeltaOps, buildPack, encodeObjHeader, zlibDeflate, parsePack, resolvePack, describePack, applyDelta, parseDelta, applyProgram, deltaOps, makeDelta, packParseOpts } from './pack.js';
 export { encodeDelta, planDeltas } from './delta.js'; // pushing a local repository is 'ply/repo-node'
 export { objectsForPack, reachableObjects, mapStore } from './packwalk.js';
 export { encodePackIndex, indexPack, layoutPackIndex } from './packindex.js';
 export { inflate } from './inflate.js';
+
+// ---- pulls: bytes in as they arrive, one piece out at a time; a refusal is a value that sticks (#172) ----
+export { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, cappedBound, zlibWrap, rawWrap } from './inflatestream.js';
+export type { InflateStream, InflatePiece, InflateStreamOpts, StreamBound, StreamWrap, InflateStats, InflateError } from './inflatestream.js';
+export { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, parsePackClose, packScanOpts } from './packstream.js';
+export type { PackScan, PackPiece, PackScanOpts, PackError } from './packstream.js';
+export { sidebandStep } from './fetch.js';
+export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
 export { hashObject, parseTree, encodeTree, treeSort, parseCommit, encodeCommit, parseTag, encodeTag, ident, TYPE, TYPE_NAME, TYPE_ID } from './objects.js';
 export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';

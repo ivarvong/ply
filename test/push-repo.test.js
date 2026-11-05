@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync, chmodSync, rmSync, appendFileSync, mkdtempSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
+import { readBody } from './body.js';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { pushRepo, readConfig } from '../src/repo-node.js';
 import { encodeDelta, planDeltas } from '../src/delta.js';
@@ -47,10 +48,12 @@ const wouldSend = (local, tips, remoteTips) => {
 // requests by service, and every receive-pack body (the pack is what follows the commands' flush)
 const counting = () => {
   const c = { 'git-upload-pack': 0, 'git-receive-pack': 0, packs: [] };
-  const fetchImpl = async (url, init) => {
+  const fetchImpl = async (url, given) => {
     const kind = String(url).split('/').pop();
     c[kind] = (c[kind] ?? 0) + 1;
-    if (kind === 'git-receive-pack') { const body = Buffer.from(init.body); const at = body.indexOf('0000PACK'); c.packs.push(at < 0 ? null : body.subarray(at + 4)); }
+    // a pack past INFLATE_CHUNK is a streamed body (src/packwrite.ts): read once, forwarded as its bytes
+    const { bytes: body, init, streamed } = await readBody(given);
+    if (kind === 'git-receive-pack') { const at = body.indexOf('0000PACK'); c.packs.push(at < 0 ? null : body.subarray(at + 4)); c.streamed = (c.streamed ?? 0) + (streamed ? 1 : 0); }
     return fetch(url, init);
   };
   return { c, fetchImpl };

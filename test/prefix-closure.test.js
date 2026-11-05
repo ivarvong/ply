@@ -15,13 +15,14 @@ import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,
 } from '../src/objects.js';
 import { pkt, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.js';
-import { encodeObjHeader, buildPack, spliceDelta } from '../src/pack.js';
-import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packresolve.js';
+import { encodeObjHeader, encodeVarint, buildPack, spliceDelta } from '../src/pack.js';
+import { readObjHeader, readOfsDelta, parsePack, applyDelta, parseDelta } from '../src/packresolve.js';
+import { readVarint } from '../src/packstream.js';
 import { inflate } from '../src/inflate.js';
 import { parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, v2Init, v2Step as v2StepR } from '../src/fetch.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 as parseCapabilitiesV2R } from '../src/discover.js';
-import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish, parseCommand, parseCommands } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseUploadPackRequest } from '../src/uprequest.js';
 import { fetchBody as fetchBodyR } from '../src/fetch.js';
@@ -30,6 +31,7 @@ import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import { parsePath } from '../src/path.js';
+import { parseHttpOptions } from '../src/http.js';
 import { parseRefname, parseBranchName, parseTagName } from '../src/refname.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
@@ -299,6 +301,18 @@ property('ofs-delta', 'ofs-delta prefixes are short reads until the offset is co
   assert.deepEqual(unwrap(readOfsDelta(enc, 0)), { off: (1 + 1) * (OBJ_SIZE_NEXT_MASK + 1) + 2, next: 2 });
 });
 
+property('varint', 'size-varint prefixes are short reads until the continuation bit clears', () => {
+  for (const n of [0, 1, 127, 128, 300, 2 ** 20 + 3, 2 ** 40]) {
+    const v = encodeVarint(n);
+    for (let i = 0; i < v.length; i++) {
+      const r = readVarint(v.subarray(0, i), 0, 'delta');
+      assert.equal(r.ok, false);
+      assert.equal(r.error.reason, 'short_read');
+    }
+    assert.deepEqual(unwrap(readVarint(v, 0, 'delta')), [n, v.length]);
+  }
+});
+
 property('pack', 'every strict prefix of a pack throws', async () => {
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('hello') }]);
   unwrap(parsePack(pack));
@@ -310,7 +324,11 @@ property('delta', 'every strict prefix of a delta throws', () => {
   const { delta } = spliceDelta({ baseLen: base.length, off: 6, oldLen: 5, insert: te.encode('there') });
   assert.ok(delta.length >= 4);
   unwrap(applyDelta(base, delta));
-  for (let i = 1; i < delta.length; i++) assert.throws(() => unwrap(applyDelta(base, delta.subarray(0, i))), e => e.code === 'pack_corrupt');
+  unwrap(parseDelta(delta));
+  for (let i = 1; i < delta.length; i++) {
+    assert.throws(() => unwrap(applyDelta(base, delta.subarray(0, i))), e => e.code === 'pack_corrupt');
+    assert.throws(() => unwrap(parseDelta(delta.subarray(0, i))), e => e.code === 'pack_corrupt');
+  }
 });
 
 property('sideband', 'a sideband frame is a channel byte plus an opaque body prefix', () => {
@@ -512,6 +530,37 @@ const closedUnderPrefix = (full, parse, valueOf) => {
   }
 };
 
+// A push command: every prefix of its ref is that ref or a bad_request; a prefix of an oid is never an oid. A prefix of
+// the list is that list, and the empty one is 'protocol' (nothing to push), never a throw.
+property('push-command', 'a prefix of a command field is that value or a bad_request; the empty list is protocol', () => {
+  const a = 'a'.repeat(OID_HEX_CHARS), b = 'b'.repeat(OID_HEX_CHARS);
+  closedUnderPrefix('refs/heads/main', v => parseCommand({ ref: v, oldOid: a, newOid: b }), v => v.ref);
+  for (const key of ['oldOid', 'newOid']) {
+    for (let i = 0; i < OID_HEX_CHARS; i++) {
+      const r = parseCommand({ ref: 'refs/heads/main', oldOid: a, newOid: b, [key]: a.slice(0, i) });
+      assert.deepEqual([r.ok, r.error?.code, r.error?.message], [false, 'bad_request', 'push: oids must be 40-hex'], `${key} ${i}`);
+    }
+  }
+  const list = ['refs/heads/x', 'refs/heads/y', 'refs/tags/z'].map(ref => ({ ref, oldOid: a, newOid: b }));
+  for (let i = 0; i <= list.length; i++) {
+    const r = parseCommands(list.slice(0, i));
+    if (i === 0) assert.deepEqual([r.ok, r.error.code, r.error.message], [false, 'protocol', 'push: no commands']);
+    else assert.deepEqual(unwrap(r).map(c => c.ref), list.slice(0, i).map(c => c.ref));
+  }
+});
+
+// The transport's options: every prefix of a remote URL (with userinfo, a port, a path) is settings for that URL or a
+// bad_request, never a throw. An absolute URL's prefix that still parses is that prefix, without its userinfo.
+property('http-options', 'a prefix of a remote URL is settings for that URL or a bad_request', () => {
+  for (const full of ['https://user:tok@example.com:8443/org/repo.git', 'http://127.0.0.1/r', 'https://h/a%20b']) {
+    for (let i = 0; i <= full.length; i++) {
+      const r = parseHttpOptions(full.slice(0, i));
+      if (r.ok) assert.equal(r.value.url.username + r.value.url.password, '', full.slice(0, i));
+      else assert.equal(r.error.code, 'bad_request', full.slice(0, i));
+    }
+  }
+});
+
 property('path', 'a prefix of a path is that path or a bad_request', () => {
   for (const full of ['a', 'src/index.ts', 'a/b/c/d.e', 'dir with space/f\u00e9.txt', '.github/workflows/ci.yml']) {
     closedUnderPrefix(full, v => parsePath(v, DEFAULT_LIMITS), v => v.path);
@@ -547,7 +596,7 @@ test('take() throws a typed short read and does not clamp', () => {
   assert.equal(unwrap(take(buf, 4, 0)).length, 0);
 });
 
-const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)(Result)?$/;
+const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readVarint|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)(Result)?$/;
 
 test('every exported decoder has a prefix-closure property', () => {
   const missing = [];

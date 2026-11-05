@@ -38,7 +38,8 @@ const parsedFetch = s => ({ command: 'fetch', caps: [], wantRefs: [], sidebandAl
 test('round trip: parseUploadPackRequest(fetchBody(x)) is x, over 2,000 generated fetch requests', () => {
   for (let i = 0; i < 2000; i++) {
     const s = fetchSpec();
-    assert.deepEqual(parse(fetchBody(s)), parsedFetch(s), JSON.stringify(s));
+    // a want is parsed once into an id, lowercased (git reads either case as one object, #156); haves and shallows are wire fields
+    assert.deepEqual(parse(fetchBody(s)), parsedFetch({ ...s, wants: s.wants.map(w => w.toLowerCase()) }), JSON.stringify(s));
   }
   // left-out arguments read as fetchBody's defaults (ofs-delta, no-progress and done on)
   assert.deepEqual(parse(fetchBody({ wants: ['a'.repeat(40)] })), parsedFetch({ wants: ['a'.repeat(40)], haves: [], shallows: [], filter: '', deepen: 0, deepenSince: 0, deepenNot: [], deepenRelative: false, thinPack: false, ofsDelta: true, includeTag: false, noProgress: true, done: true }));

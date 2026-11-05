@@ -12,7 +12,7 @@ import { assertNever, err, ok } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
-import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
+import type { Attrs, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
 import { fail, plyError } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
@@ -20,6 +20,7 @@ import { bufferSource, concat, td, te } from './bytes.js';
 import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
+import type { WireField } from './validate.js';
 import { NO_HINTS, UA, freshQuirks, quirksKeyOf, rememberedQuirks, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
@@ -320,23 +321,57 @@ const basicOf = (authorization: string | null): Basic | null => {
     return c < 0 ? { user: d, pass: '' } : { user: d.slice(0, c), pass: d.slice(c + 1) };
   } catch { return null; }
 };
+// The redirect mode of a streamed POST: 'error' where the platform takes it (undici, browsers), else 'manual'. workerd
+// refuses 'error' at `new Request` ("does not make sense at the edge", measured on the pinned workerd); its fetch is
+// not the JS fetch that clones a request, and a 3xx there is the redirect error as on any POST.
+export type StreamRedirect = 'manual' | 'error';
+export const streamRedirect = (): StreamRedirect => {
+  try { return new Request('http://localhost/', { redirect: 'error' }).redirect === 'error' ? 'error' : 'manual'; } catch { return 'manual'; }
+};
 // Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
 const unref = (timer: unknown): void => {
   const f = field(timer, 'unref');
   if (f.tag === 'some' && typeof f.value === 'function') Reflect.apply(f.value, timer, []);
 };
 
-// oxlint-disable-next-line complexity, max-lines-per-function -- the constructor resolves every credential form in one place
-export function createTransport(url: string | URL, options: HttpOptions = {}): Result<HttpTransport, PlyError> {
+// HttpOptions parsed once (#156): every check the transport makes of its options, here and nowhere after it. The two
+// limits it reads on every request (requestTimeoutMs, maxPackBytes) are read here too, so a bad one is refused when the
+// transport is made, not at its first request. The brand is a module symbol: only parseHttpOptions writes it.
+const CHECKED_HTTP: unique symbol = Symbol('checkedHttp');
+export type HttpSettings = {
+  readonly [CHECKED_HTTP]: true;
+  // the URL as approved (allowUrl), without userinfo or hash; crossOrigin: allowUrl moved it to another origin
+  readonly url: URL;
+  readonly crossOrigin: boolean;
+  readonly policy: RedirectPolicy;
+  readonly userAgent: WireField;
+  readonly recordNames: readonly string[];
+  // the explicit credential forms, total (all null without auth); the Authorization value and its Basic parts
+  readonly given: HttpAuthConfig;
+  readonly authorization: string | null;
+  readonly explicitBasic: Basic | null;
+  readonly quirks: Quirks;
+  // the caller's fetch, bound when it is the platform's (Workers: "Illegal invocation" with another `this`, SAFETY.md)
+  readonly fetch: FetchLike;
+  readonly tracer: Tracer | null;
+  readonly parent: Span | null;
+  readonly signal: AbortSignal | null;
+  readonly allowUrl: AllowUrl | null;
+  readonly limits: Limits;
+  readonly requestTimeoutMs: number;
+  readonly maxPackBytes: number;
+  readonly streamRedirect: StreamRedirect;
+};
+// @decoder parseHttpOptions prefix=http-options
+// oxlint-disable-next-line complexity, max-lines-per-function -- every option and credential form, checked in one place, in the order the refusals have always come
+export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): Result<HttpSettings, PlyError> {
   const { auth, tracer, parent, fetchImpl, userAgent, limits, signal, quirks: givenQuirks, recordResponseHeaders, followRedirects, allowUrl, maxRedirects } = withDefaults(options, httpDefaults());
   const checkedPolicy = redirectPolicy(followRedirects, maxRedirects);
   if (!checkedPolicy.ok) return checkedPolicy;
-  const policy = checkedPolicy.value;
-  const agentOk = headerField(userAgent, 'user agent');
-  if (!agentOk.ok) return agentOk;
+  const agent = validateWire(userAgent, 'user agent');
+  if (!agent.ok) return agent;
   const names = recordResponseHeaderNames(recordResponseHeaders);
   if (!names.ok) return names;
-  const recordNames = names.value;
   // The explicit forms, total (all null without auth).
   const given = auth === null ? noAuth() : withDefaults(auth, noAuth());
   for (const [value, what] of [[given.header, 'authorization'], [given.token, 'token'], [given.bearer, 'bearer'], [given.user, 'auth user']] as const) {
@@ -361,21 +396,32 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
   const offeredOrigin = u.origin;
   const approved = useAllowed(allowUrl, u);
   if (!approved.ok) return approved;
-  const approvedUrl = approved.value;
   // The explicit credential, checked before anything is built from it.
   const explicit = fromUrl !== null || auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
   if (!explicit.ok) return explicit;
-  let base = approvedUrl.toString().replace(/\/$/, '');
-  const baseCrossOrigin = approvedUrl.origin !== offeredOrigin;
-  // Workers: fetch is a method of the global and throws "Illegal invocation" when its `this` is another object (SAFETY.md); bind it
-  const f = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
+  const requestTimeoutMs = readLimit(limits, 'requestTimeoutMs');
+  if (!requestTimeoutMs.ok) return requestTimeoutMs;
+  const maxPackBytes = readLimit(limits, 'maxPackBytes');
+  if (!maxPackBytes.ok) return maxPackBytes;
+  const [authorization, explicitBasic]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : explicit.value;
+  return ok({
+    [CHECKED_HTTP]: true, url: approved.value, crossOrigin: approved.value.origin !== offeredOrigin, policy: checkedPolicy.value,
+    userAgent: agent.value, recordNames: names.value, given, authorization, explicitBasic, quirks,
+    fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, tracer, parent, signal, allowUrl, limits,
+    requestTimeoutMs: requestTimeoutMs.value, maxPackBytes: maxPackBytes.value, streamRedirect: streamRedirect(),
+  });
+}
+
+// oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
+function transportOf(settings: HttpSettings): HttpTransport {
+  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, maxPackBytes } = settings;
+  let base = settings.url.toString().replace(/\/$/, '');
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
   const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
-  const [authorization, explicitBasic]: [string | null, Basic | null] = fromUrl ? [`Basic ${btoa(`${fromUrl.user}:${fromUrl.pass}`)}`, null] : explicit.value;
   // The credential sent from here on. A cross-origin rebase (or an allowUrl that moved the base) clears it; the
   // scrubber above still redacts the original, so an echo of it cannot leak.
-  let liveAuth = baseCrossOrigin ? null : authorization;
+  let liveAuth = settings.crossOrigin ? null : authorization;
   let rebasedFrom: string | null = null;
   let redirectCount = 0;
   let initialSettled = false;
@@ -420,19 +466,20 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
   // found by the calibration harness: `hang` fault + head hint). A controller owned by a live timer cannot be collected.
   // The timer is the strong owner of `ac`. It stays scheduled for the whole exchange (so a GC cannot drop it)
   // and is cleared when the exchange ends, so a finished request does not abort later.
-  const requestSignal = (): Result<{ readonly signal: AbortSignal; readonly cancel: () => void }, PlyError> => {
-    const limit = readLimit(limits, 'requestTimeoutMs');
-    if (!limit.ok) return limit;
-    const ms = limit.value;
+  const requestSignal = (): { readonly signal: AbortSignal; readonly cancel: () => void } => {
+    const ms = requestTimeoutMs;
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(new DOMException(`request exceeded ${ms} ms`, 'TimeoutError')); }, ms);
     unref(timer);
     const sig = signal ? AbortSignal.any([ac.signal, signal]) : ac.signal;
-    return ok({ signal: sig, cancel: () => { clearTimeout(timer); } });
+    return { signal: sig, cancel: () => { clearTimeout(timer); } };
   };
   // The platform's fetch(): its rejection is the network error it is (wrapNet). The one catch of each request.
-  const send = async (target: string, init: RequestInit, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
-    try { return ok(await f(target, { ...init, signal: sig, redirect: 'manual' })); } catch (e) { return err(wrapNet(e, sig)); }
+  // `redirect`: 'manual' (a 3xx is read as the redirect error) unless the body is a stream: undici answers 'manual' and
+  // 'follow' by cloning the request, which tees the body and holds every chunk the unread branch never takes (a 64 MiB
+  // push held 64 MiB, measured). 'error' takes no clone; a 3xx then fails the request as a network error. Neither follows.
+  const send = async (target: string, init: RequestInit, sig: AbortSignal, redirect: StreamRedirect = 'manual'): Promise<Result<Response, PlyError>> => {
+    try { return ok(await f(target, { ...init, signal: sig, redirect })); } catch (e) { return err(wrapNet(e, sig)); }
   };
 
   const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
@@ -444,18 +491,16 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
   const advertisementBody = async (res: Response, service: string, span: Span, sig: AbortSignal): Promise<Result<Uint8Array, PlyError>> => {
     if (!res.ok) return fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
     if (!headerText(res, 'content-type').startsWith(`application/x-${service}-advertisement`)) return fail('not_git', `unexpected content-type from ${service} advertisement`);
-    const maxPack = readLimit(limits, 'maxPackBytes');
-    if (!maxPack.ok) return maxPack;
     const declared = Number(res.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > maxPack.value) {
+    if (Number.isFinite(declared) && declared > maxPackBytes) {
       await cancelBody(res.body);
-      return err(limitExceeded('advertisement bytes', declared, maxPack.value));
+      return err(limitExceeded('advertisement bytes', declared, maxPackBytes));
     }
     const body = bodyOf(res);
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
       case 'body': {
-        const buf = await readCapped(body.stream, maxPack.value, { what: 'advertisement bytes', truncate: false, signal: sig });
+        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: sig });
         if (buf.ok) span.set({ 'git.response.bytes': buf.value.length, 'http.response.body.size': buf.value.length, ...redirectAttrs() });
         return buf;
       }
@@ -495,17 +540,16 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
       const asked = `${base}/info/refs?service=${service}`;
       span.set({ 'git.transport': 'http', 'http.request.method': 'GET', 'url.full': redactUrl(asked), 'server.address': hostOf(), ...redirectAttrs() });
       const sig = requestSignal();
-      if (!sig.ok) return sig;
       try {
-        const res = await fetchAdvertisement(asked, service, span, sig.value.signal);
+        const res = await fetchAdvertisement(asked, service, span, sig.signal);
         if (!res.ok) return res;
         if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
         const next = await redirectHop(res.value, asked, service, following);
         if (!next.ok) return next;
         if (next.value !== null) { rebase(next.value); continue; }
         initialSettled = true;
-        return await advertisementBody(res.value, service, span, sig.value.signal);
-      } finally { sig.value.cancel(); }
+        return await advertisementBody(res.value, service, span, sig.signal);
+      } finally { sig.cancel(); }
     }
     // oxlint-enable no-await-in-loop
   }
@@ -525,8 +569,9 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     return assertNever(body);
   };
   // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk. A failure is
-  // yielded as its Err and ends the stream (frames raises it).
-  async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
+  // yielded as its Err and ends the stream (frames raises it). A streamed body is read as the request goes out (undici
+  // requires `duplex: 'half'` for it; workerd accepts the field), chunked like git's own bodies past http.postBuffer.
+  async function* post(service: string, body: RequestBody, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
     if (policy.follow === 'initial' && !initialSettled) {
       const ad = await advertise(service, span);
       if (!ad.ok) { yield ad; return; }
@@ -534,17 +579,17 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
     const extra = { 'Git-Protocol': 'version=2', ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
-    span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': limits.requestTimeoutMs, ...redirectAttrs() });
+    span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': requestTimeoutMs, ...redirectAttrs() });
     const t0 = Date.now();
     const sig = requestSignal();
-    if (!sig.ok) { yield sig; return; }
     try {
-      const res = await send(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body) }, sig.value.signal);
+      const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: body.stream, duplex: 'half' };
+      const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig.signal, body instanceof Uint8Array ? 'manual' : settings.streamRedirect);
       if (!res.ok) { yield res; return; }
       const cache = headerText(res.value, PACK_CACHE_HEADER);
       span.set({ 'http.response.status_code': res.value.status, 'http.response.header.content-type': headerText(res.value, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
       if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
-      const stream = await postStream(res.value, service, target, sig.value.signal);
+      const stream = await postStream(res.value, service, target, sig.signal);
       if (!stream.ok) { yield stream; return; }
       let bytes = 0, chunks = 0, first = -1, maxChunk = 0;
       // The body read: a platform failure mid-stream is the network error it is.
@@ -552,12 +597,12 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
         if (chunks === 0) first = Date.now() - t0;
         bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
         yield ok(chunk);
-      } } catch (e) { yield err(wrapNet(e, sig.value.signal)); return; }
+      } } catch (e) { yield err(wrapNet(e, sig.signal)); return; }
       span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first, 'git.response.duration_ms': Date.now() - t0, 'http.response.body.size': bytes, 'http.response.chunks': chunks, 'http.response.chunk.max': maxChunk, 'http.response.first_byte_ms': first, 'http.response.duration_ms': Date.now() - t0 });
-    } finally { sig.value.cancel(); }
+    } finally { sig.cancel(); }
   }
 
-  return ok({
+  return {
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
@@ -565,7 +610,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     // (operation.ts); the low-level calls (lsRefs, fetchPack, push on this transport) span on it unconditionally.
     kind: 'http', get url(): string { return base; }, tracer: tracer === null ? new Tracer() : tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     // The stream: a failure (the request's, a frame's) is raised through the iterator, as a stream signals one.
-    async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
+    async *frames(service: string, body: RequestBody, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
       let st: PktState = pktInit();
       for await (const chunk of post(service, body, span, hints)) {
         const r = chunk.ok ? pktStep(st, chunk.value) : chunk;
@@ -578,5 +623,11 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     },
     // GET info/refs?service=… (capability advertisements). Returns the whole body; advertisements are small.
     advertise,
-  });
+  };
+}
+
+// The transport for `url`: its options parsed (parseHttpOptions), then built from the settings, which nothing re-checks.
+export function createTransport(url: string | URL, options: HttpOptions = {}): Result<HttpTransport, PlyError> {
+  const settings = parseHttpOptions(url, options);
+  return settings.ok ? ok(transportOf(settings.value)) : settings;
 }

@@ -23,6 +23,9 @@ const MUTATION_FILES = [
   'test/mutant-kill-tree.test.js',
   'test/mutant-kill-packs.test.js',
   'test/packstream.test.js',
+  'test/packwrite.test.js',
+  'test/push-commands.test.js',
+  'test/http-options.test.js',
   'test/describe-pack.test.js',
   'test/packindex.test.js',
   'test/space/push-outcome.test.js',
@@ -30,6 +33,8 @@ const MUTATION_FILES = [
   'test/option.test.js',
   'test/version-refname.test.js',
   'test/uprequest.test.js',
+  'test/parse-once.test.js',
+  'test/want-oracle.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

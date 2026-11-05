@@ -53,10 +53,32 @@ tagged unions.
 - Span `status` is a tagged union: only `code: 2` carries `message`.
 - `memtree.replaceOnce` returns a `Result`.
 - A listed ref (`LsRef`) always has `peeled` and `symref-target`, `null` when the line carries none.
-- `parsePack` objects carry `baseOffset`/`baseOid` as `null` for a full object; `resolvePack` no longer writes `.oid`
-  onto the caller's parsed objects.
+- `parsePack` objects (and `resolvePack`'s, and `describePack`'s rows) carry `base`, a tagged union (`{ tag: 'none' }`,
+  `{ tag: 'ofs', offset }`, `{ tag: 'ref', oid }`), in place of `baseOffset`/`baseOid`; `resolvePack` no longer writes
+  `.oid` onto the caller's parsed objects. A hand-built `resolvePack` input gives `base` the same way with plain values
+  (left out: none) and is parsed at resolvePack's edge: a bad type, base or data is `bad_request` (a type outside the
+  six used to be `pack_corrupt`).
+- A pack object's declared size is checked where its header is read (`readObjHeader`'s cap): `fetchObject` of an object
+  past `maxObjectSize` is `limit_exceeded` with `what: 'pack object size'` (was `'object size'`), as `parsePack` already
+  said, and the scan refuses it before reading an OFS/REF base.
+- `inflate()` is a collector over the pull decoder, so it refuses what the pull refuses: CINFO > 7 (`zlib: window size N
+  is not a zlib window`) and a back-reference past the declared window (`inflate: distance too far back`), both
+  `pack_corrupt` (the owner's ruling on #172).
+- A wide fetch whose want cannot be a blob (a tree or commit through the blob:none or unfiltered fallback) drops the
+  pack's blobs and their deltas as their headers arrive; they are counted in `git.fetch.wide.blobs`, at their declared
+  size in `git.fetch.wide.extra_bytes`.
 - `mergeBase` with `maxDepth: null`, and `inflate` with `expectedSize: null`, mean "not given" (the configured limit,
   no expected size) instead of `bad_request`.
+- Parse once (#156): a fetch want is an object id. A want git's upload-pack refuses ("expected to get oid": a ref name,
+  an abbreviation, an empty want) is `bad_request` (`what: 'want'`) before any request; an upper-case id is sent
+  lowercase (git reads either case as the same object); text after the id, which git ignores, is refused.
+- `lsRefsBody` refuses a prefix with a NUL, CR or LF (`what: 'ref prefix'`, as `lsRefs`) instead of writing it.
+- `encodeTree` refuses a mode other than the five git writes (`what: 'mode'`) and an id that is not 40 lowercase hex
+  (`what: 'oid'`) instead of writing them; `buildCommitObjects` refuses a new blob id that is not one.
+- `mergeBase` refuses an id that is not 40 lowercase hex (`what: 'oid'`) before any fetch; `walkPath` refuses its tree id
+  (fetchObject's refusal) even when there is no path to walk.
+- `validateSpec`'s plan carries `base` as `{ kind: 'ref', ref } | { kind: 'commit', oid }` (no `baseOid` flag);
+  `editFile` parses the spec once, so a retry reuses the first attempt's commit time.
 
 - 0.2.0: every exported function that can fail returns `Result<T, PlyError>`; `GitHttp` is built with
   `GitHttp.create(url, opts)` (a `Result`), and its methods return the free functions' Results.

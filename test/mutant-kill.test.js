@@ -551,7 +551,7 @@ test('pack header, ofs base, delta opcodes, and trailer', async () => {
   const ofsParsed = unwrap(parsePack(ofsPack));
   assert.equal(ofsParsed.stats.full, 1);
   assert.equal(ofsParsed.stats.ofsDelta, 1);
-  assert.equal(ofsParsed.objects[1].baseOffset, PACK_HEADER_BYTES);
+  assert.deepEqual(ofsParsed.objects[1].base, { tag: 'ofs', offset: PACK_HEADER_BYTES });
 
   const early = concat([
     Uint8Array.of(...PACK_SIGNATURE, 0, 0, 0, PACK_VERSION, 0, 0, 0, 1),

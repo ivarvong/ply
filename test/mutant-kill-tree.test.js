@@ -393,7 +393,7 @@ test('pushTree: a repeat push reads only the changed trees, sends deltas and onl
   assert.deepEqual(r.fetches().map(f => [f.wants[0], f.filter, f.deepen]), [[GIT.commit, 'tree:0', 1], [GIT.root, 'tree:0', 0], [GIT.src, 'tree:0', 0]]);
   const [p] = r.pushes();
   assert.deepEqual(p.commands, [{ old: GIT.commit, new: GIT.commit2, ref: 'refs/heads/main' }]);
-  assert.deepEqual(p.pack.objects.map(o => [o.type, o.baseOid ?? null]), [[TYPE.COMMIT, null], [TYPE.REF_DELTA, GIT.root], [TYPE.REF_DELTA, GIT.src], [TYPE.BLOB, null]]);
+  assert.deepEqual(p.pack.objects.map(o => [o.type, o.base.tag === 'ref' ? o.base.oid : null]), [[TYPE.COMMIT, null], [TYPE.REF_DELTA, GIT.root], [TYPE.REF_DELTA, GIT.src], [TYPE.BLOB, null]]);
   const diff = e.span('git.push_tree.diff');
   // have: the old root, its five entries, and src's two
   assert.deepEqual([diff.attrs['git.push_tree.diff.trees_read'], diff.attrs['git.push_tree.diff.cache_hits'], diff.attrs['git.push_tree.diff.have']], [2, 0, 8]);
@@ -1382,7 +1382,7 @@ test('the details each operation stamps: prefixes, filters, nested paths, caller
   const res = await unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/lib/b.js': 'B\n' }, author: A, message: 'deploy', time: T0 }, e.opts));
   assert.deepEqual(r.log.filter(x => x.command === 'ls-refs').map(x => x.prefixes), [['refs/heads/main']]);
   assert.equal(res.treesRead, 3);
-  assert.deepEqual(r.pushes()[0].pack.objects.map(o => o.baseOid ?? null), [null, GIT.root, GIT.src, GIT.lib, null]);
+  assert.deepEqual(r.pushes()[0].pack.objects.map(o => (o.base.tag === 'ref' ? o.base.oid : null)), [null, GIT.root, GIT.src, GIT.lib, null]);
   await rejects(unwrapAsync(pushTree('http://fake/r.git', { files: { a: '1', b: '2' }, author: A, message: 'm', time: T0 }, { ...env(r).opts, limits: withLimits({ maxPackObjects: 1 }) })), 'limit_exceeded', 'files 2 exceeds limit 1');
   // a create whose tree equals the base's reads no parent tree (the server has the whole closure)
   const copy = await unwrapAsync(pushTree('http://fake/r.git', { ref: 'refs/heads/copy2', base: 'refs/heads/main', files: { ...FILES(), 'src/lib/b.js': 'B\n' }, author: A, message: 'm', time: T0 }, env(r).opts));

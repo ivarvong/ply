@@ -9,11 +9,20 @@
 //   fetch-object     fetchObject of a SIZE-byte blob through the http transport (fetchSingle) bound: peakBound(fetch-object)
 //   fetch-drain      the same response with every pack chunk dropped: the transport's own share
 //   fetch-buffered   the same bytes read the way fetchSingle did before #172: the zlib member collected, then inflate()
+//   inflate-whole    inflate() of a SIZE-byte stored member in hand, with its declared size                  bound: SIZE + peakBound(inflate)
+//   inflate-capped   the same without a declared size (the output buffer grows)
+//   fetch-wide       fetchObject of a tree through the blob:none fallback (fetchWide): a pack of COUNT 4 KiB trees, every
+//                    one retained (checked and harvested)                                                  bound: peakBound(fetch-pack, R)
+//   fetch-wide-blobs the same through the unfiltered fallback, the pack also holding COUNT/32 256 KiB blobs the tree want
+//                    does not need (R is the trees)
+//   fetch-pack       fetchPack of the fetch-wide pack (fetchPackOnce, every object parsed and resolved)      bound: peakBound(fetch-pack, R)
 import crypto from 'node:crypto';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, declaredBound, zlibWrap } from '../../src/inflatestream.js';
 import { inflate } from '../../src/inflate.js';
 import { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, packScanOpts } from '../../src/packstream.js';
 import { fetchObject, packStream, spInit, spStep, spFinish } from '../../src/fetch.js';
+import { fetchPack } from '../../src/fetchpack.js';
+import zlib from 'node:zlib';
 import { createTransport } from '../../src/http.js';
 import { encodeObjHeader } from '../../src/pack.js';
 import { concat } from '../../src/bytes.js';
@@ -29,12 +38,31 @@ const STORED = 65_535;
 const FEED = 16_384;
 const ADLER_MOD = 65_521;
 
+// Samples inside synchronous code too: every SAMPLE_BYTES of new Uint8Arrays (a buffer, not a view) the code under test
+// allocates, a sample (gc, then the live arrayBuffers). Without it a cell sees only the points where its input generator
+// runs, and a parse that joins the pack after the stream ended peaks between them. ply reads the global `Uint8Array` at
+// call time, so the subclass sees its allocations; instanceof still answers for every Uint8Array.
+const SAMPLE_BYTES = 256 * 1024;
+const NativeU8 = globalThis.Uint8Array;
+let measuring = false, sampling = false, allocated = 0;
+class SampledU8 extends NativeU8 {
+  constructor(...args) {
+    super(...args);
+    if (measuring && !sampling && typeof args[0] === 'number') {
+      allocated += args[0];
+      if (allocated >= SAMPLE_BYTES) { allocated = 0; sampling = true; note(); sampling = false; }
+    }
+  }
+  static [Symbol.hasInstance](v) { return v instanceof NativeU8; }
+}
+globalThis.Uint8Array = SampledU8;
+
 const must = r => { if (r.ok) return r.value; throw new Error(`${r.error.code}: ${r.error.message}`); };
 function ab() { global.gc(); global.gc(); return process.memoryUsage().arrayBuffers; }
 let base = 0;
 let peak = 0;
 const note = () => { const a = ab(); if (a > peak) peak = a; };
-function start() { base = ab(); peak = base; }
+function start() { base = ab(); peak = base; measuring = true; }
 
 // The blob's bytes from `at`, n of them, in pieces of at most FEED bytes (as a transport hands a body over): a
 // pattern, so nothing has to be kept to know them, and the generator holds one piece.
@@ -182,7 +210,112 @@ async function fetchBuffered() {
   return { bound: peakBound({ kind: 'fetch-object', output: SIZE }), zlib: zlib.length };
 }
 
-const run = { 'inflate-drop': inflateDrop, 'scan-drop': scanDrop, 'fetch-object': fetchStreamed, 'fetch-drain': fetchDrain, 'fetch-buffered': fetchBuffered }[mode];
+// inflate() of a member in hand: the input is the caller's (allocated before the cell starts), the output and what the
+// decoder holds are the cell's.
+// The member in one buffer, written piece by piece (no array of the pieces outlives the copy).
+function memberInHand(size) {
+  let n = 0;
+  for (const p of storedMember(size)) n += p.length;
+  const member = new Uint8Array(n);
+  let o = 0;
+  for (const p of storedMember(size)) { member.set(p, o); o += p.length; }
+  return member;
+}
+function inflateWhole(declared) {
+  const member = memberInHand(SIZE);
+  start();
+  const out = must(inflate(member, 0, declared ? { expectedSize: SIZE } : {}));
+  note();
+  if (out.out.length !== SIZE) throw new Error(`inflated ${out.out.length}`);
+  return { bound: SIZE + peakBound({ kind: 'inflate' }), member: member.length };
+}
+
+// COUNT trees of 128 entries (4,120 bytes each, distinct), and for `blobs` one 256 KiB blob per 32 trees: the pack's
+// pieces, each object's zlib member made as it is read. R is the trees' bytes, what a tree want retains.
+const TREE_ENTRIES = 128;
+function treeBytes(i) {
+  const te = new TextEncoder();
+  const parts = [];
+  for (let j = 0; j < TREE_ENTRIES; j++) {
+    parts.push(te.encode(`100644 f${String(j).padStart(3, '0')}\0`));
+    parts.push(new Uint8Array(crypto.createHash('sha1').update(`${i}/${j}`).digest()));
+  }
+  return concat(parts);
+}
+const objHash = (type, data) => crypto.createHash('sha1').update(`${type} ${data.length}\0`).update(data).digest('hex');
+// The blobs' zlib members, made before a cell starts measuring (each 256 KiB blob compresses to a few hundred bytes), so
+// the generator never holds a blob.
+const BLOB = 256 * 1024;
+const blobMembers = n => Array.from({ length: n }, (_, i) => new Uint8Array(zlib.deflateSync(new Uint8Array(BLOB).map((_, k) => (k * 131 + i) & 255), { level: 9 })));
+function* widePieces(count, blobs) {
+  const total = count + blobs.length;
+  yield packHead(total);
+  for (let i = 0; i < count; i++) {
+    const t = treeBytes(i);
+    yield encodeObjHeader(TYPE.TREE, t.length);
+    yield new Uint8Array(zlib.deflateSync(t));
+    if (i % 32 === 31 && blobs.length > (i >> 5)) {
+      yield encodeObjHeader(TYPE.BLOB, BLOB);
+      yield blobs[i >> 5];
+    }
+  }
+}
+// A v2 response framing `pieces` (a pack generator) into band-1 pkt-lines as it is read.
+function framed(pieces) {
+  const te = new TextEncoder();
+  const frame = payload => { const f = new Uint8Array(4 + payload.length); f.set(te.encode((payload.length + 4).toString(16).padStart(4, '0'))); f.set(payload, 4); return f; };
+  const iter = (function* () {
+    yield frame(te.encode('packfile\n'));
+    let pending = new Uint8Array(0);
+    const room = PKT_MAX_PAYLOAD - 1;
+    for (const p of sealed(pieces)) {
+      pending = concat([pending, p]);
+      while (pending.length >= room) { yield frame(concat([Uint8Array.of(1), pending.subarray(0, room)])); pending = pending.slice(room); }
+    }
+    if (pending.length) yield frame(concat([Uint8Array.of(1), pending]));
+    yield te.encode('0000');
+  })();
+  let frames = 0;
+  return new ReadableStream({ pull(c) { const n = iter.next(); if (n.done) { c.close(); return; } if (++frames % 16 === 0) note(); c.enqueue(n.value); } });
+}
+async function fetchWideCell(withBlobs) {
+  const count = SIZE;
+  const blobs = withBlobs ? blobMembers(Math.floor(count / 32)) : [];
+  const want = objHash('tree', treeBytes(0));
+  const retained = count * treeBytes(0).length;
+  const fetchImpl = async () => new Response(framed(widePieces(count, blobs)), { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+  const t = must(createTransport('https://git.example/repo.git', { tracer: new Tracer(), fetchImpl, quirks: { treeFilter: withBlobs ? 'none' : 'blob:none' } }));
+  start();
+  const got = must(await fetchObject(t, { oid: want, filter: 'tree:0', expectType: TYPE.TREE }));
+  note();
+  if (got.oid !== want) throw new Error(`fetched ${got.oid}`);
+  return { bound: peakBound({ kind: 'fetch-pack', retained }), retained, harvested: t.objects.size, blobs: blobs.length };
+}
+// The same response read through the transport and v2Step with every pack chunk dropped: the transport's own share.
+async function fetchWideDrain(withBlobs) {
+  const count = SIZE;
+  const blobs = withBlobs ? blobMembers(Math.floor(count / 32)) : [];
+  const fetchImpl = async () => new Response(framed(widePieces(count, blobs)), { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+  const t = must(createTransport('https://git.example/repo.git', { tracer: new Tracer(), fetchImpl, quirks: {} }));
+  start();
+  let bytes = 0;
+  for await (const chunk of packStream(t, { wants: ['0'.repeat(40)], filter: '' }, { set() {}, event() {}, error() {} })) bytes += chunk.length;
+  note();
+  return { bound: peakBound({ kind: 'sideband' }), bytes, blobs: blobs.length };
+}
+async function fetchPackCell() {
+  const count = SIZE;
+  const retained = count * treeBytes(0).length;
+  const fetchImpl = async () => new Response(framed(widePieces(count, [])), { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+  const t = must(createTransport('https://git.example/repo.git', { tracer: new Tracer(), fetchImpl, quirks: {} }));
+  start();
+  const got = must(await fetchPack(t, { wants: [objHash('tree', treeBytes(0))], filter: '' }));
+  note();
+  if (got.objects.size !== count) throw new Error(`fetched ${got.objects.size}`);
+  return { bound: peakBound({ kind: 'fetch-pack', retained }), retained, objects: got.objects.size };
+}
+
+const run = { 'inflate-whole': () => inflateWhole(true), 'inflate-capped': () => inflateWhole(false), 'fetch-wide': () => fetchWideCell(false), 'fetch-wide-blobs': () => fetchWideCell(true), 'fetch-wide-drain': () => fetchWideDrain(false), 'fetch-wide-blobs-drain': () => fetchWideDrain(true), 'fetch-pack': fetchPackCell, 'inflate-drop': inflateDrop, 'scan-drop': scanDrop, 'fetch-object': fetchStreamed, 'fetch-drain': fetchDrain, 'fetch-buffered': fetchBuffered }[mode];
 if (!run) throw new Error(`unknown mode ${mode}`);
 const report = await run();
 const m = process.memoryUsage();

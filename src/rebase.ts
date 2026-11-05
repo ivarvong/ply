@@ -19,18 +19,19 @@ import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import type { Rediff } from './linemerge.js';
-import type { AttributeSource, Author, Commit, MergeBlob, OpContext, PackObject, Signer, Transport, TreeCache, Trees } from './merge.js';
+import type { AttributeSource, Author, Commit, MergeBlob, OpContext, PackObject, Parents, Signer, Transport, TreeCache, Trees } from './merge.js';
+import { parseOid, type Oid } from './oid.js';
 import { fail } from './errors.js';
 import { assertNever, err, getOrElse, map, mapOption, none, ok, some } from './result.js';
 import { at, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
-import { mergeBase, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
+import { mergeBaseOf, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
 import { encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
-import { short, commitAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
+import { short, commitAt, givenOid, assertCommit, stamp } from './mergeio.js';
 import { limitError, readLimit, LIMIT_REBASE_COMMITS } from './limits.js';
 
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
@@ -46,11 +47,12 @@ export function carriedExtra(extra: readonly string[]): string[] {
   return out;
 }
 
-export type ChainCommit = Commit & { readonly oid: string };
+export type ChainCommit = Commit & { readonly oid: Oid };
 // Pure: the linear chain of commits from `base` (exclusive) to `tip`, oldest first; a merge commit in it is not_linear.
-export function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, base: string | null, max: number = LIMIT_REBASE_COMMITS): Result<ChainCommit[], PlyError> {
-  const chain: ChainCommit[] = [];
-  // a commit in the chain has exactly one parent: the '' never stands
+// Over node names K, as bestBases: rebaseBranch walks mergeBase's Oids, and the chain's ids are those Oids.
+export function linearChain<K extends string, C extends Parents<K>>(commits: ReadonlyMap<K, C>, tip: K, base: K | null, max: number = LIMIT_REBASE_COMMITS): Result<Array<C & { readonly oid: K }>, PlyError> {
+  const chain: Array<C & { readonly oid: K }> = [];
+  // a commit in the chain has exactly one parent: the fallback (the commit itself) never stands
   for (let c = tip; c !== base;) {
     const info = mapGet(commits, c);
     if (info.tag === 'none') return fail('internal', `commit ${c} not in the fetched history`);
@@ -58,7 +60,7 @@ export function linearChain(commits: ReadonlyMap<string, Commit>, tip: string, b
     if (parents.length !== 1) return fail('not_linear', `${c} has ${parents.length} parents; only linear branches are rebased`);
     chain.push({ oid: c, ...info.value });
     if (chain.length > max) return err(limitError('rebase chain', chain.length, max));
-    c = getOrElse(at(parents, 0), '');
+    c = getOrElse(at(parents, 0), c);
   }
   return ok(chain.toReversed());
 }
@@ -185,7 +187,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const target = targetAt.value;
     if (ontoOid.tag === 'some') { const c = await assertCommit(t, ontoOid.value, 'onto'); if (!c.ok) return c; }
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
-    const found = await mergeBase(t, tip, target);
+    const found = await mergeBaseOf(t, tip, target);
     if (!found.ok) return found;
     const { bases, commits, verdict } = found.value;
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
@@ -220,9 +222,9 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const committerLine = ident(committerPerson); if (!committerLine.ok) return committerLine;
     const who: string = committerLine.value;
     // a commit's tree by oid, among those in hand; a chain commit's one parent is in hand (linearChain)
-    const treeOf = (oid: string): string | null => getOrElse(mapOption(mapGet(commits, oid), c => c.tree), null);
-    const parentTree = (c: Commit): string | null => treeOf(getOrElse(at(c.parents, 0), ''));
-    const out = replay(rediff, attributes); const objects: PackObject[] = []; let cur = target; let curTree = targetTree; const replayed: Replayed[] = []; const dropped: string[] = [];
+    const treeOf = (oid: Oid): string | null => getOrElse(mapOption(mapGet(commits, oid), c => c.tree), null);
+    const parentTree = (c: Commit): string | null => getOrElse(mapOption(at(c.parents, 0), treeOf), null);
+    const out = replay(rediff, attributes); const objects: PackObject[] = []; let cur: string = target; let curTree = targetTree; const replayed: Replayed[] = []; const dropped: string[] = [];
     // tip !== base, so the chain has a commit
     const first = at(chain, 0);
     const last = at(chain, chain.length - 1);
@@ -300,12 +302,12 @@ function emptyPolicy(value: unknown): Result<EmptyPolicy, ErrorOf<'bad_request'>
 
 // A root's missing parent is the empty tree (mergeTrees' null). git's first parent of a parentless commit.
 // The commit `ref` points at, or not_found.
-async function refTip(t: Transport, ref: string): Promise<Result<string, PlyError>> {
+async function refTip(t: Transport, ref: string): Promise<Result<Oid, PlyError>> {
   const listed = await lsRefs(t, [ref]); if (!listed.ok) return listed;
   const tip = refOid(listed.value.refs, ref);
   return tip.tag === 'some' ? ok(tip.value) : fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
 }
-async function parentTreeAt(t: Transport, parents: readonly string[]): Promise<Result<string | null, PlyError>> {
+async function parentTreeAt(t: Transport, parents: readonly Oid[]): Promise<Result<string | null, PlyError>> {
   const parentOid = at(parents, 0);
   if (parentOid.tag === 'none') return ok(null);
   return map(await commitAt(t, parentOid.value), c => c.tree);
@@ -339,13 +341,15 @@ export async function pickCommit(url: string, spec: PickSpec, options: RebaseOpt
   const authorStamp = author === null ? ok(committerPerson) : stamp(author, time); if (!authorStamp.ok) return authorStamp;
   const revertAuthor: ValidatedIdent = authorStamp.value;
   if (message !== null) { const checked = validateMessage(message); if (!checked.ok) return checked; }
-  if (!isOid(commit)) return fail('bad_request', 'commit must be a 40-hex oid');
+  // parsed once, here
+  const pickedId = parseOid(commit);
+  if (!pickedId.ok) return fail('bad_request', 'commit must be a 40-hex oid');
   const op = revert ? 'revert' : 'cherry_pick';
   const name = `git.${op}`;
   return operation(op, url, operationOpts(options, { [`${name}.ref`]: ref, [`${name}.commit`]: commit, [`${name}.empty`]: empty }), async ({ t, outcome }: OpContext): Promise<Result<PickOutcome, PlyError>> => {
     const tipNow = await refTip(t, ref); if (!tipNow.ok) return tipNow;
     const target = tipNow.value;
-    const [targetCommit, picked] = await Promise.all([commitAt(t, target), commitAt(t, commit)]);
+    const [targetCommit, picked] = await Promise.all([commitAt(t, target), commitAt(t, pickedId.value)]);
     if (!targetCommit.ok) return targetCommit;
     if (!picked.ok) return picked;
     const tInfo: Commit = targetCommit.value;

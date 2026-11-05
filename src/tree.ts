@@ -17,12 +17,12 @@ import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
-import { fetchObject } from './fetch.js';
+import { objectAt } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
 import { parseRefname } from './refname.js';
 import type { Refname } from './refname.js';
 import { makeDelta } from './packresolve.js';
-import { parseCommit, parseTree, encodeTree, encodeCommit, hashObject, ident, TYPE } from './objects.js';
+import { parseCommit, parseTree, encodeEntries, encodeCommit, hashObject, ident, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
 import type { Limits } from './limits.js';
@@ -35,21 +35,24 @@ import type { Span } from './otel.js';
 import type { FetchedObject as Fetched } from './fetch.js';
 import type { PackObject, PushResult as Pushed } from './push.js';
 import type { Transport } from './transport.js';
-import type { TreeEntry } from './objects.js';
+import type { EntryOf, Mode, TreeEntry } from './objects.js';
+import { parseOid, type Oid } from './oid.js';
 import type { Input } from './absent.js';
 import { fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { err, getOrElse, map, mapOption, matchOption, ok } from './result.js';
 import type { Result } from './result.js';
 
-const OID = /^[0-9a-f]{40}$/;
-const BLOB_MODE_SET: ReadonlySet<string> = new Set(BLOB_MODES);
+const BLOB_MODE_SET: ReadonlySet<unknown> = new Set(BLOB_MODES);
+// A file's mode, parsed: one of the three blob modes.
+const isBlobMode = (mode: unknown): mode is (typeof BLOB_MODES)[number] => BLOB_MODE_SET.has(mode);
 
 // The caller's files, in either shape (below): a record or Map of path → content, or an iterable of file specs.
 export type FileSpec = { readonly path: string } & Input<{ readonly mode: string; readonly data: string | Uint8Array; readonly oid: string }>;
 export type FileContent = string | Uint8Array | Omit<FileSpec, 'path'>;
 export type TreeFiles = Readonly<Record<string, FileContent>> | ReadonlyMap<string, FileContent> | Iterable<FileSpec>;
 // One checked file: its path (and components), mode, oid, and bytes. A gitlink has no bytes (and no `data` key).
-type EntryBase = { readonly path: string; readonly comps: readonly string[]; readonly mode: string; readonly oid: string };
+// Mode and oid are parsed once, here (fileEntries): buildTree encodes them as they are.
+type EntryBase = { readonly path: string; readonly comps: readonly string[]; readonly mode: Mode; readonly oid: Oid };
 export type BlobFileEntry = EntryBase & { readonly data: Uint8Array };
 export type FileEntry = EntryBase | BlobFileEntry;
 const isBlobEntry = (e: FileEntry): e is BlobFileEntry => 'data' in e;
@@ -106,14 +109,15 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
     // a mode left out is a file's; any other value (null included) is the caller's, and checked
     const mode: unknown = getOrElse<unknown>(fromNullable(spec.mode), MODE_BLOB);
     if (mode === MODE_COMMIT) {
-      const oid = getOrElse(fromNullish(spec.oid), '');
-      if (!OID.test(oid) || fromNullable(spec.data).tag === 'some') return fail('bad_request', `${path}: a gitlink (160000) takes a 40-hex oid and no data`, { what: 'gitlink', path });
+      // a missing oid is no id either
+      const oid = parseOid(spec.oid);
+      if (!oid.ok || fromNullable(spec.data).tag === 'some') return fail('bad_request', `${path}: a gitlink (160000) takes a 40-hex oid and no data`, { what: 'gitlink', path });
       const charged = charge(0);
       if (!charged.ok) return charged;
-      out.push({ path, comps: comps.value, mode, oid });
+      out.push({ path, comps: comps.value, mode, oid: oid.value });
       continue;
     }
-    if (typeof mode !== 'string' || !BLOB_MODE_SET.has(mode)) return fail('bad_request', `${path}: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path });
+    if (!isBlobMode(mode)) return fail('bad_request', `${path}: mode ${JSON.stringify(mode)} is not 100644, 100755, 120000 or 160000`, { what: 'mode', path });
     const raw: unknown = spec.data;
     if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) return fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
     const data = bytesOf(raw);
@@ -128,8 +132,8 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
 }
 
 // A directory entry of a built tree; the built trees by directory ('' is the root) and the blobs by oid.
-export type DirEntry = { readonly mode: string; readonly name: string; readonly oid: string };
-export type BuiltDir = { readonly oid: string; readonly data: Uint8Array; readonly entries: readonly DirEntry[] };
+export type DirEntry = EntryOf;
+export type BuiltDir = { readonly oid: Oid; readonly data: Uint8Array; readonly entries: readonly DirEntry[] };
 export type BuiltTree = { readonly root: string; readonly trees: ReadonlyMap<string, BuiltDir>; readonly blobs: ReadonlyMap<string, Uint8Array> };
 // Pure: the trees of `entries`, bottom up. Returns { root, trees: Map(dir → { oid, data, entries }), blobs: Map(oid →
 // data) }; '' is the root directory. A path given twice, or used as both a file and a directory, is the caller's
@@ -163,8 +167,8 @@ export function buildTree(entries: readonly FileEntry[], limits: Limits = DEFAUL
   // oxlint-disable-next-line unicorn/consistent-function-scoping -- bundle budget: where the JS had it
   const depth = (dir: string): number => (dir === '' ? 0 : dir.split('/').length);
   for (const dir of [...dirs.keys()].toSorted((a, b) => depth(b) - depth(a))) {
-    const list = [...(dirs.get(dir) as Map<string, DirEntry | null>)].map(([name, e]) => (e === null ? { mode: MODE_TREE, name, oid: (trees.get(dir ? `${dir}/${name}` : name) as BuiltDir).oid } : e));
-    const encoded = encodeTree(list);
+    const list = [...(dirs.get(dir) as Map<string, DirEntry | null>)].map(([name, e]): DirEntry => (e === null ? { mode: MODE_TREE, name, oid: (trees.get(dir ? `${dir}/${name}` : name) as BuiltDir).oid } : e));
+    const encoded = encodeEntries(list);
     if (!encoded.ok) return encoded;
     const data = encoded.value;
     trees.set(dir, { oid: hashObject('tree', data), data, entries: list });
@@ -215,7 +219,7 @@ export type TreePlan = {
   readonly files: number;
   readonly author: Ident;
   readonly message: string;
-  readonly head: string | null;
+  readonly head: Oid | null;
 };
 // The author as validateIdent reads it: a missing author has no fields (and is refused there); a zone left out is UTC,
 // any other value is the caller's and checked.
@@ -241,7 +245,10 @@ export function validateTreeSpec(spec: TreeSpec, limits: Limits, head: string | 
   if (!person.ok) return person;
   const checkedMessage = validateMessage(message);
   if (!checkedMessage.ok) return checkedMessage;
-  if (head !== null && !OID.test(head)) return fail('bad_request', 'head must be a 40-hex oid');
+  // the head hint, parsed once (as String() renders a JS caller's value)
+  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- see above
+  const hint = head === null ? ok(null) : parseOid(String(head));
+  if (!hint.ok) return fail('bad_request', 'head must be a 40-hex oid');
   // maxPushBytes is charged per entry as fileEntries reads them, before buildTree retains the blobs
   const entries = fileEntries(files, limits);
   if (!entries.ok) return entries;
@@ -250,7 +257,7 @@ export function validateTreeSpec(spec: TreeSpec, limits: Limits, head: string | 
   // validatePushRef passed, so the ref is a refname
   const branded = parseRefname(ref);
   if (!branded.ok) return branded;
-  return ok(Object.freeze({ ref: branded.value, base, create: base !== ref, built: built.value, files: entries.value.length, author: person.value, message, head }));
+  return ok(Object.freeze({ ref: branded.value, base, create: base !== ref, built: built.value, files: entries.value.length, author: person.value, message, head: hint.value }));
 }
 
 export type PushTreeResult = {
@@ -290,20 +297,20 @@ type Read = Known & { read: number; hits: number };
 // Effect: the parent's trees wherever the new tree differs, recursing only into directories present on both sides with
 // different oids. Every oid those trees name joins `have`. On a host that refuses tree:0 the first fetch is a blob:none
 // pack that brings every tree of the subtree (fetch.js harvests them), so the rest are answered without a round trip.
-async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: BuiltTree, oldTree: string | null, limits: Limits): Promise<Result<Read, PlyError>> {
+async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: BuiltTree, oldTree: Oid | null, limits: Limits): Promise<Result<Read, PlyError>> {
   const have = new Set<string>(), old = new Map<string, { readonly oid: string; readonly data: Uint8Array }>();
   const k = { have, old, read: 0, hits: 0 };
   if (oldTree === null) return ok(k);
   have.add(oldTree);
-  const read = async (oid: string): Promise<Result<Uint8Array, PlyError>> => {
+  const read = async (oid: Oid): Promise<Result<Uint8Array, PlyError>> => {
     const cached = mapGet(cache, oid);
     if (cached.tag === 'some') { k.hits++; return ok(cached.value); }
-    const got = await fetchObject(t, { oid, expectType: TYPE.TREE });
+    const got = await objectAt(t, oid, { expectType: TYPE.TREE });
     if (!got.ok) return got;
     cache.set(oid, got.value.data); k.read++;
     return ok(got.value.data);
   };
-  const visit = async (dir: string, oid: string): Promise<Result<null, PlyError>> => {
+  const visit = async (dir: string, oid: Oid): Promise<Result<null, PlyError>> => {
     const got = await read(oid);
     if (!got.ok) return got;
     const data = got.value;
@@ -335,7 +342,7 @@ function baseFound(s: TreePlan, resolved: string | null): Result<null, ErrorOf<'
   return ok(null);
 }
 
-type Attempt = { readonly head: string | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null };
+type Attempt = { readonly head: Oid | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null };
 // editFile's options without allowLfsPointer (and retry, which pushTree does not read: a cas_conflict is redone once).
 export type PushTreeOptions = Omit<EditOptions, 'allowLfsPointer'>;
 type TreeConfig = Omit<EditConfig, 'allowLfsPointer' | 'retry'>;
@@ -351,13 +358,13 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
   // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
   return operation('push_tree', url, { ...options, attrs, onFinish: () => ({ 'git.push_tree.head.outcome': hint === null ? '' : hint }), link: linkTo === null ? null : { span: linkTo, kind: 'retry_of' } }, async ({ t, root, outcome }) => {
     // oxlint-disable-next-line promise-function-async -- fetchObject's promise, returned as is
-    const commitOf = (oid: string): Promise<Result<Fetched, PlyError>> => fetchObject(t, { oid, expectType: TYPE.COMMIT, deepen: 1 });
+    const commitOf = (oid: Oid): Promise<Result<Fetched, PlyError>> => objectAt(t, oid, { expectType: TYPE.COMMIT, deepen: 1 });
     // An attempt's Err leaves with its attempt number and how the hint turned out: retryLink reads them for the retry.
     // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
     const done = await (async (): Promise<Result<PushTreeResult, PlyError>> => {
     // 1. the parent: ls-refs, overlapped with the hinted commit. An absent base is a new ref only when base = ref.
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
-    const [resolvedR, speculative] = await Promise.all([lsRefs(t, [s.base]).then(r => map(r, ({ refs }) => getOrElse<string | null>(mapOption(mapGet(refs, s.base), x => x.oid), null))), head ? commitOf(head) : null]);
+    const [resolvedR, speculative] = await Promise.all([lsRefs(t, [s.base]).then(r => map(r, ({ refs }) => getOrElse<Oid | null>(mapOption(mapGet(refs, s.base), x => x.oid), null))), head ? commitOf(head) : null]);
     if (!resolvedR.ok) return resolvedR;
     const resolved = resolvedR.value;
     const found = baseFound(s, resolved);
@@ -368,7 +375,7 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     const strict = strictParent(strictHead, decided, s.base, head);
     if (!strict.ok) return strict;
     if (speculative !== null && !speculative.ok) root.set({ 'git.push_tree.head.speculative_error': speculative.error.code });
-    let oldTree: string | null = null;
+    let oldTree: Oid | null = null;
     if (parent !== null) {
       const commitGot = decided.hint === 'used' && speculative !== null && speculative.ok ? speculative : await commitOf(parent);
       if (!commitGot.ok) return commitGot;
@@ -432,7 +439,7 @@ export async function pushTree(url: string, spec: TreeSpec, options: PushTreeOpt
   const planned = validateTreeSpec(spec, limitsOf(options), cfg.head);
   if (!planned.ok) return planned;
   const s = planned.value;
-  const first = await pushTreeOnce(url, s, options, cfg, { head: cfg.head, attempt: 0, linkTo: null, hintWas: null });
+  const first = await pushTreeOnce(url, s, options, cfg, { head: s.head, attempt: 0, linkTo: null, hintWas: null });
   // only attempt 0's cas_conflict is redone, once: the retry's Err is the answer
   // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
   if (first.ok || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
