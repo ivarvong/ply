@@ -328,6 +328,7 @@ function stepHeader(st: PackScan): Step {
 }
 // A read cut by the end of what has arrived waits for more; on a closed input it is the refusal parsePack gives.
 function waitOr(st: PackScan, e: HeaderError): Step {
+  // Stryker disable next-line ConditionalExpression: only a pack_corrupt short read carries reason short_read; the code test is for the compiler
   if (e.code === 'pack_corrupt' && e.reason === 'short_read' && !st.ended) return NEED;
   return refuse(st, e);
 }

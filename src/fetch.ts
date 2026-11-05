@@ -645,6 +645,7 @@ function declaredPackCount(pack: Uint8Array): number | null {
 // A multi-object answer to a commit want: the wanted object, once its type is a commit. A tree, blob, or tag is
 // not_found from refuseNonCommit. Null means the single-object parser should refuse the pack (it does not hold the want).
 function commitFromPack(t: Transport, oid: string, parsed: ParsedPack, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
+  // Stryker disable next-line ArrowFunction: null and a bare return both mean the base is not in the pack
   const resolved = resolvePack(parsed, () => null, t.limits);
   if (!resolved.ok) return resolved;
   const objects: Map<string, PackObject> = resolved.value.objects;
@@ -671,6 +672,7 @@ export async function collectWire(it: PackFetch, c: PackCollector): Promise<Wire
     // oxlint-disable-next-line no-await-in-loop -- the generator is drained in order; its return value is the v2 state
     const n = await it.next();
     if (n.done === true) return { state: n.value, pack: held.ok ? packCollectEnd(c) : held };
+    // Stryker disable next-line ConditionalExpression: a refused scan answers every later feed with the same refusal
     if (held.ok) held = packCollectFeed(c, n.value);
   }
 }
@@ -693,6 +695,8 @@ async function commitWire(t: Transport, wire: PackFetch, feed: (chunk: Uint8Arra
     const caps = packCaps({ limits: t.limits });
     if (!caps.ok) return caps;
     const c = packCollectOpen(caps.value, true);
+    // the caps passed packCaps, so the scan opens (packScanOpen)
+    // Stryker disable next-line ConditionalExpression,BlockStatement: see above
     if (!c.ok) return c;
     at.route = { tag: 'multi', c: c.value, head: bytes.subarray(0, enough) };
     return packCollectFeed(c.value, bytes);
@@ -703,6 +707,7 @@ async function commitWire(t: Transport, wire: PackFetch, feed: (chunk: Uint8Arra
       case 'multi': return packCollectFeed(at.route.c, chunk);
       case 'head': {
         const head = concat([at.route.head, chunk]);
+        // Stryker disable next-line ConditionalExpression,EqualityOperator: deciding on more bytes reads the same pack (the header is its first 12)
         if (head.length < enough) { at.route = { tag: 'head', head }; return UNIT; }
         return open(head);
       }
@@ -877,7 +882,9 @@ type Dropped = { readonly offsets: Set<number>; bytes: number };
 function wideKeep(want: Wide, dropped: Dropped): (h: ScannedHeader) => boolean {
   const dropBlobs = want.expectType === TYPE.COMMIT || want.expectType === TYPE.TREE;
   return (h: ScannedHeader): boolean => {
-    const blob = (h.base.tag === 'none' && h.type === TYPE.BLOB) || (h.base.tag === 'ofs' && dropped.offsets.has(h.base.offset));
+    // a header typed blob is a full object (a delta's type is OFS_DELTA or REF_DELTA); only an OFS base has an offset
+    // Stryker disable next-line ConditionalExpression,LogicalOperator: a base that is not OFS has no offset, which no dropped offset equals
+    const blob = h.type === TYPE.BLOB || (h.base.tag === 'ofs' && dropped.offsets.has(h.base.offset));
     if (!dropBlobs || !blob) return true;
     dropped.offsets.add(h.offset);
     dropped.bytes += h.size;
@@ -888,9 +895,11 @@ function wideKeep(want: Wide, dropped: Dropped): (h: ScannedHeader) => boolean {
 // on a base outside it is counted, not refused.
 function wideResolve(t: Transport, parsed: ParsedPack, dropped: Dropped): Result<{ readonly objects: Map<string, PackObject>; readonly unresolved: number }, PlyError> {
   if (dropped.offsets.size === 0) {
+    // Stryker disable next-line ArrowFunction: null and a bare return both mean the base is not in the pack
     const r = resolvePack(parsed, () => null, t.limits);
     return r.ok ? ok({ objects: r.value.objects, unresolved: 0 }) : r;
   }
+  // Stryker disable next-line ArrowFunction: null and a bare return both mean the base is not in the pack
   const r = resolvePackCollect(parsed, () => null, t.limits);
   return r.ok ? ok({ objects: r.value.objects, unresolved: r.value.unresolved.length }) : r;
 }
@@ -937,6 +946,8 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
     // what is held is the objects wideKeep keeps (#172)
     const dropped: Dropped = { offsets: new Set(), bytes: 0 };
     const c = packCollectOpen(caps.value, true, wideKeep(want, dropped));
+    // the caps passed packCaps, so the scan opens (packScanOpen)
+    // Stryker disable next-line ConditionalExpression,BlockStatement: see above
     if (!c.ok) return c;
     const read = await collectWire(packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span), c.value);
     if (!read.pack.ok) return read.pack;

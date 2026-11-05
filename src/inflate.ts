@@ -23,6 +23,8 @@ export type InflateConfig = {
 export type InflateOptions = Input<InflateConfig>;
 // The first output buffer without a declared size: at least this, or the input's length (a stored member's output).
 const GUESS_MIN = 256;
+// The output buffer doubles when it is full.
+const GROWTH = 2;
 export type Inflated = { readonly out: Uint8Array; readonly consumed: number; readonly stats: InflateStats };
 
 // The member at buf[pos..], whole: the input is closed once it is fed, so the pull ends the member or says where it was
@@ -47,9 +49,9 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
   const room = (n: number): void => {
     if (o + n <= out.length) return;
     // Stryker disable next-line ArithmeticOperator,MethodExpression,ConditionalExpression: the buffer is grown until it holds the output, so a different positive first size yields the same bytes
-    let cap = expected.tag === 'some' ? expected.value : Math.min(maxOutput, Math.max(out.length * 2, GUESS_MIN, buf.length - pos));
+    let cap = expected.tag === 'some' ? expected.value : Math.min(maxOutput, Math.max(out.length * GROWTH, GUESS_MIN, buf.length - pos));
     // Stryker disable next-line ArithmeticOperator,MethodExpression,EqualityOperator: doubling stops once the buffer holds o+n, which the pull held within the cap
-    while (cap < o + n) cap = Math.min(maxOutput, cap * 2);
+    while (cap < o + n) cap = Math.min(maxOutput, cap * GROWTH);
     const grown = new Uint8Array(cap);
     grown.set(out.subarray(0, o));
     out = grown;

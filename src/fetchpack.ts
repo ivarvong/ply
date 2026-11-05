@@ -96,6 +96,8 @@ export async function fetchPackOnce(t: Transport, opts: FetchOpts, extra: FetchP
     const caps = packCaps({ limits: t.limits });
     if (!caps.ok) return caps;
     const c = packCollectOpen(caps.value, true);
+    // the caps passed packCaps, so the scan opens (packScanOpen)
+    // Stryker disable next-line ConditionalExpression,BlockStatement: see above
     if (!c.ok) return c;
     const read = await collectWire(packStream(t, opts, span), c.value);
     const st: V2State = read.state;

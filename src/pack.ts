@@ -81,6 +81,7 @@ export function spliceDelta({ baseLen, off, oldLen, insert }: Splice): SplicedDe
   if (off > 0) program.push({ tag: 'copy', off: 0, len: off });
   if (insert.length > 0) program.push({ tag: 'insert', bytes: insert });
   if (tail > 0) program.push({ tag: 'copy', off: off + oldLen, len: tail });
+  // Stryker disable next-line EqualityOperator,ConditionalExpression: an empty prefix or tail is Math.ceil(0) = 0 copies either way
   return { delta: encodeDeltaOps(baseLen, resultLen, program), resultLen, program, ops: { copy: (off > 0 ? Math.ceil(off / DELTA_COPY_MAX) : 0) + (tail > 0 ? Math.ceil(tail / DELTA_COPY_MAX) : 0), insert: Math.ceil(insert.length / DELTA_INSERT_MAX) } };
 }
 

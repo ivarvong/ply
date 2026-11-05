@@ -22,7 +22,7 @@ import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackE
 import { sidebandStep, v2Init, fetchObject, spInit, spStep } from '../src/fetch.js';
 import { fetchPack } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { parseDelta, applyDelta, applyProgram, deltaOps, readObjHeader, packCollectOpen, packCollectFeed, packCollectEnd } from '../src/packresolve.js';
+import { parseDelta, applyDelta, applyProgram, deltaOps, readObjHeader, packCollectOpen, packCollectFeed, packCollectEnd, resolvePack } from '../src/packresolve.js';
 import { transport, v2PackResponse, frame, cat, FLUSH } from './space/wire.js';
 import { peakBound } from '../src/streambound.js';
 import { hashObject, TYPE } from '../src/objects.js';
@@ -964,4 +964,110 @@ test('the pack collector: a dropped object is counted, never held', () => {
   const bad = must(packCollectOpen({ maxObjects: 1, maxInflatedTotal: 1e6, maxObjectSize: 100 }, true));
   assert.equal(refusal(packCollectFeed(bad, pack)), 'limit_exceeded: pack objects 2 exceeds limit 1');
   assert.equal(refusal(packCollectEnd(bad)), 'limit_exceeded: pack objects 2 exceeds limit 1');
+});
+
+test('spliceDelta: the instructions it builds, each only when it is not empty, and the opcode counts', () => {
+  const ins = te.encode('XY');
+  const cases = [
+    [{ baseLen: 10, off: 0, oldLen: 0, insert: ins }, [{ tag: 'insert', bytes: ins }, { tag: 'copy', off: 0, len: 10 }], { copy: 1, insert: 1 }],
+    [{ baseLen: 10, off: 10, oldLen: 0, insert: new Uint8Array(0) }, [{ tag: 'copy', off: 0, len: 10 }], { copy: 1, insert: 0 }],
+    [{ baseLen: 10, off: 3, oldLen: 7, insert: ins }, [{ tag: 'copy', off: 0, len: 3 }, { tag: 'insert', bytes: ins }], { copy: 1, insert: 1 }],
+    [{ baseLen: 10, off: 0, oldLen: 10, insert: ins }, [{ tag: 'insert', bytes: ins }], { copy: 0, insert: 1 }],
+    [{ baseLen: 3 * 0x10000 + 1, off: 0x10000 + 1, oldLen: 0, insert: new Uint8Array(300) }, [{ tag: 'copy', off: 0, len: 0x10001 }, { tag: 'insert', bytes: new Uint8Array(300) }, { tag: 'copy', off: 0x10001, len: 0x20000 }], { copy: 4, insert: 3 }],
+  ];
+  for (const [splice, program, ops] of cases) {
+    const d = spliceDelta(splice);
+    assert.deepEqual(d.program, program);
+    assert.deepEqual(d.ops, ops);
+    assert.equal(d.resultLen, splice.baseLen - splice.oldLen + splice.insert.length);
+    const p = must(parseDelta(d.delta));
+    assert.deepEqual([p.ops.copy, p.ops.insert], [ops.copy, ops.insert], 'the counts are the opcodes on the wire');
+  }
+});
+
+test('the collector and the resolver edge: a cap that bounds nothing, a hand-built pack without stats, a deep chain', () => {
+  assert.equal(refusal(packCollectOpen({ maxObjects: 1, maxInflatedTotal: 1, maxObjectSize: Infinity }, true)), 'bad_request: limits.maxObjectSize must be a finite non-negative number');
+  const bad = resolvePack({ objects: [{ offset: 12, type: 5, data: new Uint8Array(1) }] });
+  assert.deepEqual([bad.error.code, bad.error.what], ['bad_request', 'object']);
+  // without stats the bytes held are the data's: the room left for a delta result is the cap less them and the overhead
+  const base = te.encode('A'.repeat(40)), target = te.encode(`${'A'.repeat(40)}B`);
+  const delta = makeDelta(base, target).delta;
+  const objects = [{ offset: 12, type: TYPE.BLOB, data: base }, { offset: 60, type: TYPE.OFS_DELTA, data: delta, base: { tag: 'ofs', offset: 12 } }];
+  const held = base.length + delta.length + 2 * OV;
+  assert.equal(refusal(resolvePack({ objects }, undefined, withLimits({ maxInflatedTotal: held + target.length }))), 'ok');
+  assert.equal(refusal(resolvePack({ objects }, undefined, withLimits({ maxInflatedTotal: held + target.length - 1 }))), `limit_exceeded: delta result size ${target.length} exceeds limit ${target.length - 1}`);
+  // given stats, their inflated count is what is held (a collector that dropped objects still counted them)
+  assert.equal(refusal(resolvePack({ objects, stats: { inflated: base.length + delta.length + 1 } }, undefined, withLimits({ maxInflatedTotal: held + target.length }))), `limit_exceeded: delta result size ${target.length} exceeds limit ${target.length - 1}`);
+  assert.equal(refusal(resolvePack({ objects, stats: { inflated: 0 } }, undefined, withLimits({ maxInflatedTotal: 2 * OV + target.length }))), 'ok');
+  // a chain listed child-first is walked by recursion: the depth bound stops it at the cap, not at the stack's end
+  const chain = [];
+  const n = 20000;
+  for (let i = n; i >= 1; i--) chain.push({ offset: 12 + i, type: TYPE.OFS_DELTA, data: delta, base: { tag: 'ofs', offset: 12 + i - 1 } });
+  chain.push({ offset: 12, type: TYPE.BLOB, data: base });
+  assert.equal(refusal(resolvePack({ objects: chain }, undefined, withLimits({ maxDeltaChain: 64 }))), 'limit_exceeded: delta chain depth 65 exceeds limit 64');
+  const refChain = [];
+  let prev = base;
+  const ids = [hashObject('blob', base)];
+  const steps = [];
+  for (let i = 1; i <= 3; i++) { const next = concat([prev, te.encode(String(i))]); steps.push(makeDelta(prev, next).delta); ids.push(hashObject('blob', next)); prev = next; }
+  // REF deltas child-first, each base in the pack: resolved from the pack, the external lookup never asked
+  for (let i = 3; i >= 1; i--) refChain.push({ offset: 100 + i, type: TYPE.REF_DELTA, data: steps[i - 1], base: { tag: 'ref', oid: ids[i - 1] } });
+  refChain.push({ offset: 12, type: TYPE.BLOB, data: base });
+  const asked = [];
+  const r = must(resolvePack({ objects: refChain }, o => { asked.push(o); return null; }));
+  assert.deepEqual([r.objects.size, r.stats.externalBases, r.stats.maxChain, asked], [4, 0, 3, []]);
+  // a REF delta on an in-pack REF delta whose own base is missing: the first waiting object's base is the refusal
+  const orphan = [refChain[0], refChain[1]];
+  assert.equal(refusal(resolvePack({ objects: orphan })), `pack_corrupt: pack: ref delta base ${ids[2]} not found`);
+  // an external base that is not a stored object, or does not hash to the id it was asked for
+  const thin = [{ offset: 12, type: TYPE.REF_DELTA, data: steps[0], base: { tag: 'ref', oid: ids[0] } }];
+  assert.equal(refusal(resolvePack({ objects: thin }, () => ({ type: TYPE.OFS_DELTA, data: base }))), `pack_corrupt: pack: ref delta base ${ids[0]} has type 6`);
+  assert.equal(refusal(resolvePack({ objects: thin }, () => ({ type: TYPE.BLOB, data: target }))), `pack_corrupt: pack: ref delta base ${ids[0]} hashes to ${hashObject('blob', target)}`);
+  assert.equal(refusal(resolvePack({ objects: thin }, () => ({ type: TYPE.TREE, data: base }))), `pack_corrupt: pack: ref delta base ${ids[0]} hashes to ${hashObject('tree', base)}`);
+  assert.equal(refusal(resolvePack({ objects: thin }, () => ({ type: TYPE.BLOB, data: base }))), 'ok');
+});
+
+test('the wide and multi-object fetches read the caller\'s pack caps, verify the trailer, and count what they skipped', async () => {
+  const tA = treeOf('a');
+  const { pack } = await buildPack([{ type: TYPE.TREE, data: tA }, { type: TYPE.TREE, data: treeOf('b') }]);
+  const want = { oid: hashObject('tree', tA), filter: 'tree:0', expectType: TYPE.TREE };
+  const wide = { quirks: { treeFilter: 'blob:none' } };
+  for (const [limits, msg] of [[{ maxPackObjects: Infinity }, 'bad_request: limits.maxPackObjects must be a finite non-negative number'], [{ maxPackObjects: 1 }, 'limit_exceeded: pack objects 2 exceeds limit 1']]) {
+    assert.equal(refusal(await fetchObject(wire(pack, { ...wide, limits }).t, want)), msg);
+    assert.equal(refusal(await fetchPack(wire(pack, { limits }).t, { wants: [want.oid] })), msg);
+  }
+  const flipped = pack.slice(); flipped[flipped.length - 1] ^= 1;
+  assert.match(refusal(await fetchObject(wire(flipped, wide).t, want)), /^pack_corrupt: pack: trailer sha mismatch/);
+  assert.match(refusal(await fetchPack(wire(flipped).t, { wants: [want.oid] })), /^pack_corrupt: pack: trailer sha mismatch/);
+  // a short answer of more than one object, under a cap that bounds nothing: the cap's refusal, not a short read
+  const cid = hashObject('commit', commitOf(hashObject('tree', tA)));
+  assert.equal(refusal(await fetchObject(wire(packHead(2), { limits: { maxPackObjects: Infinity } }).t, { oid: cid, filter: 'tree:0', expectType: TYPE.COMMIT })), 'bad_request: limits.maxPackObjects must be a finite non-negative number');
+  // a commit want through the fallback drops the blobs too; an extra tree over a limit is skipped and counted
+  const commit = commitOf(hashObject('tree', tA));
+  const big = treeOf('x', 'y', 'z');
+  const blob = te.encode('blob bytes');
+  const blob2 = te.encode('blob bytes, and more of them');
+  const d2 = makeDelta(blob, blob2).delta;
+  const withBlob = await buildPack([{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tA }, { type: TYPE.BLOB, data: blob }, { type: TYPE.TREE, data: big }, { type: TYPE.BLOB, data: d2, baseIndex: 2 }]);
+  const { t, span } = wire(withBlob.pack, { ...wide, limits: { maxTreeEntries: 2 } });
+  const got = await fetchObject(t, { oid: cid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
+  assert.equal(refusal(got), 'ok');
+  const a = span('git.upload-pack fetch').attrs;
+  assert.deepEqual([a['git.fetch.wide.objects'], a['git.fetch.wide.extra_objects'], a['git.fetch.wide.blobs'], a['git.fetch.wide.skipped'], a['git.fetch.wide.extra_bytes']], [5, 4, 2, 1, tA.length + blob.length + big.length + d2.length]);
+  assert.notEqual(d2.length, blob2.length, 'a dropped delta counts at its declared size, not its result\'s');
+  assert.deepEqual([...t.objects.keys()], [hashObject('tree', tA)]);
+});
+
+test('fetchPack: one span event per object, its base as the event names it', async () => {
+  const base = te.encode('B'.repeat(64));
+  const next = te.encode(`${'B'.repeat(64)}!`);
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: base }, { type: TYPE.BLOB, data: makeDelta(base, next).delta, baseIndex: 0 }]);
+  const refPack = await buildPack([{ type: TYPE.BLOB, data: makeDelta(base, next).delta, baseOid: hashObject('blob', base) }]);
+  const ev = async (p, extra = {}) => {
+    const { t, span } = wire(p);
+    must(await fetchPack(t, { wants: [hashObject('blob', next)] }, extra));
+    return span('git.upload-pack fetch').events.filter(e => e.name === 'git.pack.object').map(e => [e.attrs['git.object.base.offset'], e.attrs['git.object.base.oid']]);
+  };
+  assert.deepEqual(await ev(pack), [[-1, ''], [12, '']]);
+  assert.deepEqual(await ev(refPack.pack, { external: () => ({ type: TYPE.BLOB, data: base }) }), [[-1, hashObject('blob', base)]]);
 });

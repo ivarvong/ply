@@ -153,65 +153,67 @@ export type PackCollector = {
 export function packCollectOpen(caps: PackCaps, verify: boolean, keep: ObjectSink = keepAll): Result<PackCollector, PackError> {
   const scan = packScanOpen(caps, verify);
   if (!scan.ok) return scan;
+  // Stryker disable next-line StringLiteral: a placeholder, the trailer piece sets it before the end returns the pack
   return ok({ scan: scan.value, keep, objects: [], stats: freshStats(0, 0), trailer: '', bytes: 0, cur: null });
 }
-// One piece of the scan into the collector. True once the pack has ended.
+const UNIT: Result<null, never> = ok(null);
+// One piece of the scan into the collector.
 // oxlint-disable-next-line complexity -- one case per scan event
-function collectPiece(c: PackCollector, p: PackPiece): boolean {
+function collectPiece(c: PackCollector, p: PackPiece): void {
   switch (p.kind) {
-    // collectDrain hands every piece but `need` here
+    // collectDrain stops at `need` and `end`: neither reaches here, and neither carries anything to collect
     // Stryker disable next-line all: see above
-    case 'need': return false;
-    case 'header': c.stats = freshStats(p.version, p.count); return false;
+    case 'need': case 'end': return;
+    case 'header': c.stats = freshStats(p.version, p.count); return;
     case 'object': {
       const header: ScannedHeader = { offset: p.offset, headerBytes: p.headerBytes, type: p.type, size: p.size, base: p.base };
       countBase(c.stats, p.base);
       c.cur = { header, out: c.keep(header) ? new Uint8Array(p.size) : null, at: 0 };
-      return false;
+      return;
     }
     case 'chunk': {
       const cur = c.cur;
-      // a declared bound: the scan never yields past the object's size, which is out's length
+      // a chunk always follows its object (cur is set), and a declared bound: the scan never yields past the object's
+      // size, which is out's length
+      // Stryker disable next-line ConditionalExpression: cur is never null here (above); a dropped object's out is
       if (cur !== null && cur.out !== null) cur.out.set(p.bytes, cur.at);
+      // Stryker disable next-line ConditionalExpression: cur is never null here (above)
       if (cur !== null) cur.at += p.bytes.length;
-      return false;
+      return;
     }
     case 'object-end': {
       const cur = c.cur;
       c.cur = null;
       // an object-end always follows its object
-      // Stryker disable next-line ConditionalExpression: see above
-      if (cur === null) return false;
+      // Stryker disable next-line ConditionalExpression,BlockStatement: see above
+      if (cur === null) return;
       const { header } = cur;
       const kind = kindOf(header.type);
       c.stats.compressed += p.compressed; c.stats.inflated += header.size;
       c.stats.inflate.blocks += p.stats.blocks; c.stats.inflate.stored += p.stats.stored; c.stats.inflate.fixed += p.stats.fixed; c.stats.inflate.dynamic += p.stats.dynamic;
       c.stats.byType[kind] = getOrElse(readKey(c.stats.byType, kind), 0) + 1;
       if (cur.out !== null) c.objects.push({ ...header, compressed: p.compressed, data: cur.out, inflate: p.stats });
-      return false;
+      return;
     }
-    case 'trailer': c.trailer = p.trailer; return false;
-    case 'end': return true;
+    case 'trailer': c.trailer = p.trailer; return;
   }
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
-  return assertNever(p);
+  assertNever(p);
 }
-// Pull until the scan wants more input (false) or the pack has ended (true), or it is refused.
-function collectDrain(c: PackCollector): Result<boolean, PackError> {
+// Pull until the scan wants more input or the pack has ended, or it is refused.
+function collectDrain(c: PackCollector): Result<null, PackError> {
   for (;;) {
     const r = parsePackPull(c.scan);
     if (!r.ok) return r;
-    if (r.value.kind === 'need') return ok(false);
-    if (collectPiece(c, r.value)) return ok(true);
+    if (r.value.kind === 'need' || r.value.kind === 'end') return UNIT;
+    collectPiece(c, r.value);
   }
 }
-const UNIT: Result<null, never> = ok(null);
 // Append pack bytes and collect what they complete. The bytes may be dropped by the caller once this returns.
 export function packCollectFeed(c: PackCollector, bytes: Uint8Array): Result<null, PackError> {
   parsePackFeed(c.scan, bytes);
   c.bytes += bytes.length;
-  const r = collectDrain(c);
-  return r.ok ? UNIT : r;
+  return collectDrain(c);
 }
 // The input is over: the pack, or where it was refused.
 export function packCollectEnd(c: PackCollector): Result<ParsedPack, PackError> {
@@ -228,9 +230,11 @@ export function parsePack(buf: Uint8Array, opts: PackParseOptions = {}): Result<
   const caps = packCaps(opts);
   if (!caps.ok) return caps;
   const c = packCollectOpen(caps.value, opts.verify !== false);
+  // the caps passed packCaps, so the scan's inflate record opens (packScanOpen)
+  // Stryker disable next-line ConditionalExpression,BlockStatement: see above
   if (!c.ok) return c;
-  const fed = packCollectFeed(c.value, buf);
-  if (!fed.ok) return fed;
+  // a refusal sticks on the scan: the end returns the feed's again
+  packCollectFeed(c.value, buf);
   return packCollectEnd(c.value);
 }
 
@@ -518,7 +522,10 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limit
         stats.baseLookups++;
         const inPack = mapGet(byOid, base.oid);
         if (inPack.tag === 'some') {
+          // byOid holds resolved objects only, so this is the memo's answer, whatever the depth
+          // Stryker disable next-line ArithmeticOperator: see above
           const s = resolveFn(inPack.value, depth + 1);
+          // Stryker disable next-line ConditionalExpression,BlockStatement: an object in byOid has resolved (above)
           if (s.tag !== 'resolved') return s;
           return { tag: 'base', base: s.r };
         }
@@ -580,6 +587,7 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limit
   // Until nothing is pending: a pass either resolves something, or moves to the external phase once, or ends in an
   // error. A REF chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check
   // above (≤ 2 · maxDeltaChain + 2), not by a pass ceiling that used to return the tail unresolved without an error (#14).
+  // Stryker disable next-line MethodExpression,ConditionalExpression: a full object left in is resolved already, and comes back from the memo
   let pending: Entry[] = entries.filter(o => o.tag === 'delta');
   while (pending.length > 0) {
     const next: Entry[] = [];
