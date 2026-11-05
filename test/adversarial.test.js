@@ -29,7 +29,7 @@ import { createTransport as createTransportR } from '../src/http.js';
 import { fetchObject as fetchObjectR } from '../src/fetch.js';
 import { fetchPack as fetchPackR, fetchPackTree0 as fetchPackTree0R } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
-import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, parseLimits, lowered } from '../src/limits.js';
 import { applyDelta, parsePack, buildPack, encodeObjHeader, packParseOpts, resolvePack, makeDelta } from '../src/pack.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { Sha1 } from '../src/sha1.js';
@@ -1186,11 +1186,16 @@ function mxExpect(path, shape, S) {
 }
 
 // a fetch that serves `body(wants)` for the blob request and forwards everything else to the real server
+// The hostile request: an unfiltered fetch that wants the target.
+function mxHostile(target, body) {
+  const req = body instanceof Uint8Array ? Buffer.from(body).toString('latin1') : '';
+  return req.includes('command=fetch\n') && !req.includes('filter ') && req.includes(`want ${target}\n`);
+}
 function mxFetch(target, bodyFor, setCap) {
   const served = [];
   const f = async (url, init) => {
     const req = init?.body instanceof Uint8Array ? Buffer.from(init.body).toString('latin1') : '';
-    const hostile = req.includes('command=fetch\n') && !req.includes('filter ') && req.includes(`want ${target}\n`);
+    const hostile = mxHostile(target, init?.body);
     setCap(hostile);
     if (!hostile) return fetch(url, init);
     const wants = req.split('want ').length - 1;
@@ -1238,11 +1243,20 @@ test('I4 #36 matrix: path × body shape × declared size × cap, every cell, nev
     const R = exp.decide === 'end' ? L : frameEnd(fr, boundByte(S));
     const cap = rel === 'under' ? R + 1 : rel === 'at' ? R : R - 1;
     const code = rel === 'over' ? 'limit_exceeded' : exp.code;
-    // the cap under test applies to the hostile request; every other request runs under the default
-    let current = DEFAULT_LIMITS.maxPackBytes;
-    const limits = Object.defineProperty({ ...DEFAULT_LIMITS, requestTimeoutMs: 30_000 }, 'maxPackBytes', { get: () => current, enumerable: true });
-    const { f, served } = mxFetch(repo.oid, wants => (wants > 1 ? mxPack(shape, repo.data, COMPANION) : single), hostile => { current = hostile ? cap : DEFAULT_LIMITS.maxPackBytes; });
-    const opts = { tracer: new Tracer(), limits, fetchImpl: f };
+    // the cap under test applies to the hostile request; every other request runs under the default. A limits record is
+    // parsed once where it enters (#156), so the switch is the transport's: the caller's transport (complete, its limits
+    // checked) is kept as it is, and each exchange reads `limits` from it as the exchange starts.
+    const base = unwrap(parseLimits({ requestTimeoutMs: 30_000 }));
+    const capped = lowered(base, 'maxPackBytes', cap);
+    let hostileNow = false;
+    const { f, served } = mxFetch(repo.oid, wants => (wants > 1 ? mxPack(shape, repo.data, COMPANION) : single), hostile => { hostileNow = hostile; });
+    const made = unwrap(createTransportR(repo.url, { tracer: new Tracer(), limits: base, fetchImpl: f }));
+    const tt = Object.create(made, {
+      limits: { get: () => (hostileNow ? capped : base), enumerable: true },
+      // an exchange is hostile by its request, known when the transport is handed the body (before its limits are read)
+      frames: { value(service, body, span, hints) { hostileNow = mxHostile(repo.oid, body); return made.frames.call(this, service, body, span, hints); }, enumerable: true },
+    });
+    const opts = { tracer: new Tracer(), limits: base, transport: tt };
     const drain = async s => { const parts = []; for await (const c of s) parts.push(c); return concat(parts); };
     const files = async r => { const got = new Map(); for await (const g of r.files) got.set(g.path, g.stream ? await drain(g.stream) : null); return got; };
     const ops = {
@@ -1250,8 +1264,8 @@ test('I4 #36 matrix: path × body shape × declared size × cap, every cell, nev
       read: async () => drain((await unwrapAsync(readFile(repo.url, { path: 'a.bin' }, opts))).stream),
       'checkout single': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, { ...opts, batch: 1 })))).get('a.bin'),
       'checkout batched': async () => (await files(await unwrapAsync(checkoutTree(repo.url, {}, opts)))).get('a.bin'),
-      fetchObject: async () => (await unwrapAsync(unwrap(GitHttp.create(repo.url, opts)).fetchObject({ oid: repo.oid, filter: null, expectType: TYPE.BLOB }))).data,
-      fetchPack: async () => (await unwrapAsync(unwrap(GitHttp.create(repo.url, opts)).fetchPack({ wants: [repo.oid] }))).objects.get(repo.oid).data,
+      fetchObject: async () => (await unwrapAsync(fetchObjectR(tt, { oid: repo.oid, filter: null, expectType: TYPE.BLOB }))).data,
+      fetchPack: async () => (await unwrapAsync(fetchPackR(tt, { wants: [repo.oid] }))).objects.get(repo.oid).data,
     };
     const t0 = performance.now();
     const res = await ops[path]().then(v => ({ v }), e => ({ e }));

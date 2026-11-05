@@ -385,8 +385,10 @@ export type PackFetch = AsyncGenerator<Uint8Array, V2State, unknown>;
 async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
   const body = fetchBody(opts);
   if (!body.ok) return body;
+  // the exchange (no request yet: the frames are pulled below), then the limits it runs under
+  const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) });
   let st = v2Init(t.limits);
-  try { for await (const f of frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) })) {
+  try { for await (const f of exchange) {
     const r = v2Step(st, f);
     if (!r.ok) { scrubError(r.error, t.scrub); return r; }
     st = r.value.state;
