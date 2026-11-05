@@ -41,27 +41,27 @@ import type { Transport, TransportInput, Scrub } from './transport.js';
 import type { PackObject } from './fetch.js';
 import type { PackInput } from './pack.js';
 import type { ParsedPack } from './packresolve.js';
-import type { Limits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { fail } from './errors.js';
-import { ok, assertNever } from './result.js';
+import { ok, map, assertNever } from './result.js';
 import { field, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchPack } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { createTransport, redactUrl } from './http.js';
-import { asTransport, withParent } from './transport.js';
+import { transportFrom, withParent } from './transport.js';
 import { parseCommit, parseTag, TYPE } from './objects.js';
 import { validatePushRef } from './validate.js';
 import { refOid } from './merge.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS, parseLimits } from './limits.js';
 import { Tracer } from './otel.js';
 import type { Span } from './otel.js';
 
 // One remote's connection: its credential, fetch, learned quirks, or a transport the caller already holds.
 export type SyncSideConfig = Pick<EntryConfig, 'auth' | 'quirks' | 'transport'> & { readonly fetchImpl: EntryConfig['fetchImpl'] | null };
 export type SyncSide = Input<SyncSideConfig>;
-type Shared = { readonly tracer: Tracer; readonly parent: Span | null; readonly limits: Limits; readonly signal: AbortSignal | null; readonly fetchImpl: EntryConfig['fetchImpl'] | null; readonly verify: boolean; readonly src: SyncSide; readonly dst: SyncSide };
+type Shared = { readonly tracer: Tracer; readonly parent: Span | null; readonly limits: LimitsInput; readonly signal: AbortSignal | null; readonly fetchImpl: EntryConfig['fetchImpl'] | null; readonly verify: boolean; readonly src: SyncSide; readonly dst: SyncSide };
 export type SyncRefOptions = Input<Shared>;
 export type SyncRefConfig = { readonly dstRef: string | null; readonly force: boolean };
 export type SyncRefSpec = { readonly ref: string } & Input<SyncRefConfig>;
@@ -73,7 +73,7 @@ const sideDefaults = (): SyncSideConfig => ({ auth: null, fetchImpl: null, quirk
 
 // The destination's transport, under the operation's root: the caller's (re-parented), or one built for the url.
 function dstTransport(url: string, side: SyncSideConfig, shared: Shared, root: Span): Result<Transport, PlyError> {
-  if (side.transport !== null) return ok(withParent(asTransport(side.transport), root));
+  if (side.transport !== null) return map(transportFrom(side.transport), d => withParent(d, root));
   const fetchImpl = side.fetchImpl === null ? shared.fetchImpl : side.fetchImpl;
   return createTransport(url, { auth: side.auth, tracer: shared.tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits: shared.limits, signal: shared.signal, ...(side.quirks === null ? {} : { quirks: side.quirks }) });
 }
@@ -87,7 +87,7 @@ const bothScrubs = (a: Scrub | null, b: Scrub | null): Scrub | null => {
 
 // Is `old` reachable from `tip` through the received pack? `tip` is peeled (an annotated tag to its object); the walk
 // follows commit parents within the pack and stops at a parent outside it (one the destination's tip already reaches).
-function reaches(objects: ReadonlyMap<string, PackObject>, tip: string, old: string, limits: Limits): Result<boolean, PlyError> {
+function reaches(objects: ReadonlyMap<string, PackObject>, tip: string, old: string, limits: CheckedLimits): Result<boolean, PlyError> {
   const stack = [tip];
   const seen = new Set<string>();
   for (let oid = stack.pop(); typeof oid === 'string'; oid = stack.pop()) {
@@ -115,9 +115,9 @@ function forwarded(parsed: ParsedPack | null): PackInput[] {
     switch (o.base.tag) {
       case 'ofs': {
         const at = mapGet(index, o.base.offset);
-        return at.tag === 'some' ? { type: o.type, data: o.data, baseIndex: at.value } : { type: o.type, data: o.data };
+        return at.tag === 'some' ? { type: o.type, data: o.data, base: { tag: 'ofs', index: at.value } } : { type: o.type, data: o.data };
       }
-      case 'ref': return { type: o.type, data: o.data, baseOid: o.base.oid };
+      case 'ref': return { type: o.type, data: o.data, base: o.base };
       case 'none': return { type: o.type, data: o.data };
     }
     // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
@@ -146,7 +146,10 @@ function parseSync(spec: SyncRefSpec, options: SyncRefOptions): Result<Parsed, P
   const dstNamed = validatePushRef(dstRef, false); if (!dstNamed.ok) return dstNamed;
   if (typeof force !== 'boolean') return fail('bad_request', 'syncRef: force must be a boolean', { what: 'force' });
   if (field(options, 'auth').tag === 'some') return fail('bad_request', 'syncRef: auth belongs to one remote: pass opts.src.auth and opts.dst.auth', { what: 'auth' });
-  const shared = withDefaults<Shared>(options, { tracer: new Tracer(), parent: null, limits: DEFAULT_LIMITS, signal: null, fetchImpl: null, verify: false, src: {}, dst: {} });
+  const given = withDefaults<Shared>(options, { tracer: new Tracer(), parent: null, limits: DEFAULT_LIMITS, signal: null, fetchImpl: null, verify: false, src: {}, dst: {} });
+  // parsed once here, for both transports: a bad one is refused before either is made
+  const limits = parseLimits(given.limits); if (!limits.ok) return limits;
+  const shared = { ...given, limits: limits.value };
   return ok({ ref, dstRef, force, shared, src: withDefaults(shared.src, sideDefaults()), dst: withDefaults(shared.dst, sideDefaults()) });
 }
 

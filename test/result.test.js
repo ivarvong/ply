@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { ok, err, map, mapErr, andThen, match, matchKind, matchOption, assertNever, errorKind, errorKindAttr, some, none, isSome, isNone, resultToOption, optionToResult, transposeResultOption, transposeOptionResult } from '../src/result.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { fail, plyError, isPlyCode, retryPolicy, isRetryable, CODES, RETRY } from '../src/errors.js';
-import { checkLimit, readLimit, limitExceeded, limitError, DEFAULT_LIMITS } from '../src/limits.js';
+import { checkLimit, parseLimits, limitsOf, lowered, limitExceeded, limitError, DEFAULT_LIMITS, WORKER_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
 test('Result: ok/err shapes, map/mapErr/andThen short-circuit, match dispatches on code, assertNever throws', () => {
@@ -112,7 +112,7 @@ test('PlyError: one constructor, an Error carrying its fields; fail wraps it in 
   assert.equal(isRetryable({ code: 'ambiguous' }), false);
 });
 
-test('limits: checkLimit/readLimit accept exactly the finite non-negative numbers; the error is an Error with its fields', () => {
+test('limits: checkLimit/parseLimits accept exactly the finite non-negative numbers; the error is an Error with its fields', () => {
   const bad = (what, got) => ({ ok: false, error: { code: 'bad_request', message: `limits.${what} must be a finite non-negative number`, what, got } });
   const shape = r => (r.ok ? r : { ok: false, error: { code: r.error.code, message: r.error.message, what: r.error.what, got: r.error.got } });
   for (const v of [0, 1, 0.5, Number.MAX_SAFE_INTEGER]) {
@@ -123,10 +123,38 @@ test('limits: checkLimit/readLimit accept exactly the finite non-negative number
     assert.deepEqual(shape(checkLimit(v, 'k')), bad('k', v));
     assert.throws(() => unwrap(checkLimit(v, 'k')), x => x instanceof Error && x.code === 'bad_request' && x.what === 'k' && Object.is(x.got, v));
   }
-  assert.deepEqual(readLimit(DEFAULT_LIMITS, 'maxRefs'), { ok: true, value: DEFAULT_LIMITS.maxRefs });
-  assert.deepEqual(shape(readLimit({}, 'maxRefs')), bad('maxRefs', undefined));
-  assert.deepEqual(shape(readLimit(null, 'maxRefs')), bad('maxRefs', undefined));
-  assert.equal(unwrap(readLimit({ maxRefs: 3 }, 'maxRefs')), 3);
+  // parseLimits (#156): a key given is checked as checkLimit checks it; a key left out (or the missing value) is the
+  // default; null is a value, refused; keys it does not read are ignored; the record is total, frozen and checked.
+  assert.equal(unwrap(parseLimits(DEFAULT_LIMITS)), DEFAULT_LIMITS, 'a checked record is returned as it is');
+  assert.deepEqual({ ...unwrap(parseLimits({})) }, { ...DEFAULT_LIMITS });
+  assert.deepEqual({ ...unwrap(parseLimits(null)) }, { ...DEFAULT_LIMITS });
+  assert.deepEqual({ ...unwrap(parseLimits({ maxRefs: undefined })) }, { ...DEFAULT_LIMITS });
+  assert.deepEqual({ ...unwrap(parseLimits({ maxRefs: 3, other: -1 })) }, { ...DEFAULT_LIMITS, maxRefs: 3 });
+  assert.equal(Object.isFrozen(unwrap(parseLimits({ maxRefs: 3 }))), true);
+  assert.deepEqual(shape(parseLimits({ maxRefs: null })), bad('maxRefs', null));
+  for (const key of Object.keys(DEFAULT_LIMITS)) {
+    for (const v of [-1, Number.NaN, Infinity, '5', null]) assert.deepEqual(shape(parseLimits({ [key]: v })), bad(key, v), key);
+    assert.equal(unwrap(parseLimits({ [key]: 0 }))[key], 0, key);
+  }
+  // the first bad key in DEFAULT_LIMITS order is the refusal, whatever order the caller wrote
+  const keys = Object.keys(DEFAULT_LIMITS);
+  assert.equal(parseLimits({ [keys.at(-1)]: -1, [keys[0]]: -1 }).error.what, keys[0]);
+  // the brand is the parser's: a spread (or a hand-built total record) is a plain record again, parsed afresh
+  const checked = unwrap(parseLimits({ maxRefs: 3 }));
+  assert.equal(unwrap(parseLimits(checked)), checked);
+  const spread = { ...checked, maxRefs: -1 };
+  assert.deepEqual(shape(parseLimits(spread)), bad('maxRefs', -1));
+  assert.notEqual(unwrap(parseLimits({ ...checked })), checked);
+  assert.deepEqual(Object.keys(checked), keys, 'the brand is not an enumerable key');
+  // lowered: one bound, never raised, never below zero, still checked
+  const low = lowered(checked, 'maxRefs', 2);
+  assert.deepEqual([low.maxRefs, lowered(checked, 'maxRefs', 9).maxRefs, lowered(checked, 'maxRefs', -5).maxRefs, low.maxObjectSize], [2, 3, 0, DEFAULT_LIMITS.maxObjectSize]);
+  assert.equal(unwrap(parseLimits(low)), low);
+  // limitsOf: an entry's options; left out or null is the defaults
+  assert.equal(unwrap(limitsOf({})), DEFAULT_LIMITS);
+  assert.deepEqual({ ...unwrap(limitsOf({ limits: null })) }, { ...DEFAULT_LIMITS });
+  assert.equal(unwrap(limitsOf({ limits: WORKER_LIMITS })), WORKER_LIMITS);
+  assert.deepEqual(shape(limitsOf({ limits: { maxRefs: -2 } })), bad('maxRefs', -2));
   const x = limitExceeded('refs', 11, 10);
   assert.deepEqual({ code: x.code, message: x.message, what: x.what, got: x.got, max: x.max }, { code: 'limit_exceeded', message: 'refs 11 exceeds limit 10', what: 'refs', got: 11, max: 10 });
   assert.equal(limitError, limitExceeded);

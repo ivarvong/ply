@@ -20,13 +20,13 @@
 import type { Attrs } from './transport.js';
 import type { FetchLike } from './http.js';
 import type { Input } from './absent.js';
-import type { Limits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 import type { PlyError } from './errors.js';
 import type { FetchRequest } from './uprequest.js';
 import type { Option, Result } from './result.js';
 import { te, concat } from './bytes.js';
 import { fail } from './errors.js';
-import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
+import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { v2Init, v2Step, v2End } from './fetch.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
@@ -90,7 +90,10 @@ export function exchangeKind(method: string, url: string | URL, body: string | U
 const noBase = (): null => null;
 export type VerifiedAnswer = { readonly objects: number };
 // oxlint-disable-next-line complexity -- one check per clause of the contract above
-export function verifyFetchAnswer(request: FetchRequest, answer: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<VerifiedAnswer, PlyError> {
+export function verifyFetchAnswer(request: FetchRequest, answer: Uint8Array, given: LimitsInput = DEFAULT_LIMITS): Result<VerifiedAnswer, PlyError> {
+  const checked = parseLimits(given);
+  if (!checked.ok) return checked;
+  const limits = checked.value;
   const read = pktStep(pktInit(), answer);
   if (!read.ok) return read;
   const fin = pktFinish(read.value.state);
@@ -184,7 +187,8 @@ export type CachingConfig = {
   readonly maxAge: number;
   // store an answer only after verifyFetchAnswer accepted it; the default rule then caches every pure fetch
   readonly verifyBeforeStore: boolean;
-  readonly limits: Limits;
+  // any subset (a key left out is the default); parsed where an answer is verified (cachingFetch returns no Result)
+  readonly limits: LimitsInput;
 };
 export type CachingOptions = Input<CachingConfig>;
 const isPureFetchBody = (body: Uint8Array): boolean => pureFetchOf(body) !== null;
@@ -196,16 +200,16 @@ export type CachingFetch = ((url: string | URL, ...init: [] | [RequestInit]) => 
 
 // verifyBeforeStore: the cache branch read whole (capped), verified against the request it answers, and stored only then.
 // A refused answer is counted and dropped: the client's own branch still carries it, and the client's own checks refuse it.
-async function verifiedStore(toCache: ReadableStream<Uint8Array>, body: Uint8Array, limits: Limits, stats: CacheStats, store: (entry: BodyInit) => Promise<void>): Promise<void> {
+async function verifiedStore(toCache: ReadableStream<Uint8Array>, body: Uint8Array, given: LimitsInput, stats: CacheStats, store: (entry: BodyInit) => Promise<void>): Promise<void> {
   const refuse = (e: PlyError): void => { stats.verifyFailed++; stats.verifyError = e.message.slice(0, 200); };
   const request = parseUploadPackRequest(body);
-  const maxPack = readLimit(limits, 'maxPackBytes');
-  if (!maxPack.ok) { refuse(maxPack.error); await toCache.cancel().catch(() => null); return; }
+  const limits = parseLimits(given);
+  if (!limits.ok) { refuse(limits.error); await toCache.cancel().catch(() => null); return; }
   // pack and progress are each held to maxPackBytes by v2Step; a pkt-line header per 65516-byte frame and the sections
   // fit in one more maxPackBytes
-  const bytes = await readCapped(toCache, maxPack.value * 3);
+  const bytes = await readCapped(toCache, limits.value.maxPackBytes * 3);
   if (!bytes.ok) { refuse(bytes.error); return; }
-  const verified = request.ok && request.value.command === 'fetch' ? verifyFetchAnswer(request.value, bytes.value, limits) : fail('protocol', 'answer: the request is not a fetch');
+  const verified = request.ok && request.value.command === 'fetch' ? verifyFetchAnswer(request.value, bytes.value, limits.value) : fail('protocol', 'answer: the request is not a fetch');
   if (!verified.ok) { refuse(verified.error); return; }
   stats.verifyOk++;
   await store(bytes.value.slice());

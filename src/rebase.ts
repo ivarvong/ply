@@ -27,12 +27,12 @@ import { at, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
-import { mergeBaseOf, mergeTrees, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
-import { encodeCommit, hashObject, ident, TYPE } from './objects.js';
+import { mergeBaseOf, mergeTreesOf, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
+import { encodeCommitOf, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { short, commitAt, givenOid, assertCommit, stamp } from './mergeio.js';
-import { limitError, readLimit, LIMIT_REBASE_COMMITS } from './limits.js';
+import { limitError, LIMIT_REBASE_COMMITS } from './limits.js';
 
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 
@@ -76,10 +76,10 @@ type Replay = {
   contentMerged: number;
 };
 const replay = (rediff: Rediff, attributes: AttributeSource): Replay => ({ fetched: 0, rediff, attributes, attrTree: none, mergeBlob: none, contentMerged: 0 });
-type NewCommit = { readonly parent: string; readonly author: string; readonly committer: string; readonly message: string | null; readonly encoding: string | null; readonly extra: readonly string[] };
+type NewCommit = { readonly parent: Oid; readonly author: string; readonly committer: string; readonly message: string | null; readonly encoding: string | null; readonly extra: readonly string[] };
 // One transplant: the commit written on the merged tree, or the merge's conflicts.
 type Transplant =
-  | { readonly kind: 'written'; readonly oid: string; readonly data: Uint8Array; readonly treeOid: string; readonly objects: PackObject[] }
+  | { readonly kind: 'written'; readonly oid: Oid; readonly data: Uint8Array; readonly treeOid: Oid; readonly objects: PackObject[] }
   | { readonly kind: 'conflict'; readonly conflicts: string[]; readonly reasons: Record<string, string> };
 
 // The attribute tree for one transplant: 'ours' is the tree being built on (what a worktree rebase/cherry-pick reads);
@@ -95,9 +95,7 @@ async function attributeTreeFor(t: Transport, out: Replay, trees: Trees): Promis
 // The replay's line merger, built on first use.
 function mergerFor(t: Transport, out: Replay): Result<MergeBlob, PlyError> {
   if (out.mergeBlob.tag === 'some') return ok(out.mergeBlob.value);
-  const cap = readLimit(t.limits, 'maxMergeBlobBytes');
-  if (!cap.ok) return cap;
-  const m = blobMerger(t, cap.value, out.rediff);
+  const m = blobMerger(t, t.limits.maxMergeBlobBytes, out.rediff);
   if (m.ok) out.mergeBlob = some(m.value);
   return m;
 }
@@ -109,17 +107,17 @@ async function transplant(t: Transport, cache: TreeCache, trees: Trees, { parent
   if (!attrTree.ok) return attrTree;
   const mergeBlob = mergerFor(t, out);
   if (!mergeBlob.ok) return mergeBlob;
-  const merged = await mergeTrees(t, cache, { ...trees, mergeBlob: mergeBlob.value, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
+  const merged = await mergeTreesOf(t, cache, { ...trees, prefix: '', removed: null, mergeBlob: mergeBlob.value, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
   if (!merged.ok) return merged;
   const m = merged.value;
   out.fetched += m.fetched;
   if (m.conflicts.length > 0) return ok({ kind: 'conflict', conflicts: m.conflicts, reasons: m.reasons });
-  const treeOid: string = m.oid === null ? hashObject('tree', new Uint8Array(0)) : m.oid;
-  const encoded = encodeCommit({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
+  const treeOid: Oid = m.oid === null ? hashObject('tree', new Uint8Array(0)) : m.oid;
+  const encoded = encodeCommitOf({ tree: treeOid, parents: [parent], author, committer, encoding, message, extra });
   if (!encoded.ok) return encoded;
   let data = encoded.value;
   if (signer) { const signed = await signCommit(data, signer); if (!signed.ok) return signed; data = signed.value; }
-  const oid: string = hashObject('commit', data);
+  const oid: Oid = hashObject('commit', data);
   out.contentMerged += m.contentMerged;
   return ok({ kind: 'written', oid, data, treeOid, objects: [...(m.oid === null ? [{ type: TYPE.TREE, data: new Uint8Array(0), oid: treeOid }] : []), ...m.objects, { type: TYPE.COMMIT, data, oid }] });
 }
@@ -208,9 +206,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
       if (!pushed.ok) return pushed;
       return outcome('fast_forward', { outcome: 'fast_forward', ref, oid: target, commits: 0 });
     }
-    const maxCommits = readLimit(limits, 'maxRebaseCommits');
-    if (!maxCommits.ok) return maxCommits;
-    const chained = linearChain(commits, tip, base, maxCommits.value);
+    const chained = linearChain(commits, tip, base, limits.maxRebaseCommits);
     if (!chained.ok) return chained;
     const chain = chained.value;
     root.set({ 'git.rebase.commits': chain.length });
@@ -218,13 +214,13 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     // no more than that; #41). Its tree is the first replay's base, so fetch it; every chain commit is above it and in hand.
     if (!commits.has(base)) { const b = await commitAt(t, base); if (!b.ok) return b; commits.set(base, b.value); }
     const targetCommit = await commitAt(t, target); if (!targetCommit.ok) return targetCommit;
-    const targetTree: string = targetCommit.value.tree;
+    const targetTree: Oid = targetCommit.value.tree;
     const committerLine = ident(committerPerson); if (!committerLine.ok) return committerLine;
     const who: string = committerLine.value;
     // a commit's tree by oid, among those in hand; a chain commit's one parent is in hand (linearChain)
-    const treeOf = (oid: Oid): string | null => getOrElse(mapOption(mapGet(commits, oid), c => c.tree), null);
-    const parentTree = (c: Commit): string | null => getOrElse(mapOption(at(c.parents, 0), treeOf), null);
-    const out = replay(rediff, attributes); const objects: PackObject[] = []; let cur: string = target; let curTree = targetTree; const replayed: Replayed[] = []; const dropped: string[] = [];
+    const treeOf = (oid: Oid): Oid | null => getOrElse(mapOption(mapGet(commits, oid), c => c.tree), null);
+    const parentTree = (c: Commit): Oid | null => getOrElse(mapOption(at(c.parents, 0), treeOf), null);
+    const out = replay(rediff, attributes); const objects: PackObject[] = []; let cur: Oid = target; let curTree = targetTree; const replayed: Replayed[] = []; const dropped: string[] = [];
     // tip !== base, so the chain has a commit
     const first = at(chain, 0);
     const last = at(chain, chain.length - 1);
@@ -307,7 +303,7 @@ async function refTip(t: Transport, ref: string): Promise<Result<Oid, PlyError>>
   const tip = refOid(listed.value.refs, ref);
   return tip.tag === 'some' ? ok(tip.value) : fail('not_found', `ref ${ref} not found`, { miss: refMiss(ref) });
 }
-async function parentTreeAt(t: Transport, parents: readonly Oid[]): Promise<Result<string | null, PlyError>> {
+async function parentTreeAt(t: Transport, parents: readonly Oid[]): Promise<Result<Oid | null, PlyError>> {
   const parentOid = at(parents, 0);
   if (parentOid.tag === 'none') return ok(null);
   return map(await commitAt(t, parentOid.value), c => c.tree);

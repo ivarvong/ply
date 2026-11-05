@@ -10,8 +10,8 @@ import { encodeEntries, hashObject } from './objects.js';
 import type { EntryOf, Mode } from './objects.js';
 import type { Oid } from './oid.js';
 import { indexOfBytes } from './bytes.js';
-import { limitExceeded, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { limitExceeded } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import { MODE_LINK, MODE_TREE, BLOB_MODES } from './format.js';
 import { atOr, mapGet } from './absent.js';
 
@@ -39,10 +39,9 @@ export function requireDir(node: Mem, path: string): Result<Map<string, Mem>, Er
 
 export type Leaf = { readonly mode: BlobMode; readonly oid: Oid; readonly data: Uint8Array };
 // Hash one blob the caller is adding. A symlink target is a path: git cannot check out an empty one, and a NUL ends it.
-export function fileLeaf(mode: BlobMode, data: Uint8Array, limits: Limits, path = 'blob'): Result<Leaf, ErrorOf<'bad_request' | 'limit_exceeded'>> {
-  const max = readLimit(limits, 'maxObjectSize');
-  if (!max.ok) return max;
-  if (data.length > max.value) return err(limitExceeded('object size', data.length, max.value));
+export function fileLeaf(mode: BlobMode, data: Uint8Array, limits: CheckedLimits, path = 'blob'): Result<Leaf, ErrorOf<'bad_request' | 'limit_exceeded'>> {
+  const max = limits.maxObjectSize;
+  if (data.length > max) return err(limitExceeded('object size', data.length, max));
   if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) return fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
   return ok({ mode, oid: hashObject('blob', data), data });
 }
@@ -61,11 +60,10 @@ function pathMiss(path: string): { readonly kind: 'path'; readonly missing: stri
   return { kind: 'path', missing: path.slice(at + 1), existingPath: path.slice(0, at) };
 }
 
-export function insertChild(entries: Map<string, Mem>, name: string, node: Mem, limits: Limits): Result<null, ErrorOf<'bad_request' | 'limit_exceeded'>> {
+export function insertChild(entries: Map<string, Mem>, name: string, node: Mem, limits: CheckedLimits): Result<null, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   if (!entries.has(name)) {
-    const max = readLimit(limits, 'maxTreeEntries');
-    if (!max.ok) return max;
-    if (entries.size >= max.value) return err(limitExceeded('tree entries', entries.size + 1, max.value));
+    const max = limits.maxTreeEntries;
+    if (entries.size >= max) return err(limitExceeded('tree entries', entries.size + 1, max));
   }
   entries.set(name, node);
   return ok(null);
@@ -91,7 +89,7 @@ function prune(stack: readonly Frame[]): void {
 
 // Put `leaf` at `comps`. `overwrite` is write (replace a file); create fails when the path exists.
 // A directory at the path is a refusal either way. Intermediate components must already be directories.
-export function putAt(root: Mem, comps: readonly string[], leaf: Mem, overwrite: boolean, limits: Limits): Result<null, MemError> {
+export function putAt(root: Mem, comps: readonly string[], leaf: Mem, overwrite: boolean, limits: CheckedLimits): Result<null, MemError> {
   const top = requireDir(root, '');
   if (!top.ok) return top;
   let entries = top.value;
@@ -213,14 +211,11 @@ function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<Oid, E
   trees.push({ oid, data });
   return ok(oid);
 }
-// The trees this memory holds, deepest first. A lazy node contributes its oid and no bytes. The limit is read once,
-// before the first directory is encoded (a lazy root reads none, as before).
-export function encodeMem(node: Mem, limits: Limits): Result<Encoded, ErrorOf<'bad_request' | 'limit_exceeded'>> {
+// The trees this memory holds, deepest first. A lazy node contributes its oid and no bytes.
+export function encodeMem(node: Mem, limits: CheckedLimits): Result<Encoded, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   if (node.kind === 'lazy') return ok({ oid: node.oid, trees: [] });
-  const max = readLimit(limits, 'maxTreeEntries');
-  if (!max.ok) return max;
   const trees: EncodedTree[] = [];
-  const oid = encodeNode(node, max.value, trees);
+  const oid = encodeNode(node, limits.maxTreeEntries, trees);
   if (!oid.ok) return oid;
   return ok({ oid: oid.value, trees });
 }

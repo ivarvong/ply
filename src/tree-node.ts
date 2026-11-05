@@ -15,13 +15,13 @@ import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
-import { err, getOrElse, ok } from './result.js';
+import { err, ok } from './result.js';
 import type { Result } from './result.js';
 import type { Input } from './absent.js';
-import { fromNullish, withDefaults } from './absent.js';
+import { withDefaults } from './absent.js';
 import { pushTree } from './tree.js';
 import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 
@@ -34,27 +34,24 @@ export type DirFile = { readonly path: string; readonly mode: string; readonly d
 // `filter(path, { directory, symlink })` → false leaves the path out.
 export type DirFilter = (path: string, kind: { readonly directory: boolean; readonly symlink: boolean }) => boolean;
 // The walk's options, total: the bounds, and the caller's filter (null: keep every path).
-export type FilesFromDirConfig = { readonly limits: Limits; readonly filter: DirFilter | null };
+export type FilesFromDirConfig = { readonly limits: LimitsInput; readonly filter: DirFilter | null };
 export type FilesFromDirOptions = Input<FilesFromDirConfig>;
 type DirError = ErrorOf<'bad_request' | 'limit_exceeded'>;
 
 // The walk as a value: a refused entry or bound is an Err. The file system's own failures (a missing directory, a
 // permission) reject as node:fs rejects them.
 export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
-  const { limits, filter } = withDefaults(options, { limits: DEFAULT_LIMITS, filter: null });
-  const maxObject = readLimit(limits, 'maxObjectSize');
-  if (!maxObject.ok) return maxObject;
-  const maxFiles = readLimit(limits, 'maxPackObjects');
-  if (!maxFiles.ok) return maxFiles;
-  const maxTotal = readLimit(limits, 'maxInflatedTotal');
-  if (!maxTotal.ok) return maxTotal;
+  const { limits, filter } = withDefaults<FilesFromDirConfig>(options, { limits: DEFAULT_LIMITS, filter: null });
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const { maxObjectSize: maxObject, maxPackObjects: maxFiles, maxInflatedTotal: maxTotal } = checked.value;
   const out: DirFile[] = [];
   let total = 0;
   const keep = (data: Uint8Array, path: string, mode: string): Result<null, DirError> => {
-    if (out.length >= maxFiles.value) return err(limitExceeded('files', out.length + 1, maxFiles.value));
+    if (out.length >= maxFiles) return err(limitExceeded('files', out.length + 1, maxFiles));
     // each file costs LIMIT_OBJECT_OVERHEAD beyond its bytes (#142)
     total += data.length + LIMIT_OBJECT_OVERHEAD;
-    if (total > maxTotal.value) return err(limitExceeded('directory bytes', total, maxTotal.value));
+    if (total > maxTotal) return err(limitExceeded('directory bytes', total, maxTotal));
     out.push({ path, mode, data: new Uint8Array(data.buffer, data.byteOffset, data.length) });
     return ok(null);
   };
@@ -71,7 +68,7 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
       if (st.isDirectory()) kept = await walk(path);
       else if (st.isSymbolicLink()) kept = keep(await readlink(full, { encoding: 'buffer' }), path, MODE_LINK);
       else if (st.isFile()) {
-        if (st.size > maxObject.value) return err(limitExceeded('object size', st.size, maxObject.value));
+        if (st.size > maxObject) return err(limitExceeded('object size', st.size, maxObject));
         kept = keep(await readFile(full), path, (st.mode & OWNER_EXEC) === 0 ? MODE_BLOB : MODE_EXEC);
       } else return fail('bad_request', `${path}: not a regular file, directory or symlink`, { what: 'path', path });
       if (!kept.ok) return kept;
@@ -84,7 +81,9 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
 
 export type PushDirSpec = Omit<TreeSpec, 'files'> & { readonly dir: string } & Input<{ readonly filter: DirFilter | null }>;
 export async function pushDir(url: string, { dir, filter = null, ...spec }: PushDirSpec, opts: PushTreeOptions = {}): Promise<Result<PushTreeResult, PlyError>> {
-  const files = await filesFromDir(dir, { limits: getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS), filter });
+  const limits = limitsOf(opts);
+  if (!limits.ok) return limits;
+  const files = await filesFromDir(dir, { limits: limits.value, filter });
   if (!files.ok) return files;
-  return pushTree(url, { ...spec, files: files.value }, opts);
+  return pushTree(url, { ...spec, files: files.value }, { ...opts, limits: limits.value });
 }

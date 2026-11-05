@@ -27,7 +27,7 @@ export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, ar
 export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
 export type { Transport } from './transport.js';
 export type { ExportLine, Exporter } from './otel.js';
-export type { Limits } from './limits.js';
+export type { Limits, CheckedLimits, LimitsInput } from './limits.js';
 export type { FetchOpts, SpState } from './fetch.js';
 export type { OperationOpts, Outcome } from './operation.js';
 export type { PackObject } from './push.js';
@@ -63,7 +63,7 @@ export { pkt, pkts, pktInit, pktStep, pktFinish } from './pktline.js';
 
 // ---- tracing, limits, errors, transport ----
 export { Tracer, Span, KIND, arrayExporter, consoleExporter, flattenLine, fromAny } from './otel.js';
-export { DEFAULT_LIMITS, WORKER_LIMITS, LIMIT_OBJECT_OVERHEAD, withLimits, limitError } from './limits.js';
+export { DEFAULT_LIMITS, WORKER_LIMITS, LIMIT_OBJECT_OVERHEAD, withLimits, parseLimits, limitError } from './limits.js';
 export { CODES, RETRY, fail, plyError, isPlyCode, retryPolicy, isRetryable, ambiguousAfterPush } from './errors.js';
 export { CODE_DOCS } from './errors-doc.js';
 export { operation, verifyRef } from './operation.js';

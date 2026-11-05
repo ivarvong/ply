@@ -146,6 +146,10 @@ test('refusals: a malformed index request is bad_request, a thin or duplicated p
   const code = r => (r.ok ? 'ok' : `${r.error.code}:${r.error.what}`);
   const cases = {
     'short pack': [encodePackIndex(pack.subarray(0, 31), []), 'bad_request:pack'],
+    // the limits record is parsed once, before the pack is read (#156); a key left out is the default
+    'bad limits': [indexPack(pack, { maxDeltaChain: -1 }), 'bad_request:maxDeltaChain'],
+    'partial limits': [indexPack(pack, { maxPackObjects: 1 }), 'ok'],
+    'a cap the pack passes': [indexPack(pack, { maxPackObjects: 0 }), 'limit_exceeded:pack objects'],
     'not a pack': [encodePackIndex(Uint8Array.from([...pack].map((b, i) => (i === 0 ? 0x51 : b))), [{ oid, offset: 12 }]), 'bad_request:pack'],
     'version 3': [encodePackIndex(Uint8Array.from([...pack].map((b, i) => (i === 7 ? 3 : b))), [{ oid, offset: 12 }]), 'bad_request:pack'],
     'count mismatch': [encodePackIndex(pack, []), 'bad_request:objects'],
@@ -176,7 +180,7 @@ test('refusals: a malformed index request is bad_request, a thin or duplicated p
   // a thin pack (a REF_DELTA whose base is not in it): git index-pack refuses it without --fix-thin, and so does indexPack
   const base = new TextEncoder().encode('base '.repeat(40));
   const target = new TextEncoder().encode(`${'base '.repeat(40)}and more`);
-  const thin = (await buildPack([{ type: TYPE.BLOB, data: ply.encodeDelta(base, target), baseOid: hashObject('blob', base) }])).pack;
+  const thin = (await buildPack([{ type: TYPE.BLOB, data: ply.encodeDelta(base, target), base: { tag: 'ref', oid: hashObject('blob', base) } }])).pack;
   writeFileSync(join(d, 'thin.pack'), thin);
   assert.throws(() => git(d, ['index-pack', '-o', join(d, 'thin.idx'), join(d, 'thin.pack')]), /unresolved deltas|fatal/i);
   assert.match(code(indexPack(thin)), /^pack_corrupt/);

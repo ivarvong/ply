@@ -50,7 +50,22 @@ test('second-pass cells (#144) exist: thin packs, protocol v0/v1, pkt-line lengt
   const wd = allCells().filter(c => c.runtime === 'workerd');
   assert.ok(wd.length >= 8 && wd.filter(c => isCi(c)).length >= 6, `workerd cells ${wd.length}`);
   // the slow-server cells at the default 60 s are nightly; CI crosses a 1 s cap
-  for (const c of allCells().filter(c => c.param === 'requestTimeoutMs' && !c.limits?.requestTimeoutMs)) assert.equal(isCi(c), false, c.id);
+  for (const c of allCells().filter(c => c.param === 'requestTimeoutMs' && !c.id.startsWith('parse.') && !c.limits?.requestTimeoutMs)) assert.equal(isCi(c), false, c.id);
+});
+
+test('every Limits key is parsed where it enters (#156): a CI cell per key refuses a value that bounds nothing at an operation that never reads it', () => {
+  const cells = allCells();
+  for (const { key } of PARAMS) {
+    const mine = cells.filter(c => c.id.startsWith(`parse.${key}.`));
+    assert.equal(mine.length, 2, key);
+    for (const c of mine) {
+      assert.ok(isCi(c), c.id);
+      assert.equal(c.op, 'lsRefs', c.id);
+      assert.deepEqual(Object.keys(c.limits), [key], c.id);
+      assert.deepEqual(c.expect, { status: 'refused', code: 'bad_request', what: key }, c.id);
+    }
+  }
+  assert.deepEqual(cells.find(c => c.id === 'parse.none').expect, { status: 'ok' });
 });
 
 test('CI keeps cells up to 16 MiB and 65536 entries; the known large boundaries are nightly', () => {

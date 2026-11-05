@@ -11,7 +11,7 @@ import { readObjHeader, readOfsDelta, readUint32BE, parsePack, applyDelta, resol
 import { buildPack, encodeObjHeader, spliceDelta } from '../src/pack.js';
 import { fromHex, toHex } from '../src/sha1.js';
 import { hashObject, TYPE } from '../src/objects.js';
-import { withLimits } from '../src/limits.js';
+import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
 import { PACK_HEADER_BYTES, OBJ_CONTINUE } from '../src/format.js';
 import { unwrap } from './unwrap.js';
 
@@ -60,7 +60,7 @@ test('#76 a thin pack resolves through the external phase; a base missing from b
   const d2 = spliceDelta({ baseLen: v1.length, off: v1.length, oldLen: 0, insert: v2.subarray(v1.length) }).delta;
   const id0 = hashObject('blob', v0), id1 = hashObject('blob', v1);
   // child first: d2 waits on d1 (in the pack) which waits on v0 (external only)
-  const { pack } = await buildPack([{ type: TYPE.BLOB, data: d2, baseOid: id1 }, { type: TYPE.BLOB, data: d1, baseOid: id0 }]);
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: d2, base: { tag: 'ref', oid: id1 } }, { type: TYPE.BLOB, data: d1, base: { tag: 'ref', oid: id0 } }]);
   const parsed = unwrap(parsePack(pack));
   let asked = [];
   const r = resolvePack(parsed, o => { asked.push(o); return o === id0 ? { type: TYPE.BLOB, data: v0 } : undefined; });
@@ -74,7 +74,7 @@ test('#76 a thin pack resolves through the external phase; a base missing from b
   errOf(resolvePack(parsed), 'pack_corrupt', `pack: ref delta base ${id1} not found`);
   assert.throws(() => unwrap(resolvePack(parsed)), e => e.code === 'pack_corrupt' && e.message === `pack: ref delta base ${id1} not found`);
   // an error inside the chain is not mistaken for a missing base: a corrupt delta fails at once, even in the in-pack phase
-  const bad = await buildPack([{ type: TYPE.BLOB, data: d2, baseOid: id1 }, { type: TYPE.BLOB, data: d1, baseOid: id0 }, { type: TYPE.BLOB, data: v0 }]);
+  const bad = await buildPack([{ type: TYPE.BLOB, data: d2, base: { tag: 'ref', oid: id1 } }, { type: TYPE.BLOB, data: d1, base: { tag: 'ref', oid: id0 } }, { type: TYPE.BLOB, data: v0 }]);
   const p2 = unwrap(parsePack(bad.pack));
   const broken = { ...p2, objects: p2.objects.map((o, i) => (i === 1 ? { ...o, data: Uint8Array.of(v0.length + 1, 1, 1, 0x41) } : o)) };
   errOf(resolvePack(broken), 'pack_corrupt', `delta: base size ${v0.length + 1} != ${v0.length}`);
@@ -121,11 +121,16 @@ test('Result cores return Err for every refusal their wrappers throw', async () 
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('x') }]);
   errOf(parsePack(pack, { maxObjects: -1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   errOf(parsePack(pack, { limits: withLimits({ maxObjectSize: NaN }) }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  errOf(parsePack(pack, { maxInflatedTotal: -1 }), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  errOf(parsePack(pack, { maxInflatedTotal: 1 }), 'limit_exceeded');
+  errOf(parsePack(pack, { limits: { maxPackObjects: null } }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   const lim = errOf(parsePack(pack, { maxObjects: 0 }), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
   assert.deepEqual([lim.what, lim.got, lim.max], ['pack objects', 1, 0]);
   errOf(parsePack(pack.subarray(0, pack.length - 1)), 'pack_corrupt');
   errOf(applyDelta(new Uint8Array(0), Uint8Array.of(0, 1, 0x81), { maxResult: -1 }), 'bad_request', 'limits.maxDeltaResult must be a finite non-negative number');
-  errOf(resolvePack(unwrap(parsePack(pack)), undefined, withLimits({ maxDeltaChain: undefined })), 'bad_request', 'limits.maxDeltaChain must be a finite non-negative number');
+  errOf(resolvePack(unwrap(parsePack(pack)), undefined, withLimits({ maxDeltaChain: null })), 'bad_request', 'limits.maxDeltaChain must be a finite non-negative number');
+  // a key left out (or passed as the missing value) is the default (#156 parseLimits)
+  assert.equal(resolvePack(unwrap(parsePack(pack)), undefined, withLimits({ maxDeltaChain: undefined })).ok, true);
 });
 
 test('applyDelta: a delta cut inside a copy opcode is a short read at its end, whichever byte is missing', () => {
@@ -157,7 +162,7 @@ test('parsePack: the six pack types are accepted and 0 and 5 refused, by kind', 
     errOf(parsePack(p, { verify: false }), 'pack_corrupt', `pack: bad object type ${t} at ${PACK_HEADER_BYTES}`);
   }
   const objs = [TYPE.COMMIT, TYPE.TREE, TYPE.BLOB, TYPE.TAG].map(type => ({ type, data: te.encode('') }));
-  const all = await buildPack([...objs, { type: TYPE.BLOB, data: Uint8Array.of(0, 0), baseOid: hashObject('tag', new Uint8Array(0)) }]);
+  const all = await buildPack([...objs, { type: TYPE.BLOB, data: Uint8Array.of(0, 0), base: { tag: 'ref', oid: hashObject('tag', new Uint8Array(0)) } }]);
   const r = parsePack(all.pack);
   assert.equal(r.ok, true);
   assert.deepEqual(r.value.stats.byType, { commit: 1, tree: 1, blob: 1, tag: 1, ref_delta: 1 });
@@ -537,12 +542,16 @@ test('treeSort: the first name the sort compares that has no byte form is the re
   }
 });
 
-test('packParseOpts reads the two pack caps out of limits, checked in order', async () => {
+test('packParseOpts parses limits and reads the two pack caps out of them; a key left out is the default', async () => {
   const { packParseOpts } = await import('../src/packresolve.js');
   const limits = withLimits({ maxPackObjects: 3, maxInflatedTotal: 7 });
   assert.deepEqual(packParseOpts(limits), { ok: true, value: { limits, maxObjects: 3, maxInflatedTotal: 7 } });
-  errOf(packParseOpts({}), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
-  errOf(packParseOpts({ maxPackObjects: 1 }), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  assert.deepEqual(unwrap(packParseOpts({})), { limits: { ...DEFAULT_LIMITS }, maxObjects: DEFAULT_LIMITS.maxPackObjects, maxInflatedTotal: DEFAULT_LIMITS.maxInflatedTotal });
+  assert.deepEqual(unwrap(packParseOpts({ maxPackObjects: 1 })).maxObjects, 1);
+  errOf(packParseOpts({ maxPackObjects: -1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
+  errOf(packParseOpts({ maxPackObjects: 1, maxInflatedTotal: NaN }), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  // a key the parser does not read is ignored
+  assert.equal(packParseOpts({ maxPackObjects: 1, notALimit: NaN }).ok, true);
 });
 
 test('parseRefname, parseBranchName, parseTagName, parsePath: the refusal names what was parsed; the validator\'s error is its cause', async () => {
@@ -571,4 +580,17 @@ test('parseRefname, parseBranchName, parseTagName, parsePath: the refusal names 
     assert.equal(x.what, what, message);
     assert.equal(x.cause, undefined);
   }
+});
+
+test('planDeltas gives each delta its tagged base and counts them: ofs against an earlier object, ref against a thin base', async () => {
+  const { planDeltas } = await import('../src/delta.js');
+  const v1 = new TextEncoder().encode(Array.from({ length: 40 }, (_, i) => `line ${i}\n`).join(''));
+  const v2 = new TextEncoder().encode(Array.from({ length: 40 }, (_, i) => `line ${i === 7 ? 'x' : i}\n`).join(''));
+  const p = planDeltas([{ type: TYPE.BLOB, data: v1, path: 'a' }, { type: TYPE.BLOB, data: v2, path: 'a' }]);
+  assert.deepEqual([p.ofs, p.ref, p.objects[0].base, p.objects[1].base], [1, 0, undefined, { tag: 'ofs', index: 0 }]);
+  const base = hashObject('blob', v1);
+  const thin = planDeltas([{ type: TYPE.BLOB, data: v2, path: 'a' }], { thinBase: () => ({ oid: base, data: v1 }) });
+  assert.deepEqual([thin.ofs, thin.ref, thin.objects[0].base], [0, 1, { tag: 'ref', oid: base }]);
+  const whole = planDeltas([{ type: TYPE.BLOB, data: v2, path: 'a' }]);
+  assert.deepEqual([whole.ofs, whole.ref, whole.objects[0].base], [0, 0, undefined]);
 });

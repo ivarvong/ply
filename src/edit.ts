@@ -18,8 +18,8 @@ import { streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
 import { KIND, cpuNow, cpuSince } from './otel.js';
 import type { Attrs, Span, StartOptions, Tracer } from './otel.js';
-import { DEFAULT_LIMITS } from './limits.js';
-import type { Limits } from './limits.js';
+import { limitsOf, parseLimits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import type { IdentInput, ValidatedIdent } from './validate.js';
 import { parseCommitId, parseOid, type Oid } from './oid.js';
@@ -162,7 +162,9 @@ const identInput = (who: Author, time: number): IdentInput => {
   const tz = fromNullish(who.tz);
   return tz.tag === 'some' ? { name: who.name, email: who.email, time, tz: tz.value } : { name: who.name, email: who.email, time };
 };
-export function validateSpec(spec: EditSpec, limits: Limits, head: string | null = null): Result<EditPlan, PlyError> {
+export function validateSpec(spec: EditSpec, limits: LimitsInput, head: string | null = null): Result<EditPlan, PlyError> {
+  const checkedLimits = parseLimits(limits);
+  if (!checkedLimits.ok) return checkedLimits;
   const given = withDefaults(spec, specDefaults());
   // a null ref is the default too, as the JS read it
   const givenRef = getOrElse(fromNullish(given.ref), DEFAULT_REF);
@@ -184,7 +186,7 @@ export function validateSpec(spec: EditSpec, limits: Limits, head: string | null
   if (!written.ok) return written;
   const checkedMessage = validateMessage(message);
   if (!checkedMessage.ok) return checkedMessage;
-  const comps = map(validatePath(spec.path, limits), p => p.components);
+  const comps = map(validatePath(spec.path, checkedLimits.value), p => p.components);
   if (!comps.ok) return comps;
   const find: unknown = bytesOf(spec.find), replace: unknown = bytesOf(spec.replace);
   if (!(find instanceof Uint8Array) || !(replace instanceof Uint8Array)) return fail('bad_request', 'find/replace must be string or Uint8Array');
@@ -222,7 +224,7 @@ export function needsHead(strictHead: boolean, head: string | null): Result<null
 
 // Pure: one path component against one tree's entries.
 export type Found = { readonly entry: TreeEntry; readonly attrs: Attrs };
-export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: Limits): Result<Found, PlyError> {
+export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: LimitsInput): Result<Found, PlyError> {
   const parsed = parseTree(data, limits);
   if (!parsed.ok) return parsed;
   const entries: readonly TreeEntry[] = parsed.value;
@@ -316,8 +318,6 @@ export type EditOptions = EntryOptions & Input<EditConfig>;
 const editDefaults = (): { -readonly [K in keyof EditConfig]: EditConfig[K] } => ({ head: null, strictHead: false, cache: null, verify: false, allowLfsPointer: false, signer: null, retry: true });
 type Attempt = { readonly head: Oid | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null };
 
-// The limits an entry's options name, else the defaults.
-export const limitsOf = (opts: EntryOptions): Limits => getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS);
 // A packcache fetch reports its counters (attrs()); any other fetch has none.
 const fetchCounters = (opts: EntryOptions): Attrs => {
   const fetchImpl = fromNullish(opts.fetchImpl);
@@ -468,10 +468,10 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
 }
 
 // oxlint-disable-next-line require-await -- async, as before: the spec's refusal is an Err the promise resolves with
-async function editOnce(url: string, s: EditPlan, options: EditOptions, cfg: EditConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<EditResult, PlyError>> {
+async function editOnce(url: string, s: EditPlan, options: EditOptions & { readonly limits: CheckedLimits }, cfg: EditConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<EditResult, PlyError>> {
   const { verify, allowLfsPointer, signer, strictHead } = cfg;
   const cache = cfg.cache === null ? new Map<string, Uint8Array>() : cfg.cache;
-  const limits = limitsOf(options);
+  const { limits } = options;
   const base = baseName(s.base);
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
   let streamed: { readonly scan: Held; readonly inflated: number } = { scan: { chunks: 0, maxChunk: 0 }, inflated: 0 };
@@ -596,13 +596,16 @@ export async function editFile(url: string, spec: EditSpec, options: EditOptions
   const cfg = withDefaults(options, editDefaults());
   const needs = needsHead(cfg.strictHead, cfg.head);
   if (!needs.ok) return needs;
-  // the spec is parsed once: both attempts run on this plan (the retry asks with no head hint)
-  const planned = validateSpec(spec, limitsOf(options), cfg.head);
+  // the limits and the spec are parsed once: both attempts run on this plan (the retry asks with no head hint)
+  const limits = limitsOf(options);
+  if (!limits.ok) return limits;
+  const planned = validateSpec(spec, limits.value, cfg.head);
   if (!planned.ok) return planned;
   const plan = planned.value;
-  const first = await editOnce(url, plan, options, cfg, { head: plan.head, attempt: 0, linkTo: null, hintWas: null });
+  const checked = { ...options, limits: limits.value };
+  const first = await editOnce(url, plan, checked, cfg, { head: plan.head, attempt: 0, linkTo: null, hintWas: null });
   // only attempt 0's cas_conflict is redone, once: the retry's Err is the answer
   // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
   if (first.ok || !cfg.retry || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
-  return editOnce(url, plan, options, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
+  return editOnce(url, plan, checked, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
 }

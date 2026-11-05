@@ -25,8 +25,9 @@
 import type { Code, ErrorOf, PlyError } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
-import { err } from './result.js';
-import type { Limits } from './limits.js';
+import { err, ok } from './result.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
+import { parseLimits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
 import { KIND } from './otel.js';
 import type { Input } from './absent.js';
@@ -147,7 +148,8 @@ export type Transport = {
   readonly url: string;
   readonly tracer: Tracer;
   readonly parent: Span | null;
-  readonly limits: Limits;
+  // parsed once, where the transport was made (createTransport) or handed in (transportFrom)
+  readonly limits: CheckedLimits;
   readonly signal: AbortSignal | null;
   readonly quirks: Quirks;
   readonly objects: Harvest;
@@ -157,23 +159,29 @@ export type Transport = {
 };
 
 // A transport as a caller may hand one in (operations take `transport`): it may lack the learned-quirks record and the
-// harvest store and the credential scrubber, or pass null for them. asTransport fills them once, at the edge: a transport that had none had no
-// memory of either, so a private fresh record behaves the same.
-export type TransportInput = Omit<Transport, 'quirks' | 'objects' | 'scrub'> & Input<{ readonly quirks: Input<Quirks> | null; readonly objects: Harvest | null; readonly scrub: Scrub | null }>;
-export function asTransport(t: TransportInput): Transport {
+// harvest store and the credential scrubber, or pass null for them, and its limits are any subset (a plain record).
+// asTransport fills them once, at the edge: a transport that had none had no memory of either, so a private fresh record
+// behaves the same; its limits are parsed (parseLimits), so a bad one is refused before the operation sends anything.
+export type TransportInput = Omit<Transport, 'quirks' | 'objects' | 'scrub' | 'limits'> & { readonly limits: LimitsInput } & Input<{ readonly quirks: Input<Quirks> | null; readonly objects: Harvest | null; readonly scrub: Scrub | null }>;
+export function asTransport(t: TransportInput, limits: CheckedLimits): Transport {
   const q = readKey(t, 'quirks');
   const o = readKey(t, 'objects');
   const sc = readKey(t, 'scrub');
   const scrub = sc.tag === 'some' ? sc.value : null;
   const quirks = fillIn(q.tag === 'some' && q.value !== null ? q.value : {}, freshQuirks());
   const objects = o.tag === 'some' && o.value !== null ? o.value : new Map<string, HeldObject>();
-  if (q.tag === 'some' && q.value === quirks && o.tag === 'some' && o.value === objects && sc.tag === 'some') {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- both fields were present; the record is a Transport
+  if (q.tag === 'some' && q.value === quirks && o.tag === 'some' && o.value === objects && sc.tag === 'some' && t.limits === limits) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- every field was present and the limits are the checked record: the record is a Transport
     return t as Transport;
   }
   // A view, like withParent: the caller's methods and state stay the prototype's.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; the view is `t` with the two fields filled
-  return Object.create(t, { quirks: { value: quirks, enumerable: true }, objects: { value: objects, enumerable: true }, scrub: { value: scrub, enumerable: true } }) as Transport;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; the view is `t` with the four fields filled
+  return Object.create(t, { quirks: { value: quirks, enumerable: true }, objects: { value: objects, enumerable: true }, scrub: { value: scrub, enumerable: true }, limits: { value: limits, enumerable: true } }) as Transport;
+}
+
+export function transportFrom(t: TransportInput): Result<Transport, ErrorOf<'bad_request'>> {
+  const limits = parseLimits(t.limits);
+  return limits.ok ? ok(asTransport(t, limits.value)) : limits;
 }
 
 // We are not git and do not claim to be: servers that branch on the agent string get the truth.

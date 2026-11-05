@@ -42,8 +42,8 @@ import type { PackObject, WideFilter } from './fetch.js';
 import { resolveCommit, openBlob, pathComps } from './read.js';
 import type { ReadOptions, RefSpec } from './read.js';
 import { parseCommit, parseTree, canonMode as canonModeOf, TYPE, TYPE_NAME, nonCommitType } from './objects.js';
-import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, limitError, limitsOf, parseLimits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { probing, withParent } from './transport.js';
 import { MODE_TREE, MODE_COMMIT } from './format.js';
 import type { Span, Tracer } from './otel.js';
@@ -78,7 +78,7 @@ export type CheckoutEntry = { readonly path: string; readonly mode: Mode; readon
 // A tree's entries by oid, or why they cannot be had (a tree missing from the pack, or one that does not parse).
 export type TreeLookup = (oid: string) => Result<readonly TreeEntry[], PlyError>;
 // `depth`: the level the walk starts at (a subtree's own depth); `limits`: maxPackObjects and maxPathDepth.
-export type TreeFilesConfig = { readonly depth: number; readonly limits: Limits };
+export type TreeFilesConfig = { readonly depth: number; readonly limits: LimitsInput };
 export type TreeFilesOptions = Input<TreeFilesConfig>;
 // Pure: every non-tree entry under `oid`, depth first in tree order. `tree(oid)` → parsed entries. Each tree is checked
 // for a name given twice (git fsck duplicateEntries: a symlink `a` beside a directory `a` would route a later write
@@ -86,12 +86,9 @@ export type TreeFilesOptions = Input<TreeFilesConfig>;
 // (each a distinct path, one object) cannot make the walk outgrow the pack it came from by more than that.
 export function treeFiles(tree: TreeLookup, oid: string, options: TreeFilesOptions = {}): Result<CheckoutEntry[], PlyError> {
   const { depth, limits } = withDefaults<TreeFilesConfig>(options, { depth: 0, limits: DEFAULT_LIMITS });
-  const entriesCap = readLimit(limits, 'maxPackObjects');
-  if (!entriesCap.ok) return entriesCap;
-  const depthCap = readLimit(limits, 'maxPathDepth');
-  if (!depthCap.ok) return depthCap;
-  const maxEntries = entriesCap.value;
-  const maxDepth = depthCap.value;
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const { maxPackObjects: maxEntries, maxPathDepth: maxDepth } = checked.value;
   const out: CheckoutEntry[] = [];
   let seen = 0;
   const walk = (at: string, prefix: string, level: number): Result<true, PlyError> => {
@@ -138,7 +135,7 @@ function treesPack(t: Transport, commit: string): Promise<Result<FetchedPack & {
 }
 // Effect: the commit and every tree under it, as one pack (deepen 1). Returns { root, tree } where tree(oid) parses a
 // tree from that pack. A bare oid that is not a commit (or not on the server) is the caller's not_found.
-async function fetchTrees(t: Transport, commit: string, limits: Limits): Promise<Result<Trees, PlyError>> {
+async function fetchTrees(t: Transport, commit: string, limits: CheckedLimits): Promise<Result<Trees, PlyError>> {
   const got = await treesPack(t, commit);
   if (!got.ok) {
     if (got.error.code === 'remote_error' && thrownReasonIs(got.error, 'not_our_ref')) return fail('not_found', `commit ${commit} not found on the remote`, { miss: { kind: 'commit', miss: { kind: 'absent', oid: commit } } });
@@ -320,25 +317,25 @@ export type CheckoutSpec = Input<CheckoutConfig>;
 // The options: operation()'s, plus `batch` (wants per blob fetch, 1..limits.maxPackObjects).
 export type CheckoutOptions = ReadOptions & Input<{ readonly batch: number }>;
 // The path's components and a batch the limits allow, refused in the order the entry always checked them.
-function checkoutArgs(path: unknown, batch: number, limits: Limits): Result<string[], PlyError> {
+function checkoutArgs(path: unknown, batch: number, limits: CheckedLimits): Result<string[], PlyError> {
   const comps = pathComps(path, limits, { allowRoot: true });
   if (!comps.ok) return comps;
   if (!Number.isSafeInteger(batch) || batch < 1) return fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
-  const max = readLimit(limits, 'maxPackObjects');
-  if (!max.ok) return max;
-  if (batch > max.value) return fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
+  if (batch > limits.maxPackObjects) return fail('bad_request', 'batch must be an integer from 1 to limits.maxPackObjects', { what: 'batch' });
   return comps;
 }
 // oxlint-disable-next-line require-await -- async: a refused argument is an Err in a promise, like every other answer
 export async function checkoutTree(url: string, spec: CheckoutSpec = {}, options: CheckoutOptions = {}): Promise<Result<CheckoutResult, PlyError>> {
   const { ref, path } = withDefaults<CheckoutConfig>(spec, { ref: null, path: '' });
   const { batch } = withDefaults<{ readonly batch: number }>(options, { batch: BATCH });
-  // A null limits record is the default, as the nullish read had it.
-  const limits = getOrElse(fromNullish(options.limits), DEFAULT_LIMITS);
+  // A null limits record is the default, as the nullish read had it; the record is parsed once, here.
+  const checked = limitsOf(options);
+  if (!checked.ok) return checked;
+  const limits = checked.value;
   const args = checkoutArgs(path, batch, limits);
   if (!args.ok) return args;
   const comps = args.value;
-  return operation('checkout', url, { ...options, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } }, async ({ t, root, outcome }) => {
+  return operation('checkout', url, { ...options, limits, attrs: { 'git.checkout.ref': ref === null ? 'HEAD' : ref, 'git.checkout.path': comps.join('/'), 'git.checkout.batch': batch } }, async ({ t, root, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;

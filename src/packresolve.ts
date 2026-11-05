@@ -7,12 +7,12 @@ import type { ErrorOf } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever, flatMapOption, getOrElse } from './result.js';
-import { at, atOr, fromNullable, fromNullish, mapGet, readKey, type Input } from './absent.js';
+import { atOr, fromNullable, fromNullish, mapGet, readKey, type Input } from './absent.js';
 import type { Oid } from './oid.js';
 import { parseOid } from './oid.js';
 import { TYPE, TYPE_NAME, hashObject, nameOfTypeId } from './objects.js';
-import type { LimitKey, Limits } from './limits.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitError, checkLimit, readLimit } from './limits.js';
+import type { CheckedLimits, LimitKey, LimitsInput } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitError, checkLimit, parseLimits } from './limits.js';
 // pack.js re-exports this module's parsers: a cycle of a re-export and one function, which ES modules resolve
 // oxlint-disable-next-line import/no-cycle -- see above
 import { spliceDelta } from './pack.js';
@@ -50,47 +50,37 @@ function storedType(n: number): ResolvedObjType | null {
 const storedName = (type: ResolvedObjType): ObjectTypeName => TYPE_NAME[type];
 
 // ---- parse ----
-// Caps are required. A missing field used to become Infinity (a nullish fallback), which disabled the check; checkLimit rejects that.
-// Each key's cap is the caller's override at the same index when it gave one, else limits[key]; the first cap that
-// bounds nothing is the error. One cap per key, in order, so the result has keys.length entries.
-type Caps = readonly [number, number, number];
-function capsOf(limits: Limits, keys: readonly [LimitKey, LimitKey, LimitKey], given: readonly unknown[] = []): Result<Caps, ErrorOf<'bad_request'>> {
-  const out: number[] = [];
-  for (const [i, k] of keys.entries()) {
-    const g = at(given, i);
-    const r = g.tag === 'some' ? checkLimit(g.value, k) : readLimit(limits, k);
-    if (!r.ok) return r;
-    out.push(r.value);
-  }
-  // three keys, three caps (the loop above)
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see above
-  return ok(out as unknown as Caps);
+// The caller's limits record is parsed once (parseLimits: a key it gives must bound something, a key it leaves out is the
+// default). An override (maxObjects, maxInflatedTotal) is checked as that key would be: a missing one is the record's.
+function overrideOf(given: unknown, fallback: number, key: LimitKey): Result<number, ErrorOf<'bad_request'>> {
+  const g = fromNullable(given);
+  return g.tag === 'some' ? checkLimit(g.value, key) : ok(fallback);
 }
-// verify: check the trailer's SHA-1 (anything but false verifies); limits: the caps (DEFAULT_LIMITS); maxObjects and
-// maxInflatedTotal: a cap that overrides the one in limits.
+// verify: check the trailer's SHA-1 (anything but false verifies); limits: the caps (any subset, DEFAULT_LIMITS for the
+// rest); maxObjects and maxInflatedTotal: a cap that overrides the one in limits.
 export type PackParseConfig = {
   readonly verify: boolean;
-  readonly limits: Limits;
+  readonly limits: LimitsInput;
   readonly maxObjects: number;
   readonly maxInflatedTotal: number;
 };
 export type PackParseOptions = Input<PackParseConfig>;
-// parsePack's options for `limits`: the two pack caps read out of it, checked (the first that bounds nothing is the error).
-export type PackParseOpts = { readonly limits: Limits; readonly maxObjects: number; readonly maxInflatedTotal: number };
-export function packParseOpts(limits: Limits = DEFAULT_LIMITS): Result<PackParseOpts, ErrorOf<'bad_request'>> {
-  const maxObjects = readLimit(limits, 'maxPackObjects');
-  if (!maxObjects.ok) return maxObjects;
-  const maxInflatedTotal = readLimit(limits, 'maxInflatedTotal');
-  if (!maxInflatedTotal.ok) return maxInflatedTotal;
-  return ok({ limits, maxObjects: maxObjects.value, maxInflatedTotal: maxInflatedTotal.value });
+// parsePack's options for `limits`: the record parsed, and the two pack caps read out of it.
+export type PackParseOpts = { readonly limits: CheckedLimits; readonly maxObjects: number; readonly maxInflatedTotal: number };
+export function packParseOpts(limits: LimitsInput = DEFAULT_LIMITS): Result<PackParseOpts, ErrorOf<'bad_request'>> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  return ok({ limits: checked.value, maxObjects: checked.value.maxPackObjects, maxInflatedTotal: checked.value.maxInflatedTotal });
 }
-// The caps parsePack's options give: each override checked as limits' own key would be (capsOf).
+// The caps parsePack's options give: the limits record parsed, then each override checked as its key would be.
 export function packCaps(opts: PackParseOptions): Result<PackCaps, ErrorOf<'bad_request'>> {
-  const limits = getOrElse(fromNullish(opts.limits), DEFAULT_LIMITS);
-  const caps = capsOf(limits, ['maxPackObjects', 'maxInflatedTotal', 'maxObjectSize'], [opts.maxObjects, opts.maxInflatedTotal]);
-  if (!caps.ok) return caps;
-  const [maxObjects, maxInflatedTotal, maxObjectSize] = caps.value;
-  return ok({ maxObjects, maxInflatedTotal, maxObjectSize });
+  const limits = parseLimits(getOrElse<LimitsInput | null>(fromNullish(opts.limits), null));
+  if (!limits.ok) return limits;
+  const maxObjects = overrideOf(opts.maxObjects, limits.value.maxPackObjects, 'maxPackObjects');
+  if (!maxObjects.ok) return maxObjects;
+  const maxInflatedTotal = overrideOf(opts.maxInflatedTotal, limits.value.maxInflatedTotal, 'maxInflatedTotal');
+  if (!maxInflatedTotal.ok) return maxInflatedTotal;
+  return ok({ maxObjects: maxObjects.value, maxInflatedTotal: maxInflatedTotal.value, maxObjectSize: limits.value.maxObjectSize });
 }
 
 // One object as parsePack read it: its type is one of the six, its declared size within maxObjectSize, its base parsed
@@ -484,10 +474,8 @@ function externalBase(oid: Oid, ext: ExternalBase): Result<Base, Corrupt> {
 // The fixpoint. `collectMissing` is describePack's path: a thin base is data, not an error. Without it a thin base the
 // lookup does not have is refused (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
 // oxlint-disable-next-line complexity -- the fixpoint's phases, one function so the memo and the budget are shared
-function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Limits, collectMissing: boolean): Result<CollectedPack, PackError> {
-  const caps = capsOf(limits, ['maxDeltaChain', 'maxDeltaResult', 'maxInflatedTotal']);
-  if (!caps.ok) return caps;
-  const [maxChain, maxDelta, inflatedCap] = caps.value;
+function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: CheckedLimits, collectMissing: boolean): Result<CollectedPack, PackError> {
+  const { maxDeltaChain: maxChain, maxDeltaResult: maxDelta, maxInflatedTotal: inflatedCap } = limits;
   const entries: Entry[] = [];
   for (const o of parsed.objects) {
     const e = packEntry(o);
@@ -626,13 +614,15 @@ const noBase = (): null => null;
 
 // objects from parsePack (or built by hand, parsed here: an invalid one is bad_request); external(oid) -> {type, data}
 // for thin bases. A thin base the lookup does not have is refused.
-export function resolvePack(parsed: PackToResolve, external: ExternalLookup = noBase, limits: Limits = DEFAULT_LIMITS): Result<ResolvedPack, PackError> {
-  const r = fixpoint(parsed, external, limits, false);
+export function resolvePack(parsed: PackToResolve, external: ExternalLookup = noBase, limits: LimitsInput = DEFAULT_LIMITS): Result<ResolvedPack, PackError> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const r = fixpoint(parsed, external, checked.value, false);
   return r.ok ? ok({ objects: r.value.objects, stats: r.value.stats }) : r;
 }
 // resolvePack, keeping what a thin base it does not have leaves unresolved instead of refusing it: those objects'
 // offsets and the bases they wait on (a wide fetch that dropped blobs reads them as blobs; describePack as missingBases).
-export function resolvePackCollect(parsed: PackToResolve, external: ExternalLookup, limits: Limits): Result<CollectedPack, PackError> {
+export function resolvePackCollect(parsed: PackToResolve, external: ExternalLookup, limits: CheckedLimits): Result<CollectedPack, PackError> {
   return fixpoint(parsed, external, limits, true);
 }
 
@@ -722,10 +712,12 @@ function packLayout(parsed: ParsedPack, resolved: CollectedPack): PackLayout {
 
 // The pack's layout as `git verify-pack -v` prints it. A thin REF base is `missingBases`, not an error and not a
 // message to match. Limits are the same ones parse and resolve already enforce.
-export function describePack(buf: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<PackLayout, PackError> {
-  const parsed = parsePack(buf, { limits });
+export function describePack(buf: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<PackLayout, PackError> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const parsed = parsePack(buf, { limits: checked.value });
   if (!parsed.ok) return parsed;
-  const resolved = fixpoint(parsed.value, noBase, limits, true);
+  const resolved = fixpoint(parsed.value, noBase, checked.value, true);
   if (!resolved.ok) return resolved;
   return ok(packLayout(parsed.value, resolved.value));
 }
