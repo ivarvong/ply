@@ -109,6 +109,16 @@ function build() {
       bytes: E, entries: E, expect: E > DEFAULT_LIMITS.maxTreeEntries ? refused('limit_exceeded', { what: 'tree entries' }) : ok,
     });
   }
+  // maxObjectSize on a fetched tree: the declared size is refused where the pack's object header is read (#156), before
+  // a body byte; exactly the cap is allowed. tree-65536's tree is 65,536 entries of 36 bytes (`100644 eNNNNNNN\0` + id).
+  const tree65536 = 65536 * 36;
+  for (const [name, cap] of [['at', tree65536], ['under', tree65536 - 1]]) {
+    add({
+      id: `tree.object.listTree.65536.${name}`, param: 'maxObjectSize', op: 'listTree', repo: 'tree-65536', path: '',
+      bytes: tree65536, entries: 65536, limits: { maxObjectSize: cap },
+      expect: cap < tree65536 ? refused('limit_exceeded', { what: 'pack object size', got: tree65536, max: cap }) : ok,
+    });
+  }
   for (const E of [1, 65536, 200000, 200001]) {
     if (E === 0) continue;
     const name = `e${String(E - 1).padStart(7, '0')}`;

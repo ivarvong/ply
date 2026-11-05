@@ -7,25 +7,23 @@
 // pull answers `need`, so a step never resumes halfway and there is no sentinel to throw. Refusals are values: a step
 // stores its PlyError on the record and the pull returns it (and keeps returning it).
 //
-// Same answers as inflate() (inflate.ts) for every member git writes; the property test in test/packstream.test.js holds
-// the two to the same bytes, consumed count and stats for every chunking. Where they differ, on input no git writes:
-//   - a back-reference past the window CINFO declares is pack_corrupt (zlib and git refuse it; inflate() checks only
-//     that it lands inside the output), and CINFO > 7 is `zlib: window size N is not a zlib window`;
-//   - a stored block whose declared length is past the output cap is refused at its header, before its bytes arrive
-//     (inflate() reports a truncation first when the bytes are also short);
-//   - a member cut inside its zlib header is a short read of the bytes fed (inflate() counts from its `pos`).
+// The one deflate decoder in ply: inflate() (inflate.ts) is a collector over this pull, so the buffered and the streamed
+// paths give the same answer by construction. On input no git writes, the decoder refuses what zlib and git refuse:
+//   - a back-reference past the window CINFO declares is pack_corrupt, and CINFO > 7 is `zlib: window size N is not a
+//     zlib window` (after the method check and before the header checksum);
+//   - a stored block whose declared length is past the output cap is refused at its header, before its bytes arrive;
+//   - a member cut inside its zlib header is a short read of the bytes fed.
+// The Huffman tables, the alphabets and Adler-32 live here too; inflate.ts re-exports them.
 import type { ErrorOf } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok, err, assertNever } from './result.js';
 import { shortRead } from './bytes.js';
 import { DEFAULT_LIMITS, checkLimit } from './limits.js';
-import type { Huffman, InflateStats, InflateError } from './inflate.js';
-import { huffBuild, adler32, FIXED_LIT, FIXED_DIST, CLORDER, DEFLATE_TABLES } from './inflate.js';
 import type { Attrs } from './otel.js';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ZLIB_CINFO_SHIFT, ZLIB_CINFO_MAX, ZLIB_WINDOW_EXPONENT,
-  ADLER_BYTES, ADLER_SHIFT, BYTE_SHIFT, BE32_SHIFTS, zlibBound,
+  ADLER_BYTES, ADLER_MOD, ADLER_SHIFT, BYTE_SHIFT, BE32_SHIFTS, zlibBound,
   DEFLATE_BFINAL_BITS, DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC,
   DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,
   DEFLATE_BIT_TABLE, DEFLATE_LITERALS, DEFLATE_EOB, DEFLATE_LENGTH_CODES,
@@ -37,13 +35,56 @@ import {
   INFLATE_WINDOW, INFLATE_CHUNK,
 } from './format.js';
 
-export type { InflateStats, InflateError } from './inflate.js';
+/* oxlint-disable no-magic-numbers -- RFC 1951 §3.2.5 length/distance alphabets and the fixed Huffman assignment */
+// The length and distance alphabets, built as RFC 1951 §3.2.5 defines them: each code's extra bits, and a base that is
+// the previous base plus the previous code's range (2^extra). Length code 285 is the exception: 0 extra bits, base 258.
+// test/mutant-kill.test.js holds these against the RFC's printed tables.
+const LBASE: number[] = [];
+const LEXT: number[] = [];
+const DBASE: number[] = [];
+const DEXT: number[] = [];
+for (let base = 3, i = 0; i < 29; i++) { const x = i < 8 || i === 28 ? 0 : (i >> 2) - 1; LEXT.push(x); LBASE.push(i === 28 ? 258 : base); base += 1 << x; }
+for (let base = 1, i = 0; i < 30; i++) { const x = i < 4 ? 0 : (i >> 1) - 1; DEXT.push(x); DBASE.push(base); base += 1 << x; }
+export const CLORDER: readonly number[] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
+export const DEFLATE_TABLES: { readonly LBASE: readonly number[]; readonly LEXT: readonly number[]; readonly DBASE: readonly number[]; readonly DEXT: readonly number[] } = /* @__PURE__ */ Object.freeze({ LBASE, LEXT, DBASE, DEXT });
+
+export type Huffman = { readonly count: Uint16Array; readonly symbol: Uint16Array };
 // Indexed reads in this file are in range (a length check, a mask, or a table built to the alphabet's size bounds each
 // one), which noUncheckedIndexedAccess cannot see; `as number` says so (src/ forbids the `!` form).
 /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above */
+// Canonical Huffman table from code lengths (puff algorithm). Returns {count, symbol}.
+export function huffBuild(lengths: ArrayLike<number>): Huffman {
+  const count = new Uint16Array(DEFLATE_BIT_TABLE);
+  const symbol = new Uint16Array(lengths.length);
+  const offs = new Uint16Array(DEFLATE_BIT_TABLE);
+  // Stryker disable next-line EqualityOperator: one past the end reads past the array (a key a typed array ignores), and count[0] is cleared on the next line
+  for (let i = 0; i < lengths.length; i++) { const l = lengths[i] as number; count[l] = (count[l] as number) + 1; }
+  count[0] = 0;
+  // Stryker disable next-line EqualityOperator: offs is DEFLATE_BIT_TABLE long, so the extra index is ignored
+  for (let l = 1; l < DEFLATE_BIT_TABLE; l++) offs[l] = (offs[l - 1] as number) + (count[l - 1] as number);
+  // Stryker disable next-line EqualityOperator: lengths[lengths.length] is past the end and the if skips it
+  for (let s = 0; s < lengths.length; s++) { const l = lengths[s] as number; if (l) { const at = offs[l] as number; symbol[at] = s; offs[l] = at + 1; } }
+  return { count, symbol };
+}
 
-const { LBASE, LEXT, DBASE, DEXT } = DEFLATE_TABLES;
+// lengths 0-143: 8, 144-255: 9, 256-279: 7, 280-287: 8
+export const FIXED_LIT: Huffman = huffBuild(new Uint8Array(288).fill(8).fill(9, 144, 256).fill(7, 256, 280));
+export const FIXED_DIST: Huffman = huffBuild(new Uint8Array(30).fill(5));
+/* oxlint-enable no-magic-numbers */
+
+export function adler32(bytes: Uint8Array, a = 1, b = 0): number {
+  // oxlint-disable-next-line no-param-reassign -- a and b are the running sums a caller may seed; updating them is the algorithm
+  for (let i = 0; i < bytes.length; i++) { a = (a + (bytes[i] as number)) % ADLER_MOD; b = (b + a) % ADLER_MOD; }
+  return ((b << ADLER_SHIFT) | a) >>> 0;
+}
+
+export type InflateStats = {
+  blocks: number; stored: number; fixed: number; dynamic: number;
+  literals: number; matches: number; matchBytes: number; maxDist: number; maxLen: number;
+};
+export type InflateError = ErrorOf<'pack_corrupt'> | ErrorOf<'limit_exceeded'> | ErrorOf<'bad_request'>;
+
 const WINDOW_MASK: number = INFLATE_WINDOW - 1;
 const EMPTY: Uint8Array = new Uint8Array(0);
 // The two decode results that are not a symbol. A symbol is a Uint16, so both are below zero.

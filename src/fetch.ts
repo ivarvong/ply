@@ -1,6 +1,6 @@
 // v2 fetch: request body (pure), response state machine (pure step), the streamed band-1 pack, and fetchObject — one
-// object by oid through the single-object pack parser, hash-verified. The buffered multi-object fetch with delta
-// resolution lives in fetchpack.js so this module never pulls the resolver into a bundle.
+// object by oid through the single-object pack parser, hash-verified. The multi-object fetch (the pack read through
+// the scan as it arrives, then delta-resolved) lives in fetchpack.js.
 // The step functions, the checks and fetchObject return Result. packStream is a stream: it fails through the stream
 // protocol (its iterator rejects with the PlyError), and the exchanges that drain it catch that once (coded).
 /* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal and changes what /i matches (U+017F, U+212A) */
@@ -21,7 +21,10 @@ import { corruptCacheHit } from './cachestatus.js';
 import { assertNever, err, getOrElse, none, ok } from './result.js';
 import type { InflateError, InflateStats, InflateStream } from './inflatestream.js';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, zlibWrap } from './inflatestream.js';
-import { parsePack, resolvePack, readObjHeader, readUint32BE, packParseOpts } from './packresolve.js';
+import { resolvePack, resolvePackCollect, packCaps, packCollectOpen, packCollectFeed, packCollectEnd, readObjHeader, readUint32BE } from './packresolve.js';
+import type { PackCollector, ParsedPack, ScannedHeader } from './packresolve.js';
+import type { HeaderError, ObjSize } from './packstream.js';
+import { NO_SIZE_CAP } from './packstream.js';
 import { atOr, fromNullish, mapGet, withDefaults } from './absent.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UINT32_BYTES, SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, SIDEBAND_CHANNEL_BYTES, OID_HEX_CHARS, PROTOCOL_V2, zlibBound } from './format.js';
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
@@ -391,19 +394,22 @@ export const isShortRead = (e: unknown): boolean => thrownCodeIs(e, 'pack_corrup
 
 // The single-object parser's state: the pack header and the object header (`header`), then the zlib body with the
 // trailer withheld (`body`); `trailer` is null until spFinish has checked it, then the trailer it checked.
-type SpCommon = { readonly head: Uint8Array; readonly lag: Uint8Array; readonly sha: Sha1; readonly bytes: number; readonly zlibBytes: number; readonly trailer: string | null };
+type SpCommon = { readonly head: Uint8Array; readonly lag: Uint8Array; readonly sha: Sha1; readonly bytes: number; readonly zlibBytes: number; readonly trailer: string | null; readonly maxObject: number };
 export type SpHeader = SpCommon & { readonly phase: 'header'; readonly type: number; readonly size: number };
-export type SpBody = SpCommon & { readonly phase: 'body'; readonly type: ObjType; readonly size: number; readonly headerBytes: number };
+export type SpBody = SpCommon & { readonly phase: 'body'; readonly type: ObjType; readonly size: ObjSize; readonly headerBytes: number };
 export type SpState = SpHeader | SpBody;
 export type SpFinished = SpBody & { readonly trailer: string };
 export type SpStepped = { readonly state: SpState; readonly zlib: Uint8Array[] };
 type Corrupt = ErrorOf<'pack_corrupt'>;
+type SpError = HeaderError;
 
-export const spInit = (): SpState => Object.freeze({ head: new Uint8Array(0), phase: 'header', type: 0, size: 0, lag: new Uint8Array(0), sha: new Sha1(), bytes: 0, zlibBytes: 0, trailer: null });
+// `maxObject`: the cap on the object's declared size, refused where its header is read (limit_exceeded, `pack object
+// size`). A streamed blob (edit, read) has none: its reader bounds it.
+export const spInit = (maxObject: number = NO_SIZE_CAP): SpState => Object.freeze({ head: new Uint8Array(0), phase: 'header', type: 0, size: 0, lag: new Uint8Array(0), sha: new Sha1(), bytes: 0, zlibBytes: 0, trailer: null, maxObject });
 const hasSignature = (head: Uint8Array): boolean => head.subarray(0, PACK_SIGNATURE.length).every((b, i) => b === PACK_SIGNATURE[i]);
 // The header phase, given every byte so far (`head`): still waiting (null), or the body state and the bytes after the
 // object header. Past the length check the header fields are views into `head`, not bounded reads: they cannot be short.
-function spHeader(s: SpHeader, head: Uint8Array): Result<{ readonly body: SpBody; readonly rest: Uint8Array } | null, Corrupt> {
+function spHeader(s: SpHeader, head: Uint8Array): Result<{ readonly body: SpBody; readonly rest: Uint8Array } | null, SpError> {
   // need the pack header plus the first object-header byte; a short read means the chunk has not arrived.
   if (head.length < PACK_HEADER_BYTES + 1) return ok(null);
   if (!hasSignature(head)) return fail('pack_corrupt', 'pack: bad signature');
@@ -414,7 +420,7 @@ function spHeader(s: SpHeader, head: Uint8Array): Result<{ readonly body: SpBody
   if (!counted.ok) return counted;
   const count = counted.value;
   if (count !== 1) return fail('pack_corrupt', `pack: expected 1 object, got ${count}`);
-  const header = readObjHeader(head, PACK_HEADER_BYTES);
+  const header = readObjHeader(head, PACK_HEADER_BYTES, PACK_HEADER_BYTES, s.maxObject);
   if (!header.ok) return isShortRead(header.error) ? ok(null) : header;
   if (header.value.type === TYPE.OFS_DELTA || header.value.type === TYPE.REF_DELTA) return fail('pack_corrupt', 'pack: single-object pack is a delta');
   const p: number = header.value.next;
@@ -423,7 +429,7 @@ function spHeader(s: SpHeader, head: Uint8Array): Result<{ readonly body: SpBody
 }
 // Where a chunk lands: still in the header (the state waits for more), or body bytes after the object header.
 type SpEntry = { readonly tag: 'wait'; readonly state: SpHeader } | { readonly tag: 'body'; readonly state: SpBody; readonly data: Uint8Array };
-function spEnter(st: SpState, chunk: Uint8Array): Result<SpEntry, Corrupt> {
+function spEnter(st: SpState, chunk: Uint8Array): Result<SpEntry, SpError> {
   switch (st.phase) {
     case 'header': {
       // The header phase is bounded here, for every caller: readObjHeader refuses an object header past 10 bytes
@@ -442,7 +448,7 @@ function spEnter(st: SpState, chunk: Uint8Array): Result<SpEntry, Corrupt> {
   return assertNever(st);
 }
 // @decoder spStep prefix=sp-header
-export function spStep(st: SpState, chunk: Uint8Array): Result<SpStepped, Corrupt> {
+export function spStep(st: SpState, chunk: Uint8Array): Result<SpStepped, SpError> {
   const entered = spEnter({ ...st, bytes: st.bytes + chunk.length }, chunk);
   if (!entered.ok) return entered;
   const entry = entered.value;
@@ -637,28 +643,90 @@ function declaredPackCount(pack: Uint8Array): number | null {
   return count.ok ? count.value : null;
 }
 // A multi-object answer to a commit want: the wanted object, once its type is a commit. A tree, blob, or tag is
-// not_found from refuseNonCommit. Null means the single-object parser should read the bytes (one object, a short
-// header, or a pack that does not hold the want).
-function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
-  const count = declaredPackCount(pack);
-  if (count === null || count === 1) return ok(null);
-  const opts = packParseOpts(t.limits);
-  if (!opts.ok) return opts;
-  const parsed = parsePack(pack, opts.value);
-  if (!parsed.ok) return parsed;
-  const resolved = resolvePack(parsed.value, () => null, t.limits);
+// not_found from refuseNonCommit. Null means the single-object parser should refuse the pack (it does not hold the want).
+function commitFromPack(t: Transport, oid: string, parsed: ParsedPack, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
+  const resolved = resolvePack(parsed, () => null, t.limits);
   if (!resolved.ok) return resolved;
   const objects: Map<string, PackObject> = resolved.value.objects;
   const found = mapGet(objects, oid);
   if (found.tag === 'none') return ok(null);
   const want = found.value;
-  span.set({ 'git.pack.objects': count, 'git.object.oid': oid, 'git.object.type': typeText(want.type) });
+  span.set({ 'git.pack.objects': parsed.stats.count, 'git.object.oid': oid, 'git.object.type': typeText(want.type) });
   const refused = refuseNonCommit(TYPE.COMMIT, want.type, oid);
   if (!refused.ok) return refused;
+  // a resolved object is commit, tree, blob or tag, and refuseNonCommit answered the other three
+  // Stryker disable next-line ConditionalExpression,BlockStatement: see above
   if (want.type !== TYPE.COMMIT) return ok(null);
   const checked = assertFetched('commit', want.data, t.limits);
   if (!checked.ok) return checked;
   return ok({ type: want.type, data: want.data, oid, size: want.data.length, bust });
+}
+// A pack read through the collector as its chunks arrive (#172): the bytes are dropped once fed, so what is held is the
+// objects the collector keeps. A refusal is held, the rest of the response read and dropped, and then returned: the
+// response's own refusals (packStream raises them) come first, as when the whole pack was read before it was parsed.
+export type WirePack = { readonly state: V2State; readonly pack: Result<ParsedPack, PlyError> };
+export async function collectWire(it: PackFetch, c: PackCollector): Promise<WirePack> {
+  let held: Result<null, PlyError> = UNIT;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- the generator is drained in order; its return value is the v2 state
+    const n = await it.next();
+    if (n.done === true) return { state: n.value, pack: held.ok ? packCollectEnd(c) : held };
+    if (held.ok) held = packCollectFeed(c, n.value);
+  }
+}
+// Where a commit want's bytes go: the first bytes are held until the pack header says how many objects there are (one:
+// the single-object parser, `feed`; more: a tag and the commit it peels to, collected).
+type CommitRoute =
+  | { readonly tag: 'head'; readonly head: Uint8Array }
+  | { readonly tag: 'single' }
+  | { readonly tag: 'multi'; readonly c: PackCollector; readonly head: Uint8Array };
+// A commit want's answer, read as it arrives (#172). Ok(null): the single-object parser has the pack (the caller checks
+// its trailer and object); otherwise the commit, or the refusal, held until the response was read to its end.
+async function commitWire(t: Transport, wire: PackFetch, feed: (chunk: Uint8Array) => Result<null, PlyError>, want: { readonly oid: string; readonly span: Span; readonly bust: boolean }): Promise<Result<FetchedObject | null, PlyError>> {
+  // one record the closures below move along (a `let` the compiler would narrow to its first value)
+  const at: { route: CommitRoute } = { route: { tag: 'head', head: new Uint8Array(0) } };
+  // the header and the first object-header byte: enough for the single-object parser to refuse a count it does not take
+  const enough = PACK_HEADER_BYTES + 1;
+  const open = (bytes: Uint8Array): Result<null, PlyError> => {
+    const count = declaredPackCount(bytes);
+    if (count === null || count === 1) { at.route = { tag: 'single' }; return feed(bytes); }
+    const caps = packCaps({ limits: t.limits });
+    if (!caps.ok) return caps;
+    const c = packCollectOpen(caps.value, true);
+    if (!c.ok) return c;
+    at.route = { tag: 'multi', c: c.value, head: bytes.subarray(0, enough) };
+    return packCollectFeed(c.value, bytes);
+  };
+  const step = (chunk: Uint8Array): Result<null, PlyError> => {
+    switch (at.route.tag) {
+      case 'single': return feed(chunk);
+      case 'multi': return packCollectFeed(at.route.c, chunk);
+      case 'head': {
+        const head = concat([at.route.head, chunk]);
+        if (head.length < enough) { at.route = { tag: 'head', head }; return UNIT; }
+        return open(head);
+      }
+    }
+    // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(at.route);
+  };
+  let held: Result<null, PlyError> = UNIT;
+  for await (const chunk of wire) if (held.ok) held = step(chunk);
+  if (!held.ok) return held;
+  // a response shorter than `enough`: decided on what came
+  if (at.route.tag === 'head') {
+    const opened = open(at.route.head);
+    if (!opened.ok) return opened;
+  }
+  const route = at.route;
+  if (route.tag !== 'multi') return ok(null);
+  const parsed = packCollectEnd(route.c);
+  if (!parsed.ok) return parsed;
+  const found = commitFromPack(t, want.oid, parsed.value, want.span, want.bust);
+  if (!found.ok || found.value !== null) return found;
+  // the pack does not hold the commit: the single-object parser's refusal of its count
+  const fed = feed(route.head);
+  return fed.ok ? ok(null) : fed;
 }
 // The single object's member, inflated as its zlib bytes arrive (issue #172): the object is written into one
 // Uint8Array of its declared size and the zlib bytes are dropped as they are read, so the peak is the object plus the
@@ -701,14 +769,14 @@ function memberTake(m: Member, z: Uint8Array): Member {
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(m);
 }
-// The zlib bytes spStep passed on. The member opens once the object header is read and its size is within maxObject
-// (fetchSingle refuses a larger one before the body); bytes after the member's end are counted, not kept.
+// The zlib bytes spStep passed on. The member opens once the object header is read (spStep held its size to maxObject,
+// spInit's cap); bytes after the member's end are counted, not kept.
 function memberFeed(m: Member, sp: SpState, zlib: readonly Uint8Array[], maxObject: number): Member {
   let cur = m;
   if (cur.tag === 'header') {
-    if (sp.phase !== 'body' || sp.size > maxObject) return cur;
+    if (sp.phase !== 'body') return cur;
     const opened = inflateInit({ bound: declaredBound(sp.size, maxObject), wrap: zlibWrap(true) });
-    // the size is within maxObject (above), which readLimit checked: the record always opens
+    // the size is within maxObject (spStep), which readLimit checked: the record always opens
     // Stryker disable next-line all: see above
     if (!opened.ok) return { tag: 'failed', error: opened.error };
     cur = { tag: 'open', stream: opened.value, out: new Uint8Array(sp.size), at: 0 };
@@ -722,7 +790,7 @@ type Inflated = { readonly out: Uint8Array<ArrayBuffer>; readonly stats: Inflate
 function memberFinish(m: Member): Result<Inflated, PlyError> {
   const last = memberDrain(m, true);
   switch (last.tag) {
-    // spFinish passed (so the object header was read) and the size was within maxObject: the member opened. inflateEnd
+    // spFinish passed (so the object header was read, its size within maxObject): the member opened. inflateEnd
     // ends a member or refuses it, so it is not still open.
     // Stryker disable next-line all: unreachable, see above
     case 'header': return fail('internal', 'member never opened');
@@ -763,9 +831,9 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
     if (!limit.ok) return limit;
     const maxObject = limit.value;
     // Pack bytes are held to maxPackBytes by v2Step (inside packStream) before a chunk reaches here; the zlib bytes are
-    // bounded by spStep at zlibBound(sp.size) and inflated as they arrive (memberFeed), sp.size by maxObjectSize as soon
-    // as the header is read.
-    let sp = spInit(); let member = MEMBER_HEADER;
+    // bounded by spStep at zlibBound(sp.size) and inflated as they arrive (memberFeed), sp.size by maxObjectSize where
+    // the header is read (readObjHeader, through spStep).
+    let sp = spInit(maxObject); let member = MEMBER_HEADER;
     const feed = (chunk: Uint8Array): Result<null, PlyError> => {
       const r = spStep(sp, chunk);
       if (!r.ok) return r;
@@ -774,30 +842,18 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
       return UNIT;
     };
     const wire = packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span);
-    let oversized = false;
-    // A commit id may arrive as the tag object plus the commit it peels to. The single-object parser refuses that
-    // count; the wanted object's type is still the not_commit answer. Other wants stay a stream, and stop at the
-    // declared size before the rest of the pack is read.
+    // A commit id may arrive as the tag object plus the commit it peels to (commitWire). Other wants stream, and stop at
+    // the header whose size is past maxObject (spStep refuses it) before the rest of the pack is read.
     if (expectType === TYPE.COMMIT) {
-      const parts: Uint8Array[] = [];
-      for await (const chunk of wire) parts.push(chunk);
-      const pack = concat(parts);
-      const found = commitFromPack(t, oid, pack, span, bust);
+      const found = await commitWire(t, wire, feed, { oid, span, bust });
       if (!found.ok) return found;
       if (found.value !== null) return ok(found.value);
-      const fed = feed(pack);
-      if (!fed.ok) return fed;
-      oversized = sp.phase === 'body' && sp.size > maxObject;
     } else {
       for await (const chunk of wire) {
         const fed = feed(chunk);
         if (!fed.ok) return fed;
-        oversized = sp.phase === 'body' && sp.size > maxObject;
-        if (oversized) break;
       }
     }
-    // One size check, in `once`: a nested function that failed would be a different fail site than this one.
-    if (oversized) return err(limitExceeded('object size', sp.size, maxObject));
     const finished = spFinish(sp);
     if (!finished.ok) return finished;
     return singleObject(t, { sp: finished.value, member, want, span, bust });
@@ -812,33 +868,60 @@ export type WideFilter = 'blob:none' | '';
 export const packName = (filter: WideFilter): string => (filter === '' ? 'unfiltered' : filter);
 export const fallbackName = (filter: WideFilter): string => (filter === '' ? 'none' : filter);
 type Wide = { readonly oid: string; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean; readonly filter: WideFilter; readonly requested: string };
-// The wanted object out of the wide pack, its extras checked (checkWide) and harvested.
-function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust: boolean): Result<FetchedObject, PlyError> {
+// What a wide fetch left out as it read the pack: full blobs (a commit or tree want is neither, and a harvest keeps
+// commits and trees) and the deltas on them, by offset, with their declared bytes.
+type Dropped = { readonly offsets: Set<number>; bytes: number };
+// The objects a wide pack keeps (#172): all of them, unless the want cannot be a blob. Then a full blob is dropped as its
+// header arrives, and so is an OFS_DELTA on a dropped object (its base, and so its result, is a blob). A REF_DELTA is
+// kept; one whose base was dropped stays unresolved (wideObject).
+function wideKeep(want: Wide, dropped: Dropped): (h: ScannedHeader) => boolean {
+  const dropBlobs = want.expectType === TYPE.COMMIT || want.expectType === TYPE.TREE;
+  return (h: ScannedHeader): boolean => {
+    const blob = (h.base.tag === 'none' && h.type === TYPE.BLOB) || (h.base.tag === 'ofs' && dropped.offsets.has(h.base.offset));
+    if (!dropBlobs || !blob) return true;
+    dropped.offsets.add(h.offset);
+    dropped.bytes += h.size;
+    return false;
+  };
+}
+// The pack resolved: with nothing dropped, every base must be in the pack (resolvePack); with blobs dropped, what waits
+// on a base outside it is counted, not refused.
+function wideResolve(t: Transport, parsed: ParsedPack, dropped: Dropped): Result<{ readonly objects: Map<string, PackObject>; readonly unresolved: number }, PlyError> {
+  if (dropped.offsets.size === 0) {
+    const r = resolvePack(parsed, () => null, t.limits);
+    return r.ok ? ok({ objects: r.value.objects, unresolved: 0 }) : r;
+  }
+  const r = resolvePackCollect(parsed, () => null, t.limits);
+  return r.ok ? ok({ objects: r.value.objects, unresolved: r.value.unresolved.length }) : r;
+}
+// The wanted object out of the wide pack, its extras checked (checkWide) and harvested. When blobs were dropped, a delta
+// the resolver cannot resolve waits on a dropped base (a REF_DELTA on a blob, or on a delta of one) and is counted with
+// them: this fetch asked for no thin pack, so a base outside the pack is a blob it left out.
+type WideRead = { readonly parsed: ParsedPack; readonly dropped: Dropped };
+function wideObject(t: Transport, { parsed, dropped }: WideRead, want: Wide, span: Span, bust: boolean): Result<FetchedObject, PlyError> {
   const { oid, expectType } = want;
   const maxObject = readLimit(t.limits, 'maxObjectSize');
   if (!maxObject.ok) return maxObject;
-  const opts = packParseOpts(t.limits);
-  if (!opts.ok) return opts;
-  const parsed = parsePack(pack, opts.value);
-  if (!parsed.ok) return parsed;
-  const resolved = resolvePack(parsed.value, () => null, t.limits);
+  const resolved = wideResolve(t, parsed, dropped);
   if (!resolved.ok) return resolved;
-  const objects: Map<string, PackObject> = resolved.value.objects;
+  const { objects, unresolved } = resolved.value;
   const checked = checkWide(objects, k => k === oid, t.limits);
   if (!checked.ok) return checked;
   const skipped = checked.value;
   const found = mapGet(objects, oid);
-  if (found.tag === 'none') return fail('pack_corrupt', `object ${oid} not in the ${packName(want.filter)} pack (${objects.size} objects)`);
+  const left = dropped.offsets.size + unresolved;
+  if (found.tag === 'none') return fail('pack_corrupt', `object ${oid} not in the ${packName(want.filter)} pack (${objects.size + left} objects)`);
   const wanted = found.value;
   if (wanted.data.length > maxObject.value) return err(limitExceeded('object size', wanted.data.length, maxObject.value));
   const refused = refuseNonCommit(expectType, wanted.type, oid);
   if (!refused.ok) return refused;
   if (expectType !== null && wanted.type !== expectType) return fail('pack_corrupt', `expected ${typeText(expectType)}, got ${typeText(wanted.type)}`);
-  let blobs = 0, extraBytes = skipped.reduce((n, x) => n + x.bytes, 0); for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
+  let blobs = left, extraBytes = skipped.reduce((n, x) => n + x.bytes, dropped.bytes); for (const [k, o] of objects) { if (k !== oid) extraBytes += o.data.length; if (o.type === TYPE.BLOB) blobs++; }
   const harvested = harvest(t, objects, oid);
   if (!harvested.ok) return harvested;
   const h = harvested.value;
-  span.set({ 'git.pack.objects': parsed.value.stats.count, 'git.pack.bytes': pack.length, 'git.object.oid': oid, 'git.object.type': typeText(wanted.type), 'git.fetch.wide.objects': objects.size + skipped.length, 'git.fetch.wide.extra_objects': objects.size + skipped.length - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes, ...skippedAttrs(skipped) });
+  const all = objects.size + skipped.length + left;
+  span.set({ 'git.pack.objects': parsed.stats.count, 'git.pack.bytes': parsed.bytes, 'git.object.oid': oid, 'git.object.type': typeText(wanted.type), 'git.fetch.wide.objects': all, 'git.fetch.wide.extra_objects': all - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes, ...skippedAttrs(skipped) });
   return ok({ type: wanted.type, data: wanted.data, oid, size: wanted.data.length, bust, wide: true });
 }
 // oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
@@ -848,9 +931,16 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
   const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': requested, 'git.fetch.filter.learned': learned }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
     const limit = readLimit(t.limits, 'maxObjectSize');
     if (!limit.ok) return limit;
-    const parts: Uint8Array[] = [];
-    for await (const chunk of packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span)) parts.push(chunk);
-    return wideObject(t, concat(parts), want, span, bust);
+    const caps = packCaps({ limits: t.limits });
+    if (!caps.ok) return caps;
+    // the pack is read through the scan as it arrives: its bytes and every zlib member are dropped once inflated, and
+    // what is held is the objects wideKeep keeps (#172)
+    const dropped: Dropped = { offsets: new Set(), bytes: 0 };
+    const c = packCollectOpen(caps.value, true, wideKeep(want, dropped));
+    if (!c.ok) return c;
+    const read = await collectWire(packStream(t, { wants: [oid], filter, deepen, bypassCache: bust }, span), c.value);
+    if (!read.pack.ok) return read.pack;
+    return wideObject(t, { parsed: read.pack.value, dropped }, want, span, bust);
   });
   return onceMore(once);
 }

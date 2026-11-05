@@ -15,8 +15,9 @@ import {
   parseTree, parseCommit, parseTag, parseIdent, encodeCommit, encodeTag, encodeTree, assertFetched, ident, hashObject, TYPE,
 } from '../src/objects.js';
 import { pkt, FLUSH, DELIM, pktInit, pktStep, pktFinish } from '../src/pktline.js';
-import { encodeObjHeader, buildPack, spliceDelta } from '../src/pack.js';
-import { readObjHeader, readOfsDelta, parsePack, applyDelta } from '../src/packresolve.js';
+import { encodeObjHeader, encodeVarint, buildPack, spliceDelta } from '../src/pack.js';
+import { readObjHeader, readOfsDelta, parsePack, applyDelta, parseDelta } from '../src/packresolve.js';
+import { readVarint } from '../src/packstream.js';
 import { inflate } from '../src/inflate.js';
 import { parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, v2Init, v2Step as v2StepR } from '../src/fetch.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
@@ -299,6 +300,18 @@ property('ofs-delta', 'ofs-delta prefixes are short reads until the offset is co
   assert.deepEqual(unwrap(readOfsDelta(enc, 0)), { off: (1 + 1) * (OBJ_SIZE_NEXT_MASK + 1) + 2, next: 2 });
 });
 
+property('varint', 'size-varint prefixes are short reads until the continuation bit clears', () => {
+  for (const n of [0, 1, 127, 128, 300, 2 ** 20 + 3, 2 ** 40]) {
+    const v = encodeVarint(n);
+    for (let i = 0; i < v.length; i++) {
+      const r = readVarint(v.subarray(0, i), 0, 'delta');
+      assert.equal(r.ok, false);
+      assert.equal(r.error.reason, 'short_read');
+    }
+    assert.deepEqual(unwrap(readVarint(v, 0, 'delta')), [n, v.length]);
+  }
+});
+
 property('pack', 'every strict prefix of a pack throws', async () => {
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('hello') }]);
   unwrap(parsePack(pack));
@@ -310,7 +323,11 @@ property('delta', 'every strict prefix of a delta throws', () => {
   const { delta } = spliceDelta({ baseLen: base.length, off: 6, oldLen: 5, insert: te.encode('there') });
   assert.ok(delta.length >= 4);
   unwrap(applyDelta(base, delta));
-  for (let i = 1; i < delta.length; i++) assert.throws(() => unwrap(applyDelta(base, delta.subarray(0, i))), e => e.code === 'pack_corrupt');
+  unwrap(parseDelta(delta));
+  for (let i = 1; i < delta.length; i++) {
+    assert.throws(() => unwrap(applyDelta(base, delta.subarray(0, i))), e => e.code === 'pack_corrupt');
+    assert.throws(() => unwrap(parseDelta(delta.subarray(0, i))), e => e.code === 'pack_corrupt');
+  }
 });
 
 property('sideband', 'a sideband frame is a channel byte plus an opaque body prefix', () => {
@@ -547,7 +564,7 @@ test('take() throws a typed short read and does not clamp', () => {
   assert.equal(unwrap(take(buf, 4, 0)).length, 0);
 });
 
-const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)(Result)?$/;
+const DECODER_EXPORT = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readVarint|applyDelta|inflate|pktStep|pktFinish|spStep|v2Step)(Result)?$/;
 
 test('every exported decoder has a prefix-closure property', () => {
   const missing = [];

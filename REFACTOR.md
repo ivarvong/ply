@@ -53,8 +53,20 @@ tagged unions.
 - Span `status` is a tagged union: only `code: 2` carries `message`.
 - `memtree.replaceOnce` returns a `Result`.
 - A listed ref (`LsRef`) always has `peeled` and `symref-target`, `null` when the line carries none.
-- `parsePack` objects carry `baseOffset`/`baseOid` as `null` for a full object; `resolvePack` no longer writes `.oid`
-  onto the caller's parsed objects.
+- `parsePack` objects (and `resolvePack`'s, and `describePack`'s rows) carry `base`, a tagged union (`{ tag: 'none' }`,
+  `{ tag: 'ofs', offset }`, `{ tag: 'ref', oid }`), in place of `baseOffset`/`baseOid`; `resolvePack` no longer writes
+  `.oid` onto the caller's parsed objects. A hand-built `resolvePack` input gives `base` the same way with plain values
+  (left out: none) and is parsed at resolvePack's edge: a bad type, base or data is `bad_request` (a type outside the
+  six used to be `pack_corrupt`).
+- A pack object's declared size is checked where its header is read (`readObjHeader`'s cap): `fetchObject` of an object
+  past `maxObjectSize` is `limit_exceeded` with `what: 'pack object size'` (was `'object size'`), as `parsePack` already
+  said, and the scan refuses it before reading an OFS/REF base.
+- `inflate()` is a collector over the pull decoder, so it refuses what the pull refuses: CINFO > 7 (`zlib: window size N
+  is not a zlib window`) and a back-reference past the declared window (`inflate: distance too far back`), both
+  `pack_corrupt` (the owner's ruling on #172).
+- A wide fetch whose want cannot be a blob (a tree or commit through the blob:none or unfiltered fallback) drops the
+  pack's blobs and their deltas as their headers arrive; they are counted in `git.fetch.wide.blobs`, at their declared
+  size in `git.fetch.wide.extra_bytes`.
 - `mergeBase` with `maxDepth: null`, and `inflate` with `expectedSize: null`, mean "not given" (the configured limit,
   no expected size) instead of `bad_request`.
 

@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { take, shortRead, encodeBytes, HEXV, te, concat, decodeBytes as decodeBytesOf, decodeChunk as decodeChunkOf } from '../src/bytes.js';
 import { pkt, pktStep, pktFinish, pktInit } from '../src/pktline.js';
 import { inflate, DEFLATE_TABLES } from '../src/inflate.js';
-import { readObjHeader, readOfsDelta, readUint32BE, parsePack, applyDelta, resolvePack } from '../src/packresolve.js';
+import { readObjHeader, readOfsDelta, readUint32BE, parsePack, applyDelta, resolvePack, makeDelta } from '../src/packresolve.js';
 import { buildPack, encodeObjHeader, spliceDelta } from '../src/pack.js';
 import { fromHex, toHex } from '../src/sha1.js';
 import { hashObject, TYPE } from '../src/objects.js';
@@ -164,13 +164,42 @@ test('parsePack: the six pack types are accepted and 0 and 5 refused, by kind', 
   assert.deepEqual([r.value.stats.full, r.value.stats.refDelta, r.value.stats.ofsDelta], [4, 1, 0]);
 });
 
-test('resolvePack refuses a type id outside the six before hashing it', () => {
+test('resolvePack parses a hand-built object at its edge: a type, a base, and data, or bad_request before hashing', () => {
   const data = te.encode('x');
-  const parsed = { objects: [{ offset: PACK_HEADER_BYTES, type: 5, size: data.length, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] };
-  errOf(resolvePack(parsed), 'pack_corrupt', 'pack: bad object type 5');
+  const at = PACK_HEADER_BYTES;
+  errOf(resolvePack({ objects: [{ offset: at, type: 5, size: data.length, compressed: 0, data }] }), 'bad_request', `resolvePack: object at ${at} has type 5 and no base`);
+  // a delta type with no base is not a stored object either; a stored type with an explicit none base is one
+  errOf(resolvePack({ objects: [{ offset: at, type: TYPE.OFS_DELTA, data, base: { tag: 'none' } }] }), 'bad_request', `resolvePack: object at ${at} has type 6 and no base`);
+  const one = unwrap(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, base: { tag: 'none' } }] }));
+  const r = one.objects.get(hashObject('blob', data));
+  assert.deepEqual({ type: r.type, size: r.size, compressed: r.compressed, base: r.base, chain: r.chain }, { type: TYPE.BLOB, size: 1, compressed: 0, base: { tag: 'none' }, chain: 0 });
+  errOf(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, base: { tag: 'odd' } }] }), 'bad_request', `resolvePack: object at ${at} has base tag "odd"`);
+  errOf(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, base: {} }] }), 'bad_request', `resolvePack: object at ${at} has base tag undefined`);
+  for (const offset of [-1, 1.5, Number.NaN, 2 ** 53]) {
+    errOf(resolvePack({ objects: [{ offset: 40, type: TYPE.OFS_DELTA, data, base: { tag: 'ofs', offset } }] }), 'bad_request', `resolvePack: object at 40 has ofs base ${offset}`);
+  }
+  for (const oid of ['A'.repeat(40), 'a'.repeat(39), 7]) {
+    errOf(resolvePack({ objects: [{ offset: 40, type: TYPE.REF_DELTA, data, base: { tag: 'ref', oid } }] }), 'bad_request', `resolvePack: object at 40 has ref base ${JSON.stringify(oid)}, not an object id`);
+  }
+  errOf(resolvePack({ objects: [{ offset: 40, type: TYPE.BLOB, data: 'x' }] }), 'bad_request', 'resolvePack: object at 40 has no data');
+  errOf(resolvePack({ objects: [{ offset: 40, type: TYPE.BLOB }] }), 'bad_request', 'resolvePack: object at 40 has no data');
+  // the offset 0 and the largest safe one are offsets (a base that is not an object there is the resolver's corrupt)
+  errOf(resolvePack({ objects: [{ offset: 40, type: TYPE.OFS_DELTA, data, base: { tag: 'ofs', offset: 0 } }] }), 'pack_corrupt', 'pack: ofs delta base not at object boundary 0');
+  errOf(resolvePack({ objects: [{ offset: 40, type: TYPE.OFS_DELTA, data, base: { tag: 'ofs', offset: 2 ** 53 - 1 } }] }), 'pack_corrupt', `pack: ofs delta base not at object boundary ${2 ** 53 - 1}`);
+  // a left-out size is the data's length, a left-out compressed count 0; given ones are kept
+  const sized = unwrap(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, size: 9, compressed: 4 }] })).objects.get(hashObject('blob', data));
+  assert.deepEqual([sized.size, sized.compressed], [9, 4]);
+  // a REF base as a plain lowercase string is parsed into the Oid the lookup is asked for
+  const asked = [];
+  const base = te.encode('base');
+  const delta = makeDelta(base, te.encode('based')).delta;
+  const id = hashObject('blob', base);
+  const thin = unwrap(resolvePack({ objects: [{ offset: at, type: TYPE.REF_DELTA, data: delta, base: { tag: 'ref', oid: id } }] }, o => { asked.push(o); return { type: TYPE.BLOB, data: base }; }));
+  assert.deepEqual(asked, [id]);
+  assert.deepEqual([...thin.objects.values()].map(o => [o.type, o.base]), [[TYPE.BLOB, { tag: 'ref', oid: id }]]);
 });
 
-test('resolvePack hashes each full object once', async () => {
+test('resolvePack reads each object once at its edge', async () => {
   const { pack } = await buildPack(Array.from({ length: 5 }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(`blob ${i}`) })));
   const parsed = unwrap(parsePack(pack));
   let reads = 0;
@@ -178,7 +207,7 @@ test('resolvePack hashes each full object once', async () => {
   const counted = { ...parsed, objects: parsed.objects.map(o => { let d = o.data; return Object.defineProperty({ ...o }, 'data', { get() { reads++; return d; }, enumerable: true }); }) };
   const r = unwrap(resolvePack(counted));
   assert.equal(r.objects.size, 5);
-  assert.equal(reads, 10, 'each full object: one read to hash it, one to keep it as the resolved data');
+  assert.equal(reads, 5, 'each object: one read, where the resolver parses its input (the entry holds the bytes from there)');
 });
 
 // ---- tables and codecs held to their definitions ----

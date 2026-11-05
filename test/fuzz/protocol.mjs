@@ -150,7 +150,7 @@ try {
       if (!thinPack && r.resolved.stats.externalBases) problems.push('external base in non-thin pack');
       if (thinPack && r.resolved.stats.externalBases) {
         // client safety: every thin base must be resolvable from what the client declared it has (full closure of haves)
-        for (const [, o] of r.objects) if (o.baseOid && !r.objects.has(o.baseOid) && !bound.had.has(o.baseOid)) { problems.push(`thin base ${o.baseOid.slice(0, 8)} (${model.type.get(o.baseOid)}) not derivable from the client's haves`); break; }
+        for (const [, o] of r.objects) { const baseOid = o.base.tag === 'ref' ? o.base.oid : null; if (baseOid && !r.objects.has(baseOid) && !bound.had.has(baseOid)) { problems.push(`thin base ${baseOid.slice(0, 8)} (${model.type.get(baseOid)}) not derivable from the client's haves`); break; } }
       }
       if (R.pack.depth && r.resolved.stats.maxChain > R.pack.depth) problems.push(`chain ${r.resolved.stats.maxChain} > pack.depth ${R.pack.depth}`);
       const span = exporter.lines.flatMap(flattenLine).filter(s => s.name === 'git.upload-pack fetch').pop();
@@ -178,7 +178,7 @@ try {
         console.log('     got commits:', [...got].filter(o => model.commits.has(o)).map(idx).join(' '), '| exp:', [...exp.objects].filter(o => model.commits.has(o)).map(idx).join(' '));
         console.log('     missing:', [...exp.objects].filter(o => !got.has(o)).map(idx).join(' '), '| extra:', [...got].filter(o => !exp.objects.has(o)).map(idx).join(' '));
         console.log('     shallow got:', r.shallow.map(idx), 'exp:', exp.shallow.map(idx), 'unshallow got:', r.unshallow.map(idx), 'exp:', exp.unshallow.map(idx));
-        console.log('     ext bases:', [...r.objects.values()].filter(o => o.baseOid && !r.objects.has(o.baseOid)).map(o => idx(o.baseOid)).join(' '));
+        console.log('     ext bases:', [...r.objects.values()].filter(o => o.base.tag === 'ref' && !r.objects.has(o.base.oid)).map(o => idx(o.base.oid)).join(' '));
       } else {
         const { fetchBody: fetchBodyR } = await import('../../src/client.js');
         const res = await fetch(`${srv.url}/${R.name}.git/git-upload-pack`, { method: 'POST', headers: { 'Content-Type': 'application/x-git-upload-pack-request', 'Git-Protocol': 'version=2' }, body: fetchBodyR(req).value });

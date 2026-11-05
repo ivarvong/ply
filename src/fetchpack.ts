@@ -1,21 +1,21 @@
-// Buffered multi-object fetch: whole pack in memory (bounded by limits.maxPackBytes, enforced by v2Step as the band-1
-// bytes arrive), parsed and delta-resolved.
+// Multi-object fetch: the pack read through the scan as its band-1 bytes arrive (bounded by limits.maxPackBytes, enforced
+// by v2Step), its objects collected and delta-resolved. The pack's bytes and its zlib members are dropped once inflated,
+// so what is held is the objects (#172).
 // The general-purpose path (clones, thin packs, negotiation); the edit pipeline uses fetch.js's fetchObject instead.
 // Reading the received pack (readPack), fetchPack and its fallbacks return Result.
 import type { Span } from './otel.js';
 import type { Attrs, Transport } from './transport.js';
 import type { FetchOpts, PackObject, V2State, WideFilter } from './fetch.js';
 import type { Input } from './absent.js';
-import { concat } from './bytes.js';
 import { TYPE, TYPE_NAME } from './objects.js';
-import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
-import type { ParsedPack, ResolvedPack } from './packresolve.js';
-import { packStream, isFilterRejection, filterUnadvertised, fallbackName, harvest, checkWide, skippedAttrs, fetchExchange } from './fetch.js';
+import { resolvePack, packCaps, packCollectOpen } from './packresolve.js';
+import type { ObjBase, ParsedPack, ResolvedPack } from './packresolve.js';
+import { packStream, collectWire, isFilterRejection, filterUnadvertised, fallbackName, harvest, checkWide, skippedAttrs, fetchExchange } from './fetch.js';
 import { fail } from './errors.js';
 import { probing } from './transport.js';
 import type { PlyError } from './errors.js';
-import { fromNullable, fromNullish, withDefaults } from './absent.js';
-import { ok, getOrElse } from './result.js';
+import { fromNullable, withDefaults } from './absent.js';
+import { ok, assertNever } from './result.js';
 import type { Result } from './result.js';
 // oxlint-disable-next-line import/max-dependencies -- the buffered fetch joins the stream, the pack parser and the cache's retry rule
 import { corruptCacheHit } from './cachestatus.js';
@@ -54,16 +54,21 @@ export const packAttrs = (parsed: Parsed, resolved: Resolved | null): Attrs => (
 // The span attribute for a type id: its name, or nothing for an id objects.js does not know (the attribute is dropped).
 const typeAttr = (type: number): unknown => Reflect.get(TYPE_NAME, type);
 type Acks = Pick<FetchPackResult, 'acks' | 'nak' | 'ready' | 'shallow' | 'unshallow'>;
+// An object's base as its span event names it: the OFS offset (-1 for none) and the REF id ('' for none).
+function baseAttrs(base: ObjBase): Attrs {
+  switch (base.tag) {
+    case 'none': return { 'git.object.base.offset': -1, 'git.object.base.oid': '' };
+    case 'ofs': return { 'git.object.base.offset': base.offset, 'git.object.base.oid': '' };
+    case 'ref': return { 'git.object.base.offset': -1, 'git.object.base.oid': base.oid };
+  }
+  // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(base);
+}
 // The received pack, parsed (one span event per object), resolved when asked, and checked.
-function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: FetchPackConfig, acks: Acks, span: Span): Result<FetchPackResult, PlyError> {
-  const opts = packParseOpts(t.limits);
-  if (!opts.ok) return opts;
-  const read = parsePack(buf, opts.value);
-  if (!read.ok) return read;
-  const parsed = read.value;
+function readPack(t: Transport, parsed: Parsed, { external, resolve, check }: FetchPackConfig, acks: Acks, span: Span): Result<FetchPackResult, PlyError> {
   for (const o of parsed.objects) span.event('git.pack.object', {
     'git.object.offset': o.offset, 'git.object.type': typeAttr(o.type), 'git.object.size': o.size, 'git.object.compressed': o.compressed,
-    'git.object.header_bytes': o.headerBytes, 'git.object.base.offset': getOrElse(fromNullish(o.baseOffset), -1), 'git.object.base.oid': getOrElse<string>(fromNullish(o.baseOid), ''),
+    'git.object.header_bytes': o.headerBytes, ...baseAttrs(o.base),
     'git.object.inflate.blocks': o.inflate.blocks, 'git.object.inflate.stored': o.inflate.stored, 'git.object.inflate.fixed': o.inflate.fixed,
     'git.object.inflate.dynamic': o.inflate.dynamic, 'git.object.inflate.matches': o.inflate.matches, 'git.object.inflate.max_dist': o.inflate.maxDist,
   });
@@ -88,14 +93,16 @@ function readPack(t: Transport, buf: Uint8Array, { external, resolve, check }: F
 export async function fetchPackOnce(t: Transport, opts: FetchOpts, extra: FetchPackExtra = {}): Promise<Result<FetchPackResult, PlyError>> {
   const cfg = withDefaults(extra, fetchPackDefaults());
   return fetchExchange(t, { 'git.pack.cache.bust': Boolean(opts.bypassCache), ...cfg.attrs }, async (span: Span): Promise<Result<FetchPackResult, PlyError>> => {
-    const parts: Uint8Array[] = []; let total = 0;
-    const it = packStream(t, opts, span);
-    let st: V2State;
-    // oxlint-disable-next-line no-await-in-loop, typescript/strict-boolean-expressions -- the generator is drained in order; its return value (done) is the v2 state
-    for (;;) { const { value, done } = await it.next(); if (done) { st = value; break; } total += value.length; parts.push(value); }
+    const caps = packCaps({ limits: t.limits });
+    if (!caps.ok) return caps;
+    const c = packCollectOpen(caps.value, true);
+    if (!c.ok) return c;
+    const read = await collectWire(packStream(t, opts, span), c.value);
+    const st: V2State = read.state;
     const acks: Acks = { acks: st.acks.filter(a => a.startsWith('ACK ')).map(a => a.slice(4)), nak: st.acks.includes('NAK'), ready: st.ready, shallow: st.shallow, unshallow: st.unshallow };
     if (st.phase !== 'pack') { span.set({ 'git.fetch.pack': false }); return ok({ parsed: null, objects: null, resolved: null, ...acks }); }
-    return readPack(t, concat(parts), cfg, acks, span);
+    if (!read.pack.ok) return read.pack;
+    return readPack(t, read.pack.value, cfg, acks, span);
   });
 }
 

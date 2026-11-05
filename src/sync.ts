@@ -43,7 +43,7 @@ import type { PackInput } from './pack.js';
 import type { ParsedPack } from './packresolve.js';
 import type { Limits } from './limits.js';
 import { fail } from './errors.js';
-import { ok } from './result.js';
+import { ok, assertNever } from './result.js';
 import { field, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchPack } from './fetchpack.js';
@@ -112,12 +112,16 @@ function forwarded(parsed: ParsedPack | null): PackInput[] {
   if (parsed === null) return [];
   const index = new Map(parsed.objects.map((o, i) => [o.offset, i]));
   return parsed.objects.map((o): PackInput => {
-    if (o.baseOffset !== null) {
-      const at = mapGet(index, o.baseOffset);
-      if (at.tag === 'some') return { type: o.type, data: o.data, baseIndex: at.value };
+    switch (o.base.tag) {
+      case 'ofs': {
+        const at = mapGet(index, o.base.offset);
+        return at.tag === 'some' ? { type: o.type, data: o.data, baseIndex: at.value } : { type: o.type, data: o.data };
+      }
+      case 'ref': return { type: o.type, data: o.data, baseOid: o.base.oid };
+      case 'none': return { type: o.type, data: o.data };
     }
-    if (o.baseOid !== null) return { type: o.type, data: o.data, baseOid: o.baseOid };
-    return { type: o.type, data: o.data };
+    // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(o.base);
   });
 }
 

@@ -1,4 +1,4 @@
-// The memory bound of the pull codecs and of fetchSingle on them (issue #172), measured: each cell is its own process
+// The memory bound of the pull codecs and of fetchSingle, fetchWide, fetchPack and inflate() on them (issue #172), measured: each cell is its own process
 // (test/stream/cell.mjs, --expose-gc) under a 64 MiB and a 128 MiB V8 heap, its input generated as it is read, and the
 // peak of live arrayBuffers over the cell (a gc at every sample) compared with streambound.ts. The parent does not import
 // src/, so a mutation run does not re-run the cells for every covered line.
@@ -26,6 +26,25 @@ for (const heap of [64, 128]) {
     const r = cell('scan-drop', 100_000, heap);
     console.log(JSON.stringify(r));
     assert.ok(r.abDelta <= HOLD, `scan held ${r.abDelta} > ${HOLD}`);
+  });
+  test(`heap ${heap} MiB: inflate() of a 64 MiB member in hand holds the output and the pull's hold, nothing more`, () => {
+    for (const mode of ['inflate-whole', 'inflate-capped']) {
+      const r = cell(mode, 64 * MIB, heap);
+      console.log(JSON.stringify(r));
+      assert.ok(r.abDelta >= 64 * MIB, `${mode}: the output is held`);
+      assert.ok(r.abDelta <= 64 * MIB + HOLD, `${mode}: inflate() held ${r.abDelta} > ${64 * MIB} + ${HOLD}`);
+    }
+  });
+  test(`heap ${heap} MiB: a wide fetch (fetchWide, fetchPack) that retains R bytes of a pack of 2,000 trees holds R and the inflate hold, not the pack`, () => {
+    const drain = cell('fetch-wide-drain', 2000, heap);
+    for (const mode of ['fetch-wide', 'fetch-wide-blobs', 'fetch-pack']) {
+      const r = cell(mode, 2000, heap);
+      console.log(JSON.stringify({ ...r, drain: drain.abDelta }));
+      // what reading the response costs is the transport's (fetch-wide-drain); the fetch adds what it retains (the trees:
+      // the blobs of fetch-wide-blobs are dropped as their headers arrive) and the scan's inflate hold
+      assert.ok(r.abDelta >= r.retained, `${mode}: the trees are held`);
+      assert.ok(r.abDelta - drain.abDelta <= r.bound, `${mode}: added ${r.abDelta - drain.abDelta} > R ${r.retained} + ${HOLD}`);
+    }
   });
   test(`heap ${heap} MiB: fetchObject of a 48 MiB blob holds the blob and the inflate hold; before #172 it held the member twice more`, () => {
     const size = 48 * MIB;

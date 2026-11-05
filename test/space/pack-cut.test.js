@@ -208,7 +208,7 @@ for (const name of ['full', 'single-blob', 'ofs', 'ref']) {
   const { p, r, i } = deltaRecord('ofs');
   const hdr = encodeObjHeader(6, r.size); const z = p.bytes.subarray(r.offset + r.headerBytes, r.end);
   const ofsVar = off => { const out = [off & 0x7f]; while ((off >>= 7)) { off -= 1; out.unshift(0x80 | (off & 0x7f)); } return Uint8Array.from(out); };
-  for (const [cls, off] of [['self (0)', 0], ['mid-object (+1)', r.offset - r.baseOffset - 1], ['mid-object (-1)', r.offset - r.baseOffset + 1], ['before pack start', r.offset - 4], ['far before', 1 << 20]]) add('ofs', 'ofs.offset', cls, replaceObject(p.bytes, i, cat([hdr, ofsVar(off), z])));
+  for (const [cls, off] of [['self (0)', 0], ['mid-object (+1)', r.offset - r.base.offset - 1], ['mid-object (-1)', r.offset - r.base.offset + 1], ['before pack start', r.offset - 4], ['far before', 1 << 20]]) add('ofs', 'ofs.offset', cls, replaceObject(p.bytes, i, cat([hdr, ofsVar(off), z])));
   add('ofs', 'ofs.offset', 'overlong', replaceObject(p.bytes, i, cat([hdr, Uint8Array.from([...Array(12).fill(0xff), 0x00]), z])));
 }
 { // ref base classes on the ref pack
@@ -316,14 +316,14 @@ test('the exported readers: every offset of every short buffer is a typed short 
   assert.deepEqual(wrong, []);
 });
 
-// parsePack refuses type 0 and 5 before an object exists (corrupt axis, obj*.type). resolve hashes a hand-built
-// object the parser never emits, and refuses that id the same way, before the bytes are hashed.
+// parsePack refuses type 0 and 5 before an object exists (corrupt axis, obj*.type). A hand-built object the parser
+// never emits is the caller's mistake, refused where resolvePack parses its input (bad_request), before it is hashed.
 test('resolve refuses a type id parse never emits, before hashing', () => {
   const data = Uint8Array.of(1);
-  const o = outcomeSync(() => unwrap(resolvePack({ objects: [{ offset: 12, type: 5, size: 1, compressed: 0, data, baseOffset: undefined, baseOid: undefined }] })));
+  const o = outcomeSync(() => unwrap(resolvePack({ objects: [{ offset: 12, type: 5, size: 1, compressed: 0, data }] })));
   assert.equal(o.tag, 'typed', JSON.stringify(o));
-  assert.equal(o.code, 'pack_corrupt');
-  assert.equal(o.message, 'pack: bad object type 5');
+  assert.equal(o.code, 'bad_request');
+  assert.equal(o.message, 'resolvePack: object at 12 has type 5 and no base');
 });
 
 test('census', t => {

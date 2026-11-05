@@ -1,5 +1,6 @@
-// The pull codecs (issue #172) against the buffered ones on the same bytes: inflatePull against inflate(), the pack
-// scan against parsePack, for every chunking (whole, one byte at a time, small and random cuts). Same output bytes,
+// The pull codecs (issue #172) against the buffered ones on the same bytes: inflatePull and inflate() (a collector over
+// the pull) against the decoder ply had before (test/oracle/inflate-ref.ts, an independent oracle), the pack scan
+// against parsePack, for every chunking (whole, one byte at a time, small and random cuts). Same output bytes,
 // consumed count, stats, objects and trailer; same refusal (code and message) wherever the two refuse the same way, and
 // the named differences (inflatestream.ts header) where they do not. Then pktStep's copied payload and sidebandStep.
 import { test } from 'vitest';
@@ -9,15 +10,20 @@ import crypto from 'node:crypto';
 import { Rng, splitRandom } from './fuzz/prng.js';
 import { concat, te } from '../src/bytes.js';
 import { pkt, pktInit, pktStep } from '../src/pktline.js';
-import { buildPack, encodeObjHeader, encodeOfsDistance, makeDelta } from '../src/pack.js';
+import { buildPack, encodeObjHeader, encodeOfsDistance, makeDelta, spliceDelta, encodeDeltaOps } from '../src/pack.js';
 import { parsePack } from '../src/packresolve.js';
 import { inflate, huffBuild, DEFLATE_TABLES } from '../src/inflate.js';
+import { inflateRef } from './oracle/inflate-ref.js';
+import { parsePackRef } from './oracle/pack-ref.js';
 import {
   inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs,
 } from '../src/inflatestream.js';
 import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts, streamPackAttrs } from '../src/packstream.js';
-import { sidebandStep, v2Init, fetchObject } from '../src/fetch.js';
-import { transport, v2PackResponse } from './space/wire.js';
+import { sidebandStep, v2Init, fetchObject, spInit, spStep } from '../src/fetch.js';
+import { fetchPack } from '../src/fetchpack.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
+import { parseDelta, applyDelta, applyProgram, deltaOps, readObjHeader, packCollectOpen, packCollectFeed, packCollectEnd } from '../src/packresolve.js';
+import { transport, v2PackResponse, frame, cat, FLUSH } from './space/wire.js';
 import { peakBound } from '../src/streambound.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV } from '../src/limits.js';
@@ -61,9 +67,16 @@ const cuts = (buf, rng) => [
   Array.from({ length: Math.ceil(buf.length / 3) }, (_, i) => buf.subarray(i * 3, i * 3 + 3)),
   splitRandom(rng, buf, { maxChunks: 40 }),
 ];
-// The pull and inflate() on the same bytes, in every chunking: the same answer.
+// The pull (in every chunking) and inflate() against the oracle on the same bytes: the same answer.
 function same(buf, o = {}, rng = new Rng(7)) {
-  const want = inflate(buf, 0, o);
+  const want = inflateRef(buf, 0, o);
+  const whole = inflate(buf, 0, o);
+  assert.equal(refusal(whole), refusal(want), 'inflate()');
+  if (want.ok) {
+    assert.deepEqual(new Uint8Array(whole.value.out), new Uint8Array(want.value.out), 'inflate(): output');
+    assert.equal(whole.value.consumed, want.value.consumed, 'inflate(): consumed');
+    assert.deepEqual(whole.value.stats, want.value.stats, 'inflate(): stats');
+  }
   for (const pieces of cuts(buf, rng)) {
     const got = pullMember(pieces, streamOpts(o));
     assert.equal(refusal(got), refusal(want), `${pieces.length} pieces`);
@@ -185,7 +198,7 @@ test('inflate pull == inflate() on every hand-built member the buffered tests re
   assert.equal(refusal(same(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), { raw: true })), 'pack_corrupt: inflate: repeat overflow');
   assert.equal(refusal(same(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), { raw: true })), 'pack_corrupt: inflate: no end-of-block code');
   // code-length codes for 16 (repeat previous, 2 bits) and 17 (zeros, 3 bits) as well as 18 and a length of 1
-  assert.equal(refusal(same(repeat({ head: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], body: [[0, 2], [3, 2], [1, 2], [7, 3], [0, 2]] }), { raw: true })), refusal(inflate(repeat({ head: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], body: [[0, 2], [3, 2], [1, 2], [7, 3], [0, 2]] }), 0, { raw: true })));
+  assert.equal(refusal(same(repeat({ head: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], body: [[0, 2], [3, 2], [1, 2], [7, 3], [0, 2]] }), { raw: true })), refusal(inflateRef(repeat({ head: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], body: [[0, 2], [3, 2], [1, 2], [7, 3], [0, 2]] }), 0, { raw: true })));
   const hole = [];
   const putHole = (v, n) => { for (let i = 0; i < n; i++) hole.push((v >> i) & 1); };
   putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(6, 4);
@@ -201,16 +214,26 @@ test('inflate pull == inflate() on every hand-built member the buffered tests re
   assert.ok(multi.value.stats.dynamic > 1, `${multi.value.stats.dynamic} dynamic blocks`);
 });
 
-test('inflate pull: the refusals inflate() does not make, and the input bound', () => {
+test('inflate pull and inflate(): the zlib window (the refusals the old decoder did not make), and the input bound', () => {
   const d = crypto.randomBytes(5000);
   const z = new Uint8Array(zlib.deflateSync(Buffer.concat([d, d])));
-  // CINFO 8 is no zlib window (git and zlib refuse it); inflate() checks only the header sum
+  // CINFO 8 is no zlib window (git and zlib refuse it); the old decoder checked only the header sum. inflate() is the
+  // pull, so it refuses it too (the owner's ruling on #172)
   const cmf8 = z.slice(); cmf8[0] = 0x88; cmf8[1] = 31 - ((0x88 * 256) % 31);
+  assert.equal(inflateRef(cmf8).ok, true, 'the old decoder took it');
   assert.equal(refusal(pulled(cmf8, streamOpts())), 'pack_corrupt: zlib: window size 8 is not a zlib window');
+  assert.equal(refusal(inflate(cmf8)), 'pack_corrupt: zlib: window size 8 is not a zlib window');
+  // after the method check, before the header checksum: CINFO 7 with a bad sum is the checksum, CINFO 8 with a bad sum
+  // the window, and a bad method with CINFO 8 the method
+  assert.equal(refusal(inflate(Uint8Array.of(0x78, 0x00))), 'pack_corrupt: zlib: bad header check');
+  assert.equal(refusal(inflate(Uint8Array.of(0x88, 0x00))), 'pack_corrupt: zlib: window size 8 is not a zlib window');
+  assert.equal(refusal(inflate(Uint8Array.of(0xf8, 0x00))), 'pack_corrupt: zlib: window size 15 is not a zlib window');
+  assert.equal(refusal(inflate(Uint8Array.of(0x89, 0x00))), 'pack_corrupt: zlib: unsupported method 9');
   // a back-reference past the window CINFO declares: here 256 bytes, the match 5000 back
   const small = z.slice(); small[0] = 0x08; small[1] = 31 - ((0x08 * 256) % 31);
-  assert.equal(inflate(small).ok, true, 'inflate() takes it (it checks only that the distance is inside the output)');
+  assert.equal(inflateRef(small).ok, true, 'the old decoder took it (it checked only that the distance is inside the output)');
   assert.equal(refusal(pulled(small, streamOpts())), 'pack_corrupt: inflate: distance too far back');
+  assert.equal(refusal(inflate(small)), 'pack_corrupt: inflate: distance too far back');
   // the same member at CINFO 7 is fine
   assert.deepEqual(pulled(z, streamOpts()).value.out, new Uint8Array(Buffer.concat([d, d])));
   // a declared size past the cap: after the zlib header (inflate()'s order), or before anything for a raw stream
@@ -308,7 +331,7 @@ function scan(pieces, opts = packScanOpts()) {
       case 'object': assert.equal(p.index, objects.length); cur = { ...p, parts: [] }; break;
       case 'chunk': assert.equal(p.index, cur.index); cur.parts.push(p.bytes); break;
       case 'object-end':
-        objects.push({ offset: cur.offset, headerBytes: cur.headerBytes, type: cur.type, size: cur.size, compressed: p.compressed, data: concat(cur.parts), baseOffset: cur.base.kind === 'ofs' ? cur.base.offset : null, baseOid: cur.base.kind === 'oid' ? cur.base.oid : null, inflate: p.stats });
+        objects.push({ offset: cur.offset, headerBytes: cur.headerBytes, type: cur.type, size: cur.size, compressed: p.compressed, data: concat(cur.parts), base: cur.base, inflate: p.stats });
         cur = null;
         break;
       case 'trailer': trailer = p.trailer; break;
@@ -317,8 +340,21 @@ function scan(pieces, opts = packScanOpts()) {
   }
 }
 const asParsed = o => ({ ...o, data: new Uint8Array(o.data) });
+// The old parser's record (test/oracle/pack-ref.ts) as a tagged base.
+const refBase = o => (o.baseOffset !== null ? { tag: 'ofs', offset: o.baseOffset } : o.baseOid !== null ? { tag: 'ref', oid: o.baseOid } : { tag: 'none' });
+const fromRef = ({ baseOffset, baseOid, ...o }) => ({ ...o, data: new Uint8Array(o.data), base: refBase({ baseOffset, baseOid }) });
+// The scan (in every chunking) and parsePack (a collector over the scan) against the old buffered parser: the same
+// objects, trailer and header; the same refusal as parsePack, and the same code as the old parser (the zlib window
+// refusals the old inflate did not make are pack_corrupt on both sides, in other words).
 function sameScan(buf, parseOpts, scanOpts, rng = new Rng(5)) {
   const want = parsePack(buf, parseOpts);
+  const old = parsePackRef(buf, parseOpts);
+  assert.equal(want.ok ? 'ok' : want.error.code, old.ok ? 'ok' : old.error.code, `parsePack ${refusal(want)} vs the old parser ${refusal(old)}`);
+  if (want.ok) {
+    assert.deepEqual(want.value.objects.map(asParsed), old.value.objects.map(fromRef), 'parsePack objects vs the old parser');
+    assert.deepEqual([want.value.trailer, want.value.bytes], [old.value.trailer, old.value.bytes]);
+    assert.deepEqual(want.value.stats, old.value.stats);
+  }
   for (const pieces of cuts(buf, rng).slice(buf.length > 4000 ? 2 : 0)) {
     const got = scan(pieces, scanOpts);
     assert.equal(refusal(got), refusal(want), `${pieces.length} pieces`);
@@ -368,9 +404,9 @@ test('pack scan == parsePack on git pack-objects output: every type, OFS and REF
   // the scanned blob is the blob git stored: git hash-object agrees on what the chunks spell
   const got = must(scan([single.blob.bytes]));
   assert.equal(hashObject('blob', got.objects[0].data), single.blob.want);
-  assert.equal(got.objects[0].baseOffset, null);
+  assert.deepEqual(got.objects[0].base, { tag: 'none' });
   const ofs = must(scan([packs.ofs.bytes]));
-  assert.ok(ofs.objects.some(o => o.baseOffset !== null));
+  assert.ok(ofs.objects.some(o => o.base.tag === 'ofs'));
 });
 
 const packHead = (count, version = PACK_VERSION) => {
@@ -531,7 +567,7 @@ function deflateBits() {
   };
   return w;
 }
-const zlibOf = raw => { const out = inflate(raw, 0, { raw: true }); const a = adler32Of(out.ok ? out.value.out : new Uint8Array(0)); return concat([Uint8Array.of(0x78, 0x01), raw, a]); };
+const zlibOf = raw => { const out = inflateRef(raw, 0, { raw: true }); const a = adler32Of(out.ok ? out.value.out : new Uint8Array(0)); return concat([Uint8Array.of(0x78, 0x01), raw, a]); };
 const adler32Of = d => { let a = 1, b = 0; for (const x of d) { a = (a + x) % 65521; b = (b + a) % 65521; } const t = new Uint8Array(4); new DataView(t.buffer).setUint32(0, ((b << 16) | a) >>> 0); return t; };
 
 test('inflate pull edges: a bit buffer already full, a stored block into a part-filled chunk, the window ring', () => {
@@ -549,7 +585,7 @@ test('inflate pull edges: a bit buffer already full, a stored block into a part-
   // fed 1000 bytes at a time a partial chunk goes out at each need, so a stored copy runs across the window's end; a
   // later match reads the bytes written past it (7201 back from 40001 is 32800)
   const wrap = deflateBits().fixed(false, 7).stored(false, big).fixed(true, { len: 258, dist: 7201 }).bytes();
-  const want = inflate(wrap, 0, { raw: true });
+  const want = inflateRef(wrap, 0, { raw: true });
   const byK = pullMember(Array.from({ length: Math.ceil(wrap.length / 1000) }, (_, i) => wrap.subarray(i * 1000, i * 1000 + 1000)), streamOpts({ raw: true }));
   assert.deepEqual(byK.value.out, new Uint8Array(want.value.out));
   same(zlibOf(ring));
@@ -627,10 +663,10 @@ test('pack scan edges: boundaries of each cap, OFS and REF deltas, refusals befo
   const ofsObj = concat([encodeObjHeader(TYPE.OFS_DELTA, delta.length), encodeOfsDistance(baseObj.length), new Uint8Array(zlib.deflateSync(delta))]);
   const ofsPack = sealed(concat([packHead(2), baseObj, ofsObj]));
   const ofs = sameScan(ofsPack, {}, packScanOpts());
-  assert.equal(ofs.value.objects[1].baseOffset, 12, 'a base at the first object offset is inside the pack');
+  assert.deepEqual(ofs.value.objects[1].base, { tag: 'ofs', offset: 12 }, 'a base at the first object offset is inside the pack');
   const refObj = concat([encodeObjHeader(TYPE.REF_DELTA, delta.length), Uint8Array.from(Buffer.from(hashObject('blob', base), 'hex')), new Uint8Array(zlib.deflateSync(delta))]);
   const refPack = sealed(concat([packHead(2), baseObj, refObj]));
-  assert.equal(sameScan(refPack, {}, packScanOpts()).value.objects[1].baseOid, hashObject('blob', base));
+  assert.deepEqual(sameScan(refPack, {}, packScanOpts()).value.objects[1].base, { tag: 'ref', oid: hashObject('blob', base) });
   // caps at their boundary
   const at = (limits, buf = ofsPack) => sameScan(buf, { limits: withLimits(limits) }, packScanOpts(withLimits(limits)));
   assert.equal(at({ maxPackObjects: 2 }).ok, true);
@@ -650,11 +686,11 @@ test('pack scan edges: boundaries of each cap, OFS and REF deltas, refusals befo
   // input that ends right after a REF_DELTA's base oid: the oid is read, the member is what is short
   assert.equal(refusal(scan([refPack.subarray(0, 12 + baseObj.length + encodeObjHeader(TYPE.REF_DELTA, delta.length).length + 20)])), 'pack_corrupt: short read: need 2 bytes at 0, have 0');
   // a full object's base is none
-  assert.deepEqual(must(scan([ofsPack])).objects.map(o => [o.baseOffset, o.baseOid]), [[null, null], [12, null]]);
+  assert.deepEqual(must(scan([ofsPack])).objects.map(o => o.base), [{ tag: 'none' }, { tag: 'ofs', offset: 12 }]);
   const firstObject = must(parsePackInit(packScanOpts()));
   parsePackFeed(firstObject, ofsPack);
   must(parsePackPull(firstObject));
-  assert.deepEqual(must(parsePackPull(firstObject)).base, { kind: 'none' });
+  assert.deepEqual(must(parsePackPull(firstObject)).base, { tag: 'none' });
   // a REF_DELTA base oid cut by the chunk waits for the rest
   const cutRef = must(parsePackInit(packScanOpts()));
   parsePackFeed(cutRef, refPack.subarray(0, 12 + baseObj.length + 1 + 10));
@@ -683,7 +719,8 @@ test('fetchObject streams the member: the blob in one buffer, trailing bytes, a 
   assert.equal(refusal(got), 'ok');
   assert.deepEqual(got.value.data, new Uint8Array(blob));
   assert.equal((await get(packOf(z), { limits: { maxObjectSize: blob.length } })).ok, true);
-  assert.equal(refusal(await get(packOf(z), { limits: { maxObjectSize: blob.length - 1 } })), `limit_exceeded: object size ${blob.length} exceeds limit ${blob.length - 1}`);
+  // the declared size is refused where the object header is read (readObjHeader, #156), before a body byte
+  assert.equal(refusal(await get(packOf(z), { limits: { maxObjectSize: blob.length - 1 } })), `limit_exceeded: pack object size ${blob.length} exceeds limit ${blob.length - 1}`);
   // bytes after the member: in the chunk it ends in, and in later chunks
   assert.equal(refusal(await get(packOf(concat([z, Uint8Array.of(1, 2, 3)])))), 'pack_corrupt: pack: 3 trailing bytes after object');
   assert.equal(refusal(await get(packOf(concat([z, new Uint8Array(40)])), { chunk: 7 })), 'pack_corrupt: pack: 40 trailing bytes after object');
@@ -697,7 +734,7 @@ test('fetchObject streams the member: the blob in one buffer, trailing bytes, a 
   assert.equal(refusal(await get(packOf(badHead), { chunk: 100 })), 'pack_corrupt: zlib: unsupported method 9');
   // a declared size past the cap is refused before a buffer of that size exists
   const huge = sealed(concat([packHead(1), encodeObjHeader(TYPE.BLOB, 2 ** 40), z]));
-  assert.equal(refusal(await get(huge)), `limit_exceeded: object size ${2 ** 40} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
+  assert.equal(refusal(await get(huge)), `limit_exceeded: pack object size ${2 ** 40} exceeds limit ${DEFAULT_LIMITS.maxObjectSize}`);
   // a member cut short inside a pack whose trailer is right: the end of input finishes the member and refuses it
   assert.equal(refusal(await get(packOf(z.subarray(0, z.length - 2)))), 'pack_corrupt: inflate: truncated adler32');
 });
@@ -716,3 +753,215 @@ function packBits(bits) {
   return Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
 }
 
+
+// ---- the fetches over the scan (#172): fetchWide, fetchPack and a commit want's tag + commit, read as they arrive ----
+const AUTH = 'A <a@b.c> 1 +0000';
+const treeOf = (...names) => concat(names.flatMap(n => [te.encode(`100644 ${n}\0`), new Uint8Array(20).fill(n.length)]));
+const commitOf = tree => te.encode(`tree ${tree}\nauthor ${AUTH}\ncommitter ${AUTH}\n\nm\n`);
+const tagOf = commit => te.encode(`object ${commit}\ntype commit\ntag v1\ntagger ${AUTH}\n\nt\n`);
+// A transport whose every upload-pack answer is `pack` (band-1 frames of `chunk` bytes), and the spans it exported.
+function wire(pack, { chunk = 64, quirks = {}, limits = {}, response = null } = {}) {
+  const exporter = arrayExporter();
+  const t = transport(() => ({ bytes: response ?? v2PackResponse(pack, { chunk }) }), limits, { tracer: new Tracer({ exporter }), quirks });
+  const span = name => exporter.lines.flatMap(flattenLine).find(s => s.name === name);
+  return { t, span };
+}
+
+test('fetchWide: a tree want keeps the trees and drops the blobs and their deltas as their headers arrive', async () => {
+  const tA = treeOf('a'), tB = treeOf('b', 'bb');
+  const blob = te.encode('x'.repeat(300)), blob2 = te.encode(`${'x'.repeat(300)}y`), blob3 = te.encode(`${'x'.repeat(300)}z`);
+  const { pack } = await buildPack([
+    { type: TYPE.TREE, data: tA },
+    { type: TYPE.BLOB, data: blob },
+    { type: TYPE.BLOB, data: makeDelta(blob, blob2).delta, baseIndex: 1 },
+    // an OFS delta on a dropped delta: a blob too
+    { type: TYPE.BLOB, data: makeDelta(blob2, blob3).delta, baseIndex: 2 },
+    // a REF delta on a dropped blob: unresolved, a blob it left out
+    { type: TYPE.BLOB, data: makeDelta(blob, blob3).delta, baseOid: hashObject('blob', blob) },
+    { type: TYPE.TREE, data: tB },
+  ]);
+  for (const quirks of [{ treeFilter: 'blob:none' }, { treeFilter: 'none' }]) {
+    const { t, span } = wire(pack, { quirks });
+    const got = await fetchObject(t, { oid: hashObject('tree', tA), filter: 'tree:0', expectType: TYPE.TREE });
+    assert.equal(refusal(got), 'ok');
+    assert.deepEqual([got.value.data, got.value.wide], [tA, true]);
+    assert.deepEqual([...t.objects.keys()], [hashObject('tree', tB)], 'the other tree is harvested, no blob is');
+    const a = span('git.upload-pack fetch').attrs;
+    assert.deepEqual([a['git.fetch.wide.objects'], a['git.fetch.wide.extra_objects'], a['git.fetch.wide.blobs'], a['git.pack.objects'], a['git.pack.bytes']], [6, 5, 4, 6, pack.length]);
+    assert.equal(a['git.fetch.wide.extra_bytes'], tB.length + blob.length + makeDelta(blob, blob2).delta.length + makeDelta(blob2, blob3).delta.length, 'the kept tree, and what was dropped at its declared size');
+  }
+});
+
+test('fetchWide: a want that may be a blob keeps every object; nothing dropped, a missing base is refused', async () => {
+  const blob = te.encode('b'.repeat(100));
+  const tree = treeOf('t');
+  const { pack } = await buildPack([{ type: TYPE.TREE, data: tree }, { type: TYPE.BLOB, data: blob }]);
+  // expectType null (any object) under a filter the host does not take: the blob is the want
+  const { t, span } = wire(pack, { quirks: { treeFilter: 'none' } });
+  const got = await fetchObject(t, { oid: hashObject('blob', blob), filter: 'blob:limit=1m' });
+  assert.equal(refusal(got), 'ok');
+  assert.deepEqual([got.value.type, got.value.data], [TYPE.BLOB, blob]);
+  assert.deepEqual([span('git.upload-pack fetch').attrs['git.fetch.wide.blobs'], span('git.upload-pack fetch').attrs['git.fetch.wide.objects']], [1, 2]);
+  // a tree want whose pack holds no blob drops nothing: a REF base outside the pack is the resolver's refusal, as before
+  const thin = await buildPack([{ type: TYPE.TREE, data: tree }, { type: TYPE.TREE, data: makeDelta(tree, treeOf('u')).delta, baseOid: hashObject('tree', treeOf('t', 'x')) }]);
+  const missing = await fetchObject(wire(thin.pack, { quirks: { treeFilter: 'blob:none' } }).t, { oid: hashObject('tree', tree), filter: 'tree:0', expectType: TYPE.TREE });
+  assert.equal(refusal(missing), `pack_corrupt: pack: ref delta base ${hashObject('tree', treeOf('t', 'x'))} not found`);
+  // a want that is not in the pack counts what was dropped too
+  const other = await fetchObject(wire(pack, { quirks: { treeFilter: 'none' } }).t, { oid: hashObject('tree', treeOf('zz')), filter: 'tree:0', expectType: TYPE.TREE });
+  assert.equal(refusal(other), `pack_corrupt: object ${hashObject('tree', treeOf('zz'))} not in the unfiltered pack (2 objects)`);
+});
+
+test('fetchWide and fetchPack: a scan refusal is held until the response is read, so the response\'s own refusal comes first', async () => {
+  const tree = treeOf('a');
+  const { pack } = await buildPack([{ type: TYPE.TREE, data: tree }]);
+  const bad = pack.slice(); bad[0] = 0x51;
+  const cut = v2PackResponse(bad).subarray(0, v2PackResponse(bad).length - 4); // no flush: the response is the error
+  for (const response of [cut, null]) {
+    const { t } = wire(bad, { quirks: { treeFilter: 'blob:none' }, response });
+    const got = await fetchObject(t, { oid: hashObject('tree', tree), filter: 'tree:0', expectType: TYPE.TREE });
+    assert.equal(refusal(got), response === null ? 'pack_corrupt: pack: bad signature' : 'protocol: v2: response ended without flush');
+    const fp = await fetchPack(wire(bad, { response }).t, { wants: [hashObject('tree', tree)] });
+    assert.equal(refusal(fp), response === null ? 'pack_corrupt: pack: bad signature' : 'protocol: v2: response ended without flush');
+  }
+  // fetchPack keeps every object and its parse: the objects, the parsed records, the acks
+  const fp = await fetchPack(wire(pack, { chunk: 5 }).t, { wants: [hashObject('tree', tree)] });
+  assert.equal(refusal(fp), 'ok');
+  assert.deepEqual([fp.value.parsed.objects.length, fp.value.parsed.bytes, [...fp.value.objects.keys()]], [1, pack.length, [hashObject('tree', tree)]]);
+  // an acknowledgments-only answer has no pack to parse
+  const acksOnly = cat([frame('acknowledgments\n'), frame('NAK\n'), FLUSH]);
+  const neg = await fetchPack(wire(pack, { response: acksOnly }).t, { wants: [hashObject('tree', tree)] });
+  assert.deepEqual([refusal(neg), neg.value.parsed, neg.value.nak], ['ok', null, true]);
+});
+
+test('a commit want read as it arrives: one object, a tag and its commit, a pack without the commit, a short answer', async () => {
+  const tree = hashObject('tree', treeOf('a'));
+  const commit = commitOf(tree);
+  const cid = hashObject('commit', commit);
+  const tag = tagOf(cid);
+  const want = { oid: cid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT };
+  // one object: the single-object parser, in any chunking
+  for (const chunk of [1, 5, 13, 64]) {
+    const single = await buildPack([{ type: TYPE.COMMIT, data: commit }]);
+    const got = await fetchObject(wire(single.pack, { chunk }).t, want);
+    assert.deepEqual([refusal(got), got.ok && got.value.data], ['ok', commit], `chunk ${chunk}`);
+    // two objects: the tag and the commit it peels to, collected and resolved
+    const both = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.COMMIT, data: commit }]);
+    const { t, span } = wire(both.pack, { chunk });
+    const peeled = await fetchObject(t, want);
+    assert.deepEqual([refusal(peeled), peeled.ok && peeled.value.data], ['ok', commit], `chunk ${chunk}`);
+    assert.deepEqual([span('git.upload-pack fetch').attrs['git.pack.objects'], span('git.upload-pack fetch').attrs['git.object.type']], [2, 'commit']);
+  }
+  // a multi-object pack that does not hold the commit: the single-object parser's refusal of the count
+  const tags = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.TAG, data: tagOf(hashObject('commit', commitOf(hashObject('tree', treeOf('b'))))) }]);
+  assert.equal(refusal(await fetchObject(wire(tags.pack, { chunk: 3 }).t, want)), 'pack_corrupt: pack: expected 1 object, got 2');
+  // the commit id names a tree: not_found, from the resolved pack
+  const treeData = treeOf('a');
+  const asTree = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.TREE, data: treeData }]);
+  assert.equal(refusal(await fetchObject(wire(asTree.pack).t, { ...want, oid: tree })), `not_found: ${tree} is not a commit`);
+  // a resolve or parse refusal of the multi-object pack is the fetch's, after the response was read
+  const corrupt = tags.pack.slice(); corrupt[corrupt.length - 1] ^= 1;
+  assert.match(refusal(await fetchObject(wire(corrupt, { chunk: 7 }).t, want)), /^pack_corrupt: pack: trailer sha mismatch/);
+  const noFlush = v2PackResponse(corrupt).subarray(0, v2PackResponse(corrupt).length - 4);
+  assert.equal(refusal(await fetchObject(wire(corrupt, { response: noFlush }).t, want)), 'protocol: v2: response ended without flush');
+  const thin = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.COMMIT, data: makeDelta(commitOf(hashObject('tree', treeOf('q'))), commit).delta, baseOid: hashObject('commit', commitOf(hashObject('tree', treeOf('q')))) }]);
+  assert.equal(refusal(await fetchObject(wire(thin.pack).t, want)), `pack_corrupt: pack: ref delta base ${hashObject('commit', commitOf(hashObject('tree', treeOf('q'))))} not found`);
+  // shorter than a pack header and its first object byte: decided on what came (one object and too short; two and no pack)
+  const head1 = packHead(1), head2 = packHead(2);
+  assert.equal(refusal(await fetchObject(wire(head1).t, want)), 'pack_corrupt: pack: truncated before object header');
+  assert.equal(refusal(await fetchObject(wire(head2).t, want)), 'pack_corrupt: pack: bad signature');
+  assert.equal(refusal(await fetchObject(wire(new Uint8Array(0)).t, want)), 'pack_corrupt: pack: truncated before object header');
+  // an oversized commit is refused at its header, whichever way the pack is read
+  const big = await buildPack([{ type: TYPE.COMMIT, data: commit }]);
+  assert.equal(refusal(await fetchObject(wire(big.pack, { limits: { maxObjectSize: commit.length - 1 } }).t, want)), `limit_exceeded: pack object size ${commit.length} exceeds limit ${commit.length - 1}`);
+  assert.equal(refusal(await fetchObject(wire(big.pack, { limits: { maxObjectSize: commit.length } }).t, want)), 'ok');
+  const bigTag = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.COMMIT, data: commit }]);
+  assert.equal(refusal(await fetchObject(wire(bigTag.pack, { limits: { maxObjectSize: commit.length - 1 } }).t, want)), `limit_exceeded: pack object size ${tag.length > commit.length - 1 ? tag.length : commit.length} exceeds limit ${commit.length - 1}`);
+  // the pack caps are read only for a multi-object answer, and a cap that bounds nothing is the fetch's bad_request
+  assert.equal(refusal(await fetchObject(wire(bigTag.pack, { limits: { maxPackObjects: Infinity } }).t, want)), 'bad_request: limits.maxPackObjects must be a finite non-negative number');
+  assert.equal(refusal(await fetchObject(wire(big.pack, { limits: { maxPackObjects: Infinity } }).t, want)), 'ok');
+});
+
+test('readObjHeader and spInit: the declared size against the cap, at the cap and one past it, after the type', () => {
+  const h = encodeObjHeader(TYPE.BLOB, 300);
+  assert.equal(must(readObjHeader(h, 0, 0, 300)).size, 300);
+  assert.equal(refusal(readObjHeader(h, 0, 0, 299)), 'limit_exceeded: pack object size 300 exceeds limit 299');
+  assert.equal(must(readObjHeader(h, 0)).size, 300, 'no cap: a streamed blob is bounded by its reader');
+  assert.equal(refusal(readObjHeader(Uint8Array.of(0x50 | 0x0f, 0x7f), 0, 0, 1)), 'pack_corrupt: pack: bad object type 5 at 0');
+  const e = readObjHeader(h, 0, 0, 299).error;
+  assert.deepEqual([e.what, e.got, e.max], ['pack object size', 300, 299]);
+  const pack = sealed(concat([packHead(1), h, new Uint8Array(zlib.deflateSync(new Uint8Array(300)))]));
+  assert.equal(refusal(spStep(spInit(299), pack)), 'limit_exceeded: pack object size 300 exceeds limit 299');
+  assert.equal(must(spStep(spInit(300), pack)).state.size, 300);
+  assert.equal(must(spStep(spInit(), pack)).state.size, 300);
+});
+
+test('parseDelta: a delta parsed once, its instructions walked and applied; the base size checked by applyProgram', () => {
+  const base = te.encode('hello world, hello delta');
+  const target = te.encode('hello there, hello delta!');
+  const { delta, program: ops } = spliceDelta({ baseLen: base.length, off: 6, oldLen: 5, insert: te.encode('there') });
+  const p = must(parseDelta(delta));
+  assert.deepEqual([p.srcSize, p.dstSize, p.ops], [base.length, base.length, { copy: 2, insert: 1, copyBytes: base.length - 5, insertBytes: 5 }]);
+  assert.deepEqual([...deltaOps(p)], ops.map(o => (o.tag === 'insert' ? { tag: 'insert', bytes: o.bytes } : o)));
+  assert.deepEqual(must(applyProgram(base, p)), must(applyDelta(base, delta)).out);
+  assert.equal(refusal(applyProgram(base.subarray(1), p)), `pack_corrupt: delta: base size ${base.length} != ${base.length - 1}`);
+  assert.equal(refusal(parseDelta(delta, {}, base.length + 1)), `pack_corrupt: delta: base size ${base.length} != ${base.length + 1}`);
+  assert.equal(refusal(parseDelta(delta, { maxResult: base.length - 1 })), `limit_exceeded: delta result size ${base.length} exceeds limit ${base.length - 1}`);
+  assert.equal(must(parseDelta(delta, { maxResult: base.length })).dstSize, base.length);
+  // makeDelta's instructions encode to what it returns, and every long copy and insert splits into opcodes
+  const m = makeDelta(base, target);
+  assert.deepEqual(m.delta, encodeDeltaOps(base.length, target.length, m.program));
+  assert.deepEqual(must(applyProgram(base, must(parseDelta(m.delta)))), target);
+  const long = new Uint8Array(0x10000 * 2 + 5).map((_, i) => i * 7);
+  const big = encodeDeltaOps(long.length, long.length + 300, [{ tag: 'copy', off: 0, len: long.length }, { tag: 'insert', bytes: new Uint8Array(300).fill(9) }]);
+  const bp = must(parseDelta(big));
+  assert.deepEqual(bp.ops, { copy: 3, insert: 3, copyBytes: long.length, insertBytes: 300 });
+  assert.deepEqual([...deltaOps(bp)].map(o => o.tag === 'copy' ? [o.tag, o.off, o.len] : [o.tag, o.bytes.length]), [['copy', 0, 0x10000], ['copy', 0x10000, 0x10000], ['copy', 0x20000, 5], ['insert', 127], ['insert', 127], ['insert', 46]]);
+  assert.deepEqual(must(applyProgram(long, bp)), concat([long, new Uint8Array(300).fill(9)]));
+  // an empty program (a zero-length result) walks nothing
+  const empty = must(parseDelta(encodeDeltaOps(2 ** 14, 0, [])));
+  assert.deepEqual([[...deltaOps(empty)], must(applyProgram(new Uint8Array(2 ** 14), empty)).length], [[], 0]);
+});
+
+test('inflate(): the output buffer, declared or grown, and a cap that bounds nothing', () => {
+  const d = new Uint8Array(5 * INFLATE_CHUNK + 3).map((_, i) => i * 13 + (i >> 8));
+  const z = new Uint8Array(zlib.deflateSync(d));
+  const sized = must(inflate(z, 0, { expectedSize: d.length }));
+  assert.deepEqual([sized.out.length, sized.out.buffer.byteLength], [d.length, d.length], 'one buffer of the declared size');
+  assert.deepEqual(new Uint8Array(sized.out), d);
+  // without a size: the first buffer is the input's length (or 256), doubled until it holds the output
+  const grown = must(inflate(z, 0));
+  assert.deepEqual(new Uint8Array(grown.out), d);
+  assert.ok(grown.out.buffer.byteLength >= d.length && grown.out.buffer.byteLength < 2 * d.length + 2 * z.length, `${grown.out.buffer.byteLength}`);
+  const capped = must(inflate(z, 0, { maxOutput: d.length }));
+  assert.equal(capped.out.buffer.byteLength, d.length, 'growth stops at the cap');
+  assert.equal(refusal(inflate(z, 0, { maxOutput: d.length - 1 })), `limit_exceeded: inflate: output exceeds limit ${d.length - 1}`);
+  assert.equal(refusal(inflate(z, 0, { maxOutput: null })), 'bad_request: limits.maxObjectSize must be a finite non-negative number');
+  assert.equal(refusal(inflate(z, 0, { maxOutput: -1 })), 'bad_request: limits.maxObjectSize must be a finite non-negative number');
+  // a member at `pos` counts from there; the tiny member's first buffer is GUESS_MIN
+  const tiny = new Uint8Array(zlib.deflateSync(Uint8Array.of(7)));
+  const at = must(inflate(concat([Uint8Array.of(9, 9), tiny]), 2));
+  assert.deepEqual([[...at.out], at.consumed, at.out.buffer.byteLength], [[7], tiny.length, 256]);
+  assert.deepEqual([...must(inflate(new Uint8Array(zlib.deflateSync(new Uint8Array(0))), 0)).out], []);
+  assert.deepEqual([...must(inflate(new Uint8Array(zlib.deflateSync(new Uint8Array(0))), 0, { expectedSize: 0 })).out], []);
+  // a stored member's output is its input's length: one buffer, never grown
+  const st = new Uint8Array(zlib.deflateSync(d, { level: 0 }));
+  assert.equal(must(inflate(st, 0)).out.buffer.byteLength, st.length);
+});
+
+test('the pack collector: a dropped object is counted, never held', () => {
+  const a = te.encode('kept'), b = te.encode('dropped bytes');
+  const body = concat([packHead(2), encodeObjHeader(TYPE.BLOB, a.length), new Uint8Array(zlib.deflateSync(a)), encodeObjHeader(TYPE.TREE, b.length), new Uint8Array(zlib.deflateSync(b))]);
+  const pack = sealed(body);
+  const seen = [];
+  const c = must(packCollectOpen({ maxObjects: 2, maxInflatedTotal: 2 * OV + 100, maxObjectSize: 100 }, true, h => { seen.push([h.offset, h.type, h.size, h.base.tag]); return h.type === TYPE.BLOB; }));
+  for (let i = 0; i < pack.length; i += 3) must(packCollectFeed(c, pack.subarray(i, i + 3)));
+  const r = must(packCollectEnd(c));
+  assert.deepEqual(seen, [[12, TYPE.BLOB, a.length, 'none'], [12 + 1 + zlib.deflateSync(a).length, TYPE.TREE, b.length, 'none']]);
+  assert.deepEqual(r.objects.map(o => [o.type, [...o.data]]), [[TYPE.BLOB, [...a]]]);
+  assert.deepEqual([r.stats.count, r.stats.full, r.stats.byType, r.stats.inflated, r.bytes], [2, 2, { blob: 1, tree: 1 }, a.length + b.length, pack.length]);
+  assert.equal(r.stats.compressed, zlib.deflateSync(a).length + zlib.deflateSync(b).length);
+  // a refusal in a later feed is the feed's; the end returns it again
+  const bad = must(packCollectOpen({ maxObjects: 1, maxInflatedTotal: 1e6, maxObjectSize: 100 }, true));
+  assert.equal(refusal(packCollectFeed(bad, pack)), 'limit_exceeded: pack objects 2 exceeds limit 1');
+  assert.equal(refusal(packCollectEnd(bad)), 'limit_exceeded: pack objects 2 exceeds limit 1');
+});

@@ -74,7 +74,7 @@ test('a pack of one of each object type is four depth-0 rows and no missing base
     assert.equal(o.type, type);
     assert.equal(o.oid, hashObject(names[type], data));
     assert.equal(o.depth, 0);
-    assert.equal(o.base, null);
+    assert.deepEqual(o.base, { tag: 'none' });
     assert.equal(o.size, data.length);
   }
 });
@@ -98,7 +98,7 @@ test('size is the inflated header, and an in-pack REF or OFS base is that object
   assert.equal(ref.objects[1].size, delta.length);
   assert.notEqual(ref.objects[1].size, target.length);
   assert.equal(ref.objects[1].depth, 1);
-  assert.deepEqual(ref.objects[1].base, { oid: baseOid });
+  assert.deepEqual(ref.objects[1].base, { tag: 'ref', oid: baseOid });
   assert.deepEqual(ref.missingBases, []);
   const parsed = unwrap(parsePack(refPack));
   assert.equal(ref.objects[1].headerBytes + ref.objects[1].compressed, parsed.objects[1].headerBytes + parsed.objects[1].compressed);
@@ -113,7 +113,7 @@ test('size is the inflated header, and an in-pack REF or OFS base is that object
   assert.equal(ofs.objects[1].oid, targetOid);
   assert.equal(ofs.objects[1].size, delta.length);
   assert.equal(ofs.objects[1].depth, 1);
-  assert.deepEqual(ofs.objects[1].base, { offset: ofs.objects[0].offset, oid: baseOid });
+  assert.deepEqual(ofs.objects[1].base, { tag: 'ofs', offset: ofs.objects[0].offset, oid: baseOid });
 });
 
 test('a thin REF base is missingBases, in pack order, and resolvePack still refuses it', async () => {
@@ -138,7 +138,7 @@ test('a thin REF base is missingBases, in pack order, and resolvePack still refu
     assert.equal(o.wireType, TYPE.REF_DELTA);
     assert.equal(o.size, o === layout.objects[1] ? deltaB.length : delta.length);
   }
-  assert.deepEqual(layout.objects[0].base, { oid: idA });
+  assert.deepEqual(layout.objects[0].base, { tag: 'ref', oid: idA });
   assert.throws(() => unwrap(resolvePack(unwrap(parsePack(pack)))), e => e.code === 'pack_corrupt' && e.message === `pack: ref delta base ${idA} not found`);
 
   const chained = await packOf([
@@ -148,12 +148,12 @@ test('a thin REF base is missingBases, in pack order, and resolvePack still refu
   const chain = layoutOf(chained);
   assert.deepEqual(chain.missingBases, [idA]);
   assert.equal(chain.objects[0].depth, 1);
-  assert.deepEqual(chain.objects[0].base, { oid: idA });
+  assert.deepEqual(chain.objects[0].base, { tag: 'ref', oid: idA });
   assert.equal(chain.objects[1].wireType, TYPE.OFS_DELTA);
   assert.equal(chain.objects[1].depth, 2);
   assert.equal(chain.objects[1].oid, null);
   assert.equal(chain.objects[1].type, null);
-  assert.deepEqual(chain.objects[1].base, { offset: chain.objects[0].offset, oid: null });
+  assert.deepEqual(chain.objects[1].base, { tag: 'ofs', offset: chain.objects[0].offset, oid: null });
 });
 
 test('limits: the boundary accepts and one past it refuses, and a cap that bounds nothing is bad_request', async () => {
