@@ -121,6 +121,9 @@ test('Result cores return Err for every refusal their wrappers throw', async () 
   const { pack } = await buildPack([{ type: TYPE.BLOB, data: te.encode('x') }]);
   errOf(parsePack(pack, { maxObjects: -1 }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   errOf(parsePack(pack, { limits: withLimits({ maxObjectSize: NaN }) }), 'bad_request', 'limits.maxObjectSize must be a finite non-negative number');
+  errOf(parsePack(pack, { maxInflatedTotal: -1 }), 'bad_request', 'limits.maxInflatedTotal must be a finite non-negative number');
+  errOf(parsePack(pack, { maxInflatedTotal: 1 }), 'limit_exceeded');
+  errOf(parsePack(pack, { limits: { maxPackObjects: null } }), 'bad_request', 'limits.maxPackObjects must be a finite non-negative number');
   const lim = errOf(parsePack(pack, { maxObjects: 0 }), 'limit_exceeded', 'pack objects 1 exceeds limit 0');
   assert.deepEqual([lim.what, lim.got, lim.max], ['pack objects', 1, 0]);
   errOf(parsePack(pack.subarray(0, pack.length - 1)), 'pack_corrupt');
@@ -577,4 +580,17 @@ test('parseRefname, parseBranchName, parseTagName, parsePath: the refusal names 
     assert.equal(x.what, what, message);
     assert.equal(x.cause, undefined);
   }
+});
+
+test('planDeltas gives each delta its tagged base and counts them: ofs against an earlier object, ref against a thin base', async () => {
+  const { planDeltas } = await import('../src/delta.js');
+  const v1 = new TextEncoder().encode(Array.from({ length: 40 }, (_, i) => `line ${i}\n`).join(''));
+  const v2 = new TextEncoder().encode(Array.from({ length: 40 }, (_, i) => `line ${i === 7 ? 'x' : i}\n`).join(''));
+  const p = planDeltas([{ type: TYPE.BLOB, data: v1, path: 'a' }, { type: TYPE.BLOB, data: v2, path: 'a' }]);
+  assert.deepEqual([p.ofs, p.ref, p.objects[0].base, p.objects[1].base], [1, 0, undefined, { tag: 'ofs', index: 0 }]);
+  const base = hashObject('blob', v1);
+  const thin = planDeltas([{ type: TYPE.BLOB, data: v2, path: 'a' }], { thinBase: () => ({ oid: base, data: v1 }) });
+  assert.deepEqual([thin.ofs, thin.ref, thin.objects[0].base], [0, 1, { tag: 'ref', oid: base }]);
+  const whole = planDeltas([{ type: TYPE.BLOB, data: v2, path: 'a' }]);
+  assert.deepEqual([whole.ofs, whole.ref, whole.objects[0].base], [0, 0, undefined]);
 });

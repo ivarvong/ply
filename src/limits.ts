@@ -149,6 +149,7 @@ export type LimitsInput = Input<Limits>;
 // The brand on a record whose every value is a finite non-negative number (each caller's check, or arithmetic on checked
 // values). Frozen: the record is shared by every read past the edge.
 function grant(values: Limits): CheckedLimits {
+  // Stryker disable next-line BooleanLiteral: the brand is its presence (isChecked reads Object.hasOwn); its value is never read
   const checked: CheckedLimits = { ...values, [CHECKED_LIMITS]: true };
   Object.defineProperty(checked, CHECKED_LIMITS, { enumerable: false });
   return Object.freeze(checked);

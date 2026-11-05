@@ -47,7 +47,7 @@ export async function negotiate(t: Transport, opts: NegotiateOpts, extra: Pick<F
   const caps = checked.value;
   // The whole command parsed once, every have with it (#156): a bad one is refused before the first round, not in the
   // round that would have sent it. The rounds send the parsed ids.
-  const parsed = fetchRequest({ ...rest, wants, haves: getOrElse(fromNullable(givenHaves), []), done: false });
+  const parsed = fetchRequest({ ...rest, wants, haves: getOrElse(fromNullable(givenHaves), []) });
   if (!parsed.ok) return parsed;
   const { haves } = parsed.value;
   // what the server acknowledged: each an id, offered again as a have in every later round

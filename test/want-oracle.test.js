@@ -192,6 +192,13 @@ test('negotiate: an acknowledgment that is not an object id is the server\'s pro
   sent = 0;
   const good = await negotiate(served(head), { wants: [head], haves: [head], batch: 1, maxRounds: 1 });
   assert.deepEqual([good.ok, good.value.common, sent], [true, [head], 2]);
+  // a long acknowledgment is quoted cut short
+  sent = 0;
+  const long = await negotiate(served('x'.repeat(100)), { wants: [head], haves: [head], batch: 1 });
+  assert.equal(long.error.message, `negotiate: the server acknowledged "${'x'.repeat(60)}", not an object id`);
+  // no haves: no round, only the final request
+  sent = 0;
+  assert.deepEqual([(await negotiate(served(head), { wants: [head] })).ok, sent], [true, 1]);
   // git writes an acknowledged id as it writes every id, lowercase: an upper-case one is not an id this client sent
   sent = 0;
   const upper = await negotiate(served(head.toUpperCase()), { wants: [head], haves: [head], batch: 1 });
@@ -238,8 +245,12 @@ test('encodeCommit: tree and parent ids against git hash-object (fsck) and git c
     assert.equal(hashObject('commit', bytes), commitTree(t.toLowerCase(), ps.map(p => p.toLowerCase())), `${t} ${ps}`);
     assert.equal(hashObject('commit', bytes), commitTree(t, ps), 'commit-tree lowercases what it is given');
   }
-  // the header refusal (a NUL or newline) is still the one a tree or parent line gets first
-  assert.deepEqual([ply(`${tree}\n`, []).error.what, ply(tree, [`${tree}\n`]).error.what], ['tree', 'parent']);
+  // the header refusal (a NUL or newline) is still the one a tree or parent line gets first; then the id; then the rest
+  assert.deepEqual([ply(`${tree}\n`, []).error.message, ply(tree, [`${tree}\n`]).error.message], ['tree must not contain NUL or newline', 'parent must not contain NUL or newline']);
+  assert.equal(encodeCommit({ tree: 'x', parents: [], author: 'a\nb' }).error.what, 'tree');
+  assert.equal(encodeCommit({ tree, parents: [], author: 'a\nb' }).error.message, 'author must not contain NUL or newline');
+  // parents left out: a root commit, as commit-tree writes it with no -p
+  assert.equal(hashObject('commit', unwrap(encodeCommit({ tree, author: who, message: 'm\n' }))), parent);
 });
 
 test('mergeTrees parses its three tree ids at the edge: null is the empty tree, anything else is an id, before any read', async () => {
@@ -254,8 +265,12 @@ test('mergeTrees parses its three tree ids at the edge: null is the empty tree, 
   // base first, then ours, then theirs
   assert.equal((await mergeTrees(t, new Map(), { base: 'x', ours: 'y', theirs: 'z' })).error.got, 'x');
   assert.equal((await mergeTrees(t, new Map(), { base: null, ours: 'y', theirs: 'z' })).error.got, 'y');
-  // three empty trees merge to nothing with no read
+  // three empty trees merge to nothing with no read: as null, and as the empty tree's id held in the cache (each side is
+  // read by its parsed id; a side read as anything else would be fetched, and this transport refuses every request)
   const empty = unwrap(await mergeTrees(t, new Map(), { base: null, ours: null, theirs: null }));
   assert.deepEqual([empty.oid, empty.conflicts], [null, []]);
+  const EMPTY = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+  const held = unwrap(await mergeTrees(t, new Map([[EMPTY, new Uint8Array(0)]]), { base: EMPTY, ours: EMPTY, theirs: EMPTY }));
+  assert.deepEqual([held.oid, held.conflicts, held.fetched], [null, [], 0]);
   assert.equal(requests, 0);
 });

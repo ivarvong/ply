@@ -210,7 +210,7 @@ export const DECISIONS = [
   { match: 'src/packwalk.ts#*:*', space: 'pack-index', axisTag: 'case' },
   { match: 'src/packindex.ts#*:*', space: 'pack-index', axisTag: 'case' },
   { match: 'src/repo-node.ts#get:decode:*', excluded: 'protocol: a loose object header is "<type> <size>" in ASCII, which the regex after the decode checks; a non-ASCII byte fails that check as it fails git (and the object hash is checked too)' },
-  { match: 'src/push.ts#checkBases:*', space: 'push-repo', axisTag: 'case' },
+  { match: 'src/push.ts#checkBases:*', space: 'push-commands', axisTag: 'case' },
   { match: 'src/operation.ts#operation:*', space: 'customer-e2e', axisTag: 'case' },
   { match: 'src/edit.ts#refuseRebase:*', space: 'commit-changes', axisTag: 'op' },
   // refuseRebase is a wrapper, so the call inside resolve is its own site. The generated resolve:* glob would hand it to

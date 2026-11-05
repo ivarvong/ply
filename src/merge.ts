@@ -520,7 +520,9 @@ export async function mergeTrees(t: Transport, cache: TreeCache, spec: MergeTree
   const config = withDefaults(spec, mergeTreesDefaults());
   const trees = parseTrees(config);
   if (!trees.ok) return trees;
-  return mergeTreesOf(t, cache, { ...config, ...trees.value }, into);
+  // the parsed ids, and none of the caller's: past this line no tree id is a raw string
+  const { prefix, removed, mergeBlob, driverFor } = config;
+  return mergeTreesOf(t, cache, { prefix, removed, mergeBlob, driverFor, ...trees.value }, into);
 }
 // Effect: the merge driver for a path from the .gitattributes files of one tree (git's attr.tree / --attr-source, or the
 // worktree's — which is ours — for a non-bare `git merge`). Reads only the directories on the path, each once; returns

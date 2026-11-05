@@ -20,7 +20,6 @@ import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from
 import { pushRepo, readConfig } from '../src/repo-node.js';
 import { encodeDelta, planDeltas } from '../src/delta.js';
 import { applyDelta, buildPack, encodeOfsDistance, parsePack, resolvePack, readOfsDelta } from '../src/pack.js';
-import { planPush } from '../src/push.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -473,26 +472,6 @@ test('encodeDelta: applyDelta (and git index-pack) rebuild the target; null when
     const enc = encodeOfsDistance(d);
     assert.equal(readOfsDelta(enc, 0).value.off, d, String(d));
   }
-});
-
-test('planPush checks every base before anything is built: an ofs base names an earlier object, a ref base is an id', () => {
-  const data = Uint8Array.of(1, 2, 3);
-  const plan = objects => planPush({ ref: 'refs/heads/main', oldOid: ZERO, newOid: 'a'.repeat(40), objects }, DEFAULT_LIMITS);
-  const refused = (objects, message, got) => {
-    const r = plan(objects);
-    assert.deepEqual([r.ok, r.error.code, r.error.what, r.error.message, r.error.got], [false, 'bad_request', 'base', message, got]);
-  };
-  for (const index of [0, 1, -1, 0.5, '0', undefined]) refused([{ type: TYPE.BLOB, data, base: { tag: 'ofs', index } }], 'push: an ofs base must name an earlier object', index ?? null);
-  for (const oid of ['', 'A'.repeat(40), 'a'.repeat(39), 7, undefined]) refused([{ type: TYPE.BLOB, data, base: { tag: 'ref', oid } }], 'push: a ref base must be an object id', oid ?? null);
-  // a JavaScript caller's base outside the three tags, and the flag fields the tagged base replaced, are refused, not ignored
-  const shape = "push: an object's base is { tag: 'none' }, { tag: 'ofs', index } or { tag: 'ref', oid }";
-  refused([{ type: TYPE.BLOB, data, base: { tag: 'thin' } }], shape, 'thin');
-  refused([{ type: TYPE.BLOB, data, base: {} }], shape, null);
-  refused([{ type: TYPE.BLOB, data }, { type: TYPE.BLOB, data, baseIndex: 0 }], shape, 'baseIndex/baseOid');
-  refused([{ type: TYPE.BLOB, data, baseOid: 'a'.repeat(40) }], shape, 'baseIndex/baseOid');
-  // the first bad object is the refusal
-  refused([{ type: TYPE.BLOB, data, base: { tag: 'ref', oid: 'x' } }, { type: TYPE.BLOB, data, base: { tag: 'ofs', index: 5 } }], 'push: a ref base must be an object id', 'x');
-  assert.ok(plan([{ type: TYPE.BLOB, data }, { type: TYPE.BLOB, data, base: { tag: 'ofs', index: 0 } }, { type: TYPE.BLOB, data, base: { tag: 'ref', oid: 'a'.repeat(40) } }, { type: TYPE.BLOB, data, base: { tag: 'none' } }]).ok);
 });
 
 test('readConfig: sections, subsections, case, comments, a bare key', () => {

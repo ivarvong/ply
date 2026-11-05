@@ -625,7 +625,7 @@ export type CommitConfig = {
 };
 export type CommitInput = { readonly tree: string; readonly author: string } & Input<Omit<CommitConfig, 'tree' | 'author'>>;
 // The same, the ids parsed: what ply's own writers hold (a built tree, a resolved commit).
-export type CommitIds = { readonly tree: Oid; readonly author: string } & Input<Omit<CommitConfig, 'tree' | 'author' | 'parents'> & { readonly parents: readonly Oid[] }>;
+export type CommitIds = { readonly tree: Oid; readonly parents: readonly Oid[]; readonly author: string } & Input<Omit<CommitConfig, 'tree' | 'author' | 'parents'>>;
 // A commit's tree or parent id: 40 hex digits, parsed once (parseOid's refusal, named for the header it would be written
 // in, what `tree` or `parent`). git's fsck reads either case (hash-object keeps the case it was given); git commit-tree
 // writes the id lowercase, and so does ply: an upper-case id is the same object (test/want-oracle.test.js).
@@ -633,7 +633,7 @@ function headerOid(value: string, what: 'tree' | 'parent'): Result<Oid, BadReque
   const id = parseOid(value.toLowerCase());
   return id.ok ? id : fail('bad_request', `commit: ${what}: ${id.error.message}`, { what, got: value });
 }
-export function encodeCommitOf({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitIds): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+export function encodeCommitOf({ tree, parents, author, committer = author, encoding = null, message = null, extra = [] }: CommitIds): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const values: Array<readonly [unknown, string]> = [[author, 'author'], [committer, 'committer']];
   if (encoding !== null) values.push([encoding, 'encoding']);
   for (const line of extra) values.push([line, 'extra']);
@@ -652,11 +652,11 @@ export function encodeCommitOf({ tree, parents = [], author, committer = author,
   return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
 }
 
-// A caller's commit, its ids parsed once: the header values are checked first (a NUL or newline is that refusal, as
-// before), then the tree, then each parent in order.
+// A caller's commit, its ids parsed once: the tree and parent header values are checked first (a NUL or newline is that
+// refusal, as before), then the tree id, then each parent's in order, then the rest (encodeCommitOf).
 export function encodeCommit(input: CommitInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
-  const { tree, parents = [], author } = input;
-  const headed = headerValues([[tree, 'tree'], ...parents.map((p): readonly [unknown, string] => [p, 'parent']), [author, 'author']]);
+  const { tree, parents = [] } = input;
+  const headed = headerValues([[tree, 'tree'], ...parents.map((p): readonly [unknown, string] => [p, 'parent'])]);
   if (!headed.ok) return headed;
   const treeId = headerOid(tree, 'tree');
   if (!treeId.ok) return treeId;

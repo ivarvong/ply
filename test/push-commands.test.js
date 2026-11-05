@@ -86,3 +86,24 @@ test('maxRefs bounds the commands: exactly maxRefs pass planning, one more is li
   const over = await outcome({ commands: cmds(3) }, { maxRefs: 2 });
   assert.deepEqual(over, { code: 'limit_exceeded', what: 'push commands', sent: 0, spans: 0 });
 });
+
+// Each object's base, checked by planPush before anything is built (#156: the tagged base replaced baseIndex/baseOid).
+test('planPush checks every base before anything is built: an ofs base names an earlier object, a ref base is an id', { skip: Boolean(process.env.PUSH_COMMANDS_SRC) }, () => {
+  const data = Uint8Array.of(1, 2, 3);
+  const plan = objects => planPush({ ref: 'refs/heads/main', oldOid: Z, newOid: 'a'.repeat(40), objects }, {});
+  const refused = (objects, message, got) => {
+    const r = plan(objects);
+    assert.deepEqual([r.ok, r.error.code, r.error.what, r.error.message, r.error.got], [false, 'bad_request', 'base', message, got]);
+  };
+  for (const index of [0, 1, -1, 0.5, '0', undefined]) refused([{ type: 3, data, base: { tag: 'ofs', index } }], 'push: an ofs base must name an earlier object', index ?? null);
+  for (const oid of ['', 'A'.repeat(40), 'a'.repeat(39), 7, undefined]) refused([{ type: 3, data, base: { tag: 'ref', oid } }], 'push: a ref base must be an object id', oid ?? null);
+  // a JavaScript caller's base outside the three tags, and the flag fields the tagged base replaced, are refused, not ignored
+  const shape = "push: an object's base is { tag: 'none' }, { tag: 'ofs', index } or { tag: 'ref', oid }";
+  refused([{ type: 3, data, base: { tag: 'thin' } }], shape, 'thin');
+  refused([{ type: 3, data, base: {} }], shape, null);
+  refused([{ type: 3, data }, { type: 3, data, baseIndex: 0 }], shape, 'baseIndex/baseOid');
+  refused([{ type: 3, data, baseOid: 'a'.repeat(40) }], shape, 'baseIndex/baseOid');
+  // the first bad object is the refusal
+  refused([{ type: 3, data, base: { tag: 'ref', oid: 'x' } }, { type: 3, data, base: { tag: 'ofs', index: 5 } }], 'push: a ref base must be an object id', 'x');
+  assert.ok(plan([{ type: 3, data }, { type: 3, data, base: { tag: 'ofs', index: 0 } }, { type: 3, data, base: { tag: 'ref', oid: 'a'.repeat(40) } }, { type: 3, data, base: { tag: 'none' } }]).ok);
+});
