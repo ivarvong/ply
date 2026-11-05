@@ -218,7 +218,8 @@ jobs:
           PLY_FAILSITES_GATE: 1
         run: npx vitest run test/space/failsites.test.js
 
-  # Stryker over the src files a PR changed (all of src/ on main), split into 16 shards balanced by measured cost
+  # Stryker over the src lines a PR changed plus every strictly gated line (each parser function and bounds file, changed
+  # or not: a moved parser is not a changed line), all of src/ on main, split into 16 shards balanced by measured cost
   # (scripts/mutate.mjs --plan 16, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
   # costing more than a shard's share. Shards only run Stryker; the job named `mutate` merges their reports, checks
   # every mutant of every planned file is there exactly once, and judges them with the same rules as an unsharded run.

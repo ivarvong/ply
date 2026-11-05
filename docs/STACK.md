@@ -168,9 +168,9 @@ fuzzers in `test/fuzz/` stay node scripts (`node --import ./test/ts-resolve.mjs 
 (`test/durations.json`, the sequencer in `vitest.config.ts`); each shard uploads its vitest JSON report.
 Mutation testing: `@stryker-mutator/vitest-runner` over `vitest.stryker.config.ts` (the mutation-killing files, quick
 sizes, push-outcome on its own thread, `test/stryker-parent-guard.cjs` preloaded to kill a test process past 3 GB),
-`mutate: src/**/*.{js,ts}`, per-test coverage. The gate (`scripts/mutate.mjs`) is unchanged: changed lines on a PR,
-everything on main, parser and bounds survivors fatal, 16 cost-balanced shards. `tsconfigFile` points at a file
-that does not exist on purpose: Stryker's tsconfig preprocessor calls the TypeScript JS API
+`mutate: src/**/*.{js,ts}`, per-test coverage. The gate (`scripts/mutate.mjs`) is unchanged: changed lines plus every
+gated parser and bounds line on a PR, everything on main, parser and bounds survivors fatal, 16 cost-balanced shards.
+`tsconfigFile` points at a file that does not exist on purpose: Stryker's tsconfig preprocessor calls the TypeScript JS API
 (`ts.parseConfigFileTextToJson`), which TypeScript 7 does not ship (`TypeError: ts.parseConfigFileTextToJson is not a
 function`); the rewrite only matters for `extends`/references outside the sandbox, which ply has none of.
 
