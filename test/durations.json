@@ -27,6 +27,7 @@
   "test/mutant-kill-packs.test.js": 13,
   "test/mutant-kill-tree.test.js": 2,
   "test/mutant-kill.test.js": 4,
+  "test/mutate-plan.test.js": 2,
   "test/no-filter.test.js": 8,
   "test/oid.test.js": 0,
   "test/option.test.js": 0,
