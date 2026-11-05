@@ -137,6 +137,11 @@ export const harvestBytes = (store: Harvest): number => { let n = 0; for (const 
 // Span attributes as otel.js records them.
 export type Attrs = Record<string, unknown>;
 
+// A request body: bytes, or a stream of known length (push's streamed pack, packwrite.ts) the transport sends as it is
+// read. `length` is what the stream will yield (the span's git.request.bytes); a stream errors rather than yield more.
+export type StreamBody = { readonly stream: ReadableStream<Uint8Array>; readonly length: number };
+export type RequestBody = Uint8Array | StreamBody;
+
 export type Transport = {
   readonly kind: 'http';
   readonly url: string;
@@ -147,7 +152,7 @@ export type Transport = {
   readonly quirks: Quirks;
   readonly objects: Harvest;
   readonly scrub: Scrub | null;
-  frames: (service: string, body: Uint8Array, span: Span, hints: Hints) => AsyncIterable<Frame>;
+  frames: (service: string, body: RequestBody, span: Span, hints: Hints) => AsyncIterable<Frame>;
   advertise: (service: string, span: Span) => Promise<Result<Uint8Array, PlyError>>;
 };
 
@@ -175,7 +180,7 @@ export function asTransport(t: TransportInput): Transport {
 export const UA = 'ply/0.2.0';
 export const proto = (msg: string): Err<ErrorOf<'protocol'>> => fail('protocol', msg);
 
-export const frames = (t: Transport, service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncIterable<Frame> => t.frames(service, body, span, hints);
+export const frames = (t: Transport, service: string, body: RequestBody, span: Span, hints: Hints = NO_HINTS): AsyncIterable<Frame> => t.frames(service, body, span, hints);
 // oxlint-disable-next-line typescript/promise-function-async -- a pass-through: the transport's own promise, unwrapped (async adds a wrapper and bytes)
 export const advertise = (t: Transport, service: string, span: Span): Promise<Result<Uint8Array, PlyError>> => t.advertise(service, span);
 

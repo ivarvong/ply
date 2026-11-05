@@ -58,3 +58,11 @@ await push(t, { ref, oldOid: oid, newOid: oid, objects: [] });
 await push(t, { commands: [command] });
 const client = GitHttp.create(url);
 if (client.ok) await client.value.push({ ref, oldOid: oid, newOid: oid, objects: [], atomic: false });
+
+// HttpOptions in, HttpSettings out (#156): settings come only from parseHttpOptions
+import { parseHttpOptions, type HttpSettings } from '../../src/http.js';
+const settings = parseHttpOptions(url, { userAgent: 'x', limits: DEFAULT_LIMITS });
+if (settings.ok) { const s: HttpSettings = settings.value; const n: number = s.requestTimeoutMs; void n; }
+// @ts-expect-error a plain record is not HttpSettings (the brand)
+const forgedSettings: HttpSettings = { requestTimeoutMs: 1 };
+void forgedSettings;

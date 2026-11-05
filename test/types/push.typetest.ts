@@ -51,3 +51,19 @@ const handle = (e: PushError): string => {
 };
 const r = outcomeResult({ tag: 'landed' }, { report: null, hookOutput: '', remote: null, commands: [] });
 if (!r.ok) void handle(r.error);
+
+// Commands are parsed once (#156): the plan's commands are Refname / Oid, at least one, made only by the parsers
+import { planPush, parseCommands, type ParsedCommands, type PushCommand } from '../../src/push.js';
+import type { Refname } from '../../src/refname.js';
+import type { Oid } from '../../src/oid.js';
+const plan = planPush({ ref: 'refs/heads/a', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40) }, null);
+if (plan.ok) { const [first] = plan.value.commands; const ref: Refname = first.ref; const old: Oid = first.oldOid; const text: string = first.newOid; void ref; void old; void text; }
+const listed = parseCommands([{ ref: 'refs/heads/a', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40) }]);
+if (listed.ok) { const cs: ParsedCommands = listed.value; void cs; }
+// @ts-expect-error a plain command is not a PushCommand
+const plainCommand: PushCommand = { ref: 'refs/heads/a', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40) };
+void plainCommand;
+declare const one: PushCommand;
+// @ts-expect-error a tuple of parsed commands is not a ParsedCommands (the brand): only the parsers make one
+const forgedList: ParsedCommands = [one];
+void forgedList;

@@ -6,6 +6,7 @@
 //     reachable from the destination's old tip is sent again;
 //   - in_sync sends no fetch and no receive-pack; a refused non-fast-forward sends no receive-pack;
 //   - a destination moved between ls-refs and receive-pack is cas_conflict naming the tip git holds.
+import { readBody } from './body.js';
 import { test, describe, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -32,10 +33,11 @@ const okOf = r => { assert.equal(r.ok, true, r.ok ? '' : `${r.error.code}: ${r.e
 // Per-side request log: every POST body's command (ls-refs / fetch / receive-pack) and every pack pushed.
 function side(before = () => {}) {
   const log = { commands: [], packs: [] };
-  const fetchImpl = async (url, init) => {
+  const fetchImpl = async (url, given) => {
     const kind = String(url).split('/').pop();
+    // a pack past INFLATE_CHUNK is a streamed body (src/packwrite.ts): read once, forwarded as its bytes
+    const { bytes: body, init } = await readBody(given);
     if (init?.method === 'POST') {
-      const body = Buffer.from(init.body);
       if (kind === 'git-receive-pack') {
         log.commands.push('receive-pack');
         const at = body.indexOf('0000PACK');

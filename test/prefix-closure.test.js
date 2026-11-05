@@ -22,7 +22,7 @@ import { inflate } from '../src/inflate.js';
 import { parseSideband as parseSidebandR, spInit, spStep as spStepR, spFinish as spFinishR, v2Init, v2Step as v2StepR } from '../src/fetch.js';
 import { parseLsRefLine as parseLsRefLineR, parseUnbornLine } from '../src/lsrefs.js';
 import { parseCapabilitiesV2 as parseCapabilitiesV2R } from '../src/discover.js';
-import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish } from '../src/push.js';
+import { classifyReport, reportInit, reportStep, streamInit, streamStep, streamFinish, parseCommand, parseCommands } from '../src/push.js';
 import { parseReceiveAdvert } from '../src/receivecaps.js';
 import { parseUploadPackRequest } from '../src/uprequest.js';
 import { fetchBody as fetchBodyR } from '../src/fetch.js';
@@ -31,6 +31,7 @@ import { parseLine, parseFile } from '../src/attributes.js';
 import { OID_BYTES, OID_HEX_CHARS, OBJ_CONTINUE, OBJ_SIZE_NEXT_MASK } from '../src/format.js';
 import { parseOid, parseCommitId } from '../src/oid.js';
 import { parsePath } from '../src/path.js';
+import { parseHttpOptions } from '../src/http.js';
 import { parseRefname, parseBranchName, parseTagName } from '../src/refname.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
@@ -528,6 +529,37 @@ const closedUnderPrefix = (full, parse, valueOf) => {
     else assert.equal(r.error.code, 'bad_request', `prefix ${JSON.stringify(cut)}`);
   }
 };
+
+// A push command: every prefix of its ref is that ref or a bad_request; a prefix of an oid is never an oid. A prefix of
+// the list is that list, and the empty one is 'protocol' (nothing to push), never a throw.
+property('push-command', 'a prefix of a command field is that value or a bad_request; the empty list is protocol', () => {
+  const a = 'a'.repeat(OID_HEX_CHARS), b = 'b'.repeat(OID_HEX_CHARS);
+  closedUnderPrefix('refs/heads/main', v => parseCommand({ ref: v, oldOid: a, newOid: b }), v => v.ref);
+  for (const key of ['oldOid', 'newOid']) {
+    for (let i = 0; i < OID_HEX_CHARS; i++) {
+      const r = parseCommand({ ref: 'refs/heads/main', oldOid: a, newOid: b, [key]: a.slice(0, i) });
+      assert.deepEqual([r.ok, r.error?.code, r.error?.message], [false, 'bad_request', 'push: oids must be 40-hex'], `${key} ${i}`);
+    }
+  }
+  const list = ['refs/heads/x', 'refs/heads/y', 'refs/tags/z'].map(ref => ({ ref, oldOid: a, newOid: b }));
+  for (let i = 0; i <= list.length; i++) {
+    const r = parseCommands(list.slice(0, i));
+    if (i === 0) assert.deepEqual([r.ok, r.error.code, r.error.message], [false, 'protocol', 'push: no commands']);
+    else assert.deepEqual(unwrap(r).map(c => c.ref), list.slice(0, i).map(c => c.ref));
+  }
+});
+
+// The transport's options: every prefix of a remote URL (with userinfo, a port, a path) is settings for that URL or a
+// bad_request, never a throw. An absolute URL's prefix that still parses is that prefix, without its userinfo.
+property('http-options', 'a prefix of a remote URL is settings for that URL or a bad_request', () => {
+  for (const full of ['https://user:tok@example.com:8443/org/repo.git', 'http://127.0.0.1/r', 'https://h/a%20b']) {
+    for (let i = 0; i <= full.length; i++) {
+      const r = parseHttpOptions(full.slice(0, i));
+      if (r.ok) assert.equal(r.value.url.username + r.value.url.password, '', full.slice(0, i));
+      else assert.equal(r.error.code, 'bad_request', full.slice(0, i));
+    }
+  }
+});
 
 property('path', 'a prefix of a path is that path or a bad_request', () => {
   for (const full of ['a', 'src/index.ts', 'a/b/c/d.e', 'dir with space/f\u00e9.txt', '.github/workflows/ci.yml']) {
