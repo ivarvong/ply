@@ -196,3 +196,14 @@ test('syncRef and a handed-in transport parse their limits before any request; a
   for (const [key, value] of [['quirks', null], ['objects', null]]) assert.notEqual(asTransport({ ...full, [key]: value }, t.limits), full, key);
   assert.deepEqual([transportFrom({ ...hand, limits: { maxRefs: NaN } }).error.what, c.n], ['maxRefs', 0]);
 });
+
+test('a URL that does not parse, and a NUL, CR or LF in its userinfo, are refused with their own message and what', () => {
+  const bad = createTransport('not a url', {});
+  assert.deepEqual([bad.error.code, bad.error.message, bad.error.what], ['bad_request', 'invalid url: not an absolute URL', 'url']);
+  for (const url of ['https://u%0a:p@h/r.git', 'https://u:p%0d@h/r.git', 'https://u%00@h/r.git']) {
+    const r = parseHttpOptions(url, {});
+    assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'bad_request', 'url userinfo'], url);
+  }
+  // explicit auth wins: the URL's userinfo is not read, so it is not refused either
+  assert.equal(parseHttpOptions('https://u%0a@h/r.git', { auth: { token: 't' } }).ok, true);
+});

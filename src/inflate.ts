@@ -47,6 +47,7 @@ export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Re
   let out = new Uint8Array(0);
   let o = 0;
   const room = (n: number): void => {
+    // Stryker disable next-line EqualityOperator: at an exact fit, `<` grows a new buffer and copies the output into it: the same bytes come out
     if (o + n <= out.length) return;
     // Stryker disable next-line ArithmeticOperator,MethodExpression,ConditionalExpression: the buffer is grown until it holds the output, so a different positive first size yields the same bytes
     let cap = expected.tag === 'some' ? expected.value : Math.min(maxOutput, Math.max(out.length * GROWTH, GUESS_MIN, buf.length - pos));
