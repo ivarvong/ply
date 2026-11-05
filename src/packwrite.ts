@@ -23,6 +23,9 @@ import { INFLATE_CHUNK, PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TR
 
 // One object's zlib stream, pulled: the object goes into CompressionStream in INFLATE_CHUNK slices as the output is read
 // (a source with no read-ahead), so nothing but zlib's own state and one output chunk is held.
+// No read-ahead of slices.
+// Stryker disable next-line ObjectLiteral: equivalent. A slice is a view of the caller's object (subarray, no copy), so a source queue of one costs no bytes, and CompressionStream gets the same slices in the same order
+const SLICE_QUEUE: QueuingStrategy<Uint8Array<ArrayBuffer>> = { highWaterMark: 0 };
 const slices = (data: Uint8Array): ReadableStream<Uint8Array<ArrayBuffer>> => {
   const bytes = bufferSource(data);
   let next = 0;
@@ -33,8 +36,7 @@ const slices = (data: Uint8Array): ReadableStream<Uint8Array<ArrayBuffer>> => {
       c.enqueue(bytes.subarray(next, end));
       next = end;
     },
-  // Stryker disable next-line ObjectLiteral: equivalent. A slice is a view of the caller's object (subarray, no copy), so a source queue of one costs no bytes, and CompressionStream gets the same slices in the same order
-  }, { highWaterMark: 0 });
+  }, SLICE_QUEUE);
 };
 export async function* deflatePull(data: Uint8Array): AsyncGenerator<Uint8Array, void, unknown> {
   const reader = slices(data).pipeThrough(new CompressionStream('deflate')).getReader();
