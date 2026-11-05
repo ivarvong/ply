@@ -316,7 +316,7 @@ export const DECISIONS = [
   { match: "src/packresolve.ts#parseDelta:pack_corrupt:delta: insert out of range", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#parseDelta:pack_corrupt:delta: reserved opcode 0", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#parseDelta:pack_corrupt:delta: produced … != …", space: 'pack-cut', axisTag: 'corrupt' },
-  { match: "src/packresolve.ts#applyProgram:pack_corrupt:delta: base size … != …", space: 'mutant-kill', axisTag: 'case' },
+  { match: "src/packresolve.ts#applyProgram:pack_corrupt:delta: base size … != …", space: 'pack-stream', axisTag: 'case' },
   { match: "src/packresolve.ts#badObject:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/packresolve.ts#parseBase:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/packresolve.ts#packEntry:*", space: 'mutant-kill', axisTag: 'case' },
