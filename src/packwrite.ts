@@ -33,6 +33,7 @@ const slices = (data: Uint8Array): ReadableStream<Uint8Array<ArrayBuffer>> => {
       c.enqueue(bytes.subarray(next, end));
       next = end;
     },
+  // Stryker disable next-line ObjectLiteral: equivalent. A slice is a view of the caller's object (subarray, no copy), so a source queue of one costs no bytes, and CompressionStream gets the same slices in the same order
   }, { highWaterMark: 0 });
 };
 export async function* deflatePull(data: Uint8Array): AsyncGenerator<Uint8Array, void, unknown> {
@@ -151,6 +152,8 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
       if (sent > m.body) { refuse(c, 'ran longer than the first'); return; }
       c.enqueue(r.value);
     },
+    // the value handed to return() becomes the finished generator's result, which nothing reads
+    // Stryker disable next-line ObjectLiteral,ArrayDeclaration: equivalent, see above
     async cancel(): Promise<void> { await it.return({ entries: [], body: 0, digest: new Uint8Array(0) }); },
   }, { highWaterMark: 0 });
   return { stream, length: prefix.length + m.bytes, failure: () => failed };

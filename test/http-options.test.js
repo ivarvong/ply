@@ -134,3 +134,20 @@ test('a body that fails mid-read is the network error it is', async () => {
   const t = createTransport('https://h/r', { fetchImpl: recorder(failing).fetchImpl }).value;
   await assert.rejects(drain(t, Uint8Array.of(0)), e => e.code === 'network');
 });
+
+test('the advertisement: its GET asks redirect manual; a foreign content type is not_git; the Content-Length cap is inclusive', async () => {
+  const adv = (ct, length = null) => () => new Response('001e# service=git-upload-pack\n0000', { status: 200, headers: { 'content-type': ct, ...(length === null ? {} : { 'content-length': String(length) }) } });
+  const r = recorder(adv('application/x-git-upload-pack-advertisement'));
+  const t = createTransport('https://h/r', { fetchImpl: r.fetchImpl }).value;
+  assert.equal((await t.advertise('git-upload-pack', spanOf())).ok, true);
+  assert.equal(r.seen[0].init.redirect, 'manual');
+  for (const ct of ['text/html', 'text/plain; application/x-git-upload-pack-advertisement', '']) {
+    const bad = await createTransport('https://h/r', { fetchImpl: recorder(adv(ct)).fetchImpl }).value.advertise('git-upload-pack', spanOf());
+    assert.deepEqual([bad.ok, bad.error.code, bad.error.message], [false, 'not_git', 'unexpected content-type from git-upload-pack advertisement'], ct);
+  }
+  const body = '001e# service=git-upload-pack\n0000'.length;
+  const at = await createTransport('https://h/r', { fetchImpl: recorder(adv('application/x-git-upload-pack-advertisement', body)).fetchImpl, limits: withLimits({ maxPackBytes: body }) }).value.advertise('git-upload-pack', spanOf());
+  assert.equal(at.ok, true, 'a Content-Length equal to the cap is read');
+  const over = await createTransport('https://h/r', { fetchImpl: recorder(adv('application/x-git-upload-pack-advertisement', body)).fetchImpl, limits: withLimits({ maxPackBytes: body - 1 }) }).value.advertise('git-upload-pack', spanOf());
+  assert.deepEqual([over.ok, over.error.code, over.error.got, over.error.max], [false, 'limit_exceeded', body, body - 1]);
+});

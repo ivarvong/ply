@@ -79,3 +79,10 @@ test('an oid that is not a string is bad_request (the old pattern read [hex] and
     assert.deepEqual([o.code, o.sent], ['bad_request', 0], String(v));
   }
 });
+
+test('maxRefs bounds the commands: exactly maxRefs pass planning, one more is limit_exceeded with nothing sent', async () => {
+  const cmds = n => Array.from({ length: n }, (_, i) => ({ ref: `refs/heads/b${i}`, oldOid: A, newOid: Z }));
+  assert.equal(unwrap(planPush({ commands: cmds(2) }, withLimits({ maxRefs: 2 }))).commands.length, 2);
+  const over = await outcome({ commands: cmds(3) }, { maxRefs: 2 });
+  assert.deepEqual(over, { code: 'limit_exceeded', what: 'push commands', sent: 0, spans: 0 });
+});
