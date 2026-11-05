@@ -71,11 +71,11 @@ test('buildCommitObjects ≡ git: trees and commit hash to what git computes, de
     assert.equal(built.newCommit, gitCommit);
     assert.equal(unwrap(parseCommit(built.commitData)).parents[0], parent);
     // object list: commit (full) + one REF_DELTA per tree + blob REF_DELTA
-    assert.deepEqual(built.objects.map(o => [o.type, !!o.baseOid]), [[TYPE.COMMIT, false], [TYPE.TREE, true], [TYPE.TREE, true], [TYPE.BLOB, true]]);
-    assert.deepEqual(built.objects.slice(1).map(o => o.baseOid), [rootOid, leafOid, oldBlob]);
+    assert.deepEqual(built.objects.map(o => [o.type, o.base?.tag ?? 'none']), [[TYPE.COMMIT, 'none'], [TYPE.TREE, 'ref'], [TYPE.TREE, 'ref'], [TYPE.BLOB, 'ref']]);
+    assert.deepEqual(built.objects.slice(1).map(o => o.base.oid), [rootOid, leafOid, oldBlob]);
     // a < 4-byte delta becomes a full blob (git's DELTA_SIZE_MIN)
     const tiny = unwrap(buildCommitObjects({ levels, blob: { oldOid: oldBlob, newOid: newBlob, delta: new Uint8Array(3), newLen: 0 }, oldCommit: parent, author: { name: 'n', email: 'e@x' }, time: 1, message: 'm' }));
-    assert.equal(tiny.objects.at(-1).baseOid, undefined); assert.equal(tiny.objects.at(-1).data.length, 0);
+    assert.equal(tiny.objects.at(-1).base, undefined); assert.equal(tiny.objects.at(-1).data.length, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

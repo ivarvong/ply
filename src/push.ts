@@ -14,8 +14,8 @@ import type { Refname } from './refname.js';
 import { measurePack, streamPack } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
 import { frames, coded, clientSpan, spanned, UA } from './transport.js';
-import { readLimit, limitExceeded } from './limits.js';
-import type { Limits } from './limits.js';
+import { limitExceeded, parseLimits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 // oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, the parsed brands, Result
 import { validatePushRef, validateWire } from './validate.js';
 import type { WireField } from './validate.js';
@@ -77,6 +77,7 @@ export type { Frame } from './transport.js';
 import type { Frame, RequestBody, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
+import { WHOLE } from './pack.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, withDefaults } from './absent.js';
@@ -417,7 +418,7 @@ export type PushSpan = {
   event(name: string, attrs: Readonly<Record<string, unknown>>): unknown;
 };
 export type PushTransport = Transport;
-// One object for buildPack: { type, data, baseOid? } (pack.js).
+// One object for buildPack: { type, data, base } (pack.ts PackInput; a left-out base is none).
 export type PackObject = PackInput;
 export type PackEntry = BuiltEntry;
 // Single-ref form { ref, oldOid, newOid, objects } or multi-ref { commands: [...], objects }. Options:
@@ -466,25 +467,35 @@ const unchecked = (o: unknown): boolean => {
   const options = flatMapOption(field(o, 'pushOptions'), p => field(p, 'length'));
   return (atomic.tag === 'some' && atomic.value === true) || (options.tag === 'some' && Number(options.value) > 0);
 };
-// An OFS_DELTA's base is an earlier object of the same pack (pack.ts buildPack does not check it).
-function checkBaseIndexes(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_request'>> {
+// Each object's base, checked before anything is built (pack.ts buildPack checks none): an OFS_DELTA's is an earlier
+// object of the same pack, a REF_DELTA's an object id. A JavaScript caller's base outside the three tags, or the flag
+// fields the tagged base replaced (baseIndex, baseOid), is refused rather than ignored: a delta sent as a whole object
+// would be a corrupt pack.
+function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_request'>> {
   for (const [i, obj] of objects.entries()) {
-    const b = getOrElse<unknown>(field(obj, 'baseIndex'), null);
-    if (b !== null && !(typeof b === 'number' && Number.isInteger(b) && b >= 0 && b < i)) return fail('bad_request', 'push: baseIndex must name an earlier object', { what: 'baseIndex', got: b });
+    const base = getOrElse<unknown>(field(obj, 'base'), WHOLE);
+    const tag = getOrElse<unknown>(field(base, 'tag'), null);
+    const flags = field(obj, 'baseIndex').tag === 'some' || field(obj, 'baseOid').tag === 'some';
+    if (flags || (tag !== 'none' && tag !== 'ofs' && tag !== 'ref')) return fail('bad_request', "push: an object's base is { tag: 'none' }, { tag: 'ofs', index } or { tag: 'ref', oid }", { what: 'base', got: flags ? 'baseIndex/baseOid' : tag });
+    const index = getOrElse<unknown>(field(base, 'index'), null);
+    if (tag === 'ofs' && !(typeof index === 'number' && Number.isInteger(index) && index >= 0 && index < i)) return fail('bad_request', 'push: an ofs base must name an earlier object', { what: 'base', got: index });
+    if (tag === 'ref' && !parseOid(getOrElse<unknown>(field(base, 'oid'), null)).ok) return fail('bad_request', 'push: a ref base must be an object id', { what: 'base', got: getOrElse<unknown>(field(base, 'oid'), null) });
   }
   return ok(null);
 }
-export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result<PushPlan, PlyError> {
+// limits: the transport's (checked), or a caller's record (any subset, a key left out is the default; null is the defaults).
+export function planPush(o: PushOptions, limits: LimitsInput | null): Result<PushPlan, PlyError> {
+  const checkedLimits = parseLimits(limits);
+  if (!checkedLimits.ok) return checkedLimits;
+  const { maxRefs, maxReportLines, maxPackBytes } = checkedLimits.value;
   const cfg = withDefaults(o, pushDefaults());
   if (cfg.checked === null && unchecked(o)) return fail('bad_request', 'push: unchecked atomic or push options');
   // the single-ref form's fields may be missing (null ref, '' oids): parseCommand refuses them as it refuses any other
   const raw: readonly RawCommand[] = cfg.commands === null ? [{ ref: cfg.ref, oldOid: cfg.oldOid, newOid: cfg.newOid }] : cfg.commands;
-  const maxRefs = readLimit(limits, 'maxRefs');
-  if (!maxRefs.ok) return maxRefs;
-  if (raw.length > maxRefs.value) return err(limitExceeded('push commands', raw.length, maxRefs.value));
+  if (raw.length > maxRefs) return err(limitExceeded('push commands', raw.length, maxRefs));
   const parsed = parseEach(raw);
   if (!parsed.ok) return parsed;
-  const bases = checkBaseIndexes(cfg.objects);
+  const bases = checkBases(cfg.objects);
   if (!bases.ok) return bases;
   // each option parsed once into the plan; the request body writes the parsed ones
   const pushOptions: WireField[] = [];
@@ -493,16 +504,11 @@ export function planPush(o: PushOptions, limits: Partial<Limits> | null): Result
     if (!option.ok) return option;
     pushOptions.push(option.value);
   }
-  // read once, before anything is built or sent: the same values bound the pack and the report
-  const maxReportLines = readLimit(limits, 'maxReportLines');
-  if (!maxReportLines.ok) return maxReportLines;
-  const maxPack = readLimit(limits, 'maxPackBytes');
-  if (!maxPack.ok) return maxPack;
   // last, as before: every other refusal comes first for an empty list
   const listed = nonEmpty(parsed.value);
   if (!listed.ok) return listed;
   const commands = listed.value;
-  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines: maxReportLines.value, maxPack: maxPack.value, objects: cfg.objects, sideband: cfg.sideband });
+  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxPack: maxPackBytes, objects: cfg.objects, sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {

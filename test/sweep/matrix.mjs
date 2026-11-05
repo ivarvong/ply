@@ -317,6 +317,16 @@ function build() {
   add({ id: 'inflate.zero', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, limits: { maxInflatedTotal: 0 }, expect: refused('limit_exceeded', { what: 'pack inflated bytes' }) });
 
   pass2(add);
+  // ---- Every key, parsed where it enters (#156 parseLimits). A value that bounds nothing is refused when the client
+  // is made, before any request, whichever operation would read it: lsRefs reads only maxRefs and maxLsRefsBytes, and
+  // every key's cell is still refused there (the lazy read refused only the key the operation reached). A key left out
+  // is the default: every other cell passes only the keys it sets (cell.mjs passes the record as written).
+  for (const key of Object.keys(DEFAULT_LIMITS)) {
+    for (const [name, value] of [['negative', -1], ['null', null]]) {
+      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect: refused('bad_request', { what: key }) });
+    }
+  }
+  add({ id: 'parse.none', param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: {}, expect: ok });
   return cells;
 }
 

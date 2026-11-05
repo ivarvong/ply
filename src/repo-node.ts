@@ -39,8 +39,8 @@ import { readFile, readdir, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fail } from './errors.js';
 import type { PlyError } from './errors.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, lowered } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack } from './packresolve.js';
 import { hashObject, parseCommit, parseTag, TYPE, TYPE_ID } from './objects.js';
@@ -59,7 +59,7 @@ import type { Walk as PackWalk } from './packwalk.js';
 import type { Span } from './otel.js';
 import { decodeBytes } from './bytes.js';
 import type { Input } from './absent.js';
-import { at, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
+import { at, mapGet, readKey, withDefaults } from './absent.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Option, Result } from './result.js';
 
@@ -178,16 +178,14 @@ async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<
   return ok(refs);
 }
 
-async function openRepo(dir: string, limits: Limits): Promise<Result<Repo, PlyError>> {
+async function openRepo(dir: string, limits: CheckedLimits): Promise<Result<Repo, PlyError>> {
   const gitDir = typeof dir === 'string' && dir !== '' ? await findGitDir(dir) : null;
   if (gitDir === null) return fail('bad_request', `${typeof dir === 'string' ? dir : '(not a string)'}: not a git repository (no .git, and not a bare repository)`, { what: 'dir' });
   const common = await maybeText(join(gitDir, 'commondir'));
   const commonDir = common === null ? gitDir : resolve(gitDir, common.trim());
   const refused = await unsupported(commonDir);
   if (refused !== null) return fail('bad_request', `${dir}: ${refused.why}`, { what: refused.what });
-  const maxRefs = readLimit(limits, 'maxRefs');
-  if (!maxRefs.ok) return maxRefs;
-  const refs = await readRefs(commonDir, maxRefs.value);
+  const refs = await readRefs(commonDir, limits.maxRefs);
   if (!refs.ok) return refs;
   const headText = getOrElse<string>(mapOrNone(await maybeText(join(gitDir, 'HEAD'))), '').trim();
   const headRef = headText.startsWith(`${SYMREF}refs/heads/`) ? headText.slice(SYMREF.length).trim() : null;
@@ -203,13 +201,8 @@ type Store = {
 };
 const TYPE_IDS: Readonly<Record<string, number>> = TYPE_ID;
 
-async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyError>> {
-  const maxTotal = readLimit(limits, 'maxInflatedTotal');
-  if (!maxTotal.ok) return maxTotal;
-  const maxObjects = readLimit(limits, 'maxPackObjects');
-  if (!maxObjects.ok) return maxObjects;
-  const maxObject = readLimit(limits, 'maxObjectSize');
-  if (!maxObject.ok) return maxObject;
+async function openStore(repo: Repo, limits: CheckedLimits): Promise<Result<Store, PlyError>> {
+  const { maxInflatedTotal: maxTotal, maxPackObjects: maxObjects, maxObjectSize: maxObject } = limits;
   const objectsDir = join(repo.commonDir, 'objects');
   const held = new Map<string, Obj>();
   const stats = { packs: 0, packed: 0, loose: 0, resident: 0 };
@@ -220,8 +213,8 @@ async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyE
     held.set(oid, o);
     stats.resident += o.data.length;
     charged += o.data.length + LIMIT_OBJECT_OVERHEAD;
-    if (charged > maxTotal.value) return err(limitExceeded('local objects bytes', charged, maxTotal.value));
-    if (held.size > maxObjects.value) return err(limitExceeded('local objects', held.size, maxObjects.value));
+    if (charged > maxTotal) return err(limitExceeded('local objects bytes', charged, maxTotal));
+    if (held.size > maxObjects) return err(limitExceeded('local objects', held.size, maxObjects));
     return ok(null);
   };
   const packDir = join(objectsDir, 'pack');
@@ -229,7 +222,7 @@ async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyE
   for (const name of packs) {
     const buf = await readFile(join(packDir, name));
     // the room the packs and objects held so far leave: a pack that would pass the bound fails while it is parsed
-    const room = { ...limits, maxInflatedTotal: Math.max(0, maxTotal.value - charged), maxPackObjects: Math.max(0, maxObjects.value - held.size) };
+    const room = lowered(lowered(limits, 'maxInflatedTotal', maxTotal - charged), 'maxPackObjects', maxObjects - held.size);
     const parsed = parsePack(buf, { limits: room });
     if (!parsed.ok) return parsed;
     const resolved = resolvePack(parsed.value, () => null, room);
@@ -246,7 +239,7 @@ async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyE
     if (hit.tag === 'some') return ok(hit.value);
     const buf = await maybeRead(join(objectsDir, oid.slice(0, HEX_DIR), oid.slice(HEX_DIR)));
     if (buf === null) return ok(null);
-    const z = inflate(buf, 0, { maxOutput: maxObject.value + HEADER_ROOM });
+    const z = inflate(buf, 0, { maxOutput: maxObject + HEADER_ROOM });
     if (!z.ok) return z;
     const out = z.value.out;
     const nul = out.indexOf(0);
@@ -254,7 +247,7 @@ async function openStore(repo: Repo, limits: Limits): Promise<Result<Store, PlyE
     const type = header === null ? null : getOrElse(readKey(TYPE_IDS, getOrElse(at(header, 1), '')), null);
     const data = out.subarray(nul + 1);
     if (header === null || type === null || Number(header[2]) !== data.length || hashObject(getOrElse(at(header, 1), ''), data) !== oid) return fail('pack_corrupt', `loose object ${oid}: bad header or hash`, { what: 'object', path: oid });
-    if (data.length > maxObject.value) return err(limitExceeded('object size', data.length, maxObject.value));
+    if (data.length > maxObject) return err(limitExceeded('object size', data.length, maxObject));
     const o = { type, data };
     const h = hold(oid, o);
     if (!h.ok) return h;
@@ -530,11 +523,13 @@ export async function pushRepo(dir: string, url: string, spec: PushRepoSpec = {}
   if ((refspecs !== null && !(Array.isArray(refspecs) && refspecs.every(s => typeof s === 'string'))) || ![cfg.all, cfg.tags, cfg.force, cfg.dryRun, cfg.thin].every(v => isBool(v)) || (cfg.all && refspecs !== null)) {
     return fail('bad_request', 'pushRepo: refspecs is a list of strings, all/tags/force/dryRun/thin are booleans, and all takes no refspecs', { what: 'spec' });
   }
-  const limits = getOrElse<Limits>(fromNullish(options.limits), DEFAULT_LIMITS);
+  const checked = limitsOf(options);
+  if (!checked.ok) return checked;
+  const limits = checked.value;
   const repo = await openRepo(dir, limits);
   if (!repo.ok) return repo;
   const r = repo.value;
-  const opOpts: OperationOpts = { ...options, attrs: { 'git.push_repo.dir': r.dir, 'git.push_repo.dry_run': cfg.dryRun, 'git.push_repo.thin': cfg.thin, 'git.push_repo.local_refs': r.refs.size } };
+  const opOpts: OperationOpts = { ...options, limits, attrs: { 'git.push_repo.dir': r.dir, 'git.push_repo.dry_run': cfg.dryRun, 'git.push_repo.thin': cfg.thin, 'git.push_repo.local_refs': r.refs.size } };
   return operation('push_repo', url, opOpts, async ({ t, root, outcome }) => {
     const listed = await lsRefs(t, []);
     if (!listed.ok) return listed;

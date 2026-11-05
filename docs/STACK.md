@@ -103,7 +103,8 @@ hot loops (inflate, sha1, delta, pkt-line, the pack parsers) keep their block su
    `step(state, input): Result<State, PlyError>`; the driver loop is the only thing with I/O. `pktStep`, `spStep`,
    `v2Step`, `streamStep` already have this shape in JS; converting them means typing the states, not rewriting them.
 6. **Bounds before allocation**, as before: every wire-driven size is checked against a `limits.*` value
-   (`checkLimit`/`readLimit` return `Result`) before a buffer exists.
+   (`checkLimit`/`parseLimits` return `Result`; a caller's limits record is parsed once at the entry into a
+   `CheckedLimits`, and code past it reads plain numbers) before a buffer exists.
 7. **Bundle budgets hold.** Types cost nothing; runtime helpers do. Prefer a type to a runtime check when the value
    is already trusted; mark unused-but-exported module-level calls `/* @__PURE__ */` so esbuild drops them.
 8. **Absence is a value.** See Absence below. Do not write the platform missing value, an optional member, optional

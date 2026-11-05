@@ -28,8 +28,8 @@
 // as a stream does: its pull, transform and flush raise the PlyError the consumer reads.
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module, so its bundle carries nothing else */
 import { fail, isPlyCode, isPlyError, plyError } from './errors.js';
-import type { Miss, PlyError } from './errors.js';
-import { assertNever, err, getOrElse, isSome, mapOption, none, ok, some } from './result.js';
+import type { ErrorOf, Miss, PlyError } from './errors.js';
+import { assertNever, err, getOrElse, isSome, map, mapOption, none, ok, some } from './result.js';
 import type { Err, Option, Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs, parseUnbornLine, type LsRefsResult } from './lsrefs.js';
@@ -40,8 +40,8 @@ import { streamingSha1 } from './sha1.js';
 import { bufferSource, concat } from './bytes.js';
 import { KIND } from './otel.js';
 import type { Span } from './otel.js';
-import { DEFAULT_LIMITS } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, limitsOf } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { validateRef, validatePath } from './validate.js';
 import type { SpState, SpStepped } from './fetch.js';
 import type { Transport } from './transport.js';
@@ -231,7 +231,7 @@ export type CommitView = {
   readonly signed: boolean;
 };
 // Pure: a commit object's view. A malformed commit is parseCommit's (objects.ts) Err.
-export function commitView(data: Uint8Array, limits: Limits = DEFAULT_LIMITS): Result<CommitView, PlyError> {
+export function commitView(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<CommitView, PlyError> {
   const parsed = parseCommit(data, limits);
   if (!parsed.ok) return parsed;
   const c: { readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string; readonly message: string | null; readonly extra: readonly string[] } = parsed.value;
@@ -321,7 +321,7 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
 }
 
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
-async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: Oid; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: Limits }): Promise<Result<Walked, PlyError>> {
+async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: Oid; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: CheckedLimits }): Promise<Result<Walked, PlyError>> {
   const fetched = await commitById(t, commit);
   if (!fetched.ok) return fetched;
   const info = parseCommit(fetched.value.data, limits);
@@ -333,7 +333,7 @@ async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: 
 }
 
 // A path as the entries take it: validated components. With `allowRoot`, a missing, null, empty or '/' path is the root.
-export const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readonly allowRoot: boolean }): Result<string[], PlyError> => {
+export const pathComps = (path: unknown, limits: CheckedLimits, { allowRoot }: { readonly allowRoot: boolean }): Result<string[], PlyError> => {
   if (allowRoot && (isNothing(path) || path === '' || path === '/')) return ok([]);
   const valid = validatePath(typeof path === 'string' ? path.replace(/\/$/, '') : path, limits);
   return valid.ok ? ok(valid.value.components) : valid;
@@ -343,13 +343,12 @@ export const pathComps = (path: unknown, limits: Limits, { allowRoot }: { readon
 export type PathConfig = RefConfig & { readonly path: string | null };
 export type PathSpec = Input<PathConfig>;
 // The options of listTree and readFile: operation()'s, plus the caller's tree cache.
-export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: Limits };
+export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: LimitsInput };
 export type TreeReadOptions = ReadOptions & Input<TreeReadConfig>;
-// A null or missing limits record is the default, as the nullish read had it; the cache is fresh per call.
-const treeReadConfig = (options: TreeReadOptions): TreeReadConfig => ({
-  cache: getOrElse(readKey(options, 'cache'), new Map<string, Uint8Array>()),
-  limits: getOrElse(fromNullish(options.limits), DEFAULT_LIMITS),
-});
+// A null or missing limits record is the default, as the nullish read had it, and the record is parsed once, here; the
+// cache is fresh per call.
+const treeReadConfig = (options: TreeReadOptions): Result<{ readonly cache: TreeCache; readonly limits: CheckedLimits }, ErrorOf<'bad_request'>> =>
+  map(limitsOf(options), limits => ({ cache: getOrElse(readKey(options, 'cache'), new Map<string, Uint8Array>()), limits }));
 
 export type ListEntry = { readonly name: string; readonly mode: string; readonly oid: string; readonly type: EntryType };
 export type ListResult = { readonly ref: string; readonly commit: string; readonly tree: string; readonly entries: readonly ListEntry[] };
@@ -362,11 +361,13 @@ function listedDir(walked: Walked, comps: readonly string[]): Result<Oid, PlyErr
 }
 export async function listTree(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<Result<ListResult, PlyError>> {
   const { ref, path } = withDefaults<PathConfig>(spec, { ref: null, path: '' });
-  const { cache, limits } = treeReadConfig(options);
+  const config = treeReadConfig(options);
+  if (!config.ok) return config;
+  const { cache, limits } = config.value;
   const checked = pathComps(path, limits, { allowRoot: true });
   if (!checked.ok) return checked;
   const comps = checked.value;
-  return operation('ls_tree', url, { ...options, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } }, async ({ t, root, outcome }) => {
+  return operation('ls_tree', url, { ...options, limits, attrs: { 'git.ls_tree.ref': ref === null ? 'HEAD' : ref, 'git.ls_tree.path': comps.join('/'), 'git.ls_tree.path.depth': comps.length } }, async ({ t, root, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
@@ -406,11 +407,13 @@ function fileEntry(entry: TreeEntry, comps: readonly string[]): Result<TreeEntry
 // but the root of its own trace, linked both ways (follows_from / followed_by): README "Span lifetimes".
 export async function readFile(url: string, spec: PathSpec = {}, options: TreeReadOptions = {}): Promise<Result<FileResult, PlyError>> {
   const { ref, path } = withDefaults<PathConfig>(spec, { ref: null, path: null });
-  const { cache, limits } = treeReadConfig(options);
+  const config = treeReadConfig(options);
+  if (!config.ok) return config;
+  const { cache, limits } = config.value;
   const checked = pathComps(path, limits, { allowRoot: false });
   if (!checked.ok) return checked;
   const comps = checked.value;
-  return operation('read', url, { ...options, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } }, async ({ t, root, outcome }) => {
+  return operation('read', url, { ...options, limits, attrs: { 'git.read.ref': ref === null ? 'HEAD' : ref, 'git.read.path': comps.join('/'), 'git.read.path.depth': comps.length } }, async ({ t, root, outcome }) => {
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;

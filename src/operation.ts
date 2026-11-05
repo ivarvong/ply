@@ -9,21 +9,21 @@
 // span and returns ok(result). An Err stamps the error's code as the outcome, is recorded on the root, carries the root
 // as `span` (a caller links a retry to it) and is returned. operation() itself returns the Result; it never throws.
 import type { ErrorOf, Extra, PlyError } from './errors.js';
-import type { Limits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
 import type { Attrs, Quirks, Transport, TransportInput } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
-import { asTransport, withParent } from './transport.js';
+import { transportFrom, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 import { fail, isPlyError } from './errors.js';
-import { DEFAULT_LIMITS } from './limits.js';
+import { DEFAULT_LIMITS, parseLimits } from './limits.js';
 import type { Input } from './absent.js';
 import { field, mapGet, withDefaults } from './absent.js';
 import type { Ok, Option, Result } from './result.js';
-import { err, flatMapOption, getOrElse, mapOption, ok } from './result.js';
+import { err, flatMapOption, getOrElse, map, mapOption, ok } from './result.js';
 import { thrownCode, thrownMessage } from './boundary.js';
 
 // Everything an operation takes besides the url and the body, total. `null` is "none": no credential, no parent span,
@@ -32,7 +32,8 @@ export type OperationConfig = {
   readonly auth: HttpAuth | null;
   readonly parent: Span | null;
   readonly fetchImpl: FetchLike | null;
-  readonly limits: Limits;
+  // any subset (a key left out is the default), parsed once before the transport is made
+  readonly limits: LimitsInput;
   readonly signal: AbortSignal | null;
   readonly quirks: Input<Quirks> | null;
   readonly transport: TransportInput | null;
@@ -47,7 +48,7 @@ const operationDefaults = (): { -readonly [K in keyof OperationConfig]: Operatio
 });
 // outcome(kind, result) or outcome(kind, result, attrs): the attributes stamped on the root beside the outcome; ok(result).
 export type Outcome = <R>(kind: string, result: R, ...extra: [] | [Attrs]) => Ok<R>;
-export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits }) => Promise<Result<R, PlyError>>;
+export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: CheckedLimits }) => Promise<Result<R, PlyError>>;
 
 export async function operation<R>(op: string, url: string | URL, opts: OperationOpts, body: OperationBody<R>): Promise<Result<R, PlyError>> {
   // `tracer` is optional (boundary.ts EntryOptions): a caller who passes none gets a Tracer with no exporter, whose spans
@@ -74,12 +75,15 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   try {
     // Inside the try: a transport that cannot be built (a bad URL, an unusable credential) ends the root with the
     // error recorded, like any other failure, instead of leaving it open and missing from the trace.
-    const made: Result<Transport, PlyError> = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits, signal, ...(quirks === null ? {} : { quirks }) }) : ok(withParent(asTransport(transport), root));
+    // The limits, parsed once (#156): a bad one is refused here, before the transport exists or any request is sent.
+    const checked = parseLimits(limits);
+    if (!checked.ok) return failed(checked.error);
+    const made: Result<Transport, PlyError> = transport === null ? createTransport(url, { auth, tracer, parent: root, fetchImpl: fetchImpl === null ? globalThis.fetch : fetchImpl, limits: checked.value, signal, ...(quirks === null ? {} : { quirks }) }) : map(transportFrom(transport), given => withParent(given, root));
     if (!made.ok) return failed(made.error);
     const t = made.value;
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub !== null) root.scrub = t.scrub;
-    r = await body({ t, root, outcome, limits });
+    r = await body({ t, root, outcome, limits: checked.value });
   } catch (e) {
     // Every ply failure is the body's Err. What still arrives as a throw is not ply's: the caller's own callback (a
     // signer, a fetchImpl, a transport) raised it. A PlyError raised that way is still that body's Err; anything else

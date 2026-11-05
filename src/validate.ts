@@ -3,8 +3,8 @@
 // Each check returns a Result.
 import { fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { parseLimits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 import { encodeBytes, te } from './bytes.js';
 import { MODE_LINK, IDENT_TZ_DIGITS, IDENT_TZ_HOUR_MIN, IDENT_TZ_HOUR_MAX, IDENT_TZ_MINUTE_MAX } from './format.js';
 import type { Err, Option, Result } from './result.js';
@@ -233,15 +233,15 @@ const isPathText = (path: unknown): path is Path => typeof path === 'string' && 
 // A validated path and its components (the path is their `/` join: split and join are inverses).
 export type ValidPath = { readonly path: Path; readonly components: string[] };
 
-// `limits`: the caller's record (any subset; null, the default, is none), read for maxPathDepth and maxPathComponent.
-export function validatePath(path: unknown, limits: Input<Limits> | null = null): Result<ValidPath, Bad> {
+// `limits`: the caller's record (any subset, a key left out is the default; null, the default, is DEFAULT_LIMITS),
+// parsed once (parseLimits) and read for maxPathDepth and maxPathComponent.
+export function validatePath(path: unknown, limits: LimitsInput | null = null): Result<ValidPath, Bad> {
   if (!isPathText(path)) return bad('path', 'must be a non-empty string');
-  const maxDepth = readLimit(limits, 'maxPathDepth');
-  if (!maxDepth.ok) return maxDepth;
-  const maxComponent = readLimit(limits, 'maxPathComponent');
-  if (!maxComponent.ok) return maxComponent;
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const { maxPathDepth: maxDepth, maxPathComponent: maxComponent } = checked.value;
   const comps = path.split('/');
-  if (comps.length > maxDepth.value) return bad('path', `depth ${comps.length} exceeds ${maxDepth.value}`);
+  if (comps.length > maxDepth) return bad('path', `depth ${comps.length} exceeds ${maxDepth}`);
   for (const c of comps) {
     if (c === '' ) return bad('path', 'empty component (leading, trailing or doubled slash)');
     // Every component is encoded, so the whole path is too (a `/` cannot complete a surrogate pair).
@@ -249,7 +249,7 @@ export function validatePath(path: unknown, limits: Input<Limits> | null = null)
     if (!bytes.ok) return bytes;
     if (c === '.' || c === '..' || isDotGitName(bytes.value)) return bad('path', `component ${JSON.stringify(c)} not allowed (git fsck hasDotgit)`);
     if (c.includes('\0')) return bad('path', 'NUL in component');
-    if (c.length > maxComponent.value) return bad('path', 'component too long');
+    if (c.length > maxComponent) return bad('path', 'component too long');
   }
   return ok({ path, components: comps });
 }

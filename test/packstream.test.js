@@ -27,6 +27,7 @@ import { transport, v2PackResponse, frame, cat, FLUSH } from './space/wire.js';
 import { peakBound } from '../src/streambound.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD as OV } from '../src/limits.js';
+import { createTransport as createTransportR } from '../src/http.js';
 import { Sha1 } from '../src/sha1.js';
 
 import { buildPacks } from './space/pack-fixtures.js';
@@ -38,6 +39,8 @@ const forAll = (name, fn, n = N) => test(name, async () => { for (let i = 0; i <
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
 const refusal = r => (r.ok ? 'ok' : `${r.error.code}: ${r.error.message}`);
+// createTransport under these limits: 'ok', or its refusal
+const made = limits => refusal(createTransportR('https://git.example/repo.git', { limits: withLimits(limits) }));
 // inflate()'s options as the pull's: a declared size or a cap, a zlib member or raw deflate.
 const streamOpts = (o = {}) => ({
   bound: o.expectedSize !== undefined ? declaredBound(o.expectedSize, o.maxOutput ?? DEFAULT_LIMITS.maxObjectSize) : cappedBound(o.maxOutput ?? DEFAULT_LIMITS.maxObjectSize),
@@ -375,7 +378,7 @@ forAll('pack scan == parsePack: objects, trailer, and the refusal of a cut or fl
     objects.push({ type, data });
     if (rng.bool(0.3) && data.length > 0) {
       const target = concat([data, rng.bytes(rng.int(1, 50))]);
-      objects.push({ type, data: makeDelta(data, target).delta, baseOid: hashObject(['', 'commit', 'tree', 'blob', 'tag'][type], data) });
+      objects.push({ type, data: makeDelta(data, target).delta, base: { tag: 'ref', oid: hashObject(['', 'commit', 'tree', 'blob', 'tag'][type], data) } });
     }
   }
   const built = await buildPack(objects);
@@ -773,11 +776,11 @@ test('fetchWide: a tree want keeps the trees and drops the blobs and their delta
   const { pack } = await buildPack([
     { type: TYPE.TREE, data: tA },
     { type: TYPE.BLOB, data: blob },
-    { type: TYPE.BLOB, data: makeDelta(blob, blob2).delta, baseIndex: 1 },
+    { type: TYPE.BLOB, data: makeDelta(blob, blob2).delta, base: { tag: 'ofs', index: 1 } },
     // an OFS delta on a dropped delta: a blob too
-    { type: TYPE.BLOB, data: makeDelta(blob2, blob3).delta, baseIndex: 2 },
+    { type: TYPE.BLOB, data: makeDelta(blob2, blob3).delta, base: { tag: 'ofs', index: 2 } },
     // a REF delta on a dropped blob: unresolved, a blob it left out
-    { type: TYPE.BLOB, data: makeDelta(blob, blob3).delta, baseOid: hashObject('blob', blob) },
+    { type: TYPE.BLOB, data: makeDelta(blob, blob3).delta, base: { tag: 'ref', oid: hashObject('blob', blob) } },
     { type: TYPE.TREE, data: tB },
   ]);
   for (const quirks of [{ treeFilter: 'blob:none' }, { treeFilter: 'none' }]) {
@@ -803,7 +806,7 @@ test('fetchWide: a want that may be a blob keeps every object; nothing dropped, 
   assert.deepEqual([got.value.type, got.value.data], [TYPE.BLOB, blob]);
   assert.deepEqual([span('git.upload-pack fetch').attrs['git.fetch.wide.blobs'], span('git.upload-pack fetch').attrs['git.fetch.wide.objects']], [1, 2]);
   // a tree want whose pack holds no blob drops nothing: a REF base outside the pack is the resolver's refusal, as before
-  const thin = await buildPack([{ type: TYPE.TREE, data: tree }, { type: TYPE.TREE, data: makeDelta(tree, treeOf('u')).delta, baseOid: hashObject('tree', treeOf('t', 'x')) }]);
+  const thin = await buildPack([{ type: TYPE.TREE, data: tree }, { type: TYPE.TREE, data: makeDelta(tree, treeOf('u')).delta, base: { tag: 'ref', oid: hashObject('tree', treeOf('t', 'x')) } }]);
   const missing = await fetchObject(wire(thin.pack, { quirks: { treeFilter: 'blob:none' } }).t, { oid: hashObject('tree', tree), filter: 'tree:0', expectType: TYPE.TREE });
   assert.equal(refusal(missing), `pack_corrupt: pack: ref delta base ${hashObject('tree', treeOf('t', 'x'))} not found`);
   // a want that is not in the pack counts what was dropped too
@@ -863,7 +866,7 @@ test('a commit want read as it arrives: one object, a tag and its commit, a pack
   assert.match(refusal(await fetchObject(wire(corrupt, { chunk: 7 }).t, want)), /^pack_corrupt: pack: trailer sha mismatch/);
   const noFlush = v2PackResponse(corrupt).subarray(0, v2PackResponse(corrupt).length - 4);
   assert.equal(refusal(await fetchObject(wire(corrupt, { response: noFlush }).t, want)), 'protocol: v2: response ended without flush');
-  const thin = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.COMMIT, data: makeDelta(commitOf(hashObject('tree', treeOf('q'))), commit).delta, baseOid: hashObject('commit', commitOf(hashObject('tree', treeOf('q')))) }]);
+  const thin = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.COMMIT, data: makeDelta(commitOf(hashObject('tree', treeOf('q'))), commit).delta, base: { tag: 'ref', oid: hashObject('commit', commitOf(hashObject('tree', treeOf('q')))) } }]);
   assert.equal(refusal(await fetchObject(wire(thin.pack).t, want)), `pack_corrupt: pack: ref delta base ${hashObject('commit', commitOf(hashObject('tree', treeOf('q'))))} not found`);
   // shorter than a pack header and its first object byte: decided on what came (one object and too short; two and no pack)
   const head1 = packHead(1), head2 = packHead(2);
@@ -876,9 +879,11 @@ test('a commit want read as it arrives: one object, a tag and its commit, a pack
   assert.equal(refusal(await fetchObject(wire(big.pack, { limits: { maxObjectSize: commit.length } }).t, want)), 'ok');
   const bigTag = await buildPack([{ type: TYPE.TAG, data: tag }, { type: TYPE.COMMIT, data: commit }]);
   assert.equal(refusal(await fetchObject(wire(bigTag.pack, { limits: { maxObjectSize: commit.length - 1 } }).t, want)), `limit_exceeded: pack object size ${tag.length > commit.length - 1 ? tag.length : commit.length} exceeds limit ${commit.length - 1}`);
-  // the pack caps are read only for a multi-object answer, and a cap that bounds nothing is the fetch's bad_request
-  assert.equal(refusal(await fetchObject(wire(bigTag.pack, { limits: { maxPackObjects: Infinity } }).t, want)), 'bad_request: limits.maxPackObjects must be a finite non-negative number');
-  assert.equal(refusal(await fetchObject(wire(big.pack, { limits: { maxPackObjects: Infinity } }).t, want)), 'ok');
+  // a cap that bounds nothing is refused when the transport is made (#156 parseLimits), whatever the answer would be
+  assert.equal(made({ maxPackObjects: Infinity }), 'bad_request: limits.maxPackObjects must be a finite non-negative number');
+  // a single-object answer is still read without the pack caps: a multi-object answer is held to them
+  assert.equal(refusal(await fetchObject(wire(big.pack, { limits: { maxPackObjects: 0 } }).t, want)), 'ok');
+  assert.equal(refusal(await fetchObject(wire(bigTag.pack, { limits: { maxPackObjects: 1 } }).t, want)), 'limit_exceeded: pack objects 2 exceeds limit 1');
 });
 
 test('readObjHeader and spInit: the declared size against the cap, at the cap and one past it, after the type', () => {
@@ -1032,23 +1037,23 @@ test('the wide and multi-object fetches read the caller\'s pack caps, verify the
   const { pack } = await buildPack([{ type: TYPE.TREE, data: tA }, { type: TYPE.TREE, data: treeOf('b') }]);
   const want = { oid: hashObject('tree', tA), filter: 'tree:0', expectType: TYPE.TREE };
   const wide = { quirks: { treeFilter: 'blob:none' } };
-  for (const [limits, msg] of [[{ maxPackObjects: Infinity }, 'bad_request: limits.maxPackObjects must be a finite non-negative number'], [{ maxPackObjects: 1 }, 'limit_exceeded: pack objects 2 exceeds limit 1']]) {
+  for (const [limits, msg] of [[{ maxPackObjects: 1 }, 'limit_exceeded: pack objects 2 exceeds limit 1']]) {
     assert.equal(refusal(await fetchObject(wire(pack, { ...wide, limits }).t, want)), msg);
     assert.equal(refusal(await fetchPack(wire(pack, { limits }).t, { wants: [want.oid] })), msg);
   }
+  // a cap that bounds nothing never reaches a fetch: the transport is not made (#156 parseLimits)
+  assert.equal(made({ maxPackObjects: Infinity }), 'bad_request: limits.maxPackObjects must be a finite non-negative number');
+  const cid = hashObject('commit', commitOf(hashObject('tree', tA)));
   const flipped = pack.slice(); flipped[flipped.length - 1] ^= 1;
   assert.match(refusal(await fetchObject(wire(flipped, wide).t, want)), /^pack_corrupt: pack: trailer sha mismatch/);
   assert.match(refusal(await fetchPack(wire(flipped).t, { wants: [want.oid] })), /^pack_corrupt: pack: trailer sha mismatch/);
-  // a short answer of more than one object, under a cap that bounds nothing: the cap's refusal, not a short read
-  const cid = hashObject('commit', commitOf(hashObject('tree', tA)));
-  assert.equal(refusal(await fetchObject(wire(packHead(2), { limits: { maxPackObjects: Infinity } }).t, { oid: cid, filter: 'tree:0', expectType: TYPE.COMMIT })), 'bad_request: limits.maxPackObjects must be a finite non-negative number');
   // a commit want through the fallback drops the blobs too; an extra tree over a limit is skipped and counted
   const commit = commitOf(hashObject('tree', tA));
   const big = treeOf('x', 'y', 'z');
   const blob = te.encode('blob bytes');
   const blob2 = te.encode('blob bytes, and more of them');
   const d2 = makeDelta(blob, blob2).delta;
-  const withBlob = await buildPack([{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tA }, { type: TYPE.BLOB, data: blob }, { type: TYPE.TREE, data: big }, { type: TYPE.BLOB, data: d2, baseIndex: 2 }]);
+  const withBlob = await buildPack([{ type: TYPE.COMMIT, data: commit }, { type: TYPE.TREE, data: tA }, { type: TYPE.BLOB, data: blob }, { type: TYPE.TREE, data: big }, { type: TYPE.BLOB, data: d2, base: { tag: 'ofs', index: 2 } }]);
   const { t, span } = wire(withBlob.pack, { ...wide, limits: { maxTreeEntries: 2 } });
   const got = await fetchObject(t, { oid: cid, filter: 'tree:0', deepen: 1, expectType: TYPE.COMMIT });
   assert.equal(refusal(got), 'ok');
@@ -1061,8 +1066,8 @@ test('the wide and multi-object fetches read the caller\'s pack caps, verify the
 test('fetchPack: one span event per object, its base as the event names it', async () => {
   const base = te.encode('B'.repeat(64));
   const next = te.encode(`${'B'.repeat(64)}!`);
-  const { pack } = await buildPack([{ type: TYPE.BLOB, data: base }, { type: TYPE.BLOB, data: makeDelta(base, next).delta, baseIndex: 0 }]);
-  const refPack = await buildPack([{ type: TYPE.BLOB, data: makeDelta(base, next).delta, baseOid: hashObject('blob', base) }]);
+  const { pack } = await buildPack([{ type: TYPE.BLOB, data: base }, { type: TYPE.BLOB, data: makeDelta(base, next).delta, base: { tag: 'ofs', index: 0 } }]);
+  const refPack = await buildPack([{ type: TYPE.BLOB, data: makeDelta(base, next).delta, base: { tag: 'ref', oid: hashObject('blob', base) } }]);
   const ev = async (p, extra = {}) => {
     const { t, span } = wire(p);
     must(await fetchPack(t, { wants: [hashObject('blob', next)] }, extra));

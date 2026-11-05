@@ -8,8 +8,8 @@ import { parseOid, type Oid } from './oid.js';
 import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
-import { DEFAULT_LIMITS, limitError, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, limitError, parseLimits } from './limits.js';
+import type { LimitsInput } from './limits.js';
 import { atOr, type Input } from './absent.js';
 import type { ObjType, ObjectTypeName, PackKind } from './format.js';
 import {
@@ -235,10 +235,10 @@ const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number
 // `tree entries <max+1>`, and bytes past it are not validated: a bad mode there stays limit_exceeded.
 // @decoder parseTree prefix=tree
 // oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, inline: a helper costs bytes on every entry
-export function parseTree(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<TreeEntry[], ObjectError> {
-  const cap = readLimit(limits, 'maxTreeEntries');
-  if (!cap.ok) return cap;
-  const maxEntries = cap.value;
+export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<TreeEntry[], ObjectError> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const maxEntries = checked.value.maxTreeEntries;
   // Shorter than one minimum entry per allowed slot: the count cannot pass the cap, so skip the frame scan.
   // A flipped comparison here still agrees with the frame count (max+1 minimum frames cannot fit in fewer bytes).
   // Stryker disable next-line ConditionalExpression,EqualityOperator,ArithmeticOperator: byte length only skips the scan; the frame count decides the cap
@@ -461,10 +461,10 @@ export type Commit = {
   readonly encoding: string | null; readonly extra: string[]; readonly message: string | null;
 };
 // @decoder parseCommit prefix=commit
-export function parseCommit(data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<Commit, ObjectError> {
-  const cap = readLimit(limits, 'maxCommitParents');
-  if (!cap.ok) return cap;
-  const maxParents = cap.value;
+export function parseCommit(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<Commit, ObjectError> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const maxParents = checked.value.maxCommitParents;
   const s: string = decodeBytes(data);
   const headers = verifyHeaders(s, 'commit');
   if (!headers.ok) return headers;
@@ -581,7 +581,7 @@ export function parseTag(data: Uint8Array): Result<Tag, Corrupt> {
 // Every object fetch passes through here once it hashes to the oid the server advertised (fetchObject, checkWide on a
 // pack before any of it is returned or harvested). It is the same parser every reader calls, so a commit or tag no
 // reader would accept never reaches one.
-export function assertFetched(typeName: string, data: Uint8Array, limits: Partial<Limits> = DEFAULT_LIMITS): Result<null, ObjectError> {
+export function assertFetched(typeName: string, data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<null, ObjectError> {
   const found = wireTypeName(typeName);
   switch (found.tag) {
     case 'invalid': return fail('pack_corrupt', `object: bad type ${typeName}`);
@@ -618,16 +618,23 @@ const messageBody = (message: unknown): Result<null, BadRequest> =>
 
 // Faithful: the message is written verbatim after the blank line; null means no body section. Callers that want
 // git's conventional trailing newline add it themselves (editFile does). parents, committer (the author), encoding,
-// message and extra may be left out.
+// message and extra may be left out. tree and parents are plain strings in, parsed once (parseOid) at encodeCommit.
 export type CommitConfig = {
   readonly tree: string; readonly parents: readonly string[]; readonly author: string; readonly committer: string;
   readonly encoding: string | null; readonly message: string | null; readonly extra: readonly string[];
 };
 export type CommitInput = { readonly tree: string; readonly author: string } & Input<Omit<CommitConfig, 'tree' | 'author'>>;
-export function encodeCommit({ tree, parents = [], author, committer = author, encoding = null, message = null, extra = [] }: CommitInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
-  const values: Array<readonly [unknown, string]> = [[tree, 'tree']];
-  for (const p of parents) values.push([p, 'parent']);
-  values.push([author, 'author'], [committer, 'committer']);
+// The same, the ids parsed: what ply's own writers hold (a built tree, a resolved commit).
+export type CommitIds = { readonly tree: Oid; readonly parents: readonly Oid[]; readonly author: string } & Input<Omit<CommitConfig, 'tree' | 'author' | 'parents'>>;
+// A commit's tree or parent id: 40 hex digits, parsed once (parseOid's refusal, named for the header it would be written
+// in, what `tree` or `parent`). git's fsck reads either case (hash-object keeps the case it was given); git commit-tree
+// writes the id lowercase, and so does ply: an upper-case id is the same object (test/want-oracle.test.js).
+function headerOid(value: string, what: 'tree' | 'parent'): Result<Oid, BadRequest> {
+  const id = parseOid(value.toLowerCase());
+  return id.ok ? id : fail('bad_request', `commit: ${what}: ${id.error.message}`, { what, got: value });
+}
+export function encodeCommitOf({ tree, parents, author, committer = author, encoding = null, message = null, extra = [] }: CommitIds): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+  const values: Array<readonly [unknown, string]> = [[author, 'author'], [committer, 'committer']];
   if (encoding !== null) values.push([encoding, 'encoding']);
   for (const line of extra) values.push([line, 'extra']);
   const headed = headerValues(values);
@@ -643,6 +650,23 @@ export function encodeCommit({ tree, parents = [], author, committer = author, e
   if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
   lines.push(...extra);
   return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
+}
+
+// A caller's commit, its ids parsed once: the tree and parent header values are checked first (a NUL or newline is that
+// refusal, as before), then the tree id, then each parent's in order, then the rest (encodeCommitOf).
+export function encodeCommit(input: CommitInput): Result<Uint8Array<ArrayBuffer>, BadRequest> {
+  const { tree, parents = [] } = input;
+  const headed = headerValues([[tree, 'tree'], ...parents.map((p): readonly [unknown, string] => [p, 'parent'])]);
+  if (!headed.ok) return headed;
+  const treeId = headerOid(tree, 'tree');
+  if (!treeId.ok) return treeId;
+  const parentIds: Oid[] = [];
+  for (const p of parents) {
+    const id = headerOid(p, 'parent');
+    if (!id.ok) return id;
+    parentIds.push(id.value);
+  }
+  return encodeCommitOf({ ...input, tree: treeId.value, parents: parentIds });
 }
 
 // The four types a tag can name (git's type_from_string_gently: object_type_strings, nothing else).

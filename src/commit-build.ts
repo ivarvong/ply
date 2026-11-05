@@ -1,7 +1,7 @@
 // Pure: the objects one edit commit is made of (new trees along the path, the commit, the blob as a delta), and a
 // commit's bytes from its tree and parents. A caller's identity is validated here (a bad one is the Err validateIdent
 // returns); a validated one is used as it is.
-import { ident, encodeCommit, hashObject, treeReplaceOid, TYPE } from './objects.js';
+import { ident, encodeCommitOf, hashObject, treeReplaceOid, TYPE } from './objects.js';
 import type { TreeEntry } from './objects.js';
 import { spliceDelta } from './pack.js';
 import type { PackInput } from './pack.js';
@@ -61,6 +61,9 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer 
   // the new blob's id is parsed once, here: every tree above it is spliced from it
   const newBlob = parseOid(blob.newOid);
   if (!newBlob.ok) return newBlob;
+  // and the parent's, once: the commit is written on it
+  const parent = parseOid(oldCommit);
+  if (!parent.ok) return parent;
   let child: Oid = newBlob.value;
   for (const { treeOid: oldOid, data, entry } of levels.toReversed()) {
     const newData: Uint8Array = treeReplaceOid(data, entry, child);
@@ -72,14 +75,14 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer 
   const lines = people(author, committer, time);
   if (!lines.ok) return lines;
   const body = message.endsWith('\n') ? message : `${message}\n`;
-  const encoded = encodeCommit({ tree: child, parents: [oldCommit], author: lines.value.who, committer: lines.value.written, message: body });
+  const encoded = encodeCommitOf({ tree: child, parents: [parent.value], author: lines.value.who, committer: lines.value.written, message: body });
   if (!encoded.ok) return encoded;
   const commitData = encoded.value;
   const newCommit = hashObject('commit', commitData);
   const objects: PackInput[] = [
     { type: TYPE.COMMIT, data: commitData },
-    ...trees.map(t => ({ type: t.type, data: t.data, baseOid: t.baseOid })),
-    blob.delta.length >= 4 ? { type: TYPE.BLOB, data: blob.delta, baseOid: blob.oldOid } : { type: TYPE.BLOB, data: new Uint8Array(blob.newLen) },
+    ...trees.map((t): PackInput => ({ type: t.type, data: t.data, base: { tag: 'ref', oid: t.baseOid } })),
+    blob.delta.length >= 4 ? { type: TYPE.BLOB, data: blob.delta, base: { tag: 'ref', oid: blob.oldOid } } : { type: TYPE.BLOB, data: new Uint8Array(blob.newLen) },
   ];
   return ok({ trees, newTree: child, commitData, newCommit, objects });
 }
@@ -89,11 +92,11 @@ export function withCommitData(built: Built, commitData: Uint8Array): Built {
   return { ...built, commitData, newCommit, objects: [{ type: TYPE.COMMIT, data: commitData }, ...built.objects.slice(1)] };
 }
 
-export function buildCommitData({ tree, parents, author, committer = null, time, message }: Stamp & { readonly tree: string; readonly parents: readonly string[] }): Result<{ readonly data: Uint8Array; readonly oid: string }, BadRequest> {
+export function buildCommitData({ tree, parents, author, committer = null, time, message }: Stamp & { readonly tree: Oid; readonly parents: readonly Oid[] }): Result<{ readonly data: Uint8Array; readonly oid: Oid }, BadRequest> {
   const lines = people(author, committer, time);
   if (!lines.ok) return lines;
   const body = message.endsWith('\n') ? message : `${message}\n`;
-  const encoded = encodeCommit({ tree, parents, author: lines.value.who, committer: lines.value.written, message: body });
+  const encoded = encodeCommitOf({ tree, parents, author: lines.value.who, committer: lines.value.written, message: body });
   if (!encoded.ok) return encoded;
   return ok({ data: encoded.value, oid: hashObject('commit', encoded.value) });
 }

@@ -17,11 +17,11 @@
 // planDeltas is bounded: a delta chain is at most maxDepth deep (git's pack.depth default, 50; resolvePack's own bound
 // is maxDeltaChain, 64), an object over maxBytes is stored whole, and a delta is kept only when it is under half the
 // object less an object id (git's try_delta max_size), so a delta is never larger than the object it replaces. Bases
-// precede their deltas in pack order, so an in-pack base is an OFS_DELTA (`baseIndex`); a thin base is a REF_DELTA
-// (`baseOid`), and only a caller who knows the remote has that object passes one.
+// precede their deltas in pack order, so an in-pack base is an OFS_DELTA (base `ofs`, by index); a thin base is a
+// REF_DELTA (base `ref`, by id), and only a caller who knows the remote has that object passes one.
 /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- the scan's indexed reads are in range of a checked length and say `as number` (free at run time, unlike an Option per byte; not the `!` src/ forbids), as packresolve.ts does */
 import { concat } from './bytes.js';
-import { copyOps, encodeVarint, insertOps } from './pack.js';
+import { copyOps, encodeVarint, inputBase, insertOps } from './pack.js';
 import type { PackInput } from './pack.js';
 import { TYPE } from './objects.js';
 import { DELTA_INSERT_MAX, DELTA_SIZE_MIN, OID_BYTES } from './format.js';
@@ -194,17 +194,18 @@ export function planDeltas(objects: readonly DeltaCandidate[], options: DeltaPla
       const keys = [`${o.type} ${o.path}`, `${o.type} name ${fileName(o.path)}`];
       const bases = [...new Set(keys.map(k => getOrElse(mapGet(lastAt, k), NONE)).filter(j => j !== NONE))];
       const picked = bestDelta(o, bases.map(j => ({ index: j, depth: getOrElse(at(depth, j), 0), data: getOrElse(mapOption(at(objects, j), b => b.data), EMPTY) })), { maxDepth, maxBytes });
-      if (picked !== null) { chosen = { type: o.type, data: picked.delta, baseIndex: picked.index }; chosenDepth = picked.depth; }
+      if (picked !== null) { chosen = { type: o.type, data: picked.delta, base: { tag: 'ofs', index: picked.index } }; chosenDepth = picked.depth; }
       // the first version of a path in this pack: the remote's own copy, when the caller vouches for thin packs
       const thin = thinBase !== null && bases.length === 0 ? thinBase(o.type, o.path) : null;
       if (thin !== null && thin.data.length <= maxBytes) {
         const delta = encodeDelta(thin.data, o.data, Math.floor(o.data.length / 2) - OID_BYTES);
-        if (delta !== null) { chosen = { type: o.type, data: delta, baseOid: thin.oid }; chosenDepth = 1; }
+        if (delta !== null) { chosen = { type: o.type, data: delta, base: { tag: 'ref', oid: thin.oid } }; chosenDepth = 1; }
       }
       for (const key of keys) lastAt.set(key, i);
     }
-    if ('baseIndex' in chosen) ofs++;
-    else if ('baseOid' in chosen) ref++;
+    const tag = inputBase(chosen).tag;
+    if (tag === 'ofs') ofs++;
+    else if (tag === 'ref') ref++;
     plannedBytes += chosen.data.length;
     depth.push(chosenDepth);
     out.push(chosen);

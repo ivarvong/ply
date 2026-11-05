@@ -22,12 +22,12 @@ import { push, ZERO_OID } from './push.js';
 import { parseRefname } from './refname.js';
 import type { Refname } from './refname.js';
 import { makeDelta } from './packresolve.js';
-import { parseCommit, parseTree, encodeEntries, encodeCommit, hashObject, ident, TYPE } from './objects.js';
+import { parseCommit, parseTree, encodeEntries, encodeCommitOf, hashObject, ident, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, readLimit } from './limits.js';
-import type { Limits } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
-import { decideHead, inSpan, limitsOf, needsHead, retryLink, strictParent, tagAttempt } from './edit.js';
+import { decideHead, inSpan, needsHead, retryLink, strictParent, tagAttempt } from './edit.js';
 import type { Author, EditConfig, EditOptions, HintOutcome, Ident } from './edit.js';
 import { signCommit } from './sign.js';
 import { MODE_BLOB, MODE_LINK, MODE_TREE, MODE_COMMIT, BLOB_MODES, DELTA_SIZE_MIN } from './format.js';
@@ -77,18 +77,15 @@ const specOf = (f: unknown): Input<FileSpec> => {
 // whatever its size, so 100 000 tiny files are refused here instead of exhausting a Worker (#142). got is the running
 // total, including the entry that crossed the cap; exactly the cap is allowed.
 // oxlint-disable-next-line complexity -- one check per field, in the order git would refuse them
-export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Result<FileEntry[], PlyError> {
+export function fileEntries(files: unknown, limits: LimitsInput = DEFAULT_LIMITS): Result<FileEntry[], PlyError> {
   if (files === null || typeof files !== 'object') return fail('bad_request', 'files must be an object or an iterable of { path, mode, data }', { what: 'files' });
-  const maxFiles = readLimit(limits, 'maxPackObjects');
-  if (!maxFiles.ok) return maxFiles;
-  const maxObject = readLimit(limits, 'maxObjectSize');
-  if (!maxObject.ok) return maxObject;
-  const maxPush = readLimit(limits, 'maxPushBytes');
-  if (!maxPush.ok) return maxPush;
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const { maxPackObjects: maxFiles, maxObjectSize: maxObject, maxPushBytes: maxPush } = checked.value;
   let pushBytes = 0;
   const charge = (bytes: number): Result<null, PlyError> => {
     const next = pushBytes + bytes + LIMIT_OBJECT_OVERHEAD;
-    if (next > maxPush.value) return err(limitExceeded('push bytes', next, maxPush.value));
+    if (next > maxPush) return err(limitExceeded('push bytes', next, maxPush));
     pushBytes = next;
     return ok(null);
   };
@@ -101,9 +98,9 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
   /* oxlint-enable typescript/no-unsafe-type-assertion */
   const out: FileEntry[] = [];
   for (const f of list) {
-    if (out.length >= maxFiles.value) return err(limitExceeded('files', out.length + 1, maxFiles.value));
+    if (out.length >= maxFiles) return err(limitExceeded('files', out.length + 1, maxFiles));
     const spec = specOf(f);
-    const comps = map(validatePath(spec.path, limits), p => p.components);
+    const comps = map(validatePath(spec.path, checked.value), p => p.components);
     if (!comps.ok) return comps;
     const path = comps.value.join('/');
     // a mode left out is a file's; any other value (null included) is the caller's, and checked
@@ -121,7 +118,7 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
     const raw: unknown = spec.data;
     if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) return fail('bad_request', `${path}: data must be a string or Uint8Array`, { what: 'data', path });
     const data = bytesOf(raw);
-    if (data.length > maxObject.value) return err(limitExceeded('object size', data.length, maxObject.value));
+    if (data.length > maxObject) return err(limitExceeded('object size', data.length, maxObject));
     // a symlink target is a path: git cannot check out an empty one, and a NUL ends it on every platform
     if (mode === MODE_LINK && (data.length === 0 || data.includes(0))) return fail('bad_request', `${path}: a symlink target must be non-empty and contain no NUL`, { what: 'symlink', path });
     const charged = charge(data.length);
@@ -134,14 +131,15 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
 // A directory entry of a built tree; the built trees by directory ('' is the root) and the blobs by oid.
 export type DirEntry = EntryOf;
 export type BuiltDir = { readonly oid: Oid; readonly data: Uint8Array; readonly entries: readonly DirEntry[] };
-export type BuiltTree = { readonly root: string; readonly trees: ReadonlyMap<string, BuiltDir>; readonly blobs: ReadonlyMap<string, Uint8Array> };
+export type BuiltTree = { readonly root: Oid; readonly trees: ReadonlyMap<string, BuiltDir>; readonly blobs: ReadonlyMap<string, Uint8Array> };
 // Pure: the trees of `entries`, bottom up. Returns { root, trees: Map(dir → { oid, data, entries }), blobs: Map(oid →
 // data) }; '' is the root directory. A path given twice, or used as both a file and a directory, is the caller's
 // error (git would reject the tree as duplicateEntries); each directory is bounded by maxTreeEntries. No files at all is
 // git's empty tree (4b825dc6…), a valid root.
-export function buildTree(entries: readonly FileEntry[], limits: Limits = DEFAULT_LIMITS): Result<BuiltTree, TreeError> {
-  const maxEntries = readLimit(limits, 'maxTreeEntries');
-  if (!maxEntries.ok) return maxEntries;
+export function buildTree(entries: readonly FileEntry[], limits: LimitsInput = DEFAULT_LIMITS): Result<BuiltTree, TreeError> {
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const maxEntries = checked.value.maxTreeEntries;
   // null: a subdirectory (its entries are under its own key)
   const dirs = new Map<string, Map<string, DirEntry | null>>([['', new Map()]]);
   const blobs = new Map<string, Uint8Array>();
@@ -158,7 +156,7 @@ export function buildTree(entries: readonly FileEntry[], limits: Limits = DEFAUL
     }
     const here = dirs.get(dir) as Map<string, DirEntry | null>, name = e.comps.at(-1) as string;
     if (here.has(name)) return fail('bad_request', here.get(name) === null ? `${e.path} is both a file and a directory` : `${e.path} is given twice`, { what: 'path', path: e.path });
-    if (here.size >= maxEntries.value) return err(limitExceeded('tree entries', here.size + 1, maxEntries.value));
+    if (here.size >= maxEntries) return err(limitExceeded('tree entries', here.size + 1, maxEntries));
     here.set(name, { mode: e.mode, name, oid: e.oid });
     if (isBlobEntry(e)) blobs.set(e.oid, e.data);
   }
@@ -196,7 +194,7 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
     sent.add(t.oid);
     // git's patch_delta rejects a delta under DELTA_SIZE_MIN; a delta no smaller than the tree is not worth the base lookup
     const thin = mapOption(mapGet(old, dir), base => ({ base: base.oid, delta: makeDelta(base.data, t.data).delta }));
-    trees.push(thin.tag === 'some' && thin.value.delta.length >= DELTA_SIZE_MIN && thin.value.delta.length < t.data.length ? { type: TYPE.TREE, data: thin.value.delta, baseOid: thin.value.base } : { type: TYPE.TREE, data: t.data });
+    trees.push(thin.tag === 'some' && thin.value.delta.length >= DELTA_SIZE_MIN && thin.value.delta.length < t.data.length ? { type: TYPE.TREE, data: thin.value.delta, base: { tag: 'ref', oid: thin.value.base } } : { type: TYPE.TREE, data: t.data });
     for (const e of t.entries) {
       if (e.mode === MODE_TREE) walk(dir ? `${dir}/${e.name}` : e.name);
       else if (BLOB_MODE_SET.has(e.mode) && !have.has(e.oid) && !sent.has(e.oid)) { sent.add(e.oid); blobs.push({ type: TYPE.BLOB, data: built.blobs.get(e.oid) as Uint8Array }); }
@@ -204,8 +202,8 @@ export function selectObjects(built: BuiltTree, { have = new Set(), old = new Ma
   };
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
   walk('');
-  // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (baseOid is an oid or not there)
-  return { trees, blobs, deltas: trees.filter(t => t.baseOid).length };
+  // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: a truthy test (a tree here has a ref base or none at all)
+  return { trees, blobs, deltas: trees.filter(t => t.base).length };
 }
 
 // What the caller names besides the files: `ref` (default refs/heads/main), `base` (default `ref`), `time` (default now).
@@ -231,7 +229,7 @@ const authorInput = (author: Author | null, time: number): Parameters<typeof val
 // Pure: every caller-controlled field, checked before any I/O. `base` as in editFile: the ref whose head is the
 // parent (default `ref`); base ≠ ref creates `ref` (zero old oid). base = ref and the ref absent: the first commit of a
 // new ref, no parent, zero old oid — a deploy's first push.
-export function validateTreeSpec(spec: TreeSpec, limits: Limits, head: string | null = null): Result<TreePlan, PlyError> {
+export function validateTreeSpec(spec: TreeSpec, limits: LimitsInput, head: string | null = null): Result<TreePlan, PlyError> {
   const { ref, time } = withDefaults(spec, { ref: 'refs/heads/main', time: Math.floor(Date.now() / 1000) });
   const { files, author, message } = spec;
   const pushRef = validatePushRef(ref, false);
@@ -250,9 +248,11 @@ export function validateTreeSpec(spec: TreeSpec, limits: Limits, head: string | 
   const hint = head === null ? ok(null) : parseOid(String(head));
   if (!hint.ok) return fail('bad_request', 'head must be a 40-hex oid');
   // maxPushBytes is charged per entry as fileEntries reads them, before buildTree retains the blobs
-  const entries = fileEntries(files, limits);
+  const checked = parseLimits(limits);
+  if (!checked.ok) return checked;
+  const entries = fileEntries(files, checked.value);
   if (!entries.ok) return entries;
-  const built = buildTree(entries.value, limits);
+  const built = buildTree(entries.value, checked.value);
   if (!built.ok) return built;
   // validatePushRef passed, so the ref is a refname
   const branded = parseRefname(ref);
@@ -297,7 +297,7 @@ type Read = Known & { read: number; hits: number };
 // Effect: the parent's trees wherever the new tree differs, recursing only into directories present on both sides with
 // different oids. Every oid those trees name joins `have`. On a host that refuses tree:0 the first fetch is a blob:none
 // pack that brings every tree of the subtree (fetch.js harvests them), so the rest are answered without a round trip.
-async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: BuiltTree, oldTree: Oid | null, limits: Limits): Promise<Result<Read, PlyError>> {
+async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: BuiltTree, oldTree: Oid | null, limits: CheckedLimits): Promise<Result<Read, PlyError>> {
   const have = new Set<string>(), old = new Map<string, { readonly oid: string; readonly data: Uint8Array }>();
   const k = { have, old, read: 0, hits: 0 };
   if (oldTree === null) return ok(k);
@@ -349,10 +349,10 @@ type TreeConfig = Omit<EditConfig, 'allowLfsPointer' | 'retry'>;
 const treeDefaults = (): { -readonly [K in keyof TreeConfig]: TreeConfig[K] } => ({ head: null, strictHead: false, cache: null, verify: false, signer: null });
 
 // oxlint-disable-next-line require-await -- async, as before
-async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, cfg: TreeConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<PushTreeResult, PlyError>> {
+async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions & { readonly limits: CheckedLimits }, cfg: TreeConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<PushTreeResult, PlyError>> {
   const { verify, signer, strictHead } = cfg;
   const cache = cfg.cache === null ? new Map<string, Uint8Array>() : cfg.cache;
-  const limits = limitsOf(options);
+  const { limits } = options;
   let hint = hintWas;
   const attrs = { 'git.push_tree.ref': s.ref, 'git.push_tree.base': s.base, 'git.push_tree.create': s.create, 'git.push_tree.files': s.files, 'git.push_tree.trees': s.built.trees.size, 'git.push_tree.tree.new': s.built.root, 'git.push_tree.head.hint': head === null ? '' : head, 'git.push_tree.attempt': attempt };
   // oxlint-disable-next-line complexity -- the push is one sequence of protocol steps
@@ -402,7 +402,7 @@ async function pushTreeOnce(url: string, s: TreePlan, options: PushTreeOptions, 
     const who = ident(s.author);
     if (!who.ok) return who;
     // oxlint-disable-next-line typescript/strict-boolean-expressions, prefer-template -- bundle budget: the JS's own truthy test and concatenation, byte for byte
-    const encoded = encodeCommit({ tree: s.built.root, parents: parent ? [parent] : [], author: who.value, committer: who.value, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
+    const encoded = encodeCommitOf({ tree: s.built.root, parents: parent ? [parent] : [], author: who.value, committer: who.value, message: s.message.endsWith('\n') ? s.message : s.message + '\n' });
     if (!encoded.ok) return encoded;
     let commitData = encoded.value;
     if (signer !== null) {
@@ -436,12 +436,16 @@ export async function pushTree(url: string, spec: TreeSpec, options: PushTreeOpt
   const cfg = withDefaults(options, treeDefaults());
   const needs = needsHead(cfg.strictHead, cfg.head);
   if (!needs.ok) return needs;
-  const planned = validateTreeSpec(spec, limitsOf(options), cfg.head);
+  // the limits are parsed once, for the spec and both attempts
+  const limits = limitsOf(options);
+  if (!limits.ok) return limits;
+  const planned = validateTreeSpec(spec, limits.value, cfg.head);
   if (!planned.ok) return planned;
   const s = planned.value;
-  const first = await pushTreeOnce(url, s, options, cfg, { head: s.head, attempt: 0, linkTo: null, hintWas: null });
+  const checked = { ...options, limits: limits.value };
+  const first = await pushTreeOnce(url, s, checked, cfg, { head: s.head, attempt: 0, linkTo: null, hintWas: null });
   // only attempt 0's cas_conflict is redone, once: the retry's Err is the answer
   // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
   if (first.ok || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
-  return pushTreeOnce(url, s, options, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
+  return pushTreeOnce(url, s, checked, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
 }

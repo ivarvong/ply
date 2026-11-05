@@ -18,7 +18,7 @@
 /* oxlint-disable import/max-dependencies -- a merge drives ls-refs, fetch, push, the object codecs and the line merge */
 /* oxlint-disable eslint/require-await, typescript/promise-function-async -- each function keeps its async-ness (a sync throw stays sync); together the two rules forbid a function that forwards a promise */
 import type { ValidatedIdent } from './validate.js';
-import type { Limits } from './limits.js';
+import type { CheckedLimits } from './limits.js';
 import type { Driver, Rediff } from './linemerge.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import type { Err, Ok, Option, Result } from './result.js';
@@ -34,13 +34,13 @@ import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { parseOid, type Oid } from './oid.js';
 import { operation, verifyRef } from './operation.js';
-import { parseTree, encodeEntries, parseCommit, encodeCommit, hashObject, ident, TYPE, type Mode } from './objects.js';
+import { parseTree, encodeEntries, parseCommit, encodeCommitOf, hashObject, ident, TYPE, type Mode } from './objects.js';
 import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
 import { attributeOf, attributesFor, bytesToStr, popLast, utf8ToStr } from './attributes.js';
 import { short, commitAt, commitBytesAt, isOid, givenOid, assertCommit, stamp } from './mergeio.js';
-import { checkLimit, limitError, readLimit } from './limits.js';
+import { checkLimit, limitError, lowered } from './limits.js';
 
 // A merge_conflict's payload: Detail carries `conflicts`; reasons and bases are extras (errors.ts is shared; additive
 // detail is the steward's call).
@@ -66,7 +66,7 @@ import type { Transport } from './transport.js';
 export type { Span } from './otel.js';
 import type { Span } from './otel.js';
 export type { Outcome } from './operation.js';
-export type OpContext = { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: Limits };
+export type OpContext = { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: CheckedLimits };
 export type PushResult = { readonly packBytes: number };
 // a commit stamp: `time` (unix seconds) defaults to the operation's `time`, `tz` (+HHMM / -HHMM) to +0000
 export type Author = { readonly name: string; readonly email: string } & Input<{ readonly tz: string; readonly time: number }>;
@@ -263,7 +263,7 @@ export type MergeBaseOptions = Input<MergeBaseConfig>;
 // mergeBase of parsed ids: mergeBranch and rebaseBranch, which hold Oids, start here.
 export async function mergeBaseOf(t: Transport, a: Oid, b: Oid, options: MergeBaseOptions = {}): Promise<Result<MergeBase, PlyError>> {
   const { maxDepth } = withDefaults<MergeBaseConfig>(options, { maxDepth: null });
-  const capped = maxDepth === null ? readLimit(t.limits, 'maxMergeDepth') : checkLimit(maxDepth, 'maxMergeDepth');
+  const capped = maxDepth === null ? ok(t.limits.maxMergeDepth) : checkLimit(maxDepth, 'maxMergeDepth');
   if (!capped.ok) return capped;
   const cap = capped.value;
   const top = Math.floor(cap);
@@ -312,12 +312,12 @@ const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: 
   cache.set(oid, data); onFetch();
   return parseTree(data, t.limits);
 };
-const subtree = (e: Entry): string | null => (e.tag === 'some' && isTreeEntry(e.value) ? e.value.oid : null);
+const subtree = (e: Entry): Oid | null => (e.tag === 'some' && isTreeEntry(e.value) ? e.value.oid : null);
 // a tree by oid; null is the empty tree
-type ReadTree = (oid: string | null) => Promise<Result<readonly TreeEntry[], PlyError>>;
+type ReadTree = (oid: Oid | null) => Promise<Result<readonly TreeEntry[], PlyError>>;
 // Effect: the paths `side` adds relative to `base` (both tree oids), recursing only into differing subtrees; a directory
 // new on `side` is one entry, 'dir/', standing for everything inside it.
-async function addedPaths(read: ReadTree, base: string | null, side: string | null, prefix = ''): Promise<Result<string[], PlyError>> {
+async function addedPaths(read: ReadTree, base: Oid | null, side: Oid | null, prefix = ''): Promise<Result<string[], PlyError>> {
   if (base === side) return ok([]);
   const [B, S] = await Promise.all([read(base), read(side)]);
   if (!B.ok) return B;
@@ -376,6 +376,8 @@ export type MergeTreesConfig = {
   readonly driverFor: DriverFor | null;
 };
 export type MergeTreesSpec = Input<MergeTreesConfig>;
+// The same, the three tree ids parsed (mergeTrees' edge, or an Oid the caller already holds).
+type MergeDirConfig = Omit<MergeTreesConfig, 'base' | 'ours' | 'theirs'> & Trees;
 // A reasons record with no prototype (Object.create's result is `any`). It has no keys, so it is any such record.
 // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- an empty null-prototype object: no key, no inherited key
 const noProtoReasons = (): Record<string, ConflictReason> => Object.create(null) as Record<string, ConflictReason>;
@@ -408,7 +410,7 @@ const mergeTreesDefaults = (): MergeTreesConfig => ({ base: null, ours: null, th
 //   G2  a directory one side removed entirely, the other side adds inside it   (directory rename + add)
 // A rename on one side with the other side untouched merges exactly as git does.
 /* oxlint-disable eslint/no-await-in-loop, eslint/complexity, eslint/max-params -- one path at a time (the merges share `out`, the cache and the fetch budget); the rename guards run once, at the top */
-async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, prefix, removed, mergeBlob, driverFor }: MergeTreesConfig, out: MergeAcc, top: boolean): Promise<Result<MergeTreesResult, PlyError>> {
+async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, prefix, removed, mergeBlob, driverFor }: MergeDirConfig, out: MergeAcc, top: boolean): Promise<Result<MergeTreesResult, PlyError>> {
   const conflict = (path: string, why: ConflictReason): void => { out.conflicts.push(path); out.reasons[path] = why; };
   const read: ReadTree = async oid => (oid === null ? ok(EMPTY) : cachedTree(t, cache, oid, () => { out.fetched++; }));
   const [readB, readO, readT] = await Promise.all([read(base), read(ours), read(theirs)]);
@@ -497,11 +499,30 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
 }
 /* oxlint-enable eslint/no-await-in-loop, eslint/complexity, eslint/max-params */
 
-export async function mergeTrees(t: Transport, cache: TreeCache, spec: MergeTreesSpec, into: MergeAcc | null = null): Promise<Result<MergeTreesResult, PlyError>> {
+// A tree id as mergeTrees takes it: null is the empty tree; anything else is parsed once (parseOid: 40 lowercase hex,
+// what: 'oid') before any tree is read.
+const treeIdOf = (id: string | null): Result<Oid | null, ErrorOf<'bad_request'>> => (id === null ? ok(null) : parseOid(id));
+// The three trees parsed once, at the edge: base, then ours, then theirs.
+function parseTrees({ base, ours, theirs }: Pick<MergeTreesConfig, 'base' | 'ours' | 'theirs'>): Result<Trees, ErrorOf<'bad_request'>> {
+  const b = treeIdOf(base); if (!b.ok) return b;
+  const o = treeIdOf(ours); if (!o.ok) return o;
+  const th = treeIdOf(theirs); if (!th.ok) return th;
+  return ok({ base: b.value, ours: o.value, theirs: th.value });
+}
+// mergeTrees of parsed tree ids: the merge and rebase entries, which hold Oids, start here.
+export async function mergeTreesOf(t: Transport, cache: TreeCache, spec: MergeDirConfig, into: MergeAcc | null = null): Promise<Result<MergeTreesResult, PlyError>> {
   const top = into === null;
   // reasons is keyed by path, so it has no prototype: a path named `__proto__` or `constructor` is recorded like any other
   const out: MergeAcc = into === null ? { objects: [], conflicts: [], fetched: 0, deletedBoth: [], dirAdds: [], reasons: noProtoReasons(), contentMerged: 0, deletedOne: false } : into;
-  return mergeDir(t, cache, withDefaults(spec, mergeTreesDefaults()), out, top);
+  return mergeDir(t, cache, spec, out, top);
+}
+export async function mergeTrees(t: Transport, cache: TreeCache, spec: MergeTreesSpec, into: MergeAcc | null = null): Promise<Result<MergeTreesResult, PlyError>> {
+  const config = withDefaults(spec, mergeTreesDefaults());
+  const trees = parseTrees(config);
+  if (!trees.ok) return trees;
+  // the parsed ids, and none of the caller's: past this line no tree id is a raw string
+  const { prefix, removed, mergeBlob, driverFor } = config;
+  return mergeTreesOf(t, cache, { prefix, removed, mergeBlob, driverFor, ...trees.value }, into);
 }
 // Effect: the merge driver for a path from the .gitattributes files of one tree (git's attr.tree / --attr-source, or the
 // worktree's — which is ours — for a non-bare `git merge`). Reads only the directories on the path, each once; returns
@@ -568,18 +589,16 @@ const lost = (r: Err<PlyError>): Result<BlobMerge, PlyError> => (r.error.code ==
 
 // Effect: the content half of a both-sides-changed file — git's shortcuts first (one side equal to base or both equal),
 // then the three blobs (bounded by maxMergeBlobBytes) through the ported xdiff merge. Shared by merge, rebase,
-// cherry-pick and revert. Refused (bad_request) before any merge: a rediff that is not one of the three, a blob cap or a
-// transport object cap that bounds nothing.
+// cherry-pick and revert. Refused (bad_request) before any merge: a rediff that is not one of the three, or a blob cap
+// that bounds nothing (the transport's object cap was checked where the transport was made). Blobs are read under the
+// lower of the two caps.
 export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Rediff): Result<MergeBlob, ErrorOf<'bad_request'>> {
   if (!['undecided', 'skip', 'myers'].includes(rediff)) return fail('bad_request', `rediff must be 'undecided', 'skip' or 'myers', not ${JSON.stringify(rediff)}`);
   const blobCapped = checkLimit(maxMergeBlobBytes, 'maxMergeBlobBytes');
   if (!blobCapped.ok) return blobCapped;
-  const objectCapped = readLimit(t.limits, 'maxObjectSize');
-  if (!objectCapped.ok) return objectCapped;
-  const blobCap = blobCapped.value;
   const stats: MergeStats = { merged: 0, undecided: 0, unioned: 0, attrBinary: 0 };
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; the view is `t` with limits shadowed (as transport.ts withParent)
-  const bounded = Object.create(t, { limits: { value: { ...t.limits, maxObjectSize: Math.min(objectCapped.value, blobCap) } } }) as Transport;
+  const bounded = Object.create(t, { limits: { value: lowered(t.limits, 'maxObjectSize', blobCapped.value) } }) as Transport;
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
@@ -597,7 +616,7 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
     if (!rO.ok) return lost(rO);
     if (!rT.ok) return lost(rT);
     const [B, O, T] = [rB.value, rO.value, rT.value];
-    const m = mergeLines(B, O, T, { maxBytes: blobCap, rediff, driver });
+    const m = mergeLines(B, O, T, { maxBytes: blobCapped.value, rediff, driver });
     if (!m.clean) {
       if (m.reason === 'undecided') { stats.undecided++; return refused('content (git would decide this with a classic-diff fallback ply does not implement)'); }
       return refused(m.reason === 'content' ? 'content (both sides changed the same lines)' : m.reason);
@@ -629,7 +648,8 @@ export const validateAttributes = (a: unknown): Result<AttributeSource, ErrorOf<
   return map(validateRef(v), () => v);
 };
 // The three sides' trees (null: the empty tree, or a side not in play).
-export type Trees = { readonly base: string | null; readonly ours: string | null; readonly theirs: string | null };
+// The three trees of a merge, parsed (null: the empty tree).
+export type Trees = { readonly base: Oid | null; readonly ours: Oid | null; readonly theirs: Oid | null };
 export const NO_TREES: Trees = { base: null, ours: null, theirs: null };
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 // a ref's oid in an ls-refs answer
@@ -790,31 +810,29 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const { base } = land;
     // three-way: commits for the three trees (the commit-only packs from mergeBase did not carry trees)
     const [cB, cO, cT] = await Promise.all([commitBytesAt(t, base), commitBytesAt(t, ours), commitBytesAt(t, theirs)]);
-    const tree = (c: Result<{ readonly data: Uint8Array }, PlyError>): Result<string, PlyError> => andThen(c, b => map(parseCommit(b.data, t.limits), x => x.tree));
+    const tree = (c: Result<{ readonly data: Uint8Array }, PlyError>): Result<Oid, PlyError> => andThen(c, b => map(parseCommit(b.data, t.limits), x => x.tree));
     const tB = tree(cB); if (!tB.ok) return tB;
     const tO = tree(cO); if (!tO.ok) return tO;
     const tT = tree(cT); if (!tT.ok) return tT;
     const trees: Trees = { base: tB.value, ours: tO.value, theirs: tT.value };
-    const blobCap = readLimit(t.limits, 'maxMergeBlobBytes');
-    if (!blobCap.ok) return blobCap;
-    const merger = blobMerger(t, blobCap.value, rediff);
+    const merger = blobMerger(t, t.limits.maxMergeBlobBytes, rediff);
     if (!merger.ok) return merger;
     const mergeBlob = merger.value;
     const attrTree = await attributeTree(t, attributes, trees);
     if (!attrTree.ok) return attrTree;
     root.set({ 'git.merge.attributes': attributes === null ? '' : attributes });
-    const treesMerged = await mergeTrees(t, cache, { ...trees, mergeBlob, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
+    const treesMerged = await mergeTreesOf(t, cache, { ...trees, prefix: '', removed: null, mergeBlob, driverFor: attrTree.value === null ? null : attributeDrivers(t, cache, attrTree.value) });
     if (!treesMerged.ok) return treesMerged;
     const merged = treesMerged.value;
     const newTrees = merged.objects.filter(o => o.type === TYPE.TREE).length;
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': newTrees, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
     if (merged.conflicts.length > 0) return fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
     const emptyTree = encodeEntries([]); if (!emptyTree.ok) return emptyTree;
-    const treeOid: string = merged.oid === null ? hashObject('tree', emptyTree.value) : merged.oid;
+    const treeOid: Oid = merged.oid === null ? hashObject('tree', emptyTree.value) : merged.oid;
     if (person.tag === 'none' || committerPerson.tag === 'none') return fail('bad_request', 'author is required for a merge commit');
     const authorLine = ident(person.value); if (!authorLine.ok) return authorLine;
     const committerLine = ident(committerPerson.value); if (!committerLine.ok) return committerLine;
-    const encoded = encodeCommit({ tree: treeOid, parents: [ours, theirs], author: authorLine.value, committer: committerLine.value, message: (message === null ? `Merge ${short(from)} into ${short(ref)}` : message).replace(/\n?$/u, '\n') });
+    const encoded = encodeCommitOf({ tree: treeOid, parents: [ours, theirs], author: authorLine.value, committer: committerLine.value, message: (message === null ? `Merge ${short(from)} into ${short(ref)}` : message).replace(/\n?$/u, '\n') });
     if (!encoded.ok) return encoded;
     let commitData = encoded.value;
     if (signer) { const signed = await signCommit(commitData, signer); if (!signed.ok) return signed; commitData = signed.value; }

@@ -1,12 +1,14 @@
 // Bounds on everything an untrusted server (or a careless caller) can size. Every allocation driven by
-// wire data checks one of these before the buffer exists. A missing or non-finite field is a hard error:
-// a missing value compared with `>` is false in JS, so a forgotten default must not silently disable the check.
+// wire data checks one of these before the buffer exists. A caller's record is parsed once, where it enters
+// (parseLimits: a transport, an operation, a public codec): a key it gives must be a finite non-negative number, a key
+// it leaves out is the default. Past that line the record is a total CheckedLimits and every read is a property read:
+// a missing value compared with `>` is false in JS, so no unchecked record may reach a check.
 import type { ErrorOf } from './errors.js';
 import { plyError } from './errors.js';
 import type { Result } from './result.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Input } from './absent.js';
-import { fromNullish } from './absent.js';
+import { fromNullish, withDefaults } from './absent.js';
 
 /* oxlint-disable no-magic-numbers -- these are the cap definitions; parsers import the names */
 
@@ -136,7 +138,25 @@ export type Limits = {
 };
 export type LimitKey = keyof Limits;
 
-export const DEFAULT_LIMITS: Limits = Object.freeze({
+// A limits record parsed once (#156): every key present, each a finite non-negative number. The brand is a module
+// symbol, written only here (parseLimits, and the presets below); it is not enumerable, so a spread of a checked record
+// is a plain record again and is parsed afresh. Internal code takes CheckedLimits and reads its keys directly.
+const CHECKED_LIMITS: unique symbol = Symbol('checkedLimits');
+export type CheckedLimits = Limits & { readonly [CHECKED_LIMITS]: true };
+// What a caller passes: any subset of the keys (a missing key is the default), or none.
+export type LimitsInput = Input<Limits>;
+
+// The brand on a record whose every value is a finite non-negative number (each caller's check, or arithmetic on checked
+// values). Frozen: the record is shared by every read past the edge.
+function grant(values: Limits): CheckedLimits {
+  // Stryker disable next-line BooleanLiteral: the brand is its presence (isChecked reads Object.hasOwn); its value is never read
+  const checked: CheckedLimits = { ...values, [CHECKED_LIMITS]: true };
+  Object.defineProperty(checked, CHECKED_LIMITS, { enumerable: false });
+  return Object.freeze(checked);
+}
+const isChecked = (value: LimitsInput): value is CheckedLimits => Object.hasOwn(value, CHECKED_LIMITS);
+
+export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxMergeBlobBytes: LIMIT_MERGE_BLOB,
   maxObjectSize: LIMIT_OBJECT,
   maxHarvestBytes: LIMIT_HARVEST,
@@ -170,7 +190,7 @@ export const DEFAULT_LIMITS: Limits = Object.freeze({
  * each refuses or succeeds, none runs out of memory.
  */
 /* oxlint-disable no-magic-numbers -- the preset's cap definitions, as above */
-export const WORKER_LIMITS: Limits = Object.freeze({
+export const WORKER_LIMITS: CheckedLimits = grant({
   ...DEFAULT_LIMITS,
   maxObjectSize: 16 * MIB,
   maxPackBytes: 32 * MIB,
@@ -184,8 +204,7 @@ export const WORKER_LIMITS: Limits = Object.freeze({
 });
 /* oxlint-enable no-magic-numbers */
 
-// A caller's overrides on top of the defaults. Values are checked where they are used (checkLimit), not here: a
-// caller may pass a field this version does not read.
+// A caller's overrides on top of the defaults, as a plain record: it is checked where it enters (parseLimits).
 export const withLimits = (o: Partial<Limits> = {}): Limits => Object.freeze({ ...DEFAULT_LIMITS, ...o });
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
@@ -193,11 +212,32 @@ export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf
   typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
-// The caller's limits record (any subset), or none (null). A key it lacks is checked as the missing value it reads as,
-// so the refusal's `got` is what the caller passed. A JS caller's missing record reads as none, as the loose read did.
-const given = (limits: Input<Limits> | null): Input<Limits> => getOrElse<Input<Limits>>(fromNullish(limits), {});
-export const readLimit = (limits: Input<Limits> | null, key: LimitKey): Result<number, ErrorOf<'bad_request'>> =>
-  checkLimit(given(limits)[key], key);
+
+// The caller's limits record (any subset), or none (null), parsed once where it enters. A key it gives must pass
+// checkLimit (the refusal names the key, `got` is what was passed; keys are checked in DEFAULT_LIMITS order); a key it
+// leaves out, or passes as the missing value, is DEFAULT_LIMITS's. Keys this version does not read are ignored. A
+// record parseLimits already returned is returned as it is; none (null) is DEFAULT_LIMITS.
+// @decoder parseLimits prefix=limits
+export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, ErrorOf<'bad_request'>> {
+  if (input === null) return ok(DEFAULT_LIMITS);
+  if (isChecked(input)) return ok(input);
+  // A spread of DEFAULT_LIMITS: its keys (the brand is not enumerable), in order, each filled from the input where given.
+  const filled = withDefaults<Limits>(input, { ...DEFAULT_LIMITS });
+  for (const [key, value] of Object.entries(filled)) {
+    const checked = checkLimit(value, key);
+    if (!checked.ok) return checked;
+  }
+  return ok(grant(filled));
+}
+
+// The limits an entry's options name (`limits`: any subset; left out or null is the defaults), parsed once at the entry.
+export const limitsOf = (options: Input<{ readonly limits: LimitsInput | null }>): Result<CheckedLimits, ErrorOf<'bad_request'>> =>
+  parseLimits(getOrElse<LimitsInput | null>(fromNullish(options.limits), null));
+
+// A checked record with one bound lowered to `value` (never raised): an operation's room for one step (what is left of
+// a budget, a tighter per-call cap). `value` is arithmetic on checked bounds; below zero is zero.
+export const lowered = (limits: CheckedLimits, key: LimitKey, value: number): CheckedLimits =>
+  grant({ ...limits, [key]: Math.max(0, Math.min(limits[key], value)) });
 
 // The value for `what` exceeding its bound: `got` against `max`.
 export const limitExceeded = (what: string, got: number, max: number): ErrorOf<'limit_exceeded'> =>

@@ -79,6 +79,43 @@ tagged unions.
   (fetchObject's refusal) even when there is no path to walk.
 - `validateSpec`'s plan carries `base` as `{ kind: 'ref', ref } | { kind: 'commit', oid }` (no `baseOid` flag);
   `editFile` parses the spec once, so a retry reuses the first attempt's commit time.
+- Parse once (#156): a limits record is parsed once where it enters (`parseLimits`): `createTransport` /
+  `GitHttp.create`, `operation()` (every entry), a transport handed in (`transportFrom`), `syncRef`, and every public
+  codec that takes limits (`parseTree`, `parseCommit`, `parsePack` / `packParseOpts` / `parsePackInit`, `resolvePack`,
+  `describePack`, `indexPack`, `verifyFetchAnswer`, `validatePath` / `parsePath`, `fileEntries`, `buildTree`,
+  `validateTreeSpec`, `validateSpec`, `treeFiles`, `commitView`, `filesFromDir`, `writeFiles`, `objectsForPack`,
+  `reachableObjects`, `planPush`). A key that is present must be a finite non-negative number: the same `bad_request`
+  (`limits.<key> must be a finite non-negative number`, `what: <key>`, `got`) as before, but refused at the entry before
+  any request, whichever operation would have read it (it used to be refused only at the read that used it, so a bad
+  key an operation never reached was never refused). When several keys are bad, the first in `DEFAULT_LIMITS` order is
+  the refusal, and an entry parses its limits before its spec (a call with both wrong gets the limits refusal). A key
+  that is missing, or passed as the platform missing value, takes `DEFAULT_LIMITS`'s value (it used
+  to be refused at its first read; `validatePath(p)` and `parsePath(p)` with no limits record used to refuse every
+  path); `null` is a value, and refused. `Transport.limits` (and `GitHttp#limits`) is a `CheckedLimits`, branded by
+  `parseLimits` alone; `DEFAULT_LIMITS` and `WORKER_LIMITS` are checked records. `parseLimits`, `CheckedLimits` and
+  `LimitsInput` are exported. `v2Init` takes a `CheckedLimits` (`parseLimits` a caller's record first; the default is
+  `DEFAULT_LIMITS`). A `cachingFetch` (which returns no `Result`) parses its `limits` where it verifies an answer, as
+  before. A merge's blob reads keep their bound as the lower of `maxObjectSize` and `maxMergeBlobBytes`.
+- Parse once (#156): a fetch `have` and `shallow` is an object id, as a want is: upload-pack dies on anything else
+  (`process_haves` "expected SHA1 object", `process_shallow` "invalid shallow line"), so one is `bad_request`
+  (`what: 'have'` / `'shallow'`, `invalid have: must be an object id (40 hex digits)`) before any request; an
+  upper-case id is sent lowercase; text after the id is refused. `negotiate` parses every have before its first round
+  (a bad one in a later batch used to be sent rounds later, or refused only then), and an acknowledgment that is not an
+  object id is `protocol` (it used to be offered back to the server as a have).
+- Parse once (#156): `mergeTrees` parses its `base` / `ours` / `theirs` tree ids at the edge (`null` is the empty
+  tree; anything else must be 40 lowercase hex: `bad_request`, `what: 'oid'`, in that order) before any tree is read
+  (a bad one used to be refused by the first fetch). `encodeCommit` parses `tree` and each `parent` (after the header
+  checks it always made): not 40 hex digits is `bad_request` `what: 'tree'` / `'parent'` (it used to write the line;
+  git's fsck refuses it: `badTreeSha1`, `badParentSha1`), and an upper-case id is written lowercase, as `git
+  commit-tree` writes it. `buildCommitObjects` parses `oldCommit`.
+- `buildPack`'s input (`PackInput`, also push's `objects`) gives its base as a tagged union with the read side's tags:
+  `base: { tag: 'none' } | { tag: 'ofs', index } | { tag: 'ref', oid }` (left out: none), in place of `baseIndex` /
+  `baseOid`. An ofs base names an earlier object by its index (its offset is not known until the pack is written). The
+  quirks of the flag fields are gone: an empty `baseOid` meant no base, and `baseIndex` beside `baseOid` was an
+  OFS_DELTA whose entry named no base. `planPush` refuses, before anything is built, an ofs base that names no earlier
+  object, a ref base that is not an object id (`what: 'base'`, both), and an object that still carries `baseIndex` /
+  `baseOid` or a base outside the three tags (it used to ignore an unknown field, and send a delta as a whole object).
+  `buildPack` and the streamed push writer share one entry encoder (`pack.ts entryHead`); their bytes are unchanged.
 
 - 0.2.0: every exported function that can fail returns `Result<T, PlyError>`; `GitHttp` is built with
   `GitHttp.create(url, opts)` (a `Result`), and its methods return the free functions' Results.

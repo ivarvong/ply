@@ -57,7 +57,7 @@ export default {
       const body = await req.json();
       const exporter = arrayExporter();
       try {
-        const r = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }), ...(body.limits ? { limits: withLimits(body.limits) } : {}) }));
+        const r = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer: new Tracer({ exporter }), ...(body.limits ? { limits: body.limits } : {}) }));
         let bytes = 0;
         const rd = r.stream.getReader();
         if (body.cancel) { const { value } = await rd.read(); bytes = value?.length ?? 0; await rd.cancel('enough'); }
@@ -67,7 +67,7 @@ export default {
     }
     if (u.pathname === '/sweep') { // one limit-sweep cell (test/sweep): the same operation code the node cell runs
       const cell = await req.json();
-      const op = fetchOps(cell, { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) })[cell.op];
+      const op = fetchOps(cell, { tracer: new Tracer(), limits: cell.limits ?? {} })[cell.op];
       if (!op) return Response.json({ status: 'crash', code: null, msg: `workerd: no op ${cell.op}` });
       try { return Response.json({ status: 'ok', ...(await op()) }); } catch (e) { return Response.json(failure(e)); }
     }

@@ -1,13 +1,15 @@
 // HttpOptions are parsed once (#156): parseHttpOptions makes every check the transport makes of its options, and the
-// transport reads only the settings. The two limits it reads on every request (requestTimeoutMs, maxPackBytes) are
-// read there: a bad one is now refused when the transport is made, with no request, and is the same bad_request a
-// request used to fail with. Every refusal keeps its order (the limits come last).
+// transport reads only the settings. The limits record is parsed there (parseLimits): a bad key, among them the two
+// it reads on every request (requestTimeoutMs, maxPackBytes), is refused when the transport is made, with no request,
+// and is the same bad_request a request used to fail with. Every refusal keeps its order (the limits come last; among
+// the limits, DEFAULT_LIMITS order). A key left out is the default.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createTransport, parseHttpOptions } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
 import { readFile } from '../src/read.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
 
 const counting = () => { const c = { n: 0 }; c.fetchImpl = async () => { c.n++; return new Response('', { status: 500 }); }; return c; };
 
@@ -23,9 +25,14 @@ test('a bad request timeout or pack cap is refused when the transport is made, b
     assert.deepEqual([op.ok, op.error?.code, op.error?.what], [false, 'bad_request', key]);
     assert.equal(c.n, 0, key);
   }
-  // a limits record missing one of them reads it as missing (got: the missing value)
+  // a key given as null is given, and refused (got: null)
   const partial = createTransport('https://h/r.git', { limits: { ...DEFAULT_LIMITS, requestTimeoutMs: null } });
-  assert.deepEqual([partial.error.code, partial.error.what], ['bad_request', 'requestTimeoutMs']);
+  assert.deepEqual([partial.error.code, partial.error.what, partial.error.got], ['bad_request', 'requestTimeoutMs', null]);
+  // a key left out is the default (#156: it used to be refused at its first read)
+  const { requestTimeoutMs: _left, ...rest } = DEFAULT_LIMITS;
+  const filled = parseHttpOptions('https://h/r.git', { limits: { ...rest, maxPackBytes: 7 } }).value;
+  assert.deepEqual([filled.requestTimeoutMs, filled.maxPackBytes, filled.limits.requestTimeoutMs], [DEFAULT_LIMITS.requestTimeoutMs, 7, DEFAULT_LIMITS.requestTimeoutMs]);
+  assert.deepEqual({ ...parseHttpOptions('https://h/r.git', { limits: {} }).value.limits }, { ...DEFAULT_LIMITS });
 });
 
 test('the limits come after every other refusal, as the first request used to', () => {
@@ -36,8 +43,9 @@ test('the limits come after every other refusal, as the first request used to', 
   assert.equal(createTransport('not a url', { limits: bad }).error.what, 'url');
   assert.equal(createTransport('https://h/r', { auth: { user: 'u' }, limits: bad }).error.what, 'auth');
   assert.equal(createTransport('https://h/r', { allowUrl: () => ({ ok: false, error: { code: 'bad_request', what: 'mine' } }), limits: bad }).error.what, 'mine');
-  // requestTimeoutMs before maxPackBytes
-  assert.equal(createTransport('https://h/r', { limits: withLimits({ requestTimeoutMs: NaN, maxPackBytes: NaN }) }).error.what, 'requestTimeoutMs');
+  // the first bad key in DEFAULT_LIMITS order: maxPackBytes before requestTimeoutMs
+  assert.equal(createTransport('https://h/r', { limits: withLimits({ requestTimeoutMs: NaN, maxPackBytes: NaN }) }).error.what, 'maxPackBytes');
+  assert.equal(createTransport('https://h/r', { limits: withLimits({ requestTimeoutMs: NaN, maxMergeBlobBytes: -1 }) }).error.what, 'maxMergeBlobBytes');
 });
 
 test('the settings: the URL without userinfo, the credential resolved once, the fetch bound, the stream redirect mode', () => {
@@ -150,6 +158,43 @@ test('the advertisement: its GET asks redirect manual; a foreign content type is
   assert.equal(at.ok, true, 'a Content-Length equal to the cap is read');
   const over = await createTransport('https://h/r', { fetchImpl: recorder(adv('application/x-git-upload-pack-advertisement', body)).fetchImpl, limits: withLimits({ maxPackBytes: body - 1 }) }).value.advertise('git-upload-pack', spanOf());
   assert.deepEqual([over.ok, over.error.code, over.error.got, over.error.max], [false, 'limit_exceeded', body, body - 1]);
+});
+
+// The other places a limits record enters (#156): syncRef parses it once for both remotes, and a transport handed in
+// has its record parsed (transportFrom) before the operation sends anything.
+test('syncRef and a handed-in transport parse their limits before any request; a complete transport is kept as it is', async () => {
+  const { syncRef } = await import('../src/sync.js');
+  const { asTransport, transportFrom } = await import('../src/transport.js');
+  const { parseLimits, lowered } = await import('../src/limits.js');
+  const c = counting();
+  const r = await syncRef('https://h/a.git', 'https://h/b.git', { ref: 'refs/heads/main' }, { fetchImpl: c.fetchImpl, limits: { maxRefs: -1 } });
+  assert.deepEqual([r.ok, r.error.code, r.error.what, c.n], [false, 'bad_request', 'maxRefs', 0]);
+  const t = createTransport('https://h/r.git', { fetchImpl: c.fetchImpl }).value;
+  // every field present and the limits the transport's own: the transport itself
+  assert.equal(asTransport(t, t.limits), t);
+  assert.equal(transportFrom(t).value, t);
+  // other limits: a view of it with those limits, the caller's state shared
+  const low = lowered(t.limits, 'maxRefs', 3);
+  const view = asTransport(t, low);
+  assert.notEqual(view, t);
+  assert.deepEqual([view.limits, view.quirks, view.objects, view.scrub, view.url], [low, t.quirks, t.objects, t.scrub, t.url]);
+  // a hand-built record: its plain limits parsed (a key left out is the default), its missing state filled
+  const hand = { kind: 'http', url: 'x', tracer: t.tracer, parent: null, signal: null, frames: t.frames, advertise: t.advertise, limits: { maxRefs: 5 } };
+  const made = transportFrom(hand).value;
+  assert.deepEqual([made.limits.maxRefs, made.limits.maxObjectSize, unwrap(parseLimits(made.limits)) === made.limits], [5, DEFAULT_LIMITS.maxObjectSize, true]);
+  assert.deepEqual([made.quirks, made.objects.size, made.scrub], [{ treeFilter: 'tree:0', blobWants: 'many' }, 0, null]);
+  // only a record with all three fields and these limits is kept as it is
+  const full = { ...hand, quirks: t.quirks, objects: t.objects, scrub: null, limits: t.limits };
+  assert.equal(asTransport(full, t.limits), full);
+  assert.notEqual(asTransport(full, low), full);
+  for (const drop of ['quirks', 'objects', 'scrub']) {
+    const { [drop]: _gone, ...rec } = full;
+    const v = asTransport(rec, t.limits);
+    assert.notEqual(v, rec, drop);
+    assert.deepEqual([v.quirks, v.objects instanceof Map, v.scrub, v.limits], [drop === 'quirks' ? { treeFilter: 'tree:0', blobWants: 'many' } : t.quirks, true, null, t.limits], drop);
+  }
+  for (const [key, value] of [['quirks', null], ['objects', null]]) assert.notEqual(asTransport({ ...full, [key]: value }, t.limits), full, key);
+  assert.deepEqual([transportFrom({ ...hand, limits: { maxRefs: NaN } }).error.what, c.n], ['maxRefs', 0]);
 });
 
 test('a URL that does not parse, and a NUL, CR or LF in its userinfo, are refused with their own message and what', () => {

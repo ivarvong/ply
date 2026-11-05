@@ -33,7 +33,7 @@ import { parseOid, parseCommitId } from '../src/oid.js';
 import { parsePath } from '../src/path.js';
 import { parseHttpOptions } from '../src/http.js';
 import { parseRefname, parseBranchName, parseTagName } from '../src/refname.js';
-import { DEFAULT_LIMITS } from '../src/limits.js';
+import { DEFAULT_LIMITS, parseLimits } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
 // Throwing adapters over the Result API (0.2.0): the assertions below are about the throw.
@@ -557,6 +557,24 @@ property('http-options', 'a prefix of a remote URL is settings for that URL or a
       const r = parseHttpOptions(full.slice(0, i));
       if (r.ok) assert.equal(r.value.url.username + r.value.url.password, '', full.slice(0, i));
       else assert.equal(r.error.code, 'bad_request', full.slice(0, i));
+    }
+  }
+});
+
+// A limits record's prefix is its first keys (in DEFAULT_LIMITS order): every key it gives is taken, every key it leaves
+// out is the default. A bad key is refused from the first prefix that holds it on, and never before.
+property('limits', 'a prefix of a limits record is that record with the defaults for the rest, or the first bad key', () => {
+  const keys = Object.keys(DEFAULT_LIMITS);
+  const full = Object.fromEntries(keys.map((k, i) => [k, i + 1]));
+  // no bad key (badAt past the end), or one at the first, a middle or the last key
+  for (const [badAt, value] of [[keys.length, 0], [0, Infinity], [3, -1], [keys.length - 1, NaN]]) {
+    const record = badAt < keys.length ? { ...full, [keys[badAt]]: value } : full;
+    for (let i = 0; i <= keys.length; i++) {
+      const prefix = Object.fromEntries(keys.slice(0, i).map(k => [k, record[k]]));
+      const r = parseLimits(prefix);
+      if (i > badAt) { assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'bad_request', keys[badAt]], String(i)); continue; }
+      assert.equal(r.ok, true, String(i));
+      for (const [j, k] of keys.entries()) assert.equal(r.value[k], j < i ? record[k] : DEFAULT_LIMITS[k], `${i} ${k}`);
     }
   }
 });

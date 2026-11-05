@@ -181,7 +181,7 @@ test('blob:none object cap: one under, at, and one past each size the pack meets
     const extra = new Uint8Array(extraN).fill(0x42);
     const result = concat([base, extra]);
     const { delta } = spliceDelta({ baseLen: baseN, off: baseN, oldLen: 0, insert: extra });
-    const { pack, entries } = await buildPack([{ type: TYPE.BLOB, data: base }, { type: TYPE.BLOB, data: delta, baseOid: hashObject('blob', base) }]);
+    const { pack, entries } = await buildPack([{ type: TYPE.BLOB, data: base }, { type: TYPE.BLOB, data: delta, base: { tag: 'ref', oid: hashObject('blob', base) } }]);
     const oid = hashObject('blob', result);
     const where = `base ${baseN} +${extraN}`;
     assert.ok(Buffer.from(catBlob(pack, oid)).equals(Buffer.from(result)), where);

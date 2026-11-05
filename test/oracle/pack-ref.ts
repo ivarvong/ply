@@ -7,14 +7,19 @@ import type { ErrorOf } from '../../src/errors.js';
 import { fail } from '../../src/errors.js';
 import type { Err, Result } from '../../src/result.js';
 import { ok, err, assertNever, getOrElse } from '../../src/result.js';
-import { at, atOr, fromNullish, readKey, type Input } from '../../src/absent.js';
+import { at, atOr, fromNullable, fromNullish, readKey, type Input } from '../../src/absent.js';
 import type { InflateStats } from '../../src/inflatestream.js';
 import { inflateRef } from './inflate-ref.js';
 import { Sha1, toHex, toOid, type Oid } from '../../src/sha1.js';
 import { nameOfTypeId } from '../../src/objects.js';
 import type { ObjType } from '../../src/objects.js';
 import type { LimitKey, Limits } from '../../src/limits.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitError, checkLimit, readLimit } from '../../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitError, checkLimit } from '../../src/limits.js';
+
+// One key of a caller's limits record as src/ reads it since #156 (parseLimits): a key given must pass checkLimit, a key
+// left out is DEFAULT_LIMITS's. The oracle reads one key at a time, where src/ parses the record at the edge.
+const readLimit = (limits: Input<Limits> | null, key: LimitKey): Result<number, ErrorOf<'bad_request'>> =>
+  checkLimit(getOrElse<unknown>(fromNullable((limits === null ? {} : limits)[key]), DEFAULT_LIMITS[key]), key);
 import { take, shortRead } from '../../src/bytes.js';
 import type { PackKind } from '../../src/format.js';
 import {

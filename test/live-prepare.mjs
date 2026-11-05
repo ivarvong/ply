@@ -48,7 +48,7 @@ export async function prepare({ url, ref = 'refs/heads/main', path, find, replac
   const who = unwrap(ident(unwrap(validateIdent({ name: author.name, email: author.email, time: Math.floor(Date.now() / 1000), tz: author.tz }))));
   const commitData = unwrap(encodeCommit({ tree: child, parents: [oldCommit], author: who, committer: who, message: message + '\n' }));
   const newCommit = hashObject('commit', commitData);
-  const objects = [{ type: TYPE.COMMIT, data: commitData }, ...treeObjs.map(t => ({ type: t.type, data: t.data, baseOid: t.baseOid })), blobDelta.length >= 4 ? { type: TYPE.BLOB, data: blobDelta, baseOid: blobOid } : { type: TYPE.BLOB, data: new Uint8Array(0) }];
+  const objects = [{ type: TYPE.COMMIT, data: commitData }, ...treeObjs.map(t => ({ type: t.type, data: t.data, base: { tag: 'ref', oid: t.baseOid } })), blobDelta.length >= 4 ? { type: TYPE.BLOB, data: blobDelta, base: { tag: 'ref', oid: blobOid } } : { type: TYPE.BLOB, data: new Uint8Array(0) }];
   const { pack, entries } = await buildPack(objects);
   root.set({ 'git.edit.commit.old': oldCommit, 'git.edit.commit.new': newCommit, 'git.edit.push.bytes': pack.length, }).end();
   return { ms: Date.now() - t0, oldCommit, newCommit, oldTree: commit.tree, newTree: child, oldBlob: blobOid, newBlob, baseLen: sp.size, newLen, matchOffset: scan.matches[0], trees: treeObjs.map(t => ({ old: t.baseOid, new: t.newOid })), command: `${oldCommit} ${newCommit} ${ref}`, pack, entries, spans: exporter.lines.flatMap(flattenLine) };

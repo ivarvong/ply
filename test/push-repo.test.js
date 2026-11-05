@@ -20,7 +20,6 @@ import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from
 import { pushRepo, readConfig } from '../src/repo-node.js';
 import { encodeDelta, planDeltas } from '../src/delta.js';
 import { applyDelta, buildPack, encodeOfsDistance, parsePack, resolvePack, readOfsDelta } from '../src/pack.js';
-import { planPush } from '../src/push.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -459,7 +458,7 @@ test('encodeDelta: applyDelta (and git index-pack) rebuild the target; null when
   const plan = planDeltas(objs, { maxDepth: 10 });
   assert.ok(plan.ofs > 50);
   const depth = [];
-  for (const [i, o] of plan.objects.entries()) { assert.ok(o.baseIndex === undefined || o.baseIndex < i); depth.push(o.baseIndex === undefined ? 0 : depth[o.baseIndex] + 1); }
+  for (const [i, o] of plan.objects.entries()) { const ofs = o.base?.tag === 'ofs'; assert.ok(o.base === undefined || (ofs && o.base.index < i)); depth.push(ofs ? depth[o.base.index] + 1 : 0); }
   assert.ok(Math.max(...depth) <= 10);
   const { pack } = await buildPack(plan.objects);
   const resolved = resolvePack(parsePack(pack).value);
@@ -473,17 +472,6 @@ test('encodeDelta: applyDelta (and git index-pack) rebuild the target; null when
     const enc = encodeOfsDistance(d);
     assert.equal(readOfsDelta(enc, 0).value.off, d, String(d));
   }
-});
-
-test('planPush refuses a baseIndex that names no earlier object', () => {
-  const data = Uint8Array.of(1, 2, 3);
-  for (const baseIndex of [0, 1, -1, 0.5, '0']) {
-    const r = planPush({ ref: 'refs/heads/main', oldOid: ZERO, newOid: 'a'.repeat(40), objects: [{ type: TYPE.BLOB, data, baseIndex }] }, DEFAULT_LIMITS);
-    assert.equal(r.ok, false);
-    assert.equal(r.error.code, 'bad_request');
-    assert.equal(r.error.what, 'baseIndex');
-  }
-  assert.ok(planPush({ ref: 'refs/heads/main', oldOid: ZERO, newOid: 'a'.repeat(40), objects: [{ type: TYPE.BLOB, data }, { type: TYPE.BLOB, data, baseIndex: 0 }] }, DEFAULT_LIMITS).ok);
 });
 
 test('readConfig: sections, subsections, case, comments, a bare key', () => {

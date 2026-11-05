@@ -78,7 +78,7 @@ for (let i = 0; i < N; i++) {
         const r = unwrap(applyDelta(base, delta)); if (!Buffer.from(r.out).equals(Buffer.from(target))) throw new Error(`${name} apply mismatch`);
         if (which === 'delta-git' && base.length > 0) {
           const baseOid = gitHash(base);
-          const { pack } = await buildPack([{ type: 3, data: delta, baseOid }]);
+          const { pack } = await buildPack([{ type: 3, data: delta, base: { tag: 'ref', oid: baseOid } }]);
           try { execFileSync('git', ['-C', dir, 'index-pack', '--fix-thin', '--strict', '--stdin'], { input: pack, stdio: 'pipe' }); }
           catch (e) { throw new Error(`${name}: git rejected delta (base ${base.length}B off=${off} old=${oldLen} ins=${ins.length} delta=${delta.length}B): ${(e.stderr || '').toString().trim().split('\n').pop()}`); }
           const targetOid = crypto.createHash('sha1').update(`blob ${target.length}\0`).update(target).digest('hex');
