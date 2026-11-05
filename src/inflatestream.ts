@@ -1,6 +1,11 @@
 // Pull inflate (RFC 1950 + RFC 1951): bytes in as they arrive, output out in chunks of at most INFLATE_CHUNK, a 32 KiB
-// window kept for back-references and nothing else. Peak is the window, one chunk, and the unread bytes the caller fed;
-// never the inflated object, never the zlib member (issue #172).
+// window kept for back-references and nothing else. Peak is the window, one chunk, two 1 KiB code tables and the unread
+// bytes the caller fed; never the inflated object, never the zlib member (issue #172).
+//
+// Codes are looked up INFLATE_FAST_BITS at a time in a table built by puff's own walk (huffFast), from a bit buffer
+// read up to 24 bits ahead; a longer code goes a bit at a time. The bytes read ahead are not consumed: they go back to
+// the input before a byte boundary, at the end and with a full chunk, so the output, `consumed` and every refusal are
+// what a bit-at-a-time decoder gives (test/packstream.test.js holds both to the oracle in every chunking).
 //
 // One owner, one mutable record: an immutable record per symbol would retain every prefix and blow the bound this module
 // exists to hold. A pull runs atomic steps. A step that runs out of input puts back the bits it took (the mark) and the
@@ -23,7 +28,7 @@ import { DEFAULT_LIMITS, checkLimit } from './limits.js';
 import type { Attrs } from './otel.js';
 import {
   ZLIB_HEADER_BYTES, ZLIB_CM_DEFLATE, ZLIB_CM_MASK, ZLIB_FDICT, ZLIB_HEADER_MOD, ZLIB_CINFO_SHIFT, ZLIB_CINFO_MAX, ZLIB_WINDOW_EXPONENT,
-  ADLER_BYTES, ADLER_MOD, ADLER_SHIFT, BYTE_SHIFT, BE32_SHIFTS, zlibBound,
+  ADLER_BYTES, ADLER_MOD, ADLER_NMAX, ADLER_SHIFT, BYTE_SHIFT, BE32_SHIFTS, zlibBound,
   DEFLATE_BFINAL_BITS, DEFLATE_BTYPE_BITS, DEFLATE_STORED, DEFLATE_FIXED, DEFLATE_DYNAMIC,
   DEFLATE_STORED_HEADER_BYTES, DEFLATE_STORED_LEN_MASK,
   DEFLATE_BIT_TABLE, DEFLATE_LITERALS, DEFLATE_EOB, DEFLATE_LENGTH_CODES,
@@ -32,7 +37,7 @@ import {
   DEFLATE_REPEAT_PREV, DEFLATE_REPEAT_ZERO3,
   DEFLATE_REPEAT16_BASE, DEFLATE_REPEAT16_BITS, DEFLATE_REPEAT17_BASE, DEFLATE_REPEAT17_BITS,
   DEFLATE_REPEAT18_BASE, DEFLATE_REPEAT18_BITS,
-  INFLATE_WINDOW, INFLATE_CHUNK,
+  INFLATE_WINDOW, INFLATE_CHUNK, INFLATE_FAST_BITS, INFLATE_FAST_SYMBOL_BITS, INFLATE_LOOKAHEAD_BITS,
 } from './format.js';
 
 /* oxlint-disable no-magic-numbers -- RFC 1951 §3.2.5 length/distance alphabets and the fixed Huffman assignment */
@@ -73,10 +78,56 @@ export const FIXED_LIT: Huffman = huffBuild(new Uint8Array(288).fill(8).fill(9, 
 export const FIXED_DIST: Huffman = huffBuild(new Uint8Array(30).fill(5));
 /* oxlint-enable no-magic-numbers */
 
+// A table of every INFLATE_FAST_BITS-bit lookahead, in the order the bits are read (the first bit read is bit 0): the
+// symbol puff's decode gives for it and the length of its code, or 0 where the code is longer or no code matches (the
+// decoder then goes a bit at a time, as before). Built from the same count and symbol arrays and the same walk as
+// decode, so a table lookup and decode agree on every input, an incomplete or over-subscribed code included: at length
+// `len` decode answers the codes first..first+count-1 that fit in len bits, and a code at one length never starts with
+// a shorter one's bits (each length's first code is past the previous length's last, shifted).
+export type FastTable = Uint16Array;
+const FAST_SIZE: number = 1 << INFLATE_FAST_BITS;
+const FAST_MASK: number = FAST_SIZE - 1;
+const FAST_SYMBOL_MASK: number = (1 << INFLATE_FAST_SYMBOL_BITS) - 1;
+// The len low bits of code, reversed: the code's first bit (its highest) is the first bit read.
+function reversed(code: number, len: number): number {
+  let r = 0;
+  for (let i = 0; i < len; i++) r = (r << 1) | ((code >> i) & 1);
+  return r;
+}
+export function huffFast(h: Huffman, into: FastTable = new Uint16Array(FAST_SIZE)): FastTable {
+  into.fill(0);
+  let first = 0;
+  let index = 0;
+  for (let len = 1; len <= INFLATE_FAST_BITS; len++) {
+    const c = h.count[len] as number;
+    // the codes of this length that fit in len bits (an over-subscribed length has more than fit; decode never reads them)
+    const fit = Math.min(c, (1 << len) - first);
+    for (let j = 0; j < fit; j++) {
+      const entry = (len << INFLATE_FAST_SYMBOL_BITS) | (h.symbol[index + j] as number);
+      // every lookahead whose first len bits are this code
+      // Stryker disable next-line EqualityOperator: into[FAST_SIZE] is past the end, which a typed array ignores
+      for (let k = reversed(first + j, len); k < FAST_SIZE; k += 1 << len) into[k] = entry;
+    }
+    index += c;
+    first = (first + c) << 1;
+  }
+  return into;
+}
+const FIXED_LIT_FAST: FastTable = huffFast(FIXED_LIT);
+const FIXED_DIST_FAST: FastTable = huffFast(FIXED_DIST);
+
+// The sums are reduced every ADLER_NMAX bytes, not every byte: a and b stay exact in a double either way, so the result
+// is the same and the loop does one add pair per byte.
 export function adler32(bytes: Uint8Array, a = 1, b = 0): number {
-  // oxlint-disable-next-line no-param-reassign -- a and b are the running sums a caller may seed; updating them is the algorithm
-  for (let i = 0; i < bytes.length; i++) { a = (a + (bytes[i] as number)) % ADLER_MOD; b = (b + a) % ADLER_MOD; }
-  return ((b << ADLER_SHIFT) | a) >>> 0;
+  let sa = a;
+  let sb = b;
+  for (let i = 0; i < bytes.length;) {
+    const end = Math.min(i + ADLER_NMAX, bytes.length);
+    for (; i < end; i++) { sa += bytes[i] as number; sb += sa; }
+    sa %= ADLER_MOD;
+    sb %= ADLER_MOD;
+  }
+  return ((sb << ADLER_SHIFT) | sa) >>> 0;
 }
 
 export type InflateStats = {
@@ -130,7 +181,11 @@ export type InflateStream = {
   maxInput: number;
   windowSize: number;
   ended: boolean;
-  // input: `carry` from `p`, bits not yet used in `bitbuf` (`bitcnt` of them); `base` bytes came before this carry
+  // input: `carry` from `p`, bits not yet used in `bitbuf` (`bitcnt` of them); `base` bytes came before this carry.
+  // The bit buffer may hold whole bytes read ahead (decodeFast). They are not consumed (consumedOf), and they go back to
+  // the carry (settle) before a byte boundary is read (align), at the end (finish), and when a full chunk is answered,
+  // so a feed after a chunk joins the carry behind them. After a need they stay: the step that needed more input
+  // rewound to the start of a symbol whose bits run past them, so the bits are all used before the next boundary.
   carry: Uint8Array;
   p: number;
   base: number;
@@ -160,6 +215,13 @@ export type InflateStream = {
   lencode: Huffman;
   lit: Huffman;
   dist: Huffman;
+  // the fast tables of lencode (litTab's buffer, before the literal table is built in it), lit and dist: a fixed
+  // block's are shared constants, a dynamic block's are built in this record's two buffers
+  lenFast: FastTable;
+  litFast: FastTable;
+  distFast: FastTable;
+  litTab: FastTable;
+  distTab: FastTable;
   copyLeft: number;
   copyDist: number;
 };
@@ -176,7 +238,8 @@ function refuse(st: InflateStream, error: InflateError): Drive {
   st.halt = { tag: 'failed', error };
   return FAILED;
 }
-const consumedOf = (st: InflateStream): number => st.base + st.p;
+// The bytes the decoder has used: a byte read ahead into the bit buffer and not used is not consumed.
+const consumedOf = (st: InflateStream): number => st.base + st.p - Math.floor(st.bitcnt / BYTE_SHIFT);
 const tooLong = (st: InflateStream): ErrorOf<'pack_corrupt'> =>
   plyError('pack_corrupt', `inflate: zlib stream longer than its declared size allows (${consumedOf(st)} > ${st.maxInput} for ${st.declared} bytes)`);
 
@@ -209,18 +272,15 @@ function take(st: InflateStream, n: number): number {
   st.bitcnt -= n;
   return v;
 }
-// puff's decode, one code bit at a time (as inflate.ts): a symbol, SYM_NEED, or SYM_NO_CODE.
+// puff's decode, one code bit at a time, from the bit buffer decodeFast filled: a symbol, SYM_NEED, or SYM_NO_CODE. That
+// buffer holds every byte there is up to INFLATE_LOOKAHEAD_BITS, more than the longest code, so running out of bits here
+// is running out of input.
 function decode(st: InflateStream, h: Huffman): number {
   let code = 0;
   let first = 0;
   let index = 0;
   for (let len = 1; len < DEFLATE_BIT_TABLE; len++) {
-    if (st.bitcnt === 0) {
-      if (st.p >= st.carry.length) return SYM_NEED;
-      st.bitbuf = st.carry[st.p] as number;
-      st.p += 1;
-      st.bitcnt = BYTE_SHIFT;
-    }
+    if (st.bitcnt <= 0) return SYM_NEED;
     code |= st.bitbuf & 1; // oxlint-disable-line oxc/bad-bitwise-operator -- puff's decode: the next bit goes in at bit 0
     st.bitbuf >>>= 1;
     st.bitcnt -= 1;
@@ -231,6 +291,41 @@ function decode(st: InflateStream, h: Huffman): number {
     code <<= 1;
   }
   return SYM_NO_CODE;
+}
+// Whole bytes the bit buffer holds go back to the carry (they were read from it in this pull), and the bits left are
+// fewer than 8: what reading bit by bit would have left. A pull settles before it answers, so a feed after any answer
+// keeps every unused byte.
+function settle(st: InflateStream): void {
+  const whole = Math.floor(st.bitcnt / BYTE_SHIFT);
+  st.p -= whole;
+  st.bitcnt -= whole * BYTE_SHIFT;
+  st.bitbuf &= (1 << st.bitcnt) - 1;
+}
+// A byte boundary (a stored block's header, the Adler-32 trailer): the bytes read ahead go back, the rest of the
+// current byte is padding.
+function align(st: InflateStream): void {
+  settle(st);
+  st.bitbuf = 0;
+  st.bitcnt = 0;
+}
+// decode by the fast table: the bit buffer topped up to INFLATE_LOOKAHEAD_BITS (fewer at the end of the input), its next
+// INFLATE_FAST_BITS bits looked up at once. A code the table does not hold, or one longer than the bits there are, goes
+// to decode, which reads the same bits from the buffer first.
+function decodeFast(st: InflateStream, h: Huffman, table: FastTable): number {
+  const c = st.carry;
+  // Stryker disable next-line EqualityOperator: at 24 bits one more byte still fits 32, and a settle returns it unused
+  while (st.bitcnt < INFLATE_LOOKAHEAD_BITS && st.p < c.length) {
+    st.bitbuf |= (c[st.p] as number) << st.bitcnt;
+    st.p += 1;
+    st.bitcnt += BYTE_SHIFT;
+  }
+  const entry = table[st.bitbuf & FAST_MASK] as number;
+  const len = entry >>> INFLATE_FAST_SYMBOL_BITS;
+  // Stryker disable next-line ConditionalExpression,EqualityOperator: decode reads the same bits to the same symbol (the fast table is a shortcut; test/packstream.test.js holds it to puff's walk)
+  if (entry === 0 || len > st.bitcnt) return decode(st, h);
+  st.bitbuf >>>= len;
+  st.bitcnt -= len;
+  return entry & FAST_SYMBOL_MASK;
 }
 // A decode that did not give a symbol: the input ran out (rewind), or no code matched.
 const undecoded = (st: InflateStream, sym: number): Drive =>
@@ -300,6 +395,8 @@ function stepHeader(st: InflateStream): Drive {
   return CONT;
 }
 function finish(st: InflateStream): Drive {
+  // a raw stream ends inside its last byte: the bytes read past it are what follows the stream
+  settle(st);
   if (st.bound.kind === 'declared' && st.emitted !== st.bound.size) return refuse(st, plyError('pack_corrupt', `inflate: size ${st.emitted} != expected ${st.bound.size}`));
   if (consumedOf(st) > st.maxInput) return refuse(st, tooLong(st));
   st.phase = 'end';
@@ -313,8 +410,7 @@ function endBlock(st: InflateStream): Drive {
   switch (st.wrap.kind) {
     case 'zlib':
       // the trailer is byte-aligned: the rest of the last byte is padding
-      st.bitbuf = 0;
-      st.bitcnt = 0;
+      align(st);
       st.phase = 'adler';
       return CONT;
     case 'raw':
@@ -334,14 +430,15 @@ function stepBlock(st: InflateStream): Drive {
     case DEFLATE_STORED:
       st.stats.stored += 1;
       // a stored block starts on a byte boundary: the rest of this byte is discarded
-      st.bitbuf = 0;
-      st.bitcnt = 0;
+      align(st);
       st.phase = 'stored-header';
       return CONT;
     case DEFLATE_FIXED:
       st.stats.fixed += 1;
       st.lit = FIXED_LIT;
       st.dist = FIXED_DIST;
+      st.litFast = FIXED_LIT_FAST;
+      st.distFast = FIXED_DIST_FAST;
       st.phase = 'codes';
       return CONT;
     case DEFLATE_DYNAMIC:
@@ -404,6 +501,7 @@ function stepDynClen(st: InflateStream): Drive {
     st.lensI += 1;
   }
   st.lencode = huffBuild(st.lengths.subarray(0, DEFLATE_CODELEN_CODES));
+  st.lenFast = huffFast(st.lencode, st.litTab);
   st.lensI = 0;
   st.phase = 'dyn-lens';
   return CONT;
@@ -415,11 +513,13 @@ function stepDynLens(st: InflateStream): Drive {
     if (st.lengths[DEFLATE_EOB] === 0) return refuse(st, plyError('pack_corrupt', 'inflate: no end-of-block code'));
     st.lit = huffBuild(Array.from(st.lengths.subarray(0, st.nlen)));
     st.dist = huffBuild(Array.from(st.lengths.subarray(st.nlen, total)));
+    st.litFast = huffFast(st.lit, st.litTab);
+    st.distFast = huffFast(st.dist, st.distTab);
     st.phase = 'codes';
     return CONT;
   }
   mark(st);
-  const sym = decode(st, st.lencode);
+  const sym = decodeFast(st, st.lencode, st.lenFast);
   if (sym < 0) return undecoded(st, sym);
   if (sym < DEFLATE_REPEAT_PREV) {
     st.lengths[st.lensI] = sym;
@@ -445,49 +545,70 @@ function stepDynLens(st: InflateStream): Drive {
   st.lensI += rep;
   return CONT;
 }
-// The pending match first, then one literal, end of block, or length/distance pair (all of its bits or none).
+// The pending match's bytes that fit in the chunk, through the window (a match may overlap its own output: the bytes it
+// reads are the ones it has just written).
+function copyMatch(st: InflateStream): void {
+  const n = Math.min(st.copyLeft, INFLATE_CHUNK - st.outLen);
+  const win = st.window;
+  const out = st.out;
+  let w = st.w;
+  let from = (w - st.copyDist) & WINDOW_MASK;
+  let o = st.outLen;
+  for (let i = 0; i < n; i++) {
+    const b = win[from] as number;
+    win[w] = b;
+    out[o] = b;
+    o += 1;
+    w = (w + 1) & WINDOW_MASK;
+    from = (from + 1) & WINDOW_MASK;
+  }
+  st.w = w;
+  st.outLen = o;
+  st.emitted += n;
+  st.copyLeft -= n;
+}
+// Symbols until the chunk is full, the block ends, the input runs out or a refusal: each time round the pending match
+// first, then one literal, end of block, or length/distance pair (all of its bits or none).
 function stepCodes(st: InflateStream): Drive {
-  while (st.copyLeft > 0) {
+  for (;;) {
+    copyMatch(st);
+    // a literal needs one byte of chunk, a match's copy at least one: a full chunk goes out before the next symbol
     if (full(st)) return CHUNK;
-    emit(st, st.window[(st.w - st.copyDist) & WINDOW_MASK] as number);
-    st.copyLeft -= 1;
-  }
-  // a literal needs one byte of chunk: a full chunk goes out before the next symbol is read
-  if (full(st)) return CHUNK;
-  mark(st);
-  const sym = decode(st, st.lit);
-  if (sym < 0) return undecoded(st, sym);
-  if (sym < DEFLATE_LITERALS) {
-    const fits = room(st, 1);
+    mark(st);
+    const sym = decodeFast(st, st.lit, st.litFast);
+    if (sym < 0) return undecoded(st, sym);
+    if (sym < DEFLATE_LITERALS) {
+      const fits = room(st, 1);
+      if (!fits.ok) return refuse(st, fits.error);
+      emit(st, sym);
+      st.stats.literals += 1;
+      continue;
+    }
+    if (sym === DEFLATE_EOB) return endBlock(st);
+    const li = sym - DEFLATE_HLIT_BASE;
+    if (li >= DEFLATE_LENGTH_CODES) return refuse(st, plyError('pack_corrupt', 'inflate: bad length symbol'));
+    const lbits = LEXT[li] as number;
+    // Stryker disable next-line ConditionalExpression: short extra bits mean the input is spent, so the distance decode below finds no bits (decode answers need) and rewinds to the same mark
+    if (!fill(st, lbits)) return rewind(st);
+    const len = (LBASE[li] as number) + take(st, lbits);
+    const di = decodeFast(st, st.dist, st.distFast);
+    if (di < 0) return undecoded(st, di);
+    // a distance table is built from at most DEFLATE_HDIST_MAX lengths (FIXED_DIST from 30), so di indexes DBASE and DEXT
+    const dbits = DEXT[di] as number;
+    if (!fill(st, dbits)) return rewind(st);
+    const d = (DBASE[di] as number) + take(st, dbits);
+    if (d > st.emitted || d > st.windowSize) return refuse(st, plyError('pack_corrupt', 'inflate: distance too far back'));
+    const fits = room(st, len);
     if (!fits.ok) return refuse(st, fits.error);
-    emit(st, sym);
-    st.stats.literals += 1;
-    return CONT;
+    st.stats.matches += 1;
+    st.stats.matchBytes += len;
+    // Stryker disable next-line EqualityOperator: writing the same maximum when the distance is equal does not change the stat
+    if (d > st.stats.maxDist) st.stats.maxDist = d;
+    // Stryker disable next-line EqualityOperator: writing the same maximum when the length is equal does not change the stat
+    if (len > st.stats.maxLen) st.stats.maxLen = len;
+    st.copyLeft = len;
+    st.copyDist = d;
   }
-  if (sym === DEFLATE_EOB) return endBlock(st);
-  const li = sym - DEFLATE_HLIT_BASE;
-  if (li >= DEFLATE_LENGTH_CODES) return refuse(st, plyError('pack_corrupt', 'inflate: bad length symbol'));
-  const lbits = LEXT[li] as number;
-  if (!fill(st, lbits)) return rewind(st);
-  const len = (LBASE[li] as number) + take(st, lbits);
-  const di = decode(st, st.dist);
-  if (di < 0) return undecoded(st, di);
-  // a distance table is built from at most DEFLATE_HDIST_MAX lengths (FIXED_DIST from 30), so di indexes DBASE and DEXT
-  const dbits = DEXT[di] as number;
-  if (!fill(st, dbits)) return rewind(st);
-  const d = (DBASE[di] as number) + take(st, dbits);
-  if (d > st.emitted || d > st.windowSize) return refuse(st, plyError('pack_corrupt', 'inflate: distance too far back'));
-  const fits = room(st, len);
-  if (!fits.ok) return refuse(st, fits.error);
-  st.stats.matches += 1;
-  st.stats.matchBytes += len;
-  // Stryker disable next-line EqualityOperator: writing the same maximum when the distance is equal does not change the stat
-  if (d > st.stats.maxDist) st.stats.maxDist = d;
-  // Stryker disable next-line EqualityOperator: writing the same maximum when the length is equal does not change the stat
-  if (len > st.stats.maxLen) st.stats.maxLen = len;
-  st.copyLeft = len;
-  st.copyDist = d;
-  return CONT;
 }
 function stepAdler(st: InflateStream): Drive {
   if (st.carry.length - st.p < ADLER_BYTES) return NEED;
@@ -544,7 +665,12 @@ export function inflatePull(st: InflateStream): Result<InflatePiece, InflateErro
   for (;;) {
     if (st.halt.tag === 'failed') return err(st.halt.error);
     const d = dispatch(st);
-    if (d === CHUNK) return ok({ kind: 'chunk', bytes: takeChunk(st) });
+    // a full chunk leaves the carry holding the bytes not used: the caller may feed before the next need (see
+    // InflateStream); the end has settled (finish)
+    if (d === CHUNK) {
+      settle(st);
+      return ok({ kind: 'chunk', bytes: takeChunk(st) });
+    }
     if (d === END) return ok({ kind: 'end', consumed: consumedOf(st), stats: { ...st.stats } });
     if (d === NEED) {
       if (st.outLen > 0) return ok({ kind: 'chunk', bytes: takeChunk(st) });
@@ -593,7 +719,10 @@ function blank(): InflateStream {
     window: new Uint8Array(INFLATE_WINDOW), w: 0, out: new Uint8Array(INFLATE_CHUNK), outLen: 0, summed: 0, adler: 1, emitted: 0,
     // Stryker disable next-line all: placeholders, see above (a block header sets `final` and the counts before they are read)
     stats: freshStats(), final: false, storedLeft: 0, nlen: 0, ndist: 0, ncode: 0, lensI: 0,
-    lengths: new Uint8Array(DEFLATE_HLIT_MAX + DEFLATE_HDIST_MAX), lencode: FIXED_LIT, lit: FIXED_LIT, dist: FIXED_DIST, copyLeft: 0, copyDist: 0,
+    lengths: new Uint8Array(DEFLATE_HLIT_MAX + DEFLATE_HDIST_MAX), lencode: FIXED_LIT, lit: FIXED_LIT, dist: FIXED_DIST,
+    // Stryker disable next-line all: placeholders, see above (a block header sets the tables before they are read)
+    lenFast: FIXED_LIT_FAST, litFast: FIXED_LIT_FAST, distFast: FIXED_DIST_FAST,
+    litTab: new Uint16Array(FAST_SIZE), distTab: new Uint16Array(FAST_SIZE), copyLeft: 0, copyDist: 0,
   };
 }
 // Start a member on an existing record: the window and chunk buffers are kept (a pack scan inflates one member per
