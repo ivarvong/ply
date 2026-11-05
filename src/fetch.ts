@@ -27,6 +27,7 @@ import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, UI
 import { DEFAULT_LIMITS, limitExceeded, readLimit } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
+import { parseOid, type Oid } from './oid.js';
 import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, probing, spanned } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
@@ -65,6 +66,24 @@ function wireList(values: readonly string[], what: string): Result<WireField[], 
   return ok(out);
 }
 
+// A want is an object id: upload-pack.c parse_want reads it with get_oid_hex and dies "expected to get oid, not 'want …'"
+// for anything else (a ref name, an abbreviation, an empty want: ref-in-want is its own `want-ref` line, which ply does
+// not send). get_oid_hex reads either case (hexval), so an upper-case id is the same object to git: it is lowercased,
+// as ls-refs lowercases a listed oid, and parsed once. git reads only the first OID_HEX_CHARS characters and ignores
+// the rest of the line; ply refuses text after the id instead of sending it (test/want-oracle.test.js). A NUL, CR or
+// LF is the wire refusal it always was.
+function wantList(values: readonly string[]): Result<Oid[], BadRequest> {
+  const out: Oid[] = [];
+  for (const v of values) {
+    const field = validateWire(v, 'want');
+    if (!field.ok) return field;
+    const id = parseOid(field.value.toLowerCase());
+    if (!id.ok) return fail('bad_request', `invalid want: must be an object id (${OID_HEX_CHARS} hex digits)`, { what: 'want' });
+    out.push(id.value);
+  }
+  return ok(out);
+}
+
 // The arguments of one v2 fetch command. An empty filter, a zero deepen and a zero deepen-since are absent.
 export type FetchConfig = {
   readonly haves: readonly string[];
@@ -87,10 +106,10 @@ const fetchDefaults = (): FetchConfig => ({
   includeTag: false, noProgress: true, done: true, shallows: [], bypassCache: false,
 });
 
-// A fetch command parsed once (fetchRequest): every token is one wire field and every count a checked integer, so
-// encoding it (fetchRequestBody) checks nothing. No filter is null, and no deepen or deepen-since is 0.
+// A fetch command parsed once (fetchRequest): every want an object id, every other token one wire field and every count
+// a checked integer, so encoding it (fetchRequestBody) checks nothing. No filter is null, and no deepen or deepen-since is 0.
 export type FetchRequest = {
-  readonly wants: readonly WireField[];
+  readonly wants: readonly Oid[];
   readonly haves: readonly WireField[];
   readonly shallows: readonly WireField[];
   readonly deepenNot: readonly WireField[];
@@ -110,7 +129,7 @@ export type FetchRequest = {
 // oxlint-disable-next-line complexity -- one check per fetch argument
 export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> {
   const { haves, filter, deepen, deepenSince, deepenNot, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done, shallows } = withDefaults(opts, fetchDefaults());
-  const w = wireList(opts.wants, 'want');
+  const w = wantList(opts.wants);
   if (!w.ok) return w;
   const h = wireList(haves, 'have');
   if (!h.ok) return h;
@@ -488,7 +507,6 @@ export const spAttrs = (st: SpState, prefix = 'git.pack'): Attrs => ({ [`${prefi
 // want its whole subtree — so it is parsed and delta-resolved (packresolve.js), the wanted object is taken by its
 // computed hash, and the other commits and trees are harvested into `t.objects` (bounded by limits.maxHarvestBytes):
 // the next tree:0 fetch of any of them is answered locally. Spans: `git.fetch.filter.fallback`, `git.fetch.wide.*`.
-const OID_RE = new RegExp(`^[0-9a-f]{${OID_HEX_CHARS}}$`);
 // The phrases a server uses when it refuses a fetch filter. Cloudflare Artifacts (observed 2026-10-23) is HTTP 400
 // plus the first one. One regex, shared: ply-web used to keep a copy of it next to the cache.
 const FILTER_REFUSAL = /only blob:none is supported|unsupported (git )?fetch filter|filter .* not (supported|allowed)/i;
@@ -620,11 +638,11 @@ async function onceMore<T>(once: (bust: boolean) => Promise<Result<T, PlyError>>
 export type ObjectWantConfig = { readonly filter: string; readonly deepen: number; readonly expectType: number | null };
 export type ObjectWant = { readonly oid: string } & Input<ObjectWantConfig>;
 const objectWantDefaults = (): ObjectWantConfig => ({ filter: 'tree:0', deepen: 0, expectType: null });
-type FetchedBase = { readonly type: number; readonly data: Uint8Array; readonly oid: string; readonly size: number; readonly bust: boolean };
+type FetchedBase = { readonly type: number; readonly data: Uint8Array; readonly oid: Oid; readonly size: number; readonly bust: boolean };
 // A fetched object; `harvested` when the transport's harvest answered it, `wide` when a blob:none pack did.
 export type FetchedObject = FetchedBase | (FetchedBase & { readonly harvested: true }) | (FetchedBase & { readonly wide: true });
 
-type Single = { readonly oid: string; readonly filter: string; readonly deepen: number; readonly expectType: number | null };
+type Single = { readonly oid: Oid; readonly filter: string; readonly deepen: number; readonly expectType: number | null };
 // The object count in a pack header, or null when the header is not a version-2 pack (the single-object parser then
 // reports its own error). A commit want may be a tag plus the commit it peels to: more than one object, and still the
 // wanted object's type.
@@ -639,7 +657,7 @@ function declaredPackCount(pack: Uint8Array): number | null {
 // A multi-object answer to a commit want: the wanted object, once its type is a commit. A tree, blob, or tag is
 // not_found from refuseNonCommit. Null means the single-object parser should read the bytes (one object, a short
 // header, or a pack that does not hold the want).
-function commitFromPack(t: Transport, oid: string, pack: Uint8Array, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
+function commitFromPack(t: Transport, oid: Oid, pack: Uint8Array, span: Span, bust: boolean): Result<FetchedObject | null, PlyError> {
   const count = declaredPackCount(pack);
   if (count === null || count === 1) return ok(null);
   const opts = packParseOpts(t.limits);
@@ -811,7 +829,7 @@ export type WideFilter = 'blob:none' | '';
 // The filter a wide fetch sent, as spans and messages name it.
 export const packName = (filter: WideFilter): string => (filter === '' ? 'unfiltered' : filter);
 export const fallbackName = (filter: WideFilter): string => (filter === '' ? 'none' : filter);
-type Wide = { readonly oid: string; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean; readonly filter: WideFilter; readonly requested: string };
+type Wide = { readonly oid: Oid; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean; readonly filter: WideFilter; readonly requested: string };
 // The wanted object out of the wide pack, its extras checked (checkWide) and harvested.
 function wideObject(t: Transport, pack: Uint8Array, want: Wide, span: Span, bust: boolean): Result<FetchedObject, PlyError> {
   const { oid, expectType } = want;
@@ -855,14 +873,17 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
   return onceMore(once);
 }
 
-// One object by oid: a bad oid, a fetch failure, a verification failure are the Err.
-// oxlint-disable-next-line typescript/promise-function-async -- probing's promise (or the harvest's answer), passed through
-export function fetchObject(t: Transport, want: ObjectWant): Promise<Result<FetchedObject, PlyError>> {
-  const { oid } = want;
-  // A JS caller may pass anything for the oid: it is checked as String() renders it (none as ''), and quoted the same way.
+// The caller's oid, parsed once: a JS caller may pass anything, so it is read as String() renders it (none as ''), and
+// quoted the same way. Not 40 lowercase hex is `fetchObject: oid must be 40-hex` (bad_request, no `what`, as always).
+export function objectId(oid: unknown): Result<Oid, BadRequest> {
   // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- see above
-  if (!OID_RE.test(String(getOrElse(fromNullish<unknown>(oid), '')))) return Promise.resolve(fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`));
-  const { filter, deepen, expectType } = withDefaults(want, objectWantDefaults());
+  const id = parseOid(String(getOrElse(fromNullish<unknown>(oid), '')));
+  return id.ok ? id : fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`);
+}
+// fetchObject of a parsed id: ply's own callers, which hold an Oid, start here.
+// oxlint-disable-next-line typescript/promise-function-async -- probing's promise (or the harvest's answer), passed through
+export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig> = {}): Promise<Result<FetchedObject, PlyError>> {
+  const { filter, deepen, expectType } = withDefaults(options, objectWantDefaults());
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
   if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true }));
@@ -883,4 +904,10 @@ export function fetchObject(t: Transport, want: ObjectWant): Promise<Result<Fetc
     }
     return (await filterUnadvertised(t, single.error)) ? wide('', true) : single;
   });
+}
+// One object by oid: a bad oid, a fetch failure, a verification failure are the Err.
+// oxlint-disable-next-line typescript/promise-function-async -- objectAt's promise, passed through
+export function fetchObject(t: Transport, want: ObjectWant): Promise<Result<FetchedObject, PlyError>> {
+  const id = objectId(want.oid);
+  return id.ok ? objectAt(t, id.value, want) : Promise.resolve(id);
 }

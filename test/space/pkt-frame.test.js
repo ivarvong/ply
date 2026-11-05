@@ -315,7 +315,8 @@ test('writer: a field that frames past LARGE_PACKET_MAX is bad_request before an
     // field -> (payload length) -> [the call, the payload prefix the field adds]
     'push option': n => ({ call: t => pushWithOptions(t, { commands: [{ ref: 'refs/heads/r0', oldOid: OID, newOid: ZERO }], pushOptions: ['o'.repeat(n - 1)], sideband: false }), service: 'git-receive-pack', adv: true }),
     'ls-refs prefix': n => ({ call: t => lsRefs(t, ['p'.repeat(n - 'ref-prefix \n'.length)]), service: 'git-upload-pack' }),
-    want: n => ({ call: () => fetchBody({ wants: ['w'.repeat(n - 'want \n'.length)] }), pure: true }),
+    // a want is an object id (40 hex digits, #156): it cannot reach the bound. A have is still one wire field.
+    have: n => ({ call: () => fetchBody({ wants: [OID], haves: ['h'.repeat(n - 'have \n'.length)] }), pure: true }),
     'deepen-not': n => ({ call: () => fetchBody({ wants: [OID], deepenNot: ['d'.repeat(n - 'deepen-not \n'.length)] }), pure: true }),
     filter: n => ({ call: () => fetchBody({ wants: [OID], filter: 'f'.repeat(n - 'filter \n'.length) }), pure: true }),
     'ls-refs body': n => ({ call: () => lsRefsBody(['p'.repeat(n - 'ref-prefix \n'.length)]), pure: true }),

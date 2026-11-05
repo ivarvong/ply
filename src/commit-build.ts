@@ -6,6 +6,7 @@ import type { TreeEntry } from './objects.js';
 import { spliceDelta } from './pack.js';
 import type { PackInput } from './pack.js';
 import { fromHex } from './sha1.js';
+import { parseOid, type Oid } from './oid.js';
 import type { ValidatedIdent } from './validate.js';
 import { validateIdent, isValidatedIdent } from './validate.js';
 import type { ErrorOf } from './errors.js';
@@ -40,12 +41,12 @@ function people(author: AuthorLike, committer: AuthorLike | null, time: number):
 export type Level = { readonly treeOid: string; readonly data: Uint8Array; readonly entry: TreeEntry };
 export type BlobEditLite = { readonly oldOid: string; readonly newOid: string; readonly newLen: number; readonly delta: Uint8Array };
 
-export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: string; readonly newData: Uint8Array };
+export type NewTree = { readonly type: number; readonly data: Uint8Array; readonly baseOid: string; readonly newOid: Oid; readonly newData: Uint8Array };
 export type Built = {
   readonly trees: readonly NewTree[];
-  readonly newTree: string;
+  readonly newTree: Oid;
   readonly commitData: Uint8Array;
-  readonly newCommit: string;
+  readonly newCommit: Oid;
   readonly objects: readonly PackInput[];
 };
 // The commit's people and words. `committer` null (or left out) is the author.
@@ -57,7 +58,10 @@ export function buildCommitObjects({ levels, blob, oldCommit, author, committer 
   readonly oldCommit: string;
 }): Result<Built, BadRequest> {
   const trees: NewTree[] = [];
-  let child = blob.newOid;
+  // the new blob's id is parsed once, here: every tree above it is spliced from it
+  const newBlob = parseOid(blob.newOid);
+  if (!newBlob.ok) return newBlob;
+  let child: Oid = newBlob.value;
   for (const { treeOid: oldOid, data, entry } of levels.toReversed()) {
     const newData: Uint8Array = treeReplaceOid(data, entry, child);
     const newOid = hashObject('tree', newData);

@@ -30,6 +30,8 @@ const MUTATION_FILES = [
   'test/option.test.js',
   'test/version-refname.test.js',
   'test/uprequest.test.js',
+  'test/parse-once.test.js',
+  'test/want-oracle.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

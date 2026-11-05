@@ -32,8 +32,9 @@ import { lsRefs } from './lsrefs.js';
 import { fetchObject } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
+import { parseOid, type Oid } from './oid.js';
 import { operation, verifyRef } from './operation.js';
-import { parseTree, encodeTree, parseCommit, encodeCommit, hashObject, ident, TYPE } from './objects.js';
+import { parseTree, encodeEntries, parseCommit, encodeCommit, hashObject, ident, TYPE, type Mode } from './objects.js';
 import { validateRef, validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
 import { mergeLines } from './linemerge.js';
@@ -47,10 +48,10 @@ type ConflictDetail = Extra & { readonly conflicts: readonly string[] };
 
 // The shapes this module reads from other modules (objects, transport, operation, push, ls-refs); their own modules
 // own the full types.
-export type TreeEntry = { readonly mode: string; readonly name: string; readonly oid: string };
+export type TreeEntry = { readonly mode: Mode; readonly name: string; readonly oid: Oid };
 export type Commit = {
-  readonly tree: string;
-  readonly parents: readonly string[];
+  readonly tree: Oid;
+  readonly parents: readonly Oid[];
   readonly author: string;
   readonly committer: string;
   readonly encoding: string | null;
@@ -77,7 +78,7 @@ export type PushObject = { readonly type: number; readonly data: Uint8Array };
 
 
 const EMPTY: readonly TreeEntry[] = [];
-const NO_PARENTS: readonly string[] = [];
+const NO_PARENTS: readonly never[] = [];
 const isTreeEntry = (e: TreeEntry): boolean => e.mode === '40000';
 // An entry absent on a side is None.
 type Entry = Option<TreeEntry>;
@@ -159,7 +160,7 @@ export function threeWay(base: readonly TreeEntry[], ours: readonly TreeEntry[],
 
 // Pure: git's mode merge for a regular file both sides touched: equal → that; one side unchanged → the other's; null:
 // both changed it, differently (a conflict).
-export const mergeMode = (b: string, o: string, t: string): string | null => {
+export const mergeMode = <M extends string>(b: M, o: M, t: M): M | null => {
   if (o === t || b === t) return o;
   if (b === o) return t;
   return null;
@@ -179,19 +180,21 @@ export const mergeMode = (b: string, o: string, t: string): string | null => {
 //     would walk to the root or the cap (limit_exceeded where git answers two bases).
 // A single best base over a graph whose only cuts are settled is final, and the rule says so without a special case:
 // every settled commit is the base or below it, so the one base reaches every settled cut.
-export type Parents = { readonly parents: readonly string[] };
+// The graph is over node names K: mergeBase walks Oids (K = Oid, so every base it answers is one); a caller's own graph
+// may name its nodes with any strings, since nothing here reads a name but to compare it.
+export type Parents<K extends string = string> = { readonly parents: readonly K[] };
 // a known commit's parents; a cut has none known
-const parentsIn = (commits: ReadonlyMap<string, Parents>, c: string): readonly string[] => getOrElse(mapOption(mapGet(commits, c), x => x.parents), NO_PARENTS);
-export function bestBases(commits: ReadonlyMap<string, Parents>, a: string, b: string): { best: string[]; truncated: boolean } {
+const parentsIn = <K extends string>(commits: ReadonlyMap<K, Parents<K>>, c: K): readonly K[] => getOrElse(mapOption(mapGet(commits, c), x => x.parents), NO_PARENTS);
+export function bestBases<K extends string>(commits: ReadonlyMap<K, Parents<K>>, a: K, b: K): { best: K[]; truncated: boolean } {
   // the commits reachable from `starts`, not walking into `stop` (a commit not in the map is reached, not walked)
-  const closure = (starts: readonly string[], stop: ReadonlySet<string> = new Set()): Set<string> => { const seen = new Set<string>(); const st = [...starts]; for (let c = popLast(st); c.tag === 'some'; c = popLast(st)) { if (seen.has(c.value) || stop.has(c.value)) continue; seen.add(c.value); for (const p of parentsIn(commits, c.value)) st.push(p); } return seen; };
+  const closure = (starts: readonly K[], stop: ReadonlySet<K> = new Set()): Set<K> => { const seen = new Set<K>(); const st = [...starts]; for (let c = popLast(st); c.tag === 'some'; c = popLast(st)) { if (seen.has(c.value) || stop.has(c.value)) continue; seen.add(c.value); for (const p of parentsIn(commits, c.value)) st.push(p); } return seen; };
   const A = closure([a]);
   const B = closure([b]);
   const common = [...A].filter(c => B.has(c));
   const below = closure(common.flatMap(c => parentsIn(commits, c))); // proper ancestors of common ancestors
   const best = common.filter(c => !below.has(c)).toSorted();
   const settled = new Set([...common, ...below]);
-  const cut = (c: string): boolean => !commits.has(c);
+  const cut = (c: K): boolean => !commits.has(c);
   // a cut reachable from a or b outside the settled region, or a settled cut some best base reaches and another does not
   const between = (): boolean => { const reach = best.map(c => closure([c])); return [...settled].some(k => cut(k) && reach.some(r => !r.has(k))); };
   return { best, truncated: [...closure([a, b], settled)].some(c => cut(c)) || between() };
@@ -203,21 +206,25 @@ export function bestBases(commits: ReadonlyMap<string, Parents>, a: string, b: s
 // hash-verified, so ancestry cannot be forged, only withheld; a server that withholds it without saying so would make
 // bestBases answer over a cut graph that looks whole (#18), so that is `pack_corrupt` here. git's upload-pack keeps the
 // contract (the boundary of the depth and of a shallow server repository are both reported).
-export async function ancestors(t: Transport, head: string, depth: number): Promise<Result<Map<string, Commit>, PlyError>> {
+// The answer is keyed by the ids the walk reached (head and the parents named in parsed commits), so every key is an Oid
+// parsed once (by parseOid and parseCommit), not the pack's own keys.
+export async function ancestors(t: Transport, head: Oid, depth: number): Promise<Result<Map<Oid, Commit>, PlyError>> {
   const got = await fetchPackTree0(t, { wants: [head], filter: 'tree:0', deepen: depth });
   if (!got.ok) return got;
   const r = got.value;
-  const commits = new Map<string, Commit>();
+  const sent = new Map<string, Commit>();
   const objects = fromNullish(r.objects);
-  if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) { const c = parseCommit(o.data, t.limits); if (!c.ok) return c; commits.set(oid, c.value); }
-  if (!commits.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
+  if (objects.tag === 'some') for (const [oid, o] of objects.value) if (o.type === TYPE.COMMIT) { const c = parseCommit(o.data, t.limits); if (!c.ok) return c; sent.set(oid, c.value); }
+  if (!sent.has(head)) return fail('pack_corrupt', `commit ${head} not in the pack that wanted it`);
+  const commits = new Map<Oid, Commit>();
   const seen = new Set([head]);
   // seen grows while it is walked: every commit reachable from head through the pack
-  for (const c of seen) for (const p of parentsIn(commits, c)) seen.add(p);
+  for (const c of seen) { const known = mapGet(sent, c); if (known.tag === 'some') { commits.set(c, known.value); for (const p of known.value.parents) seen.add(p); } }
   const shallow = new Set(r.shallow);
-  for (const [oid, c] of commits) {
-    if (!seen.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
-    const missing = shallow.has(oid) ? none : fromNullable(c.parents.find(p => !commits.has(p)));
+  const reached = new Set<string>(commits.keys());
+  for (const [oid, c] of sent) {
+    if (!reached.has(oid)) return fail('pack_corrupt', `commit ${oid} sent but not an ancestor of ${head}`);
+    const missing = shallow.has(oid) ? none : fromNullable(c.parents.find(p => !sent.has(p)));
     if (missing.tag === 'some') return fail('pack_corrupt', `parent ${missing.value} of ${oid} withheld and ${oid} not reported shallow`);
   }
   return ok(commits);
@@ -228,17 +235,17 @@ export async function ancestors(t: Transport, head: string, depth: number): Prom
 // 64 alone). A graph that is not truncated is the verdict: one base, several (criss-cross), or none (unrelated). A
 // truncated graph at the cap is `capped`: limit_exceeded, never an answer over a cut graph. `searchStep` is pure; the
 // driver in mergeBase is the only part that fetches.
-export type Search =
+export type Search<K extends string = string> =
   | { readonly tag: 'searching'; readonly depth: number }
-  | { readonly tag: 'found'; readonly depth: number; readonly base: string; readonly bases: string[] }
-  | { readonly tag: 'criss-cross'; readonly depth: number; readonly bases: string[] }
-  | { readonly tag: 'unrelated'; readonly depth: number; readonly bases: string[] }
+  | { readonly tag: 'found'; readonly depth: number; readonly base: K; readonly bases: K[] }
+  | { readonly tag: 'criss-cross'; readonly depth: number; readonly bases: K[] }
+  | { readonly tag: 'unrelated'; readonly depth: number; readonly bases: K[] }
   | { readonly tag: 'capped'; readonly depth: number };
-export type Verdict = Extract<Search, { readonly tag: 'found' | 'criss-cross' | 'unrelated' }>;
+export type Verdict<K extends string = string> = Extract<Search<K>, { readonly tag: 'found' | 'criss-cross' | 'unrelated' }>;
 // `depth` is the window searched (commits a side, the tip at 1); `cap` counts whole commits (mergeBase rounds a limit
 // down); bases is git merge-base --all on every verdict. The first state is searching(min(8, cap)); a cap under 1 is
 // capped before any search.
-export function searchStep(depth: number, cap: number, commits: ReadonlyMap<string, Parents>, a: string, b: string): Search {
+export function searchStep<K extends string>(depth: number, cap: number, commits: ReadonlyMap<K, Parents<K>>, a: K, b: K): Search<K> {
   const { best, truncated } = bestBases(commits, a, b);
   // Both sides complete and still truncated cannot happen (ancestors refuses a parent withheld without a shallow line);
   // it used to be accepted (#18).
@@ -249,20 +256,21 @@ export function searchStep(depth: number, cap: number, commits: ReadonlyMap<stri
 }
 
 // base is the verdict's one base, or null
-export type MergeBase = { readonly base: string | null; readonly bases: string[]; readonly depth: number; readonly commits: Map<string, Commit>; readonly verdict: Verdict };
+export type MergeBase = { readonly base: Oid | null; readonly bases: Oid[]; readonly depth: number; readonly commits: Map<Oid, Commit>; readonly verdict: Verdict<Oid> };
 // maxDepth: the search cap in commits a side; null (the default) reads the transport's limits.maxMergeDepth.
 export type MergeBaseConfig = { readonly maxDepth: number | null };
 export type MergeBaseOptions = Input<MergeBaseConfig>;
-export async function mergeBase(t: Transport, a: string, b: string, options: MergeBaseOptions = {}): Promise<Result<MergeBase, PlyError>> {
+// mergeBase of parsed ids: mergeBranch and rebaseBranch, which hold Oids, start here.
+export async function mergeBaseOf(t: Transport, a: Oid, b: Oid, options: MergeBaseOptions = {}): Promise<Result<MergeBase, PlyError>> {
   const { maxDepth } = withDefaults<MergeBaseConfig>(options, { maxDepth: null });
   const capped = maxDepth === null ? readLimit(t.limits, 'maxMergeDepth') : checkLimit(maxDepth, 'maxMergeDepth');
   if (!capped.ok) return capped;
   const cap = capped.value;
   const top = Math.floor(cap);
-  let s: Search = top < 1 ? { tag: 'capped', depth: 0 } : { tag: 'searching', depth: Math.min(8, top) };
-  let commits = new Map<string, Commit>();
+  let s: Search<Oid> = top < 1 ? { tag: 'capped', depth: 0 } : { tag: 'searching', depth: Math.min(8, top) };
+  let commits = new Map<Oid, Commit>();
   while (s.tag === 'searching') {
-    const { depth } = s;
+    const depth: number = s.depth;
     // oxlint-disable-next-line eslint/no-await-in-loop -- each round deepens from what the last one found
     const [A, B] = await Promise.all([ancestors(t, a, depth), ancestors(t, b, depth)]);
     if (!A.ok) return A;
@@ -281,6 +289,15 @@ export async function mergeBase(t: Transport, a: string, b: string, options: Mer
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(s);
+}
+
+// The caller's two ids are parsed once, here (parseOid: bad_request, what `oid`), before any fetch.
+export async function mergeBase(t: Transport, a: string, b: string, options: MergeBaseOptions = {}): Promise<Result<MergeBase, PlyError>> {
+  const ia = parseOid(a);
+  if (!ia.ok) return ia;
+  const ib = parseOid(b);
+  if (!ib.ok) return ib;
+  return mergeBaseOf(t, ia.value, ib.value, options);
 }
 
 // Effect: a tree's entries, from the oid → bytes cache or fetched into it (`onFetch` counts a fetch)
@@ -336,12 +353,12 @@ export type ConflictReason =
   | 'possible directory rename (added inside a directory the other side removed)'
   | 'possible rename source (deleted on both sides while paths were added; ply does not detect renames)'
   | 'possible rename target (added while the merge has a deletion conflict)';
-export type BlobSpec = { readonly base: string; readonly ours: string; readonly theirs: string; readonly path: string; readonly driverFor: DriverFor | null };
+export type BlobSpec = { readonly base: Oid; readonly ours: Oid; readonly theirs: Oid; readonly path: string; readonly driverFor: DriverFor | null };
 // A both-sides-changed file's content: one side's blob as it is (already on the server), a new merged blob (to push),
 // or a conflict with its reason.
 export type BlobMerge =
-  | { readonly kind: 'existing'; readonly oid: string }
-  | { readonly kind: 'merged'; readonly oid: string; readonly data: Uint8Array }
+  | { readonly kind: 'existing'; readonly oid: Oid }
+  | { readonly kind: 'merged'; readonly oid: Oid; readonly data: Uint8Array }
   | { readonly kind: 'conflict'; readonly reason: ContentReason };
 export type MergeStats = { merged: number; undecided: number; unioned: number; attrBinary: number };
 export type MergeBlob = ((spec: BlobSpec) => Promise<Result<BlobMerge, PlyError>>) & { stats: MergeStats };
@@ -376,7 +393,7 @@ export type MergeAcc = {
   deletedOne: boolean;
 };
 // oid: the merged tree, or null when the merge conflicts or the tree is empty
-export type MergeTreesResult = MergeAcc & { readonly oid: string | null };
+export type MergeTreesResult = MergeAcc & { readonly oid: Oid | null };
 const mergeTreesDefaults = (): MergeTreesConfig => ({ base: null, ours: null, theirs: null, prefix: '', removed: null, mergeBlob: null, driverFor: null });
 
 // Effect: merge three trees (by oid, any may be null = empty) into a new tree, returning its oid, the new objects to push
@@ -439,10 +456,10 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
     if (sub.value.oid !== null) entries.push({ mode: '40000', name, oid: sub.value.oid }); // an empty merged subtree drops the directory, as git does
   }
   if (top) for (const p of out.dirAdds) if (!(p in out.reasons)) conflict(p, 'possible directory rename (added inside a directory the other side removed)');
-  const encoded = encodeTree(entries);
+  const encoded = encodeEntries(entries);
   if (!encoded.ok) return encoded;
   const data: Uint8Array = encoded.value;
-  const oid: string = hashObject('tree', data);
+  const oid: Oid = hashObject('tree', data);
   // deletedOne is set only beside a conflict
   if (top && (out.deletedBoth.length > 0 || out.deletedOne)) {
     // Every path either side added, across the whole tree — the walk above skips directories only one side changed, and a
@@ -586,7 +603,7 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
       return refused(m.reason === 'content' ? 'content (both sides changed the same lines)' : m.reason);
     }
     stats.merged++; if ('unioned' in m) stats.unioned++;
-    const oid: string = hashObject('blob', m.data); made.set(oid, m.data);
+    const oid: Oid = hashObject('blob', m.data); made.set(oid, m.data);
     return ok({ kind: 'merged', oid, data: m.data });
   };
   return ok(Object.assign(f, { stats }));
@@ -616,15 +633,17 @@ export type Trees = { readonly base: string | null; readonly ours: string | null
 export const NO_TREES: Trees = { base: null, ours: null, theirs: null };
 const refMiss = (ref: string): Miss => ({ kind: 'ref', ref, candidates: [ref] });
 // a ref's oid in an ls-refs answer
-export const refOid = (refs: LsRefsResult['refs'], ref: string): Option<string> => mapOption(mapGet(refs, ref), r => r.oid);
+export const refOid = (refs: LsRefsResult['refs'], ref: string): Option<Oid> => mapOption(mapGet(refs, ref), r => r.oid);
 // The tree whose .gitattributes apply; a JS caller's missing tree is null.
 export async function attributeTree(t: Transport, attributes: AttributeSource, given: Input<Trees>): Promise<Result<string | null, PlyError>> {
   const trees = withDefaults(given, { ...NO_TREES });
   if (attributes === null) return ok(null);
   if (attributes === 'ours' || attributes === 'theirs' || attributes === 'base') return ok(trees[attributes]);
-  // validateAttributes ran first (mergeBranch, rebaseBranch, pickCommit): a ref name or an oid
-  let oid = attributes;
-  if (!isOid(attributes)) {
+  // validateAttributes ran first (mergeBranch, rebaseBranch, pickCommit): a ref name or an oid, parsed once here
+  const id = parseOid(attributes);
+  let oid: Oid;
+  if (id.ok) oid = id.value;
+  else {
     const named = validateRef(attributes);
     if (!named.ok) return named;
     const listed = await lsRefs(t, [attributes]); if (!listed.ok) return listed;
@@ -651,11 +670,11 @@ export async function deleteRef(t: Transport, { ref, oid }: { readonly ref: stri
 // virtual one, recursively; a single base can give a clean result that differs from git's, so we refuse rather than
 // guess), as are unrelated histories and, when only a fast-forward is allowed, a merge commit.
 type Landing =
-  | { readonly kind: 'up_to_date'; readonly base: string }
-  | { readonly kind: 'fast_forward'; readonly base: string }
-  | { readonly kind: 'three_way'; readonly base: string };
+  | { readonly kind: 'up_to_date'; readonly base: Oid }
+  | { readonly kind: 'fast_forward'; readonly base: Oid }
+  | { readonly kind: 'three_way'; readonly base: Oid };
 type LandingFlags = { readonly ref: string; readonly from: string; readonly fastForwardOnly: boolean; readonly noFastForward: boolean };
-function decideMerge(verdict: Verdict, ours: string, theirs: string, { ref, from, fastForwardOnly, noFastForward }: LandingFlags): Result<Landing, PlyError> {
+function decideMerge(verdict: Verdict<Oid>, ours: Oid, theirs: Oid, { ref, from, fastForwardOnly, noFastForward }: LandingFlags): Result<Landing, PlyError> {
   switch (verdict.tag) {
     case 'criss-cross': return fail('merge_conflict', `${ref} and ${from} have ${verdict.bases.length} merge bases (criss-cross history); ply does not build git's virtual merge base`, { conflicts: [], reasons: noProtoReasons(), bases: verdict.bases } as ConflictDetail);
     case 'unrelated': return fail('unrelated_histories', `${ref} and ${from} share no common ancestor within the search depth`);
@@ -760,7 +779,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     root.set({ 'git.merge.ours': ours, 'git.merge.theirs': theirs });
     const upToDate = (base: string): Ok<MergeOutcome> => outcome('up_to_date', { outcome: 'up_to_date', ref, oid: ours, ours, theirs, base });
     if (ours === theirs) return upToDate(ours);
-    const found = await mergeBase(t, ours, theirs);
+    const found = await mergeBaseOf(t, ours, theirs);
     if (!found.ok) return found;
     const { base: one, bases, depth, verdict } = found.value;
     root.set({ 'git.merge.base': one === null ? '' : one, 'git.merge.bases': bases.length, 'git.merge.base.depth': depth });
@@ -790,7 +809,7 @@ export async function mergeBranch(url: string, spec: MergeSpec, options: MergeOp
     const newTrees = merged.objects.filter(o => o.type === TYPE.TREE).length;
     root.set({ 'git.merge.content.merged': merged.contentMerged, 'git.merge.content.undecided': mergeBlob.stats.undecided, 'git.merge.content.unioned': mergeBlob.stats.unioned, 'git.merge.content.attr_binary': mergeBlob.stats.attrBinary, 'git.merge.trees.fetched': merged.fetched, 'git.merge.trees.new': newTrees, 'git.merge.conflicts': merged.conflicts.slice(0, 64), 'git.merge.conflicts.count': merged.conflicts.length });
     if (merged.conflicts.length > 0) return fail('merge_conflict', `conflicts: ${merged.conflicts.slice(0, 8).map(p => `${p} (${merged.reasons[p]})`).join(', ')}${merged.conflicts.length > 8 ? '…' : ''}`, { conflicts: merged.conflicts, reasons: merged.reasons } as ConflictDetail);
-    const emptyTree = encodeTree([]); if (!emptyTree.ok) return emptyTree;
+    const emptyTree = encodeEntries([]); if (!emptyTree.ok) return emptyTree;
     const treeOid: string = merged.oid === null ? hashObject('tree', emptyTree.value) : merged.oid;
     if (person.tag === 'none' || committerPerson.tag === 'none') return fail('bad_request', 'author is required for a merge commit');
     const authorLine = ident(person.value); if (!authorLine.ok) return authorLine;
