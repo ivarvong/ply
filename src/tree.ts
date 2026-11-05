@@ -109,7 +109,8 @@ export function fileEntries(files: unknown, limits: Limits = DEFAULT_LIMITS): Re
     // a mode left out is a file's; any other value (null included) is the caller's, and checked
     const mode: unknown = getOrElse<unknown>(fromNullable(spec.mode), MODE_BLOB);
     if (mode === MODE_COMMIT) {
-      const oid = parseOid(getOrElse(fromNullish(spec.oid), ''));
+      // a missing oid is no id either
+      const oid = parseOid(spec.oid);
       if (!oid.ok || fromNullable(spec.data).tag === 'some') return fail('bad_request', `${path}: a gitlink (160000) takes a 40-hex oid and no data`, { what: 'gitlink', path });
       const charged = charge(0);
       if (!charged.ok) return charged;

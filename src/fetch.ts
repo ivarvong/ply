@@ -873,12 +873,13 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
   return onceMore(once);
 }
 
-// The caller's oid, parsed once: a JS caller may pass anything, so it is read as String() renders it (none as ''), and
-// quoted the same way. Not 40 lowercase hex is `fetchObject: oid must be 40-hex` (bad_request, no `what`, as always).
+// The caller's oid, parsed once: a JS caller may pass anything, so it is read as String() renders it (a missing one
+// renders as no id) and quoted the same way. Not 40 lowercase hex is `fetchObject: oid must be 40-hex` (bad_request, no
+// `what`, as always).
 export function objectId(oid: unknown): Result<Oid, BadRequest> {
-  // oxlint-disable-next-line typescript/no-unnecessary-type-conversion -- see above
-  const id = parseOid(String(getOrElse(fromNullish<unknown>(oid), '')));
-  return id.ok ? id : fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(String(oid).slice(0, OID_PREVIEW))}`);
+  const text = String(oid);
+  const id = parseOid(text);
+  return id.ok ? id : fail('bad_request', `fetchObject: oid must be 40-hex, got ${JSON.stringify(text.slice(0, OID_PREVIEW))}`);
 }
 // fetchObject of a parsed id: ply's own callers, which hold an Oid, start here.
 // oxlint-disable-next-line typescript/promise-function-async -- probing's promise (or the harvest's answer), passed through

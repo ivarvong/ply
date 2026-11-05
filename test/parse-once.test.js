@@ -90,6 +90,11 @@ test('fetchObject, fetchCommit, mergeBase and walkPath parse their ids at the ed
   // a non-string is checked as String() renders it (none as ''), and quoted as String() renders it, as before
   assert.equal(objectId(undefined).error.message, msg('undefined'));
   assert.equal(objectId(null).error.message, 'fetchObject: oid must be 40-hex, got "null"');
+  // a String object renders as its text, and is that id (as the String() check always read it)
+  assert.equal(unwrap(objectId(new String(A))), A);
+  assert.equal(objectId(new String('x')).error.message, msg('x'));
+  // the refusal quotes the first 48 characters
+  assert.equal(objectId('x'.repeat(100)).error.message, msg('x'.repeat(48)));
   assert.equal(seen.n, 0);
 });
 
@@ -111,4 +116,32 @@ test('validateSpec parses the base once into a ref or a commit id, and the head 
 test('buildCommitObjects parses the new blob id once: every tree above it is spliced from that id', () => {
   const r = buildCommitObjects({ levels: [], blob: { oldOid: A, newOid: 'zz', delta: new Uint8Array(0), newLen: 0 }, oldCommit: A, author: { name: 'n', email: 'e@x' }, time: 1, message: 'm' });
   refused(r, 'oid');
+});
+
+test('a merge `from` / rebase `onto` and a picked commit are parsed once: an id is an Oid, a name a ref', async () => {
+  const { givenOid } = await import('../src/mergeio.js');
+  const { pickCommit } = await import('../src/rebase.js');
+  assert.deepEqual(unwrap(givenOid(A, 'from')), { tag: 'some', value: A });
+  assert.deepEqual(unwrap(givenOid('refs/heads/main', 'from')), { tag: 'none' });
+  refused(givenOid('main', 'onto'), 'ref');
+  refused(givenOid('0'.repeat(40), 'onto'), 'onto', 'onto must not be the zero oid');
+  refused(givenOid('refs/heads/a..b', 'from'), 'ref');
+  // an upper-case id is no id: it is read as a name, as before
+  refused(givenOid(A.toUpperCase(), 'from'), 'ref');
+  const who = { name: 'n', email: 'e@x' };
+  for (const commit of ['HEAD', A.toUpperCase(), A.slice(1)]) {
+    const r = await pickCommit('http://127.0.0.1:9/r.git', { commit, committer: who }, { tracer: { span: () => { throw new Error('no I/O'); } } });
+    assert.equal(r.error.code, 'bad_request'); assert.equal(r.error.message, 'commit must be a 40-hex oid');
+  }
+});
+
+test('attributeTree parses an oid attribute once: an id is fetched as a commit, a name is a ref', async () => {
+  const { attributeTree } = await import('../src/merge.js');
+  const { seen, t } = noIO();
+  const byId = await attributeTree(t, A, {});
+  assert.notEqual(byId.error.code, 'bad_request', 'an id goes to the fetch, not the ref check');
+  assert.ok(seen.n > 0);
+  const before = seen.n;
+  refused(await attributeTree(t, 'refs/heads/a..b', {}), 'ref');
+  assert.equal(seen.n, before, 'a bad name is refused before any request');
 });

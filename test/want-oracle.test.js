@@ -37,6 +37,17 @@ const uploadPack = body => {
   assert.match(r.stderr.toString(), /expected to get oid, not 'want /, `git's refusal: ${r.stderr}`);
   return { verdict: 'refuse', out };
 };
+// the pack bytes of an answer: band 1 of every pkt after the packfile header (git may split them differently per run)
+const band1 = out => {
+  const b = Buffer.from(out, 'latin1'), parts = [];
+  for (let p = b.indexOf('packfile\n', 0, 'latin1') + 'packfile\n'.length; p + 4 <= b.length;) {
+    const n = Number.parseInt(b.toString('latin1', p, p + 4), 16);
+    if (n < 4) { p += 4; continue; }
+    if (b[p + 4] === 1) parts.push(b.subarray(p + 5, p + n));
+    p += n;
+  }
+  return Buffer.concat(parts);
+};
 const plyVerdict = want => {
   const r = fetchRequest({ wants: [want] });
   if (r.ok) return { verdict: 'ok', want: r.value.wants[0] };
@@ -74,8 +85,10 @@ test('want: an upper-case id is sent lowercase, and git answers the upper-case l
   assert.equal(unwrap(fetchRequest({ wants: [upper] })).wants[0], head);
   // ply's body for the upper-case id is its body for the id, byte for byte
   assert.deepEqual(Buffer.from(unwrap(fetchBody({ wants: [upper] }))), Buffer.from(unwrap(fetchBody({ wants: [head] }))));
-  // and git reads the two lines as one object: the same answer to either
-  assert.equal(uploadPack(request(upper)).out, uploadPack(request(head)).out);
+  // and git reads the two lines as one object: the same pack (band 1) in answer to either
+  const pack = band1(uploadPack(request(head)).out);
+  assert.equal(pack.subarray(0, 4).toString(), 'PACK');
+  assert.deepEqual(band1(uploadPack(request(upper)).out), pack);
 });
 
 test('want: a NUL, CR or LF is the wire refusal it always was; a non-oid want is refused before any request', async () => {

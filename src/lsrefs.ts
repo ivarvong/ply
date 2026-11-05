@@ -72,7 +72,7 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   const cut = rest.indexOf(' ');
   // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
   const name = cut < 0 ? rest : rest.slice(0, cut);
-  // Stryker disable next-line ConditionalExpression,BooleanLiteral: unreachable, `name` stops before the first space (above)
+  // Stryker disable next-line ConditionalExpression,BooleanLiteral,StringLiteral,MethodExpression: unreachable, `name` stops before the first space (above)
   if (!isListedName(name)) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   // Empty tokens (doubled spaces) need no filter: they have no colon and the loop skips them.
   // Stryker disable next-line ArrayDeclaration: any token injected for a name with no attributes has no `key:` before its colon, so the loop skips it

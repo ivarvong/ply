@@ -29,7 +29,7 @@ import { fail } from './errors.js';
 import { andThen, assertNever, err, getOrElse, isNone, isSome, map, mapOption, none, ok, some } from './result.js';
 import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
-import { fetchObject } from './fetch.js';
+import { fetchObject, objectAt } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { parseOid, type Oid } from './oid.js';
@@ -531,7 +531,7 @@ export function attributeDrivers(t: Transport, cache: TreeCache, treeOid: string
   // a .gitattributes entry's text
   const textOf = async (e: Option<TreeEntry>): Promise<Result<Option<string>, PlyError>> => {
     if (e.tag === 'none') return ok(none);
-    return map(await fetchObject(t, { oid: e.value.oid, expectType: TYPE.BLOB }), b => some(bytesToStr(b.data)));
+    return map(await objectAt(t, e.value.oid, { expectType: TYPE.BLOB }), b => some(bytesToStr(b.data)));
   };
   const fileOf = (dir: string): Look => once(dir, async () => {
     const oid = await treeOf(dir);
@@ -583,7 +583,7 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
   // Blobs this merger produced exist only in the pending push (a rebase replays commit 2 onto commit 1's merged blob), so
   // they are served from here; the bytes are already held for the push, so this costs no extra memory.
   const made = new Map<string, Uint8Array>();
-  const get = async (oid: string): Promise<Result<Uint8Array, PlyError>> => { const held = mapGet(made, oid); return held.tag === 'some' ? ok(held.value) : map(await fetchObject(bounded, { oid, expectType: TYPE.BLOB }), b => b.data); };
+  const get = async (oid: Oid): Promise<Result<Uint8Array, PlyError>> => { const held = mapGet(made, oid); return held.tag === 'some' ? ok(held.value) : map(await objectAt(bounded, oid, { expectType: TYPE.BLOB }), b => b.data); };
   const f = async ({ base, ours, theirs, path, driverFor }: BlobSpec): Promise<Result<BlobMerge, PlyError>> => {
     if (ours === theirs || theirs === base) return ok({ kind: 'existing', oid: ours });
     if (ours === base) return ok({ kind: 'existing', oid: theirs });
