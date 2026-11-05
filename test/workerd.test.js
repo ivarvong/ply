@@ -183,3 +183,26 @@ test('workerd: a limit hit inside readFile\'s blob stream reaches the reader as 
   const r = await post('/read', { url: `${srv.url}/rdcap.git`, path: 'big.bin', limits: { maxPackBytes: 1 << 20 } });
   assert.deepEqual([r.ok, r.code, r.what, r.blob], [false, 'limit_exceeded', 'pack bytes', ['limit_exceeded']], JSON.stringify(r));
 });
+
+// #172: the streamed push under workerd. workerd ends an errored request body as if it were complete (measured: the
+// server sees a clean chunked end), so a pass 2 that refuses to finish the pack must leave git without a whole pack.
+test('workerd: pass 1 and pass 2 write buildPack\'s bytes under workerd\'s CompressionStream', { skip: !WORKERD }, async () => {
+  for (const half of [false, true]) {
+    const r = await post('/packwrite', { sizes: [0, 1, 16383, 16384, 16385, 100000, 1 << 20], half });
+    for (const c of r) assert.deepEqual([c.passes, c.built], [true, true], JSON.stringify(c));
+  }
+});
+
+test('workerd: a 4 MiB push streams its pack (duplex half; redirect manual, workerd refuses error) and lands; a pack changed between passes does not', { skip: !WORKERD }, async () => {
+  const bare = makeBareRepo(root, 'ps');
+  const r = await post('/push', { url: `${srv.url}/ps.git`, size: 4 << 20 });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.seen, [{ streamed: true, duplex: 'half', redirect: 'manual' }]);
+  assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.commit);
+  assert.deepEqual(fsckProblems(bare), []);
+  const cut = makeBareRepo(root, 'pscut');
+  const m = await post('/push', { url: `${srv.url}/pscut.git`, size: 1 << 20, mutate: true });
+  assert.deepEqual([m.ok, m.code, m.original], [false, 'ambiguous', 'internal'], JSON.stringify(m));
+  assert.match(m.message, /second deflate pass/);
+  assert.equal(git(cut, ['for-each-ref']).trim(), '', 'git moved no ref');
+});

@@ -8,7 +8,8 @@ import type { Result } from './result.js';
 import { pkt, FLUSH, pktInit, pktStep } from './pktline.js';
 import { td, concat, decodeBytes, decodeChunk } from './bytes.js';
 import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR, OID_HEX_CHARS, ZERO_OID } from './format.js';
-import { buildPack } from './pack.js';
+import { measurePack, streamPack } from './packwrite.js';
+import type { MeasuredPack, StreamedPack } from './packwrite.js';
 import { frames, coded, clientSpan, spanned, UA } from './transport.js';
 import { readLimit, limitExceeded } from './limits.js';
 import type { Limits } from './limits.js';
@@ -35,11 +36,11 @@ export type Command = { readonly ref: string; readonly oldOid: string; readonly 
 export type Commands = readonly [Command, ...Command[]];
 // A pkt-line frame as pktStep and the transports' frames() yield it.
 export type { Frame } from './transport.js';
-import type { Frame, Transport } from './transport.js';
+import type { Frame, RequestBody, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
+// oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, Result
 import type { Span } from './otel.js';
-// oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack, transport, limits, validation, Result
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, withDefaults } from './absent.js';
 
@@ -502,7 +503,7 @@ async function serviceRefused(t: PushTransport, span: Span, cause: unknown): Pro
     return !ad.ok && ad.error.code === codeOf(cause);
   } catch { return false; } // a transport that cannot advertise confirms nothing
 }
-async function readResponse(t: PushTransport, plan: PushPlan, body: Uint8Array, span: Span, sideband: boolean): Promise<Read> {
+async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody, span: Span, sideband: boolean): Promise<Read> {
   let reportBytes = 0;
   let reading = streamInit(sideband);
   let st: StreamState = reading;
@@ -544,21 +545,35 @@ const outcomeAttrs = (done: Broken | StreamReport, report: PushReport | null, ou
 // git.object.type for a built entry: its name, or the type id in decimal for an id a caller passed that names no type
 // (pack.ts typeNameOf), so the attribute is never otel.ts's null-as-empty-string.
 const objectTypeAttr = (e: PackEntry): string => getOrElse(fromNullish(e.typeName), String(e.type));
-// The send, inside the span: build the pack, refuse an oversized one before the first byte, send, read, decide.
+// The request body: the bytes (no pack, or a pack pass 1 kept), or the commands then pass 2 of the pack as a stream.
+type Body = { readonly body: RequestBody; readonly streamed: StreamedPack | null };
+const bodyOf = (plan: PushPlan, packed: MeasuredPack | null): Result<Body, ErrorOf<'bad_request'>> => {
+  const bytes = requestBody(plan, packed === null ? null : packed.held);
+  if (!bytes.ok || packed === null || packed.held !== null) return bytes.ok ? ok({ body: bytes.value, streamed: null }) : bytes;
+  const streamed = streamPack(packed, bytes.value);
+  return ok({ body: streamed, streamed });
+};
+// The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
 async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
-  const { pack, entries }: { readonly pack: Uint8Array | null; readonly entries: readonly PackEntry[] } = plan.needPack ? await buildPack(plan.objects) : { pack: null, entries: [] };
-  const packBytes = pack === null ? 0 : pack.length;
+  const packed = plan.needPack ? await measurePack(plan.objects) : null;
+  const entries: readonly PackEntry[] = packed === null ? [] : packed.entries;
+  const packBytes = packed === null ? 0 : packed.bytes;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
   for (const [i, e] of entries.entries()) span.event('git.push.object', { 'git.object.index': i, 'git.object.type': objectTypeAttr(e), 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': getOrElse(fromNullish(e.baseOid), ''), 'git.object.bytes': e.bytes });
   // Refuse before the first byte is sent: a host with a push cap (Artifacts: 62–93 MiB) would otherwise take the whole
-  // upload and answer 4xx. The measured size is the pack as built, so `got` is what the server would have received.
-  if (pack && pack.length > plan.maxPack) return err(limitExceeded('push pack bytes', pack.length, plan.maxPack));
+  // upload and answer 4xx. The measured size is the pack as pass 1 wrote it, so `got` is what the server would have
+  // received; pass 2 never sends more (packwrite.ts).
+  if (packBytes > plan.maxPack) return err(limitExceeded('push pack bytes', packBytes, plan.maxPack));
   // The request body (commands + pack) is on the wire from here. Every failure — transport, HTTP status, framing,
   // band 3, a limit — and every report that is not exactly git's is 'ambiguous': the ref may have moved. The one
   // exception is the server refusing the service itself (refusedBeforeReceivePack, confirmed by its advertisement).
-  const body = requestBody(plan, pack);
+  const body = bodyOf(plan, packed);
   if (!body.ok) return body;
-  const r = await readResponse(t, plan, body.value, span, plan.sideband);
+  const r = await readResponse(t, plan, body.value.body, span, plan.sideband);
+  // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
+  // it was not sent the pack that was measured
+  const cut = body.value.streamed === null ? null : body.value.streamed.failure();
+  if (cut !== null) return err(ambiguousAfterPush(cut) as PlyError); // oxlint-disable-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush of a PlyError is a PlyError
   if ('cause' in r) {
     const notRun = refusedBeforeReceivePack(r) && await serviceRefused(t, span, r.cause);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refused: the cause carries one of ply's codes (a PlyError); else ambiguousAfterPush returns one (the cause itself when it already is an 'ambiguous' one)

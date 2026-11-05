@@ -12,7 +12,7 @@ import { assertNever, err, ok } from './result.js';
 import type { Limits } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
-import type { Attrs, Frame, Hints, Quirks, Scrub, Transport } from './transport.js';
+import type { Attrs, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
 import { fail, plyError } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
@@ -320,6 +320,13 @@ const basicOf = (authorization: string | null): Basic | null => {
     return c < 0 ? { user: d, pass: '' } : { user: d.slice(0, c), pass: d.slice(c + 1) };
   } catch { return null; }
 };
+// The redirect mode of a streamed POST: 'error' where the platform takes it (undici, browsers), else 'manual'. workerd
+// refuses 'error' at `new Request` ("does not make sense at the edge", measured on the pinned workerd); its fetch is
+// not the JS fetch that clones a request, and a 3xx there is the redirect error as on any POST.
+export type StreamRedirect = 'manual' | 'error';
+export const streamRedirect = (): StreamRedirect => {
+  try { return new Request('http://localhost/', { redirect: 'error' }).redirect === 'error' ? 'error' : 'manual'; } catch { return 'manual'; }
+};
 // Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
 const unref = (timer: unknown): void => {
   const f = field(timer, 'unref');
@@ -431,8 +438,11 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     return ok({ signal: sig, cancel: () => { clearTimeout(timer); } });
   };
   // The platform's fetch(): its rejection is the network error it is (wrapNet). The one catch of each request.
-  const send = async (target: string, init: RequestInit, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
-    try { return ok(await f(target, { ...init, signal: sig, redirect: 'manual' })); } catch (e) { return err(wrapNet(e, sig)); }
+  // `redirect`: 'manual' (a 3xx is read as the redirect error) unless the body is a stream: undici answers 'manual' and
+  // 'follow' by cloning the request, which tees the body and holds every chunk the unread branch never takes (a 64 MiB
+  // push held 64 MiB, measured). 'error' takes no clone; a 3xx then fails the request as a network error. Neither follows.
+  const send = async (target: string, init: RequestInit, sig: AbortSignal, redirect: StreamRedirect = 'manual'): Promise<Result<Response, PlyError>> => {
+    try { return ok(await f(target, { ...init, signal: sig, redirect })); } catch (e) { return err(wrapNet(e, sig)); }
   };
 
   const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
@@ -525,8 +535,9 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     return assertNever(body);
   };
   // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk. A failure is
-  // yielded as its Err and ends the stream (frames raises it).
-  async function* post(service: string, body: Uint8Array, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
+  // yielded as its Err and ends the stream (frames raises it). A streamed body is read as the request goes out (undici
+  // requires `duplex: 'half'` for it; workerd accepts the field), chunked like git's own bodies past http.postBuffer.
+  async function* post(service: string, body: RequestBody, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
     if (policy.follow === 'initial' && !initialSettled) {
       const ad = await advertise(service, span);
       if (!ad.ok) { yield ad; return; }
@@ -539,7 +550,8 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     const sig = requestSignal();
     if (!sig.ok) { yield sig; return; }
     try {
-      const res = await send(target, { method: 'POST', headers: headers(service, extra), body: bufferSource(body) }, sig.value.signal);
+      const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: body.stream, duplex: 'half' };
+      const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig.value.signal, body instanceof Uint8Array ? 'manual' : streamRedirect());
       if (!res.ok) { yield res; return; }
       const cache = headerText(res.value, PACK_CACHE_HEADER);
       span.set({ 'http.response.status_code': res.value.status, 'http.response.header.content-type': headerText(res.value, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
@@ -565,7 +577,7 @@ export function createTransport(url: string | URL, options: HttpOptions = {}): R
     // (operation.ts); the low-level calls (lsRefs, fetchPack, push on this transport) span on it unconditionally.
     kind: 'http', get url(): string { return base; }, tracer: tracer === null ? new Tracer() : tracer, parent, limits, signal, quirks, objects: new Map(), scrub,
     // The stream: a failure (the request's, a frame's) is raised through the iterator, as a stream signals one.
-    async *frames(service: string, body: Uint8Array, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
+    async *frames(service: string, body: RequestBody, span: Span, hints: Hints = NO_HINTS): AsyncGenerator<Frame, void, unknown> {
       let st: PktState = pktInit();
       for await (const chunk of post(service, body, span, hints)) {
         const r = chunk.ok ? pktStep(st, chunk.value) : chunk;

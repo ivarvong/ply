@@ -8,6 +8,11 @@ import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
 import { cachingFetch } from '../../src/packcache.js';
 import { generateSigner } from '../../src/sign.js';
+import { createTransport } from '../../src/http.js';
+import { push, ZERO_OID } from '../../src/push.js';
+import { hashObject, encodeTree, encodeCommit, TYPE } from '../../src/objects.js';
+import { measurePack, streamPack } from '../../src/packwrite.js';
+import { buildPack } from '../../src/pack.js';
 import { failure, fetchOps } from '../sweep/ops.mjs';
 
 // module-scoped: survives across requests within the isolate, like a real worker would hold it
@@ -65,6 +70,40 @@ export default {
       const op = fetchOps(cell, { tracer: new Tracer(), limits: withLimits(cell.limits ?? {}) })[cell.op];
       if (!op) return Response.json({ status: 'crash', code: null, msg: `workerd: no op ${cell.op}` });
       try { return Response.json({ status: 'ok', ...(await op()) }); } catch (e) { return Response.json(failure(e)); }
+    }
+    if (u.pathname === '/push') { // a streamed push (#172): an L-byte random blob; mutate: the blob changes between the passes
+      const body = await req.json();
+      const blob = new Uint8Array(body.size);
+      for (let i = 0; i < blob.length; i += 65536) crypto.getRandomValues(blob.subarray(i, Math.min(i + 65536, blob.length)));
+      const tree = unwrap(encodeTree([{ mode: '100644', name: 'big.bin', oid: hashObject('blob', blob) }]));
+      const commit = unwrap(encodeCommit({ tree: hashObject('tree', tree), author: 'a <a@x> 1700000000 +0000', message: 'm\n' }));
+      const oid = hashObject('commit', commit);
+      const objects = [{ type: TYPE.BLOB, data: blob }, { type: TYPE.TREE, data: tree }, { type: TYPE.COMMIT, data: commit }];
+      const seen = [];
+      const fetchImpl = (url, init) => {
+        if (String(url).endsWith('/git-receive-pack')) { seen.push({ streamed: typeof init.body?.getReader === 'function', duplex: init.duplex ?? null, redirect: init.redirect }); if (body.mutate) blob[100] ^= 1; }
+        return fetch(url, init);
+      };
+      const t = unwrap(createTransport(body.url, { fetchImpl, limits: withLimits({ maxPackBytes: 4 * body.size + 4096 }) }));
+      const r = await push(t, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: oid, objects });
+      return Response.json({ ok: r.ok, code: r.ok ? null : r.error.code, original: r.ok ? null : r.error.original ?? null, message: r.ok ? null : r.error.message, commit: oid, packBytes: r.ok ? r.value.packBytes : null, seen });
+    }
+    if (u.pathname === '/packwrite') { // both passes and buildPack agree byte for byte under workerd's CompressionStream
+      const body = await req.json();
+      const out = [];
+      for (const size of body.sizes) {
+        const data = new Uint8Array(size);
+        for (let i = 0; i < size; i += 65536) crypto.getRandomValues(data.subarray(i, Math.min(i + 65536, size)));
+        if (body.half) data.fill(0, size >> 1);
+        const objects = [{ type: TYPE.BLOB, data }, { type: TYPE.BLOB, data: data.subarray(0, size >> 2) }];
+        const built = (await buildPack(objects)).pack;
+        const m = await measurePack(objects, 0);
+        const a = new Uint8Array(await new Response(streamPack(m, new Uint8Array(0)).stream).arrayBuffer());
+        const b = new Uint8Array(await new Response(streamPack(m, new Uint8Array(0)).stream).arrayBuffer());
+        const same = (x, y) => x.length === y.length && x.every((v, i) => v === y[i]);
+        out.push({ size, bytes: m.bytes, passes: same(a, b), built: same(a, built) });
+      }
+      return Response.json(out);
     }
     if (u.pathname === '/edit') {
       const body = await req.json();
