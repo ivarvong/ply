@@ -228,7 +228,7 @@ jobs:
   mutate-shard:
     name: mutate-shard (${{ matrix.shard }}/16)
     runs-on: ubuntu-latest
-    # Shards are planned at ~22 min each (scripts/mutate.mjs --plan 16, from scripts/mutate-weights.json). Without a
+    # Shards are planned at ~30 min each (scripts/mutate.mjs --plan 16, from scripts/mutate-weights.json). Without a
     # limit a runaway shard holds the job, and the mutate gate, for GitHub's 6 h default. 4x the plan while the weights
     # for validate/objects/otel/limits/attributes are an estimate (their shards hit the old 60 min limit on 8757a79).
     timeout-minutes: 90
