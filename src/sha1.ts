@@ -45,12 +45,20 @@ export function fromHex(hex: string): Uint8Array {
   return out;
 }
 
+// The state is five int32 fields and the schedule a 16-word Int32Array ring (#214): a Uint32Array read of a word at or
+// above 2^31 is not a small integer to V8, so every round boxed a number (the profile's SHA-1 heap share), and an
+// 80-word schedule was 64 more stores and loads per block. Same digest (test/sha1.test.js holds it to node:crypto).
 export class Sha1 {
-  private readonly h = new Uint32Array([0x67_45_23_01, 0xef_cd_ab_89, 0x98_ba_dc_fe, 0x10_32_54_76, 0xc3_d2_e1_f0]);
+  // H0..H4 as int32: 0xefcdab89, 0x98badcfe and 0xc3d2e1f0 less 2^32
+  private h0 = 0x67_45_23_01;
+  private h1 = -0x10_32_54_77;
+  private h2 = -0x67_45_23_02;
+  private h3 = 0x10_32_54_76;
+  private h4 = -0x3c_2d_1e_10;
   private readonly buf = new Uint8Array(64);
   private bufLen = 0;
   private len = 0;
-  private readonly w = new Uint32Array(80);
+  private readonly w = new Int32Array(16);
 
   // Bytes only: a string has no bytes until a caller encodes it (bytes.ts encodeBytes, a Result).
   public update(bytes: Uint8Array): this {
@@ -73,41 +81,42 @@ export class Sha1 {
     return this;
   }
 
-  // Every index below is in range (p holds 64 bytes at o, w is 80 words, h is 5), which noUncheckedIndexedAccess cannot
-  // see; `as number` says so at no runtime cost (a fallback per read is bundle bytes and a branch in the hot loop).
-  /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above (`as number`, not the `!` src/ forbids) */
+  // Every index below is in range (p holds 64 bytes at o, w is 16 words and every index is masked to 15), which
+  // noUncheckedIndexedAccess cannot see; `as number` says so at no runtime cost (a fallback per read is bundle bytes and
+  // a branch in the hot loop). `| 0` is the 32-bit wrap SHA-1 adds modulo, not a truncation.
+  /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, unicorn/prefer-math-trunc -- in-range indexed reads and the 32-bit wrap, see above (`as number`, not the `!` src/ forbids) */
   private block(p: Uint8Array, o: number): void {
     const w = this.w;
-    const h = this.h;
     for (let i = 0; i < 16; i++) {
       w[i] = ((p[o + 4 * i] as number) << 24) | ((p[o + 4 * i + 1] as number) << 16) | ((p[o + 4 * i + 2] as number) << 8) | (p[o + 4 * i + 3] as number);
     }
-    for (let i = 16; i < 80; i++) {
-      const x = (w[i - 3] as number) ^ (w[i - 8] as number) ^ (w[i - 14] as number) ^ (w[i - 16] as number);
-      w[i] = (x << 1) | (x >>> 31);
-    }
-    let a = h[0] as number;
-    let b = h[1] as number;
-    let c = h[2] as number;
-    let d = h[3] as number;
-    let e = h[4] as number;
-    // One loop with a branch per round, not one loop per 20-round phase: the phase-unrolled form measured 50% slower
-    // on V8 (PR body), against the audit's −18% guess.
+    let a = this.h0;
+    let b = this.h1;
+    let c = this.h2;
+    let d = this.h3;
+    let e = this.h4;
+    // One loop with a branch per round; the schedule word for round i >= 16 is computed in place in the ring (w[i & 15]
+    // held w[i - 16])
     for (let i = 0; i < 80; i++) {
+      let x: number;
+      if (i < 16) x = w[i] as number;
+      else {
+        const y = (w[(i - 3) & 15] as number) ^ (w[(i - 8) & 15] as number) ^ (w[(i - 14) & 15] as number) ^ (w[i & 15] as number);
+        x = (y << 1) | (y >>> 31);
+        w[i & 15] = x;
+      }
       let f: number;
       let k: number;
       if (i < 20) { f = (b & c) | (~b & d); k = 0x5a_82_79_99; }
       else if (i < 40) { f = b ^ c ^ d; k = 0x6e_d9_eb_a1; }
-      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f_1b_bc_dc; }
-      else { f = b ^ c ^ d; k = 0xca_62_c1_d6; }
-      // `| 0` is the 32-bit wrap SHA-1 adds modulo, not a truncation
-      // oxlint-disable-next-line unicorn/prefer-math-trunc -- see above
-      const t = (((a << 5) | (a >>> 27)) + f + e + k + (w[i] as number)) | 0;
+      else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f_1b_bc_dc | 0; }
+      else { f = b ^ c ^ d; k = 0xca_62_c1_d6 | 0; }
+      const t = (((a << 5) | (a >>> 27)) + f + e + k + x) | 0;
       e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = t;
     }
-    h[0] = (h[0] as number) + a; h[1] = (h[1] as number) + b; h[2] = (h[2] as number) + c; h[3] = (h[3] as number) + d; h[4] = (h[4] as number) + e;
+    this.h0 = (this.h0 + a) | 0; this.h1 = (this.h1 + b) | 0; this.h2 = (this.h2 + c) | 0; this.h3 = (this.h3 + d) | 0; this.h4 = (this.h4 + e) | 0;
   }
-  /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
+  /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, unicorn/prefer-math-trunc */
 
   public digest(): Uint8Array {
     const bits = this.len * 8;
@@ -122,7 +131,8 @@ export class Sha1 {
     this.update(tail);
     const out = new Uint8Array(20);
     const odv = new DataView(out.buffer);
-    for (let i = 0; i < 5; i++) odv.setUint32(i * 4, this.h[i] as number); // oxlint-disable-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < 5, h is 5 words
+    // setInt32 writes the same four bytes setUint32 wrote for the unsigned word
+    odv.setInt32(0, this.h0); odv.setInt32(4, this.h1); odv.setInt32(8, this.h2); odv.setInt32(12, this.h3); odv.setInt32(16, this.h4);
     return out;
   }
 

@@ -11,7 +11,7 @@
 import { spawnSync } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { loadavg, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -144,6 +144,24 @@ for (const [kind, sz] of [['text', '1m'], ['text', '64m'], ['rand', '64m']]) {
   };
 }
 
+// SHA-1 alone (#214): one 1 MiB buffer, and hashObject over 2,000 4 KiB trees (an object id per fetched object)
+CASES['sha1-1m'] = {
+  iters: 50,
+  async setup(tree) {
+    const { Sha1 } = await import(`${tree}/src/sha1.ts`);
+    const data = dataOf('rand', MIB, 9);
+    return () => { new Sha1().update(data).hex(); };
+  },
+};
+CASES['hashObject-trees'] = {
+  iters: 20,
+  async setup(tree) {
+    const { hashObject } = await import(`${tree}/src/objects.ts`);
+    const trees = Array.from({ length: 2000 }, (_, i) => treeBytes(4 * KIB, i + 1));
+    return () => { for (const t of trees) hashObject('tree', t); };
+  },
+};
+
 // ---- child: one case on one tree ----
 async function child() {
   const tree = resolve(opt('tree', '.'));
@@ -192,7 +210,7 @@ function parent() {
       }
     }
   }
-  const load = readFileSync('/proc/loadavg', 'utf8').split(' ').slice(0, 3).join(' ');
+  const load = loadavg().map((x) => x.toFixed(2)).join(' ');
   console.log(`load after: ${load}; ${runs} runs; cpu ms per op: median [min–max]; rss+ MiB median`);
   for (const name of names) {
     for (const tree of trees) {

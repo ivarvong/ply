@@ -38,6 +38,7 @@ const MUTATION_FILES = [
   'test/dotnames.test.js',
   'test/parsetree.test.js',
   'test/otel-ended.test.js',
+  'test/sha1.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {
