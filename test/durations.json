@@ -20,6 +20,7 @@
   "test/git-differential.test.js": 5,
   "test/linemerge.test.js": 1,
   "test/log.test.js": 17,
+  "test/lsrefs-step.test.js": 2,
   "test/lsrefs-unborn.test.js": 6,
   "test/merge-machine.test.js": 0,
   "test/merge.test.js": 45,
