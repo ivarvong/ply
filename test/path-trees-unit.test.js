@@ -9,7 +9,7 @@ import { buildPack } from '../src/pack.js';
 import { encodeTree, encodeCommit, hashObject, TYPE } from '../src/objects.js';
 import { concat, td, te } from '../src/bytes.js';
 import { DEFAULT_LIMITS, parseLimits } from '../src/limits.js';
-import { Tracer } from '../src/otel.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { SIDEBAND_PACK } from '../src/format.js';
 import { unwrap } from './unwrap.js';
 
@@ -33,10 +33,10 @@ const S = { type: TYPE.TREE, data: sub };
 
 // deep(filter): the answer to a combine request: 'ok' (commit + both trees), 'refuse' (git's ERR), 'depth' (git's depth
 // ERR), 'http400' (Artifacts' refusal), 'commitOnly', 'broken' (a pack without the commit), 'drop' (network).
-function fake(deep) {
+function fake(deep, tracer = new Tracer()) {
   const log = [];
   const t = asTransport({
-    kind: 'http', url: 'http://h/r.git', tracer: new Tracer(), parent: null, limits: DEFAULT_LIMITS, signal: null, quirks: freshQuirks(), objects: null, scrub: null,
+    kind: 'http', url: 'http://h/r.git', tracer, parent: null, limits: DEFAULT_LIMITS, signal: null, quirks: freshQuirks(), objects: null, scrub: null,
     async *frames(_service, body) {
       const text = td.decode(body);
       const filter = (text.match(/filter (\S+)/) ?? [])[1] ?? '';
@@ -145,4 +145,22 @@ test('isPathTreesRefusal', () => {
   assert.equal(isPathTreesRefusal(e('pack_corrupt', 'tree filter allows max depth 0')), false);
   assert.equal(isPathTreesRefusal(e('http', 'HTTP 500 only blob:none is supported', { status: 500 })), false);
   assert.equal(isPathTreesRefusal(e('timeout', 'timed out')), false);
+});
+
+test('spans: the deep fetch names its filter; the blob:none fallback still names what it fell back from', async () => {
+  const ex = arrayExporter();
+  const f = fake('ok', new Tracer({ exporter: ex })); await settle(f.t); learnPathTrees(f.t.quirks, 'taken');
+  sameCommit(await commitForWalk(f.t, tip, 2));
+  const g = fake('ok', new Tracer({ exporter: ex })); g.t.quirks.treeFilter = 'blob:none';
+  sameCommit(await commitForWalk(g.t, tip, 2));
+  const spans = ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.upload-pack fetch');
+  const deep = spans.filter(s => s.attrs['git.fetch.path_trees'] === 'combine:blob:none+tree:2');
+  assert.equal(deep.length, 1);
+  assert.equal(deep[0].attrs['git.pack.cache.bust'], false);
+  assert.equal(deep[0].attrs['git.fetch.wide.harvested'], 2);
+  const wide = spans.filter(s => s.attrs['git.fetch.filter.fallback'] === 'blob:none');
+  assert.equal(wide.length, 1);
+  assert.equal(wide[0].attrs['git.fetch.filter.requested'], 'tree:0');
+  assert.equal(wide[0].attrs['git.fetch.filter.learned'], false);
+  assert.equal(wide[0].attrs['git.pack.cache.bust'], false);
 });
