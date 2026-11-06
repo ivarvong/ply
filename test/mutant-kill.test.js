@@ -7,7 +7,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { take, indexOfBytes, bytesOf, te, td, concat, decodeBytes, encodeBytes, decodeChunk, bufferSource } from '../src/bytes.js';
 import {
-  parseTree, parseCommit, parseTag, parseIdent, assertFetched, encodeTree, encodeCommit, encodeTag, TYPE, hashObject, ident,
+  parseTree, parseCommit, parseTag, parseIdent, assertFetched, canonMode, encodeTree, encodeCommit, encodeTag, TYPE, hashObject, ident,
 } from '../src/objects.js';
 import { pkt, pktInit, pktStep, pktFinish, FLUSH, DELIM } from '../src/pktline.js';
 import {
@@ -146,6 +146,8 @@ test('parseTree error strings and the boundaries next to them', () => {
   assert.deepEqual(unwrap(parseTree(data(e('140000', 'd'), e('100644', 'd.x')))).map(x => x.name), ['d', 'd.x']);
   // past 2^53 a whole-string parse loses the low bits; the last six digits keep them
   assert.deepEqual(unwrap(parseTree(data(e('100644', 'd.x'), e('777777777777777777777777040000', 'd')))).map(x => x.name), ['d.x', 'd'], 'a long mode is read from its last six digits');
+  // canonMode (the string form checkout reads) and parseTree's byte read agree on a long mode: its last six digits
+  for (const m of ['777777777777777777777777040000', '777777777777777777777777100755', '1040000', '7100644']) assert.equal(canonMode(m), unwrap(parseTree(data(e(m, 'd'))))[0].mode, m);
   assert.deepEqual(unwrap(parseTree(data(e('100644', 'd'), e('160000', 'd.x')))).map(x => x.mode), ['100644', '160000']);
   throws(() => unwrap(parseTree(data(e('100644', 'd.x'), e('160000', 'd')))), 'pack_corrupt', 'tree: not strictly sorted');
   assert.deepEqual(unwrap(parseTree(data(e('40000', 'd'), e('100644', 'd0')))).map(x => x.name), ['d', 'd0'], "'/' sorts below '0'");

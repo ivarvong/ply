@@ -5,7 +5,7 @@ import { ok, err, map, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toOid, fromHex } from './sha1.js';
 import { parseOid, type Oid } from './oid.js';
-import { te, td, concat, take, decodeBytes, encodeBytes } from './bytes.js';
+import { te, concat, shortRead, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, parseLimits } from './limits.js';
@@ -130,20 +130,62 @@ const cmpBytes = (a: Uint8Array, b: Uint8Array): number => {
 // fsck.c verify_ordered sorts an entry as a directory when S_ISDIR holds for the low 16 bits of its mode: `40755` sorts
 // as a directory (fsck only warns about the mode), `160000` as a file.
 const lowBits = (mode: string): number => Number.parseInt(mode.slice(-MODE_LOW_DIGITS), 8) & MODE_BITS;
-const isDirMode = (mode: string): boolean => (lowBits(mode) & MODE_S_IFMT) === MODE_S_IFDIR;
 // object.h canon_mode on the low 16 bits (tree-walk keeps the mode in a uint16_t): every reader of a tree but fsck sees
 // this. A regular file is 100755 if the owner may execute it, else 100644 (100664 → 100644, 100700 → 100755); S_IFLNK is
 // a symlink, S_IFDIR a tree (40755 → 40000); every other type is a gitlink (1, 160644, 777777 → 160000). `7100644`
 // and `300644` are 100644 to git, without even a badFilemode warning.
 export type Mode = typeof MODE_BLOB | typeof MODE_EXEC | typeof MODE_LINK | typeof MODE_TREE | typeof MODE_COMMIT;
-export function canonMode(mode: string): Mode {
-  const m = lowBits(mode), type = m & MODE_S_IFMT;
+// canon_mode of a mode's low 16 bits
+function canonBits(m: number): Mode {
+  const type = m & MODE_S_IFMT;
   if (type === MODE_S_IFREG) return m & MODE_OWNER_EXEC ? MODE_EXEC : MODE_BLOB;
   if (type === MODE_S_IFLNK) return MODE_LINK;
   if (type === MODE_S_IFDIR) return MODE_TREE;
   return MODE_COMMIT;
 }
-const SLASH = Uint8Array.of(TREE_SORT_SLASH);
+export function canonMode(mode: string): Mode {
+  return canonBits(lowBits(mode));
+}
+// The tree order of fsck verify_ordered on two names, a directory's read as if it ended in `/`, without building that
+// key (#207): the sign of cmpBytes(a + '/'?, b + '/'?).
+/* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < a.length, i < b.length: both reads are in range (`as`, not the `!` src/ forbids) */
+// oxlint-disable-next-line eslint/max-params -- two names and whether each is a directory
+function cmpTreeKeys(a: Uint8Array, aDir: boolean, b: Uint8Array, bDir: boolean): number {
+  const la = aDir ? a.length + 1 : a.length, lb = bDir ? b.length + 1 : b.length;
+  const n = Math.min(la, lb);
+  for (let i = 0; i < n; i++) {
+    const x = i < a.length ? (a[i] as number) : TREE_SORT_SLASH;
+    const y = i < b.length ? (b[i] as number) : TREE_SORT_SLASH;
+    if (x !== y) return x - y;
+  }
+  return la - lb;
+}
+/* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
+// A tree entry's mode, read from its bytes [p, sp) without decoding them (#207): lowBits of the mode, or NOT_OCTAL when a byte is
+// not an octal digit (what /^[0-7]+$/ refused of the decoded text: any other byte decodes to a non-digit). Each digit
+// is 3 bits, so the low 16 bits of the whole mode are those of its last MODE_LOW_DIGITS digits, which lowBits reads:
+// the value is kept to its low 16 bits as it is read, however long the mode. Empty (p === sp) is 0; the caller refuses
+// it first.
+/* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- p <= i < sp <= data.length: every read is in range (`as`, not the `!` src/ forbids) */
+const OCTAL_0 = 0x30;
+const OCTAL_7 = 0x37;
+const OCTAL_BITS = 3;
+const NOT_OCTAL = -1;
+function modeBits(data: Uint8Array, p: number, sp: number): number {
+  let m = 0;
+  for (let i = p; i < sp; i++) {
+    const c = data[i] as number;
+    if (c < OCTAL_0 || c > OCTAL_7) return NOT_OCTAL;
+    m = ((m << OCTAL_BITS) | (c - OCTAL_0)) & MODE_BITS;
+  }
+  return m;
+}
+// The OID_BYTES at o are all zero (fsck nullSha1)
+function nullOid(data: Uint8Array, o: number): boolean {
+  for (let i = o; i < o + OID_BYTES; i++) if ((data[i] as number) !== 0) return false;
+  return true;
+}
+/* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
 
 export type TreeEntry = { readonly mode: Mode; readonly name: string; readonly oid: Oid; readonly oidOffset: number; readonly entryOffset: number };
 // What encodeTree takes from a caller: plain strings, parsed once (treeEntryOf) into an EntryOf.
@@ -202,27 +244,26 @@ const completeTreeFrames = (data: Uint8Array, maxEntries: number): number => {
 };
 
 // The hex id is computed when a reader asks. Caching it on the entry would put a 40-character string beside every
-// name, which is what exhausted a 128 MiB heap at the cap. `bytes` is not enumerable, so equality and JSON see the
-// mode, the name, and the offsets.
-type TreeEntryState = { readonly bytes: Uint8Array; readonly oidOffset: number };
-// The one place a tree entry gets its prototype (Object.create's result is `any`); the fields are assigned below.
-// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the prototype chain carries `oid` and `bytes`; the caller assigns the rest
-const inherit = (proto: TreeEntry | null): TreeEntry => Object.create(proto) as TreeEntry;
-const treeEntryProto: TreeEntry = inherit(null);
-Object.defineProperty(treeEntryProto, 'oid', {
-  get(this: TreeEntryState): Oid {
-    return toOid(this.bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
-  },
-});
-// One prototype per tree carries the buffer. Entries are ordinary assigned objects: defineProperty on every
-// entry puts it in dictionary mode, and that is what exhausted a 128 MiB heap at the cap.
-const treeBytes = (bytes: Uint8Array): TreeEntry => {
-  const proto: TreeEntry = inherit(treeEntryProto);
-  Object.defineProperty(proto, 'bytes', { value: bytes });
-  return proto;
-};
-const treeEntry = (proto: TreeEntry, mode: Mode, name: string, oidOffset: number, entryOffset: number): TreeEntry =>
-  Object.assign(inherit(proto), { mode, name, oidOffset, entryOffset });
+// name, which is what exhausted a 128 MiB heap at the cap. The tree's buffer is a private field: not enumerable, not in
+// JSON, not a key, so equality and JSON see the mode, the name, and the offsets. Entries are ordinary objects of one
+// shape, built by one constructor (#207: an Object.create of a per-tree prototype, then Object.assign of a record, was
+// a fifth of parseTree's CPU); defineProperty on every entry puts it in dictionary mode, which is what exhausted a
+// 128 MiB heap at the cap, and a private field does not.
+class ParsedEntry implements TreeEntry {
+  public readonly mode: Mode;
+  public readonly name: string;
+  public readonly oidOffset: number;
+  public readonly entryOffset: number;
+  readonly #bytes: Uint8Array;
+  // oxlint-disable-next-line eslint/max-params -- the tree's bytes and one entry's four fields, on every entry: no record to allocate
+  public constructor(bytes: Uint8Array, mode: Mode, name: string, oidOffset: number, entryOffset: number) {
+    this.mode = mode; this.name = name; this.oidOffset = oidOffset; this.entryOffset = entryOffset;
+    this.#bytes = bytes;
+  }
+  public get oid(): Oid {
+    return toOid(this.#bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
+  }
+}
 
 // entry: { mode: '100644'|'100755'|'120000'|'40000'|'160000', name, oid (hex), oidOffset }
 // Duplicates and order are git's rules (fsck duplicateEntries and treeNotSorted, both errors under --strict) on the
@@ -246,11 +287,12 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
   // Stryker disable next-line ConditionalExpression,EqualityOperator: past the cap the loop refuses either way; this flag only skips retaining entries the caller never sees
   const over = wide && completeTreeFrames(data, maxEntries) > maxEntries;
   const entries: TreeEntry[] = [];
-  const shape = treeBytes(data);
   const seen = new Set<string>();
   let p = 0;
   let count = 0;
-  let prevKey: Uint8Array | null = null;
+  let prevName: Uint8Array | null = null;
+  // Stryker disable next-line BooleanLiteral: read only once prevName is set, and set with it
+  let prevDir = false;
   while (p < data.length) {
     if (count >= maxEntries) return err(limitError('tree entries', count + 1, maxEntries));
     const sp = data.indexOf(TREE_MODE_SEP, p);
@@ -258,26 +300,25 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
     if (sp < p) return badTree('malformed entry');
     const nul = data.indexOf(TREE_NUL, sp + 1);
     if (nul < sp + 1) return badTree('malformed entry');
-    // p <= sp < nul < data.length (the two checks above): the mode and the name are views, they cannot be short
-    const raw: string = td.decode(data.subarray(p, sp));
+    // p <= sp < nul < data.length (the two checks above): the mode and the name are in range, they cannot be short
     // The name is bytes to git: decodeBytes keeps a leading BOM and escapes ill-formed UTF-8, so the string maps back (#43)
     const nameBytes: Uint8Array = data.subarray(sp + 1, nul);
     const name: string = decodeBytes(nameBytes);
-    // The id starts at nul+1. take demands OID_BYTES bytes there; the old `nul + OID_BYTES > length`
+    // The id starts at nul+1 and needs OID_BYTES bytes there (take's short read); the old `nul + OID_BYTES > length`
     // guard counted from the NUL and let a 19-byte id through.
-    const oid = take(data, nul + 1, OID_BYTES);
-    if (!oid.ok) return oid;
-    const oidBytes: Uint8Array = oid.value;
-    if (raw.length === 0) return badTree('empty mode');
-    if (!/^[0-7]+$/u.test(raw)) return badTree('malformed mode');
+    if (data.length - (nul + 1) < OID_BYTES) return err(shortRead('pack_corrupt', nul + 1, OID_BYTES, data.length));
+    if (sp === p) return badTree('empty mode');
+    // the mode's bytes, not a decode of them (#207)
+    const bits = modeBits(data, p, sp);
+    if (bits === NOT_OCTAL) return badTree('malformed mode');
     // decode_tree_entry refuses an empty name before fsck_tree looks at the mode's first byte
     if (name.length === 0) return badTree('empty name');
-    if (raw[0] === '0') return badTree('zero-padded mode');
-    const mode = canonMode(raw);
+    if (data[p] === OCTAL_0) return badTree('zero-padded mode');
+    const mode = canonBits(bits);
     if (name.includes('/')) return badTree('full pathname');
     if (name === '.' || name === '..' || isDotGitName(nameBytes)) return badTree('bad name');
     if (nameBytes.length > TREE_MAX_NAME_BYTES) return badTree('large pathname');
-    if (oidBytes.every(b => b === 0)) return badTree('null sha1');
+    if (nullOid(data, nul + 1)) return badTree('null sha1');
     // fsck_tree: a .gitmodules (any spelling) that is a symlink is gitmodulesSymlink; one that is not a blob (a tree, or a
     // gitlink, whose commit is never in the repository) is gitmodulesBlob / gitmodulesMissing in fsck_finish. The same
     // for .gitattributes, except that as a symlink it is only a warning (gitattributesSymlink, INFO)
@@ -288,14 +329,15 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
     if ((mode === MODE_TREE || mode === MODE_COMMIT) && isDotFileName(nameBytes, 'gitattributes')) return badTree('.gitattributes is not a blob');
     if (seen.has(name)) return badTree(`duplicate entry ${JSON.stringify(name)}`);
     seen.add(name);
-    const key: Uint8Array = isDirMode(raw) ? concat([nameBytes, SLASH]) : nameBytes;
+    const dir = (bits & MODE_S_IFMT) === MODE_S_IFDIR;
     // Stryker disable next-line EqualityOperator: equal keys are equal names (a name holds no '/'), which the duplicate check above refused
-    if (prevKey !== null && cmpBytes(prevKey, key) >= 0) return badTree('not strictly sorted');
-    prevKey = key;
+    if (prevName !== null && cmpTreeKeys(prevName, prevDir, nameBytes, dir) >= 0) return badTree('not strictly sorted');
+    prevName = nameBytes;
+    prevDir = dir;
     // Past the cap, keep the name set (a bad prefix is still pack_corrupt) and do not retain the entry.
     // Always pushing still refuses on the next entry, so the returned array is the same; never pushing is a length assertion.
     // Stryker disable next-line ConditionalExpression: retaining the entries past the cap does not change the refusal or the array a caller sees
-    if (!over) entries.push(treeEntry(shape, mode, name, nul + 1, p));
+    if (!over) entries.push(new ParsedEntry(data, mode, name, nul + 1, p));
     count += 1;
     p = nul + 1 + OID_BYTES;
   }
