@@ -3,10 +3,12 @@
 //                         over the cap is refused before the first request byte (push.ts, I36);
 //   streamPack (pass 2)   deflates them again into the request body as it is read, and ends the body with the trailer
 //                         only when this pass gave the same length and SHA-1 as the first.
-// A pack no longer than INFLATE_CHUNK is kept from pass 1 and sent as bytes (no second pass). Either way the writer holds
-// at most one deflate chunk and the pieces under INFLATE_CHUNK beside the caller's objects: a push whose largest object
-// is L peaks at L + INFLATE_CHUNK.
-// Both passes feed CompressionStream the same input in the same INFLATE_CHUNK slices, so zlib (deterministic for a fixed
+// A pack no longer than INFLATE_CHUNK is kept from pass 1 and sent as bytes (no second pass). Either way the writer holds,
+// beside the caller's objects and zlib's own state, the deflate output of at most one DEFLATE_SLICE slice: the slice and
+// the one block of earlier input zlib may still be holding (level 6 ends a block every 16 Ki symbols), so a push whose
+// largest object is L peaks at about L + DEFLATE_SLICE + 16 KiB (81,940 B measured on random input, node and workerd;
+// 32,776 B with the 16 KiB slices before).
+// Both passes feed CompressionStream the same input in the same DEFLATE_SLICE slices, so zlib (deterministic for a fixed
 // input sequence and parameters) writes the same bytes (test/packwrite.test.js, node and workerd). If it ever did not,
 // pass 2 errors its stream before the trailer: the server is never handed a pack that is whole, and push reports it.
 // The bytes are buildPack's (pack.ts) for the same objects: the same headers, bases and zlib streams.
@@ -16,9 +18,9 @@ import type { BuiltEntry, PackInput } from './pack.js';
 import { bufferSource, concat } from './bytes.js';
 import { plyError } from './errors.js';
 import type { ErrorOf } from './errors.js';
-import { INFLATE_CHUNK, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from './format.js';
+import { DEFLATE_SLICE, INFLATE_CHUNK, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from './format.js';
 
-// One object's zlib stream, pulled: the object goes into CompressionStream in INFLATE_CHUNK slices as the output is read
+// One object's zlib stream, pulled: the object goes into CompressionStream in DEFLATE_SLICE slices as the output is read
 // (a source with no read-ahead), so nothing but zlib's own state and one output chunk is held.
 // No read-ahead of slices.
 // Stryker disable next-line ObjectLiteral: equivalent. A slice is a view of the caller's object (subarray, no copy), so a source queue of one costs no bytes, and CompressionStream gets the same slices in the same order
@@ -29,7 +31,7 @@ const slices = (data: Uint8Array): ReadableStream<Uint8Array<ArrayBuffer>> => {
   return new ReadableStream<Uint8Array<ArrayBuffer>>({
     pull(c): void {
       if (next >= bytes.length) { c.close(); return; }
-      const end = Math.min(next + INFLATE_CHUNK, bytes.length);
+      const end = Math.min(next + DEFLATE_SLICE, bytes.length);
       c.enqueue(bytes.subarray(next, end));
       next = end;
     },

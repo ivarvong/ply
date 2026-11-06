@@ -226,6 +226,10 @@ export const DEFLATE_MAX_BITS = 15;
 export const INFLATE_WINDOW: number = 1 << DEFLATE_MAX_BITS;
 /** Bytes one streaming inflate pull yields at most: half a window, so a pull holds one chunk beside the window. */
 export const INFLATE_CHUNK: number = INFLATE_WINDOW / 2;
+/** Bytes of an object push hands CompressionStream at a time (packwrite.ts): two windows. The deflate output of one slice
+ *  is what the push writer holds beside the caller's objects (at most this plus one 16 KiB block: 81,940 B measured, was
+ *  32,776 B with INFLATE_CHUNK slices), for 3-5% less push CPU under workerd and 8% under node (CONTEXT.md). */
+export const DEFLATE_SLICE: number = 2 * INFLATE_WINDOW;
 export const DEFLATE_BIT_TABLE = 16;
 /** Bits the inflate decoder looks a code up by in one step; a longer code is decoded a bit at a time. */
 export const INFLATE_FAST_BITS = 9;

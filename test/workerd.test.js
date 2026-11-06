@@ -188,7 +188,7 @@ test('workerd: a limit hit inside readFile\'s blob stream reaches the reader as 
 // server sees a clean chunked end), so a pass 2 that refuses to finish the pack must leave git without a whole pack.
 test('workerd: pass 1 and pass 2 write buildPack\'s bytes under workerd\'s CompressionStream', { skip: !WORKERD }, async () => {
   for (const half of [false, true]) {
-    const r = await post('/packwrite', { sizes: [0, 1, 16383, 16384, 16385, 100000, 1 << 20], half });
+    const r = await post('/packwrite', { sizes: [0, 1, 16383, 16384, 16385, 65535, 65536, 65537, 200000, 1 << 20], half });
     for (const c of r) assert.deepEqual([c.passes, c.built], [true, true], JSON.stringify(c));
   }
 });

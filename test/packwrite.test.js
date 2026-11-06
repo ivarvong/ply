@@ -3,7 +3,7 @@
 //   a pack pass 1 can keep (<= keep bytes) is held; a larger one is not
 //   pass 2 refuses to finish a pack that is not pass 1's: longer, shorter, or the same length with other bytes. The
 //   trailer is never written then, and never more than pass 1's length
-//   deflatePull feeds INFLATE_CHUNK slices and stops when its reader stops
+//   deflatePull feeds DEFLATE_SLICE slices and stops when its reader stops
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { randomFillSync } from 'node:crypto';
@@ -11,7 +11,7 @@ import { inflateSync } from 'node:zlib';
 import { measurePack, streamPack, deflatePull } from '../src/packwrite.js';
 import { buildPack, parsePack, resolvePack } from '../src/pack.js';
 import { TYPE } from '../src/objects.js';
-import { INFLATE_CHUNK, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from '../src/format.js';
+import { DEFLATE_SLICE, INFLATE_CHUNK, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from '../src/format.js';
 import { Sha1 } from '../src/sha1.js';
 import { unwrap } from './unwrap.js';
 
@@ -35,7 +35,7 @@ const readUntilError = async (stream) => {
 const prefix = Uint8Array.of(1, 2, 3);
 
 test('both passes write buildPack\'s bytes, for every size around the chunk and every kind of content', async () => {
-  for (const n of [0, 1, 100, INFLATE_CHUNK - 1, INFLATE_CHUNK, INFLATE_CHUNK + 1, 3 * INFLATE_CHUNK + 7, 1 << 20]) {
+  for (const n of [0, 1, 100, INFLATE_CHUNK - 1, INFLATE_CHUNK, INFLATE_CHUNK + 1, DEFLATE_SLICE - 1, DEFLATE_SLICE, DEFLATE_SLICE + 1, 3 * DEFLATE_SLICE + 7, 1 << 20]) {
     for (const kind of ['random', 'zero', 'text']) {
       const d = fill(n, kind);
       const objects = [{ type: TYPE.BLOB, data: d }, { type: TYPE.BLOB, data: d.subarray(0, n >> 1) }, { type: TYPE.TREE, data: fill(40, 'text') }];
@@ -97,7 +97,7 @@ test('pass 1 holds the pack exactly when it fits in keep (default INFLATE_CHUNK)
   const built = await buildPack(small);
   assert.deepEqual(Buffer.from(m.held), Buffer.from(built.pack));
   // a keep of exactly the pack's length holds it; one less does not
-  assert.notEqual((await measurePack(small, built.pack.length)).held, null);
+  assert.deepEqual(Buffer.from((await measurePack(small, built.pack.length)).held), Buffer.from(built.pack));
   assert.equal((await measurePack(small, built.pack.length - 1)).held, null);
   // an empty pack is 32 bytes and is held
   const empty = await measurePack([]);
@@ -275,11 +275,12 @@ const spyDeflate = async (body) => {
 class Counted extends Uint8Array { constructor(n) { super(n); this.taken = 0; } subarray(a, b) { this.taken++; return new Uint8Array(this.buffer, this.byteOffset + a, (b ?? this.length) - a); } }
 const settle = () => new Promise(r => setTimeout(r, 20));
 
-test('deflatePull feeds CompressionStream slices of at most INFLATE_CHUNK, and stops it when its reader stops', async () => {
+test('deflatePull feeds CompressionStream slices of at most DEFLATE_SLICE, and stops it when its reader stops', async () => {
+  assert.equal(DEFLATE_SLICE, 65_536);
   await spyDeflate(async seen => {
     const parts = [];
-    for await (const z of deflatePull(fill(5 * INFLATE_CHUNK + 3, 'random'))) parts.push(z);
-    assert.deepEqual(seen.slices, [INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, INFLATE_CHUNK, 3]);
+    for await (const z of deflatePull(fill(5 * DEFLATE_SLICE + 3, 'random'))) parts.push(z);
+    assert.deepEqual(seen.slices, [DEFLATE_SLICE, DEFLATE_SLICE, DEFLATE_SLICE, DEFLATE_SLICE, DEFLATE_SLICE, 3]);
     assert.equal(seen.cancelled, 0);
     const it = deflatePull(fill(64 * INFLATE_CHUNK, 'random'));
     await it.next();
