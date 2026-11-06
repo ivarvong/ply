@@ -26,7 +26,7 @@ export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, ar
 // ---- wire ----
 export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
 export type { Transport } from './transport.js';
-export type { ExportLine, Exporter } from './otel.js';
+export type { ExportLine, Exporter, EndedSpan, SpanSink, FlatSpan } from './otel.js';
 export type { Limits, CheckedLimits, LimitsInput } from './limits.js';
 export type { FetchOpts, SpState } from './fetch.js';
 export type { OperationOpts, Outcome } from './operation.js';

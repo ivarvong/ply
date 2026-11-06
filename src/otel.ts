@@ -7,7 +7,7 @@ import { scrubError } from './errors.js';
 import { thrownCode, thrownMessage, thrownName, thrownStack } from './boundary.js';
 import { errorKind, getOrElse, none } from './result.js';
 import type { Input } from './absent.js';
-import { field, fromNullable, fromNullish, withDefaults } from './absent.js';
+import { atOr, field, fromNullable, fromNullish, isMissing, withDefaults } from './absent.js';
 
 // OTLP AnyValue: exactly one of these fields. `in` on the field name discriminates.
 export type AnyValue =
@@ -49,11 +49,22 @@ export type ScopeSpans = { readonly scope: Scope; readonly spans: readonly OtlpS
 export type ResourceSpans = { readonly resource: { readonly attributes: readonly KeyValue[] }; readonly scopeSpans: readonly ScopeSpans[] };
 export type ExportLine = { readonly resourceSpans: readonly ResourceSpans[] };
 export type Exporter = (line: ExportLine) => void;
+// A span as it ended, as plain values: exactly what `flattenLine` reads back from the OTLP line `end()` would export for
+// it (attributes and event attributes scrubbed, an int as a number, bytes as base64, null as ''), plus its start and end
+// times. `otlp()` builds that OTLP span on first call and returns the same object after. For an exporter that lives in
+// the same process (a list kept for the request, a span mirrored onto a platform tracer): no OTLP is built for it.
+export type EndedSpan = FlatSpan & {
+  readonly startTimeUnixNano: string;
+  readonly endTimeUnixNano: string;
+  readonly otlp: () => OtlpSpan;
+};
+export type SpanSink = (span: EndedSpan) => void;
 
 // Platform clocks are probed, not type-checked: newer Workers compatibility dates define a `process` global whose
 // `hrtime`/`cpuUsage` exist but throw "not implemented" (found under workerd 2026-10-18, compat date 2026-10-18).
 const probe = <F extends () => unknown>(make: () => F, fallback: F): F => { try { const f = make(); f(); return f; } catch { return fallback; } };
-const now = probe((): (() => string) => { const base = BigInt(Date.now()) * 1_000_000n - process.hrtime.bigint(); return () => (base + process.hrtime.bigint()).toString(); }, () => (BigInt(Date.now()) * 1_000_000n).toString());
+const nowNs = probe((): (() => bigint) => { const base = BigInt(Date.now()) * 1_000_000n - process.hrtime.bigint(); return () => base + process.hrtime.bigint(); }, () => BigInt(Date.now()) * 1_000_000n);
+const now = (): string => nowNs().toString();
 
 // CPU clock: real on node (process.cpuUsage), null on Workers where no clock advances during synchronous work. Spans
 // record cpu_ms only where it is measured; the edge carries calibrated estimates instead (see edit.js CPU_RATE).
@@ -66,7 +77,20 @@ export const cpuSince = (t0: number | null): number | null => (t0 === null ? nul
 // first root span of an isolate is the one that paid connection setup, JIT warmup and cache misses.
 let invocations = 0;
 
-const rand = (n: number): string => { const b = new Uint8Array(n); crypto.getRandomValues(b); return Array.from(b, x => x.toString(16).padStart(2, '0')).join(''); };
+// Span and trace ids: `words` random 32-bit words as lowercase hex, 8 digits each. The words come from a pool filled 256
+// at a time (one getRandomValues call per 42 spans, not one per id), each word used once. Filled on first use, never at
+// module load: Workers refuse getRandomValues in the global scope.
+const POOL_WORDS = 256;
+const pool = new Uint32Array(POOL_WORDS);
+let pooled = POOL_WORDS;
+const rand = (words: number): string => {
+  let hex = '';
+  for (let i = 0; i < words; i++) {
+    if (pooled === POOL_WORDS) { crypto.getRandomValues(pool); pooled = 0; }
+    hex += atOr(pool, pooled++, 0).toString(16).padStart(8, '0');
+  }
+  return hex;
+};
 
 // OTLP AnyValue encoding (pure)
 export function anyValue(v: unknown): AnyValue {
@@ -91,9 +115,44 @@ const scrubAny = (v: AnyValue, scrub: Scrub): AnyValue => {
 };
 const scrubKvs = (list: readonly KeyValue[], scrub: Scrub): KeyValue[] => list.map(({ key, value }) => ({ key, value: scrubAny(value, scrub) }));
 
+// One attribute value as the reading side sees it: fromAny(scrubAny(anyValue(v))) without building the AnyValue, so an
+// in-process consumer pays neither encoding. Each branch is anyValue's, in its order; test/otel-ended.test.js holds the
+// two equal over every kind of value.
+const text = (s: string, scrub: Scrub | null): string => (scrub === null ? s : scrub(s));
+function flatValue(v: unknown, scrub: Scrub | null): FlatValue {
+  if (v === null || isMissing(v)) return text('', scrub);
+  if (typeof v === 'string') return text(v, scrub);
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'bigint') return Number(v.toString());
+  // an integer goes out as intValue String(v) and comes back through Number(): only -0 changes (to 0)
+  if (typeof v === 'number') return v === 0 ? 0 : v;
+  // bytes are not scrubbed: they leave as base64, which no credential pattern matches
+  // oxlint-disable-next-line unicorn/prefer-code-point -- code units 0-255, as anyValue
+  if (v instanceof Uint8Array) return btoa(String.fromCharCode(...v.subarray(0, 4096)));
+  if (Array.isArray(v)) return v.map(x => flatValue(x, scrub));
+  // oxlint-disable-next-line typescript/no-base-to-string -- a caller's object renders as String() renders it, as anyValue
+  return text(String(v), scrub);
+}
+// A plain record, keyed as Object.fromEntries keys it: an own `__proto__` key is a property, not the prototype.
+function flatAttrs(attrs: Attrs, scrub: Scrub | null): FlatAttrs {
+  const out: FlatAttrs = {};
+  for (const key of Object.keys(attrs)) {
+    const v = attrs[key];
+    if (isMissing(v)) continue;
+    if (key === '__proto__') Object.defineProperty(out, key, { value: flatValue(v, scrub), enumerable: true, writable: true, configurable: true });
+    else out[key] = flatValue(v, scrub);
+  }
+  return out;
+}
+
+// The default exporter: spans are dropped. end() checks for it, so a tracer without an exporter builds no OTLP.
+const dropSpans: Exporter = () => { /* spans are dropped */ };
+
 export const KIND: Readonly<{ INTERNAL: 1; SERVER: 2; CLIENT: 3; PRODUCER: 4; CONSUMER: 5 }> = Object.freeze({ INTERNAL: 1, SERVER: 2, CLIENT: 3, PRODUCER: 4, CONSUMER: 5 });
 
-export type TracerConfig = { readonly exporter: Exporter; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
+// `onEnd`: called with each span as it ends (an EndedSpan), before the exporter. `exporter`: the OTLP/JSON line per span.
+// A tracer with only `onEnd` builds no OTLP unless a consumer calls `otlp()`; one with neither builds nothing.
+export type TracerConfig = { readonly exporter: Exporter; readonly onEnd: SpanSink | null; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
 export type TracerOptions = Input<TracerConfig>;
 // How a span starts: under `parent`, or following `follows` (never both), with the credential scrubber it inherits.
 export type StartConfig = { readonly parent: Span | null; readonly follows: Span | null; readonly kind: number; readonly attrs: Attrs; readonly scrub: Scrub | null };
@@ -107,6 +166,66 @@ const inheritedScrub = ({ scrub, parent, follows }: StartConfig): Scrub | null =
 };
 // A thrown field rendered the way String() renders it (a stack, a message). A string is itself.
 const asText = (v: unknown): string => (typeof v === 'string' ? v : String(v));
+
+// ---- reading a value back (shared by the reading side below and EndedSpan) ----
+export function fromAny(v: AnyValue): FlatValue {
+  if ('stringValue' in v) return v.stringValue;
+  if ('intValue' in v) return Number(v.intValue);
+  if ('doubleValue' in v) return v.doubleValue;
+  if ('boolValue' in v) return v.boolValue;
+  if ('arrayValue' in v) return v.arrayValue.values.map(fromAny);
+  return v.bytesValue;
+}
+export const flattenKvs = (list: readonly KeyValue[]): FlatAttrs => Object.fromEntries(list.map(({ key, value }) => [key, fromAny(value)]));
+
+// an error's message (even empty) is a string the scrubber must see; ok and unset carry none
+const scrubbedStatus = (status: Status, s: Scrub | null): Status => (s !== null && status.code === 2 ? { code: 2, message: s(status.message) } : status);
+
+// What the OTLP span is built from: a live span, or an ended span's fields as they were when it ended.
+type SpanFields = Pick<Span, 'traceId' | 'spanId' | 'parentSpanId' | 'name' | 'kind' | 'start' | 'attrs' | 'events' | 'links' | 'status' | 'droppedEvents' | 'droppedLinks' | 'scrub'>;
+
+// The OTLP span end() exports.
+function otlpSpan(span: SpanFields, endTimeUnixNano: string): OtlpSpan {
+  const s = span.scrub;
+  return {
+    ...(span.parentSpanId === null ? {} : { parentSpanId: span.parentSpanId }),
+    traceId: span.traceId, spanId: span.spanId, name: span.name, kind: span.kind,
+    startTimeUnixNano: span.start, endTimeUnixNano,
+    attributes: s ? scrubKvs(kvs(span.attrs), s) : kvs(span.attrs),
+    events: s ? span.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : span.events,
+    links: span.links, status: scrubbedStatus(span.status, s),
+    droppedAttributesCount: 0, droppedEventsCount: span.droppedEvents, droppedLinksCount: span.droppedLinks,
+  };
+}
+
+const flatEvent = (ev: SpanEvent, s: Scrub | null): FlatSpan['events'][number] => ({ name: ev.name, attrs: flattenKvs(s ? scrubKvs(ev.attributes, s) : ev.attributes) });
+const flatLink = (l: SpanLink): FlatSpan['links'][number] => ({ traceId: l.traceId, spanId: l.spanId, attrs: flattenKvs(l.attributes) });
+// A list as it stands, for a span that may still be written to after it ended. Most spans have no events or links.
+const copied = <T>(list: T[]): T[] => (list.length === 0 ? [] : list.slice());
+
+// The EndedSpan of a span that just ended. Its OTLP form is built on first call from the span's fields as they were at
+// end: the attributes record (set() after end writes a copy), and copies of the event and link lists.
+function endedSpan(span: Span, end: bigint): EndedSpan {
+  const s = span.scrub;
+  const endTimeUnixNano = end.toString();
+  const fields: SpanFields = {
+    traceId: span.traceId, spanId: span.spanId, parentSpanId: span.parentSpanId, name: span.name, kind: span.kind, start: span.start,
+    attrs: span.attrs, events: copied(span.events), links: copied(span.links), status: span.status,
+    droppedEvents: span.droppedEvents, droppedLinks: span.droppedLinks, scrub: s,
+  };
+  let built: OtlpSpan | null = null;
+  const otlp = (): OtlpSpan => {
+    if (built === null) built = otlpSpan(fields, endTimeUnixNano);
+    return built;
+  };
+  return {
+    traceId: span.traceId, spanId: span.spanId, parentSpanId: span.parentSpanId, name: span.name, kind: span.kind,
+    durationMs: Number(end - BigInt(span.start)) / 1e6,
+    status: scrubbedStatus(span.status, s), attrs: flatAttrs(span.attrs, s), droppedEvents: span.droppedEvents,
+    events: fields.events.map(ev => flatEvent(ev, s)), links: fields.links.map(flatLink),
+    startTimeUnixNano: span.start, endTimeUnixNano, otlp,
+  };
+}
 
 // `declare` fields: assigned in the constructor, so they emit nothing (the JS is the constructor body as before).
 // A span under an authenticated transport carries the transport's `scrub` (http.js), and every child inherits it. At
@@ -132,8 +251,8 @@ export class Span {
     const { name, kind, attrs, parent, follows } = init;
     if (parent && follows) throw new TypeError('a span has a parent or follows one, not both');
     this.tracer = tracer;
-    this.traceId = parent ? parent.traceId : rand(16);
-    this.spanId = rand(8);
+    this.traceId = parent ? parent.traceId : rand(4);
+    this.spanId = rand(2);
     this.parentSpanId = parent ? parent.spanId : null;
     this.name = name;
     this.kind = kind;
@@ -149,7 +268,8 @@ export class Span {
     this.scrub = inheritedScrub(init);
     if (follows) { this.link(follows, { 'ply.link': 'follows_from' }); if (!follows.ended) follows.link(this, { 'ply.link': 'followed_by' }); }
   }
-  public set(attrs: Attrs): this { Object.assign(this.attrs, attrs); return this; }
+  // After end() the record an EndedSpan's otlp() reads is left as it ended: a late set() writes to a copy.
+  public set(attrs: Attrs): this { if (this.ended) this.attrs = { ...this.attrs }; Object.assign(this.attrs, attrs); return this; }
   // Bounded: a pack with 10k objects must not produce a 10k-event span. The count of dropped events is exported.
   public event(name: string, attrs: Attrs = {}): this {
     if (this.events.length >= this.tracer.maxEvents) { this.droppedEvents++; return this; }
@@ -176,35 +296,42 @@ export class Span {
     return this;
   }
   public ok(): this { if (this.status.code === 0) this.status = { code: 1 }; return this; }
+  // Ends the span once. The tracer's onEnd gets the EndedSpan; its exporter (or an override of export) gets the OTLP
+  // span. With neither, nothing is built: the span is only counted.
   public end(): this {
     if (this.ended) return this;
     this.ended = true;
     this.ok();
-    const s = this.scrub;
-    const status = this.status;
-    this.tracer.export({
-      ...(this.parentSpanId === null ? {} : { parentSpanId: this.parentSpanId }),
-      traceId: this.traceId, spanId: this.spanId, name: this.name, kind: this.kind,
-      startTimeUnixNano: this.start, endTimeUnixNano: now(),
-      attributes: s ? scrubKvs(kvs(this.attrs), s) : kvs(this.attrs),
-      events: s ? this.events.map(ev => ({ ...ev, attributes: scrubKvs(ev.attributes, s) })) : this.events,
-      // an error's message (even empty) is a string the scrubber must see; ok and unset carry none
-      links: this.links, status: s !== null && status.code === 2 ? { code: 2, message: s(status.message) } : status,
-      droppedAttributesCount: 0, droppedEventsCount: this.droppedEvents, droppedLinksCount: this.droppedLinks,
-    });
+    const end = nowNs();
+    const tracer = this.tracer;
+    const sink = tracer.onEnd;
+    // a subclass that overrides export (a tracer that mirrors spans elsewhere) still gets every span
+    // oxlint-disable-next-line no-use-before-define -- Span and Tracer are one API (see the top of this file); this runs after both exist
+    const exports = tracer.exporter !== dropSpans || tracer.export !== Tracer.prototype.export;
+    if (sink === null) {
+      if (exports) tracer.export(otlpSpan(this, end.toString()));
+      else tracer.count++;
+      return this;
+    }
+    const ended = endedSpan(this, end);
+    sink(ended);
+    if (exports) tracer.export(ended.otlp());
+    else tracer.count++;
     return this;
   }
 }
 
 export class Tracer {
   public declare exporter: Exporter;
+  public declare onEnd: SpanSink | null;
   public declare maxEvents: number;
   public declare resource: { attributes: KeyValue[] };
   public declare scope: Scope;
   public declare count: number;
   public constructor(options: TracerOptions = {}) {
-    const { exporter, resource, scope, maxEvents } = withDefaults(options, { exporter: () => { /* spans are dropped */ }, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
+    const { exporter, onEnd, resource, scope, maxEvents } = withDefaults(options, { exporter: dropSpans, onEnd: null, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
     this.exporter = exporter;
+    this.onEnd = onEnd;
     this.maxEvents = maxEvents;
     this.resource = { attributes: kvs({ 'service.name': 'ply', 'telemetry.sdk.name': 'ply-otel', 'telemetry.sdk.language': 'javascript', ...resource }) };
     this.scope = scope;
@@ -250,15 +377,6 @@ export type FlatSpan = {
   readonly events: ReadonlyArray<{ readonly name: string; readonly attrs: FlatAttrs }>;
   readonly links: ReadonlyArray<{ readonly traceId: string; readonly spanId: string; readonly attrs: FlatAttrs }>;
 };
-export function fromAny(v: AnyValue): FlatValue {
-  if ('stringValue' in v) return v.stringValue;
-  if ('intValue' in v) return Number(v.intValue);
-  if ('doubleValue' in v) return v.doubleValue;
-  if ('boolValue' in v) return v.boolValue;
-  if ('arrayValue' in v) return v.arrayValue.values.map(fromAny);
-  return v.bytesValue;
-}
-export const flattenKvs = (list: readonly KeyValue[]): FlatAttrs => Object.fromEntries(list.map(({ key, value }) => [key, fromAny(value)]));
 // The reading side takes lines from any producer: parentSpanId, links and the dropped counts may be missing there.
 const foreignString = (s: OtlpSpan, key: string): string | null => { const v = field(s, key); return v.tag === 'some' && typeof v.value === 'string' ? v.value : null; };
 const foreignCount = (s: OtlpSpan, key: string): number => { const v = field(s, key); return v.tag === 'some' && typeof v.value === 'number' ? v.value : 0; };
