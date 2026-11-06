@@ -27,9 +27,11 @@ import { join } from 'node:path';
 import { git, gitAsync, tmpRoot, makeBareRepo, commitFiles, startGitServer } from './server.js';
 import { GitHttp } from '../src/client.js';
 import { lsRefs as lsRefsR } from '../src/lsrefs.js';
-import { createTransport as createTransportR, baseFromRedirect, redirectPolicy as redirectPolicyR } from '../src/http.js';
+import { createTransport as createTransportR, baseFromRedirect, redirectPolicy as redirectPolicyR, streamRedirect } from '../src/http.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { ok } from '../src/result.js';
+import { forgetQuirks } from '../src/transport.js';
+import { lsRefsBody } from '../src/lsrefs.js';
 import { fail } from '../src/errors.js';
 
 import { unwrap, unwrapAsync } from './unwrap.js';
@@ -489,4 +491,156 @@ test('a network failure before a response does not settle the initial exchange',
     assert.deepEqual(hits, ['GET /old.git/info/refs', 'GET /new.git/info/refs', `POST /new.git/${SERVICE}`]);
     assert.equal(c.url, `${front.url}/new.git`);
   } finally { await front.close(); }
+});
+
+// The redirect memo (ply-web#117). `moves` maps a repo name to where a GET of its info/refs (and, with `all`, every
+// request) is sent with a 301; anything that reaches a name in `serve` is proxied to new.git. `hits` is every request.
+async function movingHost() {
+  const hits = [];
+  const moves = new Map();
+  const host = await listen((req, res) => {
+    const path = req.url.split('?')[0];
+    hits.push({ line: `${req.method} ${path}`, auth: req.headers.authorization ?? null });
+    const name = /^\/([^/]+)\.git\//.exec(req.url)?.[1];
+    const move = moves.get(name);
+    if (move && (move.all || (req.method === 'GET' && path.endsWith('/info/refs')))) {
+      req.resume();
+      res.writeHead(301, { location: req.url.replace(`/${name}.git/`, `${move.to}/`) }); res.end(); return;
+    }
+    proxy(req, res, srv.url, req.url.replace(/^\/[^/]+\.git\//, '/new.git/'));
+  });
+  return { ...host, hits, moves, lines: () => hits.map(h => h.line) };
+}
+const POST = `POST /new.git/${SERVICE}`;
+
+test('memo: a second transport for the remote makes no GET, redirected or not; never, maxRedirects and forgetQuirks are respected', async () => {
+  const h = await movingHost();
+  try {
+    h.moves.set('old', { to: '/new.git', all: false });
+    const first = plyClient(`${h.url}/old.git`, { follow: 'initial', auth: true });
+    await unwrapAsync(first.lsRefs());
+    assert.deepEqual(h.lines(), ['GET /old.git/info/refs', 'GET /new.git/info/refs', POST]);
+    h.hits.length = 0;
+    const ex = arrayExporter();
+    const second = plyClient(`${h.url}/old.git`, { follow: 'initial', auth: true, exporter: ex });
+    const refs = await unwrapAsync(second.lsRefs());
+    assert.ok(refs.refs.has('refs/heads/main'));
+    assert.deepEqual(h.lines(), [POST], 'a memo hit asks nothing of the old base and makes no GET');
+    assert.equal(second.url, `${h.url}/new.git`);
+    assert.ok(h.hits.every(x => x.auth === BASIC), 'same origin: the credential is kept');
+    const span = ex.lines.flatMap(flattenLine).find(x => x.attrs['http.redirect.count'] !== undefined);
+    assert.equal(span.attrs['http.redirect.count'], 1);
+    assert.equal(span.attrs['git.remote.rebased_from'], `${h.url}/old.git`);
+
+    // a remote that does not redirect is remembered too: one GET for the first transport, none after
+    h.hits.length = 0;
+    await unwrapAsync(plyClient(`${h.url}/new.git`, { follow: 'initial', auth: false }).lsRefs());
+    await unwrapAsync(plyClient(`${h.url}/new.git`, { follow: 'initial', auth: false }).lsRefs());
+    assert.deepEqual(h.lines(), ['GET /new.git/info/refs', POST, POST]);
+
+    // `never` does not use the memo, and a memo longer than maxRedirects is not replayed
+    h.hits.length = 0;
+    const never = await plyLs(`${h.url}/old.git`, { follow: 'off', auth: false });
+    assert.equal(never.ok, true);
+    assert.deepEqual(h.lines(), [`POST /old.git/${SERVICE}`]);
+    h.hits.length = 0;
+    const capped = await plyLs(`${h.url}/old.git`, { follow: 'initial', auth: false, max: 0 });
+    assert.equal(capped.ok, false);
+    assert.equal(capped.error.code, 'http');
+    assert.deepEqual(h.lines(), ['GET /old.git/info/refs']);
+
+    // forgetQuirks(url) forgets it: the next transport asks again
+    forgetQuirks(`${h.url}/old.git`);
+    h.hits.length = 0;
+    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false }).lsRefs());
+    assert.deepEqual(h.lines(), ['GET /old.git/info/refs', 'GET /new.git/info/refs', POST]);
+  } finally { await h.close(); }
+});
+
+test('memo: a cross-origin rebase replayed from the memo still drops the credential', async () => {
+  const h = await movingHost();
+  try {
+    h.moves.set('old', { to: `${gate.url}/new.git`, all: false });
+    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: true }).lsRefs());
+    h.hits.length = 0;
+    gateHits.length = 0;
+    const second = plyClient(`${h.url}/old.git`, { follow: 'initial', auth: true });
+    await unwrapAsync(second.lsRefs());
+    assert.equal(second.url, `${gate.url}/new.git`);
+    assert.deepEqual(h.hits, [], 'nothing asked of the old origin');
+    assert.deepEqual(gateHits.map(x => [x.method, x.path.split('?')[0], x.auth]), [['POST', `/new.git/${SERVICE}`, null]]);
+  } finally { await h.close(); }
+});
+
+test('memo: a stale memo answered with a 3xx is dropped; bytes are re-sent once after the GET; a stream gets the error', async () => {
+  const h = await movingHost();
+  try {
+    h.moves.set('old', { to: '/a.git', all: false });
+    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false }).lsRefs());
+    // the repo moves again: a.git now redirects everything to b.git, and old.git's info/refs points at b.git
+    h.moves.set('old', { to: '/b.git', all: false });
+    h.moves.set('a', { to: '/b.git', all: true });
+    h.hits.length = 0;
+    const stale = plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false });
+    const refs = await unwrapAsync(stale.lsRefs());
+    assert.ok(refs.refs.has('refs/heads/main'));
+    assert.deepEqual(h.lines(), [`POST /a.git/${SERVICE}`, 'GET /old.git/info/refs', 'GET /b.git/info/refs', `POST /b.git/${SERVICE}`]);
+    assert.equal(stale.url, `${h.url}/b.git`);
+    h.hits.length = 0;
+    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false }).lsRefs());
+    assert.deepEqual(h.lines(), [`POST /b.git/${SERVICE}`], 'the memo now says b.git');
+
+    // a stale memo met on a GET (discover) starts over too
+    h.moves.set('b', { to: '/c.git', all: true });
+    h.moves.set('old', { to: '/c.git', all: false });
+    h.hits.length = 0;
+    const d = plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false });
+    await unwrapAsync(d.discover());
+    assert.deepEqual(h.lines(), ['GET /b.git/info/refs', 'GET /old.git/info/refs', 'GET /c.git/info/refs']);
+    assert.equal(d.url, `${h.url}/c.git`);
+
+    // a streamed body is sent once: the stale memo's 3xx is the redirect error, and the memo is dropped
+    h.moves.set('c', { to: '/d.git', all: true });
+    h.hits.length = 0;
+    const t = createTransport(`${h.url}/old.git`, { tracer: new Tracer(), followRedirects: 'initial' });
+    const bytes = unwrap(lsRefsBody([]));
+    const stream = new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
+    const span = new Tracer().start('t');
+    const failed = await (async () => { for await (const _ of t.frames(SERVICE, { stream, length: bytes.length }, span)) { /* drain */ } })().catch(e => e);
+    // undici sends a stream with redirect 'error', so there the 3xx is a network failure; workerd's 'manual' gives the 301
+    if (streamRedirect() === 'error') assert.equal(failed.code, 'network');
+    else { assert.equal(failed.code, 'http'); assert.equal(failed.status, 301); assert.equal(failed.location, `${h.url}/d.git/${SERVICE}`); }
+    assert.deepEqual(h.lines(), [`POST /c.git/${SERVICE}`], 'the stream was not re-sent');
+    h.moves.set('old', { to: '/new.git', all: false });
+    h.hits.length = 0;
+    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false }).lsRefs());
+    assert.deepEqual(h.lines(), ['GET /old.git/info/refs', 'GET /new.git/info/refs', POST], 'the stale memo was dropped');
+  } finally { await h.close(); }
+});
+
+test('memo: each Location is approved again by the new transport\'s allowUrl; a refusal there asks the network', async () => {
+  const h = await movingHost();
+  try {
+    h.moves.set('old', { to: '/new.git', all: false });
+    await unwrapAsync(plyClient(`${h.url}/old.git`, { follow: 'initial', auth: false }).lsRefs());
+    const calls = [];
+    h.hits.length = 0;
+    const denied = await plyLs(`${h.url}/old.git`, {
+      follow: 'initial', auth: false,
+      allowUrl(url) { calls.push(url.href); return url.pathname.startsWith('/new.git') ? fail('auth', 'host denied') : ok(url); },
+    });
+    assert.equal(denied.ok, false);
+    assert.equal(denied.error.message, 'host denied');
+    assert.deepEqual(calls, [`${h.url}/old.git`, `${h.url}/new.git${TAIL}`, `${h.url}/new.git${TAIL}`], 'the memo replay asked allowUrl once, then the network did');
+    assert.deepEqual(h.lines(), ['GET /old.git/info/refs'], 'nothing past the refusal was fetched');
+    // an allowUrl that rewrites the Location: the replay takes its answer, with no request
+    h.hits.length = 0;
+    const renamed = await plyLs(`${h.url}/old.git`, {
+      follow: 'initial', auth: false,
+      allowUrl(url) { return url.pathname === '/new.git/info/refs' ? ok(new URL(`${h.url}/renamed.git${TAIL}`)) : ok(url); },
+    });
+    assert.equal(renamed.ok, true, renamed.error?.message);
+    assert.equal(renamed.url, `${h.url}/renamed.git`);
+    assert.deepEqual(h.lines(), [`POST /renamed.git/${SERVICE}`]);
+  } finally { await h.close(); }
 });
