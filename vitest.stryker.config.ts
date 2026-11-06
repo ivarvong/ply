@@ -40,6 +40,7 @@ const MUTATION_FILES = [
   'test/otel-ended.test.js',
   'test/sha1.test.js',
   'test/lsrefs-step.test.js',
+  'test/path-trees-unit.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

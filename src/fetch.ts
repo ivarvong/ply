@@ -900,9 +900,10 @@ function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, 
 // ('') for one that does not take `filter` at all. Bounded by limits.maxPackBytes (v2Step) and the pack parser's limits.
 export type WideFilter = 'blob:none' | '';
 // The filter a wide fetch sent, as spans and messages name it.
-export const packName = (filter: WideFilter): string => (filter === '' ? 'unfiltered' : filter);
+export const packName = (filter: string): string => (filter === '' ? 'unfiltered' : filter);
 export const fallbackName = (filter: WideFilter): string => (filter === '' ? 'none' : filter);
-type Wide = { readonly oid: Oid; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean; readonly filter: WideFilter; readonly requested: string };
+// A wide fetch: the want, and the filter sent (a fallback's WideFilter, or a path walk's combine filter, #218).
+type Wide = { readonly oid: Oid; readonly deepen: number; readonly expectType: number | null; readonly filter: string };
 // What a wide fetch left out as it read the pack: full blobs (a commit or tree want is neither, and a harvest keeps
 // commits and trees) and the deltas on them, by offset, with their declared bytes.
 type Dropped = { readonly offsets: Set<number>; bytes: number };
@@ -962,11 +963,12 @@ function wideObject(t: Transport, { parsed, dropped }: WideRead, want: Wide, spa
   span.set({ 'git.pack.objects': parsed.stats.count, 'git.pack.bytes': parsed.bytes, 'git.object.oid': oid, 'git.object.type': typeText(wanted.type), 'git.fetch.wide.objects': all, 'git.fetch.wide.extra_objects': all - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes, ...skippedAttrs(skipped) });
   return ok({ type: wanted.type, data: wanted.data, oid, size: wanted.data.length, bust, tree: none, wide: true });
 }
+// The wide pack read and its wanted object taken (wideObject), under one fetch span carrying `attrs`.
 // oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
-function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyError>> {
-  const { oid, deepen, learned, filter, requested } = want;
+function wideFetch(t: Transport, want: Wide, attrs: Attrs): Promise<Result<FetchedObject, PlyError>> {
+  const { oid, deepen, filter } = want;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
-  const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, 'git.fetch.filter.fallback': fallbackName(filter), 'git.fetch.filter.requested': requested, 'git.fetch.filter.learned': learned }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
+  const once = (bust: boolean): Promise<Result<FetchedObject, PlyError>> => fetchExchange(t, { 'git.pack.cache.bust': bust, ...attrs }, async (span: Span): Promise<Result<FetchedObject, PlyError>> => {
     const caps = packCaps({ limits: t.limits });
     if (!caps.ok) return caps;
     // the pack is read through the scan as it arrives: its bytes and every zlib member are dropped once inflated, and
@@ -982,6 +984,19 @@ function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyE
   });
   return onceMore(once);
 }
+// The fallback (fetchObject): what was asked (tree:0, or the filter the caller gave), what was sent, and whether this
+// request is the one that learned the refusal.
+type Fallback = { readonly oid: Oid; readonly deepen: number; readonly expectType: number | null; readonly learned: boolean; readonly filter: WideFilter; readonly requested: string };
+// oxlint-disable-next-line typescript/promise-function-async -- wideFetch's promise, passed through
+const fetchWide = (t: Transport, { learned, requested, ...want }: Fallback): Promise<Result<FetchedObject, PlyError>> =>
+  wideFetch(t, want, { 'git.fetch.filter.fallback': fallbackName(want.filter), 'git.fetch.filter.requested': requested, 'git.fetch.filter.learned': learned });
+// A commit and the trees `filter` brings with it (deepen 1), read as a wide pack is: every object keyed by its computed
+// hash, each commit and tree held to the caller's limits (checkWide, the commit the wanted object: an extra over a limit
+// is dropped, a malformed one fails the fetch), the trees harvested into the transport's store for the walk's tree:0
+// reads (objectAt answers them locally). A path walk's first levels in one round trip (pathtrees.ts, #218).
+// oxlint-disable-next-line typescript/promise-function-async -- wideFetch's promise, passed through
+export const commitWithTrees = (t: Transport, oid: Oid, filter: string): Promise<Result<FetchedObject, PlyError>> =>
+  wideFetch(t, { oid, deepen: 1, expectType: TYPE.COMMIT, filter }, { 'git.fetch.path_trees': filter });
 
 // The caller's oid, parsed once: a JS caller may pass anything, so it is read as String() renders it (a missing one
 // renders as no id) and quoted the same way. Not 40 lowercase hex is `fetchObject: oid must be 40-hex` (bad_request, no

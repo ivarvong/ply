@@ -164,6 +164,17 @@ export async function probing<T extends { readonly ok: boolean }>(q: Quirks, sen
     probes.delete(q);
   }
 }
+// Whether a server takes `combine:blob:none+tree:K` for a commit want (#218, pathtrees.ts): learned from its answer, kept
+// per quirks record like `settled` above, so the public Quirks shape (callers build and persist it as JSON) is unchanged.
+// No entry: not known yet. A record the caller keeps (ply-web: one per origin) keeps it for that record's life; the
+// default memo's records keep it per remote. Never re-learned from 'refused': a host that starts taking it is used only
+// once its record is new, as with treeFilter's blob:none.
+export type PathTrees = 'taken' | 'refused';
+const pathTrees = new WeakMap<Quirks, PathTrees>();
+export const pathTreesOf = (q: Quirks): PathTrees | null => { const known = fromNullable(pathTrees.get(q)); return known.tag === 'some' ? known.value : null; };
+export const learnPathTrees = (q: Quirks, value: PathTrees): void => { pathTrees.set(q, value); };
+// The server has answered a tree:0 request on this record (probing settled it): tree:0 itself is taken.
+export const tree0Taken = (q: Quirks): boolean => q.treeFilter === 'tree:0' && settled.get(q) === 'tree:0';
 // Commits and trees harvested from over-wide packs (fetch.js), keyed by oid; `bytes` is their running total.
 export type HeldObject = { readonly type: number; readonly data: Uint8Array };
 export type Harvest = Map<string, HeldObject>;
