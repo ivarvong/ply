@@ -86,6 +86,7 @@ let pooled = POOL_WORDS;
 const rand = (words: number): string => {
   let hex = '';
   for (let i = 0; i < words; i++) {
+    // Stryker disable next-line ConditionalExpression: refilling for every word gives ids of the same form (the pool is the fast path)
     if (pooled === POOL_WORDS) { crypto.getRandomValues(pool); pooled = 0; }
     hex += atOr(pool, pooled++, 0).toString(16).padStart(8, '0');
   }
@@ -121,6 +122,7 @@ const scrubKvs = (list: readonly KeyValue[], scrub: Scrub): KeyValue[] => list.m
 const text = (s: string, scrub: Scrub | null): string => (scrub === null ? s : scrub(s));
 function flatValue(v: unknown, scrub: Scrub | null): FlatValue {
   if (v === null || isMissing(v)) return text('', scrub);
+  // Stryker disable next-line ConditionalExpression,StringLiteral: a string skipped here reaches the String(v) branch below, which returns the same text
   if (typeof v === 'string') return text(v, scrub);
   if (typeof v === 'boolean') return v;
   if (typeof v === 'bigint') return Number(v.toString());
@@ -139,6 +141,7 @@ function flatAttrs(attrs: Attrs, scrub: Scrub | null): FlatAttrs {
   for (const key of Object.keys(attrs)) {
     const v = attrs[key];
     if (isMissing(v)) continue;
+    // Stryker disable next-line ConditionalExpression: defining every key as a property gives the same record (the assignment is the fast path)
     if (key === '__proto__') Object.defineProperty(out, key, { value: flatValue(v, scrub), enumerable: true, writable: true, configurable: true });
     else out[key] = flatValue(v, scrub);
   }
@@ -201,6 +204,7 @@ function otlpSpan(span: SpanFields, endTimeUnixNano: string): OtlpSpan {
 const flatEvent = (ev: SpanEvent, s: Scrub | null): FlatSpan['events'][number] => ({ name: ev.name, attrs: flattenKvs(s ? scrubKvs(ev.attributes, s) : ev.attributes) });
 const flatLink = (l: SpanLink): FlatSpan['links'][number] => ({ traceId: l.traceId, spanId: l.spanId, attrs: flattenKvs(l.attributes) });
 // A list as it stands, for a span that may still be written to after it ended. Most spans have no events or links.
+// Stryker disable next-line ConditionalExpression: slicing an empty list is a fresh empty list too (the test is the fast path)
 const copied = <T>(list: T[]): T[] => (list.length === 0 ? [] : list.slice());
 
 // The EndedSpan of a span that just ended. Its OTLP form is built on first call from the span's fields as they were at

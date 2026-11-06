@@ -132,6 +132,63 @@ test('onEnd runs before the exporter, and a subclass that overrides export gets 
   assert.equal(exported.length, 1, 'an exporter assigned after construction is used');
 });
 
+test('OTLP is built only for a consumer of it: the scrubber sees each string once per form built', () => {
+  const run = options => {
+    let calls = 0;
+    const t = new Tracer(options);
+    const s = t.start('git.x', { attrs: { a: 'one', b: 'two', n: 3 }, scrub: v => { calls++; return v; } });
+    s.end();
+    return { calls, t };
+  };
+  const ended = [];
+  assert.equal(run({}).calls, 0, 'neither: nothing built');
+  assert.equal(run({ onEnd: s => ended.push(s) }).calls, 2, 'onEnd alone: the plain values only');
+  assert.equal(run({ exporter: () => {} }).calls, 2, 'exporter alone: the OTLP form only');
+  assert.equal(run({ exporter: () => {}, onEnd: () => {} }).calls, 4, 'both: each form once');
+  let lazy = 0;
+  const t = new Tracer({ onEnd: s => ended.push(s) });
+  t.start('git.y', { attrs: { a: 'one' }, scrub: v => { lazy++; return v; } }).end();
+  assert.equal(lazy, 1);
+  ended.at(-1).otlp();
+  ended.at(-1).otlp();
+  assert.equal(lazy, 2, 'otlp() builds once, on demand');
+});
+
+test('the OTLP form and times: a root has no parentSpanId key, times are the wall clock in ns, the defaults are ply\'s', () => {
+  const ended = [];
+  const t = new Tracer({ onEnd: s => ended.push(s) });
+  assert.deepStrictEqual(t.scope, { name: 'ply', version: '0.2.0' });
+  assert.deepStrictEqual(t.resource.attributes.map(kv => kv.key), ['service.name', 'telemetry.sdk.name', 'telemetry.sdk.language']);
+  assert.deepStrictEqual(t.resource.attributes.map(kv => kv.value.stringValue), ['ply', 'ply-otel', 'javascript']);
+  const before = BigInt(Date.now()) * 1_000_000n;
+  const root = t.start('r');
+  const child = t.start('c', { parent: root });
+  child.end(); root.end();
+  const after = BigInt(Date.now() + 1) * 1_000_000n;
+  const [c, r] = ended;
+  assert.equal('parentSpanId' in r.otlp(), false);
+  assert.equal(c.otlp().parentSpanId, r.spanId);
+  for (const e of ended) {
+    const start = BigInt(e.startTimeUnixNano), end = BigInt(e.endTimeUnixNano);
+    assert.ok(start >= before - 5_000_000n && end <= after + 5_000_000n && start <= end, `${start} ${end} within ${before}..${after}`);
+    assert.equal(e.durationMs, Number(end - start) / 1e6);
+  }
+});
+
+test('set() before end writes the span\'s own record; an own __proto__ key is a plain writable property', () => {
+  const ended = [];
+  const t = new Tracer({ onEnd: s => ended.push(s) });
+  // start() spreads its attrs (an own __proto__ key stays a property there; set()'s Object.assign would not keep it)
+  const s = t.start('x', { attrs: Object.defineProperty({}, '__proto__', { value: 'p', enumerable: true, writable: true, configurable: true }) });
+  const record = s.attrs;
+  s.set({ a: 1 });
+  assert.equal(s.attrs, record, 'no copy while the span is open');
+  s.end();
+  assert.notEqual(s.set({ b: 2 }).attrs, record, 'a late set writes a copy');
+  assert.deepStrictEqual(Object.getOwnPropertyDescriptor(ended[0].attrs, '__proto__'), { value: 'p', enumerable: true, writable: true, configurable: true });
+  assert.equal(Object.getPrototypeOf(ended[0].attrs), Object.prototype);
+});
+
 test('ids: 32 and 16 lowercase hex digits, distinct across pool refills', () => {
   const t = new Tracer();
   const ids = new Set();
