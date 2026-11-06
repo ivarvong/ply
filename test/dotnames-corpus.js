@@ -28,7 +28,19 @@ export const SPELLINGS = [
   '.gitignore', 'gitign~1', 'gi250a~1', 'gi250~12', '.gitattributes', 'gitatt~1', 'gi7d29~1', 'gi7d2~12', '.mailmap', 'mailma~1', 'maba30~1', 'maba3~12', 'MAILMA~3',
   '.gitmodulesx', '.gitmodule', 'gitmodules', '.gitmodules~1', 'gitmodules~1',
 ];
-export const TAILS = ['', '.', ' ', '. .', ' . ', ':', ':x', ':$DATA', '/', '/x', '\\', '\\x', 'x', '.x', ' x', '\0', '\0x', '~', '1'];
+export const TAILS = ['', '.', ' ', '. .', ' . ', ':', ':x', ':$DATA', '/', '/x', '\\', '\\x', 'x', '.x', ' x', '\0', '\0x', '~', '1', 'é', '€', '\u{1f600}', '‌'];
+// UTF-8 after a spelling, byte by byte: each length's first and last code point, and what git calls invalid (a stray
+// continuation, a cut sequence, C0/C1 leads, overlong 3- and 4-byte forms, a surrogate, U+FFFE/U+FFFF, above U+10FFFF,
+// a lead past F4)
+export const BYTE_TAILS = [
+  [0x7f], [0xc2, 0x80], [0xdf, 0xbf], [0xe0, 0xa0, 0x80], [0xef, 0xbf, 0xbd], [0xf0, 0x90, 0x80, 0x80], [0xf4, 0x8f, 0xbf, 0xbf],
+  [0x80], [0xbf], [0xc3], [0xe2, 0x80], [0xf0, 0x9f, 0x98], [0xc0, 0x80], [0xc1, 0xbf], [0xe0, 0x9f, 0xbf], [0xf0, 0x8f, 0xbf, 0xbf],
+  [0xed, 0xa0, 0x80], [0xed, 0x9f, 0xbf], [0xef, 0xbf, 0xbe], [0xef, 0xbf, 0xbf], [0xef, 0xbe, 0xbf], [0xf4, 0x90, 0x80, 0x80], [0xf5, 0x80, 0x80, 0x80],
+  [0xc3, 0x41], [0xe2, 0x41, 0x80], [0xe2, 0x80, 0x41], [0xf0, 0x41, 0x80, 0x80], [0xf0, 0x90, 0x41, 0x80], [0xf0, 0x90, 0x80, 0x41], [0xf8, 0x80, 0x80, 0x80, 0x80],
+];
+// The bytes the checks branch on, few enough for 4-byte strings and the mutation run's substitutions: the separators,
+// `~`, digits at the range edges, the letters of git and of the short names, and UTF-8 leads and continuations
+export const BRANCH_BYTES = Uint8Array.from([0x00, 0x20, 0x2e, 0x2f, 0x3a, 0x5c, 0x7e, 0x30, 0x31, 0x34, 0x35, 0x39, 0x67, 0x69, 0x74, 0x47, 0x49, 0x54, 0x6d, 0x4d, 0x37, 0x65, 0x62, 0x61, 0x78, 0x80, 0x81, 0x8c, 0x8f, 0xae, 0xbb, 0xbf, 0xc2, 0xe2, 0xed, 0xef, 0xf0, 0xff]);
 export const HEADS = ['', 'a\\', '\\', 'a\\b\\', '\\\\', '.git\\', 'x', ' ', '‌'];
 
 // Every predicate the two sides answer, as one string: isDotGitName and isDotFileName × 4.
@@ -70,11 +82,14 @@ export function* exhaustive(alphabet, maxLen) {
 }
 export const ALL_BYTES = Uint8Array.from({ length: 256 }, (_, i) => i);
 
-// Each spelling × head × tail; then of each: every truncation, every one-byte substitution by the alphabet, every
-// ignorable inserted at every position, each byte deleted, and each byte doubled.
-export function* targeted(heads = HEADS, tails = TAILS, alphabet = ALPHABET) {
+// Each spelling × head × (tail, and byte tail); then of each: every truncation, every one-byte substitution by the
+// alphabet, every ignorable inserted at every position, each byte deleted, and each byte doubled.
+export function* targeted(heads = HEADS, tails = TAILS, alphabet = ALPHABET, byteTails = BYTE_TAILS, spellings = SPELLINGS) {
   const bases = [];
-  for (const s of SPELLINGS) for (const h of heads) for (const t of tails) bases.push(enc(h + s + t));
+  for (const s of spellings) for (const h of heads) {
+    for (const t of tails) bases.push(enc(h + s + t));
+    for (const t of byteTails) bases.push(Uint8Array.of(...enc(h + s), ...t));
+  }
   for (const b of bases) {
     yield b;
     for (let n = 0; n < b.length; n++) yield b.subarray(0, n);

@@ -151,41 +151,44 @@ function codePointAt(b: Uint8Array, i: number, len: number): number {
 const hfsIgnored = (cp: number): boolean =>
   (cp >= 0x20_0c && cp <= 0x20_0f) || (cp >= 0x20_2a && cp <= 0x20_2e) || (cp >= 0x20_6a && cp <= 0x20_6f) || cp === 0xfe_ff;
 // utf8.c is_hfs_dot_generic: `.` and the needle, ASCII case folded, then the end or `/`, reading code points with
-// next_hfs_char (the ones HFS+ ignores are skipped; an invalid sequence reads as 0, the end, from then on: i = -1).
-// k = -1 reads the dot, k = needle.length the end.
+// next_hfs_char (the ones HFS+ ignores are skipped; an invalid sequence reads as 0, the end). k = -1 reads the dot,
+// k = needle.length the end. Every read decides: a 0 (an invalid sequence, or the end) is the end at k = needle.length
+// and fails every other read, so nothing is read after one (git's "0 from then on" is never consulted). git also
+// refuses a code point above 127 before folding; lower() leaves one unchanged and no needle byte is above 127, so the
+// comparison alone refuses it.
 function isHfsDot(b: Uint8Array, needle: Uint8Array): boolean {
   let i = 0;
   for (let k = -1; ; k++) {
     let c = 0;
-    while (i >= 0) {
+    for (;;) {
       const len = utf8Length(b, i);
-      if (len === 0) { i = -1; break; }
+      if (len === 0) break;
       const cp = codePointAt(b, i, len);
       i += len;
       if (!hfsIgnored(cp)) { c = cp; break; }
     }
     if (k === needle.length) return c === 0 || c === 0x2f;
-    if (k < 0 ? c !== 0x2e : c > 127 || lower(c) !== needle[k]) return false;
-  }
-}
-// path.c is_ntfs_dotgit, from offset `o`: `.git` or `git~1`, then only dots and spaces up to the end, a separator
-// (`/` or `\`) or `:`
-function isNtfsDotGit(b: Uint8Array, o: number): boolean {
-  let i = o;
-  const c0 = at(b, i++);
-  if (c0 !== 0x2e && lower(c0) !== 0x67) return false;
-  const want = c0 === 0x2e ? GIT : IT_TILDE_1;
-  for (let k = 0; k < want.length; k++) { const c = at(b, i++); if ((k < 2 || c0 === 0x2e ? lower(c) : c) !== want[k]) return false; }
-  for (;;) {
-    const c = at(b, i++);
-    if (c === 0 || c === 0x2f || c === 0x5c || c === 0x3a) return true;
-    if (c !== 0x2e && c !== 0x20) return false;
+    if (k < 0 ? c !== 0x2e : lower(c) !== needle[k]) return false;
   }
 }
 // The `count` bytes at i are `needle`'s first `count`, ASCII case folded
 function foldedAt(b: Uint8Array, i: number, needle: Uint8Array, count: number): boolean {
   for (let k = 0; k < count; k++) if (lower(at(b, i + k)) !== needle[k]) return false;
   return true;
+}
+// path.c is_ntfs_dotgit, from offset `o`: `.git` or `git~1`, then only dots and spaces up to the end, a separator
+// (`/` or `\`) or `:`. git folds case for the letters only (`.git`, and `gi` of `git~1`); folding `~1` too is the same
+// test, since lower() changes only A-Z.
+function isNtfsDotGit(b: Uint8Array, o: number): boolean {
+  const c0 = at(b, o);
+  if (c0 !== 0x2e && lower(c0) !== 0x67) return false;
+  const want = c0 === 0x2e ? GIT : IT_TILDE_1;
+  if (!foldedAt(b, o + 1, want, want.length)) return false;
+  for (let i = o + 1 + want.length; ; i++) {
+    const c = at(b, i);
+    if (c === 0 || c === 0x2f || c === 0x5c || c === 0x3a) return true;
+    if (c !== 0x2e && c !== 0x20) return false;
+  }
 }
 // is_ntfs_dot_generic's tail from i: only dots and spaces up to the end or `:`
 function ntfsTail(b: Uint8Array, i: number): boolean {
@@ -207,7 +210,9 @@ function isNtfsDot(b: Uint8Array, o: number, { name, prefix }: DotSpelling): boo
     if (x === 0) return false;
     if (sawTilde) { if (x < 0x30 || x > 0x39) return false; }
     else if (x === 0x7e) { const d = at(b, o + ++i); if (d < 0x31 || d > 0x39) return false; sawTilde = true; }
-    else if (i >= 6 || x & 0x80 || lower(x) !== prefix[i]) return false;
+    // git also refuses i >= 6 and a byte >= 0x80 here: past the prefix's 6 bytes at() reads 0, which x is not (refused
+    // above), and lower() leaves a byte >= 0x80 unchanged, which no prefix byte is; the comparison refuses both
+    else if (lower(x) !== at(prefix, i)) return false;
   }
   return ntfsTail(b, o + 8);
 }

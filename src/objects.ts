@@ -162,9 +162,10 @@ function cmpTreeKeys(a: Uint8Array, aDir: boolean, b: Uint8Array, bDir: boolean)
 }
 /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style */
 // A tree entry's mode, read from its bytes [p, sp) without decoding them (#207): lowBits of the mode, or NOT_OCTAL when a byte is
-// not an octal digit (what /^[0-7]+$/ refused of the decoded text: any other byte decodes to a non-digit). The low 16
-// bits are those of the last MODE_LOW_DIGITS digits, as lowBits reads them. Empty (p === sp) is 0; the caller refuses it
-// first.
+// not an octal digit (what /^[0-7]+$/ refused of the decoded text: any other byte decodes to a non-digit). Each digit
+// is 3 bits, so the low 16 bits of the whole mode are those of its last MODE_LOW_DIGITS digits, which lowBits reads:
+// the value is kept to its low 16 bits as it is read, however long the mode. Empty (p === sp) is 0; the caller refuses
+// it first.
 /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- p <= i < sp <= data.length: every read is in range (`as`, not the `!` src/ forbids) */
 const OCTAL_0 = 0x30;
 const OCTAL_7 = 0x37;
@@ -172,13 +173,12 @@ const OCTAL_BITS = 3;
 const NOT_OCTAL = -1;
 function modeBits(data: Uint8Array, p: number, sp: number): number {
   let m = 0;
-  const low = sp - MODE_LOW_DIGITS;
   for (let i = p; i < sp; i++) {
     const c = data[i] as number;
     if (c < OCTAL_0 || c > OCTAL_7) return NOT_OCTAL;
-    if (i >= low) m = (m << OCTAL_BITS) | (c - OCTAL_0);
+    m = ((m << OCTAL_BITS) | (c - OCTAL_0)) & MODE_BITS;
   }
-  return m & MODE_BITS;
+  return m;
 }
 // The OID_BYTES at o are all zero (fsck nullSha1)
 function nullOid(data: Uint8Array, o: number): boolean {
@@ -244,12 +244,11 @@ const completeTreeFrames = (data: Uint8Array, maxEntries: number): number => {
 };
 
 // The hex id is computed when a reader asks. Caching it on the entry would put a 40-character string beside every
-// name, which is what exhausted a 128 MiB heap at the cap. `bytes` is not enumerable, so equality and JSON see the
-// mode, the name, and the offsets.
-// The buffer is a private field: not enumerable, not in JSON, not a key. Entries are ordinary objects of one shape, built
-// by one constructor (#207: an Object.create of a per-tree prototype, then Object.assign of a record, was a fifth of
-// parseTree's CPU); defineProperty on every entry puts it in dictionary mode, which is what exhausted a 128 MiB heap at
-// the cap, and a private field does not.
+// name, which is what exhausted a 128 MiB heap at the cap. The tree's buffer is a private field: not enumerable, not in
+// JSON, not a key, so equality and JSON see the mode, the name, and the offsets. Entries are ordinary objects of one
+// shape, built by one constructor (#207: an Object.create of a per-tree prototype, then Object.assign of a record, was
+// a fifth of parseTree's CPU); defineProperty on every entry puts it in dictionary mode, which is what exhausted a
+// 128 MiB heap at the cap, and a private field does not.
 class ParsedEntry implements TreeEntry {
   public readonly mode: Mode;
   public readonly name: string;
@@ -263,9 +262,6 @@ class ParsedEntry implements TreeEntry {
   }
   public get oid(): Oid {
     return toOid(this.#bytes.subarray(this.oidOffset, this.oidOffset + OID_BYTES));
-  }
-  public get bytes(): Uint8Array {
-    return this.#bytes;
   }
 }
 
@@ -295,6 +291,7 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
   let p = 0;
   let count = 0;
   let prevName: Uint8Array | null = null;
+  // Stryker disable next-line BooleanLiteral: read only once prevName is set, and set with it
   let prevDir = false;
   while (p < data.length) {
     if (count >= maxEntries) return err(limitError('tree entries', count + 1, maxEntries));
