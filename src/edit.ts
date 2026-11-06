@@ -10,7 +10,7 @@ import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
-import { packStream, objectAt, spInit, spStep, spFinish } from './fetch.js';
+import { packStream, objectAt, spInit, spStep, spFinish, treeEntries } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
 import { spliceDelta } from './pack.js';
 import { parseCommit, parseTree, objectHeader, TYPE } from './objects.js';
@@ -224,12 +224,10 @@ export function needsHead(strictHead: boolean, head: string | null): Result<null
 
 // Pure: one path component against one tree's entries.
 export type Found = { readonly entry: TreeEntry; readonly attrs: Attrs };
-export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: LimitsInput): Result<Found, PlyError> {
-  const parsed = parseTree(data, limits);
-  if (!parsed.ok) return parsed;
-  const entries: readonly TreeEntry[] = parsed.value;
+// The lookup on entries already parsed (a fetched tree's, #208); `bytes` is the tree's size, for the span
+function findEntry(entries: readonly TreeEntry[], bytes: number, name: string, last: boolean): Result<Found, PlyError> {
   const found = fromNullish(entries.find(e => e.name === name));
-  const attrs = { 'git.edit.tree.bytes': data.length, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': found.tag === 'some', 'git.edit.tree.entry.mode': getOrElse(mapOption(found, e => e.mode), ''), 'git.edit.tree.entry.oid': getOrElse(mapOption(found, (e): string => e.oid), ''), 'git.edit.tree.entry.oid_offset': getOrElse(mapOption(found, e => e.oidOffset), -1) };
+  const attrs = { 'git.edit.tree.bytes': bytes, 'git.edit.tree.entries': entries.length, 'git.edit.tree.entry.found': found.tag === 'some', 'git.edit.tree.entry.mode': getOrElse(mapOption(found, e => e.mode), ''), 'git.edit.tree.entry.oid': getOrElse(mapOption(found, (e): string => e.oid), ''), 'git.edit.tree.entry.oid_offset': getOrElse(mapOption(found, e => e.oidOffset), -1) };
   if (found.tag === 'none') return fail('not_found', `path component ${name} not found`, { attrs, miss: { kind: 'path', missing: name, existingPath: '' } });
   const entry = found.value;
   if (!last && entry.mode !== '40000') return fail('not_found', `${name} is not a directory`, { attrs, miss: { kind: 'not_directory', path: name, mode: entry.mode } });
@@ -241,6 +239,10 @@ export function lookupEntry(data: Uint8Array, name: string, last: boolean, limit
     return fail('not_found', `${name} is not a regular file (mode ${entry.mode})`, { attrs, miss });
   }
   return ok({ entry, attrs });
+}
+export function lookupEntry(data: Uint8Array, name: string, last: boolean, limits: LimitsInput): Result<Found, PlyError> {
+  const parsed = parseTree(data, limits);
+  return parsed.ok ? findEntry(parsed.value, data.length, name, last) : parsed;
 }
 
 export type Level = BuiltLevel;
@@ -532,9 +534,11 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
       const lvl = await inSpan(tracer, 'git.edit.tree', { parent: root, attrs: { 'git.edit.tree.depth': depth, 'git.edit.tree.oid': treeOid, 'git.edit.tree.lookup': name } }, async span => {
         const cached = mapGet(cache, treeOid);
         let data: Uint8Array;
-        if (cached.tag === 'some') { data = cached.value; cacheHits++; } else { const got = await getObject(treeOid, TYPE.TREE, 0); if (!got.ok) return got; data = got.value.data; cache.set(treeOid, data); }
+        // a fetched tree's entries are the ones its check parsed (treeEntries, #208); a cached tree's are parsed here
+        let entries: Result<TreeEntry[], PlyError>;
+        if (cached.tag === 'some') { data = cached.value; cacheHits++; entries = parseTree(data, limits); } else { const got = await getObject(treeOid, TYPE.TREE, 0); if (!got.ok) return got; data = got.value.data; cache.set(treeOid, data); entries = treeEntries(got.value, limits); }
         span.set({ 'git.edit.tree.cache_hit': cached.tag === 'some' });
-        const found = lookupEntry(data, name, last, limits);
+        const found = entries.ok ? findEntry(entries.value, data.length, name, last) : entries;
         if (!found.ok) {
           const seen = fromNullish(found.error.attrs);
           if (seen.tag === 'some') span.set(seen.value);

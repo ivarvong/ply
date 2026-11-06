@@ -8,17 +8,17 @@ import type { ErrorOf, Extra, PlyError } from './errors.js';
 import type { CheckedLimits } from './limits.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
-import type { Result } from './result.js';
+import type { Option, Result } from './result.js';
 import type { Attrs, Frame, Transport } from './transport.js';
 import { fail, scrubError } from './errors.js';
 import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
-import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType } from './objects.js';
-import type { ObjType } from './objects.js';
+import { TYPE, TYPE_NAME, hashObject, assertFetched, nonCommitType, parseTree } from './objects.js';
+import type { ObjType, ObjectError, TreeEntry } from './objects.js';
 // oxlint-disable-next-line import/max-dependencies -- the fetch path's parsers each live in their own module (pack, inflate, objects, sha1, cache)
 import { corruptCacheHit } from './cachestatus.js';
-import { assertNever, err, getOrElse, none, ok } from './result.js';
+import { assertNever, err, getOrElse, mapOption, none, ok } from './result.js';
 import type { InflateError, InflateStats, InflateStream } from './inflatestream.js';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, zlibWrap } from './inflatestream.js';
 import { resolvePack, resolvePackCollect, packCaps, packCollectOpen, packCollectFeed, packCollectEnd, readObjHeader, readUint32BE } from './packresolve.js';
@@ -644,9 +644,22 @@ async function onceMore<T>(once: (bust: boolean) => Promise<Result<T, PlyError>>
 export type ObjectWantConfig = { readonly filter: string; readonly deepen: number; readonly expectType: number | null };
 export type ObjectWant = { readonly oid: string } & Input<ObjectWantConfig>;
 const objectWantDefaults = (): ObjectWantConfig => ({ filter: 'tree:0', deepen: 0, expectType: null });
-type FetchedBase = { readonly type: number; readonly data: Uint8Array; readonly oid: Oid; readonly size: number; readonly bust: boolean };
+// The entries of a fetched tree as its check (assertFetched) parsed them, and the entry cap they were parsed under: the
+// only limit parseTree reads (#208).
+export type CheckedTree = { readonly entries: TreeEntry[]; readonly maxTreeEntries: number };
+// `tree`: a tree fetched by its own want carries the parse that checked it; a harvested or wide answer, and any other
+// type, none.
+type FetchedBase = { readonly type: number; readonly data: Uint8Array; readonly oid: Oid; readonly size: number; readonly bust: boolean; readonly tree: Option<CheckedTree> };
 // A fetched object; `harvested` when the transport's harvest answered it, `wide` when a blob:none pack did.
 export type FetchedObject = FetchedBase | (FetchedBase & { readonly harvested: true }) | (FetchedBase & { readonly wide: true });
+// A fetched tree's entries, parsed once (#208): the check's parse when the reader's entry cap is the one it was made
+// under (parseTree is a pure function of the bytes and that cap, so it is the parse the reader would make), else the
+// reader's own parse under its limits. The fetch hands its object to one reader, so the array is that reader's.
+export function treeEntries(fetched: FetchedObject, limits: CheckedLimits): Result<TreeEntry[], ObjectError> {
+  const { tree } = fetched;
+  if (tree.tag === 'some' && tree.value.maxTreeEntries === limits.maxTreeEntries) return ok(tree.value.entries);
+  return parseTree(fetched.data, limits);
+}
 
 type Single = { readonly oid: Oid; readonly filter: string; readonly deepen: number; readonly expectType: number | null };
 // The object count in a pack header, or null when the header is not a version-2 pack (the single-object parser then
@@ -678,7 +691,7 @@ function commitFromPack(t: Transport, oid: Oid, parsed: ParsedPack, span: Span, 
   if (want.type !== TYPE.COMMIT) return ok(null);
   const checked = assertFetched('commit', want.data, t.limits);
   if (!checked.ok) return checked;
-  return ok({ type: want.type, data: want.data, oid, size: want.data.length, bust });
+  return ok({ type: want.type, data: want.data, oid, size: want.data.length, bust, tree: none });
 }
 // A pack read through the collector as its chunks arrive (#172): the bytes are dropped once fed, so what is held is the
 // objects the collector keeps. A refusal is held, the rest of the response read and dropped, and then returned: the
@@ -842,7 +855,8 @@ function singleObject(t: Transport, { sp, member, want, span, bust }: Received):
   const refused = refuseNonCommit(expectType, sp.type, oid);
   if (!refused.ok) return refused;
   if (expectType !== null && sp.type !== expectType) return fail('pack_corrupt', `expected ${typeText(expectType)}, got ${typeText(sp.type)}`);
-  return ok({ type: sp.type, data: out, oid, size: out.length, bust });
+  const tree = mapOption(checked.value, (entries): CheckedTree => ({ entries, maxTreeEntries: t.limits.maxTreeEntries }));
+  return ok({ type: sp.type, data: out, oid, size: out.length, bust, tree });
 }
 // oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
 function fetchSingle(t: Transport, want: Single): Promise<Result<FetchedObject, PlyError>> {
@@ -946,7 +960,7 @@ function wideObject(t: Transport, { parsed, dropped }: WideRead, want: Wide, spa
   const h = harvested.value;
   const all = objects.size + skipped.length + left;
   span.set({ 'git.pack.objects': parsed.stats.count, 'git.pack.bytes': parsed.bytes, 'git.object.oid': oid, 'git.object.type': typeText(wanted.type), 'git.fetch.wide.objects': all, 'git.fetch.wide.extra_objects': all - 1, 'git.fetch.wide.extra_bytes': extraBytes, 'git.fetch.wide.blobs': blobs, 'git.fetch.wide.harvested': h.kept, 'git.fetch.wide.harvested_bytes': h.bytes, ...skippedAttrs(skipped) });
-  return ok({ type: wanted.type, data: wanted.data, oid, size: wanted.data.length, bust, wide: true });
+  return ok({ type: wanted.type, data: wanted.data, oid, size: wanted.data.length, bust, tree: none, wide: true });
 }
 // oxlint-disable-next-line typescript/promise-function-async -- onceMore's promise, passed through
 function fetchWide(t: Transport, want: Wide): Promise<Result<FetchedObject, PlyError>> {
@@ -983,14 +997,14 @@ export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig
   const { filter, deepen, expectType } = withDefaults(options, objectWantDefaults());
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
-  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, harvested: true }));
+  if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, tree: none, harvested: true }));
   // oxlint-disable-next-line typescript/promise-function-async -- fetchWide's promise, passed through
   const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter });
   if (filter === '') return fetchSingle(t, { oid, filter, deepen, expectType });
   // one probe at a time per quirks record (transport.ts probing): the checks below read it after any wait
   return probing(t.quirks, narrow ? 'tree:0' : 'filter', async (): Promise<Result<FetchedObject, PlyError>> => {
     const harvested = narrow ? mapGet(t.objects, oid) : none;
-    if (harvested.tag === 'some' && (expectType === null || harvested.value.type === expectType)) return ok({ type: harvested.value.type, data: harvested.value.data, oid, size: harvested.value.data.length, bust: false, harvested: true });
+    if (harvested.tag === 'some' && (expectType === null || harvested.value.type === expectType)) return ok({ type: harvested.value.type, data: harvested.value.data, oid, size: harvested.value.data.length, bust: false, tree: none, harvested: true });
     if (t.quirks.treeFilter === 'none') return wide('', false);
     if (narrow && t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
     const single = await fetchSingle(t, { oid, filter, deepen, expectType });

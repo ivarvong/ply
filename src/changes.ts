@@ -15,12 +15,12 @@ import { operation, verifyRef } from './operation.js';
 import { lsRefs, parseUnbornLine } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
-import { objectAt } from './fetch.js';
+import { objectAt, treeEntries } from './fetch.js';
 import { commitById } from './commit.js';
 import { push, ZERO_OID } from './push.js';
 import type { PackObject } from './push.js';
 import { parseOid, parseCommitId, type Oid } from './oid.js';
-import { parseTree, hashObject, TYPE } from './objects.js';
+import { hashObject, TYPE } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf } from './limits.js';
 import type { CheckedLimits } from './limits.js';
@@ -330,7 +330,7 @@ async function loadTree(walk: Walk, oid: Oid): Promise<Result<Dir, PlyError>> {
   if (!got.ok) return got;
   const obj = got.value;
   const dir = emptyDir();
-  const parsed = parseTree(obj.data, walk.limits);
+  const parsed = treeEntries(obj, walk.limits);
   if (!parsed.ok) return parsed;
   for (const entry of parsed.value) {
     dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));

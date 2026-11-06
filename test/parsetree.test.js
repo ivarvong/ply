@@ -6,6 +6,37 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { rng } from './dotnames-corpus.js';
 import { randomTree, judgeTrees } from './parsetree-corpus.js';
+import { assertFetched, parseTree, encodeTree, encodeCommit } from '../src/objects.js';
+import { treeEntries } from '../src/fetch.js';
+import { DEFAULT_LIMITS, parseLimits } from '../src/limits.js';
+import { unwrap } from './unwrap.js';
+
+// A fetched tree is parsed once (#208): assertFetched's answer is the tree's entries (none for any other type), and
+// treeEntries hands that very array to the reader when its entry cap is the one the check ran under, else parses.
+const tree = unwrap(encodeTree([{ mode: '100644', name: 'a', oid: '1'.repeat(40) }, { mode: '40000', name: 'd', oid: '2'.repeat(40) }]));
+test('assertFetched answers a tree with its entries, any other type with none', () => {
+  const r = unwrap(assertFetched('tree', tree));
+  assert.equal(r.tag, 'some');
+  assert.deepEqual(r.value.map(e => [e.mode, e.name, e.oid]), unwrap(parseTree(tree)).map(e => [e.mode, e.name, e.oid]));
+  const commit = unwrap(encodeCommit({ tree: '3'.repeat(40), author: 'a <a@b> 0 +0000' }));
+  for (const [type, data] of [['blob', tree], ['commit', commit], ['ofs_delta', tree], ['ref_delta', tree]]) assert.deepEqual(unwrap(assertFetched(type, data)), { tag: 'none' }, type);
+  // a refusal is still the refusal
+  assert.equal(assertFetched('tree', tree.subarray(0, tree.length - 1)).ok, false);
+});
+test('treeEntries: the check parse when the entry cap matches, the reader\'s own parse when it does not', () => {
+  const checked = unwrap(assertFetched('tree', tree)).value;
+  const fetched = (t, max) => ({ type: 2, data: tree, oid: '4'.repeat(40), size: tree.length, bust: false, tree: t === null ? { tag: 'none' } : { tag: 'some', value: { entries: t, maxTreeEntries: max } } });
+  const limits = unwrap(parseLimits(DEFAULT_LIMITS));
+  assert.equal(unwrap(treeEntries(fetched(checked, limits.maxTreeEntries), limits)), checked, 'the same array: not parsed again');
+  const other = unwrap(treeEntries(fetched(checked, limits.maxTreeEntries + 1), limits));
+  assert.notEqual(other, checked, 'another cap: parsed under the reader\'s limits');
+  assert.deepEqual(other.map(e => e.name), ['a', 'd']);
+  const harvested = unwrap(treeEntries(fetched(null, 0), limits));
+  assert.deepEqual(harvested.map(e => e.name), ['a', 'd']);
+  // the reader's cap binds when it is not the check's: one entry allowed
+  const one = unwrap(parseLimits({ maxTreeEntries: 1 }));
+  assert.equal(treeEntries(fetched(checked, limits.maxTreeEntries), one).error.code, 'limit_exceeded');
+});
 
 test('random trees: the same entries or the same refusal as before (seeded)', () => {
   const r = rng(Number(process.env.PARSETREE_SEED ?? 207));

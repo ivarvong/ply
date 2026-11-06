@@ -17,7 +17,7 @@ import { fail, isPlyError } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { operation, verifyRef } from './operation.js';
 import { lsRefs } from './lsrefs.js';
-import { objectAt } from './fetch.js';
+import { objectAt, treeEntries } from './fetch.js';
 import { push, ZERO_OID } from './push.js';
 import { parseRefname } from './refname.js';
 import type { Refname } from './refname.js';
@@ -302,22 +302,21 @@ async function parentTrees(t: Transport, cache: Map<string, Uint8Array>, built: 
   const k = { have, old, read: 0, hits: 0 };
   if (oldTree === null) return ok(k);
   have.add(oldTree);
-  const read = async (oid: Oid): Promise<Result<Uint8Array, PlyError>> => {
+  // a tree's bytes and entries: from the cache (parsed here), or fetched (the fetch's check parsed it: treeEntries, #208)
+  const read = async (oid: Oid): Promise<Result<{ readonly data: Uint8Array; readonly entries: TreeEntry[] }, PlyError>> => {
     const cached = mapGet(cache, oid);
-    if (cached.tag === 'some') { k.hits++; return ok(cached.value); }
+    if (cached.tag === 'some') { k.hits++; return map(parseTree(cached.value, limits), entries => ({ data: cached.value, entries })); }
     const got = await objectAt(t, oid, { expectType: TYPE.TREE });
     if (!got.ok) return got;
     cache.set(oid, got.value.data); k.read++;
-    return ok(got.value.data);
+    return map(treeEntries(got.value, limits), entries => ({ data: got.value.data, entries }));
   };
   const visit = async (dir: string, oid: Oid): Promise<Result<null, PlyError>> => {
-    const got = await read(oid);
-    if (!got.ok) return got;
-    const data = got.value;
-    old.set(dir, { oid, data });
-    const parsed = parseTree(data, limits);
+    const parsed = await read(oid);
     if (!parsed.ok) return parsed;
-    const before = new Map<string, TreeEntry>(parsed.value.map((e: TreeEntry) => [e.name, e]));
+    const { data, entries } = parsed.value;
+    old.set(dir, { oid, data });
+    const before = new Map<string, TreeEntry>(entries.map((e: TreeEntry) => [e.name, e]));
     for (const e of before.values()) have.add(e.oid);
     const next: Array<Promise<Result<null, PlyError>>> = [];
     // dir is a key of built.trees: the root, or a tree entry of a directory visited before it

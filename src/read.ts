@@ -34,7 +34,7 @@ import type { Err, Option, Result } from './result.js';
 import { operation } from './operation.js';
 import { lsRefs, parseUnbornLine, type LsRefsResult } from './lsrefs.js';
 import { discover } from './discover.js';
-import { packStream, objectAt, objectId, spInit, spStep, spFinish } from './fetch.js';
+import { packStream, objectAt, objectId, spInit, spStep, spFinish, treeEntries } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { bufferSource, concat } from './bytes.js';
@@ -272,12 +272,15 @@ export async function readCommit(url: string, spec: ReadCommitSpec = {}, opts: R
   });
 }
 
-// Effect: a tree's bytes by one tree:0 fetch, kept in the caller's cache.
-async function fetchTree(t: Transport, cache: TreeCache, oid: Oid): Promise<Result<Uint8Array, PlyError>> {
+// Effect: a tree's entries, from its bytes in the caller's cache (parsed here) or by one tree:0 fetch whose bytes the
+// cache keeps (the fetch's own check parsed them: treeEntries, #208).
+async function treeAt(t: Transport, cache: TreeCache, oid: Oid, limits: CheckedLimits): Promise<Result<TreeEntry[], PlyError>> {
+  const cached = mapGet(cache, oid);
+  if (cached.tag === 'some') return parseTree(cached.value, limits);
   const fetched = await objectAt(t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
   if (!fetched.ok) return fetched;
   cache.set(oid, fetched.value.data);
-  return ok(fetched.value.data);
+  return treeEntries(fetched.value, limits);
 }
 // A failure inside a span: recorded on it (the span's own end follows), and passed on.
 const spanErr = <E>(span: Span, r: Err<E>): Err<E> => { span.error(r.error); return r; };
@@ -296,11 +299,8 @@ async function walkFrom(t: Transport, treeOid: Oid, comps: readonly string[], op
   for (const [depth, name] of comps.entries()) {
     // oxlint-disable-next-line no-loop-func -- the span runs to completion inside this iteration (awaited)
     const level = await t.tracer.span('git.read.tree', { parent: t.parent, attrs: { 'git.read.tree.depth': depth, 'git.read.tree.oid': here, 'git.read.tree.lookup': name } }, async (span): Promise<Result<TreeEntry, PlyError>> => {
-      const cached = mapGet(cache, here);
-      span.set({ 'git.read.tree.cache_hit': isSome(cached) });
-      const tree = cached.tag === 'some' ? ok(cached.value) : await fetchTree(t, cache, here);
-      if (!tree.ok) return spanErr(span, tree);
-      const entries = parseTree(tree.value, t.limits);
+      span.set({ 'git.read.tree.cache_hit': isSome(mapGet(cache, here)) });
+      const entries = await treeAt(t, cache, here, t.limits);
       if (!entries.ok) return spanErr(span, entries);
       const found = fromNullable(entries.value.find(x => x.name === name));
       span.set({ 'git.read.tree.entries': entries.value.length, 'git.read.tree.entry.found': found.tag === 'some', 'git.read.tree.entry.mode': getOrElse(mapOption(found, f => f.mode), '') });
@@ -377,10 +377,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
     const dir = listedDir(walked.value, comps);
     if (!dir.ok) return dir;
     const oid = dir.value;
-    const cached = mapGet(cache, oid);
-    const data = cached.tag === 'some' ? ok(cached.value) : await fetchTree(t, cache, oid);
-    if (!data.ok) return data;
-    const parsed = parseTree(data.value, limits);
+    const parsed = await treeAt(t, cache, oid, limits);
     if (!parsed.ok) return parsed;
     const entries: readonly TreeEntry[] = parsed.value;
     return outcome('ok', { ref: name, commit, tree: oid, entries: entries.map(e => ({ name: e.name, mode: lsMode(e.mode), oid: e.oid, type: entryType(e.mode) })) }, { 'git.ls_tree.tree': oid, 'git.ls_tree.entries': entries.length });
