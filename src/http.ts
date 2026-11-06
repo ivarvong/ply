@@ -468,24 +468,25 @@ function transportOf(settings: HttpSettings): HttpTransport {
   };
   // The initial exchange settled from the memo, with no request: each remembered Location is approved again by this
   // transport's allowUrl and the suffix rule, from the base this transport started at. Anything the replay cannot take
-  // (a refusal, a list past maxRedirects) leaves the transport as it was, to ask the network.
-  const replay = (service: string): boolean => {
-    if (policy.follow !== 'initial' || initialSettled || redirectCount > 0 || replayed) return false;
+  // (a refusal, a list past maxRedirects) leaves the transport as it was, to ask the network. It runs once, before the
+  // transport's first exchange (every exchange that can settle the initial one replays first), so it always starts
+  // unsettled, at the start base.
+  const replay = (service: string): void => {
+    if (policy.follow !== 'initial' || replayed) return;
     replayed = true;
     const locations = recalledRedirect(memoKey, service);
-    if (locations === null || locations.length > policy.max) return false;
+    if (locations === null || locations.length > policy.max) return;
     const bases: string[] = [];
     let at = base;
     for (const location of locations) {
       const next = locationBase(`${at}/info/refs?service=${service}`, location, service, allowUrl);
-      if (!next.ok || next.value === null) return false;
+      if (!next.ok || next.value === null) return;
       at = next.value.base;
       bases.push(at);
     }
     for (const b of bases) rebase(b);
     initialSettled = true;
     memoUnconfirmed = true;
-    return true;
   };
   // A memo answered with a 3xx: drop it and start over from the original base, as a transport that never had one.
   const unsettle = (service: string): void => {
@@ -642,9 +643,11 @@ function transportOf(settings: HttpSettings): HttpTransport {
   // yielded as its Err and ends the stream (frames raises it). A streamed body is read as the request goes out (undici
   // requires `duplex: 'half'` for it; workerd accepts the field), chunked like git's own bodies past http.postBuffer.
   async function* post(service: string, body: RequestBody, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
-    if (policy.follow === 'initial' && !initialSettled && !replay(service)) {
-      const ad = await advertise(service, span);
-      if (!ad.ok) { yield ad; return; }
+    if (policy.follow === 'initial' && !initialSettled) {
+      // the memo first: a hit settles the exchange with no request; a miss is the GET git makes
+      replay(service);
+      const ad = initialSettled ? null : await advertise(service, span);
+      if (ad !== null && !ad.ok) { yield ad; return; }
     }
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint

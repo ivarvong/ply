@@ -265,6 +265,11 @@ test('memo: never, and a settled transport, report a 3xx on an advertisement and
   const h = memoHost(new Map([['m7/old', { to: 'https://m7/new', all: false }]]));
   const never = await createTransport('https://m7/old', { fetchImpl: h.fetchImpl }).value.advertise(UP, spanOf());
   assert.deepEqual([never.ok, never.error.code, never.error.status], [false, 'http', 301]);
+  // a remembered remote: never still asks the original base and reports its 3xx
+  await postUp(memoT('https://m7/old', h).value);
+  h.seen.length = 0;
+  const neverHit = await createTransport('https://m7/old', { fetchImpl: h.fetchImpl }).value.advertise(UP, spanOf());
+  assert.deepEqual([neverHit.ok, neverHit.error.status, h.lines()], [false, 301, ['GET m7/old/info/refs']]);
   const plain = await createTransport('https://m7/plain', { fetchImpl: h.fetchImpl }).value.advertise(UP, spanOf());
   assert.equal(plain.ok, true);
   const settled = memoT('https://m7/flip', h).value;
@@ -359,6 +364,7 @@ test('memo: stale on a POST (bytes re-sent once after the GET), on a GET (starts
   h.clear();
   await assert.rejects(postUp(memoT('https://m4/old', down).value), e => e.code === 'upstream_5xx');
   assert.deepEqual(h.lines(), ['POST m4/b/git-upload-pack']);
+  assert.equal(recalledRedirect('https://m4/old', UP), null, 'the stale entry is gone although nothing replaced it');
   // stale on the GET of an advertise: starts over from the original base
   moves.set('m4/old', { to: 'https://m4/c', all: false });
   await postUp(memoT('https://m4/old', h).value);
