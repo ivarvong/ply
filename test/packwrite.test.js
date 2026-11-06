@@ -97,7 +97,7 @@ test('pass 1 holds the pack exactly when it fits in keep (default INFLATE_CHUNK)
   const built = await buildPack(small);
   assert.deepEqual(Buffer.from(m.held), Buffer.from(built.pack));
   // a keep of exactly the pack's length holds it; one less does not
-  assert.notEqual((await measurePack(small, built.pack.length)).held, null);
+  assert.deepEqual(Buffer.from((await measurePack(small, built.pack.length)).held), Buffer.from(built.pack));
   assert.equal((await measurePack(small, built.pack.length - 1)).held, null);
   // an empty pack is 32 bytes and is held
   const empty = await measurePack([]);
