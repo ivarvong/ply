@@ -29,7 +29,7 @@ import { fail } from './errors.js';
 import { andThen, assertNever, err, getOrElse, isNone, isSome, map, mapOption, none, ok, some } from './result.js';
 import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
-import { fetchObject, objectAt } from './fetch.js';
+import { fetchObject, objectAt, treeEntries } from './fetch.js';
 import { fetchPackTree0 } from './fetchpack.js';
 import { push, ZERO_OID } from './push.js';
 import { parseOid, type Oid } from './oid.js';
@@ -308,9 +308,9 @@ const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: 
   if (held.tag === 'some') return parseTree(held.value, t.limits);
   const got = await fetchObject(t, { oid, expectType: TYPE.TREE });
   if (!got.ok) return got;
-  const { data } = got.value;
-  cache.set(oid, data); onFetch();
-  return parseTree(data, t.limits);
+  cache.set(oid, got.value.data); onFetch();
+  // the fetch's check parsed it (#208)
+  return treeEntries(got.value, t.limits);
 };
 const subtree = (e: Entry): Oid | null => (e.tag === 'some' && isTreeEntry(e.value) ? e.value.oid : null);
 // a tree by oid; null is the empty tree

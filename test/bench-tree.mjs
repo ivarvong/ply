@@ -6,8 +6,8 @@
 // local clone and cached in the temp dir; the default is this checkout at HEAD. A tree is any ply checkout (an older
 // commit's worktree too), whose src/ is imported through its own ts-resolve.
 //   parse    parseTree(data) of every tree, once per pass
-//   fetched  what a read pays per fetched tree: assertFetched(data) then parseTree(data) (before #2), or the parse
-//            assertFetched hands over (after it), whichever the tree exports (`checkFetched`)
+//   fetched  what a read pays per fetched tree: assertFetched(data) then parseTree(data) (before #208), or the parse
+//            assertFetched hands over (treeEntries, after it), whichever the tree has
 // Per run: CPU (process.cpuUsage, user + system) per pass after warm-up passes, reported as ns per entry; and bytes
 // allocated per entry, read as the heap growth over one pass under a young generation large enough that no GC runs
 // in it (the run says so if one did: then the number is a lower bound and is printed with `gc!`).
@@ -66,16 +66,19 @@ async function child() {
   const op = opt('op', 'parse');
   const trees = readCorpus(opt('file', ''));
   const { parseTree, assertFetched } = await import(`${tree}/src/objects.ts`);
-  const objects = await import(`${tree}/src/objects.ts`);
+  const fetch = await import(`${tree}/src/fetch.ts`);
+  const { DEFAULT_LIMITS } = await import(`${tree}/src/limits.ts`);
   let entries = 0;
   for (const t of trees) { const r = parseTree(t); if (!r.ok) throw new Error(r.error.message); entries += r.value.length; }
   let sink = 0;
+  const max = DEFAULT_LIMITS.maxTreeEntries;
   const pass = op === 'parse'
     ? () => { for (const t of trees) sink += parseTree(t).value.length; }
-    // after #2 the fetch path keeps assertFetched's parse (checkFetched returns it); before, the reader parsed again
-    : typeof objects.checkFetched === 'function'
-      ? () => { for (const t of trees) sink += objects.checkFetched('tree', t).value.tree.length; }
-      : () => { for (const t of trees) { if (!assertFetched('tree', t).ok) throw new Error('tree'); sink += parseTree(t).value.length; } };
+    // since #208 the fetch keeps assertFetched's parse on the fetched object and the reader takes it (treeEntries);
+    // before, the reader parsed the same bytes again
+    : typeof fetch.treeEntries === 'function'
+      ? () => { for (const t of trees) { const c = assertFetched('tree', t, DEFAULT_LIMITS); const o = { data: t, tree: c.value.tag === 'some' ? { tag: 'some', value: { entries: c.value.value, maxTreeEntries: max } } : c.value }; sink += fetch.treeEntries(o, DEFAULT_LIMITS).value.length; } }
+      : () => { for (const t of trees) { if (!assertFetched('tree', t, DEFAULT_LIMITS).ok) throw new Error('tree'); sink += parseTree(t, DEFAULT_LIMITS).value.length; } };
   for (let i = 0; i < 5; i++) pass(); // warm-up: every function optimized
   // allocation: one pass between two full GCs, no GC inside it (counted)
   let gcs = 0;

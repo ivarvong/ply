@@ -281,9 +281,9 @@ test('commit and tag headers, idents, and assertFetched', () => {
   assert.deepEqual(unwrap(parseCommit(commit)).parents, [oid(2)]);
   unwrap(assertFetched('commit', commit));
   throws(() => unwrap(assertFetched('commit', te.encode(`author ${author}\ncommitter ${author}\n\n`))), 'pack_corrupt', `${C}missingTree: invalid format - expected 'tree' line`);
-  assert.deepEqual(assertFetched('blob', te.encode('x')), { ok: true, value: null });
-  assert.deepEqual(assertFetched('ofs_delta', te.encode('x')), { ok: true, value: null });
-  assert.deepEqual(assertFetched('ref_delta', te.encode('x')), { ok: true, value: null });
+  assert.deepEqual(assertFetched('blob', te.encode('x')), { ok: true, value: { tag: 'none' } });
+  assert.deepEqual(assertFetched('ofs_delta', te.encode('x')), { ok: true, value: { tag: 'none' } });
+  assert.deepEqual(assertFetched('ref_delta', te.encode('x')), { ok: true, value: { tag: 'none' } });
   throws(() => unwrap(assertFetched('submodule', te.encode('x'))), 'pack_corrupt', 'object: bad type submodule');
   throws(() => unwrap(assertFetched('tree', data(' a\0', oidBytes(1)))), 'pack_corrupt', 'tree: empty mode');
   throws(() => unwrap(assertFetched('tag', te.encode('x'))), 'pack_corrupt', `${T}unterminatedHeader: unterminated header`);

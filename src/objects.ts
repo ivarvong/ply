@@ -1,7 +1,7 @@
 // Git object encoding/decoding. All pure. Every function that can refuse returns a Result.
 import { fail } from './errors.js';
-import type { Err, Ok, Result } from './result.js';
-import { ok, err, map, assertNever } from './result.js';
+import type { Err, Ok, Option, Result } from './result.js';
+import { ok, err, map, none, some, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toOid, fromHex } from './sha1.js';
 import { parseOid, type Oid } from './oid.js';
@@ -622,17 +622,19 @@ export function parseTag(data: Uint8Array): Result<Tag, Corrupt> {
 
 // Every object fetch passes through here once it hashes to the oid the server advertised (fetchObject, checkWide on a
 // pack before any of it is returned or harvested). It is the same parser every reader calls, so a commit or tag no
-// reader would accept never reaches one.
-export function assertFetched(typeName: string, data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<null, ObjectError> {
+// reader would accept never reaches one. A tree's entries are its answer (#208): the parse is the reader's too, so a fetched
+// tree is parsed once (fetch.ts treeEntries); any other type answers none.
+const NOTHING_PARSED: Ok<Option<TreeEntry[]>> = ok(none);
+export function assertFetched(typeName: string, data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS): Result<Option<TreeEntry[]>, ObjectError> {
   const found = wireTypeName(typeName);
   switch (found.tag) {
     case 'invalid': return fail('pack_corrupt', `object: bad type ${typeName}`);
     case 'named': {
       switch (found.name) {
-        case 'blob': case 'ofs_delta': case 'ref_delta': return DONE;
-        case 'tree': { const r = parseTree(data, limits); return r.ok ? DONE : r; }
-        case 'commit': { const r = parseCommit(data, limits); return r.ok ? DONE : r; }
-        case 'tag': { const r = parseTag(data); return r.ok ? DONE : r; }
+        case 'blob': case 'ofs_delta': case 'ref_delta': return NOTHING_PARSED;
+        case 'tree': { const r = parseTree(data, limits); return r.ok ? ok(some(r.value)) : r; }
+        case 'commit': { const r = parseCommit(data, limits); return r.ok ? NOTHING_PARSED : r; }
+        case 'tag': { const r = parseTag(data); return r.ok ? NOTHING_PARSED : r; }
       }
       // Stryker disable next-line ConditionalExpression,CallExpression: unreachable, the compiler's exhaustiveness check
       return assertNever(found.name);
