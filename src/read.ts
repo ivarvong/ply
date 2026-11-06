@@ -49,6 +49,7 @@ import { raised } from './transport.js';
 import type { TreeEntry } from './objects.js';
 import { isPlyThrown, thrownCodeOr, thrownText } from './boundary.js';
 import { commitById } from './commit.js';
+import { commitForWalk } from './pathtrees.js';
 import { parseOid, type Oid } from './oid.js';
 import type { EntryOptions, TypeNames } from './boundary.js';
 import { at, fromNullable, fromNullish, mapGet, readKey, withDefaults } from './absent.js';
@@ -321,8 +322,10 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
 }
 
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
-async function walk(t: Transport, root: Span, { commit, comps, cache, limits }: { readonly commit: Oid; readonly comps: readonly string[]; readonly cache: TreeCache; readonly limits: CheckedLimits }): Promise<Result<Walked, PlyError>> {
-  const fetched = await commitById(t, commit);
+// `levels` is how many tree levels the caller reads from the root: the path's directories, and the listed directory
+// itself for listTree. The commit fetch brings the first of them where the server takes it (pathtrees.ts, #218).
+async function walk(t: Transport, root: Span, { commit, comps, levels, cache, limits }: { readonly commit: Oid; readonly comps: readonly string[]; readonly levels: number; readonly cache: TreeCache; readonly limits: CheckedLimits }): Promise<Result<Walked, PlyError>> {
+  const fetched = await commitForWalk(t, commit, levels);
   if (!fetched.ok) return fetched;
   const info = parseCommit(fetched.value.data, limits);
   if (!info.ok) return info;
@@ -372,7 +375,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
     // the tracer operation() started the root span on (opts.tracer)
-    const walked = await walk(t, root, { commit, comps, cache, limits });
+    const walked = await walk(t, root, { commit, comps, levels: comps.length + 1, cache, limits });
     if (!walked.ok) return walked;
     const dir = listedDir(walked.value, comps);
     if (!dir.ok) return dir;
@@ -414,7 +417,7 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
-    const walked = await walk(t, root, { commit, comps, cache, limits });
+    const walked = await walk(t, root, { commit, comps, levels: comps.length, cache, limits });
     if (!walked.ok) return walked;
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)

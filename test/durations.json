@@ -35,6 +35,8 @@
   "test/packcache.test.js": 7,
   "test/packstream.test.js": 6,
   "test/parity.test.js": 7,
+  "test/path-trees-unit.test.js": 1,
+  "test/path-trees.test.js": 30,
   "test/pick-empty.test.js": 10,
   "test/prefix-closure.test.js": 1,
   "test/props.test.js": 3,
