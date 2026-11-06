@@ -11,7 +11,8 @@
 import { spawnSync } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { loadavg, tmpdir } from 'node:os';
+import { tmpdir, loadavg } from 'node:os';
+import { PerformanceObserver } from 'node:perf_hooks';
 import { join, resolve } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -161,6 +162,49 @@ CASES['hashObject-trees'] = {
     return () => { for (const t of trees) hashObject('tree', t); };
   },
 };
+// A v2 ls-refs answer (#209): n refs shaped like a large GitHub repository's listing (github.com/curl/curl lists
+// ~10,000+ with refs/pull/*): HEAD with its symref target, 1% branches, 5% annotated tags with a peeled oid, the rest
+// refs/pull/<k>/head and /merge pairs. One data frame per line (LF-terminated, as upload-pack writes it), then the
+// flush. The frames are built untimed; the operation is the listing reader (lsInit, lsRefsStep per frame, lsRefsEnd),
+// the code between the pkt-line reader and the caller. `cap` is the caller's maxRefs: a listing past it is refused.
+function lsRefsFrames(n, seed) {
+  const r = prng(seed);
+  const hex = () => { let h = ''; for (let i = 0; i < 5; i++) h += r().toString(16).padStart(8, '0'); return h; };
+  const te = new TextEncoder();
+  const lines = [`${hex()} HEAD symref-target:refs/heads/master`];
+  for (let i = 0; lines.length < n + 1; i++) {
+    const k = i % 100;
+    if (k === 0) lines.push(`${hex()} refs/heads/branch-${i}`);
+    else if (k < 6) lines.push(`${hex()} refs/tags/curl-7_${i} peeled:${hex()}`);
+    else lines.push(`${hex()} refs/pull/${i >> 1}/${i % 2 ? 'merge' : 'head'}`);
+  }
+  return [...lines.map((l) => ({ kind: 'data', payload: te.encode(`${l}\n`) })), { kind: 'flush' }];
+}
+for (const [name, n, cap, it] of [['lsrefs-20', 20, null, 2000], ['lsrefs-10k', 10_000, null, 10], ['lsrefs-100k', 100_000, null, 2], ['lsrefs-100k-capped', 100_000, 10_000, 10]]) {
+  CASES[name] = {
+    iters: it,
+    refs: cap ?? n,
+    async setup(tree) {
+      const { lsInit, lsRefsStep, lsRefsEnd } = await import(`${tree}/src/lsrefs.ts`);
+      const frames = lsRefsFrames(n, 9);
+      const caps = { maxBytes: 1 << 30, maxRefs: cap ?? n + 1, unborn: { tag: 'none' } };
+      return () => {
+        let st = lsInit();
+        for (const f of frames) {
+          const next = lsRefsStep(st, f, caps);
+          if (!next.ok) {
+            if (cap !== null && next.error.what === 'ls-refs lines') return next;
+            throw new Error(next.error.message);
+          }
+          st = next.value;
+        }
+        const end = lsRefsEnd(st);
+        if (cap !== null || !end.ok || end.value.refs.size !== n + 1) throw new Error('lsrefs');
+        return end;
+      };
+    },
+  };
+}
 
 // ---- child: one case on one tree ----
 async function child() {
@@ -181,13 +225,32 @@ async function child() {
   Atomics.store(peak, 1, 1n);
   await new Promise((r) => sampler.once('exit', r));
   const rssPeak = Math.max(Number(peak[0]), process.memoryUsage.rss());
+  // allocation: the heap growth over one operation that ran with no collection in it (young-generation garbage
+  // included); with --max-semi-space-size large enough that a scavenge does not interrupt it. null when one did.
+  let gcs = 0, gcMs = 0;
+  const obs = new PerformanceObserver((list) => { for (const e of list.getEntries()) { gcs += 1; gcMs += e.duration; } });
+  obs.observe({ entryTypes: ['gc'] });
+  globalThis.gc();
+  await new Promise((r) => setTimeout(r, 50));
+  gcs = 0;
+  const h0 = process.memoryUsage().heapUsed;
+  const kept = await op();
+  const h1 = process.memoryUsage().heapUsed;
+  await new Promise((r) => setTimeout(r, 50)); // the observer's entries arrive on a later turn
+  const alloc = gcs === 0 ? h1 - h0 : null;
+  globalThis.gc();
+  const retained = process.memoryUsage().heapUsed - h0;
+  void kept; // held through the gc() above: retained is what the operation's result keeps
   const n = c.iters;
+  gcs = 0; gcMs = 0;
   const c0 = process.cpuUsage();
   const t0 = performance.now();
   for (let i = 0; i < n; i++) await op(); // oxlint-disable-line no-await-in-loop -- timed in sequence
   const cpu = process.cpuUsage(c0);
   const wall = performance.now() - t0;
-  process.stdout.write(`${JSON.stringify({ cpu: (cpu.user + cpu.system) / 1000 / n, wall: wall / n, rss: rssPeak - base })}\n`);
+  await new Promise((r) => setTimeout(r, 50));
+  obs.disconnect();
+  process.stdout.write(`${JSON.stringify({ cpu: (cpu.user + cpu.system) / 1000 / n, wall: wall / n, rss: rssPeak - base, alloc, retained, gcMs: gcMs / n, gcs: gcs / n })}\n`);
 }
 
 // ---- parent: every case × tree × run, interleaved ----
@@ -203,7 +266,7 @@ function parent() {
   for (let r = 0; r < runs; r++) {
     for (const name of names) {
       for (const tree of trees) {
-        const p = spawnSync(process.execPath, ['--expose-gc', '--import', `${tree}/test/ts-resolve.mjs`, import.meta.filename, '--child', '--tree', tree, '--case', name], { encoding: 'utf8', maxBuffer: 1 << 20 });
+        const p = spawnSync(process.execPath, ['--expose-gc', ...(CASES[name].refs ? ['--max-semi-space-size=1024'] : []), '--import', `${tree}/test/ts-resolve.mjs`, import.meta.filename, '--child', '--tree', tree, '--case', name], { encoding: 'utf8', maxBuffer: 1 << 20 });
         if (p.status !== 0) throw new Error(`${name} on ${tree}: ${p.stderr}`);
         const key = `${name}\t${tree}`;
         res.set(key, [...(res.get(key) ?? []), JSON.parse(p.stdout)]);
@@ -211,12 +274,14 @@ function parent() {
     }
   }
   const load = loadavg().map((x) => x.toFixed(2)).join(' ');
-  console.log(`load after: ${load}; ${runs} runs; cpu ms per op: median [min–max]; rss+ MiB median`);
+  console.log(`load after: ${load}; ${runs} runs; cpu ms per op: median [min–max]; rss+ MiB median; ls-refs cases: ns per ref, allocated and retained MiB per op, GC ms per op (medians)`);
   for (const name of names) {
     for (const tree of trees) {
       const xs = res.get(`${name}\t${tree}`);
       const cpu = xs.map((x) => x.cpu);
-      console.log(`${name.padEnd(20)} ${tree.split('/').pop().padEnd(14)} ${median(cpu).toFixed(2).padStart(9)} [${Math.min(...cpu).toFixed(2)}–${Math.max(...cpu).toFixed(2)}]  wall ${median(xs.map((x) => x.wall)).toFixed(2)}  rss+ ${(median(xs.map((x) => x.rss)) / MIB).toFixed(1)}`);
+      const refs = CASES[name].refs;
+      const perRef = refs ? `  ns/ref ${(median(cpu) * 1e6 / refs).toFixed(0)} [${(Math.min(...cpu) * 1e6 / refs).toFixed(0)}–${(Math.max(...cpu) * 1e6 / refs).toFixed(0)}]  alloc ${xs.some((x) => x.alloc === null) ? 'n/a' : (median(xs.map((x) => x.alloc)) / MIB).toFixed(2)}  retained ${(median(xs.map((x) => x.retained)) / MIB).toFixed(2)}  gc ms ${median(xs.map((x) => x.gcMs)).toFixed(2)}` : '';
+      console.log(`${name.padEnd(20)} ${tree.split('/').pop().padEnd(14)} ${median(cpu).toFixed(2).padStart(9)} [${Math.min(...cpu).toFixed(2)}–${Math.max(...cpu).toFixed(2)}]  wall ${median(xs.map((x) => x.wall)).toFixed(2)}  rss+ ${(median(xs.map((x) => x.rss)) / MIB).toFixed(1)}${perRef}`);
     }
   }
 }
