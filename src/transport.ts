@@ -93,12 +93,46 @@ export function rememberedQuirks(key: string): Quirks {
   }
   return q;
 }
-// Forget what was learned about `url` (as quirksKey normalizes it), or about every remote when no url is given.
-// Transports already made keep their record; the next one made for that remote starts fresh.
+// The redirect memo, declared here so forgetQuirks can clear it (described below, with its functions).
+const redirectMemo = new Map<string, Map<string, readonly string[]>>();
+// Forget what was learned about `url` (as quirksKey normalizes it), or about every remote when no url is given: its
+// quirks and its settled redirect (below). Transports already made keep theirs; the next one made for that remote
+// starts fresh.
 export function forgetQuirks(url: string | URL | null = null): void {
-  if (url === null) { quirksMemo.clear(); return; }
+  if (url === null) { quirksMemo.clear(); redirectMemo.clear(); return; }
   const key = quirksKey(url);
-  if (key !== null) quirksMemo.delete(key);
+  // Stryker disable next-line ConditionalExpression: deleting a null key from either map is a no-op, so the guard only states intent
+  if (key !== null) { quirksMemo.delete(key); redirectMemo.delete(key); }
+}
+// The redirect memo (ply-web#117): how a remote's followRedirects 'initial' exchange settled, per remote (the same key as
+// the quirks memo) and per service. The value is the Location of each 3xx that was followed, absolute, without userinfo
+// or fragment, in order; an empty list is "no redirect". A later transport for the same remote replays it with no
+// request: each Location goes through that transport's own allowUrl and the suffix rule again, so a memo never lets a
+// transport go where its own allowUrl would not, and a list longer than its maxRedirects is not used. A memo is a hint:
+// the transport that used one and is then answered with a 3xx drops it and asks the network (http.ts). The same bound
+// and the same per-process (per-isolate) scope as the quirks memo; forgetQuirks clears both.
+export function recalledRedirect(key: string, service: string): readonly string[] | null {
+  const hit = mapGet(redirectMemo, key);
+  if (hit.tag === 'none') return null;
+  redirectMemo.delete(key);
+  redirectMemo.set(key, hit.value);
+  const got = mapGet(hit.value, service);
+  return got.tag === 'some' ? got.value : null;
+}
+export function rememberRedirect(key: string, service: string, locations: readonly string[]): void {
+  const hit = mapGet(redirectMemo, key);
+  const services = hit.tag === 'some' ? hit.value : new Map<string, readonly string[]>();
+  services.set(service, [...locations]);
+  redirectMemo.delete(key);
+  redirectMemo.set(key, services);
+  for (const oldest of redirectMemo.keys()) {
+    if (redirectMemo.size <= QUIRKS_MEMO_MAX) break;
+    redirectMemo.delete(oldest);
+  }
+}
+export function forgetRedirect(key: string, service: string): void {
+  const hit = mapGet(redirectMemo, key);
+  if (hit.tag === 'some') hit.value.delete(service);
 }
 // One probe at a time per record (#136). Until a server has answered a filtered request, two concurrent ones (merge
 // walks both sides at once; two operations on one remembered record) would each pay the refusal or the empty answer.

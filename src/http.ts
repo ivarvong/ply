@@ -21,7 +21,7 @@ import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
-import { NO_HINTS, UA, freshQuirks, quirksKeyOf, rememberedQuirks, wrapNet } from './transport.js';
+import { NO_HINTS, UA, forgetRedirect, freshQuirks, quirksKeyOf, recalledRedirect, rememberRedirect, rememberedQuirks, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -206,14 +206,18 @@ function useAllowed(allow: AllowUrl | null, url: URL): Result<URL, PlyError> {
 // redirect and does not request it). git's curl requests the Location first and update_url_from_redirect dies after;
 // refusing first is that die, without handing the next host a request. allowUrl sees the Location and its URL is the
 // one the suffix rule is applied to. Userinfo on the Location is removed and is never installed as a credential.
-function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | null): Result<string | null, PlyError> {
+// `location` is that Location as the redirect memo keeps it: absolute, without userinfo or fragment, before allowUrl.
+type Rebase = { readonly base: string; readonly location: string };
+function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | null): Result<Rebase | null, PlyError> {
   if (location === null || location === '') return ok(null);
   let got: URL;
   try { got = new URL(location, asked); } catch { return ok(null); }
   got.username = ''; got.password = ''; got.hash = '';
+  const kept = got.href;
   const allowed = useAllowed(allow, got);
   if (!allowed.ok) return allowed;
-  return ok(baseFromRedirect(asked, allowed.value, service));
+  const base = baseFromRedirect(asked, allowed.value, service);
+  return ok(base === null ? null : { base, location: kept });
 }
 const isRedirect = (res: Response): boolean => res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
 // A body a test double may not implement `cancel` on, and a real one whose `cancel()` rejects. The rejection is the
@@ -415,16 +419,23 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
 // oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
 function transportOf(settings: HttpSettings): HttpTransport {
   const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, maxPackBytes } = settings;
-  let base = settings.url.toString().replace(/\/$/, '');
+  const startBase = settings.url.toString().replace(/\/$/, '');
+  let base = startBase;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
   const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
   // The credential sent from here on. A cross-origin rebase (or an allowUrl that moved the base) clears it; the
   // scrubber above still redacts the original, so an echo of it cannot leak.
-  let liveAuth = settings.crossOrigin ? null : authorization;
+  const startAuth = settings.crossOrigin ? null : authorization;
+  let liveAuth = startAuth;
   let rebasedFrom: string | null = null;
   let redirectCount = 0;
   let initialSettled = false;
+  // The redirect memo (transport.ts): this remote's key, the base it starts from, and whether the current base came
+  // from a memo that no answer has confirmed yet (a 3xx then means the memo is stale).
+  const memoKey = quirksKeyOf(settings.url);
+  let memoUnconfirmed = false;
+  let replayed = false;
   // The Basic parts as a server would echo them (UTF-8 text). From a header they are decoded, as bytes and as UTF-8.
   const decoded = basicOf(authorization);
   // oxlint-disable-next-line no-nested-ternary -- the explicit parts, else the decoded ones, else none
@@ -454,6 +465,38 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (rebasedFrom === null) rebasedFrom = base;
     base = next;
     redirectCount += 1;
+  };
+  // The initial exchange settled from the memo, with no request: each remembered Location is approved again by this
+  // transport's allowUrl and the suffix rule, from the base this transport started at. Anything the replay cannot take
+  // (a refusal, a list past maxRedirects) leaves the transport as it was, to ask the network. It runs once, before the
+  // transport's first exchange (every exchange that can settle the initial one replays first), so it always starts
+  // unsettled, at the start base.
+  const replay = (service: string): void => {
+    if (policy.follow !== 'initial' || replayed) return;
+    replayed = true;
+    const locations = recalledRedirect(memoKey, service);
+    if (locations === null || locations.length > policy.max) return;
+    const bases: string[] = [];
+    let at = base;
+    for (const location of locations) {
+      const next = locationBase(`${at}/info/refs?service=${service}`, location, service, allowUrl);
+      if (!next.ok || next.value === null) return;
+      at = next.value.base;
+      bases.push(at);
+    }
+    for (const b of bases) rebase(b);
+    initialSettled = true;
+    memoUnconfirmed = true;
+  };
+  // A memo answered with a 3xx: drop it and start over from the original base, as a transport that never had one.
+  const unsettle = (service: string): void => {
+    forgetRedirect(memoKey, service);
+    base = startBase;
+    liveAuth = startAuth;
+    rebasedFrom = null;
+    redirectCount = 0;
+    initialSettled = false;
+    memoUnconfirmed = false;
   };
   const headers = (service: string, extra: Record<string, string> = {}): Record<string, string> => {
     const h: Record<string, string> = { 'Content-Type': `application/x-${service}-request`, Accept: `application/x-${service}-result`, 'User-Agent': userAgent, ...extra };
@@ -510,14 +553,14 @@ function transportOf(settings: HttpSettings): HttpTransport {
   };
   // A 3xx on the initial GET. Returns the next base, or null when `res` is not a redirect. A redirect that is not
   // followed (the default, a hop past maxRedirects, a Location that fails the suffix rule) is the existing http error.
-  async function redirectHop(res: Response, asked: string, service: string, following: boolean): Promise<Result<string | null, PlyError>> {
+  async function redirectHop(res: Response, asked: string, service: string, following: boolean): Promise<Result<Rebase | null, PlyError>> {
     if (!isRedirect(res)) return ok(null);
     const room = following && redirectCount < policy.max;
     if (!room) {
       initialSettled = true;
       return err(await redirectError(res, asked, `${service} advertisement`, scrub));
     }
-    let next: Result<string | null, PlyError> | null = null;
+    let next: Result<Rebase | null, PlyError> | null = null;
     // allowUrl is the caller's code: if it throws, the body is still released before that propagates.
     try { next = locationBase(asked, res.headers.get('location'), service, allowUrl); }
     finally { if (next === null) await cancelBody(res.body); }
@@ -533,10 +576,12 @@ function transportOf(settings: HttpSettings): HttpTransport {
   // rebases `base` (up to maxRedirects) and the GET is retried there. A network failure leaves the exchange unsettled
   // so a retry continues from the base already reached.
   async function advertise(service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
-    const following = policy.follow === 'initial' && !initialSettled;
+    replay(service);
+    const followed: string[] = [];
     // Each hop's URL is the previous response's Location, so the next GET cannot start until this one has been read.
     // oxlint-disable no-await-in-loop
     for (;;) {
+      const following = policy.follow === 'initial' && !initialSettled;
       const asked = `${base}/info/refs?service=${service}`;
       span.set({ 'git.transport': 'http', 'http.request.method': 'GET', 'url.full': redactUrl(asked), 'server.address': hostOf(), ...redirectAttrs() });
       const sig = requestSignal();
@@ -544,11 +589,16 @@ function transportOf(settings: HttpSettings): HttpTransport {
         const res = await fetchAdvertisement(asked, service, span, sig.signal);
         if (!res.ok) return res;
         if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
+        // A stale memo: this GET is replayable, so the exchange starts over from the original base.
+        if (memoUnconfirmed && isRedirect(res.value)) { await cancelBody(res.value.body); unsettle(service); continue; }
         const next = await redirectHop(res.value, asked, service, following);
         if (!next.ok) return next;
-        if (next.value !== null) { rebase(next.value); continue; }
+        if (next.value !== null) { followed.push(next.value.location); rebase(next.value.base); continue; }
         initialSettled = true;
-        return await advertisementBody(res.value, service, span, sig.signal);
+        memoUnconfirmed = false;
+        const body = await advertisementBody(res.value, service, span, sig.signal);
+        if (following && body.ok) rememberRedirect(memoKey, service, followed);
+        return body;
       } finally { sig.cancel(); }
     }
     // oxlint-enable no-await-in-loop
@@ -568,13 +618,36 @@ function transportOf(settings: HttpSettings): HttpTransport {
     // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
     return assertNever(body);
   };
+  // The POST itself, and where it went. A 3xx on a base the memo gave means the memo is stale: bytes are sent again,
+  // once, after the exchange is settled over the network. A stream was consumed: it gets the redirect error (or, where a
+  // stream is sent with redirect 'error' (undici), the network failure a 3xx is there, which cannot be told apart from a
+  // dead link), and the memo is dropped all the same, so the next transport asks again.
+  async function sendPost(service: string, body: RequestBody, extra: Record<string, string>, span: Span, sig: AbortSignal): Promise<Result<{ readonly res: Response; readonly target: string }, PlyError>> {
+    const target = `${base}/${service}`;
+    const bytes = body instanceof Uint8Array ? body : null;
+    const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: body.stream, duplex: 'half' };
+    const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig, bytes === null ? settings.streamRedirect : 'manual');
+    const stale = memoUnconfirmed && (res.ok ? isRedirect(res.value) : bytes === null);
+    if (!stale) return res.ok ? ok({ res: res.value, target }) : res;
+    if (bytes === null || !res.ok) { forgetRedirect(memoKey, service); return res.ok ? ok({ res: res.value, target }) : res; }
+    await cancelBody(res.value.body);
+    unsettle(service);
+    const ad = await advertise(service, span);
+    if (!ad.ok) return ad;
+    const again = `${base}/${service}`;
+    span.set({ 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
+    const retried = await send(again, { method: 'POST', headers: headers(service, extra), body: bufferSource(bytes) }, sig, 'manual');
+    return retried.ok ? ok({ res: retried.value, target: again }) : retried;
+  }
   // POST and yield body chunks, filling span with HTTP attrs. Async generator keeps memory at one chunk. A failure is
   // yielded as its Err and ends the stream (frames raises it). A streamed body is read as the request goes out (undici
   // requires `duplex: 'half'` for it; workerd accepts the field), chunked like git's own bodies past http.postBuffer.
   async function* post(service: string, body: RequestBody, span: Span, hints: Hints): AsyncGenerator<Result<Uint8Array, PlyError>, void, unknown> {
     if (policy.follow === 'initial' && !initialSettled) {
-      const ad = await advertise(service, span);
-      if (!ad.ok) { yield ad; return; }
+      // the memo first: a hit settles the exchange with no request; a miss is the GET git makes
+      replay(service);
+      const ad = initialSettled ? null : await advertise(service, span);
+      if (ad !== null && !ad.ok) { yield ad; return; }
     }
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
@@ -583,13 +656,15 @@ function transportOf(settings: HttpSettings): HttpTransport {
     const t0 = Date.now();
     const sig = requestSignal();
     try {
-      const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: body.stream, duplex: 'half' };
-      const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig.signal, body instanceof Uint8Array ? 'manual' : settings.streamRedirect);
-      if (!res.ok) { yield res; return; }
-      const cache = headerText(res.value, PACK_CACHE_HEADER);
-      span.set({ 'http.response.status_code': res.value.status, 'http.response.header.content-type': headerText(res.value, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
-      if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
-      const stream = await postStream(res.value, service, target, sig.signal);
+      const sent = await sendPost(service, body, extra, span, sig.signal);
+      if (!sent.ok) { yield sent; return; }
+      const res = sent.value.res;
+      const posted = sent.value.target;
+      memoUnconfirmed = false;
+      const cache = headerText(res, PACK_CACHE_HEADER);
+      span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': headerText(res, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
+      if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
+      const stream = await postStream(res, service, posted, sig.signal);
       if (!stream.ok) { yield stream; return; }
       let bytes = 0, chunks = 0, first = -1, maxChunk = 0;
       // The body read: a platform failure mid-stream is the network error it is.
