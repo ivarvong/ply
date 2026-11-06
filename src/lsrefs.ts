@@ -18,7 +18,7 @@ import { assertNever, err, ok } from './result.js';
 import { fromNullable, readKey, withDefaults } from './absent.js';
 // oxlint-disable-next-line import/max-dependencies -- and, for an empty answer, the advertisement's reader
 import { parseCapabilitiesV2 } from './caps.js';
-// oxlint-disable-next-line import/max-dependencies -- and the id parser every listed oid goes through once
+// oxlint-disable-next-line import/max-dependencies -- and the id parser every listed oid goes through
 import { parseOid, type Oid } from './oid.js';
 
 /* oxlint-disable no-magic-numbers -- error previews and the span's ref sample are diagnostics, not wire-format facts */
@@ -29,9 +29,14 @@ const ERR = 'ERR ';
 const PEELED = 'peeled', SYMREF_TARGET = 'symref-target';
 
 // connect.c process_ref_v2 reads an oid with parse_oid_hex_algop, which takes either case (hexval); the oid is kept
-// lowercase, as git stores it in binary and writes it back lowercase. Lowercased, it is parsed once (parseOid): only
-// A-F lowercase to hex digits, so the parse accepts exactly the 40 hex digits of either case.
-const sha1Of = (text: string): Result<Oid, ErrorOf<'bad_request'>> => parseOid(text.toLowerCase());
+// lowercase, as git stores it in binary and writes it back lowercase. Lowercased, it is parsed (parseOid): only
+// A-F lowercase to hex digits, so the parse accepts exactly the 40 hex digits of either case. An oid upload-pack wrote
+// is lowercase already and parses as it is: no lowercased copy per listed oid (#209).
+function sha1Of(text: string): Result<Oid, ErrorOf<'bad_request'>> {
+  const exact = parseOid(text);
+  // Stryker disable next-line ConditionalExpression: the fast path; a lowercase oid lowercases to itself, so parsing the lowercased copy gives the same result
+  return exact.ok ? exact : parseOid(text.toLowerCase());
+}
 const OID_SHA256 = new RegExp(`^[0-9a-fA-F]{${SHA256_HEX_CHARS}}$`);
 const UNBORN = 'unborn';
 
@@ -50,10 +55,16 @@ declare const listedBrand: unique symbol;
 export type ListedName = string & { readonly [listedBrand]: typeof listedBrand };
 // The brand's check: a field holds no space.
 const isListedName = (field: string): field is ListedName => !field.includes(' ');
-// The name field of the text after the oid: all of it when it holds no space, else the text before its first space.
-function listedName(text: string): ListedName {
-  if (isListedName(text)) return text;
-  return listedName(text.slice(0, text.indexOf(' ')));
+// The name field, which holds no space (it ends at the first space past the oid).
+function listedName(field: string): ListedName {
+  // Stryker disable next-line ConditionalExpression,StringLiteral: the field ends before the first space past the oid, so it holds none; the fallback only gives the guard its other branch
+  return isListedName(field) ? field : listedName('');
+}
+// The end of the field that starts at `from`: the next space, or the end of the line.
+function fieldEnd(line: string, from: number): number {
+  const next = line.indexOf(' ', from);
+  // Stryker disable next-line EqualityOperator: every field starts past the first space, so the next space is never at 0
+  return next < 0 ? line.length : next;
 }
 // One listed ref. Only `peeled` and `symref-target` are kept from the attributes, and only when the line carries them
 // (a key that is present or not: the readers in changes, merge and read test for it).
@@ -65,6 +76,9 @@ export type LsRefsUnborn = { readonly name: 'HEAD'; readonly target: string };
 // unborn: the unborn HEAD, when the server listed one (it does only when the request says `unborn`); null otherwise.
 export type LsRefsResult = { readonly refs: Map<string, LsRef>; readonly head: string | null; readonly unborn: LsRefsUnborn | null };
 
+const PEELED_KEY = `${PEELED}:`, SYMREF_KEY = `${SYMREF_TARGET}:`;
+// The line is read by index, in place: one slice for the oid, one for the name, one per kept attribute's value, and
+// nothing for the attributes it skips (#209: a large listing paid a split array, and a key and a value per attribute).
 // @decoder parseLsRefLine prefix=ls-ref
 export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   if (line.startsWith(ERR)) return fail('remote_error', `remote: ${line.slice(ERR.length)}`);
@@ -73,29 +87,25 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
   if (sp < 0) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
   const oid = line.slice(0, sp);
   if (oid === UNBORN) return ok(null);
-  const rest = line.slice(sp + 1);
-  const cut = rest.indexOf(' ');
-  // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
-  const name = listedName(rest);
-  // Empty tokens (doubled spaces) need no filter: they have no colon and the loop skips them.
-  // Stryker disable next-line ArrayDeclaration: any token injected for a name with no attributes has no `key:` before its colon, so the loop skips it
-  const attrs = cut < 0 ? [] : rest.slice(cut + 1).split(' ');
-  if (OID_SHA256.test(oid)) return fail('unsupported', 'unsupported object-format: only sha1 repositories are supported');
+  // 40 hex digits is a sha1 oid; 64 is a sha256 repository's, refused as such; anything else is malformed.
   const parsed = sha1Of(oid);
-  if (!parsed.ok) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  if (!parsed.ok) return OID_SHA256.test(oid) ? fail('unsupported', 'unsupported object-format: only sha1 repositories are supported') : proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
+  const nameEnd = fieldEnd(line, sp + 1);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
   // server attribute can never stand in for the parsed oid or name. A bad peeled oid is malformed (git: invalid ls-refs response).
-  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: parsed.value, name, [PEELED]: null, [SYMREF_TARGET]: null };
-  for (const a of attrs) {
-    const colon = a.indexOf(':');
-    // Stryker disable next-line EqualityOperator: a token starting with ':' has the empty key, which is neither kept attribute
-    if (colon < 0) continue;
-    const key = a.slice(0, colon), value = a.slice(colon + 1);
-    if (key === PEELED) {
-      const peeled = sha1Of(value);
+  const rec: { -readonly [K in keyof LsRef]: LsRef[K] } = { oid: parsed.value, name: listedName(line.slice(sp + 1, nameEnd)), [PEELED]: null, [SYMREF_TARGET]: null };
+  // Each attribute is a field after the name. A key is the text before its first colon, so a field starts with
+  // `peeled:` exactly when its key is `peeled` (neither key holds a space or a colon). An empty field (a doubled space)
+  // and a field with no colon match neither key.
+  for (let end = nameEnd; end < line.length;) {
+    const from = end + 1;
+    end = fieldEnd(line, from);
+    if (line.startsWith(PEELED_KEY, from)) {
+      const peeled = sha1Of(line.slice(from + PEELED_KEY.length, end));
       if (!peeled.ok) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
-      rec[key] = peeled.value;
-    } else if (key === SYMREF_TARGET) rec[key] = value;
+      rec[PEELED] = peeled.value;
+    } else if (line.startsWith(SYMREF_KEY, from)) rec[SYMREF_TARGET] = line.slice(from + SYMREF_KEY.length, end);
   }
   return ok(rec);
 }
@@ -142,50 +152,55 @@ export function lsRefsBody(prefixes: readonly string[] = [], options: LsRefsBody
 }
 
 // The listing as it is read: `open` until the flush that ends it, then `ended` (any frame after that is refused).
-// `refs` grows in place as lines arrive (a copy per line would be quadratic in the ref count); `counted` is the names
-// other than HEAD (HEAD is listed beside the refs, as git ls-remote shows it, and does not consume maxRefs: a repository
-// of exactly maxRefs branches also has a HEAD line; refs/heads/HEAD is a branch and counts).
+// It is one object, updated in place, and each step returns it (#209: a copy per line was an allocation per listed
+// ref; `refs` always grew in place, as a copy of the map per line would be quadratic in the ref count). `counted` is the
+// names other than HEAD (HEAD is listed beside the refs, as git ls-remote shows it, and does not consume maxRefs: a
+// repository of exactly maxRefs branches also has a HEAD line; refs/heads/HEAD is a branch and counts).
 export type LsListing = {
-  readonly tag: 'open' | 'ended';
+  tag: 'open' | 'ended';
   readonly refs: Map<string, LsRef>;
-  readonly counted: number;
-  readonly bytes: number;
-  readonly head: string | null;
-  readonly unborn: LsRefsUnborn | null;
+  counted: number;
+  bytes: number;
+  head: string | null;
+  unborn: LsRefsUnborn | null;
 };
 export type LsCaps = { readonly maxBytes: number; readonly maxRefs: number; readonly unborn: Option<UnbornReader | null> };
 export const lsInit = (): LsListing => ({ tag: 'open', refs: new Map(), counted: 0, bytes: 0, head: null, unborn: null });
-// One frame of the listing. gitprotocol-v2 ls-refs: output = *ref flush-pkt.
+// One frame of the listing. gitprotocol-v2 ls-refs: output = *ref flush-pkt. A refusal leaves the listing as it was
+// before the frame (every check comes before the first update) and the caller stops reading: the ref limit refuses the
+// first ref past maxRefs as it arrives, and the byte limit the frame that crosses it, before that frame is decoded.
 export function lsRefsStep(st: LsListing, f: Frame, caps: LsCaps): Result<LsListing, PlyError> {
   switch (st.tag) {
     case 'ended': return proto(`ls-refs: ${f.kind} after the terminating flush-pkt`);
     case 'open': {
-      if (f.kind === 'flush') return ok({ ...st, tag: 'ended' });
+      if (f.kind === 'flush') { st.tag = 'ended'; return ok(st); }
       if (f.kind !== 'data') return proto(`ls-refs: unexpected ${f.kind} in ref listing`);
       const bytes = st.bytes + f.payload.length;
       if (bytes > caps.maxBytes) return err(limitExceeded('ls-refs bytes', bytes, caps.maxBytes));
       // A ref name is bytes (check-ref-format allows any byte >= 0x80): decodeBytes keeps them distinct and writable back,
       // and only the LF comes off, as connect.c's packet reader chomps it. trim() also ate a trailing U+FEFF or U+00A0 (#43).
-      const line = decodeBytes(f.payload).replace(/\n$/, '');
+      const text = decodeBytes(f.payload);
+      const line = text.endsWith('\n') ? text.slice(0, text.length - 1) : text;
       const parsed = parseLsRefLine(line);
       if (!parsed.ok) return parsed;
       const rec = parsed.value;
       if (rec === null) {
-        // oxlint-disable-next-line typescript/strict-boolean-expressions -- a reader the caller passed as null reads nothing
-        const unborn = caps.unborn.tag === 'some' && caps.unborn.value ? caps.unborn.value(line, st.unborn) : st.unborn;
-        return ok({ ...st, bytes, unborn });
+        // A reader the caller passed as null reads nothing (strict-boolean-expressions: the null is the test).
+        // Stryker disable next-line ConditionalExpression: the tag test only narrows the type; a none's value is absent, which the second test reads as no reader
+        if (caps.unborn.tag === 'some' && caps.unborn.value) st.unborn = caps.unborn.value(line, st.unborn); // oxlint-disable-line typescript/strict-boolean-expressions -- see above
+        st.bytes = bytes;
+        return ok(st);
       }
       // A name listed twice: git keeps both in its ref list and every lookup (find_ref_by_name) takes the first.
-      if (st.refs.has(rec.name)) return ok({ ...st, bytes });
-      let { counted } = st;
-      if (rec.name !== 'HEAD') {
-        if (counted >= caps.maxRefs) return err(limitExceeded('ls-refs lines', counted + 1, caps.maxRefs));
-        counted += 1;
-      }
+      if (st.refs.has(rec.name)) { st.bytes = bytes; return ok(st); }
+      const isHead = rec.name === 'HEAD';
+      if (!isHead && st.counted >= caps.maxRefs) return err(limitExceeded('ls-refs lines', st.counted + 1, caps.maxRefs));
       st.refs.set(rec.name, rec);
+      st.bytes = bytes;
+      if (!isHead) st.counted += 1;
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- an empty symref-target names no HEAD, as before
-      const head = rec.name === 'HEAD' && rec['symref-target'] ? rec['symref-target'] : st.head;
-      return ok({ ...st, bytes, counted, head });
+      else if (rec['symref-target']) st.head = rec['symref-target'];
+      return ok(st);
     }
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
