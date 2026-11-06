@@ -101,6 +101,7 @@ const redirectMemo = new Map<string, Map<string, readonly string[]>>();
 export function forgetQuirks(url: string | URL | null = null): void {
   if (url === null) { quirksMemo.clear(); redirectMemo.clear(); return; }
   const key = quirksKey(url);
+  // Stryker disable next-line ConditionalExpression: deleting a null key from either map is a no-op, so the guard only states intent
   if (key !== null) { quirksMemo.delete(key); redirectMemo.delete(key); }
 }
 // The redirect memo (ply-web#117): how a remote's followRedirects 'initial' exchange settled, per remote (the same key as

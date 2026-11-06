@@ -219,14 +219,14 @@ const memoHost = (moves = new Map(), { throwOnStreamRedirect = false } = {}) => 
   const fetchImpl = async (url, init) => {
     const u = new URL(String(url));
     const method = init.method ?? 'GET';
-    seen.push({ line: `${method} ${u.host}${u.pathname}`, auth: new Headers(init.headers).get('authorization') });
+    seen.push({ line: `${method} ${u.host}${u.pathname}`, auth: new Headers(init.headers).get('authorization'), redirect: init.redirect });
     const repo = u.pathname.slice(0, u.pathname.lastIndexOf(u.pathname.endsWith('/info/refs') ? '/info/refs' : '/'));
     const move = moves.get(`${u.host}${repo}`);
     if (move !== undefined && (move.all || method === 'GET')) {
       if (throwOnStreamRedirect && init.redirect === 'error') throw new TypeError('fetch failed: redirect mode is error');
       return new Response(null, { status: 301, headers: { location: `${move.to}${u.pathname.slice(repo.length)}${u.search}` } });
     }
-    if (method === 'GET') return new Response(ADV, { status: 200, headers: { 'content-type': `application/x-${UP}-advertisement` } });
+    if (method === 'GET') return new Response(ADV, { status: 200, headers: { 'content-type': `application/x-${u.searchParams.get('service')}-advertisement` } });
     return new Response('0000', { status: 200, headers: { 'content-type': `application/x-${UP}-result` } });
   };
   return { seen, fetchImpl, lines: () => seen.map(s => s.line), clear: () => { seen.length = 0; } };
@@ -251,12 +251,36 @@ test('memo: the second transport for a remote makes no GET and posts to the sett
   await postUp(second);
   assert.equal((await memoT('https://m1/old', h).value.advertise(UP, spanOf())).ok, true);
   assert.deepEqual(h.lines(), ['POST m1/new/git-upload-pack', 'GET m1/new/info/refs']);
-  // no redirect is remembered too; another service is its own entry
+  // no redirect is remembered too; another service is its own entry, kept beside the first
   h.clear();
   await postUp(memoT('https://m1/plain', h).value);
   await postUp(memoT('https://m1/plain', h).value);
-  assert.equal((await memoT('https://m1/plain', h).value.advertise('git-receive-pack', spanOf())).ok, false, 'the double answers upload-pack only');
-  assert.deepEqual(h.lines(), ['GET m1/plain/info/refs', 'POST m1/plain/git-upload-pack', 'POST m1/plain/git-upload-pack', 'GET m1/plain/info/refs']);
+  const rp = memoT('https://m1/plain', h).value;
+  assert.equal((await rp.advertise('git-receive-pack', spanOf())).ok, true);
+  await postUp(memoT('https://m1/plain', h).value);
+  assert.deepEqual(h.lines(), ['GET m1/plain/info/refs', 'POST m1/plain/git-upload-pack', 'POST m1/plain/git-upload-pack', 'GET m1/plain/info/refs', 'POST m1/plain/git-upload-pack']);
+});
+
+test('memo: never, and a settled transport, report a 3xx on an advertisement and do not follow or remember it', async () => {
+  const h = memoHost(new Map([['m7/old', { to: 'https://m7/new', all: false }]]));
+  const never = await createTransport('https://m7/old', { fetchImpl: h.fetchImpl }).value.advertise(UP, spanOf());
+  assert.deepEqual([never.ok, never.error.code, never.error.status], [false, 'http', 301]);
+  const plain = await createTransport('https://m7/plain', { fetchImpl: h.fetchImpl }).value.advertise(UP, spanOf());
+  assert.equal(plain.ok, true);
+  const settled = memoT('https://m7/flip', h).value;
+  assert.equal((await settled.advertise(UP, spanOf())).ok, true);
+  h.seen.length = 0;
+  await postUp(memoT('https://m7/plain', h).value);
+  assert.deepEqual(h.lines(), ['GET m7/plain/info/refs', 'POST m7/plain/git-upload-pack'], 'never remembered nothing');
+  const moves = new Map([['m7/flip', { to: 'https://m7/new', all: false }]]);
+  const later = memoHost(moves);
+  const again = await createTransport('https://m7/flip', { fetchImpl: later.fetchImpl, followRedirects: 'initial' }).value;
+  assert.equal((await again.advertise(UP, spanOf())).ok, true, 'memo: no redirect, and the GET at the base answers');
+  const t2 = memoT('https://m7/other', later).value;
+  assert.equal((await t2.advertise(UP, spanOf())).ok, true);
+  moves.set('m7/other', { to: 'https://m7/new', all: false });
+  const second = await t2.advertise(UP, spanOf());
+  assert.deepEqual([second.ok, second.error.code], [false, 'http'], 'a settled transport does not follow a later 3xx');
 });
 
 test('memo: never neither reads nor writes it; a list past maxRedirects is not replayed; a failed advertisement is not remembered', async () => {
@@ -322,6 +346,7 @@ test('memo: stale on a POST (bytes re-sent once after the GET), on a GET (starts
   h.clear();
   const t = memoT('https://m4/old', h).value;
   const span = await postUp(t);
+  assert.deepEqual(h.seen.map(s => s.redirect), ['manual', 'manual', 'manual', 'manual'], 'the re-sent POST asks redirect manual too');
   assert.deepEqual(h.lines(), ['POST m4/a/git-upload-pack', 'GET m4/old/info/refs', 'GET m4/b/info/refs', 'POST m4/b/git-upload-pack']);
   assert.equal(h.seen[3].line, 'POST m4/b/git-upload-pack');
   assert.deepEqual([t.url, span.attrs['url.full'], span.attrs['http.redirect.count']], ['https://m4/b', 'https://m4/b/git-upload-pack', 1]);
@@ -388,7 +413,63 @@ test('memo: forgetQuirks forgets one remote or all; the memo is bounded like the
   await postUp(memoT('https://m5/r0', h).value);
   await postUp(memoT('https://m5/over', h).value);
   h.clear();
-  for (const r of ['r0', 'over', 'r1']) await postUp(memoT(`https://m5/${r}`, h).value);
-  assert.deepEqual(h.lines(), ['POST m5/r0/git-upload-pack', 'POST m5/over/git-upload-pack', 'GET m5/r1/info/refs', 'POST m5/r1/git-upload-pack']);
+  for (const r of ['r0', 'over', 'r2', 'r1']) await postUp(memoT(`https://m5/${r}`, h).value);
+  assert.deepEqual(h.lines(), ['POST m5/r0/git-upload-pack', 'POST m5/over/git-upload-pack', 'POST m5/r2/git-upload-pack', 'GET m5/r1/info/refs', 'POST m5/r1/git-upload-pack'], 'exactly one dropped: the least recently used');
+  forgetQuirks();
+});
+
+test('memo: forgetQuirks clears the quirks record with the redirect memo, for one remote or all', () => {
+  const q = url => createTransport(url).value.quirks;
+  const a = q('https://m8/a');
+  const b = q('https://m8/b');
+  assert.equal(q('https://m8/a'), a);
+  forgetQuirks('https://m8/a');
+  assert.notEqual(q('https://m8/a'), a);
+  assert.equal(q('https://m8/b'), b);
+  forgetQuirks();
+  assert.notEqual(q('https://m8/b'), b);
+});
+
+test('memo: an entry already gone when its transport finds it stale (forgotten meanwhile) is not an error', async () => {
+  const moves = new Map([['m9/old', { to: 'https://m9/a', all: false }]]);
+  const h = memoHost(moves);
+  await postUp(memoT('https://m9/old', h).value);
+  moves.set('m9/a', { to: 'https://m9/b', all: true });
+  moves.set('m9/old', { to: 'https://m9/b', all: false });
+  const forgetting = { ...h, fetchImpl: async (url, init) => { if (init.method === 'POST' && String(url).includes('m9/a/')) forgetQuirks(); return h.fetchImpl(url, init); } };
+  h.clear();
+  const t = memoT('https://m9/old', forgetting).value;
+  await postUp(t);
+  assert.equal(t.url, 'https://m9/b');
+  const stream = { stream: new ReadableStream({ start(c) { c.enqueue(Uint8Array.of(0x30, 0x30, 0x30, 0x30)); c.close(); } }), length: 4 };
+  moves.set('m9/b', { to: 'https://m9/c', all: true });
+  const forgetting2 = { ...h, fetchImpl: async (url, init) => { if (init.method === 'POST') forgetQuirks(); return h.fetchImpl(url, init); } };
+  await assert.rejects(postUp(memoT('https://m9/old', forgetting2).value, stream), e => e.code === 'http');
+});
+
+test('memo: re-remembering a remote makes it the most recently used, even after other remotes were used meanwhile', async () => {
+  forgetQuirks();
+  const moves = new Map([['m10/k', { to: 'https://m10/k2', all: false }]]);
+  const h = memoHost(moves);
+  await postUp(memoT('https://m10/k', h).value);
+  for (let i = 1; i < QUIRKS_MEMO_MAX; i++) await postUp(memoT(`https://m10/r${i}`, h).value);
+  // k's next transport refuses the remembered Location once (the replay), so it asks the network; while its GET is out,
+  // every other remote is used, which leaves k the least recently used until its own answer is remembered
+  let refusals = 0;
+  const allowUrl = url => (url.pathname.startsWith('/k2') && refusals++ === 0 ? { ok: false, error: Object.assign(new Error('not now'), { code: 'auth' }) } : { ok: true, value: url });
+  let touched = false;
+  const busy = { ...h, fetchImpl: async (url, init) => {
+    if (!touched && String(url).startsWith('https://m10/k/info/refs')) {
+      touched = true;
+      for (let i = 1; i < QUIRKS_MEMO_MAX; i++) await postUp(memoT(`https://m10/r${i}`, h).value);
+    }
+    return h.fetchImpl(url, init);
+  } };
+  await postUp(memoT('https://m10/k', busy, { allowUrl }).value);
+  assert.deepEqual([touched, refusals], [true, 2]);
+  await postUp(memoT('https://m10/over', h).value);
+  h.clear();
+  await postUp(memoT('https://m10/k', h).value);
+  assert.deepEqual(h.lines(), ['POST m10/k2/git-upload-pack'], 'k was kept: its re-remembered entry was the newest');
   forgetQuirks();
 });
