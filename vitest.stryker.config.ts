@@ -37,6 +37,7 @@ const MUTATION_FILES = [
   'test/want-oracle.test.js',
   'test/dotnames.test.js',
   'test/parsetree.test.js',
+  'test/otel-ended.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

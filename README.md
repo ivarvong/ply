@@ -475,6 +475,24 @@ Span names, kinds, parent/child structure, links and attribute keys (with their 
 - **Removing or renaming** a span or key, changing a value's type, or moving a span is a **breaking change** for consumers' dashboards and alerts, and is called out as one in the PR and the release notes.
 - **Adding** one also fails the test until the snapshot is regenerated (`npm run test:spans:update`), so every addition is visible in review as a diff of `test/span-contract.json`.
 
+### In-process consumers: `onEnd`
+
+An exporter gets each span as an OTLP/JSON line, which is what a file or a collector wants. A consumer in the same
+process (a list kept for one request, spans mirrored onto a platform tracer) usually wants plain values instead, and
+would otherwise pay to build the OTLP form and then `flattenLine` it straight back. `new Tracer({ onEnd })` calls
+`onEnd(span)` with an `EndedSpan` as each span ends: exactly the `FlatSpan` that `flattenLine` reads back from the line
+the exporter would get (ids, name, kind, `durationMs`, status, attributes as plain values, credential-scrubbed; events;
+links), plus `startTimeUnixNano`, `endTimeUnixNano` and `otlp()`, which builds that OTLP span on first call (and
+returns the same object after). `onEnd` runs before the exporter. A tracer with `onEnd` and no exporter builds no OTLP
+at all unless `otlp()` is called; one with neither builds nothing. A subclass that overrides `export` still gets every
+span. `test/otel-ended.test.js` holds the EndedSpan equal to `flattenLine` of the exported line over random attribute
+records of every value kind.
+
+```js
+const spans = [];
+const tracer = new Tracer({ onEnd: s => spans.push(s) });  // s.attrs['git.response.bytes'] is a number; no OTLP built
+```
+
 ### Span lifetimes
 
 Some work is driven by the caller after the call returns: `readFile`'s `stream`, `checkoutTree`'s `files` iterator (and each streamed blob in it). Their spans — `git.read.blob`, `git.checkout.blobs` — **follow** the span that started them instead of being its children:

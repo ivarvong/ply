@@ -7,7 +7,8 @@
 // through a function here, and what leaves is Option from result.ts (the one Option). Null stays a wire value.
 import { none, some, type Option } from './result.js';
 
-function isMissing(value: unknown): value is undefined {
+// The platform missing value as a test, for a hot loop where an Option per read would allocate (otel.ts flatValue).
+export function isMissing(value: unknown): value is undefined {
   return value === undefined;
 }
 
