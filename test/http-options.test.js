@@ -211,7 +211,7 @@ test('a URL that does not parse, and a NUL, CR or LF in its userinfo, are refuse
 // The redirect memo (ply-web#117), against a fetch double. `moves` maps a path prefix to where its info/refs (and, with
 // `all`, every request) is sent with a 301; everything else answers an advertisement or an empty upload-pack result.
 // Each test uses its own host name, so the module memo is not shared between tests.
-import { forgetQuirks, QUIRKS_MEMO_MAX } from '../src/transport.js';
+import { forgetQuirks, QUIRKS_MEMO_MAX, recalledRedirect } from '../src/transport.js';
 const UP = 'git-upload-pack';
 const ADV = '000eversion 2\n0000';
 const memoHost = (moves = new Map(), { throwOnStreamRedirect = false } = {}) => {
@@ -472,4 +472,55 @@ test('memo: re-remembering a remote makes it the most recently used, even after 
   await postUp(memoT('https://m10/k', h).value);
   assert.deepEqual(h.lines(), ['POST m10/k2/git-upload-pack'], 'k was kept: its re-remembered entry was the newest');
   forgetQuirks();
+});
+
+test('memo: a Location is kept absolute, without userinfo or fragment, as the server sent it before allowUrl', async () => {
+  const h = memoHost();
+  const odd = { ...h, fetchImpl: async (url, init) => (String(url) === `https://m12/old/info/refs?service=${UP}`
+    ? new Response(null, { status: 302, headers: { location: `//u:p@m12/new/info/refs?service=${UP}#frag` } })
+    : h.fetchImpl(url, init)) };
+  const rename = url => ({ ok: true, value: url.pathname.startsWith('/new') ? new URL(`https://m12/renamed/info/refs?service=${UP}`) : url });
+  const t = memoT('https://m12/old', odd, { allowUrl: rename }).value;
+  await postUp(t);
+  assert.equal(t.url, 'https://m12/renamed');
+  assert.deepEqual(recalledRedirect('https://m12/old', UP), [`https://m12/new/info/refs?service=${UP}`]);
+  assert.equal(recalledRedirect('https://m12/old', 'git-receive-pack'), null);
+  assert.equal(recalledRedirect('https://m12/never', UP), null);
+});
+
+test('memo: a confirmed base is not stale any more: a later 3xx on it is the redirect error, with no GET and no re-send', async () => {
+  const moves = new Map();
+  const h = memoHost(moves);
+  // no memo: settled by its own GET, then a 3xx on the POST
+  const fresh = memoT('https://m13/a', h).value;
+  assert.equal((await fresh.advertise(UP, spanOf())).ok, true);
+  moves.set('m13/a', { to: 'https://m13/z', all: true });
+  h.clear();
+  await assert.rejects(postUp(fresh), e => e.code === 'http' && e.status === 301);
+  assert.deepEqual(h.lines(), ['POST m13/a/git-upload-pack']);
+  // a memo hit confirmed by its first POST: the second POST's 3xx is the error
+  moves.delete('m13/a');
+  await postUp(memoT('https://m13/b', h).value);
+  const hit = memoT('https://m13/b', h).value;
+  h.clear();
+  await postUp(hit);
+  moves.set('m13/b', { to: 'https://m13/z', all: true });
+  await assert.rejects(postUp(hit), e => e.code === 'http' && e.status === 301);
+  assert.deepEqual(h.lines(), ['POST m13/b/git-upload-pack', 'POST m13/b/git-upload-pack']);
+});
+
+test('the POST span: status, content type, a time to first byte from the request, and the recorded response headers', async () => {
+  const h = memoHost();
+  const t0 = Date.now();
+  const span = await postUp(memoT('https://m14/r', h).value);
+  assert.equal(span.attrs['http.response.status_code'], 200);
+  assert.equal(span.attrs['http.response.header.content-type'], `application/x-${UP}-result`);
+  assert.ok(span.attrs['http.response.ttfb_ms'] >= 0 && span.attrs['http.response.ttfb_ms'] <= Date.now() - t0 + 1, String(span.attrs['http.response.ttfb_ms']));
+  const tagged = { ...h, fetchImpl: async (url, init) => { const r = await h.fetchImpl(url, init); const out = new Response(r.body, r); out.headers.set('x-tag', 'v'); out.headers.set('x-ply-pack-cache', 'HIT'); return out; } };
+  const recorded = await postUp(createTransport('https://m14/r', { fetchImpl: tagged.fetchImpl, recordResponseHeaders: ['x-tag'] }).value);
+  assert.equal(recorded.attrs['http.response.header.x-tag'], 'v');
+  const plain = await postUp(createTransport('https://m14/r', { fetchImpl: tagged.fetchImpl }).value);
+  assert.equal(plain.attrs['http.response.header.x-tag'], undefined);
+  assert.equal(plain.attrs['http.response.headers.from_cache'], undefined, 'no recorded names: no recorded-header attributes at all');
+  assert.equal(recorded.attrs['http.response.headers.from_cache'], true);
 });

@@ -206,20 +206,18 @@ function useAllowed(allow: AllowUrl | null, url: URL): Result<URL, PlyError> {
 // redirect and does not request it). git's curl requests the Location first and update_url_from_redirect dies after;
 // refusing first is that die, without handing the next host a request. allowUrl sees the Location and its URL is the
 // one the suffix rule is applied to. Userinfo on the Location is removed and is never installed as a credential.
-function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | null): Result<string | null, PlyError> {
+// `location` is that Location as the redirect memo keeps it: absolute, without userinfo or fragment, before allowUrl.
+type Rebase = { readonly base: string; readonly location: string };
+function locationBase(asked: string, location: string | null, service: string, allow: AllowUrl | null): Result<Rebase | null, PlyError> {
   if (location === null || location === '') return ok(null);
   let got: URL;
   try { got = new URL(location, asked); } catch { return ok(null); }
   got.username = ''; got.password = ''; got.hash = '';
+  const kept = got.href;
   const allowed = useAllowed(allow, got);
   if (!allowed.ok) return allowed;
-  return ok(baseFromRedirect(asked, allowed.value, service));
-}
-// A followed Location as the redirect memo keeps it: absolute, without userinfo or fragment.
-function absoluteLocation(asked: string, location: string | null): string {
-  const got = new URL(location === null ? '' : location, asked);
-  got.username = ''; got.password = ''; got.hash = '';
-  return got.href;
+  const base = baseFromRedirect(asked, allowed.value, service);
+  return ok(base === null ? null : { base, location: kept });
 }
 const isRedirect = (res: Response): boolean => res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400);
 // A body a test double may not implement `cancel` on, and a real one whose `cancel()` rejects. The rejection is the
@@ -421,7 +419,8 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
 // oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
 function transportOf(settings: HttpSettings): HttpTransport {
   const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, maxPackBytes } = settings;
-  let base = settings.url.toString().replace(/\/$/, '');
+  const startBase = settings.url.toString().replace(/\/$/, '');
+  let base = startBase;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
   const recordHint = (): Record<string, string> => recordNames.length > 0 && Object.hasOwn(f, CACHING_FETCH_BRAND) ? { [RECORD_HEADERS_REQUEST]: recordNames.join(',') } : {};
   // Whatever form, the value never reaches a span or an error message (`scrub`), even echoed.
@@ -435,7 +434,6 @@ function transportOf(settings: HttpSettings): HttpTransport {
   // The redirect memo (transport.ts): this remote's key, the base it starts from, and whether the current base came
   // from a memo that no answer has confirmed yet (a 3xx then means the memo is stale).
   const memoKey = quirksKeyOf(settings.url);
-  const startBase = settings.url.toString().replace(/\/$/, '');
   let memoUnconfirmed = false;
   let replayed = false;
   // The Basic parts as a server would echo them (UTF-8 text). From a header they are decoded, as bytes and as UTF-8.
@@ -481,7 +479,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     for (const location of locations) {
       const next = locationBase(`${at}/info/refs?service=${service}`, location, service, allowUrl);
       if (!next.ok || next.value === null) return false;
-      at = next.value;
+      at = next.value.base;
       bases.push(at);
     }
     for (const b of bases) rebase(b);
@@ -554,14 +552,14 @@ function transportOf(settings: HttpSettings): HttpTransport {
   };
   // A 3xx on the initial GET. Returns the next base, or null when `res` is not a redirect. A redirect that is not
   // followed (the default, a hop past maxRedirects, a Location that fails the suffix rule) is the existing http error.
-  async function redirectHop(res: Response, asked: string, service: string, following: boolean): Promise<Result<string | null, PlyError>> {
+  async function redirectHop(res: Response, asked: string, service: string, following: boolean): Promise<Result<Rebase | null, PlyError>> {
     if (!isRedirect(res)) return ok(null);
     const room = following && redirectCount < policy.max;
     if (!room) {
       initialSettled = true;
       return err(await redirectError(res, asked, `${service} advertisement`, scrub));
     }
-    let next: Result<string | null, PlyError> | null = null;
+    let next: Result<Rebase | null, PlyError> | null = null;
     // allowUrl is the caller's code: if it throws, the body is still released before that propagates.
     try { next = locationBase(asked, res.headers.get('location'), service, allowUrl); }
     finally { if (next === null) await cancelBody(res.body); }
@@ -594,7 +592,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
         if (memoUnconfirmed && isRedirect(res.value)) { await cancelBody(res.value.body); unsettle(service); continue; }
         const next = await redirectHop(res.value, asked, service, following);
         if (!next.ok) return next;
-        if (next.value !== null) { followed.push(absoluteLocation(asked, res.value.headers.get('location'))); rebase(next.value); continue; }
+        if (next.value !== null) { followed.push(next.value.location); rebase(next.value.base); continue; }
         initialSettled = true;
         memoUnconfirmed = false;
         const body = await advertisementBody(res.value, service, span, sig.signal);
