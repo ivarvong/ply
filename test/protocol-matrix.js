@@ -100,7 +100,7 @@ export async function runMode(mode) {
     if (!ofsDelta) assert.equal(r.parsed.stats.ofsDelta, 0, label);
     if (!thinPack) assert.equal(r.resolved.stats.externalBases, 0, label);
     // a REF base outside the pack is one of the haves (the read side's tagged base; a `baseOid` field no longer exists)
-    for (const [, obj] of r.objects) { const ref = obj.base.tag === 'ref' ? obj.base.oid : null; if (ref !== null && !r.objects.has(ref)) assert.ok(bound.had.has(ref), `${label}: thin base not derivable`); }
+    for (const [, obj] of r.objects) { const ref = obj.packBase.tag === 'ref' ? obj.packBase.oid : null; if (ref !== null && !r.objects.has(ref)) assert.ok(bound.had.has(ref), `${label}: thin base not derivable`); }
     assert.ok(r.resolved.stats.maxChain <= 10, label);
     seen.set(`${S.mode}|${wk}|${hk}|${dk}|${filter ?? '-'}`, got.size);
   }

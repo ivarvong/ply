@@ -383,7 +383,9 @@ export type ResolvedFull = {
   readonly offset: number;
   readonly size: number;
   readonly compressed: number;
-  readonly base: ObjBase;
+  // Where the object sat in the pack it came from: none, an OFS_DELTA's offset there, or a REF_DELTA's base id. Not
+  // `base`: push reads `base` as its own input (pack.ts PackInputBase), and `data` here is the object whole (#217).
+  readonly packBase: ObjBase;
 };
 export type ResolvedDelta = ResolvedFull & { readonly deltaOps: DeltaOps };
 export type ResolvedObject = ResolvedFull | ResolvedDelta;
@@ -542,7 +544,7 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     if (!patched.ok) return patched;
     held += patched.value.out.length;
     const out = patched.value.out;
-    return ok({ type: base.type, data: out, chain, deltaOps: patched.value.ops, oid: hashObject(storedName(base.type), out), offset: obj.offset, size: obj.size, compressed: obj.compressed, base: obj.base });
+    return ok({ type: base.type, data: out, chain, deltaOps: patched.value.ops, oid: hashObject(storedName(base.type), out), offset: obj.offset, size: obj.size, compressed: obj.compressed, packBase: obj.base });
   }
   function resolveObj(obj: Entry, depth = 0): Step {
     const hit = mapGet(memo, obj.offset);
@@ -550,7 +552,7 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     if (depth > maxChain) return failed(limitError('delta chain depth', depth, maxChain));
     let r: ResolvedObject;
     if (obj.tag === 'full') {
-      r = { type: obj.type, data: obj.data, chain: 0, oid: hashObject(storedName(obj.type), obj.data), offset: obj.offset, size: obj.size, compressed: obj.compressed, base: obj.base };
+      r = { type: obj.type, data: obj.data, chain: 0, oid: hashObject(storedName(obj.type), obj.data), offset: obj.offset, size: obj.size, compressed: obj.compressed, packBase: obj.base };
     } else {
       const b = findBase(obj.base, depth, resolveObj);
       if (b.tag !== 'base') return b;
