@@ -177,7 +177,7 @@ test('resolvePack parses a hand-built object at its edge: a type, a base, and da
   errOf(resolvePack({ objects: [{ offset: at, type: TYPE.OFS_DELTA, data, base: { tag: 'none' } }] }), 'bad_request', `resolvePack: object at ${at} has type 6 and no base`);
   const one = unwrap(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, base: { tag: 'none' } }] }));
   const r = one.objects.get(hashObject('blob', data));
-  assert.deepEqual({ type: r.type, size: r.size, compressed: r.compressed, base: r.base, chain: r.chain }, { type: TYPE.BLOB, size: 1, compressed: 0, base: { tag: 'none' }, chain: 0 });
+  assert.deepEqual({ type: r.type, size: r.size, compressed: r.compressed, packBase: r.packBase, chain: r.chain }, { type: TYPE.BLOB, size: 1, compressed: 0, packBase: { tag: 'none' }, chain: 0 });
   errOf(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, base: { tag: 'odd' } }] }), 'bad_request', `resolvePack: object at ${at} has base tag "odd"`);
   errOf(resolvePack({ objects: [{ offset: at, type: TYPE.BLOB, data, base: {} }] }), 'bad_request', `resolvePack: object at ${at} has base tag undefined`);
   for (const offset of [-1, 1.5, Number.NaN, 2 ** 53]) {
@@ -201,7 +201,7 @@ test('resolvePack parses a hand-built object at its edge: a type, a base, and da
   const id = hashObject('blob', base);
   const thin = unwrap(resolvePack({ objects: [{ offset: at, type: TYPE.REF_DELTA, data: delta, base: { tag: 'ref', oid: id } }] }, o => { asked.push(o); return { type: TYPE.BLOB, data: base }; }));
   assert.deepEqual(asked, [id]);
-  assert.deepEqual([...thin.objects.values()].map(o => [o.type, o.base]), [[TYPE.BLOB, { tag: 'ref', oid: id }]]);
+  assert.deepEqual([...thin.objects.values()].map(o => [o.type, o.packBase]), [[TYPE.BLOB, { tag: 'ref', oid: id }]]);
 });
 
 test('resolvePack reads each object once at its edge', async () => {
