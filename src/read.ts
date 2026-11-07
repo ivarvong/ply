@@ -10,6 +10,8 @@
 //                                    an unborn HEAD, or that branch by name, is { empty: true, ref } — a state, not not_found
 //   walkPath(transport, treeOid, comps, { cache }) → Result<{ tree, entry }, PlyError>   one tree per component, from a tree
 //                                    the caller already has. not_found carries miss (ref, path, directory, submodule, …).
+//   walkCommit(transport, commitOid, comps, { cache, levels }) → Result<{ commit, data, tree, entry }, PlyError>   the
+//                                    commit and the path's trees, the first levels in the commit's own fetch where taken.
 //
 // `ref`: null/'HEAD' (the remote's HEAD), a full ref name, a short name resolved the way `git rev-parse` does it for a
 // remote's refs (refs/<n>, refs/tags/<n>, refs/heads/<n> — tags win over branches, as in git), or a 40-hex commit oid.
@@ -321,18 +323,38 @@ export async function walkPath(t: Transport, treeOid: string, comps: readonly st
   return start.ok ? walkFrom(t, start.value, comps, options) : start;
 }
 
+// A commit-rooted walk: the commit's bytes (as fetched, hash-checked), its root tree, and the walk's last entry.
+export type CommitWalked = Walked & { readonly commit: Oid; readonly data: Uint8Array };
+export type CommitWalkConfig = WalkConfig & { readonly levels: number };
+export type CommitWalkOptions = Input<CommitWalkConfig>;
 // Effect: walk `comps` from the commit's root tree. `tree` is that root (walkPath's tree is the tree it started from).
 // `levels` is how many tree levels the caller reads from the root: the path's directories, and the listed directory
 // itself for listTree. The commit fetch brings the first of them where the server takes it (pathtrees.ts, #218).
-async function walk(t: Transport, root: Span, { commit, comps, levels, cache, limits }: { readonly commit: Oid; readonly comps: readonly string[]; readonly levels: number; readonly cache: TreeCache; readonly limits: CheckedLimits }): Promise<Result<Walked, PlyError>> {
+// `root`, when given, is the operation's span: it carries the commit and its root tree before the walk starts.
+async function walkFromCommit(t: Transport, commit: Oid, comps: readonly string[], { levels, cache }: CommitWalkConfig, root: Span | null): Promise<Result<CommitWalked, PlyError>> {
   const fetched = await commitForWalk(t, commit, levels);
   if (!fetched.ok) return fetched;
-  const info = parseCommit(fetched.value.data, limits);
+  const { data } = fetched.value;
+  const info = parseCommit(data, t.limits);
   if (!info.ok) return info;
-  root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
+  if (root !== null) root.set({ 'git.read.commit': commit, 'git.read.tree.root': info.value.tree });
   const walked = await walkFrom(t, info.value.tree, comps, { cache });
   if (!walked.ok) return walked;
-  return ok({ tree: info.value.tree, entry: walked.value.entry });
+  return ok({ commit, data, tree: info.value.tree, entry: walked.value.entry });
+}
+// walkCommit(transport, commitOid, comps, { cache, levels }): the commit and its path in as few round trips as the server
+// allows (#222). A server known to take `combine:blob:none+tree:K` answers the commit and its first min(levels, 2) tree
+// levels in one fetch (pathtrees.ts); elsewhere it is the commit (tree:0, deepen 1), then one tree per level, as readFile
+// reads it. Every tree the walk reads lands in `cache`; a tree the commit's fetch brought and the walk did not read (the
+// listed directory, a sibling) is answered by fetchObject without another request. `levels` defaults to comps.length + 1
+// (the path's directories and the listed one); 0 fetches the commit alone. Not a commit (or an oid that is not 40 hex,
+// or levels that is not a non-negative integer) is that refusal; a missing component is walkPath's not_found.
+export async function walkCommit(t: Transport, commit: string, comps: readonly string[], options: CommitWalkOptions = {}): Promise<Result<CommitWalked, PlyError>> {
+  const id = objectId(commit);
+  if (!id.ok) return id;
+  const config = withDefaults<CommitWalkConfig>(options, { cache: new Map<string, Uint8Array>(), levels: comps.length + 1 });
+  if (!Number.isSafeInteger(config.levels) || config.levels < 0) return fail('bad_request', `walkCommit: levels must be a non-negative integer, got ${String(config.levels)}`);
+  return walkFromCommit(t, id.value, comps, config, null);
 }
 
 // A path as the entries take it: validated components. With `allowRoot`, a missing, null, empty or '/' path is the root.
@@ -375,7 +397,7 @@ export async function listTree(url: string, spec: PathSpec = {}, options: TreeRe
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
     // the tracer operation() started the root span on (opts.tracer)
-    const walked = await walk(t, root, { commit, comps, levels: comps.length + 1, cache, limits });
+    const walked = await walkFromCommit(t, commit, comps, { levels: comps.length + 1, cache }, root);
     if (!walked.ok) return walked;
     const dir = listedDir(walked.value, comps);
     if (!dir.ok) return dir;
@@ -417,7 +439,7 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     const resolved = await resolveCommit(t, ref);
     if (!resolved.ok) return resolved;
     const { name, commit } = resolved.value;
-    const walked = await walk(t, root, { commit, comps, levels: comps.length, cache, limits });
+    const walked = await walkFromCommit(t, commit, comps, { levels: comps.length, cache }, root);
     if (!walked.ok) return walked;
     // comps is non-empty (validatePath refuses an empty path), so the walk ends at an entry
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- see above (and no `!`: docs/STACK.md)

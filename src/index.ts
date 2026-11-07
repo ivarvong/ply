@@ -13,7 +13,7 @@ export { checkoutTree, treeFiles, canonMode } from './checkout.js'; // writing i
 // ---- read ----
 export type { AbbrevResolution, OpenedBlob } from './read.js';
 export type { Miss, CommitMiss } from './errors.js';
-export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbrev, refCandidates, entryType, lsMode, walkPath, fetchCommit, openBlob, readBlob } from './read.js';
+export { readFile, listTree, readCommit, commitView, resolveCommit, resolveAbbrev, refCandidates, entryType, lsMode, walkPath, walkCommit, fetchCommit, openBlob, readBlob } from './read.js';
 export { readLog, logWindow, logOn } from './log.js';
 
 // ---- refs, merge, rebase, sign ----

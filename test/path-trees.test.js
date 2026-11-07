@@ -10,7 +10,9 @@ import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
 import { startProxy } from './proxy.js';
-import { readFile, listTree } from '../src/read.js';
+import { readFile, listTree, walkCommit } from '../src/read.js';
+import { createTransport } from '../src/http.js';
+import { fetchObject } from '../src/fetch.js';
 import { buildPack } from '../src/pack.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat } from '../src/bytes.js';
@@ -100,6 +102,73 @@ test('a server that takes it: first contact is tree:0, then one race, then the d
     }
     assert.equal(quirks.treeFilter, 'tree:0', 'the public record is unchanged by what was learned');
     assert.deepEqual(Object.keys(quirks).toSorted(), ['blobWants', 'treeFilter']);
+  } finally { await r.proxy.close(); }
+});
+
+test('walkCommit (#222): the commit and the path\'s first two levels in one fetch, the rest per level; git is the oracle', async () => {
+  const r = await repo();
+  try {
+    const quirks = {}; const tracer = new Tracer();
+    const head = git(r.bare, ['rev-parse', 'main']).trim();
+    const rev = spec => git(r.bare, ['rev-parse', spec]).trim();
+    const t = unwrap(createTransport(r.url, { tracer, quirks }));
+    // first contact: nothing known, so the commit (tree:0) and one tree per level, as readFile's first walk
+    let at = r.mark();
+    let cache = new Map();
+    const cold = await unwrapAsync(walkCommit(t, head, ['a', 'b'], { cache }));
+    assert.deepEqual(since(r, at).map(s => s.filter), ['tree:0', 'tree:0', 'tree:0']);
+    assert.equal(cold.entry.oid, rev('main:a/b'));
+    // tree:0 is now known to be taken: the deep fetch races the commit's tree:0 fetch once and is learned
+    await unwrapAsync(walkCommit(t, head, ['a'], { cache: new Map() }));
+    at = r.mark(); cache = new Map();
+    const w = await unwrapAsync(walkCommit(t, head, ['a', 'b'], { cache }));
+    assert.deepEqual(since(r, at).map(s => s.filter), ['combine:blob:none+tree:2'], 'one request: the commit, the root and a/');
+    assert.equal(w.commit, head);
+    assert.deepEqual(Buffer.from(w.data), gitBuf(r.bare, ['cat-file', 'commit', head]));
+    assert.equal(w.tree, rev('main^{tree}'));
+    assert.deepEqual([w.entry.name, w.entry.mode, w.entry.oid], ['b', '40000', rev('main:a/b')]);
+    assert.deepEqual([...cache.keys()].toSorted(), [rev('main^{tree}'), rev('main:a')].toSorted());
+    assert.deepEqual(Buffer.from(cache.get(rev('main:a'))), gitBuf(r.bare, ['cat-file', 'tree', rev('main:a')]));
+    // a depth-1 tree the walk did not read came with the commit: fetchObject answers it without a request
+    at = r.mark();
+    const sibling = await unwrapAsync(fetchObject(t, { oid: rev('main:q'), filter: 'tree:0' }));
+    assert.deepEqual(Buffer.from(sibling.data), gitBuf(r.bare, ['cat-file', 'tree', rev('main:q')]));
+    assert.equal(since(r, at).length, 0);
+    // levels: the default is comps.length + 1 (root listing: tree:1), 0 is the commit alone (its root tree is still in the
+    // transport's harvest from the deep fetches above), past 2 is capped at 2
+    for (const [comps, levels, filters] of [
+      [[], undefined, ['combine:blob:none+tree:1']],
+      [['a'], 0, ['tree:0']],
+      [['a', 'b', 'c', 'd'], undefined, ['combine:blob:none+tree:2', 'tree:0', 'tree:0']],
+      [['a', 'b', 'c', 'd'], 9, ['combine:blob:none+tree:2', 'tree:0', 'tree:0']],
+      [['a'], 1, ['combine:blob:none+tree:1']],
+    ]) {
+      at = r.mark();
+      const got = await unwrapAsync(walkCommit(t, head, comps, { cache: new Map(), levels }));
+      assert.deepEqual(since(r, at).map(s => s.filter), filters, `${comps.join('/')} levels ${levels}`);
+      assert.equal(got.entry === null ? got.tree : got.entry.oid, rev(comps.length === 0 ? 'main^{tree}' : `main:${comps.join('/')}`));
+    }
+    // no options at all: the default cache and levels
+    at = r.mark();
+    assert.equal((await unwrapAsync(walkCommit(t, head, ['q']))).entry.oid, rev('main:q'));
+    assert.deepEqual(since(r, at).map(s => s.filter), ['combine:blob:none+tree:2']);
+    // a missing component is walkPath's not_found, with its miss
+    const missing = await walkCommit(t, head, ['a', 'nope']);
+    assert.equal(missing.ok, false);
+    assert.equal(missing.error.code, 'not_found');
+    assert.deepEqual(missing.error.miss, { kind: 'path', missing: 'nope', existingPath: 'a' });
+    // refused before any request: an oid that is not 40 hex, levels that is not a non-negative integer
+    at = r.mark();
+    for (const [oid, levels] of [['HEAD', 1], [head.slice(1), 1], [head, -1], [head, 1.5], [head, Number.NaN], [head, '2']]) {
+      const bad = await walkCommit(t, oid, ['a'], { levels });
+      assert.equal(bad.ok, false, `${oid} ${levels}`);
+      assert.equal(bad.error.code, 'bad_request', `${oid} ${levels}`);
+    }
+    assert.match((await walkCommit(t, head, [], { levels: -1 })).error.message, /^walkCommit: levels must be a non-negative integer, got -1$/);
+    assert.equal(since(r, at).length, 0);
+    // a blob is not a commit
+    const notCommit = await walkCommit(t, rev('main:README.md'), []);
+    assert.equal(notCommit.ok, false);
   } finally { await r.proxy.close(); }
 });
 
