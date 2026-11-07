@@ -410,6 +410,37 @@ test('discover then lsRefs advertises once; the default never follows and never 
   } finally { await front.close(); }
 });
 
+test('discover and lsRefs side by side on a fresh transport: one advertisement GET (chain), the POST waits for it', async () => {
+  const hits = [];
+  const front = await listen((req, res) => {
+    hits.push(`${req.method} ${req.url.split('?')[0]}`);
+    if (req.method === 'GET' && req.url.startsWith('/old.git/')) { res.writeHead(301, { location: `/new.git${TAIL}` }); res.end(); return; }
+    proxy(req, res, srv.url, req.url.replace(/^\/(?:old|new)\.git\//, '/new.git/'));
+  });
+  try {
+    const c = plyClient(`${front.url}/old.git`, { follow: 'initial', auth: false });
+    const [d, r] = await Promise.all([unwrapAsync(c.discover()), unwrapAsync(c.lsRefs())]);
+    assert.ok(d && r.refs.has('refs/heads/main'));
+    // Without the shared GET each caller settled the exchange on its own: 4 GETs, then the POST.
+    assert.deepEqual(hits, ['GET /old.git/info/refs', 'GET /new.git/info/refs', `POST /new.git/${SERVICE}`]);
+    assert.equal(c.url, `${front.url}/new.git`);
+    // A shared GET that fails (network) does not settle the exchange: the waiting POST makes its own GET.
+    hits.length = 0;
+    forgetQuirks(`${front.url}/old.git`);
+    let failed = false;
+    const fetchImpl = async (url, init) => {
+      if (!failed && (init?.method ?? 'GET') === 'GET') { failed = true; throw new TypeError('fetch failed'); }
+      return fetch(url, init);
+    };
+    const e = plyClient(`${front.url}/old.git`, { follow: 'initial', auth: false, fetchImpl });
+    const [bad, good] = await Promise.all([e.discover(), unwrapAsync(e.lsRefs())]);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'network');
+    assert.ok(good.refs.has('refs/heads/main'));
+    assert.deepEqual(hits, ['GET /old.git/info/refs', 'GET /new.git/info/refs', `POST /new.git/${SERVICE}`]);
+  } finally { await front.close(); }
+});
+
 test('allowUrl sees the base and each Location; its URL is the one requested; a refusal is never fetched', async () => {
   assert.throws(() => createTransport(`${gate.url}/new.git`, { allowUrl: () => null }), e => e.code === 'bad_request' && e.message === 'allowUrl must return a Result');
   assert.throws(() => createTransport(`${gate.url}/new.git`, { allowUrl: () => ({ ok: true, value: 'http://h/r.git' }) }), e => e.message === 'allowUrl must return an http(s) URL');

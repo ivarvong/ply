@@ -436,6 +436,10 @@ function transportOf(settings: HttpSettings): HttpTransport {
   const memoKey = quirksKeyOf(settings.url);
   let memoUnconfirmed = false;
   let replayed = false;
+  // The GET that settles the initial exchange, while it is in flight, and its service. A POST that starts meanwhile (a
+  // caller running discover and ls-refs side by side on a fresh transport) waits for that GET instead of making its own:
+  // one advertisement per settlement, not one per concurrent caller.
+  let settling: { readonly service: string; readonly done: Promise<unknown> } | null = null;
   // The Basic parts as a server would echo them (UTF-8 text). From a header they are decoded, as bytes and as UTF-8.
   const decoded = basicOf(authorization);
   // oxlint-disable-next-line no-nested-ternary -- the explicit parts, else the decoded ones, else none
@@ -575,8 +579,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
   // GET info/refs?service=… . With followRedirects 'initial' and no settled exchange yet, a suffix-preserving 3xx
   // rebases `base` (up to maxRedirects) and the GET is retried there. A network failure leaves the exchange unsettled
   // so a retry continues from the base already reached.
-  async function advertise(service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
-    replay(service);
+  async function advertiseOnce(service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
     const followed: string[] = [];
     // Each hop's URL is the previous response's Location, so the next GET cannot start until this one has been read.
     // oxlint-disable no-await-in-loop
@@ -602,6 +605,15 @@ function transportOf(settings: HttpSettings): HttpTransport {
       } finally { sig.cancel(); }
     }
     // oxlint-enable no-await-in-loop
+  }
+  // advertiseOnce, published as `settling` while it is the GET that settles the initial exchange.
+  async function advertise(service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
+    replay(service);
+    if (policy.follow !== 'initial' || initialSettled) return advertiseOnce(service, span);
+    const done = advertiseOnce(service, span);
+    const mine = { service, done };
+    settling = mine;
+    try { return await done; } finally { if (settling === mine) settling = null; }
   }
   // The POST's answer, checked before its body is read: a redirect, a non-2xx, a foreign content type, a missing body.
   const postStream = async (res: Response, service: string, target: string, sig: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>> => {
@@ -646,6 +658,10 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (policy.follow === 'initial' && !initialSettled) {
       // the memo first: a hit settles the exchange with no request; a miss is the GET git makes
       replay(service);
+      // Another exchange's GET for this service is settling it: wait for that one. If it did not settle the exchange (it
+      // failed), this POST makes its own GET, as it would have without it.
+      const shared = settling !== null && settling.service === service ? settling.done : null;
+      if (shared !== null) await shared.catch(() => null);
       const ad = initialSettled ? null : await advertise(service, span);
       if (ad !== null && !ad.ok) { yield ad; return; }
     }
