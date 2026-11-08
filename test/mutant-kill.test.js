@@ -1608,7 +1608,8 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
   assert.equal(sent, 0, 'nothing reached the transport');
   const fits = { ...t, limits: withLimits({ maxPackBytes: 1 << 20 }) };
   await assert.rejects(unwrapAsync(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false })), e => e.code === 'ambiguous');
-  assert.equal(sent, 1, 'under the cap the body is sent');
+  // receive-pack once, then tip read-back (ls-refs / upload-pack) after empty report → ambiguous.unread
+  assert.equal(sent, 2, 'under the cap the body is sent, then tip read-back');
 });
 
 test('git.push.object names every entry: a type id with no name is its decimal, not otel\'s null-as-empty', async () => {
@@ -1940,7 +1941,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
       limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
       async *frames(service) {
         if (service === 'git-upload-pack') {
-          yield { kind: 'data', payload: unwrap(pkt(`${oldOid} refs/heads/a\n`)) };
+          yield { kind: 'data', payload: te.encode(`${oldOid} refs/heads/a\n`) };
           yield { kind: 'flush' };
           return;
         }
@@ -1954,7 +1955,7 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
       limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
       async *frames(service) {
         if (service === 'git-upload-pack') {
-          yield { kind: 'data', payload: unwrap(pkt(`${newOid} refs/heads/a\n`)) };
+          yield { kind: 'data', payload: te.encode(`${newOid} refs/heads/a\n`) };
           yield { kind: 'flush' };
           return;
         }
