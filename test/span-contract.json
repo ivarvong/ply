@@ -1458,13 +1458,15 @@
               "name": "git.read.blob",
               "kind": "INTERNAL",
               "attrs": {
+                "git.blob.inflate.bytes_per_sec": "number",
                 "git.read.blob.bytes": "number",
                 "git.read.blob.hash_ms": "number",
                 "git.read.blob.hasher": "string",
                 "git.read.blob.oid": "string",
                 "git.read.blob.outcome": "string",
                 "git.read.blob.size": "number",
-                "git.read.blob.verified": "boolean"
+                "git.read.blob.verified": "boolean",
+                "ply.isolate_age_ms": "number"
               },
               "links": [
                 "follows_from"
@@ -1474,10 +1476,12 @@
                   "name": "git.blob.inflate",
                   "kind": "INTERNAL",
                   "attrs": {
+                    "git.blob.inflate.bytes_per_sec": "number",
                     "git.blob.inflate.outcome": "string",
                     "git.read.blob.hash_ms": "number",
                     "git.read.blob.oid": "string",
-                    "git.read.blob.size": "number"
+                    "git.read.blob.size": "number",
+                    "ply.isolate_age_ms": "number"
                   }
                 },
                 {
@@ -1703,13 +1707,15 @@
           "name": "git.read.blob",
           "kind": "INTERNAL",
           "attrs": {
+            "git.blob.inflate.bytes_per_sec": "number",
             "git.read.blob.bytes": "number",
             "git.read.blob.hash_ms": "number",
             "git.read.blob.hasher": "string",
             "git.read.blob.oid": "string",
             "git.read.blob.outcome": "string",
             "git.read.blob.size": "number",
-            "git.read.blob.verified": "boolean"
+            "git.read.blob.verified": "boolean",
+            "ply.isolate_age_ms": "number"
           },
           "links": [
             "follows_from"
@@ -1719,10 +1725,12 @@
               "name": "git.blob.inflate",
               "kind": "INTERNAL",
               "attrs": {
+                "git.blob.inflate.bytes_per_sec": "number",
                 "git.blob.inflate.outcome": "string",
                 "git.read.blob.hash_ms": "number",
                 "git.read.blob.oid": "string",
-                "git.read.blob.size": "number"
+                "git.read.blob.size": "number",
+                "ply.isolate_age_ms": "number"
               }
             },
             {

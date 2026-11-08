@@ -468,6 +468,9 @@ export type CappedOpts = Pick<BlobConfig, 'maxBytes'> & FollowOpts;
 // The fail-site recorder (test/space/failsite-hook.mjs) installs this only when PLY_FAILSITES is set. A guard, not a
 // cast: under the hook the value is a function and the property is absent otherwise, so the call is a no-op in a bundle.
 const FAIL_SITE = Symbol.for('ply.failsite');
+// Wall clock at isolate start: stamped as ply.isolate_age_ms on large-read spans (variance diagnosis).
+const ISOLATE_BORN_MS = Date.now();
+const nowMs = (): number => performance.now();
 const isFailSiteRecorder = (v: unknown): v is (holder: (e: unknown) => unknown) => void => typeof v === 'function';
 type BodyState = Extract<SpState, { readonly phase: 'body' }>;
 // A pull of the pack stream, or a parser step, as a value: what it threw is the failure (failHere classifies it).
@@ -586,8 +589,35 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   })();
   pump.catch(abortWith);
   const sha = streamingSha1();
-  await sha.update(objectHeader('blob', size));
+  // DigestStream write() often resolves in <1 ms, so Date.now() stamped hash_ms as 0 on Workers (prod 296e081f,
+  // n=25). performance.now() keeps sub-ms; coalescing into HASH_BUF_BYTES cuts one await per inflate chunk.
+  const HASH_BUF_BYTES = 65_536;
+  let hashBuf = new Uint8Array(HASH_BUF_BYTES);
+  let hashBufLen = 0;
+  const hashFlush = async (): Promise<void> => {
+    if (hashBufLen === 0) return;
+    const h0 = nowMs();
+    await sha.update(hashBufLen === HASH_BUF_BYTES ? hashBuf : hashBuf.subarray(0, hashBufLen));
+    hashMs += nowMs() - h0;
+    hashBufLen = 0;
+  };
+  const hashPush = async (chunk: Uint8Array): Promise<void> => {
+    let off = 0;
+    while (off < chunk.byteLength) {
+      const n = Math.min(HASH_BUF_BYTES - hashBufLen, chunk.byteLength - off);
+      hashBuf.set(chunk.subarray(off, off + n), hashBufLen);
+      hashBufLen += n;
+      off += n;
+      if (hashBufLen === HASH_BUF_BYTES) await hashFlush();
+    }
+  };
+  {
+    const h0 = nowMs();
+    await sha.update(objectHeader('blob', size));
+    hashMs += nowMs() - h0;
+  }
   let seen = 0;
+  const inflateStarted = nowMs();
   // The latest inflate chunk. An empty chunk is not a chunk: releasing the real tail because a zero-length piece
   // arrived would finish the body before the hash and the trailer were checked.
   let held: Uint8Array | null = null;
@@ -597,21 +627,37 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       if (chunk.byteLength === 0) return;
       seen += chunk.length;
       if (seen > size) throw failHere(plyError('pack_corrupt', `server streamed more than the ${size} bytes it declared`));
-      const h0 = Date.now();
-      await sha.update(chunk);
-      hashMs += Date.now() - h0;
+      await hashPush(chunk);
       if (held) ctl.enqueue(held);
       held = chunk;
     },
     async flush(ctl) {
       try { await pump; } catch (e) { throw failHere(e); }
       if (seen !== size) throw failHere(plyError('pack_corrupt', `inflated ${seen} != declared ${size}`));
+      await hashFlush();
+      const h1 = nowMs();
       const got = await sha.hex();
+      hashMs += nowMs() - h1;
       if (got !== oid) throw failHere(plyError('pack_corrupt', `blob content hashes to ${got}, not ${oid}`));
       if (held) ctl.enqueue(held);
       held = null;
-      endInflate({ 'git.blob.inflate.outcome': 'ok', 'git.read.blob.hash_ms': hashMs });
-      span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.hash_ms': hashMs, 'git.read.blob.outcome': 'ok' }).end();
+      const inflateMs = Math.max(0, nowMs() - inflateStarted);
+      const bytesPerSec = inflateMs > 0 ? Math.round(seen / (inflateMs / 1000)) : 0;
+      endInflate({
+        'git.blob.inflate.outcome': 'ok',
+        'git.read.blob.hash_ms': Math.round(hashMs * 1000) / 1000,
+        'git.blob.inflate.bytes_per_sec': bytesPerSec,
+        'ply.isolate_age_ms': Date.now() - ISOLATE_BORN_MS,
+      });
+      span.set({
+        'git.read.blob.bytes': seen,
+        'git.read.blob.verified': true,
+        'git.read.blob.hasher': sha.kind,
+        'git.read.blob.hash_ms': Math.round(hashMs * 1000) / 1000,
+        'git.blob.inflate.bytes_per_sec': bytesPerSec,
+        'ply.isolate_age_ms': Date.now() - ISOLATE_BORN_MS,
+        'git.read.blob.outcome': 'ok',
+      }).end();
     },
   });
   // DecompressionStream's own refusals (trailing junk after the deflate end, a bad block) are platform errors with no ply
@@ -626,7 +672,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {
-      if (!span.ended) { fetchSpan.end(); endInflate({ 'git.blob.inflate.outcome': 'cancelled' }); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.hash_ms': hashMs, 'git.read.blob.outcome': 'cancelled' }).end(); }
+      if (!span.ended) { fetchSpan.end(); endInflate({ 'git.blob.inflate.outcome': 'cancelled' }); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.hash_ms': Math.round(hashMs * 1000) / 1000, 'git.read.blob.outcome': 'cancelled' }).end(); }
       await inner.cancel(reason).catch(() => { /* cancelling: the outcome is recorded */ });
       await close();
     },
