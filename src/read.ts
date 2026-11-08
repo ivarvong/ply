@@ -39,8 +39,6 @@ import { discover } from './discover.js';
 import { packStream, objectAt, objectId, spInit, spStep, spFinish, treeEntries } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
-import type { BlobCacheBinding } from './blobcache.js';
-import { blobCacheKey, lookupBlobCache, storeBlobCache } from './blobcache.js';
 import { bufferSource, concat } from './bytes.js';
 import { KIND } from './otel.js';
 import type { Span } from './otel.js';
@@ -370,7 +368,7 @@ export const pathComps = (path: unknown, limits: CheckedLimits, { allowRoot }: {
 export type PathConfig = RefConfig & { readonly path: string | null };
 export type PathSpec = Input<PathConfig>;
 // The options of listTree and readFile: operation()'s, plus the caller's tree cache.
-export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: LimitsInput; readonly blobCache: BlobCacheBinding | null };
+export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: LimitsInput };
 export type TreeReadOptions = ReadOptions & Input<TreeReadConfig>;
 // A null or missing limits record is the default, as the nullish read had it, and the record is parsed once, here; the
 // cache is fresh per call.
@@ -448,9 +446,8 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     const file = fileEntry(walked.value.entry as TreeEntry, comps);
     if (!file.ok) return file;
     const entry = file.value;
-    const blobCache = getOrElse(readKey(options, 'blobCache'), null);
     // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
-    const opened = await openBlob(t, entry.oid, { follows: root, ...(blobCache === null ? {} : { blobCache }) });
+    const opened = await openBlob(t, entry.oid, { follows: root });
     if (!opened.ok) return opened;
     const { size, stream } = opened.value;
     return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size, stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': size, 'git.read.blob.mode': entry.mode });
@@ -462,10 +459,10 @@ export type BlobTooBig = { readonly kind: 'too_big'; readonly size: number };
 export type OpenedBlob = BlobStream | BlobTooBig;
 // `maxBytes`: the declared size above which the blob is too_big (left out: no cap). `follows`: the span the stream
 // follows (null: none).
-export type BlobConfig = { readonly maxBytes: number; readonly follows: Span | null; readonly blobCache: BlobCacheBinding | null };
+export type BlobConfig = { readonly maxBytes: number; readonly follows: Span | null };
 export type BlobOpts = Input<BlobConfig>;
 // The options without a cap: the answer is always a stream.
-export type FollowOpts = Input<Pick<BlobConfig, 'follows' | 'blobCache'>>;
+export type FollowOpts = Input<Pick<BlobConfig, 'follows'>>;
 export type CappedOpts = Pick<BlobConfig, 'maxBytes'> & FollowOpts;
 
 // The fail-site recorder (test/space/failsite-hook.mjs) installs this only when PLY_FAILSITES is set. A guard, not a
@@ -516,30 +513,9 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const cap = readKey(opts, 'maxBytes');
   if (cap.tag === 'some' && (!Number.isInteger(cap.value) || cap.value < 0)) return fail('bad_request', 'maxBytes must be an integer >= 0', { what: 'maxBytes' });
   const maxBytes = getOrElse(cap, Number.POSITIVE_INFINITY);
-  const { follows, blobCache } = withDefaults<Pick<BlobConfig, 'follows' | 'blobCache'>>(opts, { follows: null, blobCache: null });
+  const { follows } = withDefaults<Pick<BlobConfig, 'follows'>>(opts, { follows: null });
   const span = t.tracer.start('git.read.blob', { ...(follows === null ? {} : { follows }), attrs: { 'git.read.blob.oid': oid } });
-  // Scope = authorized remote (credential-free). Auth already ran in operation/createTransport before openBlob.
-  if (blobCache !== null) {
-    const looked = await lookupBlobCache(blobCache, t.url, oid);
-    if (looked.outcome === 'hit') {
-      if (looked.size > maxBytes) {
-        span.set({ 'git.read.blob.size': looked.size, 'git.read.blob.header_only': true, 'git.read.blob.cache': 'hit', 'git.read.blob.outcome': 'too_big', 'ply.isolate_age_ms': isolateAgeMs() }).end();
-        return ok({ kind: 'too_big', size: looked.size });
-      }
-      span.set({
-        'git.read.blob.size': looked.size,
-        'git.read.blob.bytes': looked.bytes,
-        'git.read.blob.verified': true,
-        'git.read.blob.hasher': 'cache',
-        'git.read.blob.hash_await_ms': 0,
-        'git.read.blob.cache': 'hit',
-        'git.read.blob.cache.bytes': looked.bytes,
-        'git.read.blob.outcome': 'ok',
-        'ply.isolate_age_ms': isolateAgeMs(),
-      }).end();
-      return ok({ kind: 'stream', size: looked.size, stream: looked.stream });
-    }
-  }
+  // Inflated-blob caching lives in ply-web's Workers Cache BlobCache entrypoint (never caches.default).
   const fetchSpan = t.tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   // Inflate+verify wall clock (overlaps the upload-pack body). Opened once the object header has passed the size cap.
   let inflateSpan: { ended: boolean; set(a: Record<string, unknown>): { end(): void }; end(): void; error(e: unknown): { end(): void } } | null = null;
@@ -707,43 +683,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       await close();
     },
   }, { highWaterMark: 0 });
-  // Cache fill: only the verified outbound stream is stored (OID checked in flush). Oversize bypasses put.
-  if (blobCache === null) {
-    span.set({ 'git.read.blob.cache': 'bypass' });
-    return ok({ kind: 'stream', size, stream });
-  }
-  if (size > blobCache.maxBytes) {
-    span.set({ 'git.read.blob.cache': 'bypass_oversize', 'git.read.blob.cache.max_bytes': blobCache.maxBytes });
-    return ok({ kind: 'stream', size, stream });
-  }
-  // Collect verified chunks (no tee): put runs from the complete buffer after the source closes.
-  // tee+put stored empty bodies under ply-web holdLastChunk/FixedLengthStream (2026-11-08).
-  // Mark miss before the stream is pulled — verify flush ends this span as the last chunk is released.
-  span.set({ 'git.read.blob.cache': 'miss' });
-  const cacheKey = await blobCacheKey(t.url, oid);
-  const chunks: Uint8Array[] = [];
-  let got = 0;
-  const toClient = stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, ctl) {
-      if (chunk.byteLength === 0) return;
-      // Copy: DecompressionStream may reuse buffers; the fill buffer must outlive the client pull.
-      const copy = new Uint8Array(chunk.byteLength);
-      copy.set(chunk);
-      chunks.push(copy);
-      got += copy.byteLength;
-      ctl.enqueue(chunk);
-    },
-    flush() {
-      if (got !== size) return;
-      storeBlobCache(
-        { binding: blobCache, scope: t.url, oid, size, bytes: concat(chunks), key: cacheKey },
-        (o, errText) => {
-          if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText });
-        },
-      );
-    },
-  }));
-  return ok({ kind: 'stream', size, stream: toClient });
+  return ok({ kind: 'stream', size, stream });
 }
 
 export type BlobData = { readonly kind: 'bytes'; readonly data: Uint8Array<ArrayBuffer> };

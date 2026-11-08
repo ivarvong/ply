@@ -207,34 +207,4 @@ test('workerd: a 4 MiB push streams its pack (duplex half; redirect manual, work
   assert.equal(git(cut, ['for-each-ref']).trim(), '', 'git moved no ref');
 });
 
-test('workerd: blob-cache cold→warm byte equality under holdLastChunk+FixedLengthStream', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'bc'); const work = join(root, 'wbc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
-  const medium = Buffer.alloc(256 << 10); // 256 KiB — enough for multi-chunk inflate without a 20 MiB wall
-  for (let i = 0; i < medium.length; i++) medium[i] = (i * 17) & 0xff;
-  commitFiles(work, bare, { 'README.md': 'hello\n', 'medium.bin': medium }, 'seed');
-  const url = `${srv.url}/bc.git`;
 
-  for (const path of ['README.md', 'medium.bin']) {
-    const r = await post('/blobcache', { url, path });
-    assert.equal(r.ok, true, JSON.stringify(r));
-    assert.equal(r.equal, true, `${path}: cold≠warm ${JSON.stringify(r)}`);
-    assert.equal(r.cold.bytes, r.cold.size, path);
-    assert.equal(r.warm.bytes, r.warm.size, path);
-    assert.equal(r.cold.sha256, r.warm.sha256, path);
-    assert.ok(r.cacheOutcomes.includes('miss'), `${path} miss: ${JSON.stringify(r.cacheOutcomes)}`);
-    assert.ok(r.cacheOutcomes.includes('hit'), `${path} hit: ${JSON.stringify(r.cacheOutcomes)}`);
-    assert.ok(r.storeEntries >= 1, path);
-  }
-});
-
-test('workerd: tee+put fill poisons warm (cd2cc3c residual shape)', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'bt'); const work = join(root, 'wbt'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
-  commitFiles(work, bare, { 'README.md': 'hello\n' }, 'seed');
-  const url = `${srv.url}/bt.git`;
-  const r = await post('/blobcache', { url, path: 'README.md', mode: 'tee' });
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(r.equal, false, 'poisoned warm must not equal cold');
-  assert.equal(r.warm.bytes, 0, 'warm body empty');
-  assert.equal(r.warm.contentLength, r.cold.size, 'Content-Length still declares size');
-  assert.equal(r.cold.bytes, 6);
-});
