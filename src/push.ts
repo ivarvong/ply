@@ -616,7 +616,7 @@ async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPla
   const tip = mapGet(read.value.refs, String(cmd.ref));
   const seen = tip.tag === 'some' ? tip.value.oid : null;
   const landed = seen === cmd.newOid;
-  span.set({ 'git.push.verify.ref': seen ?? '', 'git.push.ambiguous.resolved': landed ? 'landed' : 'cas_conflict' });
+  span.set({ 'git.push.verify.ref': seen === null ? '' : seen, 'git.push.ambiguous.resolved': landed ? 'landed' : 'cas_conflict' });
   if (landed) {
     span.set({ 'git.push.ok': true, 'git.push.outcome': 'landed', 'git.push.ng.reason': '' });
     return ok({ tag: 'statuses', refs: [{ ref: String(cmd.ref), ok: true as const, reason: '' as const }] });
