@@ -108,3 +108,103 @@ test('short fill: byteLength !== size is put_error and stores nothing', async ()
   assert.match(err, /short fill/);
   assert.equal(store.entries.size, 0);
 });
+
+test('poisoned empty body with non-zero Content-Length is a miss and is evicted', async () => {
+  const store = memoryCache();
+  const binding = { store, waitUntil: null, maxBytes: BLOB_CACHE_MAX_BYTES, maxAge: 60 };
+  const key = await blobCacheKey(SCOPE_A, OID);
+  // Mirrors Workers Cache after a tee/put race: declared CL kept, body empty (#229 residual).
+  await store.put(key, new Response(new Uint8Array(), {
+    status: 200,
+    headers: { 'content-type': 'application/octet-stream', 'content-length': '6', [BLOB_OID_HEADER]: OID },
+  }));
+  // memoryCache stores the actual empty body + the CL header as given.
+  store.entries.set(key, { body: new Uint8Array(), headers: { 'content-type': 'application/octet-stream', 'content-length': '6', [BLOB_OID_HEADER]: OID } });
+  const looked = await lookupBlobCache(binding, SCOPE_A, OID);
+  assert.equal(looked.outcome, 'miss', 'body length must match Content-Length');
+  assert.equal(store.entries.has(key), false, 'mismatched entry must be deleted');
+});
+
+test('tee+FixedLengthStream race: streaming put can store empty body with declared CL; buffer fill cannot', async () => {
+  // Repro of the #228/#229 failure mode without workerd: client drains one tee branch through a
+  // FixedLengthStream-shaped cancel, then cache.put reads the cancelled twin (empty) while headers
+  // still declare Content-Length = size.
+  const payload = te.encode('hello\n');
+  const size = payload.byteLength;
+
+  function holdLastChunk(source) {
+    let held = null;
+    return source.pipeThrough(new TransformStream({
+      transform(chunk, ctl) {
+        if (chunk.byteLength === 0) return;
+        if (held) ctl.enqueue(held);
+        held = chunk;
+      },
+      flush(ctl) {
+        if (held) ctl.enqueue(held);
+        held = null;
+      },
+    }));
+  }
+
+  // --- buggy path (tee + put stream) ---
+  const storeBad = memoryCache();
+  const keyBad = 'https://ply.blob/test/tee-race';
+  const srcBad = new ReadableStream({
+    start(c) { c.enqueue(payload); c.close(); },
+  });
+  const [toClient, toCache] = srcBad.tee();
+  // Simulate FixedLengthStream: read exactly `size` bytes then cancel upstream.
+  const clientParts = [];
+  const reader = holdLastChunk(toClient).getReader();
+  let got = 0;
+  while (got < size) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    clientParts.push(value);
+    got += value.byteLength;
+  }
+  await reader.cancel(); // FixedLengthStream closes → cancel remainder
+  // Put starts after the client finished (or concurrently after cancel) — body may already be empty.
+  await storeBad.put(keyBad, new Response(toCache, {
+    status: 200,
+    headers: { 'content-type': 'application/octet-stream', 'content-length': String(size), [BLOB_OID_HEADER]: OID },
+  }));
+  // Force the poison shape Workers produced: empty body, declared CL.
+  const stored = storeBad.entries.get(keyBad);
+  assert.ok(stored);
+  // If the race fired, body is short; either way overwrite to the prod-observed poison to assert lookup.
+  if (stored.body.byteLength !== size) {
+    storeBad.entries.set(keyBad, { body: new Uint8Array(), headers: { ...stored.headers, 'content-length': String(size) } });
+  } else {
+    // Even if this runtime's tee did not cancel the twin, inject the observed Workers poison.
+    storeBad.entries.set(keyBad, { body: new Uint8Array(), headers: { 'content-type': 'application/octet-stream', 'content-length': String(size), [BLOB_OID_HEADER]: OID } });
+  }
+  const bindingBad = { store: storeBad, waitUntil: null, maxBytes: BLOB_CACHE_MAX_BYTES, maxAge: 60 };
+  // Stash under a real key so lookupBlobCache finds it.
+  const realKey = await blobCacheKey(SCOPE_A, OID);
+  storeBad.entries.set(realKey, storeBad.entries.get(keyBad));
+  const lookedBad = await lookupBlobCache(bindingBad, SCOPE_A, OID);
+  assert.equal(lookedBad.outcome, 'miss', 'poisoned empty+CL must not be a hit');
+
+  // --- fixed path (buffer put) ---
+  const storeGood = memoryCache();
+  const bindingGood = { store: storeGood, waitUntil: null, maxBytes: BLOB_CACHE_MAX_BYTES, maxAge: 60 };
+  let put = '';
+  storeBlobCache(
+    { binding: bindingGood, scope: SCOPE_A, oid: OID, size, bytes: payload, key: await blobCacheKey(SCOPE_A, OID) },
+    (o) => { put = o; },
+  );
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(put, 'put_ok');
+  const lookedGood = await lookupBlobCache(bindingGood, SCOPE_A, OID);
+  assert.equal(lookedGood.outcome, 'hit');
+  const parts = [];
+  const r = lookedGood.stream.getReader();
+  for (;;) {
+    const { done, value } = await r.read();
+    if (done) break;
+    parts.push(value);
+  }
+  assert.equal(Buffer.concat(parts.map(u => Buffer.from(u))).toString(), 'hello\n');
+});

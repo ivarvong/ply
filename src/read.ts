@@ -726,8 +726,11 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const toClient = stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, ctl) {
       if (chunk.byteLength === 0) return;
-      chunks.push(chunk);
-      got += chunk.byteLength;
+      // Copy: DecompressionStream may reuse buffers; the fill buffer must outlive the client pull.
+      const copy = new Uint8Array(chunk.byteLength);
+      copy.set(chunk);
+      chunks.push(copy);
+      got += copy.byteLength;
       ctl.enqueue(chunk);
     },
     flush() {

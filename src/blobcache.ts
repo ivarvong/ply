@@ -14,9 +14,10 @@
 // test/blobcache.test.js prove cross-scope isolation.
 //
 // Integrity: the OID *is* the content hash. Only bytes that passed openBlob's OID verify (fill path)
-// are ever written (cache.put runs from the verified outbound stream after flush succeeds; a verify
-// failure errors the stream and the put does not complete). A hit is trusted: the key names the oid
-// and only verified bytes are stored. Pack-trailer verification is not enough on its own (trailer ≠
+// are ever written (cache.put runs from a complete buffer whose length === declared size after verify
+// flush). A verify failure errors the stream and the put never starts. Hits still re-check that the
+// stored body's byteLength equals Content-Length and evict on mismatch (poisoned empty bodies with a
+// non-zero CL must never be served). Pack-trailer verification is not enough on its own (trailer ≠
 // content oid); that check stays on the miss/fill path.
 //
 // Tunables (dated predictions, 2026-11-08 America/New_York):
@@ -87,8 +88,7 @@ export async function lookupBlobCache(
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- Cache API: falsy is a miss
   if (hit.tag === 'none' || !hit.value) return { outcome: 'miss' };
   const res = hit.value;
-  const body = res.body;
-  if (body === null) return { outcome: 'miss' };
+  if (res.body === null) return { outcome: 'miss' };
   const gotOid = getOrElse(fromNullish(res.headers.get(BLOB_OID_HEADER)), '').toLowerCase();
   // Content-Length must be present: Number('') === 0 would false-hit an empty body after a failed fill.
   const lenHdrOpt = fromNullish(res.headers.get('content-length'));
@@ -108,7 +108,28 @@ export async function lookupBlobCache(
     await binding.store.delete(key).catch(() => null);
     return { outcome: 'miss' };
   }
-  return { outcome: 'hit', size, stream: body, bytes: size };
+  // Never trust Content-Length alone: a later tee/FixedLengthStream race stored empty bodies while
+  // keeping a non-zero Content-Length (#229 residual / canary 057e1a9b). Buffer and compare; any
+  // length mismatch is a miss + evict so poisoned entries are never served.
+  let buf: Uint8Array;
+  try {
+    buf = new Uint8Array(await res.arrayBuffer());
+  } catch {
+    await binding.store.delete(key).catch(() => null);
+    return { outcome: 'miss' };
+  }
+  if (buf.byteLength !== size) {
+    await binding.store.delete(key).catch(() => null);
+    return { outcome: 'miss' };
+  }
+  // Rebuild the stream from the verified buffer (body was consumed by arrayBuffer).
+  const stream = new ReadableStream<Uint8Array>({
+    start(ctl) {
+      if (buf.byteLength > 0) ctl.enqueue(buf);
+      ctl.close();
+    },
+  });
+  return { outcome: 'hit', size, stream, bytes: size };
 }
 
 export type StoreBlobArgs = {
