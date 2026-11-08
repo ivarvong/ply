@@ -15,7 +15,7 @@ test('blobCacheKey: scope and oid separate entries; oid case-normalized', async 
   assert.notEqual(k, await blobCacheKey(SCOPE_B, OID), 'different repos must not share a key');
   assert.notEqual(k, await blobCacheKey(SCOPE_A, OID2), 'different oids must not share a key');
   assert.equal(k, await blobCacheKey(SCOPE_A, OID.toUpperCase()), 'oid hex is case-insensitive');
-  assert.ok(k.startsWith('https://ply.blob/v2/'));
+  assert.ok(k.startsWith('https://ply.blob/v3/'));
 });
 
 test('scope isolation: a hit under repo A is a miss under repo B (same oid)', async () => {
@@ -24,7 +24,7 @@ test('scope isolation: a hit under repo A is a miss under repo B (same oid)', as
   const body = te.encode('hello-from-a');
   let put = '';
   storeBlobCache(
-    { binding, scope: SCOPE_A, oid: OID, size: body.byteLength, body: new ReadableStream({ start(c) { c.enqueue(body); c.close(); } }), key: await blobCacheKey(SCOPE_A, OID) },
+    { binding, scope: SCOPE_A, oid: OID, size: body.byteLength, bytes: body, key: await blobCacheKey(SCOPE_A, OID) },
     (o) => { put = o; },
   );
   await new Promise(r => setTimeout(r, 0));
@@ -36,20 +36,15 @@ test('scope isolation: a hit under repo A is a miss under repo B (same oid)', as
   assert.equal(missB.outcome, 'miss', 'token for B must not see A\'s cached object');
 });
 
-test('oversize bypass: storeBlobCache cancels and does not put when size > maxBytes', async () => {
+test('oversize bypass: storeBlobCache does not put when size > maxBytes', async () => {
   const store = memoryCache();
   const binding = { store, waitUntil: null, maxBytes: 8, maxAge: 60 };
   let outcome = 'none';
-  const chunks = [];
-  const body = new ReadableStream({
-    start(c) { c.enqueue(te.encode('0123456789ABCDEF')); c.close(); },
-    cancel() { chunks.push('cancelled'); },
-  });
-  storeBlobCache({ binding, scope: SCOPE_A, oid: OID, size: 16, body, key: await blobCacheKey(SCOPE_A, OID) }, (o) => { outcome = o; });
+  const body = te.encode('0123456789ABCDEF');
+  storeBlobCache({ binding, scope: SCOPE_A, oid: OID, size: 16, bytes: body, key: await blobCacheKey(SCOPE_A, OID) }, (o) => { outcome = o; });
   await new Promise(r => setTimeout(r, 0));
   assert.equal(store.entries.size, 0, 'oversize must not be stored');
   assert.equal(outcome, 'none', 'no put_ok/put_error when bypassed');
-  assert.ok(chunks.includes('cancelled'));
 });
 
 test('corrupted-fill rejection: mismatched oid header is treated as miss and evicted', async () => {
@@ -70,7 +65,7 @@ test('fill then hit: verified bytes round-trip', async () => {
   const binding = { store, waitUntil: (p) => { void p; }, maxBytes: 1024, maxAge: 60 };
   const payload = te.encode('verified-bytes');
   storeBlobCache(
-    { binding, scope: SCOPE_A, oid: OID, size: payload.byteLength, body: new ReadableStream({ start(c) { c.enqueue(payload); c.close(); } }), key: await blobCacheKey(SCOPE_A, OID) },
+    { binding, scope: SCOPE_A, oid: OID, size: payload.byteLength, bytes: payload, key: await blobCacheKey(SCOPE_A, OID) },
     () => {},
   );
   await new Promise(r => setTimeout(r, 0));
@@ -98,4 +93,18 @@ test('poisoned size-0 entry for a non-empty oid is a miss and is evicted', async
   const looked = await lookupBlobCache(binding, SCOPE_A, OID);
   assert.equal(looked.outcome, 'miss');
   assert.equal(store.entries.has(key), false, 'poisoned size-0 entry must be deleted');
+});
+
+test('short fill: byteLength !== size is put_error and stores nothing', async () => {
+  const store = memoryCache();
+  const binding = { store, waitUntil: null, maxBytes: BLOB_CACHE_MAX_BYTES, maxAge: 60 };
+  let outcome = '';
+  let err = '';
+  storeBlobCache(
+    { binding, scope: SCOPE_A, oid: OID, size: 10, bytes: te.encode('short'), key: await blobCacheKey(SCOPE_A, OID) },
+    (o, e) => { outcome = o; err = e; },
+  );
+  assert.equal(outcome, 'put_error');
+  assert.match(err, /short fill/);
+  assert.equal(store.entries.size, 0);
 });
