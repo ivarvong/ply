@@ -592,7 +592,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   // DigestStream write() often resolves in <1 ms, so Date.now() stamped hash_ms as 0 on Workers (prod 296e081f,
   // n=25). performance.now() keeps sub-ms; coalescing into HASH_BUF_BYTES cuts one await per inflate chunk.
   const HASH_BUF_BYTES = 65_536;
-  let hashBuf = new Uint8Array(HASH_BUF_BYTES);
+  const hashBuf = new Uint8Array(HASH_BUF_BYTES);
   let hashBufLen = 0;
   const hashFlush = async (): Promise<void> => {
     if (hashBufLen === 0) return;
