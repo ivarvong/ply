@@ -625,7 +625,17 @@ async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPla
   return fail('cas_conflict', 'push rejected: stale ref', { expected: cmd.oldOid === ZERO_OID ? null : cmd.oldOid, actual: seen, cause: ambiguous, original: 'ambiguous' });
 }
 
-async function finishPush(t: PushTransport, span: Span, plan: PushPlan, res: Result<PushReport | null, PlyError>, packBytes: number, entries: readonly PackEntry[], hookOutput: string): Promise<Result<PushResult, PlyError>> {
+type FinishPush = {
+  readonly t: PushTransport;
+  readonly span: Span;
+  readonly plan: PushPlan;
+  readonly packBytes: number;
+  readonly entries: readonly PackEntry[];
+  readonly hookOutput: string;
+};
+
+async function finishPush(ctx: FinishPush, res: Result<PushReport | null, PlyError>): Promise<Result<PushResult, PlyError>> {
+  const { t, span, plan, packBytes, entries, hookOutput } = ctx;
   if (res.ok) return ok({ report: res.value, packBytes, entries, hookOutput });
   if (res.error.code !== 'ambiguous') return res;
   const resolved = await resolveAmbiguousByTip(t, span, plan, res.error);
@@ -654,12 +664,15 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
   // it was not sent the pack that was measured
   const cut = body.value.streamed === null ? null : body.value.streamed.failure();
-  if (cut !== null) return finishPush(t, span, plan, err(ambiguousAfterPush(cut) as PlyError), packBytes, entries, ''); // oxlint-disable-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush of a PlyError is a PlyError
+  const base: FinishPush = { t, span, plan, packBytes, entries, hookOutput: '' };
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush of a PlyError is a PlyError
+  if (cut !== null) return finishPush(base, err(ambiguousAfterPush(cut) as PlyError));
   if ('cause' in r) {
     const notRun = refusedBeforeReceivePack(r) && await serviceRefused(t, span, r.cause);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refused: the cause carries one of ply's codes (a PlyError); else ambiguousAfterPush returns one (the cause itself when it already is an 'ambiguous' one)
     if (notRun) return err(r.cause as PlyError);
-    return finishPush(t, span, plan, err(ambiguousAfterPush(r.cause) as PlyError), packBytes, entries, '');
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush returns a PlyError
+    return finishPush(base, err(ambiguousAfterPush(r.cause) as PlyError));
   }
   const { done, reading } = r;
   const band2 = reading.band2Carry.length > 0 ? (reading.band2 + td.decode(reading.band2Carry)).slice(-BAND_TAIL) : reading.band2;
@@ -669,7 +682,7 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   span.set(outcomeAttrs(done, report, outcome, reading.band2Frames, band2));
   if (outcome.tag === 'ambiguous') span.set({ 'git.push.ambiguous': outcome.why });
   const res = outcomeResult(outcome, { report, hookOutput: band2, remote: shape.tag === 'broken' ? shape.remote : null, commands: plan.commands });
-  return finishPush(t, span, plan, res, packBytes, entries, band2);
+  return finishPush({ ...base, hookOutput: band2 }, res);
 }
 
 // The request under its span (push, below, is the entry).
