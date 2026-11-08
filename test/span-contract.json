@@ -1460,7 +1460,8 @@
               "attrs": {
                 "git.blob.inflate.bytes_per_sec": "number",
                 "git.read.blob.bytes": "number",
-                "git.read.blob.hash_ms": "number",
+                "git.read.blob.cache": "string",
+                "git.read.blob.hash_await_ms": "number",
                 "git.read.blob.hasher": "string",
                 "git.read.blob.oid": "string",
                 "git.read.blob.outcome": "string",
@@ -1478,7 +1479,7 @@
                   "attrs": {
                     "git.blob.inflate.bytes_per_sec": "number",
                     "git.blob.inflate.outcome": "string",
-                    "git.read.blob.hash_ms": "number",
+                    "git.read.blob.hash_await_ms": "number",
                     "git.read.blob.oid": "string",
                     "git.read.blob.size": "number",
                     "ply.isolate_age_ms": "number"
@@ -1709,7 +1710,8 @@
           "attrs": {
             "git.blob.inflate.bytes_per_sec": "number",
             "git.read.blob.bytes": "number",
-            "git.read.blob.hash_ms": "number",
+            "git.read.blob.cache": "string",
+            "git.read.blob.hash_await_ms": "number",
             "git.read.blob.hasher": "string",
             "git.read.blob.oid": "string",
             "git.read.blob.outcome": "string",
@@ -1727,7 +1729,7 @@
               "attrs": {
                 "git.blob.inflate.bytes_per_sec": "number",
                 "git.blob.inflate.outcome": "string",
-                "git.read.blob.hash_ms": "number",
+                "git.read.blob.hash_await_ms": "number",
                 "git.read.blob.oid": "string",
                 "git.read.blob.size": "number",
                 "ply.isolate_age_ms": "number"

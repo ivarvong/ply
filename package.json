@@ -62,6 +62,10 @@
       "types": "./dist/packcache.d.ts",
       "default": "./dist/packcache.js"
     },
+    "./blobcache": {
+      "types": "./dist/blobcache.d.ts",
+      "default": "./dist/blobcache.js"
+    },
     "./sign": {
       "types": "./dist/sign.d.ts",
       "default": "./dist/sign.js"
@@ -101,7 +105,7 @@
     "trace": "node --import ./test/ts-resolve.mjs test/trace.mjs",
     "test:protocol": "vitest run test/protocol.test.js",
     "fuzz:protocol": "node --import ./test/ts-resolve.mjs test/fuzz/protocol.mjs",
-    "test:git": "vitest run test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js",
+    "test:git": "vitest run test/compliance.test.js test/parity.test.js test/push.test.js test/push-tree.test.js test/checkout-tree.test.js test/packcache.test.js test/blobcache.test.js",
     "test:push-full": "PUSH_MATRIX=full vitest run test/push.test.js",
     "test:space": "vitest run test/space/push-outcome.test.js test/space/push-outcome-boundary.test.js test/space/fsck-tree.test.js test/space/advertisement.test.js test/space/pack-cut.test.js test/space/pkt-frame.test.js test/space/push-ng.test.js test/space/refname.test.js",
     "test:pack-cut-full": "PACK_SPACE=full vitest run test/space/pack-cut.test.js",

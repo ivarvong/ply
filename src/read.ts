@@ -39,6 +39,8 @@ import { discover } from './discover.js';
 import { packStream, objectAt, objectId, spInit, spStep, spFinish, treeEntries } from './fetch.js';
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
+import type { BlobCacheBinding } from './blobcache.js';
+import { lookupBlobCache, storeBlobCache } from './blobcache.js';
 import { bufferSource, concat } from './bytes.js';
 import { KIND } from './otel.js';
 import type { Span } from './otel.js';
@@ -368,7 +370,7 @@ export const pathComps = (path: unknown, limits: CheckedLimits, { allowRoot }: {
 export type PathConfig = RefConfig & { readonly path: string | null };
 export type PathSpec = Input<PathConfig>;
 // The options of listTree and readFile: operation()'s, plus the caller's tree cache.
-export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: LimitsInput };
+export type TreeReadConfig = { readonly cache: TreeCache; readonly limits: LimitsInput; readonly blobCache: BlobCacheBinding | null };
 export type TreeReadOptions = ReadOptions & Input<TreeReadConfig>;
 // A null or missing limits record is the default, as the nullish read had it, and the record is parsed once, here; the
 // cache is fresh per call.
@@ -447,7 +449,8 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     if (!file.ok) return file;
     const entry = file.value;
     // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
-    const opened = await openBlob(t, entry.oid, { follows: root });
+    const blobCache = getOrElse(readKey(options, 'blobCache'), null);
+    const opened = await openBlob(t, entry.oid, { follows: root, ...(blobCache === null ? {} : { blobCache }) });
     if (!opened.ok) return opened;
     const { size, stream } = opened.value;
     return outcome('ok', { ref: name, commit, blob: entry.oid, mode: lsMode(entry.mode), size, stream }, { 'git.read.blob': entry.oid, 'git.read.blob.size': size, 'git.read.blob.mode': entry.mode });
@@ -459,18 +462,21 @@ export type BlobTooBig = { readonly kind: 'too_big'; readonly size: number };
 export type OpenedBlob = BlobStream | BlobTooBig;
 // `maxBytes`: the declared size above which the blob is too_big (left out: no cap). `follows`: the span the stream
 // follows (null: none).
-export type BlobConfig = { readonly maxBytes: number; readonly follows: Span | null };
+export type BlobConfig = { readonly maxBytes: number; readonly follows: Span | null; readonly blobCache: BlobCacheBinding | null };
 export type BlobOpts = Input<BlobConfig>;
 // The options without a cap: the answer is always a stream.
-export type FollowOpts = Input<Pick<BlobConfig, 'follows'>>;
+export type FollowOpts = Input<Pick<BlobConfig, 'follows' | 'blobCache'>>;
 export type CappedOpts = Pick<BlobConfig, 'maxBytes'> & FollowOpts;
 
 // The fail-site recorder (test/space/failsite-hook.mjs) installs this only when PLY_FAILSITES is set. A guard, not a
 // cast: under the hook the value is a function and the property is absent otherwise, so the call is a no-op in a bundle.
 const FAIL_SITE = Symbol.for('ply.failsite');
-// Wall clock at isolate start: stamped as ply.isolate_age_ms on large-read spans (variance diagnosis).
-const ISOLATE_BORN_MS = Date.now();
+// Isolate age: Workers may freeze Date.now() at 0 during module evaluation (prod 8e7f5e26 stamped
+// ply.isolate_age_ms ≈ epoch). performance.now() starts at 0 with the isolate and advances; the delta
+// from module init is the age. Stamped on large-read spans (variance diagnosis).
+const ISOLATE_BORN_PERF = performance.now();
 const nowMs = (): number => performance.now();
+const isolateAgeMs = (): number => Math.round(nowMs() - ISOLATE_BORN_PERF);
 const isFailSiteRecorder = (v: unknown): v is (holder: (e: unknown) => unknown) => void => typeof v === 'function';
 type BodyState = Extract<SpState, { readonly phase: 'body' }>;
 // A pull of the pack stream, or a parser step, as a value: what it threw is the failure (failHere classifies it).
@@ -510,8 +516,30 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const cap = readKey(opts, 'maxBytes');
   if (cap.tag === 'some' && (!Number.isInteger(cap.value) || cap.value < 0)) return fail('bad_request', 'maxBytes must be an integer >= 0', { what: 'maxBytes' });
   const maxBytes = getOrElse(cap, Number.POSITIVE_INFINITY);
-  const { follows } = withDefaults<Pick<BlobConfig, 'follows'>>(opts, { follows: null });
+  const { follows, blobCache } = withDefaults<Pick<BlobConfig, 'follows' | 'blobCache'>>(opts, { follows: null, blobCache: null });
   const span = t.tracer.start('git.read.blob', { ...(follows === null ? {} : { follows }), attrs: { 'git.read.blob.oid': oid } });
+  // Scope = authorized remote (credential-free). Auth already ran in operation/createTransport before openBlob.
+  if (blobCache !== null) {
+    const looked = await lookupBlobCache(blobCache, t.url, oid);
+    if (looked.outcome === 'hit') {
+      if (looked.size > maxBytes) {
+        span.set({ 'git.read.blob.size': looked.size, 'git.read.blob.header_only': true, 'git.read.blob.cache': 'hit', 'git.read.blob.outcome': 'too_big', 'ply.isolate_age_ms': isolateAgeMs() }).end();
+        return ok({ kind: 'too_big', size: looked.size });
+      }
+      span.set({
+        'git.read.blob.size': looked.size,
+        'git.read.blob.bytes': looked.bytes,
+        'git.read.blob.verified': true,
+        'git.read.blob.hasher': 'cache',
+        'git.read.blob.hash_await_ms': 0,
+        'git.read.blob.cache': 'hit',
+        'git.read.blob.cache.bytes': looked.bytes,
+        'git.read.blob.outcome': 'ok',
+        'ply.isolate_age_ms': isolateAgeMs(),
+      }).end();
+      return ok({ kind: 'stream', size: looked.size, stream: looked.stream });
+    }
+  }
   const fetchSpan = t.tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
   // Inflate+verify wall clock (overlaps the upload-pack body). Opened once the object header has passed the size cap.
   let inflateSpan: { ended: boolean; set(a: Record<string, unknown>): { end(): void }; end(): void; error(e: unknown): { end(): void } } | null = null;
@@ -589,8 +617,10 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   })();
   pump.catch(abortWith);
   const sha = streamingSha1();
-  // DigestStream write() often resolves in <1 ms, so Date.now() stamped hash_ms as 0 on Workers (prod 296e081f,
-  // n=25). performance.now() keeps sub-ms; coalescing into HASH_BUF_BYTES cuts one await per inflate chunk.
+  // hash_await_ms: wall time spent awaiting hasher update/hex only. DigestStream hashes in the host while
+  // write() resolves on accept, so this is often ~0 on Workers; the CPU shows up in GET cpu_time_ms overlapping
+  // inflate — not a free hash. Renamed from hash_ms (loop 2026-11-08) so the metric does not claim CPU self-time.
+  // Coalescing into HASH_BUF_BYTES cuts one await per inflate chunk.
   const HASH_BUF_BYTES = 65_536;
   const hashBuf = new Uint8Array(HASH_BUF_BYTES);
   let hashBufLen = 0;
@@ -645,17 +675,17 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       const bytesPerSec = inflateMs > 0 ? Math.round(seen / (inflateMs / 1000)) : 0;
       endInflate({
         'git.blob.inflate.outcome': 'ok',
-        'git.read.blob.hash_ms': Math.round(hashMs * 1000) / 1000,
+        'git.read.blob.hash_await_ms': Math.round(hashMs * 1000) / 1000,
         'git.blob.inflate.bytes_per_sec': bytesPerSec,
-        'ply.isolate_age_ms': Date.now() - ISOLATE_BORN_MS,
+        'ply.isolate_age_ms': isolateAgeMs(),
       });
       span.set({
         'git.read.blob.bytes': seen,
         'git.read.blob.verified': true,
         'git.read.blob.hasher': sha.kind,
-        'git.read.blob.hash_ms': Math.round(hashMs * 1000) / 1000,
+        'git.read.blob.hash_await_ms': Math.round(hashMs * 1000) / 1000,
         'git.blob.inflate.bytes_per_sec': bytesPerSec,
-        'ply.isolate_age_ms': Date.now() - ISOLATE_BORN_MS,
+        'ply.isolate_age_ms': isolateAgeMs(),
         'git.read.blob.outcome': 'ok',
       }).end();
     },
@@ -672,12 +702,29 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {
-      if (!span.ended) { fetchSpan.end(); endInflate({ 'git.blob.inflate.outcome': 'cancelled' }); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.hash_ms': Math.round(hashMs * 1000) / 1000, 'git.read.blob.outcome': 'cancelled' }).end(); }
+      if (!span.ended) { fetchSpan.end(); endInflate({ 'git.blob.inflate.outcome': 'cancelled' }); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.hash_await_ms': Math.round(hashMs * 1000) / 1000, 'git.read.blob.outcome': 'cancelled' }).end(); }
       await inner.cancel(reason).catch(() => { /* cancelling: the outcome is recorded */ });
       await close();
     },
   }, { highWaterMark: 0 });
-  return ok({ kind: 'stream', size, stream });
+  // Cache fill: only the verified outbound stream is stored (OID checked in flush). Oversize bypasses put.
+  if (blobCache === null) {
+    span.set({ 'git.read.blob.cache': 'bypass' });
+    return ok({ kind: 'stream', size, stream });
+  }
+  if (size > blobCache.maxBytes) {
+    span.set({ 'git.read.blob.cache': 'bypass_oversize', 'git.read.blob.cache.max_bytes': blobCache.maxBytes });
+    return ok({ kind: 'stream', size, stream });
+  }
+  const [toClient, toCache] = stream.tee();
+  span.set({ 'git.read.blob.cache': 'miss' });
+  storeBlobCache(
+    { binding: blobCache, scope: t.url, oid, size, body: toCache },
+    (o, errText) => {
+      if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText ?? '' });
+    },
+  );
+  return ok({ kind: 'stream', size, stream: toClient });
 }
 
 export type BlobData = { readonly kind: 'bytes'; readonly data: Uint8Array<ArrayBuffer> };
