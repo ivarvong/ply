@@ -448,8 +448,8 @@ export async function readFile(url: string, spec: PathSpec = {}, options: TreeRe
     const file = fileEntry(walked.value.entry as TreeEntry, comps);
     if (!file.ok) return file;
     const entry = file.value;
-    // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
     const blobCache = getOrElse(readKey(options, 'blobCache'), null);
+    // oxlint-disable-next-line no-use-before-define -- the JS's order (readFile, then openBlob): a function declaration, hoisted; the bundle's gzip budget
     const opened = await openBlob(t, entry.oid, { follows: root, ...(blobCache === null ? {} : { blobCache }) });
     if (!opened.ok) return opened;
     const { size, stream } = opened.value;

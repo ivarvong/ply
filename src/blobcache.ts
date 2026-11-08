@@ -41,11 +41,11 @@ export type { PackCache };
 /** Calibrated 2026-11-08 from o11y git.read.blob.size (n=307, max=20 MiB) × ~1.5 headroom. */
 export const BLOB_CACHE_MAX_BYTES: number = 32 * 1024 * 1024;
 /** PRIOR (uncalibrated retention): 7d; content-addressed. Revisit from hit-age once emitted. */
-export const BLOB_CACHE_MAX_AGE_SECONDS: number = 604_800;
+export const BLOB_CACHE_MAX_AGE_SECONDS: number = 7 * 24 * 60 * 60;
 
-export const BLOB_CACHE_HEADER: string = 'x-ply-blob-cache';
-export const BLOB_OID_HEADER: string = 'x-ply-blob-oid';
-export const BLOB_CACHE_NAMESPACE: string = 'https://ply.blob/';
+export const BLOB_CACHE_HEADER = 'x-ply-blob-cache';
+export const BLOB_OID_HEADER = 'x-ply-blob-oid';
+export const BLOB_CACHE_NAMESPACE = 'https://ply.blob/';
 
 export type BlobCacheOutcome = 'hit' | 'miss' | 'bypass_oversize' | 'put_error' | 'bypass';
 
@@ -114,7 +114,8 @@ export type StoreBlobArgs = {
 export function storeBlobCache(args: StoreBlobArgs, onOutcome: (o: 'put_ok' | 'put_error', errText: string) => void): void {
   const { binding, scope, oid, size, body } = args;
   if (size > binding.maxBytes) {
-    void body.cancel().catch(() => null);
+    const cancel = body.cancel().catch(() => null);
+    if (binding.waitUntil) binding.waitUntil(cancel);
     return;
   }
   const put = (async (): Promise<void> => {
@@ -135,5 +136,4 @@ export function storeBlobCache(args: StoreBlobArgs, onOutcome: (o: 'put_ok' | 'p
     }
   })();
   if (binding.waitUntil) binding.waitUntil(put);
-  else void put;
 }
