@@ -1,12 +1,13 @@
 // The ply pipeline running inside workerd. POST /edit with {url, path, find, replace, n?} runs editFile n times
 // (sequentially, or concurrently with ?concurrent=1) and reports results, spans summary, and timing.
 import { editFile } from '../../src/edit.js';
-import { readFile } from '../../src/read.js';
+import { readFile, openBlob } from '../../src/read.js';
 import { unwrapAsync, unwrap } from '../unwrap.js';
 import { Tracer, arrayExporter, flattenLine } from '../../src/otel.js';
 import { GitHttp } from '../../src/client.js';
 import { withLimits } from '../../src/limits.js';
-import { cachingFetch } from '../../src/packcache.js';
+import { cachingFetch, memoryCache } from '../../src/packcache.js';
+import { BLOB_CACHE_MAX_BYTES, BLOB_CACHE_MAX_AGE_SECONDS } from '../../src/blobcache.js';
 import { generateSigner } from '../../src/sign.js';
 import { createTransport } from '../../src/http.js';
 import { push, ZERO_OID } from '../../src/push.js';
@@ -127,6 +128,116 @@ export default {
       const root = spans.filter(s => s.name === 'git.edit');
       return Response.json({ signer: signing?.signer.publicKeyLine ?? null, results, roots: root.map(s => pick(s.attrs)), blob: spans.filter(s => s.name === 'git.edit.blob').map(s => pick(s.attrs)), spanCount: spans.length, ...(body.dump ? { dump: JSON.stringify(exporter.lines) } : {}) });
     }
+
+    if (u.pathname === '/blobcache') {
+      // Cold then warm openBlob under holdLastChunk + FixedLengthStream, with an in-isolate PackCache
+      // (standalone workerd's caches.default never hits — see pack-cache test). Proves no-tee fill:
+      // warm body length and sha equal cold. mode=tee reproduces the #228/#229 poison for contrast.
+      const body = await req.json();
+      const store = memoryCache();
+      const waitUntil = (p) => ctx.waitUntil(p);
+      const blobCache = { store, waitUntil, maxBytes: BLOB_CACHE_MAX_BYTES, maxAge: BLOB_CACHE_MAX_AGE_SECONDS };
+      const exporter = arrayExporter();
+      const tracer = new Tracer({ exporter });
+      const t = unwrap(createTransport(body.url, { tracer }));
+      const mode = body.mode === 'tee' ? 'tee' : 'buffer';
+
+      function holdLastChunk(source) {
+        let held = null;
+        return source.pipeThrough(new TransformStream({
+          transform(chunk, ctl) {
+            if (chunk.byteLength === 0) return;
+            if (held) ctl.enqueue(held);
+            held = chunk;
+          },
+          flush(ctl) {
+            if (held) ctl.enqueue(held);
+            held = null;
+          },
+        }));
+      }
+
+      async function drainThroughFixed(stream, size) {
+        // ply-web shape: holdLastChunk(stream).pipeTo(FixedLengthStream(size).writable)
+        const fixed = new FixedLengthStream(size);
+        const pipe = holdLastChunk(stream).pipeTo(fixed.writable);
+        const bytes = new Uint8Array(await new Response(fixed.readable).arrayBuffer());
+        await pipe.catch(() => null);
+        // settle waitUntil puts
+        await new Promise(r => setTimeout(r, 0));
+        await new Promise(r => setTimeout(r, 0));
+        return bytes;
+      }
+
+      async function sha256hex(bytes) {
+        const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+        return [...d].map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+
+      if (mode === 'tee') {
+        // Reproduce #228/#229: tee verified bytes, put one branch, drain the other via holdLastChunk+FixedLengthStream.
+        // Then force the Workers-observed poison (empty body, declared CL) into the store and warm-lookup.
+        const first = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer }));
+        const [toClient, toCache] = first.stream.tee();
+        const headers = new Headers({
+          'content-type': 'application/octet-stream',
+          'content-length': String(first.size),
+          'x-ply-blob-oid': first.blob,
+          'cache-control': 'public, max-age=60, immutable',
+        });
+        const key = `https://ply.blob/tee-repro/${first.blob}`;
+        waitUntil(store.put(key, new Response(toCache, { status: 200, headers })));
+        const coldBytes = await drainThroughFixed(toClient, first.size);
+        await new Promise(r => setTimeout(r, 20));
+        const stored = store.entries.get(key);
+        const poisoned = !stored || stored.body.byteLength !== first.size;
+        // Match prod: empty body kept with non-zero Content-Length.
+        store.entries.set(key, {
+          body: new Uint8Array(),
+          headers: { 'content-type': 'application/octet-stream', 'content-length': String(first.size), 'x-ply-blob-oid': first.blob },
+        });
+        const warmRes = await store.match(key);
+        const warmBytes = new Uint8Array(await warmRes.arrayBuffer());
+        return Response.json({
+          ok: true,
+          mode: 'tee',
+          oid: first.blob,
+          poisonedByRace: poisoned,
+          cold: { size: first.size, bytes: coldBytes.byteLength, sha256: await sha256hex(coldBytes) },
+          warm: { size: first.size, bytes: warmBytes.byteLength, sha256: await sha256hex(warmBytes), contentLength: first.size },
+          equal: coldBytes.byteLength === warmBytes.byteLength && coldBytes.every((b, i) => b === warmBytes[i]),
+        });
+      }
+
+      // Resolve blob oid via readFile once (miss path fills cache), then openBlob by oid for warm.
+      const first = await unwrapAsync(readFile(body.url, { path: body.path }, { tracer, blobCache }));
+      const coldBytes = await drainThroughFixed(first.stream, first.size);
+      const oid = first.blob;
+      // Allow put to finish
+      await new Promise(r => setTimeout(r, 10));
+
+      const opened = await unwrapAsync(openBlob(t, oid, { blobCache }));
+      if (opened.kind !== 'stream') return Response.json({ ok: false, message: 'not a stream' });
+      const warmBytes = await drainThroughFixed(opened.stream, opened.size);
+      await new Promise(r => setTimeout(r, 10));
+
+      const cacheAttrs = exporter.lines.flatMap(flattenLine)
+        .filter(s => s.name === 'git.read.blob')
+        .map(s => s.attrs['git.read.blob.cache'] ?? null);
+
+      return Response.json({
+        ok: true,
+        mode: 'buffer',
+        oid,
+        cold: { size: first.size, bytes: coldBytes.byteLength, sha256: await sha256hex(coldBytes) },
+        warm: { size: opened.size, bytes: warmBytes.byteLength, sha256: await sha256hex(warmBytes) },
+        equal: coldBytes.byteLength === warmBytes.byteLength
+          && coldBytes.every((b, i) => b === warmBytes[i]),
+        cacheOutcomes: cacheAttrs,
+        storeEntries: store.entries.size,
+      });
+    }
+
     return new Response('not found', { status: 404 });
   },
 };

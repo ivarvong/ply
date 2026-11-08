@@ -6,7 +6,7 @@
 // wall time (loop 2026-11-08 variance: r(client, inflate) ≈ 0.86). Caching the verified inflated
 // bytes skips inflate+hash on a hit.
 //
-// Security (scope isolation): the cache key is sha256("ply-blob/2\n" + scope + "\n" + oid), where
+// Security (scope isolation): the cache key is sha256("ply-blob/3\n" + scope + "\n" + oid), where
 // `scope` is the transport's credential-free remote URL (t.url). openBlob is only reached after
 // the caller has authenticated that remote (operation → createTransport with the request's token).
 // A token for repo A never builds a transport whose url is repo B, so it cannot match B's keys.
@@ -14,9 +14,10 @@
 // test/blobcache.test.js prove cross-scope isolation.
 //
 // Integrity: the OID *is* the content hash. Only bytes that passed openBlob's OID verify (fill path)
-// are ever written (cache.put runs from the verified outbound stream after flush succeeds; a verify
-// failure errors the stream and the put does not complete). A hit is trusted: the key names the oid
-// and only verified bytes are stored. Pack-trailer verification is not enough on its own (trailer ≠
+// are ever written (cache.put runs from a complete buffer whose length === declared size after verify
+// flush). A verify failure errors the stream and the put never starts. Hits still re-check that the
+// stored body's byteLength equals Content-Length and evict on mismatch (poisoned empty bodies with a
+// non-zero CL must never be served). Pack-trailer verification is not enough on its own (trailer ≠
 // content oid); that check stays on the miss/fill path.
 //
 // Tunables (dated predictions, 2026-11-08 America/New_York):
@@ -26,9 +27,9 @@
 //   maxAgeSeconds = 604_800 (7d) — content-addressed (immutable oid). Not from the size distribution;
 //     PRIOR for retention until hit-age telemetry exists. 7d keeps warm across CD dwells.
 //
-// Streaming: on a miss the key is awaited first, then the verified ReadableStream is tee'd — one
-// branch to the caller, one to cache.put(Response) under waitUntil. Put must start reading before the
-// client drains the twin (a prior await-before-put stored empty bodies with Content-Length rewritten to 0).
+// Fill: on a miss the verified outbound stream is collected through a TransformStream (chunk copies
+// kept), then storeBlobCache puts the concatenated buffer under waitUntil after length===size. No tee:
+// tee+put raced with ply-web holdLastChunk/FixedLengthStream and stored empty bodies with non-zero CL.
 
 import type { PackCache } from './packcache.js';
 import { te } from './bytes.js';
@@ -45,7 +46,7 @@ export const BLOB_CACHE_MAX_AGE_SECONDS: number = 7 * 24 * 60 * 60;
 
 export const BLOB_CACHE_HEADER = 'x-ply-blob-cache';
 export const BLOB_OID_HEADER = 'x-ply-blob-oid';
-export const BLOB_CACHE_NAMESPACE = 'https://ply.blob/v2/';
+export const BLOB_CACHE_NAMESPACE = 'https://ply.blob/v3/';
 
 export type BlobCacheOutcome = 'hit' | 'miss' | 'bypass_oversize' | 'put_error' | 'bypass';
 
@@ -56,9 +57,9 @@ export type BlobCacheBinding = {
   readonly maxAge: number;
 };
 
-/** Key: namespace + hex(sha256("ply-blob/2\\nscope\\noid\\n")). Scope is the authorized remote URL. */
+/** Key: namespace + hex(sha256("ply-blob/3\\nscope\\noid\\n")). Scope is the authorized remote URL. */
 export async function blobCacheKey(scope: string, oid: string, namespace: string = BLOB_CACHE_NAMESPACE): Promise<string> {
-  const material = te.encode(`ply-blob/2\n${scope}\n${oid.toLowerCase()}\n`);
+  const material = te.encode(`ply-blob/3\n${scope}\n${oid.toLowerCase()}\n`);
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', material));
   let hex = '';
   for (const b of d) hex += b.toString(16).padStart(2, '0');
@@ -87,8 +88,7 @@ export async function lookupBlobCache(
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- Cache API: falsy is a miss
   if (hit.tag === 'none' || !hit.value) return { outcome: 'miss' };
   const res = hit.value;
-  const body = res.body;
-  if (body === null) return { outcome: 'miss' };
+  if (res.body === null) return { outcome: 'miss' };
   const gotOid = getOrElse(fromNullish(res.headers.get(BLOB_OID_HEADER)), '').toLowerCase();
   // Content-Length must be present: Number('') === 0 would false-hit an empty body after a failed fill.
   const lenHdrOpt = fromNullish(res.headers.get('content-length'));
@@ -108,7 +108,28 @@ export async function lookupBlobCache(
     await binding.store.delete(key).catch(() => null);
     return { outcome: 'miss' };
   }
-  return { outcome: 'hit', size, stream: body, bytes: size };
+  // Never trust Content-Length alone: a later tee/FixedLengthStream race stored empty bodies while
+  // keeping a non-zero Content-Length (#229 residual / canary 057e1a9b). Buffer and compare; any
+  // length mismatch is a miss + evict so poisoned entries are never served.
+  let buf: Uint8Array;
+  try {
+    buf = new Uint8Array(await res.arrayBuffer());
+  } catch {
+    await binding.store.delete(key).catch(() => null);
+    return { outcome: 'miss' };
+  }
+  if (buf.byteLength !== size) {
+    await binding.store.delete(key).catch(() => null);
+    return { outcome: 'miss' };
+  }
+  // Rebuild the stream from the verified buffer (body was consumed by arrayBuffer).
+  const stream = new ReadableStream<Uint8Array>({
+    start(ctl) {
+      if (buf.byteLength > 0) ctl.enqueue(buf);
+      ctl.close();
+    },
+  });
+  return { outcome: 'hit', size, stream, bytes: size };
 }
 
 export type StoreBlobArgs = {
@@ -116,24 +137,32 @@ export type StoreBlobArgs = {
   readonly scope: string;
   readonly oid: string;
   readonly size: number;
-  readonly body: ReadableStream<Uint8Array>;
-  /** Precomputed blobCacheKey — must be awaited before tee so put starts reading immediately. */
+  /** Complete verified bytes (length must equal size). No streaming tee — see storeBlobCache. */
+  readonly bytes: Uint8Array;
+  /** Precomputed blobCacheKey. */
   readonly key: string;
 };
 
 /**
- * Store verified inflated bytes. Caller must only pass a stream that completes after OID verify.
- * Oversize → cancel body, no put. Errors → onOutcome('put_error').
+ * Store verified inflated bytes from a complete buffer. Caller must only pass bytes that passed
+ * OID verify and whose length equals the declared size.
+ *
+ * Why not tee+put a live stream: under ply-web's holdLastChunk + FixedLengthStream, the client
+ * branch can finish (and the tee cancel the cache branch) before caches.default.put has consumed
+ * the body. That stored empty bodies while keeping our declared Content-Length (2026-11-08), so
+ * the size===0 miss did not fire and warm reads returned 200 with an empty body. Buffering after
+ * verify, checking length, then put(ArrayBuffer) cannot poison. Key namespace is v3 so any v2
+ * poisoned entries are unreachable.
+ *
+ * Oversize → no put. Short buffer → put_error, no put.
  */
 export function storeBlobCache(args: StoreBlobArgs, onOutcome: (o: 'put_ok' | 'put_error', errText: string) => void): void {
-  const { binding, oid, size, body, key } = args;
-  if (size > binding.maxBytes) {
-    const cancel = body.cancel().catch(() => null);
-    if (binding.waitUntil) binding.waitUntil(cancel);
+  const { binding, oid, size, bytes, key } = args;
+  if (size > binding.maxBytes) return;
+  if (bytes.byteLength !== size) {
+    onOutcome('put_error', `short fill ${bytes.byteLength}!=${size}`);
     return;
   }
-  // Put must start reading `body` before the caller's tee twin drains — any await before
-  // Response construction lets the client cancel this branch and we store an empty entry.
   const headers = new Headers({
     'content-type': 'application/octet-stream',
     'content-length': String(size),
@@ -141,15 +170,21 @@ export function storeBlobCache(args: StoreBlobArgs, onOutcome: (o: 'put_ok' | 'p
     'cache-control': `public, max-age=${binding.maxAge}, immutable`,
     [BLOB_CACHE_HEADER]: 'MISS',
   });
+  // Copy into a fresh ArrayBuffer-backed view for Response (SharedArrayBuffer / detached safety).
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
   // oxlint-disable-next-line promise/always-return -- onOutcome is the result; put's value is unused (waitUntil)
   const put = (async (): Promise<void> => {
     try {
-      await binding.store.put(key, new Response(body, { status: 200, headers }));
+      await binding.store.put(key, new Response(copy, { status: 200, headers }));
       onOutcome('put_ok', '');
     } catch (e) {
       onOutcome('put_error', e instanceof Error ? e.message.slice(0, 200) : 'put failed');
-      await body.cancel().catch(() => null);
     }
   })();
   if (binding.waitUntil) binding.waitUntil(put);
+  else {
+    // Tests: no waitUntil — still run put so memoryCache fills for hit assertions.
+    put.catch(() => null);
+  }
 }

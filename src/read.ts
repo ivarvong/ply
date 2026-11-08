@@ -716,16 +716,33 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
     span.set({ 'git.read.blob.cache': 'bypass_oversize', 'git.read.blob.cache.max_bytes': blobCache.maxBytes });
     return ok({ kind: 'stream', size, stream });
   }
-  // Key before tee: storeBlobCache must attach the body to put with no await in between.
-  const cacheKey = await blobCacheKey(t.url, oid);
-  const [toClient, toCache] = stream.tee();
+  // Collect verified chunks (no tee): put runs from the complete buffer after the source closes.
+  // tee+put stored empty bodies under ply-web holdLastChunk/FixedLengthStream (2026-11-08).
+  // Mark miss before the stream is pulled — verify flush ends this span as the last chunk is released.
   span.set({ 'git.read.blob.cache': 'miss' });
-  storeBlobCache(
-    { binding: blobCache, scope: t.url, oid, size, body: toCache, key: cacheKey },
-    (o, errText) => {
-      if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText });
+  const cacheKey = await blobCacheKey(t.url, oid);
+  const chunks: Uint8Array[] = [];
+  let got = 0;
+  const toClient = stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, ctl) {
+      if (chunk.byteLength === 0) return;
+      // Copy: DecompressionStream may reuse buffers; the fill buffer must outlive the client pull.
+      const copy = new Uint8Array(chunk.byteLength);
+      copy.set(chunk);
+      chunks.push(copy);
+      got += copy.byteLength;
+      ctl.enqueue(chunk);
     },
-  );
+    flush() {
+      if (got !== size) return;
+      storeBlobCache(
+        { binding: blobCache, scope: t.url, oid, size, bytes: concat(chunks), key: cacheKey },
+        (o, errText) => {
+          if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText });
+        },
+      );
+    },
+  }));
   return ok({ kind: 'stream', size, stream: toClient });
 }
 
