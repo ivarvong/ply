@@ -15,7 +15,7 @@ test('blobCacheKey: scope and oid separate entries; oid case-normalized', async 
   assert.notEqual(k, await blobCacheKey(SCOPE_B, OID), 'different repos must not share a key');
   assert.notEqual(k, await blobCacheKey(SCOPE_A, OID2), 'different oids must not share a key');
   assert.equal(k, await blobCacheKey(SCOPE_A, OID.toUpperCase()), 'oid hex is case-insensitive');
-  assert.ok(k.startsWith('https://ply.blob/'));
+  assert.ok(k.startsWith('https://ply.blob/v2/'));
 });
 
 test('scope isolation: a hit under repo A is a miss under repo B (same oid)', async () => {
@@ -85,4 +85,17 @@ test('fill then hit: verified bytes round-trip', async () => {
   }
   const got = Buffer.concat(parts.map(u => Buffer.from(u))).toString();
   assert.equal(got, 'verified-bytes');
+});
+
+test('poisoned size-0 entry for a non-empty oid is a miss and is evicted', async () => {
+  const store = memoryCache();
+  const binding = { store, waitUntil: null, maxBytes: BLOB_CACHE_MAX_BYTES, maxAge: 60 };
+  const key = await blobCacheKey(SCOPE_A, OID);
+  await store.put(key, new Response(new Uint8Array(), {
+    status: 200,
+    headers: { 'content-type': 'application/octet-stream', 'content-length': '0', [BLOB_OID_HEADER]: OID },
+  }));
+  const looked = await lookupBlobCache(binding, SCOPE_A, OID);
+  assert.equal(looked.outcome, 'miss');
+  assert.equal(store.entries.has(key), false, 'poisoned size-0 entry must be deleted');
 });

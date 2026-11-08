@@ -6,7 +6,7 @@
 // wall time (loop 2026-11-08 variance: r(client, inflate) ≈ 0.86). Caching the verified inflated
 // bytes skips inflate+hash on a hit.
 //
-// Security (scope isolation): the cache key is sha256("ply-blob/1\n" + scope + "\n" + oid), where
+// Security (scope isolation): the cache key is sha256("ply-blob/2\n" + scope + "\n" + oid), where
 // `scope` is the transport's credential-free remote URL (t.url). openBlob is only reached after
 // the caller has authenticated that remote (operation → createTransport with the request's token).
 // A token for repo A never builds a transport whose url is repo B, so it cannot match B's keys.
@@ -45,7 +45,7 @@ export const BLOB_CACHE_MAX_AGE_SECONDS: number = 7 * 24 * 60 * 60;
 
 export const BLOB_CACHE_HEADER = 'x-ply-blob-cache';
 export const BLOB_OID_HEADER = 'x-ply-blob-oid';
-export const BLOB_CACHE_NAMESPACE = 'https://ply.blob/';
+export const BLOB_CACHE_NAMESPACE = 'https://ply.blob/v2/';
 
 export type BlobCacheOutcome = 'hit' | 'miss' | 'bypass_oversize' | 'put_error' | 'bypass';
 
@@ -56,9 +56,9 @@ export type BlobCacheBinding = {
   readonly maxAge: number;
 };
 
-/** Key: namespace + hex(sha256("ply-blob/1\\nscope\\noid\\n")). Scope is the authorized remote URL. */
+/** Key: namespace + hex(sha256("ply-blob/2\\nscope\\noid\\n")). Scope is the authorized remote URL. */
 export async function blobCacheKey(scope: string, oid: string, namespace: string = BLOB_CACHE_NAMESPACE): Promise<string> {
-  const material = te.encode(`ply-blob/1\n${scope}\n${oid.toLowerCase()}\n`);
+  const material = te.encode(`ply-blob/2\n${scope}\n${oid.toLowerCase()}\n`);
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', material));
   let hex = '';
   for (const b of d) hex += b.toString(16).padStart(2, '0');
@@ -98,6 +98,13 @@ export async function lookupBlobCache(
   }
   const size = Number(lenHdrOpt.value);
   if (gotOid !== oid.toLowerCase() || !Number.isInteger(size) || size < 0) {
+    await binding.store.delete(key).catch(() => null);
+    return { outcome: 'miss' };
+  }
+  // Poisoned fills rewrote Content-Length to 0 with an empty body (tee/put race, 2026-11-08).
+  // A real empty blob is only the well-known empty-tree-file oid; anything else at size 0 is a miss.
+  const EMPTY_BLOB_OID = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391';
+  if (size === 0 && gotOid !== EMPTY_BLOB_OID) {
     await binding.store.delete(key).catch(() => null);
     return { outcome: 'miss' };
   }
