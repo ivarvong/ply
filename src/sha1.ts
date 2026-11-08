@@ -147,7 +147,10 @@ export type StreamingSha1 =
 
 // Streaming hasher with a native fast path: Workers expose crypto.DigestStream (a WritableStream that digests
 // incrementally at native speed); node and browsers do not, so the pure-JS Sha1 above is the fallback. Same interface,
-// async because the native one is. SHA-1 is ~80% of the streamed-edit CPU (test/calibrate.mjs), so this is the lever.
+// async because the native one is. SHA-1 is ~80% of the streamed-edit CPU on node (test/calibrate.mjs); on Workers the
+// large-read wall is dominated by DecompressionStream (git.blob.inflate), not DigestStream — keep OID verification
+// (pack trailer ≠ content oid), keep DigestStream over buffering crypto.subtle.digest, and measure hash_ms with
+// performance.now (Date.now stamped 0 on Workers). Bench: test/bench-sha1-hashers.mjs.
 export function streamingSha1(): StreamingSha1 {
   const native = flatMapOption(field(globalThis, 'crypto'), c => field(c, 'DigestStream'));
   if (native.tag === 'some' && isDigestStream(native.value)) {
