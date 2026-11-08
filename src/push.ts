@@ -80,7 +80,9 @@ import type { PackInput, BuiltEntry } from './pack.js';
 import { WHOLE } from './pack.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
-import { at, atOr, field, fromNullish, withDefaults } from './absent.js';
+import { at, atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
+import { lsRefs } from './lsrefs.js';
+import type { LsRefsResult } from './lsrefs.js';
 
 // local sideband parser to reduce dependencies
 const parseSideband = (payload: Uint8Array): { readonly band: number; readonly body: Uint8Array } => ({ band: atOr(payload, 0, 0), body: payload.subarray(1) });
@@ -597,6 +599,61 @@ const bodyOf = (plan: PushPlan, packed: MeasuredPack | null): Result<Body, Error
   const streamed = streamPack(packed, bytes.value);
   return ok({ body: streamed, streamed });
 };
+
+// After a sideband band-3 report (often empty under Artifacts), a single-ref update can still be named: read the tip.
+// At our newOid → the push landed (report lost). Anywhere else → cas_conflict (lost the CAS / refused).
+// Multi-ref and deletes stay ambiguous: the tip alone does not name which command acted. Observed 2026-11-08 on
+// Cloudflare Artifacts under a same-ref race (phase6 F34): band 3 + empty report → was HTTP 502 `ambiguous`.
+// finishPush gates on isEmptyBand3Ambiguous so non-empty band 3 / cut / drop / verify stay ambiguous.
+async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPlan, ambiguous: PlyError): Promise<Result<PushReport, PlyError> | null> {
+  if (plan.commands.length !== 1) return null;
+  const [cmd] = plan.commands;
+  if (cmd.newOid === ZERO_OID) return null;
+  const read: Result<LsRefsResult, unknown> = await lsRefs(t, [String(cmd.ref)]).then(r => r, (e: unknown) => err(e));
+  if (!read.ok) {
+    span.set({ 'git.push.ambiguous.resolved': 'unread' });
+    return null;
+  }
+  const tip = mapGet(read.value.refs, String(cmd.ref));
+  const seen = tip.tag === 'some' ? tip.value.oid : null;
+  const landed = seen === cmd.newOid;
+  span.set({ 'git.push.verify.ref': seen === null ? '' : seen, 'git.push.ambiguous.resolved': landed ? 'landed' : 'cas_conflict' });
+  if (landed) {
+    span.set({ 'git.push.ok': true, 'git.push.outcome': 'landed', 'git.push.ng.reason': '' });
+    return ok({ tag: 'statuses', refs: [{ ref: String(cmd.ref), ok: true as const, reason: '' as const }] });
+  }
+  span.set({ 'git.push.ok': false, 'git.push.outcome': 'rejected', 'git.push.ng.reason': 'stale ref' });
+  return fail('cas_conflict', 'push rejected: stale ref', { expected: cmd.oldOid === ZERO_OID ? null : cmd.oldOid, actual: seen, cause: ambiguous, original: 'ambiguous' });
+}
+
+type FinishPush = {
+  readonly t: PushTransport;
+  readonly span: Span;
+  readonly plan: PushPlan;
+  readonly packBytes: number;
+  readonly entries: readonly PackEntry[];
+  readonly hookOutput: string;
+};
+
+// Tip read-back is only for empty sideband band 3 (Artifacts race: no report-status lines).
+// Band 3 with a remote message (credential echo, fatal text), cuts, drops, and forged-ok verify
+// stay ambiguous: cas_conflict would trigger edit's one retry and mis-name those outcomes.
+function isEmptyBand3Ambiguous(e: PlyError): boolean {
+  // outcomeResult embeds why as: `push outcome unknown: remote: ${remote}: band 3`
+  // empty remote (Artifacts) → trailing `remote: : band 3`.
+  return e.code === 'ambiguous' && e.message.endsWith('remote: : band 3');
+}
+
+async function finishPush(ctx: FinishPush, res: Result<PushReport | null, PlyError>): Promise<Result<PushResult, PlyError>> {
+  const { t, span, plan, packBytes, entries, hookOutput } = ctx;
+  if (res.ok) return ok({ report: res.value, packBytes, entries, hookOutput });
+  if (!isEmptyBand3Ambiguous(res.error)) return res;
+  const resolved = await resolveAmbiguousByTip(t, span, plan, res.error);
+  if (resolved === null) return res;
+  if (resolved.ok) return ok({ report: resolved.value, packBytes, entries, hookOutput });
+  return resolved;
+}
+
 // The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
 async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
   const packed = plan.needPack ? await measurePack(plan.objects) : null;
@@ -617,11 +674,15 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
   // it was not sent the pack that was measured
   const cut = body.value.streamed === null ? null : body.value.streamed.failure();
-  if (cut !== null) return err(ambiguousAfterPush(cut) as PlyError); // oxlint-disable-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush of a PlyError is a PlyError
+  const base: FinishPush = { t, span, plan, packBytes, entries, hookOutput: '' };
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush of a PlyError is a PlyError
+  if (cut !== null) return finishPush(base, err(ambiguousAfterPush(cut) as PlyError));
   if ('cause' in r) {
     const notRun = refusedBeforeReceivePack(r) && await serviceRefused(t, span, r.cause);
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- refused: the cause carries one of ply's codes (a PlyError); else ambiguousAfterPush returns one (the cause itself when it already is an 'ambiguous' one)
-    return err((notRun ? r.cause : ambiguousAfterPush(r.cause)) as PlyError);
+    if (notRun) return err(r.cause as PlyError);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush returns a PlyError
+    return finishPush(base, err(ambiguousAfterPush(r.cause) as PlyError));
   }
   const { done, reading } = r;
   const band2 = reading.band2Carry.length > 0 ? (reading.band2 + td.decode(reading.band2Carry)).slice(-BAND_TAIL) : reading.band2;
@@ -631,7 +692,7 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   span.set(outcomeAttrs(done, report, outcome, reading.band2Frames, band2));
   if (outcome.tag === 'ambiguous') span.set({ 'git.push.ambiguous': outcome.why });
   const res = outcomeResult(outcome, { report, hookOutput: band2, remote: shape.tag === 'broken' ? shape.remote : null, commands: plan.commands });
-  return res.ok ? ok({ report: res.value, packBytes, entries, hookOutput: band2 }) : res;
+  return finishPush({ ...base, hookOutput: band2 }, res);
 }
 
 // The request under its span (push, below, is the entry).
