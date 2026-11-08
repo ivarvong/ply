@@ -570,6 +570,10 @@ export const DECISIONS = [
   { match: "src/push.ts#planPush:bad_request:push: unchecked atomic or push options", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/push.ts#send:limit_exceeded:push pack bytes", space: 'push-tree', axisTag: 'case' },
   { match: "src/push.ts#send:ambiguous:<r.cause>", space: 'hostile-server', axisTag: 'case' },
+  // F34: empty band-3 tip read-back → typed cas_conflict (or landed); covered by mutant-kill + edit-race-f34
+  { match: 'src/push.ts#resolveAmbiguousByTip:cas_conflict:push rejected: stale ref', space: 'mutant-kill', axisTag: 'case' },
+  { match: "src/push.ts#resolveAmbiguousByTip:conditional=cas_conflict:span.set({ 'git.push.verify.ref': seen === null ? '' : s…", space: 'mutant-kill', axisTag: 'case' },
+
   { match: 'src/push.ts#send:ambiguous:<cut>', space: 'push-stream', axisTag: 'case' },
   { match: 'src/packwrite.ts#refuse:*', space: 'push-stream', axisTag: 'case' },
   { match: "src/push.ts#receivePack:coded=protocol:return coded('protocol', () => spanned(t, 'git.receive-p…", space: 'mutant-kill', axisTag: 'case' },

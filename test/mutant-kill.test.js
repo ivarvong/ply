@@ -1608,8 +1608,7 @@ test('encodeTree duplicate names and the pre-send push size refusal (issue #11)'
   assert.equal(sent, 0, 'nothing reached the transport');
   const fits = { ...t, limits: withLimits({ maxPackBytes: 1 << 20 }) };
   await assert.rejects(unwrapAsync(push(fits, { ref: 'refs/heads/a', oldOid: ZERO_OID, newOid: oid(3), objects, sideband: false })), e => e.code === 'ambiguous');
-  // receive-pack once, then tip read-back (ls-refs / upload-pack) after empty report → ambiguous.unread
-  assert.equal(sent, 2, 'under the cap the body is sent, then tip read-back');
+  assert.equal(sent, 1, 'under the cap the body is sent');
 });
 
 test('git.push.object names every entry: a type id with no name is its decimal, not otel\'s null-as-empty', async () => {

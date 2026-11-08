@@ -600,10 +600,11 @@ const bodyOf = (plan: PushPlan, packed: MeasuredPack | null): Result<Body, Error
   return ok({ body: streamed, streamed });
 };
 
-// After an ambiguous report (band 3 with no status lines, a cut stream, …), a single-ref update can still be named:
-// read the tip. At our newOid → the push landed (report lost). Anywhere else → cas_conflict (lost the CAS / refused).
+// After a sideband band-3 report (often empty under Artifacts), a single-ref update can still be named: read the tip.
+// At our newOid → the push landed (report lost). Anywhere else → cas_conflict (lost the CAS / refused).
 // Multi-ref and deletes stay ambiguous: the tip alone does not name which command acted. Observed 2026-11-08 on
 // Cloudflare Artifacts under a same-ref race (phase6 F34): band 3 + empty report → was HTTP 502 `ambiguous`.
+// finishPush gates on isEmptyBand3Ambiguous so non-empty band 3 / cut / drop / verify stay ambiguous.
 async function resolveAmbiguousByTip(t: PushTransport, span: Span, plan: PushPlan, ambiguous: PlyError): Promise<Result<PushReport, PlyError> | null> {
   if (plan.commands.length !== 1) return null;
   const [cmd] = plan.commands;
@@ -634,10 +635,19 @@ type FinishPush = {
   readonly hookOutput: string;
 };
 
+// Tip read-back is only for empty sideband band 3 (Artifacts race: no report-status lines).
+// Band 3 with a remote message (credential echo, fatal text), cuts, drops, and forged-ok verify
+// stay ambiguous: cas_conflict would trigger edit's one retry and mis-name those outcomes.
+function isEmptyBand3Ambiguous(e: PlyError): boolean {
+  // outcomeResult embeds why as: `push outcome unknown: remote: ${remote}: band 3`
+  // empty remote (Artifacts) → trailing `remote: : band 3`.
+  return e.code === 'ambiguous' && e.message.endsWith('remote: : band 3');
+}
+
 async function finishPush(ctx: FinishPush, res: Result<PushReport | null, PlyError>): Promise<Result<PushResult, PlyError>> {
   const { t, span, plan, packBytes, entries, hookOutput } = ctx;
   if (res.ok) return ok({ report: res.value, packBytes, entries, hookOutput });
-  if (res.error.code !== 'ambiguous') return res;
+  if (!isEmptyBand3Ambiguous(res.error)) return res;
   const resolved = await resolveAmbiguousByTip(t, span, plan, res.error);
   if (resolved === null) return res;
   if (resolved.ok) return ok({ report: resolved.value, packBytes, entries, hookOutput });
