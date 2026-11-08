@@ -1931,6 +1931,42 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   const report = (...lines) => band(1, ...lines.map(l => unwrap(pkt(l))), FLUSH);
   const del = { commands: [{ ref: 'refs/heads/a', oldOid: oid(1), newOid: ZERO_OID }], sideband: true };
   await assert.rejects(unwrapAsync(push(sb(band(2, 'hook says hi\n'), band(3, ' boom \n'), null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: remote: boom: band 3' && e.original === 'remote_error' && e.hookOutput === 'hook says hi\n');
+  // F34 / 2026-11-08: Artifacts under a same-ref race answers band 3 with an empty report. A single-ref update reads
+  // the tip: not at newOid → cas_conflict (typed), never ambiguous → 502.
+  {
+    const oldOid = oid(1), newOid = oid(3);
+    const update = { commands: [{ ref: 'refs/heads/a', oldOid, newOid }], sideband: true };
+    const band3Race = {
+      limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
+      async *frames(service) {
+        if (service === 'git-upload-pack') {
+          yield { kind: 'data', payload: unwrap(pkt(`${oldOid} refs/heads/a\n`)) };
+          yield { kind: 'flush' };
+          return;
+        }
+        yield { kind: 'data', payload: band(3, '') };
+        yield { kind: 'flush' };
+      },
+    };
+    await assert.rejects(unwrapAsync(push(band3Race, update)), e => e.code === 'cas_conflict' && e.original === 'ambiguous' && e.expected === oldOid && e.actual === oldOid);
+    // tip already at newOid → the push landed; report was lost
+    const band3Landed = {
+      limits: DEFAULT_LIMITS, tracer: tracerStub, parent: null,
+      async *frames(service) {
+        if (service === 'git-upload-pack') {
+          yield { kind: 'data', payload: unwrap(pkt(`${newOid} refs/heads/a\n`)) };
+          yield { kind: 'flush' };
+          return;
+        }
+        yield { kind: 'data', payload: band(3, '') };
+        yield { kind: 'flush' };
+      },
+    };
+    const landed = await unwrapAsync(push(band3Landed, update));
+    assert.equal(landed.report.tag, 'statuses');
+    assert.equal(landed.report.refs[0].ok, true);
+  }
+
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok*\n', 'ok refs/heads/a\n'), null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: no git unpack line first' && e.original === undefined && e.report === null);
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ok refs/heads/a\n'), null, null), del)), e => e.code === 'ambiguous' && e.message === 'push outcome unknown: data after the final flush');
   await assert.rejects(unwrapAsync(push(sb(report('unpack ok\n', 'ng refs/heads/a hook declined\n'), null), del)), e => e.code === 'push_rejected' && e.message === 'push rejected: hook declined');
