@@ -721,7 +721,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   storeBlobCache(
     { binding: blobCache, scope: t.url, oid, size, body: toCache },
     (o, errText) => {
-      if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText ?? '' });
+      if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText });
     },
   );
   return ok({ kind: 'stream', size, stream: toClient });
