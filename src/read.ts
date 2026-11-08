@@ -40,7 +40,7 @@ import { packStream, objectAt, objectId, spInit, spStep, spFinish, treeEntries }
 import { parseCommit, parseIdent, parseTree, objectHeader, TYPE, TYPE_NAME } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import type { BlobCacheBinding } from './blobcache.js';
-import { lookupBlobCache, storeBlobCache } from './blobcache.js';
+import { blobCacheKey, lookupBlobCache, storeBlobCache } from './blobcache.js';
 import { bufferSource, concat } from './bytes.js';
 import { KIND } from './otel.js';
 import type { Span } from './otel.js';
@@ -716,10 +716,12 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
     span.set({ 'git.read.blob.cache': 'bypass_oversize', 'git.read.blob.cache.max_bytes': blobCache.maxBytes });
     return ok({ kind: 'stream', size, stream });
   }
+  // Key before tee: storeBlobCache must attach the body to put with no await in between.
+  const cacheKey = await blobCacheKey(t.url, oid);
   const [toClient, toCache] = stream.tee();
   span.set({ 'git.read.blob.cache': 'miss' });
   storeBlobCache(
-    { binding: blobCache, scope: t.url, oid, size, body: toCache },
+    { binding: blobCache, scope: t.url, oid, size, body: toCache, key: cacheKey },
     (o, errText) => {
       if (o === 'put_error' && !span.ended) span.set({ 'git.read.blob.cache': 'put_error', 'git.read.blob.cache.put_error': errText });
     },
