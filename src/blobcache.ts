@@ -26,9 +26,9 @@
 //   maxAgeSeconds = 604_800 (7d) — content-addressed (immutable oid). Not from the size distribution;
 //     PRIOR for retention until hit-age telemetry exists. 7d keeps warm across CD dwells.
 //
-// Streaming: on a miss the verified ReadableStream is tee'd — one branch to the caller, one to
-// cache.put(Response) under waitUntil. No full 20 MiB buffer on the put path beyond what the Cache
-// API itself requires to store the entry.
+// Streaming: on a miss the key is awaited first, then the verified ReadableStream is tee'd — one
+// branch to the caller, one to cache.put(Response) under waitUntil. Put must start reading before the
+// client drains the twin (a prior await-before-put stored empty bodies with Content-Length rewritten to 0).
 
 import type { PackCache } from './packcache.js';
 import { te } from './bytes.js';
@@ -90,8 +90,13 @@ export async function lookupBlobCache(
   const body = res.body;
   if (body === null) return { outcome: 'miss' };
   const gotOid = getOrElse(fromNullish(res.headers.get(BLOB_OID_HEADER)), '').toLowerCase();
-  const lenHdr = getOrElse(fromNullish(res.headers.get('content-length')), '');
-  const size = Number(lenHdr);
+  // Content-Length must be present: Number('') === 0 would false-hit an empty body after a failed fill.
+  const lenHdrOpt = fromNullish(res.headers.get('content-length'));
+  if (lenHdrOpt.tag === 'none' || lenHdrOpt.value === '') {
+    await binding.store.delete(key).catch(() => null);
+    return { outcome: 'miss' };
+  }
+  const size = Number(lenHdrOpt.value);
   if (gotOid !== oid.toLowerCase() || !Number.isInteger(size) || size < 0) {
     await binding.store.delete(key).catch(() => null);
     return { outcome: 'miss' };
@@ -105,6 +110,8 @@ export type StoreBlobArgs = {
   readonly oid: string;
   readonly size: number;
   readonly body: ReadableStream<Uint8Array>;
+  /** Precomputed blobCacheKey — must be awaited before tee so put starts reading immediately. */
+  readonly key: string;
 };
 
 /**
@@ -112,21 +119,23 @@ export type StoreBlobArgs = {
  * Oversize → cancel body, no put. Errors → onOutcome('put_error').
  */
 export function storeBlobCache(args: StoreBlobArgs, onOutcome: (o: 'put_ok' | 'put_error', errText: string) => void): void {
-  const { binding, scope, oid, size, body } = args;
+  const { binding, oid, size, body, key } = args;
   if (size > binding.maxBytes) {
     const cancel = body.cancel().catch(() => null);
     if (binding.waitUntil) binding.waitUntil(cancel);
     return;
   }
+  // Put must start reading `body` before the caller's tee twin drains — any await before
+  // Response construction lets the client cancel this branch and we store an empty entry.
+  const headers = new Headers({
+    'content-type': 'application/octet-stream',
+    'content-length': String(size),
+    [BLOB_OID_HEADER]: oid.toLowerCase(),
+    'cache-control': `public, max-age=${binding.maxAge}, immutable`,
+    [BLOB_CACHE_HEADER]: 'MISS',
+  });
+  // oxlint-disable-next-line promise/always-return -- onOutcome is the result; put's value is unused (waitUntil)
   const put = (async (): Promise<void> => {
-    const key = await blobCacheKey(scope, oid);
-    const headers = new Headers({
-      'content-type': 'application/octet-stream',
-      'content-length': String(size),
-      [BLOB_OID_HEADER]: oid.toLowerCase(),
-      'cache-control': `public, max-age=${binding.maxAge}, immutable`,
-      [BLOB_CACHE_HEADER]: 'MISS',
-    });
     try {
       await binding.store.put(key, new Response(body, { status: 200, headers }));
       onOutcome('put_ok', '');
