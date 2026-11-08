@@ -1460,7 +1460,6 @@
               "attrs": {
                 "git.blob.inflate.bytes_per_sec": "number",
                 "git.read.blob.bytes": "number",
-                "git.read.blob.cache": "string",
                 "git.read.blob.hash_await_ms": "number",
                 "git.read.blob.hasher": "string",
                 "git.read.blob.oid": "string",
@@ -1710,7 +1709,6 @@
           "attrs": {
             "git.blob.inflate.bytes_per_sec": "number",
             "git.read.blob.bytes": "number",
-            "git.read.blob.cache": "string",
             "git.read.blob.hash_await_ms": "number",
             "git.read.blob.hasher": "string",
             "git.read.blob.oid": "string",
