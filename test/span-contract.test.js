@@ -242,7 +242,7 @@ test('span contract: every operation\'s span tree (names, kinds, structure, link
 test('span contract: the snapshot covers every public operation, and the wire spans', async () => {
   const want = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
   const names = new Set(flatten(Object.values(want).flat()).map(l => l.split(' [')[0].split(' · ')[0].split(/ (?:>|~>) /).at(-1)));
-  for (const s of ['git.edit', 'git.commit', 'git.commit.apply', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert', 'git.branch_create', 'git.branch_delete', 'git.tag_create',
+  for (const s of ['git.edit', 'git.commit', 'git.commit.apply', 'git.push_tree', 'git.checkout', 'git.checkout.blobs', 'git.read', 'git.read.blob', 'git.blob.inflate', 'git.ls_tree', 'git.read_commit', 'git.merge', 'git.rebase', 'git.cherry_pick', 'git.revert', 'git.branch_create', 'git.branch_delete', 'git.tag_create',
     'git.upload-pack ls-refs', 'git.upload-pack fetch', 'git.upload-pack discover', 'git.receive-pack', 'git.receive-pack advertise']) assert.ok(names.has(s), `${s} is not in the contract`);
 });
 

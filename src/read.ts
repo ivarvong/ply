@@ -510,6 +510,13 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
   const { follows } = withDefaults<Pick<BlobConfig, 'follows'>>(opts, { follows: null });
   const span = t.tracer.start('git.read.blob', { ...(follows === null ? {} : { follows }), attrs: { 'git.read.blob.oid': oid } });
   const fetchSpan = t.tracer.start('git.upload-pack fetch', { parent: span, kind: KIND.CLIENT });
+  // Inflate+verify wall clock (overlaps the upload-pack body). Opened once the object header has passed the size cap.
+  let inflateSpan: { ended: boolean; set(a: Record<string, unknown>): { end(): void }; end(): void; error(e: unknown): { end(): void } } | null = null;
+  let hashMs = 0;
+  const endInflate = (attrs: Record<string, unknown> = {}): void => {
+    if (inflateSpan === null || inflateSpan.ended) return;
+    inflateSpan.set(attrs).end();
+  };
   const it: AsyncIterator<Uint8Array> = packStream(t, { wants: [oid] }, fetchSpan)[Symbol.asyncIterator]();
   // Close the pack stream: the read failed, was cancelled, or the cap ended it. Its own failure then is not the outcome.
   const close = async (): Promise<void> => { if (typeof it.return === 'function') await it.return().catch(() => { /* the outcome is already decided */ }); };
@@ -522,11 +529,11 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
     if (isFailSiteRecorder(record)) record(failHere);
     const code = thrownCodeOr(e, null);
     if (isPlyCode(code)) {
-      if (!span.ended) { fetchSpan.error(e).end(); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
+      if (!span.ended) { fetchSpan.error(e).end(); endInflate({ 'git.blob.inflate.outcome': code }); span.error(e).set({ 'git.read.blob.outcome': code }).end(); }
       return e;
     }
     const wrapped = plyError('pack_corrupt', `blob stream: ${thrownText(e)}`, { cause: e });
-    if (!span.ended) { fetchSpan.error(wrapped).end(); span.error(wrapped).set({ 'git.read.blob.outcome': wrapped.code }).end(); }
+    if (!span.ended) { fetchSpan.error(wrapped).end(); endInflate({ 'git.blob.inflate.outcome': wrapped.code }); span.error(wrapped).set({ 'git.read.blob.outcome': wrapped.code }).end(); }
     return wrapped;
   };
   const early: Uint8Array[] = [];
@@ -546,6 +553,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
     await close();
     return ok({ kind: 'too_big', size });
   }
+  inflateSpan = t.tracer.start('git.blob.inflate', { parent: span, attrs: { 'git.read.blob.oid': oid, 'git.read.blob.size': size } });
   const ds = new DecompressionStream('deflate');
   const writer = ds.writable.getWriter();
   // a pump failure (network, framing, trailer) aborts the inflate side, which errors the stream the consumer reads. The
@@ -589,7 +597,9 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       if (chunk.byteLength === 0) return;
       seen += chunk.length;
       if (seen > size) throw failHere(plyError('pack_corrupt', `server streamed more than the ${size} bytes it declared`));
+      const h0 = Date.now();
       await sha.update(chunk);
+      hashMs += Date.now() - h0;
       if (held) ctl.enqueue(held);
       held = chunk;
     },
@@ -600,7 +610,8 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       if (got !== oid) throw failHere(plyError('pack_corrupt', `blob content hashes to ${got}, not ${oid}`));
       if (held) ctl.enqueue(held);
       held = null;
-      span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.outcome': 'ok' }).end();
+      endInflate({ 'git.blob.inflate.outcome': 'ok', 'git.read.blob.hash_ms': hashMs });
+      span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.verified': true, 'git.read.blob.hasher': sha.kind, 'git.read.blob.hash_ms': hashMs, 'git.read.blob.outcome': 'ok' }).end();
     },
   });
   // DecompressionStream's own refusals (trailing junk after the deflate end, a bad block) are platform errors with no ply
@@ -615,7 +626,7 @@ export async function openBlob(t: Transport, oid: string, opts: BlobOpts = {}): 
       if (r.done) c.close(); else c.enqueue(r.value);
     },
     async cancel(reason) {
-      if (!span.ended) { fetchSpan.end(); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.outcome': 'cancelled' }).end(); }
+      if (!span.ended) { fetchSpan.end(); endInflate({ 'git.blob.inflate.outcome': 'cancelled' }); span.set({ 'git.read.blob.bytes': seen, 'git.read.blob.hash_ms': hashMs, 'git.read.blob.outcome': 'cancelled' }).end(); }
       await inner.cancel(reason).catch(() => { /* cancelling: the outcome is recorded */ });
       await close();
     },

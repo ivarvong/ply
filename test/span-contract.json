@@ -1459,6 +1459,7 @@
               "kind": "INTERNAL",
               "attrs": {
                 "git.read.blob.bytes": "number",
+                "git.read.blob.hash_ms": "number",
                 "git.read.blob.hasher": "string",
                 "git.read.blob.oid": "string",
                 "git.read.blob.outcome": "string",
@@ -1469,6 +1470,16 @@
                 "follows_from"
               ],
               "children": [
+                {
+                  "name": "git.blob.inflate",
+                  "kind": "INTERNAL",
+                  "attrs": {
+                    "git.blob.inflate.outcome": "string",
+                    "git.read.blob.hash_ms": "number",
+                    "git.read.blob.oid": "string",
+                    "git.read.blob.size": "number"
+                  }
+                },
                 {
                   "name": "git.upload-pack fetch",
                   "kind": "CLIENT",
@@ -1693,6 +1704,7 @@
           "kind": "INTERNAL",
           "attrs": {
             "git.read.blob.bytes": "number",
+            "git.read.blob.hash_ms": "number",
             "git.read.blob.hasher": "string",
             "git.read.blob.oid": "string",
             "git.read.blob.outcome": "string",
@@ -1703,6 +1715,16 @@
             "follows_from"
           ],
           "children": [
+            {
+              "name": "git.blob.inflate",
+              "kind": "INTERNAL",
+              "attrs": {
+                "git.blob.inflate.outcome": "string",
+                "git.read.blob.hash_ms": "number",
+                "git.read.blob.oid": "string",
+                "git.read.blob.size": "number"
+              }
+            },
             {
               "name": "git.upload-pack fetch",
               "kind": "CLIENT",
