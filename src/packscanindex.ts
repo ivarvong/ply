@@ -16,7 +16,7 @@
 // base's; a REF_DELTA's base's when that base is a whole object in this pack whose oid was computed (oids on). Anything
 // else (a base absent from the pack, a base that is itself a delta, oids off) is unknown, never a guess. `oids` is on by
 // default because REF_DELTA-only packs (what Cloudflare Artifacts sends) resolve nothing without it. A REF chain whose
-// base is another delta stays unknown: linking it needs that delta's oid, which means applying it (a follow-up).
+// base is another delta stays unknown: linking it needs that delta's oid, which means applying it (#248).
 // Measured: 71 bytes per entry on a REF-only pack (31 + whole oid 20 + REF base 20), plus 4 per whole object while
 // settling.
 import type { PlyError } from './errors.js';
@@ -56,7 +56,10 @@ export type ScannedEntry = {
   readonly storedType: ObjType;
   readonly size: number;
   readonly base: ScannedBase;
-  // the resolved type, null when it cannot be known without resolving deltas (see the top of this file)
+  // The resolved type, or null: unknown, never a guess. Null for a REF_DELTA whose base is outside the pack, a REF_DELTA
+  // whose base is itself a delta (linking it needs that delta's oid, so applying deltas: #248), any REF_DELTA with
+  // oids off, and an OFS_DELTA resting on one of those. A Cloudflare Artifacts pack is REF_DELTA only, so its chains
+  // deeper than one are null here until #248.
   readonly type: ScannedType | null;
   // a whole object's id, when oids are on; null for a delta or with oids off
   readonly oid: Oid | null;
