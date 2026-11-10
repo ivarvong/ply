@@ -1,13 +1,23 @@
+
 // Inside-cell boundaries. For every cell with a definite expected outcome (landed, rejected, partial: the cells whose
 // bytes git writes, and so the bytes a fault can corrupt), take its canonical response bytes and enumerate, exhaustively,
 // every single-bit flip, every single-byte deletion, every single-byte insertion from ALPHABET at every position, and
 // every truncation. Each mutant goes through the real push path. It must answer the cell's own outcome or 'ambiguous',
 // never a different definite outcome; a rejection may only soften (cas_conflict → push_rejected: 'fresh' → 'no'), never
 // harden. Enumeration, not sampling: no randomness. PUSH_SPACE_WORKERS sets the worker count.
+//
+// The space is split into SLICES fixed slices (base j belongs to slice j % SLICES), one test file per slice
+// (push-outcome-boundary.<s>.test.js), so CI's weighted shards (vitest.config.ts) put the slices on different runners
+// and no one test holds a runner for the whole space (#263: #251 grew it from 2,772 bases / 7,419,600 mutants to
+// 4,592 / 12,981,904, and the single test passed its 30 min bound under nightly's one-runner `npm test`).
+// push-outcome-boundary.plan.test.js checks that the slice files are exactly 0..SLICES-1 and that the slices cover
+// every base exactly once, so a missing or extra slice file fails instead of silently dropping part of the space.
 import { isMainThread, parentPort, workerData, Worker } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
 import * as space from './push-outcome.space.js';
 import { runPush, sameOutcome } from './harness.js';
+
+export const SLICES = 4;
 
 // structural bytes: NUL, the band-1/band-2 designators, LF, space, a pkt-length digit, a status letter, a non-text byte
 export const ALPHABET = [0x00, 0x01, 0x02, 0x0a, 0x20, 0x30, 0x6f, 0xff];
@@ -25,6 +35,13 @@ export function bases() {
   return [...seen.values()];
 }
 
+// The indexes into bases() that slice `s` of `n` owns.
+export function sliceOf(count, s, n) {
+  const out = [];
+  for (let j = s; j < count; j += n) out.push(j);
+  return out;
+}
+
 export function* mutants(b) {
   const n = b.length;
   for (let i = 0; i < n; i++) for (let bit = 0; bit < 8; bit++) { const m = b.slice(); m[i] ^= 1 << bit; yield ['flip', m]; }
@@ -33,12 +50,16 @@ export function* mutants(b) {
   for (let i = 0; i < n; i++) yield ['truncate', b.slice(0, i)];
 }
 
-async function shard(k, w) {
+// Mutants of one base: 8n flips, n deletions, 8(n+1) insertions, n truncations.
+export const mutantCount = n => 8 * n + n + ALPHABET.length * (n + 1) + n;
+
+async function shard(slice, slices, k, w) {
   Error.stackTraceLimit = 0; // speed: the stacks of the millions of expected errors are never read
   const all = bases();
-  const out = { bases: all.length, cases: 0, kinds: {}, same: 0, ambiguous: 0, softened: 0, violations: 0, byWant: {}, bad: [] };
-  for (let j = k; j < all.length; j += w) {
-    const { r, want, id } = all[j];
+  const mine = sliceOf(all.length, slice, slices);
+  const out = { bases: all.length, sliceBases: mine.length, cases: 0, kinds: {}, same: 0, ambiguous: 0, softened: 0, violations: 0, byWant: {}, bad: [] };
+  for (let x = k; x < mine.length; x += w) {
+    const { r, want, id } = all[mine[x]];
     for (const [kind, bytes] of mutants(r.response.bytes)) {
       out.cases++; out.kinds[kind] = (out.kinds[kind] ?? 0) + 1;
       const got = await runPush(r, { bytes, end: 'eof' });
@@ -56,16 +77,19 @@ async function shard(k, w) {
   return out;
 }
 
-if (!isMainThread) {
-  shard(workerData.k, workerData.w).then(r => parentPort.postMessage(r));
-} else {
+if (!isMainThread && workerData?.pushOutcomeBoundary === true) {
+  shard(workerData.slice, workerData.slices, workerData.k, workerData.w).then(r => parentPort.postMessage(r));
+}
+
+// Register the test for slice `slice` (called by push-outcome-boundary.<slice>.test.js).
+export async function boundarySlice(slice) {
   const { test } = await import('vitest');
   const assert = (await import('node:assert/strict')).default;
-  test('push outcome boundaries: every single-byte mutant of every definite cell is its own outcome or ambiguous', { timeout: 1_800_000 }, async () => {
+  test(`push outcome boundaries, slice ${slice}/${SLICES}: every single-byte mutant of every definite cell is its own outcome or ambiguous`, { timeout: 1_800_000 }, async () => {
     const w = +(process.env.PUSH_SPACE_WORKERS ?? Math.min(4, availableParallelism()));
     const t0 = performance.now();
     const shards = await Promise.all(Array.from({ length: w }, (_, k) => new Promise((resolve, reject) => {
-      const wk = new Worker(new URL(import.meta.url), { workerData: { k, w } });
+      const wk = new Worker(new URL(import.meta.url), { workerData: { pushOutcomeBoundary: true, slice, slices: SLICES, k, w } });
       wk.once('message', resolve); wk.once('error', reject);
     })));
     const ms = performance.now() - t0;
@@ -76,9 +100,13 @@ if (!isMainThread) {
       for (const [k, v] of Object.entries(s.kinds)) sum.kinds[k] = (sum.kinds[k] ?? 0) + v;
       sum.bad.push(...s.bad);
     }
-    console.log(`  push-outcome boundaries: ${shards[0].bases} distinct definite cells (request, bytes); ${sum.cases} mutants ${JSON.stringify(sum.kinds)} in ${(ms / 1000).toFixed(1)} s on ${w} workers; own outcome ${sum.same}, ambiguous ${sum.ambiguous}, cas_conflict softened to push_rejected ${sum.softened}, violations ${sum.violations}`);
+    console.log(`  push-outcome boundaries slice ${slice}/${SLICES}: ${shards[0].sliceBases} of ${shards[0].bases} distinct definite cells (request, bytes); ${sum.cases} mutants ${JSON.stringify(sum.kinds)} in ${(ms / 1000).toFixed(1)} s on ${w} workers; own outcome ${sum.same}, ambiguous ${sum.ambiguous}, cas_conflict softened to push_rejected ${sum.softened}, violations ${sum.violations}`);
     for (const [g, n] of Object.entries(sum.byWant).sort((a, b) => b[1] - a[1])) console.log(`    ${String(n).padStart(8)}  ${g}`);
     for (const b of sum.bad.slice(0, 10)) console.log(`    e.g. ${b}`);
     assert.equal(sum.violations, 0);
+    // every mutant of every base of this slice ran: none lost to a worker that ended early
+    const all = bases();
+    const want = sliceOf(all.length, slice, SLICES).reduce((n, j) => n + mutantCount(all[j].r.response.bytes.length), 0);
+    assert.equal(sum.cases, want);
   });
 }

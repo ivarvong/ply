@@ -84,7 +84,7 @@ if (!isMainThread) {
     console.log(`  push-outcome: ${obs.length} git scenarios, ${ids.size} distinct cells observed from git; ambiguous cells' truth: ${truth.join('; ')}`);
   });
 
-  // CPU-bound on 4 workers and shares the runner with push-outcome-boundary.test.js, so it slows with the runner:
+  // CPU-bound on 4 workers and shares the runner with the push-outcome-boundary slices, so it slows with the runner:
   // 457 s of a 474 s file on main CI run 41908605477, and past the old 600 s bound on run 41920845654 (where the
   // boundary file beside it was 36% slower too, 823 s vs 605 s, with no src change between). As for version-refname
   // (#155), the bound is twice the shared CI time.
