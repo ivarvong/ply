@@ -27,6 +27,12 @@ for (const heap of [64, 128]) {
     console.log(JSON.stringify(r));
     assert.ok(r.abDelta <= HOLD, `scan held ${r.abDelta} > ${HOLD}`);
   });
+  test(`heap ${heap} MiB: a pack of three 96 MiB blobs, past every default cap, scanned under WORK_BUDGET holds one inflate record`, () => {
+    const r = cell('scan-work', 96 * MIB, heap);
+    console.log(JSON.stringify(r));
+    assert.equal(r.inflated, 3 * 96 * MIB);
+    assert.ok(r.abDelta <= HOLD, `scan held ${r.abDelta} > ${HOLD}`);
+  });
   test(`heap ${heap} MiB: inflate() of a 64 MiB member in hand holds the output and the pull's hold, nothing more`, () => {
     for (const mode of ['inflate-whole', 'inflate-capped']) {
       const r = cell(mode, 64 * MIB, heap);

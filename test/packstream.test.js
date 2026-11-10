@@ -18,7 +18,7 @@ import { parsePackRef } from './oracle/pack-ref.js';
 import {
   inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs, huffFast,
 } from '../src/inflatestream.js';
-import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts, streamPackAttrs } from '../src/packstream.js';
+import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts, streamPackAttrs, workBudget, WORK_BUDGET, RETAIN_BUDGET } from '../src/packstream.js';
 import { sidebandStep, v2Init, fetchObject, spInit, spStep } from '../src/fetch.js';
 import { fetchPack } from '../src/fetchpack.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -1205,4 +1205,142 @@ test('fetchPack: one span event per object, its base as the event names it', asy
   };
   assert.deepEqual(await ev(pack), [[-1, ''], [12, '']]);
   assert.deepEqual(await ev(refPack.pack, { external: () => ({ type: TYPE.BLOB, data: base }) }), [[-1, hashObject('blob', base)]]);
+});
+
+// ---- the work budget (#240): a scan that keeps nothing is charged what inflating costs ----
+const member = (data, level = 9) => new Uint8Array(zlib.deflateSync(data, { level }));
+const blobEntry = data => concat([encodeObjHeader(TYPE.BLOB, data.length), member(data)]);
+const packOf = datas => sealed(concat([packHead(datas.length), ...datas.map(blobEntry)]));
+// Feed `pieces` one at a time and drain; the inflated bytes delivered and the outcome (the end, or the refusal).
+function drain(pieces, opts) {
+  const opened = parsePackInit(opts);
+  if (!opened.ok) return { inflated: 0, objects: 0, r: opened };
+  const st = opened.value;
+  let inflated = 0, objects = 0, next = 0;
+  for (;;) {
+    const r = next < pieces.length ? parsePackPull(st) : parsePackEnd(st);
+    if (!r.ok) return { inflated, objects, r };
+    if (r.value.kind === 'need') { if (next < pieces.length) parsePackFeed(st, pieces[next++]); continue; }
+    if (r.value.kind === 'chunk') inflated += r.value.bytes.length;
+    if (r.value.kind === 'object-end') objects += 1;
+    if (r.value.kind === 'end') return { inflated, objects, r };
+  }
+}
+const feedings = (bytes, rng) => [[bytes], Array.from(bytes, b => Uint8Array.of(b)), splitRandom(rng, bytes)];
+
+test('work budget: a bomb is refused within one chunk of its budget, in every feeding, before the object ends', () => {
+  const bomb = packOf([new Uint8Array(8 * 1024 * 1024)]);
+  assert.ok(bomb.length < 16 * 1024, 'the fixture is a bomb');
+  const rng = new Rng(240);
+  const floor = 256 * 1024;
+  const limits = withLimits({ maxInflatedTotal: floor });
+  for (const pieces of feedings(bomb, rng)) {
+    const { inflated, objects, r } = drain(pieces, packScanOpts(limits, true, workBudget(4)));
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, 'limit_exceeded');
+    assert.equal(r.error.what, 'pack inflated work');
+    assert.equal(objects, 0);
+    // the refusal is the pull that would have handed over the chunk past the budget: nothing past it reaches the caller
+    assert.ok(inflated <= floor, `delivered ${inflated} > ${floor}`);
+    assert.ok(r.error.got <= floor + 16 * 1024, `charged ${r.error.got}`);
+  }
+});
+
+test('work budget: the budget is the larger of maxInflatedTotal and ratio times the pack bytes consumed, on bytes actually inflated', () => {
+  const data = new Uint8Array(16_000);
+  const entry = blobEntry(data);
+  const pack = sealed(concat([packHead(1), entry]));
+  const header = encodeObjHeader(TYPE.BLOB, data.length).length;
+  const consumed = 12 + entry.length;
+  assert.equal(consumed, 12 + header + member(data).length);
+  const at = (maxInflatedTotal, budget) => refusal(drain([pack], packScanOpts(withLimits({ maxInflatedTotal }), true, budget)).r);
+  // the ratio alone: 2 x consumed (the header, the object's header and its whole member)
+  assert.equal(at(0, workBudget(2)), `limit_exceeded: pack inflated work 16000 exceeds limit ${2 * consumed}`);
+  // the floor when it is the larger
+  assert.equal(at(2 * consumed + 1, workBudget(2)), `limit_exceeded: pack inflated work 16000 exceeds limit ${2 * consumed + 1}`);
+  // exactly the budget passes, either way it is reached
+  assert.equal(at(16_000, workBudget(0)), 'ok');
+  assert.equal(at(15_999, workBudget(0)), 'limit_exceeded: pack inflated work 16000 exceeds limit 15999');
+  assert.equal(at(0, workBudget(16_000 / consumed)), 'ok');
+  assert.equal(at(0, workBudget(1000)), 'ok');
+});
+
+test('work budget: charges accumulate across objects, with no per-object overhead and no declared-size charge', () => {
+  const a = new Uint8Array(1000).fill(1), b = new Uint8Array(2000).fill(2);
+  const pack = packOf([a, b]);
+  const at = n => drain([pack], packScanOpts(withLimits({ maxInflatedTotal: n }), true, workBudget(0)));
+  assert.equal(at(3000).r.ok, true);
+  assert.equal(at(3000).objects, 2);
+  assert.equal(refusal(at(2999).r), 'limit_exceeded: pack inflated work 3000 exceeds limit 2999');
+  assert.equal(at(2999).objects, 1);
+  // retain charges the declared sizes and their overhead for the same pack, before any byte inflates
+  const retained = drain([pack], packScanOpts(withLimits({ maxInflatedTotal: 3000 + 2 * OV - 1 })));
+  assert.equal(refusal(retained.r), `limit_exceeded: pack inflated bytes ${3000 + 2 * OV} exceeds limit ${3000 + 2 * OV - 1}`);
+  assert.equal(retained.inflated, 1000);
+});
+
+test('work budget: an honest pack over every retain cap passes with no caps raised, the same objects as a retain scan', () => {
+  const rng = new Rng(2400);
+  const incompressible = crypto.randomBytes(40_000);
+  const data = [new Uint8Array(incompressible), te.encode('tree text\n'.repeat(3000)), new Uint8Array(0)];
+  const pack = packOf(data);
+  const tight = withLimits({ maxObjectSize: 100, maxInflatedTotal: 1000 });
+  assert.equal(drain([pack], packScanOpts(tight)).r.ok, false);
+  const total = data.reduce((n, d) => n + d.length, 0);
+  const reference = drain([pack], packScanOpts());
+  assert.equal(reference.r.ok, true);
+  for (const pieces of feedings(pack, rng)) {
+    const got = drain(pieces, packScanOpts(tight, true, WORK_BUDGET));
+    assert.equal(got.r.ok, true, refusal(got.r));
+    assert.equal(got.inflated, total);
+    assert.equal(got.objects, reference.objects);
+  }
+});
+
+test('work budget: maxObjectSize applies only when asked for, and a size past a safe integer is still refused', () => {
+  const data = new Uint8Array(4096).fill(7);
+  const pack = packOf([data]);
+  const limits = withLimits({ maxObjectSize: 4095 });
+  assert.equal(drain([pack], packScanOpts(limits, true, WORK_BUDGET)).r.ok, true);
+  assert.equal(drain([pack], packScanOpts(limits, true, workBudget(32))).r.ok, true);
+  assert.equal(refusal(drain([pack], packScanOpts(limits, true, workBudget(32, true))).r), 'limit_exceeded: pack object size 4096 exceeds limit 4095');
+  assert.equal(drain([pack], packScanOpts(withLimits({ maxObjectSize: 4096 }), true, workBudget(32, true))).r.ok, true);
+  // type blob, 4 + 7 x 7 + 7 = 60 bits of size
+  const huge = sealed(concat([packHead(1), Uint8Array.of(0xbf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f), member(data)]));
+  const r = drain([huge], packScanOpts(DEFAULT_LIMITS, true, WORK_BUDGET));
+  assert.equal(r.r.error.code, 'limit_exceeded');
+  assert.equal(r.r.error.what, 'pack object size');
+  assert.equal(r.r.error.max, Number.MAX_SAFE_INTEGER);
+});
+
+test('work budget: maxPackObjects, corruption and the trailer are still refused', () => {
+  const pack = packOf([new Uint8Array(10), new Uint8Array(11)]);
+  assert.equal(refusal(drain([pack], packScanOpts(withLimits({ maxPackObjects: 1 }), true, WORK_BUDGET)).r), 'limit_exceeded: pack objects 2 exceeds limit 1');
+  const flipped = pack.slice();
+  flipped[flipped.length - 1] ^= 1;
+  assert.match(refusal(drain([flipped], packScanOpts(DEFAULT_LIMITS, true, WORK_BUDGET)).r), /^pack_corrupt: pack: trailer sha mismatch/);
+  assert.equal(drain([pack.subarray(0, pack.length - 25)], packScanOpts(DEFAULT_LIMITS, true, WORK_BUDGET)).r.error.code, 'pack_corrupt');
+});
+
+test('work budget: a ratio that bounds nothing is refused where the scan opens', () => {
+  for (const ratio of [Infinity, NaN, -1, '32']) {
+    assert.equal(refusal(parsePackInit(packScanOpts(DEFAULT_LIMITS, true, workBudget(ratio)))), 'bad_request: limits.workRatio must be a finite non-negative number');
+  }
+  assert.equal(parsePackInit(packScanOpts(DEFAULT_LIMITS, true, workBudget(0))).ok, true);
+});
+
+test('the default budget is retain: a record with no budget, and packScanOpts with none, refuse as parsePack does', () => {
+  assert.deepEqual(RETAIN_BUDGET, { tag: 'retain' });
+  assert.deepEqual(WORK_BUDGET, { tag: 'work', ratio: 32, capObjects: false });
+  assert.deepEqual(workBudget(5, true), { tag: 'work', ratio: 5, capObjects: true });
+  assert.deepEqual(packScanOpts().budget, RETAIN_BUDGET);
+  const data = new Uint8Array(100);
+  const pack = packOf([data]);
+  const limits = withLimits({ maxInflatedTotal: 100 + OV - 1 });
+  const expected = `limit_exceeded: pack inflated bytes ${100 + OV} exceeds limit ${100 + OV - 1}`;
+  assert.equal(refusal(parsePack(pack, { limits })), expected);
+  assert.equal(refusal(drain([pack], { verify: true, limits }).r), expected);
+  assert.equal(refusal(drain([pack], { verify: true, limits, budget: undefined }).r), expected);
+  assert.equal(refusal(drain([pack], { verify: true, limits, budget: null }).r), expected);
+  assert.equal(refusal(drain([pack], packScanOpts(limits)).r), expected);
 });

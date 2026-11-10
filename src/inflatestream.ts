@@ -240,6 +240,8 @@ function refuse(st: InflateStream, error: InflateError): Drive {
 }
 // The bytes the decoder has used: a byte read ahead into the bit buffer and not used is not consumed.
 const consumedOf = (st: InflateStream): number => st.base + st.p - Math.floor(st.bitcnt / BYTE_SHIFT);
+// The member bytes used so far, for a caller that weighs output against input (packstream.ts chargeWork).
+export const inflateConsumed: (st: InflateStream) => number = consumedOf;
 const tooLong = (st: InflateStream): ErrorOf<'pack_corrupt'> =>
   plyError('pack_corrupt', `inflate: zlib stream longer than its declared size allows (${consumedOf(st)} > ${st.maxInput} for ${st.declared} bytes)`);
 
