@@ -196,7 +196,8 @@ export const streamFinish = (st: StreamState): Broken | StreamReport => {
 //   { tag: 'malformed', why }            — anything else (absorbing)
 // and reportFinish's shapes:
 //   { tag: 'statuses', refs }            — unpack ok, one status per commanded ref
-//   { tag: 'unpackFailed', status, refs } — unpack failed and every ref is "ng <ref> unpacker error"
+//   { tag: 'unpackFailed', status, refs } — unpack failed and every ref is "ng <ref> unpacker error" (git), or every
+//                                          ref is "ng <ref> <status>", the unpack status echoed (a host: echoedFailure)
 //   { tag: 'malformed', why }
 // execute_commands: an unpack failure marks every command "unpacker error", and nothing else does.
 export type RefStatus = { readonly ref: string; readonly ok: true; readonly reason: '' } | { readonly ref: string; readonly ok: false; readonly reason: string };
@@ -236,6 +237,12 @@ const isGitUnpackError = (status: string): boolean => {
   return false;
 };
 const UNPACKER_ERROR = 'unpacker error';
+const PRINTABLE = /^[ -~]+$/u;
+// A host's unpack failure (not git's grammar): every commanded ref is refused with the unpack status itself as its
+// reason. Cloudflare Artifacts writes exactly this ("unpack invalid pack entry type 0", then "ng <ref> invalid pack entry
+// type 0" for each ref; observed 2026-11-10, #246). Positive evidence, not a guess: a landed or refused report is never
+// one byte from it, since the unpack status must equal every ref's reason and differ from "ok" (SPACE.md, judgment 3).
+const echoedFailure = (status: string, refs: readonly RefStatus[]): boolean => status !== 'ok' && refs.every(r => !r.ok && r.reason === status);
 const malformed = (why: string): Malformed => ({ tag: 'malformed', why });
 // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrayDeclaration: reportStep calls it on "ng <rest>" only; with no space or a leading one, every split names no commanded ref
 const splitOnce = (s: string, sep: string): readonly [string, string] => { const i = s.indexOf(sep); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + sep.length)]; };
@@ -252,9 +259,10 @@ export function reportStep(st: ReportState, payload: Uint8Array): ReportState {
   if (!l.endsWith('\n') || line.includes('\n')) return malformed('a line is not one LF-terminated line');
   switch (st.tag) {
     case 'unpack': {
-      // '' (no unpack line) is neither "ok" nor one of git's failures
+      // '' (no unpack line) is neither "ok" nor a failure. A printable status that is neither "ok" nor one of git's
+      // failures may still be a host's echoed failure (reportFinish decides, from the ref lines).
       const unpack = line.startsWith(UNPACK) ? line.slice(UNPACK.length) : '';
-      return unpack === 'ok' || isGitUnpackError(unpack) ? { tag: 'refs', unpack, want: st.want, seen: new Map() } : malformed('no git unpack line first');
+      return unpack === 'ok' || isGitUnpackError(unpack) || PRINTABLE.test(unpack) ? { tag: 'refs', unpack, want: st.want, seen: new Map() } : malformed('no git unpack line first');
     }
     case 'refs': {
       const isOk = line.startsWith(OK_REF);
@@ -265,7 +273,7 @@ export function reportStep(st: ReportState, payload: Uint8Array): ReportState {
       if (!st.want.has(ref)) return malformed('status for a ref not commanded');
       if (st.seen.has(ref)) return malformed(`two statuses for ${ref}`);
       if (isOk) st.seen.set(ref, { ref, ok: true, reason: '' });
-      else if (/^[ -~]+$/u.test(reason)) st.seen.set(ref, { ref, ok: false, reason });
+      else if (PRINTABLE.test(reason)) st.seen.set(ref, { ref, ok: false, reason });
       else return malformed(`no readable reason for ${ref}`);
       return st;
     }
@@ -278,9 +286,12 @@ export function reportFinish(st: ReportState): ReportShape {
     case 'malformed': return st;
     case 'unpack': return malformed('no git unpack line first');
     case 'refs': {
-      for (const ref of st.want) if (!st.seen.has(ref)) return malformed(`no status for ${ref}`);
+      const complete = [...st.want].every(ref => st.seen.has(ref));
       const refs = [...st.seen.values()];
-      if (st.unpack !== 'ok') return refs.every(r => !r.ok && r.reason === UNPACKER_ERROR) ? { tag: 'unpackFailed', status: st.unpack, refs } : malformed('unpack failed, a ref is not "unpacker error"');
+      // neither "ok" nor git's: definite only as a host's echoed failure over every commanded ref
+      if (st.unpack !== 'ok' && !isGitUnpackError(st.unpack)) return complete && echoedFailure(st.unpack, refs) ? { tag: 'unpackFailed', status: st.unpack, refs } : malformed('no git unpack line first');
+      for (const ref of st.want) if (!st.seen.has(ref)) return malformed(`no status for ${ref}`);
+      if (st.unpack !== 'ok') return refs.every(r => !r.ok && r.reason === UNPACKER_ERROR) || echoedFailure(st.unpack, refs) ? { tag: 'unpackFailed', status: st.unpack, refs } : malformed('unpack failed, a ref is not "unpacker error"');
       if (refs.some(r => !r.ok && r.reason === UNPACKER_ERROR)) return malformed('"unpacker error" beside "unpack ok"');
       return { tag: 'statuses', refs };
     }
