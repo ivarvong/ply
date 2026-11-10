@@ -57,6 +57,10 @@ export { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, parsePackClo
 export type { PackScan, PackPiece, PackScanOpts, PackError, ScanBudget } from './packstream.js';
 export { scanPackIndex, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
 export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject, ScanColumns, ScanContent, ScanIndexOpts, ScanSource } from './packscanindex.js';
+export { packSubset } from './packsubset.js';
+export type { PackSubset, PackSubsetOpts, OutsideBase } from './packsubset.js';
+export { rangeFromBytes } from './rangesource.js';
+export type { RangeSource } from './rangesource.js';
 export { sidebandStep } from './fetch.js';
 export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
