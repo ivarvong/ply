@@ -6,7 +6,7 @@
 // (space.gitReport) rendered with the same ref names; ply's outcome on git's bytes, through push() over the fake
 // transport, must be the table's; and the repository's refs must agree with the outcome: landed → every ref moved,
 // rejected → none, partial → exactly the landed ones, ambiguous → recorded (the truth ply did not claim).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { isMainThread, parentPort, workerData, Worker } from 'node:worker_threads';
 import { availableParallelism } from 'node:os';
 import { mkdirSync, writeFileSync, chmodSync, cpSync, rmSync, unlinkSync } from 'node:fs';
@@ -26,6 +26,10 @@ import { unwrap } from '../unwrap.js';
 const [MAJ, MIN] = gitVersion();
 export const LOCAL_ERA = MAJ > 2 || (MAJ === 2 && MIN >= 51) ? 'v2.51+' : 'v2.50';
 export const GIT_VERSION = `${MAJ}.${MIN}`;
+// does this git's receive-pack take --skip-connectivity-check? Asked of git itself (an unknown option exits 129 before
+// it reads a repository), not inferred from the version.
+export const SKIP_CONNECTIVITY = spawnSync('git', ['receive-pack', '--skip-connectivity-check', '--advertise-refs', '/nonexistent-ply-probe'], { env: ENV, encoding: 'utf8' }).status !== 129;
+const BAD_PACK_SEND = 'D+objects';
 
 // ---- the fixture: one repository of commits, copied per cell ----
 // A ← B ← C, A ← X (diverged), B ← D (never sent: the pack lacks it), B ← W (adds w: in the way of an untracked w);
@@ -42,7 +46,8 @@ function fixture(root) {
   const oids = { A, B, C, X, D, W, P, Q, R, U: 'dead'.repeat(10), zero: space.ZERO };
   // objects of a commit that the server (which has A and B) lacks
   const objectsOf = c => g(src, ['rev-list', '--objects', '--no-object-names', c, `^${B}`, ...(c === R ? [`^${P}`] : [])]).split('\n').filter(Boolean);
-  const objects = { C: objectsOf(C), X: objectsOf(X), W: objectsOf(W), D: [], R: objectsOf(R) };
+  // D's own objects are sent only by the bad pack recipe that removes D after the connectivity check (BAD_PACK_SEND)
+  const objects = { C: objectsOf(C), X: objectsOf(X), W: objectsOf(W), D: [], R: objectsOf(R), [BAD_PACK_SEND]: objectsOf(D) };
   // the bare template: refs main, r0, r1, r2 at B, HEAD → main; the non-bare one: the same, main checked out
   const bare = join(root, 'bare.git');
   g(root, ['init', '-q', '--bare', '-b', 'main', bare]);
@@ -91,7 +96,14 @@ export const RECIPES = {
   'shallow update not allowed': { new: 'R', shallow: 'Q' },
   'funny refname': {},
   'branch is currently checked out': { work: true, head: true },
-  'bad pack': { new: 'D', args: ['--skip-connectivity-check'] },
+  // update()'s "bad pack": the new object is gone after unpack, which the connectivity check would have refused first.
+  // git with `receive-pack --skip-connectivity-check` (not 2.47.3: "unknown option") skips that check, and the pack
+  // lacks D. Without the option, the same update() check: D is sent, unpacked loose into the quarantine, passes the
+  // connectivity check, and the pre-receive hook (which runs after that check, before the quarantine is migrated)
+  // deletes D's commit object, so update() cannot find it.
+  'bad pack': SKIP_CONNECTIVITY
+    ? { new: 'D', args: ['--skip-connectivity-check'] }
+    : { new: 'D', send: BAD_PACK_SEND, setup: ctx => { ctx.cfg('receive.unpackLimit', '1000'); const d = ctx.oids.D; ctx.hook('pre-receive', sh(`rm "$GIT_QUARANTINE_PATH/${d.slice(0, 2)}/${d.slice(2)}"`)); } },
   'deletion prohibited': { setup: ctx => ctx.cfg('receive.denyDeletes', 'true') },
   'deletion of the current branch prohibited': { head: true },
   'bad ref': { setup: ctx => ctx.cfg('receive.denyNonFastForwards', 'true') },
@@ -164,7 +176,7 @@ async function observeShard({ concurrency = 4, filter = () => true, shard = [0, 
       if (rec.head) g(dir, ['symbolic-ref', 'HEAD', names[culprits[0]]]);
       rec.setup?.(ctx);
       const before = refsOf(dir);
-      const news = new Set(cmds.map(x => x.newKey).filter(Boolean));
+      const news = new Set(cmds.map(x => (rec.send && x.newKey === rec.new ? rec.send : x.newKey)).filter(Boolean));
       let pack = packFor(news);
       if (pack && rec.pack) pack = rec.pack(pack);
       const caps = ['report-status', ...(c.atomic.tag === 'on' ? ['atomic'] : []), ...(cmds.some(x => x.new === space.ZERO) ? ['delete-refs'] : [])];
