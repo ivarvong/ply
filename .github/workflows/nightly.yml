@@ -96,12 +96,20 @@ jobs:
           # shellcheck disable=SC2086
           node scripts/nightly-fuzz.mjs "$SEED" "$FUZZER" $ARGS
 
-  test:
-    name: npm test
+  # `npm test`, split across 4 runners the way ci.yml's test-shard is (the weighted sequencer in vitest.config.ts over
+  # test/durations.json): on one runner every heavy file ran beside the others, and the push-outcome boundary space
+  # passed its 30 min bound there (#263). Job `test` then judges gate c over every shard's records and runs the
+  # pinned fuzz lines, which is the rest of `npm test`.
+  test-shard:
+    name: npm test shard (${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       GIT_AUTHOR_NAME: ply
       GIT_AUTHOR_EMAIL: ply@example.com
@@ -118,10 +126,72 @@ jobs:
       - name: git identity
         run: git config --global user.name ply && git config --global user.email ply@example.com
       - run: npm ci
-      - name: npm test
+      - name: vitest
+        env:
+          INDEX: ${{ strategy.job-index }}
+          TOTAL: ${{ strategy.job-total }}
+          PLY_FAILSITES: .failsites
+          NODE_OPTIONS: --import ${{ github.workspace }}/test/space/failsite-hook.mjs
+        run: |
+          shard="$((INDEX + 1))/${TOTAL}"
+          npx vitest run --shard "$shard" || { echo "NIGHTLY-FAIL npm-test shard $shard reproduce: npx vitest run --shard $shard (the failing files are the FAIL lines above)"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: success() || failure()
+        with:
+          name: failsites-${{ matrix.shard }}
+          path: .failsites
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    name: npm test
+    needs: test-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read # the shards' fail-site records
+    env:
+      GIT_AUTHOR_NAME: ply
+      GIT_AUTHOR_EMAIL: ply@example.com
+      GIT_COMMITTER_NAME: ply
+      GIT_COMMITTER_EMAIL: ply@example.com
+    steps:
+      - name: every shard succeeded
+        env:
+          SHARDS: ${{ needs.test-shard.result }}
+        run: |
+          if [ "$SHARDS" != success ]; then
+            echo "NIGHTLY-FAIL npm-test shards: $SHARDS (see the npm test shard jobs)"
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: git identity
+        run: git config --global user.name ply && git config --global user.email ply@example.com
+      - run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: failsites-*
+          path: .failsites
+          merge-multiple: true
+      - name: gate c (fail sites)
+        env:
+          PLY_FAILSITES: .failsites
+          PLY_FAILSITES_GATE: 1
+        run: |
+          npx vitest run test/space/failsites.test.js || { echo "NIGHTLY-FAIL gate-c reproduce: npm test (gate c runs after the full vitest run)"; exit 1; }
+      - name: pinned fuzz lines
         run: |
           # npm test's unseeded fuzz lines print their own `repro: ... --case <seed>` on a failure
-          npm test || { echo "NIGHTLY-FAIL npm-test reproduce: npm test (unseeded fuzz lines: see the repro: lines above)"; exit 1; }
+          npm run test:fuzz-pinned || { echo "NIGHTLY-FAIL npm-test fuzz reproduce: npm run test:fuzz-pinned (unseeded fuzz lines: see the repro: lines above)"; exit 1; }
 
   pack-cut-full:
     # every ply path already runs every cut on each PR; this adds git index-pack --strict on every cut (~9,600 runs,
@@ -176,7 +246,7 @@ jobs:
 
   report:
     name: report failure
-    needs: [seed, fuzz, test, pack-cut-full, sweep]
+    needs: [seed, fuzz, test-shard, test, pack-cut-full, sweep]
     # a job that hits its timeout-minutes ends cancelled, not failed: report that too, or a timeout is silent
     if: failure() || cancelled()
     runs-on: ubuntu-latest
@@ -204,8 +274,27 @@ jobs:
               while IFS=$'\t' read -r id name; do
                 echo "### $name"
                 echo '```'
-                # a log line is "<timestamp> <text>": anchoring skips the echoed script and the ##[error] copies
-                gh api "repos/$GH_REPO/actions/jobs/$id/logs" 2>/dev/null | grep -E '^[0-9TZ:.-]+ NIGHTLY-FAIL ' | cut -d' ' -f2- | head -20 || true
+                # A job's log is not served for a while after the job ends: this step started 9 s after npm test
+                # failed on 2026-11-10 and got nothing, so the issue had an empty excerpt (#263). Retry until the log
+                # carries its NIGHTLY-FAIL line, and say so when it never does instead of posting an empty block.
+                log=""
+                for _ in 1 2 3 4 5 6 7 8; do
+                  log=$(gh api "repos/$GH_REPO/actions/jobs/$id/logs" 2>/dev/null || true)
+                  if printf '%s\n' "$log" | grep -qE '^[0-9TZ:.-]+ NIGHTLY-FAIL '; then break; fi
+                  sleep 15
+                done
+                # a log line is "<timestamp> <text>": anchoring skips the echoed script and the ##[error] copies;
+                # vitest's FAIL and timeout lines name the failing file and test (colour codes stripped)
+                excerpt=$(printf '%s\n' "$log" | sed -E 's/\x1b\[[0-9;]*m//g' |
+                  grep -E '^[0-9TZ:.-]+ (NIGHTLY-FAIL | FAIL |Error: Test timed out|##\[error\]The job running on runner .* has exceeded)' |
+                  cut -d' ' -f2- | awk '!seen[$0]++' | head -20 || true)
+                if [ -n "$excerpt" ]; then
+                  printf '%s\n' "$excerpt"
+                elif [ -z "$log" ]; then
+                  echo "(job log not available after 8 tries over 2 min; open the run above)"
+                else
+                  echo "(no NIGHTLY-FAIL or FAIL line in the job log: it was likely cancelled or timed out; open the run above)"
+                fi
                 echo '```'
               done
           } > "$body"
