@@ -368,6 +368,59 @@ Memory is about two of the stream's chunks, whatever the pack's size (256 MiB me
 
 A refusal before the request (a bad command, an over-cap `length`, a capability the server does not advertise) leaves the stream unread and unlocked, and the caller still owns it. From the first request byte the stream is spent: it is never retried, a request that did not finish it cancels it, and every failure is `ambiguous`, with the first cause in `original` (`bad_request` for a wrong `length`, `limit_exceeded` for the cap, `internal` for a failed source). The last chunk is released only after the source has ended and its length has passed, so a refused pack never reaches the server whole. Ply does not parse or hash the pack: a corrupt one is refused by the server's report.
 
+## Custom exchanges on a transport (`frames`)
+
+Every command in ply is one exchange on a transport: `t.frames(service, body, span, hints)` POSTs `body` to `service` and yields the response as pkt-line frames; `t.advertise(service, span)` is the info/refs GET. A request ply has no call for (a receive-pack with its own capabilities, a v2 command of your own) goes through the same method instead of a raw `fetch()`, and so gets what ply's calls get:
+
+- **auth** as configured on the transport, and **scrubbing**: no form of the credential reaches a span, a URL attribute or an error message, even one the server echoes back;
+- **spans**: `frames` fills the span you pass with `git.service`, `git.request.bytes` (a `StreamBody`'s `length`), `http.request.method`, `url.full` (redacted), `http.response.status_code`, `git.response.bytes`, `git.response.first_byte_ms` and the rest of the HTTP attributes (the telemetry contract below);
+- the transport's **redirect policy**, **limits**, **timeouts** (first byte, idle) and `signal`;
+- **typed errors**: a non-2xx, a foreign content type, a timeout, a network failure and a broken pkt-line are each a `PlyError` (`auth`, `not_found`, `http`, `not_git`, `timeout`, `network`, `protocol`, ...), thrown from the iteration (results never throw, streams error).
+
+What it leaves to you: the request's bytes (pkt framing, capabilities, a pack), what the reply means, and ending your span. `body` is bytes or a `StreamBody` `{ stream, length }`, read at the request's pace as it goes out (chunked). `length` is the figure the span reports, not a check: `frames` sends what the stream yields, so a stream that yields a different count, or bytes that are not a whole pack, is yours to catch (measured in the test: 7 extra bytes after a pack's trailer land, 7 short is git's `unpack failed`). A stream that errors midway ends the request: on Node, `fetch` rejects and `frames` throws `network` with your error on its `cause` chain; on workerd an errored request body can end as if it were complete. So a pack you are still producing should hold its last chunk back until it has checked the whole, and keep its own failure to report, as `pushPack` does (`streamSource` in `src/packwrite.ts`). Get a transport from `createTransport(url, opts)`, `GitHttp.create(url, opts)` (`.t`), or `transportFrom(record)` for a transport of your own. A receive-pack with a streamed pack, the report read with the exported step functions (this block is executed by `test/custom-exchange.test.js` against `git http-backend`, with the error paths beside it):
+
+```js
+// custom-exchange: receive-pack
+import { createTransport, Tracer, KIND, ZERO_OID, TYPE, buildPack, hashObject, encodeTree, encodeCommit } from 'ply';
+import { frames } from 'ply/transport';
+import { pushBody, streamInit, streamStep, streamFinish, classifyReport } from 'ply/push';
+
+// what to send: a root commit holding one file
+const file = new TextEncoder().encode('hello\n');
+const tree = encodeTree([{ mode: '100644', name: 'hello.txt', oid: hashObject('blob', file) }]);
+if (!tree.ok) throw tree.error;
+const made = encodeCommit({ tree: hashObject('tree', tree.value), author: 'Me <me@example.com> 1700000000 +0000', message: 'hello\n' });
+if (!made.ok) throw made.error;
+const commit = hashObject('commit', made.value);
+const objects = [{ type: TYPE.BLOB, data: file }, { type: TYPE.TREE, data: tree.value }, { type: TYPE.COMMIT, data: made.value }];
+
+const spans = [];
+const t = createTransport(url, { ...opts, tracer: new Tracer({ onEnd: s => spans.push(s) }) });
+if (!t.ok) throw t.error;
+// the request: the commands as pkt-lines and a flush, then the pack, as one stream of known length
+const commands = [{ ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: commit }];
+const prefix = pushBody({ commands, caps: ['report-status', 'side-band-64k', 'agent=me/1'] });
+if (!prefix.ok) throw prefix.error;
+const { pack } = await buildPack(objects);
+const stream = new ReadableStream({ start(c) { c.enqueue(prefix.value); c.enqueue(pack); c.close(); } });
+const body = { stream, length: prefix.value.length + pack.length };
+const span = t.value.tracer.start('custom receive-pack', { kind: KIND.CLIENT, scrub: t.value.scrub });
+let reply = streamInit(true);  // side-band-64k: the report in band 1, progress in band 2
+try {
+  for await (const f of frames(t.value, 'git-receive-pack', body, span)) {
+    const stepped = streamStep(reply, f);
+    if (!stepped.ok) throw stepped.error;
+    reply = stepped.value;
+  }
+} catch (e) { span.error(e); throw e; } finally { span.end(); }
+const done = streamFinish(reply);
+if (done.tag !== 'report') throw new Error(`no report: ${done.why}`);
+const report = classifyReport(done.lines, commands);  // { tag: 'statuses', refs: [{ ref, ok: true, reason: '' }] }
+if (report.tag !== 'statuses' || !report.refs.every(r => r.ok)) throw new Error(`refused: ${JSON.stringify(report)}`);
+```
+
+**Stability.** `Transport` (`kind`, `url`, `tracer`, `parent`, `limits`, `signal`, `quirks`, `objects`, `scrub`, `frames`, `advertise`) is the public contract every command is written against, and the `ply/transport` exports `frames`, `advertise` and `transportFrom` are public API: a change to their shape is a breaking change, named in the release notes (ply is pre-1.0, so a minor version may carry one). `Frame` and `StreamBody` are part of it. The step functions used above (`pushBody`, `streamInit`/`streamStep`/`streamFinish`, `classifyReport`, `pktStep`, `v2Step`, `sidebandStep`) are public too, but they are protocol codecs: they follow git's wire format, and their states are opaque records you pass back, not fields to read. The HTTP implementation behind `frames` (`createTransport`'s internals, its retry and redirect memo) is not: depend on what it does, as described here, not on how. Before writing an exchange, check for the call that already does it: a pack you have is `pushPack`, objects are `push`, a fetch is `packStream`/`fetchPack`, refs are `lsRefs`, capabilities are `discover`/`receiveCaps`. Those add what a raw exchange does not: command and capability checks, a push's outcome rule (a report read exactly as git writes it, everything else `ambiguous`), and the cancel-and-release rules for a streamed pack.
+
 ## Push a whole local repository (history, no git binary)
 
 `pushRepo(dir, url, { refspecs?, all?, tags?, force?, dryRun?, thin? }, opts)` is `git push <url> <refspecs>` from a machine with Node and no git: it reads `dir`'s `.git` itself (a work tree, a linked worktree or a bare repository: loose objects inflated and hash-checked, every packfile parsed and resolved, `packed-refs` and loose refs, `HEAD`), asks the remote for its refs (one ls-refs), and sends one receive-pack request for every command. Example: [`examples/push-repo.mjs`](examples/push-repo.mjs).
