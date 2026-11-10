@@ -155,15 +155,19 @@ function scanWork() {
   const st = must(parsePackInit(packScanOpts(DEFAULT_LIMITS, false, WORK_BUDGET)));
   let objects = 0, inflated = 0, fed = 0;
   function* body() { yield packHead(count); for (let i = 0; i < count; i++) { yield encodeObjHeader(TYPE.BLOB, SIZE); yield* storedMember(SIZE); } }
-  for (const piece of sealed(body())) {
-    parsePackFeed(st, piece);
+  // in its own function, as inflateDrop: a piece left in this frame's variables is the cell's memory, not the scan's
+  const drain = () => {
     for (;;) {
       const p = must(parsePackPull(st));
-      if (p.kind === 'need') break;
+      if (p.kind === 'need') return;
       if (p.kind === 'chunk') inflated += p.bytes.length;
       if (p.kind === 'object-end') objects += 1;
     }
-    if (++fed % 4 === 0) note();
+  };
+  for (const piece of sealed(body())) {
+    parsePackFeed(st, piece);
+    drain();
+    if (++fed % 64 === 0) note();
   }
   for (let p = must(parsePackEnd(st)); p.kind !== 'end'; p = must(parsePackPull(st))) { /* the trailer */ }
   note();
