@@ -127,6 +127,24 @@ test('post: bytes go as a POST body with redirect manual; a stream goes with dup
   assert.equal(span2.attrs['git.request.bytes'], 1);
 });
 
+// #232: git sends Git-Protocol only for upload-pack (remote-curl downgrades every other service to v0)
+test('Git-Protocol: version=2 goes on upload-pack GET and POST, and on neither receive-pack request', async () => {
+  const result = service => new Response(new Uint8Array([0x30, 0x30, 0x30, 0x30]), { status: 200, headers: { 'content-type': `application/x-${service}-result` } });
+  const advert = service => { const line = `# service=${service}\n`; return new Response(`${(line.length + 4).toString(16).padStart(4, '0')}${line}0000`, { status: 200, headers: { 'content-type': `application/x-${service}-advertisement` } }); };
+  const serviceOf = url => (String(url).includes('receive-pack') ? 'git-receive-pack' : 'git-upload-pack');
+  const r = recorder(url => (String(url).includes('info/refs') ? advert(serviceOf(url)) : result(serviceOf(url))));
+  const t = createTransport('https://h/r', { fetchImpl: r.fetchImpl }).value;
+  for (const service of ['git-receive-pack', 'git-upload-pack']) {
+    assert.equal((await t.advertise(service, spanOf())).ok, true);
+    for await (const _ of t.frames(service, Uint8Array.of(0), spanOf(), { bypassCache: false })) { /* frames */ }
+  }
+  const header = (url, method) => { const hit = r.seen.find(s => s.url.includes(url) && (s.init.method ?? 'GET') === method); assert.ok(hit, `${method} ${url}`); return new Headers(hit.init.headers).get('git-protocol'); };
+  assert.equal(header('info/refs?service=git-receive-pack', 'GET'), null);
+  assert.equal(header('/git-receive-pack', 'POST'), null);
+  assert.equal(header('info/refs?service=git-upload-pack', 'GET'), 'version=2');
+  assert.equal(header('/git-upload-pack', 'POST'), 'version=2');
+});
+
 test('a finished exchange clears its timer: the request signal does not fire after it (advertise and post)', async () => {
   const adv = () => new Response('001e# service=git-upload-pack\n0000', { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-advertisement' } });
   const r = recorder((url) => (String(url).includes('info/refs') ? adv() : new Response(new Uint8Array([0x30, 0x30, 0x30, 0x30]), { status: 200, headers: { 'content-type': 'application/x-git-receive-pack-result' } })));

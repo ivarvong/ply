@@ -286,8 +286,8 @@ test('service header: absent | flush | metadata then flush | delim | cut, on bot
   const bodies = {
     'adv-v2': { run: t => discover(t), rest: cat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=git/2.50.0\n')), unwrap(pkt('ls-refs\n')), unwrap(pkt('fetch=shallow filter\n')), FLUSH]) },
     'adv-v0': { run: t => receiveCaps(t), rest: cat([unwrap(pkt(`${OID} refs/heads/main\0report-status\n`)), FLUSH]) },
-    // a receive-pack GET answered in v2 (Cloudflare Artifacts, asked with Git-Protocol: version=2): no v0 capabilities
-    'adv-v0 as v2': { run: t => receiveCaps(t), rest: cat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=x\n')), FLUSH]) },
+    // a receive-pack GET answered in v2 anyway: names no push capabilities, so a well-placed one is refused by name (#232)
+    'adv-v0 as v2': { run: t => receiveCaps(t), rest: cat([unwrap(pkt('version 2\n')), unwrap(pkt('agent=x\n')), FLUSH]), accepted: 'unsupported' },
   };
   const svc = { 'adv-v2': 'git-upload-pack', 'adv-v0': 'git-receive-pack', 'adv-v0 as v2': 'git-receive-pack' };
   for (const [name, b] of Object.entries(bodies)) {
@@ -299,7 +299,10 @@ test('service header: absent | flush | metadata then flush | delim | cut, on bot
     ]) {
       const got = await outcome(() => b.run(transport(kind => (kind === 'advertise' ? { bytes } : undefined))));
       census.positions++;
-      if (ok ? got.tag !== 'ok' : !(got.tag === 'typed' && got.code === 'protocol')) wrong.push(`${name} ${form}: ${JSON.stringify(got).slice(0, 140)}`);
+      // the v2 refusal lands on the line that says `version 2`, so only a form that never reaches that line stays a framing error
+      const reachedV2 = b.accepted && form !== 'delim' && form !== 'cut';
+      const fine = reachedV2 ? got.tag === 'typed' && got.code === b.accepted : ok ? got.tag === 'ok' : got.tag === 'typed' && got.code === 'protocol';
+      if (!fine) wrong.push(`${name} ${form}: ${JSON.stringify(got).slice(0, 140)}`);
     }
   }
   assert.deepEqual(wrong, []);
