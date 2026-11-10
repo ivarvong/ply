@@ -56,6 +56,9 @@ export type { InflateStream, InflatePiece, InflateStreamOpts, StreamBound, Strea
 export { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, parsePackClose, packScanOpts, workBudget, WORK_BUDGET, RETAIN_BUDGET } from './packstream.js';
 export type { PackScan, PackPiece, PackScanOpts, PackError, ScanBudget } from './packstream.js';
 export { scanPackIndex, scannedPackOf, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
+// the same pulls as async-iterable ReadableStreams over a byte source: the read loop, once (#241)
+export { scanPack, pktFrames, inflateChunks } from './pullstream.js';
+export type { ByteSource, ScanPiece, ScanPackOpts, InflateChunksOpts } from './pullstream.js';
 export { resolvePackRange, resolvedIndexOf, RESOLVED_ENTRY_BYTES, RESOLVE_CACHE_BYTES, NO_BASE as RESOLVED_NO_BASE, THIN_BASE as RESOLVED_THIN_BASE } from './packrangeresolve.js';
 export type { ResolvedIndex, ResolvedColumns, ResolveStats, ResolveRangeOpts, ThinBaseLookup, ThinBase as ResolvedThinBase } from './packrangeresolve.js';
 export { rangeFromBytes } from './rangesource.js';
