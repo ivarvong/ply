@@ -278,7 +278,7 @@ jobs:
                 # failed on 2026-11-10 and got nothing, so the issue had an empty excerpt (#263). Retry until the log
                 # carries its NIGHTLY-FAIL line, and say so when it never does instead of posting an empty block.
                 log=""
-                for attempt in 1 2 3 4 5 6 7 8; do
+                for _ in 1 2 3 4 5 6 7 8; do
                   log=$(gh api "repos/$GH_REPO/actions/jobs/$id/logs" 2>/dev/null || true)
                   if printf '%s\n' "$log" | grep -qE '^[0-9TZ:.-]+ NIGHTLY-FAIL '; then break; fi
                   sleep 15
