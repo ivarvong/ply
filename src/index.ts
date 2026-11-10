@@ -55,6 +55,8 @@ export { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflat
 export type { InflateStream, InflatePiece, InflateStreamOpts, StreamBound, StreamWrap, InflateStats, InflateError } from './inflatestream.js';
 export { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, parsePackClose, packScanOpts, workBudget, WORK_BUDGET, RETAIN_BUDGET } from './packstream.js';
 export type { PackScan, PackPiece, PackScanOpts, PackError, ScanBudget } from './packstream.js';
+export { scanPackIndex, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
+export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject, ScanColumns, ScanContent, ScanIndexOpts, ScanSource } from './packscanindex.js';
 export { sidebandStep } from './fetch.js';
 export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
