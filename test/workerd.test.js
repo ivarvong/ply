@@ -207,4 +207,20 @@ test('workerd: a 4 MiB push streams its pack (duplex half; redirect manual, work
   assert.equal(git(cut, ['for-each-ref']).trim(), '', 'git moved no ref');
 });
 
+test('workerd: pushPack streams a caller\'s pack and lands; a wrong length or a failed source does not, though workerd ends an errored body as if complete', { skip: !WORKERD }, async () => {
+  const bare = makeBareRepo(root, 'pp');
+  const r = await post('/push-pack', { url: `${srv.url}/pp.git`, size: 4 << 20, mode: 'ok' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.seen, [{ streamed: true, duplex: 'half', redirect: 'manual' }]);
+  assert.equal(r.packBytes, r.whole);
+  assert.equal(git(bare, ['rev-parse', 'main']).trim(), r.commit);
+  assert.deepEqual(fsckProblems(bare), []);
+  for (const [mode, original] of [['short', 'bad_request'], ['errored', 'internal']]) {
+    const cut = makeBareRepo(root, `pp${mode}`);
+    const m = await post('/push-pack', { url: `${srv.url}/pp${mode}.git`, size: 1 << 20, mode });
+    assert.deepEqual([m.ok, m.code, m.original], [false, 'ambiguous', original], JSON.stringify(m));
+    assert.equal(git(cut, ['for-each-ref']).trim(), '', `${mode}: git moved no ref`);
+  }
+});
+
 

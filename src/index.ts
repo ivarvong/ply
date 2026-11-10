@@ -24,7 +24,7 @@ export { rebaseBranch, cherryPick, revertCommit, pickCommit, linearChain } from 
 export { ed25519Signer, generateSigner, signCommit, withGpgsig, sshPublicKey, armor } from './sign.js';
 
 // ---- wire ----
-export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
+export { GitHttp, lsRefs, lsRefsBody, fetchBody, v2Init, v2Step, packStream, fetchObject, spInit, spStep, spFinish, fetchPack, negotiate, push, pushWithOptions, pushPack, receiveCaps, discover, pushBody, forgetQuirks } from './client.js';
 export type { Transport } from './transport.js';
 export type { ExportLine, Exporter, EndedSpan, SpanSink, FlatSpan } from './otel.js';
 export type { Limits, CheckedLimits, LimitsInput } from './limits.js';
