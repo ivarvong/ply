@@ -41,6 +41,7 @@ const MUTATION_FILES = [
   'test/sha1.test.js',
   'test/lsrefs-step.test.js',
   'test/path-trees-unit.test.js',
+  'test/pullstream.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

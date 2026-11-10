@@ -193,20 +193,17 @@ export function inflateChunks(source: ByteSource, input: Partial<InflateChunksOp
   const opened = inflateInit(opts);
   if (!opened.ok) return drive(source, opened);
   const st = opened.value;
-  let member = true;
   let closed = false;
-  let failed: Option<InflateError> = none;
+  // After the member's end the inflater stays at its end and holds what it is fed after (inflateUnread): the next pull
+  // returns 'end' again and reads that as trailing bytes, so a byte after the member is refused whichever chunk brought it.
   const dec: Decoder<Uint8Array, InflateError> = {
     pull: () => {
-      if (failed.tag === 'some') return err(failed.value);
-      if (!member) return ok(closed ? END : NEED);
       const p = closed ? inflateEnd(st) : inflatePull(st);
       if (!p.ok) return p;
       switch (p.value.kind) {
         case 'chunk': return ok(item(p.value.bytes));
         case 'need': return ok(NEED);
         case 'end': {
-          member = false;
           const left = inflateUnread(st).length;
           if (left > 0) return err(trailing(left));
           return ok(closed ? END : NEED);
@@ -215,10 +212,7 @@ export function inflateChunks(source: ByteSource, input: Partial<InflateChunksOp
       // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
       return assertNever(p.value);
     },
-    feed: bytes => {
-      if (member) { inflateFeed(st, bytes); return; }
-      if (bytes.length > 0) failed = some(trailing(bytes.length));
-    },
+    feed: bytes => { inflateFeed(st, bytes); },
     close: () => { closed = true; },
   };
   return drive(source, ok(dec));
