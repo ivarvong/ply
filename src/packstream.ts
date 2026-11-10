@@ -8,20 +8,27 @@
 // before an inflated byte exists. The trailer SHA-1 runs over the bytes as they are fed, 20 bytes behind, so the bytes
 // it has not hashed when the input closes are the trailer exactly when the trailer is where the objects end.
 // test/packstream.test.js holds the scan to parsePack's objects, trailer and error code for every chunking.
+//
+// That is the default budget, for a caller that keeps what it reads. A caller that drops every object can ask for a work
+// budget (workBudget): nothing is retained, so what a pack can cost is CPU, and it is charged as CPU: the bytes actually
+// inflated, against maxInflatedTotal or `ratio` times the pack bytes consumed so far, whichever is larger. A scan's memory
+// is peakBound('pack-scan') under either budget (streambound.ts). The check runs at each chunk's end, so a refusal comes
+// at most one chunk past the budget, and a pack within a chunk of its ratio can pass or refuse depending on how it is fed.
 import type { ErrorOf } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
-import { ok, err, assertNever } from './result.js';
+import { ok, err, assertNever, getOrElse } from './result.js';
 import type { LimitsInput } from './limits.js';
-import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, parseLimits } from './limits.js';
-import { atOr } from './absent.js';
+import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, LIMIT_WORK_RATIO, checkLimit, limitExceeded, parseLimits } from './limits.js';
+import type { Input } from './absent.js';
+import { atOr, fromNullish } from './absent.js';
 import { take, shortRead } from './bytes.js';
 import { Sha1, toHex, toOid } from './sha1.js';
 import type { Oid } from './oid.js';
 import type { ObjType } from './format.js';
 import type { InflateStats, InflateStream } from './inflatestream.js';
 export type { InflateStats };
-import { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, zlibWrap } from './inflatestream.js';
+import { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, inflateConsumed, declaredBound, zlibWrap } from './inflatestream.js';
 import type { Attrs } from './otel.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, OID_BYTES, UINT32_BYTES, BE32_SHIFTS,
@@ -159,8 +166,17 @@ export type ObjBase =
   | { readonly tag: 'ref'; readonly oid: Oid };
 export const NO_BASE: ObjBase = Object.freeze({ tag: 'none' });
 // limits: any subset (a key left out is the default), parsed by parsePackInit.
-export type PackScanOpts = { readonly verify: boolean; readonly limits: LimitsInput };
-export const packScanOpts = (limits: LimitsInput = DEFAULT_LIMITS, verify = true): PackScanOpts => ({ verify, limits });
+// How a scan charges inflation. retain: declared sizes plus LIMIT_OBJECT_OVERHEAD against maxInflatedTotal, before any
+// byte inflates, for a caller that keeps objects (parsePack's refusals). work: see the top of this file; maxObjectSize
+// applies only with capObjects, since a scan that keeps nothing has no reason to refuse a large blob.
+export type ScanBudget =
+  | { readonly tag: 'retain' }
+  | { readonly tag: 'work'; readonly ratio: number; readonly capObjects: boolean };
+export const RETAIN_BUDGET: ScanBudget = Object.freeze({ tag: 'retain' });
+export const workBudget = (ratio: number = LIMIT_WORK_RATIO, capObjects = false): ScanBudget => Object.freeze({ tag: 'work', ratio, capObjects });
+export const WORK_BUDGET: ScanBudget = workBudget();
+export type PackScanOpts = { readonly verify: boolean; readonly limits: LimitsInput; readonly budget: ScanBudget };
+export const packScanOpts = (limits: LimitsInput = DEFAULT_LIMITS, verify = true, budget: ScanBudget = RETAIN_BUDGET): PackScanOpts => ({ verify, limits, budget });
 
 export type PackPiece =
   | { readonly kind: 'need' }
@@ -184,6 +200,7 @@ export type PackScan = {
   maxObjects: number;
   maxInflatedTotal: number;
   maxObjectSize: number;
+  budget: ScanBudget;
   ended: boolean;
   // unread input outside an object body: `carry` from `p`, which is pack offset `at`
   carry: Uint8Array;
@@ -221,17 +238,19 @@ function refuse(st: PackScan, error: PackError): Step {
   return FAILED;
 }
 
+// A work-budgeted scan's object cap: the largest size a double holds exactly, so a declared size past it is still refused.
+const UNCAPPED_OBJECT: number = Number.MAX_SAFE_INTEGER;
 // The three caps a scan holds, each already checked (parseLimits, or parsePack's override checked the same way).
 export type PackCaps = { readonly maxObjects: number; readonly maxInflatedTotal: number; readonly maxObjectSize: number };
 // A scan under caps in hand: the limits' check is the caller's (parsePackInit, parsePack).
-export function packScanOpen(caps: PackCaps, verify: boolean): Result<PackScan, PackError> {
+export function packScanOpen(caps: PackCaps, verify: boolean, budget: ScanBudget = RETAIN_BUDGET): Result<PackScan, PackError> {
   // a declared size of 0 under a checked cap: this record always opens (each member resets it)
   // Stryker disable next-line all: see above
   const inflate = inflateInit({ bound: declaredBound(0, caps.maxObjectSize), wrap: zlibWrap(true) });
   // Stryker disable next-line all: see above
   if (!inflate.ok) return inflate;
   return ok({
-    phase: 'header', halt: RUNNING, maxObjects: caps.maxObjects, maxInflatedTotal: caps.maxInflatedTotal, maxObjectSize: caps.maxObjectSize,
+    phase: 'header', halt: RUNNING, maxObjects: caps.maxObjects, maxInflatedTotal: caps.maxInflatedTotal, maxObjectSize: caps.maxObjectSize, budget,
     // Stryker disable next-line ObjectLiteral,StringLiteral: the hash is read only as kind 'on'; any other record is off
     ended: false, carry: EMPTY, p: 0, at: 0, total: 0, lag: EMPTY, hash: verify ? { kind: 'on', sha: new Sha1() } : { kind: 'off' },
     // Stryker disable next-line all: placeholders until the first object header sets them
@@ -239,11 +258,17 @@ export function packScanOpen(caps: PackCaps, verify: boolean): Result<PackScan, 
   });
 }
 // @decoder parsePackInit prefix=pack
-export function parsePackInit(opts: PackScanOpts): Result<PackScan, PackError> {
+export function parsePackInit(opts: Omit<PackScanOpts, 'budget'> & Input<Pick<PackScanOpts, 'budget'>>): Result<PackScan, PackError> {
   const limits = parseLimits(opts.limits);
   if (!limits.ok) return limits;
-  const { maxPackObjects: maxObjects, maxInflatedTotal, maxObjectSize } = limits.value;
-  return packScanOpen({ maxObjects, maxInflatedTotal, maxObjectSize }, opts.verify);
+  const budget = getOrElse(fromNullish(opts.budget), RETAIN_BUDGET);
+  if (budget.tag === 'work') {
+    const ratio = checkLimit(budget.ratio, 'workRatio');
+    if (!ratio.ok) return ratio;
+  }
+  const { maxPackObjects: maxObjects, maxInflatedTotal } = limits.value;
+  const maxObjectSize = budget.tag === 'work' && !budget.capObjects ? UNCAPPED_OBJECT : limits.value.maxObjectSize;
+  return packScanOpen({ maxObjects, maxInflatedTotal, maxObjectSize }, opts.verify, budget);
 }
 
 // Hash everything but the last PACK_TRAILER_BYTES bytes seen so far (spStep's lag, fetch.ts). The lag is kept with
@@ -380,9 +405,11 @@ function stepRef(st: PackScan): Step {
 }
 // The declared size against the aggregate cap, before an inflated byte exists (readObjHeader held it to maxObjectSize).
 function stepGate(st: PackScan): Step {
-  const cost = st.size + LIMIT_OBJECT_OVERHEAD;
-  if (st.charged + cost > st.maxInflatedTotal) return refuse(st, limitExceeded('pack inflated bytes', st.charged + cost, st.maxInflatedTotal));
-  st.charged += cost;
+  if (st.budget.tag === 'retain') {
+    const cost = st.size + LIMIT_OBJECT_OVERHEAD;
+    if (st.charged + cost > st.maxInflatedTotal) return refuse(st, limitExceeded('pack inflated bytes', st.charged + cost, st.maxInflatedTotal));
+    st.charged += cost;
+  }
   st.headerBytes = st.at - st.offset;
   // the size passed the cap on the line above, and the cap passed parseLimits: the reset cannot refuse
   const opened = inflateReset(st.inflate, { bound: declaredBound(st.size, st.maxObjectSize), wrap: zlibWrap(true) });
@@ -395,6 +422,15 @@ function stepGate(st: PackScan): Step {
   st.phase = 'body';
   return piece({ kind: 'object', index: st.index, offset: st.offset, headerBytes: st.headerBytes, type: st.type, size: st.size, base: st.base });
 }
+// The bytes just inflated against a work budget; false when the scan has refused. A retain budget charged at the gate.
+function chargeWork(st: PackScan, inflated: number): boolean {
+  if (st.budget.tag !== 'work') return true;
+  st.charged += inflated;
+  const allowed = Math.max(st.maxInflatedTotal, st.budget.ratio * (st.at + inflateConsumed(st.inflate)));
+  if (st.charged <= allowed) return true;
+  refuse(st, limitExceeded('pack inflated work', st.charged, allowed));
+  return false;
+}
 function stepBody(st: PackScan): Step {
   const stream = st.inflate;
   const pulled = st.ended ? inflateEnd(stream) : inflatePull(stream);
@@ -402,7 +438,9 @@ function stepBody(st: PackScan): Step {
   const got = pulled.value;
   switch (got.kind) {
     case 'need': return NEED;
-    case 'chunk': return piece({ kind: 'chunk', index: st.index, bytes: got.bytes });
+    case 'chunk':
+      if (!chargeWork(st, got.bytes.length)) return FAILED;
+      return piece({ kind: 'chunk', index: st.index, bytes: got.bytes });
     case 'end': {
       // what followed the member is the scan's again
       st.carry = inflateUnread(stream);

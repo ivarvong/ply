@@ -6,6 +6,7 @@
 //
 //   inflate-drop     a stored zlib member of SIZE bytes, every chunk dropped                 bound: peakBound(inflate)
 //   scan-drop        a pack of COUNT 1-byte blobs, scanned, every object dropped             bound: peakBound(pack-scan)
+//   scan-work        a pack of 3 x SIZE stored blobs of SIZE/1 MiB chunks under WORK_BUDGET, default caps, every chunk dropped  bound: peakBound(pack-scan)
 //   fetch-object     fetchObject of a SIZE-byte blob through the http transport (fetchSingle) bound: peakBound(fetch-object)
 //   fetch-drain      the same response with every pack chunk dropped: the transport's own share
 //   fetch-buffered   the same bytes read the way fetchSingle did before #172: the zlib member collected, then inflate()
@@ -19,7 +20,7 @@
 import crypto from 'node:crypto';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, declaredBound, zlibWrap } from '../../src/inflatestream.js';
 import { inflate } from '../../src/inflate.js';
-import { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, packScanOpts } from '../../src/packstream.js';
+import { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, packScanOpts, WORK_BUDGET } from '../../src/packstream.js';
 import { fetchObject, packStream, spInit, spStep, spFinish } from '../../src/fetch.js';
 import { fetchPack } from '../../src/fetchpack.js';
 import zlib from 'node:zlib';
@@ -28,7 +29,7 @@ import { encodeObjHeader } from '../../src/pack.js';
 import { concat } from '../../src/bytes.js';
 import { TYPE } from '../../src/objects.js';
 import { Tracer } from '../../src/otel.js';
-import { withLimits, LIMIT_OBJECT_OVERHEAD } from '../../src/limits.js';
+import { withLimits, DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD } from '../../src/limits.js';
 import { peakBound } from '../../src/streambound.js';
 import { PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PKT_MAX_PAYLOAD } from '../../src/format.js';
 
@@ -145,6 +146,33 @@ function scanDrop() {
   note();
   if (objects !== count) throw new Error(`scanned ${objects} of ${count}`);
   return { bound: peakBound({ kind: 'pack-scan' }), objects };
+}
+
+// A pack past every default cap: three blobs of SIZE, each over maxObjectSize, their total over maxInflatedTotal.
+function scanWork() {
+  const count = 3;
+  start();
+  const st = must(parsePackInit(packScanOpts(DEFAULT_LIMITS, false, WORK_BUDGET)));
+  let objects = 0, inflated = 0, fed = 0;
+  function* body() { yield packHead(count); for (let i = 0; i < count; i++) { yield encodeObjHeader(TYPE.BLOB, SIZE); yield* storedMember(SIZE); } }
+  // in its own function, as inflateDrop: a piece left in this frame's variables is the cell's memory, not the scan's
+  const drain = () => {
+    for (;;) {
+      const p = must(parsePackPull(st));
+      if (p.kind === 'need') return;
+      if (p.kind === 'chunk') inflated += p.bytes.length;
+      if (p.kind === 'object-end') objects += 1;
+    }
+  };
+  for (const piece of sealed(body())) {
+    parsePackFeed(st, piece);
+    drain();
+    if (++fed % 64 === 0) note();
+  }
+  for (let p = must(parsePackEnd(st)); p.kind !== 'end'; p = must(parsePackPull(st))) { /* the trailer */ }
+  note();
+  if (objects !== count || inflated !== count * SIZE) throw new Error(`scanned ${objects} objects, ${inflated} bytes`);
+  return { bound: peakBound({ kind: 'pack-scan' }), objects, inflated };
 }
 
 // A v2 fetch response carrying the one-object pack, framed into band-1 pkt-lines as it is read.
@@ -315,7 +343,7 @@ async function fetchPackCell() {
   return { bound: peakBound({ kind: 'fetch-pack', retained }), retained, objects: got.objects.size };
 }
 
-const run = { 'inflate-whole': () => inflateWhole(true), 'inflate-capped': () => inflateWhole(false), 'fetch-wide': () => fetchWideCell(false), 'fetch-wide-blobs': () => fetchWideCell(true), 'fetch-wide-drain': () => fetchWideDrain(false), 'fetch-wide-blobs-drain': () => fetchWideDrain(true), 'fetch-pack': fetchPackCell, 'inflate-drop': inflateDrop, 'scan-drop': scanDrop, 'fetch-object': fetchStreamed, 'fetch-drain': fetchDrain, 'fetch-buffered': fetchBuffered }[mode];
+const run = { 'inflate-whole': () => inflateWhole(true), 'inflate-capped': () => inflateWhole(false), 'fetch-wide': () => fetchWideCell(false), 'fetch-wide-blobs': () => fetchWideCell(true), 'fetch-wide-drain': () => fetchWideDrain(false), 'fetch-wide-blobs-drain': () => fetchWideDrain(true), 'fetch-pack': fetchPackCell, 'inflate-drop': inflateDrop, 'scan-drop': scanDrop, 'scan-work': scanWork, 'fetch-object': fetchStreamed, 'fetch-drain': fetchDrain, 'fetch-buffered': fetchBuffered }[mode];
 if (!run) throw new Error(`unknown mode ${mode}`);
 const report = await run();
 const m = process.memoryUsage();

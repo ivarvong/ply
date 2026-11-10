@@ -53,8 +53,8 @@ export { inflate } from './inflate.js';
 // ---- pulls: bytes in as they arrive, one piece out at a time; a refusal is a value that sticks (#172) ----
 export { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, cappedBound, zlibWrap, rawWrap } from './inflatestream.js';
 export type { InflateStream, InflatePiece, InflateStreamOpts, StreamBound, StreamWrap, InflateStats, InflateError } from './inflatestream.js';
-export { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, parsePackClose, packScanOpts } from './packstream.js';
-export type { PackScan, PackPiece, PackScanOpts, PackError } from './packstream.js';
+export { parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, parsePackClose, packScanOpts, workBudget, WORK_BUDGET, RETAIN_BUDGET } from './packstream.js';
+export type { PackScan, PackPiece, PackScanOpts, PackError, ScanBudget } from './packstream.js';
 export { sidebandStep } from './fetch.js';
 export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';

@@ -112,6 +112,12 @@ export const LIMIT_REQUEST_TIMEOUT_MS = 60_000;
  */
 export const LIMIT_OBJECT_OVERHEAD: number = 3 * KIB;
 
+/**
+ * Inflated bytes a work-budgeted pack scan may produce per pack byte consumed, past the maxInflatedTotal it may always
+ * spend. Not a memory figure (such a scan keeps no object): it bounds the CPU a pack can buy. DEFLATE reaches about
+ * 1032:1; real packs measure far below this (deltas inflate only their instructions).
+ */
+export const LIMIT_WORK_RATIO = 32;
 /* oxlint-enable no-magic-numbers */
 
 export type Limits = {

@@ -27,6 +27,15 @@ for (const heap of [64, 128]) {
     console.log(JSON.stringify(r));
     assert.ok(r.abDelta <= HOLD, `scan held ${r.abDelta} > ${HOLD}`);
   });
+  test(`heap ${heap} MiB: a pack of three 96 MiB blobs, past every default cap, scanned under WORK_BUDGET holds one inflate record`, () => {
+    const r = cell('scan-work', 96 * MIB, heap);
+    console.log(JSON.stringify(r));
+    assert.equal(r.inflated, 3 * 96 * MIB);
+    // peakBound leaves out what the caller holds: here the generator's 16 KiB piece and the next one being built. On
+    // node 22 (CI) this cell measured one or two of them over HOLD, in whole 16 KiB steps; on node 24, none.
+    const FED = 2 * 16_384;
+    assert.ok(r.abDelta <= HOLD + FED, `scan held ${r.abDelta} > ${HOLD} + ${FED}`);
+  });
   test(`heap ${heap} MiB: inflate() of a 64 MiB member in hand holds the output and the pull's hold, nothing more`, () => {
     for (const mode of ['inflate-whole', 'inflate-capped']) {
       const r = cell(mode, 64 * MIB, heap);

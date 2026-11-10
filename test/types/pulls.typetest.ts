@@ -2,7 +2,7 @@
 // driven the way a consumer drives them, with no casts. `tsc --noEmit` must pass; every @ts-expect-error must still be an error.
 import {
   inflateInit, inflateFeed, inflatePull, inflateEnd, inflateUnread, declaredBound, cappedBound, zlibWrap, rawWrap,
-  parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, packScanOpts, sidebandStep, v2Init, DEFAULT_LIMITS,
+  parsePackInit, parsePackFeed, parsePackPull, parsePackEnd, packScanOpts, sidebandStep, v2Init, DEFAULT_LIMITS, WORK_BUDGET, workBudget,
   type InflateStream, type InflatePiece, type InflateStats, type PackScan, type PackPiece, type ObjBase, type Oid,
   type SidebandPiece,
 } from '../../src/index.js';
@@ -47,6 +47,12 @@ if (scanned.ok) {
   }
   void parsePackEnd(st);
 }
+
+void parsePackInit(packScanOpts(DEFAULT_LIMITS, true, WORK_BUDGET));
+void parsePackInit(packScanOpts(DEFAULT_LIMITS, true, workBudget(8, true)));
+void parsePackInit({ verify: true, limits: DEFAULT_LIMITS });
+// @ts-expect-error a budget is built by workBudget or named by a preset, not a bare ratio
+void parsePackInit(packScanOpts(DEFAULT_LIMITS, true, 32));
 
 const sb = sidebandStep(v2Init(), { kind: 'data', payload: bytes }, 1024);
 if (sb.ok) { const p: SidebandPiece = sb.value.piece; if (p.kind === 'pack') { const b: Uint8Array = p.body; void b; } }
