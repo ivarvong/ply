@@ -80,7 +80,9 @@ export type ScanIndexOpts = {
 // A fresh record per call: withDefaults fills it in place.
 const defaultOpts = (): ScanIndexOpts => ({ limits: DEFAULT_LIMITS, verify: true, budget: WORK_BUDGET, oids: true, content: null });
 
-// Typed columns, one slot per entry. `type` is 0 for unknown; `baseIndex` is -1 for none or not found.
+// Typed columns, one slot per entry. `type` is 0 for unknown; `baseIndex` is -1 for none or not found. `oids` holds
+// entry i's whole-object id at i * 20 (empty with oids off; zeros for a delta); `refs` entry i's REF base id at i * 20
+// (empty when the pack has no REF_DELTA; zeros for any other entry).
 export type ScanColumns = {
   readonly offset: Float64Array;
   readonly headerBytes: Uint8Array;
@@ -89,6 +91,8 @@ export type ScanColumns = {
   readonly storedType: Uint8Array;
   readonly type: Uint8Array;
   readonly baseIndex: Int32Array;
+  readonly oids: Uint8Array;
+  readonly refs: Uint8Array;
 };
 export type ScannedPack = {
   readonly version: number;
@@ -208,7 +212,7 @@ function settle(s: Store, oids: boolean): void {
   }
 }
 
-function view(s: Store, oids: boolean, i: number): ScannedEntry {
+function view(s: ScanColumns, oids: boolean, i: number): ScannedEntry {
   const stored = s.storedType[i] as ObjType;
   const t = s.type[i] as number;
   const baseIndex = s.baseIndex[i] as number;
@@ -222,6 +226,18 @@ function view(s: Store, oids: boolean, i: number): ScannedEntry {
     type: isWhole(t) ? t : null,
     oid: oids && isWhole(stored) ? toOid(s.oids.subarray(i * OID_BYTES, (i + 1) * OID_BYTES)) : null,
   };
+}
+
+// What an index is besides its columns: the pack's header, trailer and length, and the column bytes it holds.
+export type ScannedMeta = { readonly version: number; readonly count: number; readonly trailer: string; readonly bytes: number; readonly heldBytes: number };
+// An index over `columns` (each sized to the entries; oids on when `columns.oids` holds an id per entry). scanPackIndex
+// builds one after a scan; decodeSavedIndex (packsaved.ts, #260) builds one from saved columns.
+export function scannedPackOf(meta: ScannedMeta, columns: ScanColumns): ScannedPack {
+  const n = columns.offset.length;
+  const oids = columns.oids.length === n * OID_BYTES && n > 0;
+  const entry = (i: number): Option<ScannedEntry> => (Number.isInteger(i) && i >= 0 && i < n ? some(view(columns, oids, i)) : none);
+  function* entries(): IterableIterator<ScannedEntry> { for (let i = 0; i < n; i++) yield view(columns, oids, i); }
+  return { ...meta, columns, entry, entries };
 }
 
 type Pull = { readonly next: () => Promise<Uint8Array | null>; readonly cancel: () => Promise<void> };
@@ -334,16 +350,14 @@ async function onObjectEnd(sc: Scanner, i: number, compressed: number): Promise<
 
 function finish(sc: Scanner, bytes: number): ScannedPack {
   const s = sc.s;
-  const oids = sc.opts.oids;
   const n = s.n;
   const columns: ScanColumns = {
     offset: s.offset.subarray(0, n), headerBytes: s.headerBytes.subarray(0, n), compressed: s.compressed.subarray(0, n),
     size: s.size.subarray(0, n), storedType: s.storedType.subarray(0, n), type: s.type.subarray(0, n), baseIndex: s.baseIndex.subarray(0, n),
+    oids: s.oids.subarray(0, n * OID_BYTES), refs: s.refs.subarray(0, n * OID_BYTES),
   };
   const heldBytes = s.cap * SCAN_INDEX_ENTRY_BYTES + s.oids.length + s.refs.length;
-  const entry = (i: number): Option<ScannedEntry> => (Number.isInteger(i) && i >= 0 && i < n ? some(view(s, oids, i)) : none);
-  function* entries(): IterableIterator<ScannedEntry> { for (let i = 0; i < n; i++) yield view(s, oids, i); }
-  return { version: sc.version, count: sc.count, trailer: sc.trailer, bytes, columns, heldBytes, entry, entries };
+  return scannedPackOf({ version: sc.version, count: sc.count, trailer: sc.trailer, bytes, heldBytes }, columns);
 }
 
 // One pulled piece: feed the scan, record an entry, or note the header or trailer. A non-null error is the refusal.

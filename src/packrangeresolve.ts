@@ -482,9 +482,12 @@ async function fromThin(s: State): Promise<PlyError | null> {
   return null;
 }
 
-function finish(s: State): ResolvedIndex {
-  const n = s.n;
-  const byOid = Int32Array.from({ length: n }, (_, i) => i).toSorted((x, y) => oidCompare(s.oid, x * OID_BYTES, s.oid, y * OID_BYTES) || x - y);
+// An index over resolved `columns` (each sized to the entries) with the stats of the run that produced them.
+// resolvePackRange builds one after resolving; decodeSavedIndex (packsaved.ts, #260) builds one from saved columns.
+export function resolvedIndexOf(columns: ResolvedColumns, stats: ResolveStats): ResolvedIndex {
+  const n = columns.type.length;
+  const ids = columns.oid;
+  const byOid = Int32Array.from({ length: n }, (_, i) => i).toSorted((x, y) => oidCompare(ids, x * OID_BYTES, ids, y * OID_BYTES) || x - y);
   const inRange = (i: number): boolean => Number.isInteger(i) && i >= 0 && i < n;
   const find = (want: Oid): Option<number> => {
     if (!/^[0-9a-f]{40}$/u.test(want)) return none;
@@ -493,20 +496,23 @@ function finish(s: State): ResolvedIndex {
     let hi = n;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
-      if (oidCompare(s.oid, (byOid[mid] as number) * OID_BYTES, id, 0) < 0) lo = mid + 1;
+      if (oidCompare(ids, (byOid[mid] as number) * OID_BYTES, id, 0) < 0) lo = mid + 1;
       else hi = mid;
     }
-    return lo < n && oidCompare(s.oid, (byOid[lo] as number) * OID_BYTES, id, 0) === 0 ? some(byOid[lo] as number) : none;
+    return lo < n && oidCompare(ids, (byOid[lo] as number) * OID_BYTES, id, 0) === 0 ? some(byOid[lo] as number) : none;
   };
   return {
     count: n,
-    columns: { oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size },
+    columns,
     heldBytes: n * RESOLVED_ENTRY_BYTES,
-    stats: { ...s.stats, work: s.work, workMax: s.workMax },
-    oid: i => (inRange(i) ? some(oidAt(s.oid, i)) : none),
-    type: i => (inRange(i) ? some(s.type[i] as ScannedType) : none),
+    stats,
+    oid: i => (inRange(i) ? some(oidAt(ids, i)) : none),
+    type: i => (inRange(i) ? some(columns.type[i] as ScannedType) : none),
     find,
   };
+}
+function finish(s: State): ResolvedIndex {
+  return resolvedIndexOf({ oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size }, { ...s.stats, work: s.work, workMax: s.workMax });
 }
 
 // Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
