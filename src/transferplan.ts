@@ -20,28 +20,26 @@
 // written by `ply transfer <ply-transfer@invalid> 0 +0000`, so the same plan always gives the same ids.
 import type { PlyError } from './errors.js';
 import { fail } from './errors.js';
-import type { Result } from './result.js';
-import { ok, getOrElse } from './result.js';
+import type { Option, Result } from './result.js';
+import { ok, some, none, getOrElse } from './result.js';
 import { parseCommit, encodeCommitOf, encodeEntries, hashObject, TYPE } from './objects.js';
+import type { EntryOf } from './objects.js';
 import type { Input } from './absent.js';
-import { mapGet, withDefaults } from './absent.js';
+import { at, mapGet, withDefaults } from './absent.js';
 import type { PackPlan, PushBudget } from './packplan.js';
 import { planPackBatches } from './packplan.js';
-import type { ScannedPack } from './packscanindex.js';
+import type { ScannedPack, ScannedType } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import type { Oid } from './sha1.js';
-import { Sha1, toOid } from './sha1.js';
-import { te } from './bytes.js';
 import type { RangeSource } from './rangesource.js';
+import type { Refname, TempRef } from './transfernames.js';
+import { sha1Hex, targetRef, tempRefOf, isOid, isOptionOid, isPushRef, isList } from './transfernames.js';
 
 const OBJ_BLOB = TYPE.BLOB;
 const OBJ_COMMIT = TYPE.COMMIT;
 const OBJ_TREE = TYPE.TREE;
 const MODE_BLOB = '100644';
 const MODE_TREE = '40000';
-
-// In-range indexed reads of columns sized by the index; noUncheckedIndexedAccess cannot see that.
-/* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above */
 
 export const TRANSFER_VERSION = 1;
 export const TRANSFER_REF_PREFIX = 'refs/ply/transfer/';
@@ -55,16 +53,17 @@ const GEN_BYTES_PER_OBJECT = 68;
 const GEN_BYTES_FIXED = 32 * 1024;
 const SIGNATURE_HEADERS = ['gpgsig', 'gpgsig-sha256', 'mergetag'];
 
+export type { TempRef };
 // The pack, read through `source`, with its index and resolved columns: what a step reads its batch from.
 export type TransferPack = { readonly source: RangeSource; readonly pack: ScannedPack; readonly resolved: ResolvedIndex };
 export type TransferConfig = {
   // the host's per-push limits, before ply's own reserve for generated objects (added here)
   readonly budget: PushBudget;
-  // the ref to create on the destination; it must not exist there
+  // the ref to create on the destination; it must not exist there (any value: refused unless git would push it)
   readonly ref: string;
   // the source commit's bytes (scanPackIndex's content callback hands them over)
   readonly commit: Uint8Array;
-  // where temp refs live (default refs/ply/transfer/)
+  // where temp refs live (default refs/ply/transfer/); it ends in '/'
   readonly tempPrefix: string;
   // a delta whose base is pushed in an earlier batch, as REF_DELTA (packPlan crossBatchRef; default off)
   readonly crossBatchRef: boolean;
@@ -72,54 +71,62 @@ export type TransferConfig = {
   readonly atomic: boolean;
 };
 export type TransferOpts = Pick<TransferConfig, 'budget' | 'ref' | 'commit'> & Input<Omit<TransferConfig, 'budget' | 'ref' | 'commit'>>;
-export type TransferStepPlan = {
-  readonly kind: 'batch' | 'final';
-  // the temp commit this step moves the temp ref to (null for the final step) and the one before it (null: none)
-  readonly temp: Oid | null;
-  readonly prev: Oid | null;
-};
+// A step: a batch moves the temp ref from `prev` (none: the temp ref does not exist yet) to its temp commit; the final
+// step creates the target ref from `prev` (the temp ref to delete, none when the transfer is one push). The plan is
+// stored as JSON between requests: an Option is plain JSON ({"tag":"none"} / {"tag":"some","value":...}).
+export type BatchStep = { readonly kind: 'batch'; readonly temp: Oid; readonly prev: Option<Oid> };
+export type FinalStep = { readonly kind: 'final'; readonly prev: Option<Oid> };
+export type TransferStepPlan = BatchStep | FinalStep;
 export type TransferPlan = {
   readonly version: typeof TRANSFER_VERSION;
   readonly source: Oid;
   readonly tree: Oid;
   // the new root commit the ref is created at
   readonly head: Oid;
-  readonly ref: string;
-  readonly tempRef: string;
+  readonly ref: Refname;
+  readonly tempRef: TempRef;
   readonly atomic: boolean;
   readonly pack: PackPlan;
   readonly steps: readonly TransferStepPlan[];
   // SHA-1 hex of the canonical JSON of everything above
   readonly hash: string;
 };
-export type GeneratedObject = { readonly type: number; readonly data: Uint8Array; readonly oid: Oid };
+export type GeneratedType = typeof TYPE.TREE | typeof TYPE.COMMIT;
+export type GeneratedObject = { readonly type: GeneratedType; readonly data: Uint8Array; readonly oid: Oid };
 
-const sha1Hex = (s: string): string => new Sha1().update(te.encode(s)).hex();
-const oidAt = (r: ResolvedIndex, i: number): Oid => toOid(r.columns.oid.subarray(i * 20, i * 20 + 20));
+const outOfRange = (i: number): Result<never, PlyError> => fail('bad_request', `transfer: entry ${i} is not in the resolved index`, { what: 'entry' });
+// The resolved id and type of entry `i`, read through the index's checked accessors.
+function entryAt(r: ResolvedIndex, i: number): Result<{ readonly oid: Oid; readonly type: ScannedType }, PlyError> {
+  const oid = r.oid(i);
+  const type = r.type(i);
+  return oid.tag === 'some' && type.tag === 'some' ? ok({ oid: oid.value, type: type.value }) : outOfRange(i);
+}
 
-// The temp tree for a batch: its objects by id, fanned out by the id's first two hex digits.
-export function batchTrees(resolved: ResolvedIndex, entries: readonly number[]): Result<GeneratedObject[], PlyError> {
-  const groups = new Map<string, Map<string, string>>();
+// The temp tree for a batch: its objects by id, fanned out by the id's first two hex digits. The root tree is last.
+export function batchTrees(resolved: ResolvedIndex, entries: readonly number[]): Result<{ readonly subtrees: readonly GeneratedObject[]; readonly root: GeneratedObject }, PlyError> {
+  // by fan, then by name: an id the batch holds twice (a pack may) is listed once
+  const groups = new Map<string, Map<string, EntryOf>>();
   for (const i of entries) {
-    const hex = oidAt(resolved, i);
-    const mode = (resolved.columns.type[i] as number) === OBJ_TREE ? MODE_TREE : MODE_BLOB;
-    const group = getOrElse(mapGet(groups, hex.slice(0, 2)), new Map<string, string>());
-    group.set(hex.slice(2), mode);
-    groups.set(hex.slice(0, 2), group);
+    const e = entryAt(resolved, i);
+    if (!e.ok) return e;
+    const { oid, type } = e.value;
+    const fan = oid.slice(0, 2);
+    const group = getOrElse(mapGet(groups, fan), new Map<string, EntryOf>());
+    group.set(oid.slice(2), { mode: type === OBJ_TREE ? MODE_TREE : MODE_BLOB, name: oid.slice(2), oid });
+    groups.set(fan, group);
   }
-  const out: GeneratedObject[] = [];
-  const root: Array<{ mode: typeof MODE_TREE; name: string; oid: Oid }> = [];
-  for (const [prefix, group] of groups) {
-    const data = encodeEntries([...group].map(([name, mode]) => ({ mode: mode === MODE_TREE ? MODE_TREE : MODE_BLOB, name, oid: `${prefix}${name}` as Oid })));
+  const subtrees: GeneratedObject[] = [];
+  const top: EntryOf[] = [];
+  for (const [fan, group] of groups) {
+    const data = encodeEntries([...group.values()]);
     if (!data.ok) return data;
     const oid = hashObject('tree', data.value);
-    out.push({ type: OBJ_TREE, data: data.value, oid });
-    root.push({ mode: MODE_TREE, name: prefix, oid });
+    subtrees.push({ type: OBJ_TREE, data: data.value, oid });
+    top.push({ mode: MODE_TREE, name: fan, oid });
   }
-  const rootData = encodeEntries(root);
+  const rootData = encodeEntries(top);
   if (!rootData.ok) return rootData;
-  out.push({ type: OBJ_TREE, data: rootData.value, oid: hashObject('tree', rootData.value) });
-  return ok(out);
+  return ok({ subtrees, root: { type: OBJ_TREE, data: rootData.value, oid: hashObject('tree', rootData.value) } });
 }
 
 // A commit object, encoded and hashed.
@@ -129,8 +136,8 @@ function commitObject(fields: Parameters<typeof encodeCommitOf>[0]): Result<Gene
 }
 
 // A batch's temp commit over its temp root tree, its parent the previous temp commit.
-export function tempCommit(key: string, step: number, steps: number, tree: Oid, prev: Oid | null): Result<GeneratedObject, PlyError> {
-  return commitObject({ tree, parents: prev === null ? [] : [prev], author: TRANSFER_IDENT, committer: TRANSFER_IDENT, message: `ply transfer ${key} batch ${step + 1} of ${steps}\n` });
+export function tempCommit(key: string, step: number, steps: number, tree: Oid, prev: Option<Oid>): Result<GeneratedObject, PlyError> {
+  return commitObject({ tree, parents: prev.tag === 'some' ? [prev.value] : [], author: TRANSFER_IDENT, committer: TRANSFER_IDENT, message: `ply transfer ${key} batch ${step + 1} of ${steps}\n` });
 }
 
 // The source commit's headers without signatures (a header line and its continuation lines).
@@ -159,71 +166,101 @@ function reserved(b: PushBudget): PushBudget {
   return { ...b, reserveObjects: b.reserveObjects + TRANSFER_GENERATED_OBJECTS, reserveBytes: b.reserveBytes + b.maxObjects * GEN_BYTES_PER_OBJECT + GEN_BYTES_FIXED };
 }
 
+// A step as canonical JSON: the variant's tag first, an absent prev as null (never the same text as an id).
+const optionJson = (o: Option<Oid>): Oid | null => (o.tag === 'some' ? o.value : null);
+const stepJson = (s: TransferStepPlan): ReadonlyArray<string | null> => (s.kind === 'batch' ? ['batch', s.temp, optionJson(s.prev)] : ['final', optionJson(s.prev)]);
 function canonical(p: Omit<TransferPlan, 'hash'>): string {
-  return JSON.stringify([p.version, p.source, p.tree, p.head, p.ref, p.tempRef, p.atomic, p.pack.hash, p.steps.map(s => [s.kind, s.temp, s.prev])]);
+  return JSON.stringify([p.version, p.source, p.tree, p.head, p.ref, p.tempRef, p.atomic, p.pack.hash, p.steps.map(stepJson)]);
 }
 // The hash a plan should carry; a plan read back from storage is checked with it before a step uses it.
 export const transferPlanHash = (p: Omit<TransferPlan, 'hash'>): string => sha1Hex(canonical(p));
 
 // Only the commit's tree and blobs are copied: a commit or tag in the pack is left out (the new commit replaces it).
-function treeEntries(pack: ScannedPack, resolved: ResolvedIndex): number[] {
+function treeEntries(pack: ScannedPack, resolved: ResolvedIndex): Result<number[], PlyError> {
   const out: number[] = [];
   for (let i = 0; i < pack.count; i++) {
-    const t = resolved.columns.type[i] as number;
-    if (t === OBJ_TREE || t === OBJ_BLOB) out.push(i);
+    const e = entryAt(resolved, i);
+    if (!e.ok) return e;
+    if (e.value.type === OBJ_TREE || e.value.type === OBJ_BLOB) out.push(i);
   }
-  return out;
+  return ok(out);
 }
 
 // A batch's generated objects: its temp trees and temp commit (the commit last).
-export function tempFor(resolved: ResolvedIndex, entries: readonly number[], at: { readonly key: string; readonly step: number; readonly steps: number; readonly prev: Oid | null }): Result<{ readonly objects: readonly GeneratedObject[]; readonly commit: GeneratedObject }, PlyError> {
+export function tempFor(resolved: ResolvedIndex, entries: readonly number[], place: { readonly key: string; readonly step: number; readonly steps: number; readonly prev: Option<Oid> }): Result<{ readonly objects: readonly GeneratedObject[]; readonly commit: GeneratedObject }, PlyError> {
   const trees = batchTrees(resolved, entries);
   if (!trees.ok) return trees;
-  const rootTree = trees.value.at(-1) as GeneratedObject;
-  const commit = tempCommit(at.key, at.step, at.steps, rootTree.oid, at.prev);
+  const { subtrees, root } = trees.value;
+  const commit = tempCommit(place.key, place.step, place.steps, root.oid, place.prev);
   if (!commit.ok) return commit;
-  return ok({ objects: [...trees.value, commit.value], commit: commit.value });
+  return ok({ objects: [...subtrees, root, commit.value], commit: commit.value });
 }
 
-// Plan a transfer of `opts.commit`'s tree (see the top of this file). Refusals (a tree not in the pack, a budget an
-// object cannot fit, anything planPackBatches refuses) happen here, before anything is pushed.
+// The steps, one per batch: each batch's temp commit is the next one's prev.
+function planSteps(resolved: ResolvedIndex, planned: PackPlan, key: string): Result<TransferStepPlan[], PlyError> {
+  const steps: TransferStepPlan[] = [];
+  let prev: Option<Oid> = none;
+  const n = planned.batches.length;
+  for (const [i, b] of planned.batches.entries()) {
+    if (b.kind === 'final') { steps.push({ kind: 'final', prev }); continue; }
+    const made = tempFor(resolved, b.entries, { key, step: i, steps: n, prev });
+    if (!made.ok) return made;
+    const temp = made.value.commit.oid;
+    steps.push({ kind: 'batch', temp, prev });
+    prev = some(temp);
+  }
+  return ok(steps);
+}
+
+// Plan a transfer of `opts.commit`'s tree (see the top of this file). Refusals (a ref git would not push, a tree not in
+// the pack, a budget an object cannot fit, anything planPackBatches refuses) happen here, before anything is pushed.
 export function planTransfer(pack: ScannedPack, resolved: ResolvedIndex, input: TransferOpts): Result<TransferPlan, PlyError> {
   const opts = withDefaults<TransferConfig>(input, { budget: input.budget, ref: input.ref, commit: input.commit, tempPrefix: TRANSFER_REF_PREFIX, crossBatchRef: false, atomic: true });
+  const ref = targetRef(opts.ref);
+  if (!ref.ok) return ref;
   const root = rootCommit(opts.commit);
   if (!root.ok) return root;
   const { tree } = root.value;
   // ResolvedIndex.find is a lookup by id, not Array#find
   const lookup = resolved.find;
   const treeAt = lookup(tree);
-  if (treeAt.tag !== 'some' || (resolved.columns.type[treeAt.value] as number) !== OBJ_TREE) {
-    return fail('bad_request', `transfer: the commit's tree ${root.value.tree} is not a tree in the pack`, { what: 'tree' });
+  const treeType = treeAt.tag === 'some' ? resolved.type(treeAt.value) : none;
+  if (treeType.tag !== 'some' || treeType.value !== OBJ_TREE) {
+    return fail('bad_request', `transfer: the commit's tree ${tree} is not a tree in the pack`, { what: 'tree' });
   }
-  const planned = planPackBatches(pack, resolved, { budget: reserved(opts.budget), select: treeEntries(pack, resolved), crossBatchRef: opts.crossBatchRef });
+  const select = treeEntries(pack, resolved);
+  if (!select.ok) return select;
+  const planned = planPackBatches(pack, resolved, { budget: reserved(opts.budget), select: select.value, crossBatchRef: opts.crossBatchRef });
   if (!planned.ok) return planned;
   const head = root.value.commit.oid;
-  const key = sha1Hex(JSON.stringify([planned.value.hash, head, opts.ref]));
-  const tempRef = `${opts.tempPrefix}${key}`;
-  const steps: TransferStepPlan[] = [];
-  let prev: Oid | null = null;
-  const n = planned.value.batches.length;
-  for (const [i, b] of planned.value.batches.entries()) {
-    if (b.kind === 'final') { steps.push({ kind: 'final', temp: null, prev }); continue; }
-    const made = tempFor(resolved, b.entries, { key, step: i, steps: n, prev });
-    if (!made.ok) return made;
-    const temp: Oid = made.value.commit.oid;
-    steps.push({ kind: 'batch', temp, prev });
-    prev = temp;
-  }
-  const body = { version: TRANSFER_VERSION, source: root.value.source, tree: root.value.tree, head, ref: opts.ref, tempRef, atomic: opts.atomic, pack: planned.value, steps } as const;
+  const key = sha1Hex(JSON.stringify([planned.value.hash, head, ref.value]));
+  const tempRef = tempRefOf(opts.tempPrefix, key);
+  if (!tempRef.ok) return tempRef;
+  const steps = planSteps(resolved, planned.value, key);
+  if (!steps.ok) return steps;
+  const body = { version: TRANSFER_VERSION, source: root.value.source, tree, head, ref: ref.value, tempRef: tempRef.value, atomic: opts.atomic, pack: planned.value, steps: steps.value } as const;
   return ok({ ...body, hash: transferPlanHash(body) });
 }
 
 // The key a plan's temp commits and temp ref are named by.
 export const transferKey = (plan: TransferPlan): string => sha1Hex(JSON.stringify([plan.pack.hash, plan.head, plan.ref]));
 
-// A plan as read back (JSON, a store): its hash must match, so a step never pushes from an edited or stale plan.
+const edited = (): Result<never, PlyError> => fail('bad_request', 'transfer: the plan does not match its hash', { what: 'plan' });
+// A step read back: one of the two variants, its ids well formed, its prev an Option of one.
+function wellFormedStep(s: TransferStepPlan): boolean {
+  if (typeof s !== 'object' || s === null || !isOptionOid(s.prev)) return false;
+  if (s.kind === 'batch') return isOid(s.temp);
+  return s.kind === 'final' && !Reflect.has(s, 'temp');
+}
+
+// A plan as read back (JSON, a store): its ids, refs and steps well formed, and its hash matching, so a step never
+// pushes from an edited or stale plan. The last step is the only final one.
 export function checkTransferPlan(plan: TransferPlan): Result<TransferPlan, PlyError> {
+  if (typeof plan !== 'object' || plan === null || plan.version !== TRANSFER_VERSION) return edited();
+  if (!isOid(plan.source) || !isOid(plan.tree) || !isOid(plan.head) || !isList(plan.steps)) return edited();
+  if (!targetRef(plan.ref).ok || !isPushRef(plan.tempRef)) return edited();
+  const last = at(plan.steps, plan.steps.length - 1);
+  if (last.tag !== 'some' || last.value.kind !== 'final' || !plan.steps.every((s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === plan.steps.length - 1))) return edited();
   const { hash, ...body } = plan;
-  if (plan.version !== TRANSFER_VERSION || transferPlanHash(body) !== hash) return fail('bad_request', 'transfer: the plan does not match its hash', { what: 'plan' });
-  return ok(plan);
+  return transferPlanHash(body) === hash ? ok(plan) : edited();
 }

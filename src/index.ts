@@ -66,9 +66,9 @@ export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject
 export { packSubset } from './packsubset.js';
 export type { PackSubset, PackSubsetOpts, OutsideBase } from './packsubset.js';
 export { planTransfer, checkTransferPlan, transferPlanHash, TRANSFER_VERSION, TRANSFER_REF_PREFIX, TRANSFER_IDENT } from './transferplan.js';
-export type { TransferPlan, TransferStepPlan, TransferOpts, TransferPack } from './transferplan.js';
-export { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers } from './transfer.js';
-export type { TransferNext, TransferRun, RunOpts } from './transfer.js';
+export type { TransferPlan, TransferStepPlan, BatchStep, FinalStep, TempRef, TransferOpts, TransferPack } from './transferplan.js';
+export { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers, SETTLE_DEFAULTS } from './transfer.js';
+export type { TransferNext, TransferRun, RunOpts, SettleConfig } from './transfer.js';
 export { sidebandStep } from './fetch.js';
 export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';

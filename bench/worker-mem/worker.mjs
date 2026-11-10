@@ -14,10 +14,11 @@ const GIB = 1024 * MIB;
 const READ_TOKEN_TTL_S = 900;
 const PROGRESS_EVERY_BYTES = 64 * MIB;
 // The transport counts every band-1 byte against maxPackBytes. The seed pack is ~1 GiB, so the transport cap is raised
-// here and only here; the scan's own budget (WORK_BUDGET) is what bounds inflate work. requestTimeoutMs bounds the
-// whole exchange, body included, not idle time: the default 60 s cut the first index run of the ~1 GiB pack at 60 s
-// (run ml-20261110t034240z), and the plain scan takes ~55 s. It is raised to just under the 300 s CPU limit.
-const TRANSPORT_LIMITS = ply.withLimits({ maxPackBytes: 8 * GIB, requestTimeoutMs: 280_000 });
+// here and only here; the scan's own budget (WORK_BUDGET) is what bounds inflate work. Time is bounded by ply's
+// default stall limits (#258): firstByteTimeoutMs and idleTimeoutMs, 60 s each, cut an exchange that stops making
+// progress, while a long one that keeps streaming (the ~55 s scan of the ~1 GiB pack, run ml-20261110t034240z) runs
+// on. No whole-exchange requestTimeoutMs: a cap sized to the pack would only hide a stall behind a longer wait.
+const TRANSPORT_LIMITS = ply.withLimits({ maxPackBytes: 8 * GIB });
 
 const enc = new TextEncoder();
 

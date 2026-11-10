@@ -11,6 +11,12 @@
 //     status: the ref already at another commit, a temp ref the plan never writes; a step that never lands
 //   - the commit policy (signatures dropped, other headers kept) and the deterministic ids
 //   - sweepTransfers removes what an abandoned transfer left, keeping what it is told to
+//   - the plan's types: batch steps carry their temp commit, the final step none; prev is an Option; refs are refused
+//     unless git would push them; a plan read back with a malformed step, id or ref is refused
+//   - ls-refs that lags a push (a host that acknowledges before its reads show it): settled by reading the refs again,
+//     never by sending the step again; a lag longer than the reads pauses the run ('settling'); a step sent again after a
+//     lagging read is refused by the server, and the refs, settled, show it landed, so the run goes on
+//   - a done run reports a temp ref left behind (tempLeft); the spans each function writes, with the plan hash
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -24,6 +30,7 @@ import { createTransport } from '../src/http.js';
 import { planTransfer, checkTransferPlan, rootCommit, batchTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
 import { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers } from '../src/transfer.js';
 import { te } from '../src/bytes.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
@@ -76,10 +83,24 @@ async function spooled(pack) {
   const source = rangeFromBytes(pack);
   return { source, pack: p, resolved: must(await resolvePackRange(p, source)) };
 }
-function repo() {
+function repo(options = {}) {
   const name = `t${n++}`;
   const bare = makeBareRepo(root, name);
-  return { bare, t: unwrap(createTransport(`${srv.url}/${name}.git`)) };
+  return { bare, t: unwrap(createTransport(`${srv.url}/${name}.git`, options)) };
+}
+// A destination whose ls-refs lags its pushes: after each receive-pack, the next `lag()` ls-refs answer what the read
+// before the push saw (the refs as they were). Everything else is the real transport.
+function lagging(t, lag) {
+  let stale = 0, last = null, reads = 0;
+  const view = Object.create(t);
+  view.frames = function frames(service, body, span, hints) {
+    const real = t.frames.call(this, service, body, span, hints);
+    if (service !== 'git-upload-pack') { stale = lag(); return real; }
+    reads++;
+    if (stale > 0 && last !== null) { stale--; const kept = last; return (async function* replay() { yield* kept; })(); }
+    return (async function* record() { const got = []; for await (const f of real) { got.push(f); yield f; } last = got; })();
+  };
+  return { t: view, reads: () => reads };
 }
 const refsOf = bare => git(bare, ['for-each-ref', '--format=%(refname) %(objectname)']).trim();
 const objectsOf = (dir, rev) => git(dir, ['rev-list', '--objects', rev]).split('\n').filter(Boolean).map(l => l.slice(0, 40)).sort();
@@ -209,7 +230,8 @@ test('refusals at a step and at status: an edited plan, another pack, other ids,
   assert.match((await transferStep(t, other, plan, 0, src.commit)).error.message, /is not the planned one/);
   const ids = Uint8Array.from(from.resolved.columns.oid);
   ids.fill(0x11, 0, 20 * from.resolved.count);
-  const lying = { ...from, resolved: { ...from.resolved, columns: { ...from.resolved.columns, oid: ids } } };
+  const lyingOid = i => (Number.isInteger(i) && i >= 0 && i < from.resolved.count ? { tag: 'some', value: '11'.repeat(20) } : { tag: 'none' });
+  const lying = { ...from, resolved: { ...from.resolved, oid: lyingOid, columns: { ...from.resolved.columns, oid: ids } } };
   assert.match((await transferStep(t, lying, plan, 0, src.commit)).error.message, /the pack is not the one planned/);
   const last = plan.steps.length - 1;
   const wrongCommit = te.encode(new TextDecoder().decode(src.commit).replace('two', 'three'));
@@ -243,8 +265,8 @@ test('commit policy: signatures dropped (with their continuation lines), other h
 test('temp trees: fanned out by the first two hex digits, ids git agrees with', async () => {
   const from = await spooled(src.packs.ref);
   const all = [...Array(from.pack.count).keys()].filter(i => from.resolved.columns.type[i] === 3);
-  const trees = must(batchTrees(from.resolved, all));
-  const rootTree = trees.at(-1);
+  const { subtrees, root: rootTree } = must(batchTrees(from.resolved, all));
+  const trees = [...subtrees, rootTree];
   const scratch = makeBareRepo(root, `scratch${n++}`);
   for (const o of trees) assert.equal(git(scratch, ['hash-object', '-w', '-t', 'tree', '--stdin'], { input: Buffer.from(o.data) }).trim(), o.oid);
   const names = git(scratch, ['ls-tree', rootTree.oid]).split('\n').filter(Boolean).map(l => l.split('\t')[1]);
@@ -261,4 +283,118 @@ test('sweepTransfers: removes an abandoned transfer\'s temp ref, keeps what it i
   assert.deepEqual(must(await sweepTransfers(t, { keep: [plan.tempRef] })), []);
   assert.deepEqual(must(await sweepTransfers(t)), [plan.tempRef]);
   assert.equal(git(bare, ['for-each-ref', 'refs/ply']).trim(), '');
+});
+
+test('the plan: a tagged step per batch, prev an Option, refs git would push; a malformed plan read back is refused', async () => {
+  const from = await spooled(src.packs.ref);
+  const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
+  const last = plan.steps.length - 1;
+  plan.steps.forEach((s, i) => {
+    assert.equal(s.kind, i === last ? 'final' : 'batch');
+    if (i === 0) assert.deepEqual(s.prev, { tag: 'none' });
+    else assert.deepEqual(s.prev, { tag: 'some', value: plan.steps[i - 1].temp });
+    if (s.kind === 'final') assert.equal('temp' in s, false);
+    else assert.match(s.temp, /^[0-9a-f]{40}$/);
+  });
+  // one push: the final step alone, no temp ref to delete
+  const one = must(planTransfer(from.pack, from.resolved, { budget: { ...BUDGET, maxRequestBytes: 10_000_000 }, ref: REF, commit: src.commit }));
+  assert.deepEqual(one.steps, [{ kind: 'final', prev: { tag: 'none' } }]);
+  for (const ref of ['main', 'refs/heads', 'refs/@', 'refs/heads/a..b', 7]) {
+    const r = planTransfer(from.pack, from.resolved, { budget: BUDGET, ref, commit: src.commit });
+    assert.equal(r.error.code, 'bad_request', String(ref));
+    assert.equal(r.error.what, 'ref');
+  }
+  for (const tempPrefix of ['refs/ply', 'refs/', 'nope/']) assert.equal(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit, tempPrefix }).error.what, 'tempPrefix', tempPrefix);
+  assert.ok(must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit, tempPrefix: 'refs/x/y/' })).tempRef.startsWith('refs/x/y/'));
+  // read back: each malformed shape refused, even with its hash recomputed by hand
+  const json = JSON.parse(JSON.stringify(plan));
+  const bad = [
+    p => { p.steps[0] = { ...p.steps[0], prev: null }; },
+    p => { p.steps[0] = { ...p.steps[0], temp: null }; },
+    p => { p.steps[last] = { ...p.steps[last], temp: p.steps[0].temp }; },
+    p => { p.steps[0] = { ...p.steps[0], kind: 'final' }; },
+    p => { p.steps[last] = { ...p.steps[last], kind: 'batch' }; },
+    p => { p.steps.push({ kind: 'final', prev: { tag: 'none' } }); },
+    p => { p.steps = {}; },
+    p => { p.steps[1] = { ...p.steps[1], prev: { tag: 'some', value: 'x' } }; },
+    p => { p.head = 'HEAD'; },
+    p => { p.ref = 'main'; },
+    p => { p.tempRef = 'refs/@'; },
+  ];
+  for (const edit of bad) {
+    const p = structuredClone(json);
+    edit(p);
+    assert.equal(checkTransferPlan(p).ok, false, String(edit));
+  }
+  assert.ok(checkTransferPlan(json).ok);
+});
+
+test('ls-refs that lags a push: settled by reading again, not by sending again; a longer lag pauses; a resend refused after a lag goes on', async () => {
+  const from = await spooled(src.packs.ref);
+  const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
+  // every push shows two reads late; three reads settle it: no step is sent twice
+  {
+    const { bare, t } = repo();
+    const lag = lagging(t, () => 2);
+    const run = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 3, delayMs: 0 } }));
+    assert.deepEqual(run, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
+    assertCopied(bare, plan);
+  }
+  // a lag longer than the reads: the run pauses at the step it pushed ('settling'), the refs already past it
+  const { bare, t } = repo();
+  let lagNext = 4;
+  const lag = lagging(t, () => lagNext);
+  const paused = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 2, delayMs: 0 } }));
+  assert.deepEqual(paused, { tag: 'paused', step: 0, pushes: 1, reason: 'settling' });
+  assert.equal(git(bare, ['rev-parse', plan.tempRef]).trim(), plan.steps[0].temp, 'the push landed');
+  // the next run's first read still lags: it sends step 0 again, the server refuses it (stale), the refs settled show
+  // step 0 landed, and the run goes on to the end
+  lagNext = 0;
+  const before = lag.reads();
+  const resumed = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 3, delayMs: 0 } }));
+  assert.equal(resumed.tag, 'done');
+  assert.equal(resumed.pushes, plan.steps.length, 'one resend, refused, then every other step once');
+  assert.ok(lag.reads() > before);
+  assertCopied(bare, plan);
+  // a refusal the refs do not explain stands: the target taken by another commit, read after the push
+  const other = repo();
+  git(work, ['push', '-q', other.bare, `${src.head}:${REF}`]);
+  assert.equal((await runTransfer(other.t, from, plan, src.commit)).error.code, 'cas_conflict');
+});
+
+test('done reports a temp ref left behind; the spans: run > status, step, settle, each with the plan hash and an outcome', async () => {
+  const from = await spooled(src.packs.ref);
+  const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
+  const ex = arrayExporter();
+  const { bare, t } = repo({ tracer: new Tracer({ exporter: ex }) });
+  const run = must(await runTransfer(t, from, plan, src.commit, { settle: { reads: 1, delayMs: 0 } }));
+  assert.equal(run.tempLeft, false);
+  const spans = ex.lines.flatMap(flattenLine);
+  const named = name => spans.filter(s => s.name === name);
+  const [root] = named('git.transfer.run');
+  assert.equal(root.attrs['git.transfer.outcome'], 'done');
+  assert.equal(root.attrs['git.transfer.pushes'], plan.steps.length);
+  assert.equal(root.attrs['git.transfer.plan.hash'], plan.hash);
+  assert.equal(root.attrs['git.transfer.ref'], REF);
+  const steps = named('git.transfer.step');
+  assert.deepEqual(steps.map(s => s.attrs['git.transfer.step']), plan.steps.map((_, i) => i));
+  for (const [i, s] of steps.entries()) {
+    assert.equal(s.parentSpanId, root.spanId);
+    assert.equal(s.attrs['git.transfer.plan.hash'], plan.hash);
+    assert.equal(s.attrs['git.transfer.step.kind'], plan.steps[i].kind);
+    assert.equal(s.attrs['git.transfer.step.outcome'], 'landed');
+    assert.equal(s.attrs['git.transfer.batch.entries'], plan.pack.batches[i].entries.length);
+    assert.ok(s.attrs['git.transfer.batch.bytes'] > 0 && s.attrs['git.transfer.batch.bytes'] <= plan.pack.batches[i].packBytes + 300 * 68 + 32 * 1024);
+    assert.ok(spans.some(w => w.parentSpanId === s.spanId), 'the push\'s wire spans under the step');
+  }
+  const settles = named('git.transfer.settle');
+  assert.equal(settles.length, plan.steps.length);
+  assert.ok(settles.every(s => s.attrs['git.transfer.settle.outcome'] === 'moved' && s.parentSpanId === root.spanId));
+  assert.ok(named('git.transfer.status').every(s => s.attrs['git.transfer.plan.hash'] === plan.hash && typeof s.attrs['git.transfer.status.outcome'] === 'string'));
+  // a temp ref still on the destination after the ref was created (a host that kept it): done, tempLeft
+  git(bare, ['update-ref', plan.tempRef, plan.steps[0].temp]);
+  assert.deepEqual(must(await runTransfer(t, from, plan, src.commit)), { tag: 'done', head: plan.head, pushes: 0, tempLeft: true });
+  assert.deepEqual(must(await sweepTransfers(t)), [plan.tempRef]);
+  const [sweep] = named('git.transfer.sweep').length ? named('git.transfer.sweep') : ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.transfer.sweep');
+  assert.equal(sweep.attrs['git.transfer.sweep.deleted'], 1);
 });
