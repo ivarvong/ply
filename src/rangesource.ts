@@ -1,7 +1,7 @@
-// A range reader: the one storage interface for a pack (or any bytes) too large to hold. `size` is the whole length;
-// `read(offset, length)` streams exactly `length` bytes starting at `offset`, or refuses. The same interface serves a
-// file, a memory buffer or an object store (an R2 ranged get), so the pack-subset builder (#235) and the streaming
-// index-pack (#248) work over whatever a caller spools into.
+// A random-access byte source: `size` bytes, read as a stream of [offset, offset + length). The one storage interface
+// the pack-over-a-spool code takes (#235, #248), so the same code works over a file, a memory buffer or an object store
+// (an R2 ranged GET). A read past `size`, or a negative or fractional bound, is the source's refusal to make; the stream
+// yields exactly `length` bytes or errors.
 import type { PlyError } from './errors.js';
 import { fail } from './errors.js';
 import type { Result } from './result.js';
@@ -9,28 +9,17 @@ import { ok } from './result.js';
 
 export type RangeSource = { readonly size: number; read(offset: number, length: number): Promise<Result<ReadableStream<Uint8Array>, PlyError>> };
 
-const RANGE_CHUNK = 64 * 1024;
-
-// Bytes held in memory as a RangeSource (tests, small packs): each read is a stream of views into `bytes`, never a copy.
+// A RangeSource over bytes in memory (tests, and a pack small enough to hold): each read is one chunk, a view (no copy).
 export function rangeFromBytes(bytes: Uint8Array): RangeSource {
   return {
     size: bytes.length,
-    // async: the interface is a promise, whatever the backing store
-    // oxlint-disable-next-line eslint/require-await, typescript/require-await -- see above
-    async read(offset: number, length: number): Promise<Result<ReadableStream<Uint8Array>, PlyError>> {
-      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 || offset + length > bytes.length) {
-        return fail('bad_request', `range read: [${offset}, ${offset + length}) is outside 0..${bytes.length}`, { what: 'range' });
+    read: async (offset, length) => {
+      await Promise.resolve();
+      if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > bytes.length) {
+        return fail('bad_request', `range ${offset}+${length} outside ${bytes.length} bytes`);
       }
-      let at = offset;
-      const end = offset + length;
-      return ok(new ReadableStream<Uint8Array>({
-        pull(c): void {
-          if (at >= end) { c.close(); return; }
-          const next = Math.min(end, at + RANGE_CHUNK);
-          c.enqueue(bytes.subarray(at, next));
-          at = next;
-        },
-      }, { highWaterMark: 0 }));
+      const view = bytes.subarray(offset, offset + length);
+      return ok(new ReadableStream<Uint8Array>({ start(c) { if (view.length > 0) c.enqueue(view); c.close(); } }));
     },
   };
 }
