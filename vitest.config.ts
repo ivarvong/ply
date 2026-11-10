@@ -49,6 +49,10 @@ class WeightedSequencer extends BaseSequencer {
 const failsites = Boolean(process.env['PLY_FAILSITES']);
 const { ERRORS, instrument } = failsites ? await import('./test/space/failsite-instrument.mjs') : { ERRORS: '', instrument: (s: string): string => s };
 
+// `npm run coverage`: test/coverage.mjs reads V8's counts against src/*.ts byte offsets, so the files run under node's
+// own import (type stripping keeps every offset) instead of vite's module runner, and each fork flushes its counts.
+const coverage = Boolean(process.env['NODE_V8_COVERAGE']);
+
 export default defineConfig({
   plugins: failsites ? [{
     name: 'ply-failsite',
@@ -58,7 +62,11 @@ export default defineConfig({
   }] : [],
   test: {
     // quirks-reset: no remembered per-remote quirks leak between tests (#136)
-    setupFiles: failsites ? ['test/quirks-reset.js', 'test/space/failsite-setup.js'] : ['test/quirks-reset.js'],
+    setupFiles: [
+      'test/quirks-reset.js',
+      ...(failsites ? ['test/space/failsite-setup.js'] : []),
+      ...(coverage ? ['test/coverage-flush.js'] : []),
+    ],
     include: ['test/**/*.test.js'],
     exclude: ['**/node_modules/**'],
     // node:test had no default timeout and the space/oracle tests run for minutes; a test that needs a bound states it
@@ -72,5 +80,6 @@ export default defineConfig({
     fileParallelism: true,
     // Tests run in declaration order within a file, as under node:test.
     sequence: { concurrent: false, sequencer: WeightedSequencer },
+    experimental: { viteModuleRunner: !coverage },
   },
 });
