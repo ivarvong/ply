@@ -12,6 +12,8 @@
 //   node scripts/mutate.mjs --plan N         print the N-way partition (units, planned seconds, mutant counts) and exit
 //   node scripts/mutate.mjs --check          judge an existing reports/mutation/mutation.json
 //   node scripts/mutate.mjs --weights [REPORT...]  rewrite scripts/mutate-weights.json from full-run reports
+//   node scripts/mutate.mjs --weights-pr REPORT...  rewrite scripts/mutate-weights-pr.json from pull request shard
+//                                            reports, newest first (a pull request plans from this table)
 //
 // The rules live only in this file. Every mode judges with the same summarize() and the same
 // verdict(); a shard only runs Stryker. The merge recomputes the partition from the commit and
@@ -194,7 +196,7 @@ async function plan(n) {
   const ranges = prRanges();
   const files = (ranges ? [...ranges.keys()] : allSrc()).filter(f => existsSync(f)).sort();
   const counts = await mutantCounts(files);
-  const cost = costModel();
+  const cost = costModel(ranges !== null);
   const expected = new Map();
   const costed = [];
   for (const f of files) {
@@ -262,39 +264,62 @@ const unitFile = unit => unit.replace(/:\d+-\d+$/, '');
 // --weights REPORT...; the first report holding a file wins). A line with no entry costs the file's mean seconds per
 // mutant for each mutant starting there; a file with no entry, the median known rate. Committed, so every shard and the
 // gate compute the same plan.
+// A pull request has its own table, scripts/mutate-weights-pr.json, measured from pull request shard reports
+// (--weights-pr REPORT...): the same line costs a different amount in the two modes, so one table cannot plan both.
+// On #243/#244 the PR runs cost attributes.ts:235-300 at 5,943-6,604 s (the full-run table said 413 s, so the
+// planner never cut it and one shard ran 36-51 min) and objects.ts:279-347 at 11 s (the full run measured 3,688 s).
+// A pull request plans from its table, falling back per line to the full-run table, then to a rate.
 const WEIGHTS = 'scripts/mutate-weights.json';
-function costModel() {
-  const known = existsSync(WEIGHTS) ? JSON.parse(readFileSync(WEIGHTS, 'utf8')) : {};
-  const rates = Object.values(known).filter(w => w.mutants > 0).map(w => w.seconds / w.mutants).sort((a, b) => a - b);
+const WEIGHTS_PR = 'scripts/mutate-weights-pr.json';
+const readWeights = path => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {});
+function costModel(pr) {
+  const full = readWeights(WEIGHTS);
+  const tables = pr ? [readWeights(WEIGHTS_PR), full] : [full];
+  const rates = Object.values(full).filter(w => w.mutants > 0).map(w => w.seconds / w.mutants).sort((a, b) => a - b);
   const median = rates.length ? rates[rates.length >> 1] : 1;
   // Seconds per line for this file's current mutants (spans from the instrumenter).
   return (file, { spans }) => {
-    const w = known[file];
-    const rate = w?.mutants ? w.seconds / w.mutants : median;
+    const ws = tables.map(t => t[file]);
+    const known = ws.find(w => w?.mutants);
+    const rate = known ? known.seconds / known.mutants : median;
     const startsAt = new Map();
     for (const [a] of spans) startsAt.set(a, (startsAt.get(a) ?? 0) + 1);
     const byLine = new Map();
-    for (const [line, n] of startsAt) byLine.set(line, w?.byLine?.[line] ?? n * rate);
+    for (const [line, n] of startsAt) byLine.set(line, ws.map(w => w?.byLine?.[line]).find(s => s !== undefined) ?? n * rate);
     return byLine;
   };
 }
 
-function writeWeights(paths) {
+// Measured seconds per file and per line (by the line a mutant starts on). Merged by line: the first report holding a
+// line wins it, so a file a full run split across shards, or that several pull requests each covered in part, keeps
+// every measured line (holding only a file's first report dropped the rest: inflatestream.ts on main's 16-way plan).
+// seconds and mutants are the totals over the kept lines.
+function writeWeights(paths, target) {
   const out = {};
   for (const path of paths) {
     const files = JSON.parse(readFileSync(path, 'utf8')).files ?? {};
     for (const [file, info] of Object.entries(files)) {
-      if (out[file]) continue;
-      const mutants = info.mutants ?? [];
-      const byLine = {};
-      for (const m of mutants) byLine[m.location.start.line] = (byLine[m.location.start.line] ?? 0) + (m.duration ?? 0) / 1000;
-      for (const k of Object.keys(byLine)) byLine[k] = Math.round(byLine[k] * 10) / 10;
-      out[file] = { seconds: Math.round(mutants.reduce((t, m) => t + (m.duration ?? 0), 0) / 100) / 10, mutants: mutants.filter(m => m.status !== 'Ignored').length, byLine };
+      const lines = new Map();
+      for (const m of info.mutants ?? []) {
+        const l = m.location.start.line;
+        const e = lines.get(l) ?? { s: 0, n: 0 };
+        e.s += (m.duration ?? 0) / 1000;
+        if (m.status !== 'Ignored') e.n += 1;
+        lines.set(l, e);
+      }
+      const w = (out[file] ??= { seconds: 0, mutants: 0, byLine: {} });
+      for (const [l, { s, n }] of lines) {
+        if (w.byLine[l] !== undefined) continue;
+        w.byLine[l] = Math.round(s * 10) / 10;
+        w.seconds += s;
+        w.mutants += n;
+      }
     }
   }
+  for (const w of Object.values(out)) w.seconds = Math.round(w.seconds * 10) / 10;
   const sorted = Object.fromEntries(Object.keys(out).sort().map(k => [k, out[k]]));
-  writeFileSync(WEIGHTS, JSON.stringify(sorted) + '\n');
-  console.log(`mutate: wrote ${WEIGHTS} from ${paths.join(', ')} (${Object.keys(out).length} files)`);
+  writeFileSync(target, JSON.stringify(sorted) + '\n');
+  console.log(`mutate: wrote ${target} from ${paths.length} report(s) (${Object.keys(out).length} files)`);
 }
 
 function parseShard(arg) {
@@ -466,10 +491,18 @@ if (problems.length) {
   process.exit(1);
 }
 
-if (process.argv.includes('--weights')) {
+if (process.argv.includes('--weights-pr')) {
+  const k = process.argv.indexOf('--weights-pr');
+  const paths = process.argv.slice(k + 1).filter(a => !a.startsWith('--'));
+  if (!paths.length) {
+    console.error('mutate: --weights-pr wants pull request shard reports (newest first)');
+    process.exit(2);
+  }
+  writeWeights(paths, WEIGHTS_PR);
+} else if (process.argv.includes('--weights')) {
   const k = process.argv.indexOf('--weights');
   const paths = process.argv.slice(k + 1).filter(a => !a.startsWith('--'));
-  writeWeights(paths.length ? paths : [REPORT]);
+  writeWeights(paths.length ? paths : [REPORT], WEIGHTS);
 } else if (process.argv.includes('--plan')) {
   const n = Number(argValue('--plan'));
   if (!(n >= 1)) {
