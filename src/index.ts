@@ -59,6 +59,8 @@ export { scanPackIndex, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
 export { resolvePackRange, RESOLVED_ENTRY_BYTES, RESOLVE_CACHE_BYTES, NO_BASE as RESOLVED_NO_BASE, THIN_BASE as RESOLVED_THIN_BASE } from './packrangeresolve.js';
 export type { ResolvedIndex, ResolvedColumns, ResolveStats, ResolveRangeOpts, ThinBaseLookup, ThinBase as ResolvedThinBase } from './packrangeresolve.js';
 export { rangeFromBytes } from './rangesource.js';
+export { planPackBatches, planHash, PLAN_VERSION } from './packplan.js';
+export type { PackPlan, PlannedBatch, PushBudget, PlanOpts, BatchKind } from './packplan.js';
 export type { RangeSource } from './rangesource.js';
 export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject, ScanColumns, ScanContent, ScanIndexOpts, ScanSource } from './packscanindex.js';
 export { sidebandStep } from './fetch.js';

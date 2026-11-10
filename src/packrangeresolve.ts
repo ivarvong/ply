@@ -18,7 +18,8 @@
 // that named it. Refused: a base in neither the pack nor `bases` (pack_corrupt, "not found"; a REF cycle cannot
 // resolve, so it ends there too), a chain deeper than maxDeltaChain, and work past the budget (limit_exceeded).
 //
-// Kept per entry in the result: RESOLVED_ENTRY_BYTES (oid 20 + type 1 + base 4 + depth 4 + the oid-ordered index 4).
+// Kept per entry in the result: RESOLVED_ENTRY_BYTES (oid 20 + type 1 + base 4 + depth 4 + size 8 + the oid-ordered
+// index 4).
 // Held per entry only while resolving: child links (4 per entry + 4 per OFS delta), each REF delta's base id and
 // position (24), and a known flag (1).
 import type { PlyError } from './errors.js';
@@ -58,8 +59,8 @@ export type ResolveRangeOpts = {
 export const RESOLVE_CACHE_BYTES: number = 16 * 1024 * 1024;
 const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null });
 
-// oid 20 + type 1 + base 4 + depth 4 + byOid 4
-export const RESOLVED_ENTRY_BYTES = 33;
+// oid 20 + type 1 + base 4 + depth 4 + size 8 + byOid 4
+export const RESOLVED_ENTRY_BYTES = 41;
 // `base`: the entry a delta was applied to; NO_BASE for a whole object; THIN_BASE for a base from `bases`.
 export const NO_BASE = -1;
 export const THIN_BASE = -2;
@@ -68,6 +69,8 @@ export type ResolvedColumns = {
   readonly type: Uint8Array;
   readonly base: Int32Array;
   readonly depth: Int32Array;
+  // the resolved object's size in bytes (a delta's result, not its instructions)
+  readonly size: Float64Array;
 };
 export type ResolveStats = {
   // bytes inflated from the source, delta results produced, range reads made, bytes read back
@@ -139,6 +142,7 @@ type State = {
   readonly type: Uint8Array;
   readonly base: Int32Array;
   readonly depth: Int32Array;
+  readonly size: Float64Array;
   // OFS children of entry i: ofsKids[ofsStart[i] .. ofsStart[i + 1])
   readonly ofsStart: Int32Array;
   readonly ofsKids: Int32Array;
@@ -313,6 +317,7 @@ async function resolveKids(s: State, p: Parent, stack: number[]): Promise<PlyErr
     s.known[c] = 1;
     s.type[c] = p.type;
     s.depth[c] = depth;
+    s.size[c] = out.value.length;
     s.base[c] = p.index;
     if (hasKids(s, c)) {
       cachePut(s.cache, c, out.value);
@@ -387,7 +392,7 @@ function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, c
   }
   return {
     pack, source, bases: opts.bases, n, ...caps, work: 0, oid, known,
-    type: new Uint8Array(n), base: new Int32Array(n).fill(NO_BASE), depth: new Int32Array(n), ofsStart, ofsKids,
+    type: new Uint8Array(n), base: new Int32Array(n).fill(NO_BASE), depth: new Int32Array(n), size: Float64Array.from(pack.columns.size), ofsStart, ofsKids,
     refEntry, refOid, thinOf: new Int32Array(n).fill(-1), thinOids: new Uint8Array(0), thinCount: 0,
     cache: { map: new Map(), bytes: 0, cap: opts.cacheBytes },
     stats: { inflated: 0, applied: 0, reads: 0, readBytes: 0, cacheHits: 0, rebuilt: 0, thinBases: 0 },
@@ -495,7 +500,7 @@ function finish(s: State): ResolvedIndex {
   };
   return {
     count: n,
-    columns: { oid: s.oid, type: s.type, base: s.base, depth: s.depth },
+    columns: { oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size },
     heldBytes: n * RESOLVED_ENTRY_BYTES,
     stats: { ...s.stats, work: s.work, workMax: s.workMax },
     oid: i => (inRange(i) ? some(oidAt(s.oid, i)) : none),
