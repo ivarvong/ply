@@ -1896,12 +1896,13 @@ test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and t
   const advOk = (frames, capsWant) => { const r = parseReceiveAdvert(frames); assert.equal(r.ok, true, JSON.stringify(r.error?.message)); assert.deepEqual([...r.value], capsWant); };
   advErr([dat('# service=git-receive-pack\n'), dat(`${oid(1)} refs/heads/a\n`)], 'advertisement: no flush after the service header');
   advOk([dat('# service=git-receive-pack\n'), FL, dat(`${oid(1)} refs/heads/a\0report-status atomic\n`), FL], ['report-status', 'atomic']);
-  // v2 answer (Artifacts): held to the v2 shape, no v0 caps; a v2 shape broken is parseCapabilitiesV2's typed error
-  advOk([dat('version 2\n'), dat('agent=x\n'), FL], []);
-  advOk([dat('version 2'), dat('agent=x\n'), FL], []);
-  const v2Cut = parseReceiveAdvert([dat('version 2\n'), dat('agent=x\n')]);
-  assert.equal(v2Cut.ok, false);
-  assert.equal(v2Cut.error.code, 'protocol');
+  // a v2 answer names no push capabilities: refused by name (#232), never read as an empty set
+  const V2_REFUSED = 'receive-pack advertisement: the server answered in protocol v2, which has no push capabilities';
+  for (const frames of [[dat('version 2\n'), dat('agent=x\n'), FL], [dat('version 2'), dat('agent=x\n'), FL], [dat('version 2\n'), dat('agent=x\n')], [dat('# service=git-receive-pack\n'), FL, dat('version 2\n'), FL]]) {
+    const r = parseReceiveAdvert(frames);
+    assert.equal(r.ok, false);
+    assert.deepEqual([r.error.code, r.error.message], ['unsupported', V2_REFUSED]);
+  }
   advErr([dat('\nversion 2'), FL], 'receive-pack advertisement: unexpected line "\\nversion 2"');
   advErr([dat(`${oid(1)} refs/heads/a\n`)], 'receive-pack advertisement: no flush after the refs');
   advErr([dat(`${oid(1)} refs/heads/a\n`), { kind: 'delim' }, FL], 'receive-pack advertisement: invalid packet (delim)');

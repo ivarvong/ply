@@ -416,6 +416,10 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   });
 }
 
+// git asks for protocol v2 on upload-pack only: remote-curl downgrades every other service to v0 and sends no
+// Git-Protocol header, and a server may answer a v2-flagged receive-pack GET with a list that names no push capability.
+const protocolHeader = (service: string): Record<string, string> => (service === 'git-upload-pack' ? { 'Git-Protocol': 'version=2' } : {});
+
 // oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
 function transportOf(settings: HttpSettings): HttpTransport {
   const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, maxPackBytes } = settings;
@@ -531,7 +535,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
 
   const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
     const t0 = Date.now();
-    const res = await send(asked, { headers: headers(service, { 'Git-Protocol': 'version=2', ...recordHint() }) }, sig);
+    const res = await send(asked, { headers: headers(service, { ...protocolHeader(service), ...recordHint() }) }, sig);
     if (res.ok) span.set({ 'http.response.status_code': res.value.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': headerText(res.value, 'content-type') });
     return res;
   };
@@ -667,7 +671,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     }
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
-    const extra = { 'Git-Protocol': 'version=2', ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
+    const extra = { ...protocolHeader(service), ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
     span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': requestTimeoutMs, ...redirectAttrs() });
     const t0 = Date.now();
     const sig = requestSignal();

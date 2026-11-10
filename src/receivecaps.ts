@@ -8,8 +8,6 @@ import { decideObjectFormat } from './closed.js';
 import type { Option, Result } from './result.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
-import { parseCapabilitiesV2 } from './discover.js';
-import type { CapsV2Error } from './discover.js';
 import { coded, clientSpan, advertise, spanned } from './transport.js';
 import { push } from './push.js';
 import type { CheckedCaps, PushOptions, PushResult, PushTransport } from './push.js';
@@ -22,8 +20,8 @@ import type { Frame } from './transport.js';
 import type { Span } from './otel.js';
 
 type Protocol = ErrorOf<'protocol'>;
-// What reading an advertisement can fail with: the v0 shape is protocol; a v2 answer is held to discover's checks.
-export type AdvertError = CapsV2Error;
+// What reading an advertisement can fail with: the v0 shape is protocol; a v2 answer has no push capabilities to read.
+export type AdvertError = ErrorOf<'protocol' | 'unsupported'>;
 type DataFrame = Extract<Frame, { readonly kind: 'data' }>;
 const frameAt = (frames: readonly Frame[], i: number): Option<Frame> => at(frames, i);
 // The data frame at `i`, if the frame there is one.
@@ -65,12 +63,12 @@ export function parseReceiveAdvert(frames: readonly Frame[]): Result<Set<string>
   const end = serviceHeaderEnd(frames);
   if (!end.ok) return end;
   const start = end.value;
-  // A server asked with Git-Protocol: version=2 may answer the receive-pack GET with a v2 capability advertisement
-  // (Cloudflare Artifacts does): it is held to the v2 shape (discover.ts) and, as before, names no v0 capabilities.
+  // ply asks for the v0 advertisement here, as git does (http.ts sends no Git-Protocol header for receive-pack). A v2
+  // answer anyway is a different vocabulary, with no report-status or atomic: reading it as an empty set would be
+  // indistinguishable from a server with no capabilities, so it is refused by name.
   const opening = dataAt(frames, start);
   if (opening !== null && td.decode(opening.payload).replace(/\n$/u, '') === 'version 2') {
-    const v2 = parseCapabilitiesV2(frames);
-    return v2.ok ? ok(caps) : v2;
+    return fail('unsupported', 'receive-pack advertisement: the server answered in protocol v2, which has no push capabilities');
   }
   let hex = SHA1_HEX;
   for (let k = start; ; k++) {

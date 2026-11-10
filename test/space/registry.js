@@ -226,6 +226,7 @@ export const DECISIONS = [
   { match: 'src/push.ts#knownNgClass:*', space: 'push-ng', axisTag: 'reason' },
   { match: 'src/closed.ts#decideObjectFormat:export', space: 'advertisement', axisTag: 'objectFormat' },
   { match: 'src/receivecaps.ts#parseReceiveAdvert:protocol:*', space: 'pkt-frame', axisTag: 'position' },
+  { match: 'src/receivecaps.ts#parseReceiveAdvert:unsupported:*', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#parseReceiveAdvert:export', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#serviceHeaderEnd:protocol:*', space: 'pkt-frame', axisTag: 'position' },
   { match: 'src/receivecaps.ts#serviceHeaderEnd:decode:*', excluded: 'protocol: the "# service=" keyword git defines' },
