@@ -1,7 +1,7 @@
 name: nightly
 
 # Deep fuzz against main with a seed that rotates daily (the UTC date as YYYYMMDD), the full `npm test`, the full
-# limit sweep, and the pack-cut space with git's oracle on every cut (PACK_SPACE=full). No Stryker: ci.yml runs the
+# limit sweep, and the pack-cut space with git's oracle on every cut (PACK_SPACE=full). No Stryker: mutate.yml runs the
 # full src/ mutation run, in 16 shards, on every push to main, and a mutation run of unchanged code is the same run
 # (unsharded it is ~8 h of test time and never fit this job's 300 min: nightly 1, 4 and 5 were cancelled at it).
 # A failure prints the seed, the failing case and a one-line reproduce command (NIGHTLY-FAIL lines), and the report

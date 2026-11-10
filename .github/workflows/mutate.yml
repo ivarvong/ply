@@ -1,0 +1,162 @@
+name: mutate
+
+# Stryker, out of band (since 2026-11-10): the same shards, plan and gate (scripts/mutate.mjs, thresholds and
+# rules unchanged) that ci.yml ran as its `mutate` job, in a workflow of its own, so a push's ci run (tests, lint, fuzz,
+# limit sweep) finishes without waiting about an hour for mutation. It still runs on every push to main and every pull
+# request, and the check is still named `mutate`. A newer push to main cancels the older main run (only the newest main
+# is worth judging; a pull request run is cancelled by its next push, as in ci.yml). A failed verdict on main opens or
+# comments on the issue "mutation survivors <date>" with the survivor list, the way nightly.yml reports.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: mutate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Stryker over the src lines a PR changed plus every strictly gated line (each parser function and bounds file, changed
+  # or not: a moved parser is not a changed line), all of src/ on main, split into 16 shards balanced by measured cost
+  # (scripts/mutate.mjs --plan 16, weights in scripts/mutate-weights.json). A file is the unit, or a line range of a file
+  # costing more than a shard's share. Shards only run Stryker; the job named `mutate` merges their reports, checks
+  # every mutant of every planned file is there exactly once, and judges them with the same rules as an unsharded run.
+  # The 16 appears here three times; the merge refuses a missing or extra shard, so changing one and not the others
+  # fails the gate.
+  mutate-shard:
+    name: mutate-shard (${{ matrix.shard }}/16)
+    runs-on: ubuntu-latest
+    # Planned from measured seconds (scripts/mutate.mjs --plan 16): a pull request from scripts/mutate-weights-pr.json
+    # (refresh with --weights-pr from recent PR shard reports), main from scripts/mutate-weights.json (--weights from a
+    # full run). Without a limit a runaway shard holds the job, and the mutate gate, for GitHub's 6 h default.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: write # setup-node persists the npm cache
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: stryker
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+          SHARD: ${{ matrix.shard }}
+        run: node scripts/mutate.mjs --shard "${SHARD}/16"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-shard-${{ matrix.shard }}
+          path: reports/mutation/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # The gate. Its name stays `mutate` so anything waiting on that check still works. It runs even when a shard
+  # fails or is cancelled (a skipped required check would count as passing), and fails unless every shard succeeded.
+  mutate:
+    name: mutate
+    needs: mutate-shard
+    # not always(): a run cancelled by a newer push to main (concurrency below) is not a failure to report
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # setup-node persists the npm cache
+    steps:
+      - name: every shard succeeded
+        env:
+          SHARDS: ${{ needs.mutate-shard.result }}
+        run: |
+          if [ "$SHARDS" != success ]; then
+            echo "mutate-shard result: $SHARDS"
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mutation-shard-*
+          path: shard-reports
+      - run: mkdir -p reports/mutation
+      - name: merge and judge
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          MUTATE_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: |
+          set -o pipefail
+          node scripts/mutate.mjs --merge shard-reports --shards 16 2>&1 | tee reports/mutation/verdict.txt
+      # The merged report, for per-file history (weights for a future partition, or a look at what survived).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: success() || failure()
+        with:
+          name: mutation-report
+          path: |
+            reports/mutation/mutation.json
+            reports/mutation/verdict.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    name: report survivors
+    needs: [mutate-shard, mutate]
+    if: ${{ failure() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: mutation-report
+          path: report
+      - name: open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          SHARDS: ${{ needs.mutate-shard.result }}
+        run: |
+          set -euo pipefail
+          title="mutation survivors $(date -u +%Y-%m-%d)"
+          body=$(mktemp)
+          {
+            echo "Mutation run $RUN_URL failed on main at \`$SHA\` (shards: $SHARDS)."
+            echo
+            echo '```'
+            if [ -s report/verdict.txt ]; then
+              # the verdict's failure lines: the gated survivors (path:line function mutator status -> replacement) and
+              # any refusal of the merge; the per-file table is in the run's mutation-report artifact
+              grep -E '^(src/[^ ]+:[0-9]+ |[0-9]+ surviving mutant|mutate: |score )' report/verdict.txt | head -150 || true
+            else
+              echo "(no verdict: a shard did not finish; open the run above)"
+            fi
+            echo '```'
+          } > "$body"
+          cat "$body"
+          num=$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body-file "$body"
+          else
+            gh issue create --title "$title" --body-file "$body"
+          fi
