@@ -5,13 +5,14 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { MEMORY_CELL_FLAGS } from './memcell.js';
 
 const MIB = 1024 * 1024;
 const SIZE = 4 * MIB;
 const CACHE = 8 * MIB;
 const DEPTH = 10;
 function cell(chains) {
-  const r = spawnSync(process.execPath, ['--expose-gc', '--max-old-space-size=64', '--import', './test/ts-resolve.mjs', 'test/stream/resolve-cell.mjs', String(chains), String(DEPTH), String(SIZE), String(CACHE)], { encoding: 'utf8', env: process.env, maxBuffer: 1 << 20 });
+  const r = spawnSync(process.execPath, [...MEMORY_CELL_FLAGS, '--max-old-space-size=64', '--import', './test/ts-resolve.mjs', 'test/stream/resolve-cell.mjs', String(chains), String(DEPTH), String(SIZE), String(CACHE)], { encoding: 'utf8', env: process.env, maxBuffer: 1 << 20 });
   assert.equal(r.status, 0, `chains ${chains}: exit ${r.status}\n${r.stderr}`);
   return JSON.parse(r.stdout.trim().split('\n').at(-1));
 }

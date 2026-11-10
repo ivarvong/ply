@@ -10,6 +10,7 @@
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
@@ -404,7 +405,7 @@ test('memory: a pack far larger than held memory holds about two chunks', async 
   const chunk = 1 << 20;
   const chunks = 256; // 256 MiB
   const out = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--expose-gc', '--import', './test/ts-resolve.mjs', 'test/push-pack-child.mjs', String(chunk), String(chunks)], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const child = spawn(process.execPath, [...MEMORY_CELL_FLAGS, '--import', './test/ts-resolve.mjs', 'test/push-pack-child.mjs', String(chunk), String(chunks)], { stdio: ['ignore', 'pipe', 'inherit'] });
     let text = '';
     child.stdout.on('data', d => { text += d; });
     child.on('error', reject);
@@ -413,8 +414,10 @@ test('memory: a pack far larger than held memory holds about two chunks', async 
   assert.equal(out.ok, true, out.error);
   assert.equal(out.packBytes, chunk * chunks);
   assert.equal(out.bytesSeen > chunk * chunks, true);
-  // Alone it peaks at 2 chunks (2,097,288 B measured). Beside other test files arrayBuffers lags the sweep (11.5 MiB seen),
-  // so the gate is 32 of the pack's 256 chunks: buffering the pack, or a tee, is far past it.
+  console.log(JSON.stringify(out));
+  // Two chunks: the one being written and the one the source made next (2,097,288 B on node 24, 2,097,292 B on node 22).
+  // Before #249 node 22 read 11.5 MiB here: the backing stores of dropped chunks still counted until V8's background
+  // sweep reached them, which MEMORY_CELL_FLAGS now does with the gc. A third chunk is a copy or a tee.
   assert.ok(out.samples >= 10, JSON.stringify(out));
-  assert.ok(out.liveDelta < 32 * chunk, JSON.stringify(out));
+  assert.ok(out.liveDelta < 3 * chunk, JSON.stringify(out));
 }, 180_000);

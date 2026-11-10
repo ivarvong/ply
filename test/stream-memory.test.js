@@ -1,16 +1,19 @@
 // The memory bound of the pull codecs and of fetchSingle, fetchWide, fetchPack and inflate() on them (issue #172), measured: each cell is its own process
-// (test/stream/cell.mjs, --expose-gc) under a 64 MiB and a 128 MiB V8 heap, its input generated as it is read, and the
-// peak of live arrayBuffers over the cell (a gc at every sample) compared with streambound.ts. The parent does not import
+// (test/stream/cell.mjs, MEMORY_CELL_FLAGS) under a 64 MiB and a 128 MiB V8 heap, its input generated as it is read, and the
+// peak of live arrayBuffers over the cell (a gc at every sample, array buffers swept with it) compared with streambound.ts.
+// Every scan cell asserts the bound itself, on node 22 and 24 alike (#249: the per-PR node 22 allowances were the cells'
+// generator sources and V8's background sweep, not ply; see test/memcell.js and test/stream/pieces.mjs). The parent does not import
 // src/, so a mutation run does not re-run the cells for every covered line.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { MEMORY_CELL_FLAGS } from './memcell.js';
 
 const MIB = 1024 * 1024;
 const HOLD = 32_768 + 16_384 + 65_520; // INFLATE_WINDOW + INFLATE_CHUNK + PKT_MAX_SIZE (format.ts; peakBound 'inflate')
 const PKT = 65_520;
 function cell(mode, size, heap) {
-  const r = spawnSync(process.execPath, ['--expose-gc', `--max-old-space-size=${heap}`, '--import', './test/ts-resolve.mjs', 'test/stream/cell.mjs', mode, String(size)], { encoding: 'utf8', env: process.env, maxBuffer: 1 << 20 });
+  const r = spawnSync(process.execPath, [...MEMORY_CELL_FLAGS, `--max-old-space-size=${heap}`, '--import', './test/ts-resolve.mjs', 'test/stream/cell.mjs', mode, String(size)], { encoding: 'utf8', env: process.env, maxBuffer: 1 << 20 });
   assert.equal(r.status, 0, `${mode} ${size} heap ${heap}: exit ${r.status}\n${r.stderr}`);
   return JSON.parse(r.stdout.trim().split('\n').at(-1));
 }
@@ -31,10 +34,9 @@ for (const heap of [64, 128]) {
     const r = cell('scan-work', 96 * MIB, heap);
     console.log(JSON.stringify(r));
     assert.equal(r.inflated, 3 * 96 * MIB);
-    // peakBound leaves out what the caller holds: here the generator's 16 KiB piece and the next one being built. On
-    // node 22 (CI) this cell measured one or two of them over HOLD, in whole 16 KiB steps; on node 24, none.
-    const FED = 2 * 16_384;
-    assert.ok(r.abDelta <= HOLD + FED, `scan held ${r.abDelta} > ${HOLD} + ${FED}`);
+    // 84,284 B on node 22 and 24 (#249). With generator sources node 22 read 133,436 B: three stale 16 KiB pieces in
+    // the suspended frames of the cell's own generators.
+    assert.ok(r.abDelta <= HOLD, `scan held ${r.abDelta} > ${HOLD}`);
   });
   test(`heap ${heap} MiB: scanPackIndex of 200,000 one-byte blobs (oids on) holds the scan and 51 bytes per entry`, () => {
     const r = cell('scan-index', 200_000, heap);
@@ -42,22 +44,31 @@ for (const heap of [64, 128]) {
     // 31 bytes of columns and a 20-byte oid per entry, sized to the header's count
     assert.equal(r.perEntry, r.entryBytes + 20);
     assert.equal(r.heldBytes, 200_000 * (r.entryBytes + 20));
-    // the last doubling holds the old columns and the new ones at once; the fed chunk and the next one are the cell's
-    const FED = 2 * 16_384;
-    assert.ok(r.abDelta <= HOLD + FED + 2 * r.heldBytes, `index held ${r.abDelta} > ${HOLD} + ${FED} + 2 x ${r.heldBytes}`);
+    // the last doubling holds the old columns and the new ones at once; the chunk being fed is inside HOLD's unread input
+    assert.ok(r.abDelta <= HOLD + 2 * r.heldBytes, `index held ${r.abDelta} > ${HOLD} + 2 x ${r.heldBytes}`);
   });
   test(`heap ${heap} MiB: scanPackIndex of three 96 MiB blobs, past every default cap, holds one inflate record`, () => {
     const r = cell('scan-index-big', 96 * MIB, heap);
     console.log(JSON.stringify(r));
     assert.ok(r.packBytes > 3 * 96 * MIB);
-    // Node 22 holds more here than the scan's bound plus two fed pieces: 166,204 B (node 22.15 locally and CI, both
-    // heaps within 4 B), against 84,284 B on node 24. The holder is unattributed. Feeding through chunked() made node 22
-    // worse (198,972 B), which points at the async-generator source rather than the scan, but that is not proven. The
-    // allowance is the measured node 22 figure plus 8 KiB. #240, #244 and #247 all hit node 22 overages in these cells:
-    // a methodology issue, not a per-PR one.
-    const NODE22_MEASURED = 166_204;
-    const allowed = Math.max(HOLD + 2 * 16_384 + r.heldBytes, NODE22_MEASURED + 8_192);
-    assert.ok(r.abDelta <= allowed, `index held ${r.abDelta} > ${allowed}`);
+    // 84,284 B on node 24; node 22 reads 84,289 B or 100,673 B. The extra 16 KiB there is one inflate chunk that a stale
+    // register of scanPackIndex's own async frame keeps (a heap snapshot at the peak, #249): ply's, and inside the bound.
+    // The 166,204 B node 22 read before #249 was the cell's async-generator source.
+    assert.ok(r.abDelta <= HOLD + r.heldBytes, `index held ${r.abDelta} > ${HOLD} + ${r.heldBytes}`);
+  });
+  test(`heap ${heap} MiB: the async-iterable adapters (#241) hold their decoder's bound: scanPack over 3 x 96 MiB, inflateChunks of 64 MiB, pktFrames of 2,000 frames`, () => {
+    const scan = cell('scan-iter', 96 * MIB, heap);
+    console.log(JSON.stringify(scan));
+    assert.equal(scan.inflated, 3 * 96 * MIB);
+    assert.ok(scan.abDelta <= HOLD, `scanPack held ${scan.abDelta} > ${HOLD}`);
+    const inf = cell('inflate-iter', 64 * MIB, heap);
+    console.log(JSON.stringify(inf));
+    assert.equal(inf.bound, HOLD);
+    assert.ok(inf.abDelta <= HOLD, `inflateChunks held ${inf.abDelta} > ${HOLD}`);
+    const frames = cell('pkt-iter', 2000, heap);
+    console.log(JSON.stringify(frames));
+    assert.equal(frames.bytes, 2000 * 65_516);
+    assert.ok(frames.abDelta <= frames.bound, `pktFrames held ${frames.abDelta} > ${frames.bound}`);
   });
   test(`heap ${heap} MiB: inflate() of a 64 MiB member in hand holds the output and the pull's hold, nothing more`, () => {
     for (const mode of ['inflate-whole', 'inflate-capped']) {

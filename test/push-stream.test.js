@@ -12,6 +12,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { randomFillSync } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -201,7 +202,7 @@ test('the bytes of a captured streamed body are the request a buffered push woul
 });
 
 const runChild = (args) => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, ['--expose-gc', '--import', './test/ts-resolve.mjs', 'test/push-stream-child.mjs', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [...MEMORY_CELL_FLAGS, '--import', './test/ts-resolve.mjs', 'test/push-stream-child.mjs', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', errText = '';
   child.stdout.on('data', d => { out += d; });
   child.stderr.on('data', d => { errText += d; });
@@ -214,6 +215,7 @@ test('memory: a 32 MiB streamed push holds well under one copy of the object (li
   const L = 32 << 20;
   const r = await runChild([url, String(L)]);
   assert.equal(r.status, 0, r.err ?? r.out);
+  console.log(JSON.stringify(r));
   assert.equal(r.ok, true, r.error);
   assert.equal(tipOf(bare), r.commit);
   // measured: 80 KB to 2.3 MB live beyond the object (socket and zlib buffers in flight); the buffered writer held about 4 L

@@ -12,6 +12,7 @@
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
@@ -356,7 +357,7 @@ test('pushPack round trip: a reordered subset pushed to git http-backend lands, 
 test('memory: a subset of a source far larger than what is held', async () => {
   // 48 entries of 4 MiB stored blobs (192 MiB of pack), every other one selected, drained slowly
   const child = await new Promise((resolve, reject) => {
-    const p = spawn(process.execPath, ['--expose-gc', '--import', './test/ts-resolve.mjs', 'test/pack-subset-child.mjs', String(4 << 20), '48'], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const p = spawn(process.execPath, [...MEMORY_CELL_FLAGS, '--import', './test/ts-resolve.mjs', 'test/pack-subset-child.mjs', String(4 << 20), '48'], { stdio: ['ignore', 'pipe', 'inherit'] });
     let text = '';
     p.stdout.on('data', d => { text += d; });
     p.on('error', reject);
