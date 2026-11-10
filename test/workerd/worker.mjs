@@ -117,6 +117,33 @@ export default {
       const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: oid, pack, length: body.mode === 'short' ? whole.length + 1 : whole.length });
       return Response.json({ ok: r.ok, code: r.ok ? null : r.error.code, original: r.ok ? null : r.error.original ?? null, message: r.ok ? null : r.error.message, commit: oid, packBytes: r.ok ? r.value.packBytes : null, whole: whole.length, seen });
     }
+    if (u.pathname === '/timeouts') { // #255 under workerd: {url, mode, limits}; frames over a POST whose server drips, stalls or is slow
+      const body = await req.json();
+      const t = unwrap(createTransport(body.url, { limits: withLimits(body.limits) }));
+      const span = { attrs: {}, set(a) { Object.assign(this.attrs, a); }, event() {}, error() {} };
+      let upload = new Uint8Array(4);
+      if (body.mode === 'uploadstall' || body.mode === 'uploadsteady') {
+        let i = 0;
+        const n = 12;
+        const stream = new ReadableStream({
+          async pull(c) {
+            if (body.mode === 'uploadstall' && i >= 2) { await new Promise(() => {}); return; }
+            if (i >= n) { c.close(); return; }
+            if (i > 0) await new Promise(r => setTimeout(r, 40));
+            i++; c.enqueue(new Uint8Array(1024));
+          },
+        }, { highWaterMark: 0 });
+        upload = { stream, length: n * 1024 };
+      }
+      const t0 = Date.now();
+      let frames = 0;
+      try {
+        for await (const _ of t.frames('git-upload-pack', upload, span, { bypassCache: false })) frames++;
+        return Response.json({ ok: true, frames, ms: Date.now() - t0, limit: span.attrs['git.timeout.limit'] ?? null });
+      } catch (e) {
+        return Response.json({ ok: false, code: e.code, what: e.what ?? null, message: e.message, ms: Date.now() - t0, limit: span.attrs['git.timeout.limit'] ?? null });
+      }
+    }
     if (u.pathname === '/packwrite') { // both passes and buildPack agree byte for byte under workerd's CompressionStream
       const body = await req.json();
       const out = [];

@@ -12,7 +12,7 @@ import { assertNever, err, ok } from './result.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
-import type { Attrs, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
+import type { Attrs, ExchangeClock, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
 import { fail, plyError } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
@@ -21,7 +21,7 @@ import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
-import { NO_HINTS, UA, forgetRedirect, freshQuirks, quirksKeyOf, recalledRedirect, rememberRedirect, rememberedQuirks, wrapNet } from './transport.js';
+import { exchangeClock, readAbortable, watchedUpload, NO_HINTS, UA, forgetRedirect, freshQuirks, quirksKeyOf, recalledRedirect, rememberRedirect, rememberedQuirks, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -248,14 +248,16 @@ async function redirectError(res: Response, url: string, what: string, scrub: Sc
 // Read a body without ever holding more than `max` bytes. `truncate` keeps a prefix (error pages);
 // otherwise the first chunk that would pass the cap is the error and is not retained. A body read is a platform edge:
 // its failure is the network error it is (wrapNet), as on a POST's body.
-type CapRead = { readonly what: string; readonly truncate: boolean; readonly signal: AbortSignal };
-async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, { what, truncate, signal }: CapRead): Promise<Result<Uint8Array, PlyError>> {
+type CapRead = { readonly what: string; readonly truncate: boolean; readonly signal: AbortSignal; readonly progress: () => void };
+async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, { what, truncate, signal, progress }: CapRead): Promise<Result<Uint8Array, PlyError>> {
   // oxlint-disable-next-line typescript/no-unnecessary-condition -- a fetch double may hand back a body that is not async-iterable
   if (!body || typeof body[Symbol.asyncIterator] !== 'function') return ok(new Uint8Array(0));
   const chunks: Uint8Array[] = [];
   let n = 0;
+  const read = readAbortable(body, signal);
   try {
-    for await (const chunk of body) {
+    for await (const chunk of read.chunks) {
+      progress();
       const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
       if (n + bytes.length > max) {
         if (!truncate) return err(limitExceeded(what, n + bytes.length, max));
@@ -266,13 +268,15 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
       n += bytes.length;
     }
   } catch (e) { return err(wrapNet(e, signal)); } finally { await cancelBody(body); }
+  // the exchange's signal ended the read: its reason is the error (a timeout names its limit)
+  if (read.cut()) return err(wrapNet(signal.reason, signal));
   return ok(concat(chunks));
 }
 
 // A non-2xx answer: a prefix of the body for the message (credential-scrubbed), the rest cancelled. A truncating read
 // keeps a prefix: its only error is the body read failing, and that is the exchange's error.
-async function statusError(res: Response, service: string, scrub: Scrub | null, signal: AbortSignal): Promise<PlyError> {
-  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal });
+async function statusError(res: Response, service: string, scrub: Scrub | null, clock: ExchangeClock): Promise<PlyError> {
+  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal: clock.signal, progress: clock.progress });
   if (!read.ok) return read.error;
   const preview = td.decode(read.value);
   const quoted = (scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE);
@@ -333,11 +337,6 @@ export type StreamRedirect = 'manual' | 'error';
 export const streamRedirect = (): StreamRedirect => {
   try { return new Request('http://localhost/', { redirect: 'error' }).redirect === 'error' ? 'error' : 'manual'; } catch { return 'manual'; }
 };
-// Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
-const unref = (timer: unknown): void => {
-  const f = field(timer, 'unref');
-  if (f.tag === 'some' && typeof f.value === 'function') Reflect.apply(f.value, timer, []);
-};
 
 // HttpOptions parsed once (#156): every check the transport makes of its options, here and nowhere after it. The limits
 // record is parsed here too (parseLimits), so a bad one is refused when the transport is made, not at its first request
@@ -364,6 +363,8 @@ export type HttpSettings = {
   readonly allowUrl: AllowUrl | null;
   readonly limits: CheckedLimits;
   readonly requestTimeoutMs: number;
+  readonly firstByteTimeoutMs: number;
+  readonly idleTimeoutMs: number;
   readonly maxPackBytes: number;
   readonly streamRedirect: StreamRedirect;
 };
@@ -412,7 +413,7 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
     [CHECKED_HTTP]: true, url: approved.value, crossOrigin: approved.value.origin !== offeredOrigin, policy: checkedPolicy.value,
     userAgent: agent.value, recordNames: names.value, given, authorization, explicitBasic, quirks,
     fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, tracer, parent, signal, allowUrl, limits: checkedLimits.value,
-    requestTimeoutMs: checkedLimits.value.requestTimeoutMs, maxPackBytes: checkedLimits.value.maxPackBytes, streamRedirect: streamRedirect(),
+    requestTimeoutMs: checkedLimits.value.requestTimeoutMs, firstByteTimeoutMs: checkedLimits.value.firstByteTimeoutMs, idleTimeoutMs: checkedLimits.value.idleTimeoutMs, maxPackBytes: checkedLimits.value.maxPackBytes, streamRedirect: streamRedirect(),
   });
 }
 
@@ -422,7 +423,7 @@ const protocolHeader = (service: string): Record<string, string> => (service ===
 
 // oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
 function transportOf(settings: HttpSettings): HttpTransport {
-  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, maxPackBytes } = settings;
+  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs, maxPackBytes } = settings;
   const startBase = settings.url.toString().replace(/\/$/, '');
   let base = startBase;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
@@ -512,19 +513,12 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (liveAuth) h['Authorization'] = liveAuth;
     return h;
   };
-  // Not AbortSignal.any([AbortSignal.timeout(ms)]): the composite holds its sources weakly and the timeout signal is held
-  // only by its own (weak) timer, so after a GC the timeout never fires and a stalled body hangs forever (Node 20/22;
-  // found by the calibration harness: `hang` fault + head hint). A controller owned by a live timer cannot be collected.
-  // The timer is the strong owner of `ac`. It stays scheduled for the whole exchange (so a GC cannot drop it)
-  // and is cleared when the exchange ends, so a finished request does not abort later.
-  const requestSignal = (): { readonly signal: AbortSignal; readonly cancel: () => void } => {
-    const ms = requestTimeoutMs;
-    const ac = new AbortController();
-    const timer = setTimeout(() => { ac.abort(new DOMException(`request exceeded ${ms} ms`, 'TimeoutError')); }, ms);
-    unref(timer);
-    const sig = signal ? AbortSignal.any([ac.signal, signal]) : ac.signal;
-    return { signal: sig, cancel: () => { clearTimeout(timer); } };
-  };
+  // The exchange's clock (src/deadline.ts): first byte, idle, and the opt-in total. The span records the limit that
+  // fired. It is cancelled when the exchange ends, so a finished request does not abort later.
+  const timeouts = { firstByteMs: firstByteTimeoutMs, idleMs: idleTimeoutMs, totalMs: requestTimeoutMs };
+  const requestClock = (span: Span): ExchangeClock =>
+    exchangeClock(timeouts, signal, (key, ms) => { span.set({ 'git.timeout.limit': key, 'git.timeout.ms': ms }); });
+  const limitAttrs = (): Attrs => ({ 'git.limits.request_timeout_ms': requestTimeoutMs, 'git.limits.first_byte_timeout_ms': firstByteTimeoutMs, 'git.limits.idle_timeout_ms': idleTimeoutMs });
   // The platform's fetch(): its rejection is the network error it is (wrapNet). The one catch of each request.
   // `redirect`: 'manual' (a 3xx is read as the redirect error) unless the body is a stream: undici answers 'manual' and
   // 'follow' by cloning the request, which tees the body and holds every chunk the unread branch never takes (a 64 MiB
@@ -539,7 +533,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (res.ok) span.set({ 'http.response.status_code': res.value.status, 'http.response.ttfb_ms': Date.now() - t0, 'http.response.header.content-type': headerText(res.value, 'content-type') });
     return res;
   };
-  const advertisementBody = async (res: Response, service: string, span: Span, sig: AbortSignal): Promise<Result<Uint8Array, PlyError>> => {
+  const advertisementBody = async (res: Response, service: string, span: Span, clock: ExchangeClock): Promise<Result<Uint8Array, PlyError>> => {
     if (!res.ok) return fail(httpCode(res.status), `HTTP ${res.status} ${service} advertisement`, { status: res.status, ...(res.status === 404 ? { miss: { kind: 'repository' as const } } : {}) } as Detail['http'] & Extra);
     if (!headerText(res, 'content-type').startsWith(`application/x-${service}-advertisement`)) return fail('not_git', `unexpected content-type from ${service} advertisement`);
     const declared = Number(res.headers.get('content-length'));
@@ -551,7 +545,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
       case 'body': {
-        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: sig });
+        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: clock.signal, progress: clock.progress });
         if (buf.ok) span.set({ 'git.response.bytes': buf.value.length, 'http.response.body.size': buf.value.length, ...redirectAttrs() });
         return buf;
       }
@@ -591,10 +585,11 @@ function transportOf(settings: HttpSettings): HttpTransport {
       const following = policy.follow === 'initial' && !initialSettled;
       const asked = `${base}/info/refs?service=${service}`;
       span.set({ 'git.transport': 'http', 'http.request.method': 'GET', 'url.full': redactUrl(asked), 'server.address': hostOf(), ...redirectAttrs() });
-      const sig = requestSignal();
+      const sig = requestClock(span);
       try {
         const res = await fetchAdvertisement(asked, service, span, sig.signal);
         if (!res.ok) return res;
+        sig.phase('body');
         if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
         // A stale memo: this GET is replayable, so the exchange starts over from the original base.
         if (memoUnconfirmed && isRedirect(res.value)) { await cancelBody(res.value.body); unsettle(service); continue; }
@@ -603,7 +598,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
         if (next.value !== null) { followed.push(next.value.location); rebase(next.value.base); continue; }
         initialSettled = true;
         memoUnconfirmed = false;
-        const body = await advertisementBody(res.value, service, span, sig.signal);
+        const body = await advertisementBody(res.value, service, span, sig);
         if (following && body.ok) rememberRedirect(memoKey, service, followed);
         return body;
       } finally { sig.cancel(); }
@@ -620,10 +615,10 @@ function transportOf(settings: HttpSettings): HttpTransport {
     try { return await done; } finally { if (settling === mine) settling = null; }
   }
   // The POST's answer, checked before its body is read: a redirect, a non-2xx, a foreign content type, a missing body.
-  const postStream = async (res: Response, service: string, target: string, sig: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>> => {
+  const postStream = async (res: Response, service: string, target: string, clock: ExchangeClock): Promise<Result<ReadableStream<Uint8Array>, PlyError>> => {
     if (isRedirect(res)) return err(await redirectError(res, target, service, scrub));
     // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
-    if (!res.ok) return err(await statusError(res, service, scrub, sig));
+    if (!res.ok) return err(await statusError(res, service, scrub, clock));
     const ct = headerText(res, 'content-type');
     if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${JSON.stringify(ct)} from ${service}`);
     const body = bodyOf(res);
@@ -638,10 +633,13 @@ function transportOf(settings: HttpSettings): HttpTransport {
   // once, after the exchange is settled over the network. A stream was consumed: it gets the redirect error (or, where a
   // stream is sent with redirect 'error' (undici), the network failure a 3xx is there, which cannot be told apart from a
   // dead link), and the memo is dropped all the same, so the next transport asks again.
-  async function sendPost(service: string, body: RequestBody, extra: Record<string, string>, span: Span, sig: AbortSignal): Promise<Result<{ readonly res: Response; readonly target: string }, PlyError>> {
+  async function sendPost(service: string, body: RequestBody, extra: Record<string, string>, span: Span, clock: ExchangeClock): Promise<Result<{ readonly res: Response; readonly target: string }, PlyError>> {
     const target = `${base}/${service}`;
     const bytes = body instanceof Uint8Array ? body : null;
-    const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: body.stream, duplex: 'half' };
+    const sig = clock.signal;
+    // A streamed body's pulls are the upload's progress (idle timer); its end starts the wait for the headers.
+    if (bytes === null) clock.phase('upload');
+    const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: watchedUpload(body.stream, clock), duplex: 'half' };
     const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig, bytes === null ? settings.streamRedirect : 'manual');
     const stale = memoUnconfirmed && (res.ok ? isRedirect(res.value) : bytes === null);
     if (!stale) return res.ok ? ok({ res: res.value, target }) : res;
@@ -652,6 +650,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (!ad.ok) return ad;
     const again = `${base}/${service}`;
     span.set({ 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
+    clock.phase('first_byte');
     const retried = await send(again, { method: 'POST', headers: headers(service, extra), body: bufferSource(bytes) }, sig, 'manual');
     return retried.ok ? ok({ res: retried.value, target: again }) : retried;
   }
@@ -672,27 +671,32 @@ function transportOf(settings: HttpSettings): HttpTransport {
     const target = `${base}/${service}`;
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- an absent hint is no hint
     const extra = { ...protocolHeader(service), ...recordHint(), ...(hints.bypassCache ? { 'x-ply-cache': 'bust' } : {}) };
-    span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, 'git.limits.request_timeout_ms': requestTimeoutMs, ...redirectAttrs() });
+    span.set({ 'git.transport': 'http', 'http.request.method': 'POST', 'url.full': redactUrl(target), 'server.address': hostOf(), 'git.request.bytes': body.length, 'http.request.body.size': body.length, 'git.service': service, ...limitAttrs(), ...redirectAttrs() });
     const t0 = Date.now();
-    const sig = requestSignal();
+    const sig = requestClock(span);
     try {
-      const sent = await sendPost(service, body, extra, span, sig.signal);
+      const sent = await sendPost(service, body, extra, span, sig);
       if (!sent.ok) { yield sent; return; }
+      sig.phase('body');
       const res = sent.value.res;
       const posted = sent.value.target;
       memoUnconfirmed = false;
       const cache = headerText(res, PACK_CACHE_HEADER);
       span.set({ 'http.response.status_code': res.status, 'http.response.header.content-type': headerText(res, 'content-type'), 'http.response.ttfb_ms': Date.now() - t0, 'git.response.cache': cache, 'git.pack.cache': cache });
       if (recordNames.length > 0) span.set(recordedHeaderAttrs(res, recordNames, scrub));
-      const stream = await postStream(res, service, posted, sig.signal);
+      const stream = await postStream(res, service, posted, sig);
       if (!stream.ok) { yield stream; return; }
       let bytes = 0, chunks = 0, first = -1, maxChunk = 0;
       // The body read: a platform failure mid-stream is the network error it is.
-      try { for await (const chunk of stream.value) {
+      const read = readAbortable(stream.value, sig.signal);
+      try { for await (const chunk of read.chunks) {
+        sig.progress();
         if (chunks === 0) first = Date.now() - t0;
         bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
         yield ok(chunk);
       } } catch (e) { yield err(wrapNet(e, sig.signal)); return; }
+      // the exchange's signal ended the read: its reason is the error (a timeout names its limit)
+      if (read.cut()) { yield err(wrapNet(sig.signal.reason, sig.signal)); return; }
       span.set({ 'git.response.bytes': bytes, 'git.response.first_byte_ms': first, 'git.response.duration_ms': Date.now() - t0, 'http.response.body.size': bytes, 'http.response.chunks': chunks, 'http.response.chunk.max': maxChunk, 'http.response.first_byte_ms': first, 'http.response.duration_ms': Date.now() - t0 });
     } finally { sig.cancel(); }
   }

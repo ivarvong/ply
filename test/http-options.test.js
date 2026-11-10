@@ -123,7 +123,10 @@ test('post: bytes go as a POST body with redirect manual; a stream goes with dup
   const stream = new ReadableStream({ start(c) { c.enqueue(Uint8Array.of(9)); c.close(); } });
   const span2 = await drain(t, { stream, length: 1 });
   const b = r.seen[1];
-  assert.deepEqual([b.init.method, b.init.redirect, b.init.duplex, b.init.body === stream], ['POST', 'error', 'half', true]);
+  // the body is the stream watched for upload progress (#255): a stream, never a buffer, reading the caller's bytes
+  assert.deepEqual([b.init.method, b.init.redirect, b.init.duplex, typeof b.init.body.getReader], ['POST', 'error', 'half', 'function']);
+  assert.equal(stream.locked, false, 'the caller stream is not locked until the platform pulls the body');
+  assert.deepEqual([...new Uint8Array(await new Response(b.init.body).arrayBuffer())], [9]);
   assert.equal(span2.attrs['git.request.bytes'], 1);
 });
 
