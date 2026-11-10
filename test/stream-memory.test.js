@@ -36,6 +36,23 @@ for (const heap of [64, 128]) {
     const FED = 2 * 16_384;
     assert.ok(r.abDelta <= HOLD + FED, `scan held ${r.abDelta} > ${HOLD} + ${FED}`);
   });
+  test(`heap ${heap} MiB: scanPackIndex of 200,000 one-byte blobs (oids on) holds the scan and 51 bytes per entry`, () => {
+    const r = cell('scan-index', 200_000, heap);
+    console.log(JSON.stringify(r));
+    // 31 bytes of columns and a 20-byte oid per entry, sized to the header's count
+    assert.equal(r.perEntry, r.entryBytes + 20);
+    assert.equal(r.heldBytes, 200_000 * (r.entryBytes + 20));
+    // the last doubling holds the old columns and the new ones at once; the fed chunk and the next one are the cell's
+    const FED = 2 * 16_384;
+    assert.ok(r.abDelta <= HOLD + FED + 2 * r.heldBytes, `index held ${r.abDelta} > ${HOLD} + ${FED} + 2 x ${r.heldBytes}`);
+  });
+  test(`heap ${heap} MiB: scanPackIndex of three 96 MiB blobs, past every default cap, holds one inflate record`, () => {
+    const r = cell('scan-index-big', 96 * MIB, heap);
+    console.log(JSON.stringify(r));
+    assert.ok(r.packBytes > 3 * 96 * MIB);
+    const FED = 2 * 16_384;
+    assert.ok(r.abDelta <= HOLD + FED + r.heldBytes, `index held ${r.abDelta} > ${HOLD} + ${FED} + ${r.heldBytes}`);
+  });
   test(`heap ${heap} MiB: inflate() of a 64 MiB member in hand holds the output and the pull's hold, nothing more`, () => {
     for (const mode of ['inflate-whole', 'inflate-capped']) {
       const r = cell(mode, 64 * MIB, heap);

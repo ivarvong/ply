@@ -7,6 +7,8 @@
 //   inflate-drop     a stored zlib member of SIZE bytes, every chunk dropped                 bound: peakBound(inflate)
 //   scan-drop        a pack of COUNT 1-byte blobs, scanned, every object dropped             bound: peakBound(pack-scan)
 //   scan-work        a pack of 3 x SIZE stored blobs of SIZE/1 MiB chunks under WORK_BUDGET, default caps, every chunk dropped  bound: peakBound(pack-scan)
+//   scan-index       scanPackIndex of a pack of COUNT 1-byte blobs, oids on                  bound: peakBound(pack-scan) + its columns
+//   scan-index-big   scanPackIndex of 3 x SIZE stored blobs, default caps, oids on           bound: peakBound(pack-scan)
 //   fetch-object     fetchObject of a SIZE-byte blob through the http transport (fetchSingle) bound: peakBound(fetch-object)
 //   fetch-drain      the same response with every pack chunk dropped: the transport's own share
 //   fetch-buffered   the same bytes read the way fetchSingle did before #172: the zlib member collected, then inflate()
@@ -173,6 +175,54 @@ function scanWork() {
   note();
   if (objects !== count || inflated !== count * SIZE) throw new Error(`scanned ${objects} objects, ${inflated} bytes`);
   return { bound: peakBound({ kind: 'pack-scan' }), objects, inflated };
+}
+
+// Pieces regrouped into FEED-byte chunks, as a transport hands a body over (one async step per chunk, not per object).
+async function* chunked(pieces) {
+  let buf = new Uint8Array(FEED), at = 0;
+  for (const p of pieces) {
+    let off = 0;
+    while (off < p.length) {
+      const n = Math.min(FEED - at, p.length - off);
+      buf.set(p.subarray(off, off + n), at);
+      at += n; off += n;
+      if (at === FEED) { yield buf; buf = new Uint8Array(FEED); at = 0; }
+    }
+  }
+  if (at > 0) yield buf.subarray(0, at);
+}
+// scanPackIndex (#236) of a pack of COUNT 1-byte blobs, oids on: the scan's hold plus the index's columns.
+async function scanIndexCell() {
+  const { scanPackIndex, SCAN_INDEX_ENTRY_BYTES } = await import('../../src/packscanindex.js');
+  const count = SIZE;
+  const one = concat([encodeObjHeader(TYPE.BLOB, 1), Uint8Array.of(0x78, 0x01, 1, 1, 0, 0xfe, 0xff, 7, 0, 8, 0, 8)]);
+  const limits = withLimits({ maxPackObjects: count });
+  start();
+  let fed = 0;
+  async function* source() { for await (const c of chunked(sealed((function* () { yield packHead(count); for (let i = 0; i < count; i++) yield one; })()))) { if (++fed % 256 === 0) note(); yield c; } }
+  const t0 = performance.now();
+  const got = must(await scanPackIndex(source(), { limits, oids: true }));
+  const ms = performance.now() - t0;
+  note();
+  if (got.count !== count || got.columns.offset.length !== count) throw new Error(`indexed ${got.columns.offset.length} of ${count}`);
+  const keep = got.heldBytes;
+  return { bound: peakBound({ kind: 'pack-scan' }), objects: count, heldBytes: keep, perEntry: keep / count, entryBytes: SCAN_INDEX_ENTRY_BYTES, packBytes: got.bytes, ms };
+}
+// scanPackIndex of three SIZE stored blobs, past every default cap, under its default WORK_BUDGET, oids on: the hold
+// stays the scan's whatever the pack's size.
+async function scanIndexBigCell() {
+  const { scanPackIndex } = await import('../../src/packscanindex.js');
+  const count = 3;
+  start();
+  let fed = 0;
+  async function* source() { for (const c of sealed((function* () { yield packHead(count); for (let i = 0; i < count; i++) { yield encodeObjHeader(TYPE.BLOB, SIZE); yield* storedMember(SIZE); } })())) { if (++fed % 64 === 0) note(); yield c; } }
+  const t0 = performance.now();
+  const got = must(await scanPackIndex(source(), { oids: true }));
+  const ms = performance.now() - t0;
+  note();
+  const first = got.entry(0);
+  if (first.tag !== 'some' || first.value.oid !== blobOid(SIZE)) throw new Error('first blob oid differs from its hash');
+  return { bound: peakBound({ kind: 'pack-scan' }), objects: count, packBytes: got.bytes, heldBytes: got.heldBytes, ms };
 }
 
 // A v2 fetch response carrying the one-object pack, framed into band-1 pkt-lines as it is read.
@@ -343,7 +393,7 @@ async function fetchPackCell() {
   return { bound: peakBound({ kind: 'fetch-pack', retained }), retained, objects: got.objects.size };
 }
 
-const run = { 'inflate-whole': () => inflateWhole(true), 'inflate-capped': () => inflateWhole(false), 'fetch-wide': () => fetchWideCell(false), 'fetch-wide-blobs': () => fetchWideCell(true), 'fetch-wide-drain': () => fetchWideDrain(false), 'fetch-wide-blobs-drain': () => fetchWideDrain(true), 'fetch-pack': fetchPackCell, 'inflate-drop': inflateDrop, 'scan-drop': scanDrop, 'scan-work': scanWork, 'fetch-object': fetchStreamed, 'fetch-drain': fetchDrain, 'fetch-buffered': fetchBuffered }[mode];
+const run = { 'inflate-whole': () => inflateWhole(true), 'inflate-capped': () => inflateWhole(false), 'fetch-wide': () => fetchWideCell(false), 'fetch-wide-blobs': () => fetchWideCell(true), 'fetch-wide-drain': () => fetchWideDrain(false), 'fetch-wide-blobs-drain': () => fetchWideDrain(true), 'fetch-pack': fetchPackCell, 'inflate-drop': inflateDrop, 'scan-drop': scanDrop, 'scan-work': scanWork, 'scan-index': scanIndexCell, 'scan-index-big': scanIndexBigCell,'fetch-object': fetchStreamed, 'fetch-drain': fetchDrain, 'fetch-buffered': fetchBuffered }[mode];
 if (!run) throw new Error(`unknown mode ${mode}`);
 const report = await run();
 const m = process.memoryUsage();
