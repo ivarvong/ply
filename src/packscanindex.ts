@@ -14,7 +14,11 @@
 //
 // The resolved type is the type of the whole object a delta chain rests on: a whole object's own; an OFS_DELTA's
 // base's; a REF_DELTA's base's when that base is a whole object in this pack whose oid was computed (oids on). Anything
-// else (a base absent from the pack, a base that is itself a delta, oids off) is unknown, never a guess.
+// else (a base absent from the pack, a base that is itself a delta, oids off) is unknown, never a guess. `oids` is on by
+// default because REF_DELTA-only packs (what Cloudflare Artifacts sends) resolve nothing without it. A REF chain whose
+// base is another delta stays unknown: linking it needs that delta's oid, which means applying it (a follow-up).
+// Measured: 71 bytes per entry on a REF-only pack (31 + whole oid 20 + REF base 20), plus 4 per whole object while
+// settling.
 import type { PlyError } from './errors.js';
 import { plyError } from './errors.js';
 import type { Option, Result } from './result.js';
@@ -71,7 +75,7 @@ export type ScanIndexOpts = {
   readonly content: ScanContent | null;
 };
 // A fresh record per call: withDefaults fills it in place.
-const defaultOpts = (): ScanIndexOpts => ({ limits: DEFAULT_LIMITS, verify: true, budget: WORK_BUDGET, oids: false, content: null });
+const defaultOpts = (): ScanIndexOpts => ({ limits: DEFAULT_LIMITS, verify: true, budget: WORK_BUDGET, oids: true, content: null });
 
 // Typed columns, one slot per entry. `type` is 0 for unknown; `baseIndex` is -1 for none or not found.
 export type ScanColumns = {
@@ -160,7 +164,7 @@ function oidCompare(a: Uint8Array, ai: number, b: Uint8Array, bi: number): numbe
   return 0;
 }
 // The whole object whose id is entry i's REF base, among `sorted` (whole-object indices in oid order), or NO_INDEX.
-function findWhole(s: Store, sorted: readonly number[], i: number): number {
+function findWhole(s: Store, sorted: Int32Array, i: number): number {
   let lo = 0;
   let hi = sorted.length - 1;
   while (lo <= hi) {
@@ -175,10 +179,16 @@ function findWhole(s: Store, sorted: readonly number[], i: number): number {
 }
 // After the last entry: each REF base found among the whole objects (oids on), then every type in pack order. An OFS
 // base is earlier than its delta, and a found REF base is a whole object, so one ascending pass settles every chain.
+// The oid -> index map is the whole objects' indices in oid order: an Int32Array, 4 bytes per whole object, held only
+// while settling.
 function settle(s: Store, oids: boolean): void {
-  const wholes: number[] = [];
+  let wholes = new Int32Array(0);
   if (oids && s.refs.length > 0) {
-    for (let i = 0; i < s.n; i++) if (isWhole(s.storedType[i] as number)) wholes.push(i);
+    let k = 0;
+    for (let i = 0; i < s.n; i++) if (isWhole(s.storedType[i] as number)) k += 1;
+    wholes = new Int32Array(k);
+    k = 0;
+    for (let i = 0; i < s.n; i++) if (isWhole(s.storedType[i] as number)) wholes[k++] = i;
     wholes.sort((x, y) => oidCompare(s.oids, x * OID_BYTES, s.oids, y * OID_BYTES));
   }
   // whole objects first: a REF base can come later in the pack than its delta

@@ -50,7 +50,9 @@ for (const heap of [64, 128]) {
     const r = cell('scan-index-big', 96 * MIB, heap);
     console.log(JSON.stringify(r));
     assert.ok(r.packBytes > 3 * 96 * MIB);
-    const FED = 2 * 16_384;
+    // the source here is an async generator: on node 22 (CI) a suspended one keeps a third 16 KiB piece alive across
+    // the yield (166,204 B measured, 18,611 B over two pieces); on node 24, 84,284 B
+    const FED = 3 * 16_384;
     assert.ok(r.abDelta <= HOLD + FED + r.heldBytes, `index held ${r.abDelta} > ${HOLD} + ${FED} + ${r.heldBytes}`);
   });
   test(`heap ${heap} MiB: inflate() of a 64 MiB member in hand holds the output and the pull's hold, nothing more`, () => {

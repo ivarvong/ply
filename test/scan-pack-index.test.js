@@ -147,7 +147,7 @@ test('REF_DELTA: a whole base earlier or later in the pack resolves with oids on
   assert.equal(on.entry(1).value.oid, aOid);
   assert.equal(on.entry(3).value.type, null);
   assert.equal(on.heldBytes, 7 * (SCAN_INDEX_ENTRY_BYTES + 20 + 20));
-  const off = must(await scanPackIndex(streamOf([pack])));
+  const off = must(await scanPackIndex(streamOf([pack]), { oids: false }));
   assert.deepEqual([...off.columns.type], [0, TYPE.BLOB, 0, 0, 0, 0, 0]);
   assert.equal(off.entry(1).value.oid, null);
   assert.equal(off.heldBytes, 7 * (SCAN_INDEX_ENTRY_BYTES + 20));
@@ -208,11 +208,27 @@ test("this repository's objects, packed by git with OFS and with REF deltas, mat
   for (const args of [['--delta-base-offset'], []]) {
     const pack = new Uint8Array(gitIn(process.cwd(), ['pack-objects', '--stdout', '-q', ...args], objects));
     const { idx, known } = await againstGit(pack);
-    assert.ok(idx.count > 1000, `only ${idx.count} objects`);
+    // CI checks out shallow: a few hundred objects there, thousands in a full clone
+    assert.ok(idx.count > 100, `only ${idx.count} objects`);
     // OFS chains rest on whole objects in the pack: all known. REF chains know every type whose base is whole.
     if (args.length > 0) assert.equal(known, idx.count);
     else assert.ok(known > 0);
   }
+});
+
+test('a REF_DELTA-only pack (what Artifacts sends) resolves every depth-1 delta by default, at 71 bytes per entry', async () => {
+  const objects = gitIn(process.cwd(), ['rev-list', '--objects', 'HEAD', '-n', '400']);
+  const pack = new Uint8Array(gitIn(process.cwd(), ['pack-objects', '--stdout', '-q', '--depth=1', '--no-reuse-delta'], objects));
+  const idx = must(await scanPackIndex(iterOf(splitRandom(new Rng(7), pack, { allowEmpty: false }))));
+  const stored = [...idx.columns.storedType];
+  assert.equal(stored.includes(TYPE.OFS_DELTA), false);
+  const refs = stored.filter(t => t === TYPE.REF_DELTA).length;
+  assert.ok(refs > 0, 'git wrote no REF deltas');
+  // depth 1: every base is a whole object in the pack, so every type is known
+  assert.equal([...idx.columns.type].filter(t => t === 0).length, 0);
+  assert.equal(idx.heldBytes, idx.count * (SCAN_INDEX_ENTRY_BYTES + 20 + 20));
+  const git = verifyPack(pack);
+  for (const e of idx.entries()) assert.equal(e.type, git.get(e.offset).type);
 });
 
 test('selected content: whole objects the caller picks, in pack order, with their oid; others are not buffered', async () => {
@@ -297,6 +313,7 @@ test('maxPackObjects refuses at the header; the columns never exceed the count t
   assert.equal(r.error.code, 'limit_exceeded');
   // the options of one call never leak into the next: the defaults are a fresh record each time
   const idx = must(await scanPackIndex(streamOf([pack])));
-  assert.equal(idx.heldBytes, 3000 * SCAN_INDEX_ENTRY_BYTES);
+  // oids on by default: 31 bytes of columns and a 20-byte oid per entry
+  assert.equal(idx.heldBytes, 3000 * (SCAN_INDEX_ENTRY_BYTES + 20));
   assert.equal(idx.columns.size.length, 3000);
 });
