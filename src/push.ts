@@ -661,7 +661,7 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   const packBytes = packed === null ? 0 : packed.bytes;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
   for (const [i, e] of entries.entries()) span.event('git.push.object', { 'git.object.index': i, 'git.object.type': objectTypeAttr(e), 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': getOrElse(fromNullish(e.baseOid), ''), 'git.object.bytes': e.bytes });
-  // Refuse before the first byte is sent: a host with a push cap (Artifacts: 62–93 MiB) would otherwise take the whole
+  // Refuse before the first byte is sent: a host with a push cap (Artifacts: 64 MiB of request body) would otherwise take the whole
   // upload and answer 4xx. The measured size is the pack as pass 1 wrote it, so `got` is what the server would have
   // received; pass 2 never sends more (packwrite.ts).
   if (packBytes > plan.maxPack) return err(limitExceeded('push pack bytes', packBytes, plan.maxPack));
