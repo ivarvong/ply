@@ -83,6 +83,7 @@ export function startGitServer(root, extraEnv = {}) {
       res.write(head.subarray(i + sepLen));
     });
     child.on('close', code => {
+      if (!req.complete) { req.unpipe(child.stdin); req.resume(); }
       if (!headerDone) { res.writeHead(500); res.end(Buffer.concat(stderr).toString()); return; }
       res.end();
     });
