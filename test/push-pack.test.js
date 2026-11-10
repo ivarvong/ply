@@ -236,6 +236,42 @@ test('over maxPackBytes with no length: refused mid-stream at the chunk that cro
   assert.equal(tipOf(bare), null);
 });
 
+// #246: a pack the server cannot unpack is a definite refusal, never ambiguous; nothing moves
+test('a corrupt pack against stock git: push_rejected (git\'s unpack failure), the ref not moved, nothing read back', async () => {
+  const { createHash } = await import('node:crypto');
+  const withTrailer = body => concat([body, new Uint8Array(createHash('sha1').update(body).digest())]);
+  const body = source.pack.subarray(0, source.pack.length - 20);
+  // a zlib stream damaged inside the first object, and a first entry of type 0 (invalid), both with a valid trailer
+  const damaged = new Uint8Array(body); damaged[40] ^= 0xff;
+  const type0 = new Uint8Array(body); type0[12] &= 0x8f;
+  for (const pack of [withTrailer(damaged), withTrailer(type0)]) {
+    const { bare, url } = repo();
+    const posts = [];
+    const fetchImpl = async (u, init) => { posts.push(String(u).split('/').at(-1)); return fetch(u, init); };
+    const r = await pushPack(transport(url, { fetchImpl }), { ...create(), pack: streamOf(pack).stream, length: pack.length });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, 'push_rejected', r.error.message);
+    assert.equal(r.error.report.tag, 'unpackFailed');
+    assert.equal(tipOf(bare), null);
+    assert.equal(posts.filter(p => p === 'git-upload-pack').length, 0, 'a definite answer reads nothing back');
+  }
+});
+
+// #246: Artifacts' unpack failure (observed bytes, 2026-11-10) through the real transport: push_rejected with its reason
+test('a host\'s echoed unpack failure (Cloudflare Artifacts\' report bytes) is push_rejected with the host\'s reason', async () => {
+  const { url } = repo();
+  const reason = 'invalid pack entry type 0';
+  const inner = concat([unwrap(pkt(`unpack ${reason}\n`)), unwrap(pkt(`ng ${REF} ${reason}\n`)), FLUSH]);
+  const sideband = concat([unwrap(pkt(concat([Uint8Array.of(1), inner]))), FLUSH]);
+  const answer = () => new Response(sideband, { status: 200, headers: { 'content-type': 'application/x-git-receive-pack-result' } });
+  const fetchImpl = routed(async init => { await drain(init.body); return answer(); });
+  const r = await pushPack(transport(url, { fetchImpl }), { ...create(), pack: streamOf(source.pack).stream, length: source.pack.length });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'push_rejected', r.error.message);
+  assert.equal(r.error.message, `push rejected: ${reason}`);
+  assert.equal(r.error.report.status, reason);
+});
+
 test('a stale old oid is cas_conflict, as push reports it', async () => {
   const { bare, url } = repo();
   const first = await pushPack(transport(url), { ...create(), pack: streamOf(source.pack).stream });

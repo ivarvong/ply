@@ -30,6 +30,9 @@ export const GIT_UNPACK_ERRORS = [
   'index-pack fork failed',
   'index-pack abnormal exit',
 ];
+// A host's own unpack failure (not git's grammar), echoed as every ref's reason: Cloudflare Artifacts, observed
+// 2026-11-10 (#246): "unpack invalid pack entry type 0" then "ng <ref> invalid pack entry type 0" per ref.
+export const HOST_UNPACK_ERROR = 'invalid pack entry type 0';
 
 // ---- per-ref status: one union, used by two axes (every ref's status, and the odd ref of a mixed report) ----
 const STATUS = [
@@ -38,6 +41,7 @@ const STATUS = [
   { tag: 'ngHook', reason: 'hook declined', why: 'update(): the update hook refused (observed)' },
   { tag: 'ngAtomic', reason: 'atomic push failure', why: 'execute_commands_atomic(): the innocent members of a failed atomic push (observed)' },
   { tag: 'ngUnpacker', reason: 'unpacker error', why: 'execute_commands(): every command, and only when unpack failed' },
+  { tag: 'ngEcho', reason: HOST_UNPACK_ERROR, why: 'a host (Cloudflare Artifacts) refuses every ref with its unpack status as the reason (observed, #246); after "unpack ok" it is an ordinary refusal' },
   { tag: 'missing', why: 'no status line for a commanded ref: report() writes one per command, so never git' },
   { tag: 'duplicate', why: 'the ref\'s "ok" line twice: report() writes one per command; report_v2 repeats "ok" only with option lines (proc-receive)' },
   { tag: 'unexpected', why: `the ref's line names ${FOREIGN_REF}, a ref not commanded (send-pack.c receive_status: "unknown ref")` },
@@ -109,6 +113,7 @@ export const AXES = [
   { name: 'unpack', doc: 'the unpack line', variants: [
     { tag: 'ok', why: 'report(): "unpack ok" when unpack_status is NULL' },
     { tag: 'gitError', status: 'unpack-objects abnormal exit', why: 'unpack(): one of git\'s fixed failure strings (observed with a corrupted pack)' },
+    { tag: 'hostError', status: HOST_UNPACK_ERROR, why: 'a host\'s own unpack failure text (Cloudflare Artifacts, observed with a pack entry of type 0, #246): definite only when every ref echoes it' },
     { tag: 'absent', why: 'no unpack line: send-pack.c receive_unpack_status fails' },
     { tag: 'unreadable', why: 'status bytes 0xff 0xfe: not text' },
     { tag: 'nearMiss', status: 'ok*', why: 'one flip from "ok" (issue #33): neither "ok" nor a git failure string' },
@@ -201,6 +206,7 @@ export const RENDER = {
   unpack: v => ({
     ok: () => [line('unpack ok\n')],
     gitError: () => [line(`unpack ${v.status}\n`)],
+    hostError: () => [line(`unpack ${v.status}\n`)],
     absent: () => [],
     unreadable: () => [line('unpack ', Uint8Array.of(0xff, 0xfe), '\n')],
     nearMiss: () => [line(`unpack ${v.status}\n`)],
@@ -213,6 +219,7 @@ export const RENDER = {
     ngHook: () => [line(`ng ${ref} ${v.reason}\n`)],
     ngAtomic: () => [line(`ng ${ref} ${v.reason}\n`)],
     ngUnpacker: () => [line(`ng ${ref} ${v.reason}\n`)],
+    ngEcho: () => [line(`ng ${ref} ${v.reason}\n`)],
     missing: () => [],
     duplicate: () => [line(`ok ${ref}\n`), line(`ok ${ref}\n`)],
     unexpected: () => [line(`ok ${FOREIGN_REF}\n`)],
@@ -294,11 +301,11 @@ export const MEANING = {
   // other ref or oid on our behalf): ply does not model it, so a report carrying them is never a definite answer.
   format: { v1: () => ({ options: false }), v2: () => ({ options: false }), v2Options: () => ({ options: true }), v1Options: () => ({ options: true }) },
   unpack: {
-    ok: () => 'ok', gitError: () => 'failed',
+    ok: () => 'ok', gitError: () => 'failed', hostError: () => 'hostFailed',
     absent: () => 'bad', unreadable: () => 'bad', nearMiss: () => 'bad', duplicated: () => 'bad',
   },
   status: {
-    ok: () => 'ok', ngCas: () => 'ng', ngHook: () => 'ng', ngAtomic: () => 'ng', ngUnpacker: () => 'unpacker',
+    ok: () => 'ok', ngCas: () => 'ng', ngHook: () => 'ng', ngAtomic: () => 'ng', ngUnpacker: () => 'unpacker', ngEcho: () => 'echo',
     missing: () => 'bad', duplicate: () => 'bad', unexpected: () => 'bad', unreadable: () => 'bad', nearMiss: () => 'bad',
   },
   spread: { uniform: () => null, mixed: v => v.at },
@@ -338,8 +345,11 @@ export function expected(c) {
   if (options && per.some(p => p.kind === 'ok')) return AMBIGUOUS;
   const refs = REFS.slice(0, c.refs.n);
   if (unpack === 'failed') return pack && per.every(p => p.kind === 'unpacker') ? { tag: 'rejected', code: 'push_rejected' } : AMBIGUOUS;
+  // a host's failure text is definite only echoed by every ref (#246); git's grammar never writes it
+  if (unpack === 'hostFailed') return pack && per.every(p => p.kind === 'echo') ? { tag: 'rejected', code: 'push_rejected' } : AMBIGUOUS;
   if (per.some(p => p.kind === 'unpacker')) return AMBIGUOUS;
-  const ok = refs.filter((_, i) => per[i].kind === 'ok'), ng = refs.filter((_, i) => per[i].kind === 'ng');
+  // after "unpack ok" the echoed reason is an ordinary refusal (ngClass: rejected)
+  const ok = refs.filter((_, i) => per[i].kind === 'ok'), ng = refs.filter((_, i) => per[i].kind === 'ng' || per[i].kind === 'echo');
   if (!ng.length) return { tag: 'landed', refs: ok };
   if (!ok.length) {
     const tags = per.map(p => p.s.tag);

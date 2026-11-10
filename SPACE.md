@@ -75,6 +75,14 @@ proc-receive choose it); it decides only `cas_conflict` versus `push_rejected` (
    Under v1 they are not git's at all.
 3. *Unknown unpack failure text.* A non-`ok` unpack status that is not one of git's eight strings is `ambiguous`, even
    with every ref `ng unpacker error`: a server that is not git may word it differently, and the cost is one read.
+   One exception, on positive evidence (#246): every commanded ref refused with the unpack status itself as its reason
+   (`unpack <s>`, then `ng <ref> <s>` for each ref) is `push_rejected`. Cloudflare Artifacts writes exactly that for a
+   pack it cannot unpack (observed 2026-11-10 on prod, plain and side-band, one and two refs, atomic or not:
+   "invalid pack entry type 0", "invalid zlib member", "pack stream incomplete at finish", "invalid pack signature").
+   It is never one byte from a definite cell of another outcome: the status must equal every ref's reason and not be
+   `ok` (the boundary enumeration, unchanged). No ref lines, a ref that does not echo the status, an `ok` beside it, or
+   a delete-only push stay `ambiguous`. Before this, such a report was `ambiguous` and a single-ref update was read
+   back: an invalid pack whose ref had not moved came back `cas_conflict`, and a caller retried a pack that cannot land.
 4. *Anything after the final flush* (a second report, a transport error) is `ambiguous`, although the report before it
    was complete.
 5. *A connection failure before any response byte* is `ambiguous` even when the request was cut before the pack (the
@@ -181,49 +189,51 @@ two deviations from git's canonical answer (7 s on one worker).
 - `v2Options` — report_v2(): "option forced-update" after each ok, written only for proc-receive reports
 - `v1Options` — option lines when report-status-v2 was not negotiated: report() never writes them
 
-**unpack** — the unpack line (6 variants)
+**unpack** — the unpack line (7 variants)
 
 - `ok` — report(): "unpack ok" when unpack_status is NULL
 - `gitError` (status="unpack-objects abnormal exit") — unpack(): one of git's fixed failure strings (observed with a corrupted pack)
+- `hostError` (status="invalid pack entry type 0") — a host's own unpack failure text (Cloudflare Artifacts, observed with a pack entry of type 0, #246): definite only when every ref echoes it
 - `absent` — no unpack line: send-pack.c receive_unpack_status fails
 - `unreadable` — status bytes 0xff 0xfe: not text
 - `nearMiss` (status="ok*") — one flip from "ok" (issue #33): neither "ok" nor a git failure string
 - `duplicated` — two "unpack ok" lines: receive_unpack_status reads one; the second is an invalid ref status
 
-**status** — every commanded ref's status (a mixed report overrides one ref, see spread) (10 variants)
+**status** — every commanded ref's status (a mixed report overrides one ref, see spread) (11 variants)
 
 - `ok` — report(): "ok <ref>" when cmd->error_string is NULL
 - `ngCas` (reason="failed to update ref") — execute_commands_non_atomic(): ref_transaction_commit failed (stale old oid; observed from git 2.50)
 - `ngHook` (reason="hook declined") — update(): the update hook refused (observed)
 - `ngAtomic` (reason="atomic push failure") — execute_commands_atomic(): the innocent members of a failed atomic push (observed)
 - `ngUnpacker` (reason="unpacker error") — execute_commands(): every command, and only when unpack failed
+- `ngEcho` (reason="invalid pack entry type 0") — a host (Cloudflare Artifacts) refuses every ref with its unpack status as the reason (observed, #246); after "unpack ok" it is an ordinary refusal
 - `missing` — no status line for a commanded ref: report() writes one per command, so never git
 - `duplicate` — the ref's "ok" line twice: report() writes one per command; report_v2 repeats "ok" only with option lines (proc-receive)
 - `unexpected` — the ref's line names refs/heads/zz, a ref not commanded (send-pack.c receive_status: "unknown ref")
 - `unreadable` — the status word is not text (0xff 0xfe): send-pack.c receive_status "invalid ref status"
 - `nearMiss` — "ng <ref>" with no reason: report() always writes a reason; send-pack.c would read it as "failed"
 
-**spread** — statuses across refs: uniform, or one ref (at index `at`) differs (31 variants)
+**spread** — statuses across refs: uniform, or one ref (at index `at`) differs (34 variants)
 
 - `uniform` — every ref has `status`
-- `mixed` — at ∈ {0, 1, 2} × odd ∈ the 10 `status` tags: 30 variants (the odd ref's status overrides `status` for ref `at`)
+- `mixed` — at ∈ {0, 1, 2} × odd ∈ the 11 `status` tags: 33 variants (the odd ref's status overrides `status` for ref `at`)
 
 ### Product
 
-Raw product: 14 × 2 × 13 × 3 × 2 × 2 × 4 × 6 × 10 × 31 = **32,497,920** (event × framing × delivery × refs × commands × atomic × format × unpack × status × spread).
+Raw product: 14 × 2 × 13 × 3 × 2 × 2 × 4 × 7 × 11 × 34 = **45,741,696** (event × framing × delivery × refs × commands × atomic × format × unpack × status × spread).
 
 | removed | why | raw cells |
 |---|---|---:|
-| impossible | plain framing has no band 1, 2 or 3 (use_sideband=0: hook output goes to stderr) | 5,535,360 |
-| impossible | a delete-only push sends no pack, so it cannot be cut inside or after one, nor refused for its size | 133,920 |
-| impossible | one ref cannot be mixed | 2,707,200 |
-| impossible | the odd ref index is beyond the commanded refs | 902,400 |
-| impossible | a mixed report whose odd status equals the common status is the uniform cell | 451,200 |
-| collapsed | no response is read (refused before sending, or the connection failed first): the response axes are irrelevant (framing, delivery, format, unpack, status, spread keep their first variant) | 18,436,242 |
+| impossible | plain framing has no band 1, 2 or 3 (use_sideband=0: hook output goes to stderr) | 7,791,168 |
+| impossible | a delete-only push sends no pack, so it cannot be cut inside or after one, nor refused for its size | 188,496 |
+| impossible | one ref cannot be mixed | 3,821,664 |
+| impossible | the odd ref index is beyond the commanded refs | 1,273,888 |
+| impossible | a mixed report whose odd status equals the common status is the uniform cell | 579,040 |
+| collapsed | no response is read (refused before sending, or the connection failed first): the response axes are irrelevant (framing, delivery, format, unpack, status, spread keep their first variant) | 25,949,538 |
 
-**Cells: 4,331,598.** Expected outcomes: ambiguous 4,326,000, rejected(push_rejected) 3,080, rejected(cas_conflict) 1,456, partial 840, landed 168, preSend(bad_request) 36, preSend(limit_exceeded) 18.
+**Cells: 6,137,902.** Expected outcomes: ambiguous 6,128,160, rejected(push_rejected) 6,944, rejected(cas_conflict) 1,456, partial 1,120, landed 168, preSend(bad_request) 36, preSend(limit_exceeded) 18.
 
-### Observed from git (63 cells; the other 4,331,535 are derived)
+### Observed from git (63 cells; the other 6,137,839 are derived)
 
 - `clean/plain/complete/one/withPack/off/v1/ok/ok/uniform` — all ok one/plain/v1/atomic off
 - `clean/plain/complete/one/withPack/on/v1/ok/ok/uniform` — all ok one/plain/v1/atomic on

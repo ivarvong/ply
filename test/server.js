@@ -60,6 +60,8 @@ export function startGitServer(root, extraEnv = {}) {
     };
     if (req.headers['content-length']) env.CONTENT_LENGTH = req.headers['content-length'];
     const child = spawn('git', ['http-backend'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    // receive-pack may exit before it reads the whole body (a pack it refuses): EPIPE then means nothing, the response says it all
+    child.stdin.on('error', () => {});
     req.pipe(child.stdin);
     let head = Buffer.alloc(0), headerDone = false;
     const stderr = [];
