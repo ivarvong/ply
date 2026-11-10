@@ -304,8 +304,14 @@ test('the plan: a tagged step per batch, prev an Option, refs git would push; a 
     assert.equal(r.error.code, 'bad_request', String(ref));
     assert.equal(r.error.what, 'ref');
   }
-  for (const tempPrefix of ['refs/ply', 'refs/', 'nope/']) assert.equal(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit, tempPrefix }).error.what, 'tempPrefix', tempPrefix);
+  for (const tempPrefix of ['refs/ply', 'refs/', 'nope/', 'refs/ply/transfer']) assert.equal(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit, tempPrefix }).error.what, 'tempPrefix', tempPrefix);
   assert.ok(must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit, tempPrefix: 'refs/x/y/' })).tempRef.startsWith('refs/x/y/'));
+  // an index the resolved columns do not hold: refused, not read past the end
+  const outside = batchTrees(from.resolved, [from.resolved.count]);
+  assert.equal(outside.error.code, 'bad_request');
+  assert.match(outside.error.message, /is not in the resolved index/);
+  const longer = planTransfer({ ...from.pack, count: from.pack.count + 1 }, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit });
+  assert.match(longer.error.message, /entry \d+ is not in the resolved index/);
   // read back: each malformed shape refused, even with its hash recomputed by hand
   const json = JSON.parse(JSON.stringify(plan));
   const bad = [
