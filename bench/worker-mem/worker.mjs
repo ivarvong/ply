@@ -14,8 +14,10 @@ const GIB = 1024 * MIB;
 const READ_TOKEN_TTL_S = 900;
 const PROGRESS_EVERY_BYTES = 64 * MIB;
 // The transport counts every band-1 byte against maxPackBytes. The seed pack is ~1 GiB, so the transport cap is raised
-// here and only here; the scan's own budget (WORK_BUDGET) is what bounds inflate work.
-const TRANSPORT_LIMITS = ply.withLimits({ maxPackBytes: 8 * GIB });
+// here and only here; the scan's own budget (WORK_BUDGET) is what bounds inflate work. requestTimeoutMs bounds the
+// whole exchange, body included, not idle time: the default 60 s cut the first index run of the ~1 GiB pack at 60 s
+// (run ml-20261110t034240z), and the plain scan takes ~55 s. It is raised to just under the 300 s CPU limit.
+const TRANSPORT_LIMITS = ply.withLimits({ maxPackBytes: 8 * GIB, requestTimeoutMs: 280_000 });
 
 const enc = new TextEncoder();
 
@@ -176,24 +178,131 @@ async function cellBomb(q, _env, progress) {
 const tokenState = { last: null, write: null };
 const pending = (name, why) => ({ ok: false, pending: true, cell: name, why });
 
-// Cell 4a: the streaming pack index (#236). Pending until ply exports it and PENDING_CELLS=on.
+// Cell 4a: the streaming pack index (#236, scanPackIndex): the whole seed history from packStream, oids on (each whole
+// object hashed while streaming), work budget, verify on. Reports the index's own held column bytes and how many
+// entries' resolved type stayed unknown.
 async function cellIndex(q, env) {
   const fn = ply.scanPackIndex;
-  if (typeof fn !== 'function') return pending('index', 'ply has no scanPackIndex export yet (#236)');
-  if (env.PENDING_CELLS !== 'on') return pending('index', 'PENDING_CELLS is off');
+  if (typeof fn !== 'function') return pending('index', 'ply has no scanPackIndex export (#236)');
   const { token, revoke } = await readToken(env, q.repo);
   try {
     const gh = client(q.remote, token);
     const span = gh.tracer.start('memlab.index');
-    const gen = gh.packStream({ wants: [q.commit] }, span);
-    const stream = new ReadableStream({ async pull(c) { const n = await gen.next(); if (n.done) c.close(); else c.enqueue(n.value); } });
     const t0 = Date.now();
-    const r = await fn(stream);
+    const oids = q.oids !== 'off';
+    const r = await fn(gh.packStream({ wants: [q.commit] }, span), { oids, budget: ply.WORK_BUDGET, verify: true, limits: scanLimits(q.limits) });
     span.end();
-    if (!r.ok) return { ok: false, error: { code: r.error.code, message: r.error.message }, wallMs: Date.now() - t0 };
+    if (!r.ok) return { ok: false, error: { code: r.error.code, message: String(r.error.message).slice(0, 300) }, wallMs: Date.now() - t0 };
     const v = r.value;
-    return { ok: true, count: v.count ?? null, keys: Object.keys(v), wallMs: Date.now() - t0, note: 'shape unverified against the final #236 API' };
+    const types = {};
+    let unknown = 0;
+    for (let i = 0; i < v.count; i++) {
+      const t = v.columns.type[i];
+      if (t === 0) unknown++;
+      types[t] = (types[t] ?? 0) + 1;
+    }
+    return { ok: true, count: v.count, objects: v.count, packBytes: v.bytes, trailer: v.trailer, heldBytes: v.heldBytes, perEntryBytes: v.count ? v.heldBytes / v.count : null, resolvedTypes: types, unknownType: unknown, oids, wallMs: Date.now() - t0 };
   } finally { tokenState.last = await revoke(); }
+}
+
+// R2 spool (harness-side; ply stays storage-neutral). The pack is written once by the `spool` cell as a multipart
+// upload in fixed parts (R2 needs every part but the last the same size), then read back by range for resolvePackRange.
+const SPOOL_PART_BYTES = 16 * MIB;
+const spoolKey = q => `spool/${q.key}`;
+
+// A ply RangeSource over one R2 object: each read is one ranged get, streamed.
+function r2Range(bucket, key, size) {
+  return {
+    size,
+    read: async (offset, length) => {
+      if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > size) {
+        return { ok: false, error: ply.plyError('bad_request', `range ${offset}+${length} outside ${size} bytes`) };
+      }
+      if (length === 0) return { ok: true, value: new ReadableStream({ start(c) { c.close(); } }) };
+      const obj = await bucket.get(key, { range: { offset, length } });
+      if (!obj || !obj.body) return { ok: false, error: ply.plyError('not_found', `spool object ${key} is gone`) };
+      return { ok: true, value: obj.body };
+    },
+  };
+}
+
+// Cell: spool the whole seed history into R2 (run once per key).
+async function cellSpool(q, env, progress) {
+  const { token, revoke } = await readToken(env, q.repo);
+  try {
+    const gh = client(q.remote, token);
+    const span = gh.tracer.start('memlab.spool');
+    const t0 = Date.now();
+    const up = await env.SPOOL.createMultipartUpload(spoolKey(q));
+    const parts = [];
+    let buf = new Uint8Array(SPOOL_PART_BYTES);
+    let fill = 0;
+    let total = 0;
+    const flush = async last => {
+      if (fill === 0 && !last) return;
+      parts.push(await up.uploadPart(parts.length + 1, fill === SPOOL_PART_BYTES ? buf : buf.slice(0, fill)));
+      buf = new Uint8Array(SPOOL_PART_BYTES);
+      fill = 0;
+    };
+    try {
+      for await (const chunk of gh.packStream({ wants: [q.commit] }, span)) {
+        let at = 0;
+        while (at < chunk.length) {
+          const n = Math.min(chunk.length - at, SPOOL_PART_BYTES - fill);
+          buf.set(chunk.subarray(at, at + n), fill);
+          fill += n; at += n; total += n;
+          if (fill === SPOOL_PART_BYTES) { await flush(false); if (parts.length % 8 === 0) await progress({ spooled: total }); }
+        }
+      }
+      if (fill > 0) await flush(true);
+      const done = await up.complete(parts);
+      span.end();
+      return { ok: done.size === total, key: spoolKey(q), size: done.size, packBytes: total, parts: parts.length, wallMs: Date.now() - t0 };
+    } catch (e) {
+      await up.abort().catch(() => {});
+      throw e;
+    }
+  } finally { tokenState.last = await revoke(); }
+}
+
+// Cell: scanPackIndex over the spooled object, then resolvePackRange over R2 ranged reads. Every entry must end with a
+// type and an oid (unknowns 0). Held memory is the two indexes' columns plus the resolver's base cache bound.
+async function cellResolve(q, env) {
+  const head = await env.SPOOL.head(spoolKey(q));
+  if (!head) return { ok: false, error: { code: 'harness', message: `no spool object ${spoolKey(q)}` } };
+  const t0 = Date.now();
+  const obj = await env.SPOOL.get(spoolKey(q));
+  const idx = await ply.scanPackIndex(obj.body, { oids: true, budget: ply.WORK_BUDGET, verify: true, limits: ply.DEFAULT_LIMITS });
+  if (!idx.ok) return { ok: false, phase: 'index', error: { code: idx.error.code, message: String(idx.error.message).slice(0, 300) } };
+  const scanMs = Date.now() - t0;
+  let indexUnknown = 0;
+  for (let i = 0; i < idx.value.count; i++) if (idx.value.columns.type[i] === 0) indexUnknown++;
+  const cacheBytes = Number(q.cacheBytes ?? ply.RESOLVE_CACHE_BYTES);
+  const res = await ply.resolvePackRange(idx.value, r2Range(env.SPOOL, spoolKey(q), head.size), { cacheBytes, budget: ply.WORK_BUDGET, limits: ply.DEFAULT_LIMITS });
+  if (!res.ok) return { ok: false, phase: 'resolve', error: { code: res.error.code, message: String(res.error.message).slice(0, 300) }, indexUnknown };
+  const r = res.value;
+  let unknownType = 0;
+  let unknownOid = 0;
+  const types = {};
+  for (let i = 0; i < r.count; i++) {
+    const t = r.type(i);
+    if (t.tag !== 'some') unknownType++; else types[t.value] = (types[t.value] ?? 0) + 1;
+    if (r.oid(i).tag !== 'some') unknownOid++;
+  }
+  const headFound = q.commit ? r.find(q.commit).tag === 'some' : null;
+  return {
+    ok: unknownType === 0 && unknownOid === 0 && headFound !== false, count: r.count, packBytes: head.size, indexUnknown, unknownType, unknownOid, types, headFound,
+    indexHeldBytes: idx.value.heldBytes, resolvedHeldBytes: r.heldBytes, cacheBytes, heldBoundBytes: idx.value.heldBytes + r.heldBytes + cacheBytes,
+    stats: r.stats, scanMs, wallMs: Date.now() - t0,
+  };
+}
+
+// Cell: delete a spooled object.
+async function cellSpoolDel(q, env) {
+  const had = await env.SPOOL.head(spoolKey(q));
+  await env.SPOOL.delete(spoolKey(q));
+  const after = await env.SPOOL.head(spoolKey(q));
+  return { ok: after === null, existed: Boolean(had), key: spoolKey(q) };
 }
 
 // Cell 4b: pushPack (#234). Relays one seed commit to the destination repo as one streamed pack: the fetch asks for
@@ -239,7 +348,7 @@ async function cellPushPack(q, env, progress) {
   }
 }
 
-const CELLS = { scan: cellScan, read: cellRead, bomb: cellBomb, index: cellIndex, pushpack: cellPushPack };
+const CELLS = { scan: cellScan, read: cellRead, bomb: cellBomb, index: cellIndex, pushpack: cellPushPack, spool: cellSpool, resolve: cellResolve, spooldel: cellSpoolDel };
 
 export default {
   async fetch(req, env, ctx) {
