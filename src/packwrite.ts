@@ -17,7 +17,8 @@ import { builtEntry, entryHead, packHeader } from './pack.js';
 import type { BuiltEntry, PackInput } from './pack.js';
 import { bufferSource, concat } from './bytes.js';
 import { plyError } from './errors.js';
-import type { ErrorOf } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
+import { limitExceeded } from './limits.js';
 import { DEFLATE_SLICE, INFLATE_CHUNK, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from './format.js';
 
 // One object's zlib stream, pulled: the object goes into CompressionStream in DEFLATE_SLICE slices as the output is read
@@ -144,4 +145,67 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
     async cancel(): Promise<void> { await it.return({ entries: [], body: 0, digest: new Uint8Array(0) }); },
   }, { highWaterMark: 0 });
   return { stream, length: prefix.length + m.bytes, failure: () => failed };
+}
+
+// A pack the caller already has, as the request body after `prefix` (commands, and push options): read at the reader's
+// pace, never buffered or teed, one chunk held back. `length` is the pack's own length when the caller knows it (null:
+// it does not); SourcedPack.length is the whole body, the prefix and that pack (only the prefix when unknown: the real
+// count is `sent()`, for the span).
+// The last chunk is released only once the source has ended and its length has passed, and a chunk that would go over
+// `length` or `maxPack` is never released, so a refused pack never reaches the server whole, whatever the runtime does
+// with an errored request body (undici aborts the request; workerd ends it as if complete, measured: streamPack above).
+// `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish.
+export type SourcedPack = {
+  readonly stream: ReadableStream<Uint8Array>; readonly length: number;
+  readonly failure: () => PlyError | null; readonly sent: () => number; readonly release: () => Promise<void>;
+};
+export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Array, length: number | null, maxPack: number): SourcedPack {
+  const reader = source.getReader();
+  let failed: PlyError | null = null;
+  let started = false;
+  let open = true;
+  let held: Uint8Array | null = null;
+  let read = 0;
+  let sent = 0;
+  const release = async (why: unknown = null): Promise<void> => {
+    if (!open) return;
+    open = false;
+    await reader.cancel(why).catch(() => null); // the pack is already abandoned: a source that fails to cancel changes nothing
+  };
+  const refuse = async (c: ReadableStreamDefaultController<Uint8Array>, e: PlyError): Promise<void> => { failed = e; c.error(e); await release(e); };
+  const mismatch = (want: number): ErrorOf<'bad_request'> => plyError('bad_request', `pushPack: the pack stream yielded ${read} bytes where length said ${want}; it was not sent whole`, { what: 'push pack length', got: read, max: want });
+  const emit = (c: ReadableStreamDefaultController<Uint8Array>, chunk: Uint8Array): void => { sent += chunk.length; c.enqueue(chunk); };
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(c): Promise<void> {
+      if (!started) { started = true; c.enqueue(prefix); return; }
+      for (;;) {
+        let r: ReadableStreamReadResult<Uint8Array>;
+        // oxlint-disable-next-line no-await-in-loop -- one chunk at a time, at the request's pace
+        try { r = await reader.read(); } catch (e) { open = false; await refuse(c, plyError('internal', 'pushPack: the pack stream failed; it was not sent whole', { what: 'push pack', got: read, cause: e })); return; }
+        if (r.done) {
+          open = false;
+          // oxlint-disable-next-line no-await-in-loop -- this refusal ends the loop
+          if (length !== null && read !== length) { await refuse(c, mismatch(length)); return; }
+          if (held !== null) emit(c, held);
+          c.close();
+          return;
+        }
+        const chunk: unknown = r.value;
+        // oxlint-disable-next-line no-await-in-loop -- each refusal ends the loop
+        if (!(chunk instanceof Uint8Array)) { await refuse(c, plyError('bad_request', 'pushPack: the pack stream yielded something other than bytes', { what: 'push pack chunk' })); return; }
+        read += chunk.length;
+        // oxlint-disable-next-line no-await-in-loop -- see above
+        if (read > maxPack) { await refuse(c, limitExceeded('push pack bytes', read, maxPack)); return; }
+        // oxlint-disable-next-line no-await-in-loop -- see above
+        if (length !== null && read > length) { await refuse(c, mismatch(length)); return; }
+        if (chunk.length > 0) {
+          const out = held;
+          held = chunk;
+          if (out !== null) { emit(c, out); return; }
+        }
+      }
+    },
+    async cancel(why): Promise<void> { await release(why); },
+  }, { highWaterMark: 0 });
+  return { stream, length: prefix.length + (length === null ? 0 : length), failure: () => failed, sent: () => sent, release };
 }

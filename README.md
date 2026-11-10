@@ -351,6 +351,23 @@ Repeat pushes are thin: ply reads the parent's trees only where the new tree dif
 
 `pushDir` / `filesFromDir(dir, { filter, limits })` read a directory as git's index would: the owner's execute bit makes `100755`, a symlink is `120000` with its target (never followed), empty directories vanish, `.git` is skipped, anything else (FIFO, socket) is `bad_request`. `filter(path, { directory, symlink })` → `false` leaves a path out; `.gitignore` is not read, and there is no `ply push` CLI. Gitlinks come only from `files` (`{ mode: '160000', oid }`): a nested checkout is walked as a plain directory. A tree oid from `filesFromDir` equals `git add -A && git write-tree` on the same directory (tested).
 
+## Push a pack you already have (`pushPack`)
+
+A mirror relay, a bundle import or a pack cut from another pack does not need its objects in memory. `pushPack` sends a complete pack from a `ReadableStream`, with `push`'s command checks, capability checks and report handling:
+
+```js
+const r = await pushPack(transport, {
+  commands: [{ ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: head }],
+  pack: stream,          // header, entries, trailer; read once
+  length: packBytes,     // optional: the pack alone, without the commands
+  atomic: true,          // optional, checked against the advertisement (as are pushOptions)
+});
+```
+
+Memory is about two of the stream's chunks, whatever the pack's size (256 MiB measured, `test/push-pack.test.js`). `length`, when given, is checked against `maxPackBytes` before anything is sent and against the bytes as they go. Without it, the count is enforced while sending: the chunk that would cross `maxPackBytes` is never sent. The request is chunked either way (no `Content-Length`).
+
+A refusal before the request (a bad command, an over-cap `length`, a capability the server does not advertise) leaves the stream unread and unlocked, and the caller still owns it. From the first request byte the stream is spent: it is never retried, a request that did not finish it cancels it, and every failure is `ambiguous`, with the first cause in `original` (`bad_request` for a wrong `length`, `limit_exceeded` for the cap, `internal` for a failed source). The last chunk is released only after the source has ended and its length has passed, so a refused pack never reaches the server whole. Ply does not parse or hash the pack: a corrupt one is refused by the server's report.
+
 ## Push a whole local repository (history, no git binary)
 
 `pushRepo(dir, url, { refspecs?, all?, tags?, force?, dryRun?, thin? }, opts)` is `git push <url> <refspecs>` from a machine with Node and no git: it reads `dir`'s `.git` itself (a work tree, a linked worktree or a bare repository: loose objects inflated and hash-checked, every packfile parsed and resolved, `packed-refs` and loose refs, `HEAD`), asks the remote for its refs (one ls-refs), and sends one receive-pack request for every command. Example: [`examples/push-repo.mjs`](examples/push-repo.mjs).

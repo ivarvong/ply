@@ -9,8 +9,8 @@ import type { Option, Result } from './result.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { coded, clientSpan, advertise, spanned } from './transport.js';
-import { push } from './push.js';
-import type { CheckedCaps, PushOptions, PushResult, PushTransport } from './push.js';
+import { planPackPush, push, pushPackChecked } from './push.js';
+import type { CheckedCaps, PackPushOptions, PushOptions, PushResult, PushTransport } from './push.js';
 import type { Input } from './absent.js';
 // oxlint-disable-next-line import/max-dependencies -- the advertisement reader joins the frame reader, the v2 parser and push
 import { at, fromNullable, fromNullish, mapGet, withDefaults } from './absent.js';
@@ -174,4 +174,20 @@ export async function pushWithOptions(t: CapsTransport, options: CheckedPushOpti
   const checked = checkPushCaps(caps.value, { atomic, pushOptions });
   if (!checked.ok) return checked;
   return push(t, { ...opts, checked: checked.value });
+}
+
+// pushWithOptions for a pack the caller already has (push.ts PackPushOptions). A request that cannot be sent is refused
+// first: the advertisement GET and the pack are only touched for one that can.
+export type CheckedPackPushOptions = Omit<PackPushOptions, 'checked'> & PushWants;
+export async function pushPack(t: CapsTransport, options: CheckedPackPushOptions): Promise<Result<PushResult, PlyError>> {
+  const { atomic: _atomic, pushOptions: _pushOptions, ...opts } = options;
+  const { atomic, pushOptions } = withDefaults(options, noWants());
+  const planned = planPackPush(opts, t.limits);
+  if (!planned.ok) return planned;
+  if (!atomic && pushOptions.length === 0) return pushPackChecked(t, opts);
+  const caps = await receiveCaps(t);
+  if (!caps.ok) return caps;
+  const checked = checkPushCaps(caps.value, { atomic, pushOptions });
+  if (!checked.ok) return checked;
+  return pushPackChecked(t, { ...opts, checked: checked.value });
 }

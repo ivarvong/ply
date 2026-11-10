@@ -11,7 +11,7 @@ import { SIDEBAND_PACK, SIDEBAND_PROGRESS, SIDEBAND_ERROR } from './format.js';
 import { ZERO_OID, parseOid } from './oid.js';
 import type { Oid } from './oid.js';
 import type { Refname } from './refname.js';
-import { measurePack, streamPack } from './packwrite.js';
+import { measurePack, streamPack, streamSource } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
 import { frames, coded, clientSpan, spanned, UA } from './transport.js';
 import { limitExceeded, parseLimits } from './limits.js';
@@ -654,27 +654,9 @@ async function finishPush(ctx: FinishPush, res: Result<PushReport | null, PlyErr
   return resolved;
 }
 
-// The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
-async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
-  const packed = plan.needPack ? await measurePack(plan.objects) : null;
-  const entries: readonly PackEntry[] = packed === null ? [] : packed.entries;
-  const packBytes = packed === null ? 0 : packed.bytes;
-  span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
-  for (const [i, e] of entries.entries()) span.event('git.push.object', { 'git.object.index': i, 'git.object.type': objectTypeAttr(e), 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': getOrElse(fromNullish(e.baseOid), ''), 'git.object.bytes': e.bytes });
-  // Refuse before the first byte is sent: a host with a push cap (Artifacts: 64 MiB of request body) would otherwise take the whole
-  // upload and answer 4xx. The measured size is the pack as pass 1 wrote it, so `got` is what the server would have
-  // received; pass 2 never sends more (packwrite.ts).
-  if (packBytes > plan.maxPack) return err(limitExceeded('push pack bytes', packBytes, plan.maxPack));
-  // The request body (commands + pack) is on the wire from here. Every failure — transport, HTTP status, framing,
-  // band 3, a limit — and every report that is not exactly git's is 'ambiguous': the ref may have moved. The one
-  // exception is the server refusing the service itself (refusedBeforeReceivePack, confirmed by its advertisement).
-  const body = bodyOf(plan, packed);
-  if (!body.ok) return body;
-  const r = await readResponse(t, plan, body.value.body, span, plan.sideband);
-  // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
-  // it was not sent the pack that was measured
-  const cut = body.value.streamed === null ? null : body.value.streamed.failure();
-  const base: FinishPush = { t, span, plan, packBytes, entries, hookOutput: '' };
+// The answer to a request whose body went out: `cut` is the body's own failure, whatever the server said.
+async function decide(base: FinishPush, r: Read, cut: PlyError | null): Promise<Result<PushResult, PlyError>> {
+  const { t, span, plan } = base;
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush of a PlyError is a PlyError
   if (cut !== null) return finishPush(base, err(ambiguousAfterPush(cut) as PlyError));
   if ('cause' in r) {
@@ -695,13 +677,36 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   return finishPush({ ...base, hookOutput: band2 }, res);
 }
 
-// The request under its span (push, below, is the entry).
+// The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
+async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
+  const packed = plan.needPack ? await measurePack(plan.objects) : null;
+  const entries: readonly PackEntry[] = packed === null ? [] : packed.entries;
+  const packBytes = packed === null ? 0 : packed.bytes;
+  span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
+  for (const [i, e] of entries.entries()) span.event('git.push.object', { 'git.object.index': i, 'git.object.type': objectTypeAttr(e), 'git.object.size': e.size, 'git.object.compressed': e.compressed, 'git.object.base.oid': getOrElse(fromNullish(e.baseOid), ''), 'git.object.bytes': e.bytes });
+  // Refuse before the first byte is sent: a host with a push cap (Artifacts: 64 MiB of request body) would otherwise take the whole
+  // upload and answer 4xx. The measured size is the pack as pass 1 wrote it, so `got` is what the server would have
+  // received; pass 2 never sends more (packwrite.ts).
+  if (packBytes > plan.maxPack) return err(limitExceeded('push pack bytes', packBytes, plan.maxPack));
+  // The request body (commands + pack) is on the wire from here. Every failure — transport, HTTP status, framing,
+  // band 3, a limit — and every report that is not exactly git's is 'ambiguous': the ref may have moved. The one
+  // exception is the server refusing the service itself (refusedBeforeReceivePack, confirmed by its advertisement).
+  const body = bodyOf(plan, packed);
+  if (!body.ok) return body;
+  const r = await readResponse(t, plan, body.value.body, span, plan.sideband);
+  // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
+  // it was not sent the pack that was measured
+  const cut = body.value.streamed === null ? null : body.value.streamed.failure();
+  return decide({ t, span, plan, packBytes, entries, hookOutput: '' }, r, cut);
+}
+
+// The request under its span (push and pushPackChecked, below, are the entries).
 // oxlint-disable-next-line eslint/require-await -- async, as push was
-async function receivePack(t: PushTransport, plan: PushPlan): Promise<Result<PushResult, PlyError>> {
+async function receivePack(t: PushTransport, plan: PushPlan, run: (span: Span) => Promise<Result<PushResult, PlyError>>): Promise<Result<PushResult, PlyError>> {
   const { commands, caps } = plan;
   const [first] = commands;
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through (an async wrapper adds bytes, not behaviour)
-  return coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), (span: Span) => send(t, plan, span)));
+  return coded('protocol', () => spanned(t, 'git.receive-pack', clientSpan(t, { 'git.command': 'receive-pack', 'git.protocol.version': 0, 'git.push.commands': commands.map(c => `${c.oldOid.slice(0, SHORT_OID)} ${c.newOid.slice(0, SHORT_OID)} ${c.ref}`), 'git.push.caps': caps, 'git.push.ref': first.ref, 'git.push.old': first.oldOid, 'git.push.new': first.newOid }), run));
 
 }
 
@@ -711,6 +716,52 @@ async function receivePack(t: PushTransport, plan: PushPlan): Promise<Result<Pus
 export function push(t: PushTransport, opts: PushOptions): Promise<Result<PushResult, PlyError>> {
   const plan = planPush(opts, t.limits);
   if (!plan.ok) return Promise.resolve(plan);
-  return receivePack(t, plan.value);
+  // oxlint-disable-next-line typescript/promise-function-async -- send's promise, returned as is
+  return receivePack(t, plan.value, span => send(t, plan.value, span));
+}
+
+// ---- a pack the caller already has (#234) ----
+// `pack` is a complete pack: header, entries, trailer. It is read once and never retried. A refusal here leaves it
+// unread and unlocked; from the first request byte it is spent, and every failure is 'ambiguous'.
+// `length` is the pack's own length, without the commands, when the caller knows it (default null). It is checked against
+// maxPackBytes before anything is sent and against the bytes as they go. The request is chunked either way.
+export type PackPushOptions = Input<Omit<PushConfig, 'objects'> & { readonly length: number | null }> & { readonly pack: ReadableStream<Uint8Array> };
+export type PackPushPlan = { readonly plan: PushPlan; readonly pack: ReadableStream<Uint8Array>; readonly length: number | null };
+const isPackLength = (n: unknown): n is number | null => n === null || (typeof n === 'number' && Number.isSafeInteger(n) && n >= 0);
+// Pure: every refusal happens with nothing read and nothing on the wire.
+export function planPackPush(o: PackPushOptions, limits: LimitsInput | null): Result<PackPushPlan, PlyError> {
+  if (field(o, 'objects').tag === 'some') return fail('bad_request', 'pushPack: takes a pack, not objects', { what: 'objects' });
+  const pack = getOrElse<unknown>(field(o, 'pack'), null);
+  if (!(pack instanceof ReadableStream) || pack.locked) return fail('bad_request', 'pushPack: pack must be an unlocked ReadableStream', { what: 'pack' });
+  const planned = planPush(o, limits);
+  if (!planned.ok) return planned;
+  if (!planned.value.needPack) return fail('bad_request', 'pushPack: a push of only deletes sends no pack', { what: 'pack' });
+  const length = getOrElse<unknown>(field(o, 'length'), null);
+  if (!isPackLength(length)) return fail('bad_request', 'pushPack: length must be a non-negative integer', { what: 'length', got: length });
+  if (length !== null && length > planned.value.maxPack) return err(limitExceeded('push pack bytes', length, planned.value.maxPack));
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the guard above checked the stream; its chunks are checked as they are read (packwrite.ts streamSource)
+  return ok({ plan: planned.value, pack: pack as ReadableStream<Uint8Array>, length });
+}
+async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
+  const { plan } = p;
+  const prefix = requestBody(plan, null);
+  if (!prefix.ok) return prefix;
+  const body = streamSource(p.pack, prefix.value, p.length, plan.maxPack);
+  const r = await readResponse(t, plan, body, span, plan.sideband);
+  // read before release: abandoning the rest of a pack the server already answered is not a failure of the pack
+  const cut = body.failure();
+  await body.release();
+  const packBytes = body.sent();
+  const requestBytes = prefix.value.length + packBytes;
+  span.set({ 'git.push.pack.bytes': packBytes, 'git.request.bytes': requestBytes, 'http.request.body.size': requestBytes });
+  return decide({ t, span, plan, packBytes, entries: [], hookOutput: '' }, r, cut);
+}
+// The effect, for `checked` caps (pushPack in receivecaps.ts reads them from the advertisement).
+// oxlint-disable-next-line typescript/promise-function-async -- receivePack's promise, returned as is
+export function pushPackChecked(t: PushTransport, opts: PackPushOptions): Promise<Result<PushResult, PlyError>> {
+  const p = planPackPush(opts, t.limits);
+  if (!p.ok) return Promise.resolve(p);
+  // oxlint-disable-next-line typescript/promise-function-async -- sendSource's promise, returned as is
+  return receivePack(t, p.value.plan, span => sendSource(t, p.value, span));
 }
 

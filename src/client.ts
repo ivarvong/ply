@@ -17,8 +17,8 @@ import { fetchPack } from './fetchpack.js';
 import { negotiate } from './negotiate.js';
 import type { PushResult as PushOk } from './push.js';
 // oxlint-disable-next-line import/max-dependencies -- the one module that gathers every wire operation
-import { receiveCaps, pushWithOptions } from './receivecaps.js';
-import type { CheckedPushOptions } from './receivecaps.js';
+import { receiveCaps, pushWithOptions, pushPack } from './receivecaps.js';
+import type { CheckedPackPushOptions, CheckedPushOptions } from './receivecaps.js';
 import { discover } from './discover.js';
 import type { Input } from './absent.js';
 import { withDefaults } from './absent.js';
@@ -35,7 +35,7 @@ export { fetchBody, v2Init, v2Step, v2Attrs, packStream, fetchObject, spInit, sp
 export { fetchPack, fetchPackFiltered, packAttrs } from './fetchpack.js';
 export { negotiate } from './negotiate.js';
 export { ZERO_OID, pushBody, classifyReport, decideOutcome, push } from './push.js';
-export { receiveCaps, capsProblem, checkPushCaps, pushWithOptions } from './receivecaps.js';
+export { receiveCaps, capsProblem, checkPushCaps, pushWithOptions, pushPack } from './receivecaps.js';
 export { discover, parseCapabilitiesV2, capLookup } from './discover.js';
 
 // lsRefs options. unborn: ask for the unborn HEAD (an empty repository's `HEAD -> refs/heads/main`), as git's clone does:
@@ -85,6 +85,7 @@ export class GitHttp {
   public negotiate(opts: NegotiateOpts, extra: Pick<FetchPackExtra, 'external' | 'resolve'> = {}): Answer<NegotiateResult> { return negotiate(this.t, opts, extra); }
   // pushWithOptions reads the advertisement only when the push asks for atomic or push options
   public push(opts: PushOpts): Answer<PushOk> { return pushWithOptions(this.t, opts); }
+  public pushPack(opts: CheckedPackPushOptions): Answer<PushOk> { return pushPack(this.t, opts); }
   public receiveCaps(): Answer<Set<string>> { return receiveCaps(this.t); }
   public discover(): Answer<DiscoverInfo> { return discover(this.t); }
 }
