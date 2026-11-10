@@ -27,6 +27,8 @@ export function workerConfig({ pendingCells = 'off' } = {}) {
       REPOS: { type: 'artifacts', namespace: NAMESPACE },
       VERSION: { type: 'version-metadata' },
       PENDING_CELLS: { type: 'text', value: pendingCells },
+      // Scratch spool for the resolve cell (created once: cf r2 buckets create --name ply-memlab-spool).
+      SPOOL: { type: 'r2', name: 'ply-memlab-spool' },
     },
     exports: { default: { type: 'worker', cache: { enabled: false } } },
     manifest: { type: 'partial', mainModule: 'index.js', modules: {} },

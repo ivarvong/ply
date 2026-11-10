@@ -42,6 +42,10 @@ const CELL_QUERY = {
   bombworker: { route: 'bomb', q: { declared: String(1024 ** 3), limits: 'worker' } },
   index: { route: 'index', q: { repo: seed.name, remote: seed.remote, commit: seed.head } },
   pushpack: { route: 'pushpack', q: { repo: seed.name, remote: seed.remote } },
+  // resolve: spool once, resolve N times, delete the spooled object (the bucket stays).
+  spool: { route: 'spool', q: { repo: seed.name, remote: seed.remote, commit: seed.head, key: `${run}.pack` } },
+  resolve: { route: 'resolve', q: { commit: seed.head, key: `${run}.pack` } },
+  spooldel: { route: 'spooldel', q: { key: `${run}.pack` } },
 };
 
 function versionsTagged(tag) {
@@ -279,6 +283,25 @@ const from = Date.now() - 60_000;
 const results = [];
 let relay = null;
 for (const name of args.cells.split(',').filter(Boolean)) {
+  if (name === 'resolve') {
+    const sp = await callCell(target, 'spool', 0);
+    results.push(sp);
+    log(`spool: ok=${sp.ok} size=${sp.size} parts=${sp.parts} client=${sp.clientMs} ${sp.error ? JSON.stringify(sp.error).slice(0, 240) : ''}`);
+    try {
+      if (sp.ok) {
+        for (let i = 0; i < RUNS; i++) {
+          const r = await callCell(target, 'resolve', i);
+          results.push(r);
+          log(`resolve #${i}: ok=${r.ok} unknownType=${r.unknownType} unknownOid=${r.unknownOid} indexUnknown=${r.indexUnknown} held=${r.indexHeldBytes}+${r.resolvedHeldBytes} client=${r.clientMs} ${r.error ? JSON.stringify(r.error).slice(0, 240) : ''}`);
+        }
+      }
+    } finally {
+      const del = await callCell(target, 'spooldel', 0);
+      results.push(del);
+      log(`spooldel: ok=${del.ok} existed=${del.existed}`);
+    }
+    continue;
+  }
   if (name === 'pushpack') {
     const commits = seed.pushes ?? [];
     const dst = createDst();
