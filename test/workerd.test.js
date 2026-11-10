@@ -34,6 +34,44 @@ after(async () => { if (!WORKERD) return; proc?.kill(); await srv?.close(); clea
 
 const post = async (path, body, q = '') => (await fetch(`http://127.0.0.1:${PORT}${path}${q}`, { method: 'POST', body: JSON.stringify(body) })).json();
 
+// #255 under workerd: a Node server that drips, stalls or answers late; the worker's transport must cut stalls (first
+// byte, idle) and let a long steady exchange through. Timers in workerd fire while a body read is pending.
+test('workerd: first-byte and idle timeouts; a long steady body or upload is not cut', { skip: !WORKERD }, async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const server = http.createServer(async (req, res) => {
+    const mode = new URL(req.url, 'http://x').pathname.split('/')[1];
+    // a client that gives up resets the connection mid-upload: that is the expected end of those cases
+    try { for await (const _ of req) { /* the upload, read as it comes */ } } catch { return; }
+    if (mode === 'slowheaders') await sleep(800);
+    res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-result' });
+    const frames = mode === 'steady' ? 20 : mode === 'stall' ? 2 : 1;
+    for (let i = 0; i < frames; i++) { res.write('0008abcd'); if (mode === 'steady') await sleep(40); }
+    if (mode === 'stall') return; // never ends: the client must give up
+    res.end('0000');
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const limits = { firstByteTimeoutMs: 250, idleTimeoutMs: 250 };
+  try {
+    const run = (mode, extra = {}) => post('/timeouts', { url: `${base}/${mode}/r.git`, mode, limits: { ...limits, ...extra } });
+    const steady = await run('steady');
+    assert.deepEqual([steady.ok, steady.frames], [true, 21], JSON.stringify(steady));
+    assert.ok(steady.ms > 600, `steady body ran ${steady.ms} ms, past every 250 ms timer`);
+    const capped = await run('steady', { requestTimeoutMs: 400 });
+    assert.deepEqual([capped.ok, capped.code, capped.what], [false, 'timeout', 'requestTimeoutMs'], JSON.stringify(capped));
+    const stall = await run('stall');
+    assert.deepEqual([stall.ok, stall.code, stall.what, stall.limit], [false, 'timeout', 'idleTimeoutMs', 'idleTimeoutMs'], JSON.stringify(stall));
+    assert.ok(stall.ms < 3000, `${stall.ms} ms`);
+    const slow = await run('slowheaders');
+    assert.deepEqual([slow.ok, slow.code, slow.what], [false, 'timeout', 'firstByteTimeoutMs'], JSON.stringify(slow));
+    const up = await run('uploadsteady');
+    assert.deepEqual([up.ok, up.frames], [true, 2], JSON.stringify(up));
+    const upStall = await run('uploadstall');
+    assert.deepEqual([upStall.ok, upStall.code, upStall.what], [false, 'timeout', 'idleTimeoutMs'], JSON.stringify(upStall));
+    console.log(`  workerd timeouts: steady ${steady.ms} ms ok, stall cut at ${stall.ms} ms, slow headers ${slow.ms} ms, upload stall ${upStall.ms} ms`);
+  } finally { server.closeAllConnections?.(); server.close(); }
+});
+
 test('workerd: platform features the pipeline relies on', { skip: !WORKERD }, async () => {
   const f = await (await fetch(`http://127.0.0.1:${PORT}/features`)).json();
   for (const k of ['DecompressionStream', 'CompressionStream', 'AbortSignalAny', 'AbortSignalTimeout', 'getRandomValues']) assert.equal(f[k], 'function', k);

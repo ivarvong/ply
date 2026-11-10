@@ -7,7 +7,7 @@ export const CODE_DOCS: Readonly<Record<Code, CodeDoc>> = Object.freeze({
   bad_request: { where: 'local', what: 'an argument is malformed (ref, ident, path, oid, message, find, files: a duplicate or file/directory path; checkout: a non-empty dir, or a path that collides or would pass through a symlink)' },
   unsupported: { where: 'remote', what: 'the server lacks a capability we need (sha256 repo, no filter, push-options not advertised, no protocol v2: what "protocol version")' },
   network: { where: 'net', what: 'connection failed or dropped before a response was complete' },
-  timeout: { where: 'net', what: 'the request exceeded limits.requestTimeoutMs' },
+  timeout: { where: 'net', what: 'a request stalled past limits.firstByteTimeoutMs or limits.idleTimeoutMs, or ran past an opt-in limits.requestTimeoutMs; `what` names the limit' },
   aborted: { where: 'local', what: 'the caller\'s AbortSignal fired' },
   http: { where: 'remote', what: 'an HTTP status we do not classify further, including any 3xx: redirects are not followed (status, location)' },
   auth: { where: 'remote', what: '401/403' },

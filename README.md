@@ -540,6 +540,16 @@ Every bound is a field of `limits` (`opts.limits`, any call). `DEFAULT_LIMITS` i
 
 The byte budgets count what an object costs, not only its bytes: each object parsed from a pack (`parsePack`, and the room `resolvePack` has left; so every fetch, `checkoutTree`, and `pushRepo`'s local packs), each local object `pushRepo` holds, each file `filesFromDir` reads, and each file or change `pushTree`/`commitChanges` takes is charged its bytes plus `LIMIT_OBJECT_OVERHEAD` (3 KiB, above the 1.0 to 2.4 KiB of heap and RSS one tiny object was measured to cost; the method is in `src/limits.ts`). So a pack of 100 000 three-byte blobs (1.4 MB on the wire, which `git index-pack` accepts) is `limit_exceeded` (`what: 'pack inflated bytes'`) under the defaults, and 100 000 eight-byte files are `limit_exceeded` (`what: 'push bytes'`), where counting bytes alone let both run a 128 MiB heap out of memory. On the defaults that is about 87 000 tiny objects per pack and 43 000 tiny files per push; `got` includes the overhead. `stats.inflated` is still the declared sum git reports.
 
+Time is bounded per exchange by three timers (#255), all fields of `limits`; 0 turns one off:
+
+- `firstByteTimeoutMs` (60 s): from the request to the response headers. For a streamed request body (`pushPack`, a `StreamBody`), it starts when the upload ends.
+- `idleTimeoutMs` (60 s): the longest gap with no progress, either no upload chunk pulled or no response chunk read. A server that keeps sending (upload-pack sends keepalives while it counts objects) is never cut.
+- `requestTimeoutMs` (0, off): an opt-in cap on the whole exchange, body included. Before #255 this was the only timer, at 60 s, so a large streamed fetch died at 60 s however steadily bytes arrived. A caller who passes it keeps that behaviour.
+
+**With the defaults there is no total cap: an exchange that keeps making progress runs as long as it takes, unless the caller sets `requestTimeoutMs` or passes a `signal`.** Stalls are still bounded by the two timers above.
+
+A timeout is the typed `timeout` error with `what` naming the limit that fired. The exchange span records `git.timeout.limit` and `git.timeout.ms` as well as `git.limits.first_byte_timeout_ms`, `git.limits.idle_timeout_ms` and `git.limits.request_timeout_ms`. There is no total cap by default, matching stock git, which has none (`http.lowSpeedLimit` is off by default). For a wall-clock bound, pass `requestTimeoutMs` or your own `signal`. Body reads end on abort even when a fetch wrapper does not tie the body to the signal. In a Worker, timers fire while a body read is pending (tested under workerd).
+
 `WORKER_LIMITS` is the preset for a 128 MiB isolate (a Cloudflare Worker): `maxObjectSize` and `maxDeltaResult` 16 MiB (one object peaks near twice its size), `maxPackBytes`, `maxPushBytes` and `maxLsRefsBytes` 32 MiB, `maxInflatedTotal` 64 MiB (about 21 000 tiny objects), `maxHarvestBytes` 8 MiB, `maxMergeBlobBytes` 2 MiB, `maxTreeEntries` 32 768; the rest are the defaults. The limit sweep (`npm run sweep -- --full`, nightly) runs it at `--max-old-space-size=128`: every `worker.*` cell refuses or succeeds, none runs out of memory.
 
 ```js

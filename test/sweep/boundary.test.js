@@ -49,8 +49,10 @@ test('second-pass cells (#144) exist: thin packs, protocol v0/v1, pkt-line lengt
   ]) assert.equal(ids.has(id), true, id);
   const wd = allCells().filter(c => c.runtime === 'workerd');
   assert.ok(wd.length >= 8 && wd.filter(c => isCi(c)).length >= 6, `workerd cells ${wd.length}`);
-  // the slow-server cells at the default 60 s are nightly; CI crosses a 1 s cap
-  for (const c of allCells().filter(c => c.param === 'requestTimeoutMs' && !c.id.startsWith('parse.') && !c.limits?.requestTimeoutMs)) assert.equal(isCi(c), false, c.id);
+  // the slow-server cells at the default 60 s timers are nightly; CI crosses a 1 s cap (#255: one per timer)
+  const timers = ['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs'];
+  for (const c of allCells().filter(c => timers.includes(c.param) && !c.id.startsWith('parse.') && !c.limits?.[c.param])) assert.equal(isCi(c), false, c.id);
+  for (const key of timers) assert.ok(allCells().some(c => c.param === key && isCi(c) && c.limits?.[key] === 1000), `a CI cell crosses a 1 s ${key}`);
 });
 
 test('every Limits key is parsed where it enters (#156): a CI cell per key refuses a value that bounds nothing at an operation that never reads it', () => {

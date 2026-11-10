@@ -472,18 +472,27 @@ function pass2(add) {
   }
   add({ id: 'harvest.readLog.default', param: 'maxHarvestBytes', op: 'readLog', repo: 'cap-nofilter--log-64', limit: 64, history: 64, bytes: 64 * 8, entries: 64, expect: ok });
 
-  // ---- requestTimeoutMs, through the slow-server shim (shim.mjs). A cap of 1 s in CI, with the server well inside
-  // and well past it; the default 60 s nightly. A stalled body is the same timer: it covers the whole exchange.
+  // ---- the exchange timers (#255), through the slow-server shim (shim.mjs). requestTimeoutMs is an opt-in total: a
+  // cap of 1 s in CI covers the whole exchange, a stalled body included. firstByteTimeoutMs bounds a slow server (delay)
+  // and idleTimeoutMs a stalled body (stall): 1 s caps in CI, each with the server well inside and well past it, and the
+  // 60 s defaults nightly.
   const timeout = refused('timeout');
   for (const [mode, ms, expect] of [['delay', 200, ok], ['delay', 2500, timeout], ['stall', 200, ok], ['stall', 2500, timeout]]) {
     add({ id: `timeout.cap1000.lsRefs.${mode}-${ms}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `${mode}-${ms}`, bytes: 200, entries: 1, limits: { requestTimeoutMs: 1000 }, expect });
   }
   add({ id: 'timeout.cap1000.readFile.stall-2500', param: 'requestTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'stall-2500', bytes: MiB, entries: 2, limits: { requestTimeoutMs: 1000 }, expect: timeout });
-  const tCap = DEFAULT_LIMITS.requestTimeoutMs;
-  for (const [ms, expect] of [[tCap - 5000, ok], [tCap + 5000, timeout]]) {
-    add({ id: `timeout.lsRefs.delay-${ms}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `delay-${ms}`, bytes: 200, entries: 1, nightly: true, expect });
+  for (const [ms, expect] of [[200, ok], [2500, timeout]]) {
+    add({ id: `timeout.firstbyte1000.lsRefs.delay-${ms}`, param: 'firstByteTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `delay-${ms}`, bytes: 200, entries: 1, limits: { firstByteTimeoutMs: 1000 }, expect });
+    add({ id: `timeout.idle1000.lsRefs.stall-${ms}`, param: 'idleTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${ms}`, bytes: 200, entries: 1, limits: { idleTimeoutMs: 1000 }, expect });
   }
-  add({ id: `timeout.lsRefs.stall-${tCap + 5000}`, param: 'requestTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${tCap + 5000}`, bytes: 200, entries: 1, nightly: true, expect: timeout });
+  add({ id: 'timeout.idle1000.readFile.stall-2500', param: 'idleTimeoutMs', op: 'readFile', repo: 'blob-1048576', path: 'big.bin', shim: 'stall-2500', bytes: MiB, entries: 2, limits: { idleTimeoutMs: 1000 }, expect: timeout });
+  const fCap = DEFAULT_LIMITS.firstByteTimeoutMs, iCap = DEFAULT_LIMITS.idleTimeoutMs;
+  for (const [ms, expect] of [[fCap - 5000, ok], [fCap + 5000, timeout]]) {
+    add({ id: `timeout.lsRefs.delay-${ms}`, param: 'firstByteTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `delay-${ms}`, bytes: 200, entries: 1, nightly: true, expect });
+  }
+  for (const [ms, expect] of [[iCap - 5000, ok], [iCap + 5000, timeout]]) {
+    add({ id: `timeout.lsRefs.stall-${ms}`, param: 'idleTimeoutMs', op: 'lsRefs', repo: 'refs-1', shim: `stall-${ms}`, bytes: 200, entries: 1, nightly: true, expect });
+  }
 
   // ---- protocol v0 / v1: the server answers without v2 (the shim drops or downgrades Git-Protocol), so upload-pack
   // reads ply's `command=ls-refs` as a v0 request and answers nothing at all. ply speaks v2 only: the desired answer is

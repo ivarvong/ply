@@ -26,7 +26,9 @@ export const PARAMS = [
   { key: 'maxReportLines', limit: DEFAULT_LIMITS.maxReportLines, probe: 'pushRepo of N branches (N + 1 report lines)', later: false },
   { key: 'maxCommitParents', limit: DEFAULT_LIMITS.maxCommitParents, probe: 'readLog of an octopus commit', later: false },
   { key: 'maxLsRefsBytes', limit: DEFAULT_LIMITS.maxLsRefsBytes, probe: 'lsRefs with the byte cap overridden', later: false },
-  { key: 'requestTimeoutMs', limit: DEFAULT_LIMITS.requestTimeoutMs, probe: 'lsRefs and readFile through a delaying or stalling shim', later: false },
+  { key: 'requestTimeoutMs', limit: DEFAULT_LIMITS.requestTimeoutMs, probe: 'lsRefs and readFile through a delaying or stalling shim, with the opt-in total set', later: false },
+  { key: 'firstByteTimeoutMs', limit: DEFAULT_LIMITS.firstByteTimeoutMs, probe: 'lsRefs through a delaying shim (a slow server)', later: false },
+  { key: 'idleTimeoutMs', limit: DEFAULT_LIMITS.idleTimeoutMs, probe: 'lsRefs and readFile through a stalling shim (a stalled body)', later: false },
 ];
 
 export const PARAM_BY_KEY = new Map(PARAMS.map(p => [p.key, p]));

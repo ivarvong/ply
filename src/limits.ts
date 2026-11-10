@@ -95,8 +95,16 @@ export const LIMIT_COMMIT_PARENTS: number = LIMIT_REFS;
  * hundreds of MiB; the buffered-response cap we already accept for one pack is the ceiling.
  */
 export const LIMIT_LS_REFS_BYTES: number = LIMIT_PACK_WIRE;
-/** Per HTTP exchange, including a stalled body. The timer that enforces this owns the AbortSignal. */
-export const LIMIT_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * The whole HTTP exchange, opt-in: 0 (the default) is no total cap, so a long healthy stream is never cut for its
+ * duration alone (#255). A positive value bounds the exchange end to end, body included, as before #255. Stalls are
+ * bounded by the two timers below whatever this is (src/deadline.ts).
+ */
+export const LIMIT_REQUEST_TIMEOUT_MS = 0;
+/** From the request (or the end of a streamed upload) to the response headers. 0 turns it off. */
+export const LIMIT_FIRST_BYTE_TIMEOUT_MS = 60_000;
+/** The longest gap with no progress: no upload chunk pulled, no response body chunk read. 0 turns it off. */
+export const LIMIT_IDLE_TIMEOUT_MS = 60_000;
 /**
  * What one held object costs beyond its bytes, charged against the byte budget that holds it: each parsed pack object
  * against maxInflatedTotal (parsePack, and resolvePack's room), each local object against it (pushRepo), each file or
@@ -141,6 +149,8 @@ export type Limits = {
   readonly maxCommitParents: number;
   readonly maxLsRefsBytes: number;
   readonly requestTimeoutMs: number;
+  readonly firstByteTimeoutMs: number;
+  readonly idleTimeoutMs: number;
 };
 export type LimitKey = keyof Limits;
 
@@ -183,6 +193,8 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxCommitParents: LIMIT_COMMIT_PARENTS,
   maxLsRefsBytes: LIMIT_LS_REFS_BYTES,
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,
+  firstByteTimeoutMs: LIMIT_FIRST_BYTE_TIMEOUT_MS,
+  idleTimeoutMs: LIMIT_IDLE_TIMEOUT_MS,
 });
 
 /**

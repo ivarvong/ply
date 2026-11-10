@@ -32,6 +32,10 @@ import type { Span, Tracer } from './otel.js';
 import { KIND } from './otel.js';
 import type { Input } from './absent.js';
 import { field, fillIn, fromNullable, mapGet, readKey } from './absent.js';
+import { timeoutLimit } from './deadline.js';
+// the exchange clock (#255), for the HTTP transport
+export { exchangeClock, readAbortable, watchedUpload } from './deadline.js';
+export type { ExchangeClock } from './deadline.js';
 import { isPlyThrown, thrownText } from './boundary.js';
 
 // One pkt-line frame as pktline.js yields it.
@@ -284,7 +288,10 @@ export function wrapNet(e: unknown, signal: AbortSignal | null = null): PlyError
   const aborted = signal !== null && signal.aborted;
   if (aborted || nameIs(e, 'AbortError') || nameIs(e, 'TimeoutError')) {
     const timedOut = nameIs(e, 'TimeoutError') || (signal !== null && nameIs(signal.reason, 'TimeoutError'));
-    return plyError(timedOut ? 'timeout' : 'aborted', `request aborted: ${thrownText(e)}`, { cause: e });
+    // the limit that fired (src/deadline.ts), on the thrown value or on the signal's reason
+    const thrown = timeoutLimit(e);
+    const limit = thrown !== null || signal === null ? thrown : timeoutLimit(signal.reason);
+    return plyError(timedOut ? 'timeout' : 'aborted', `request aborted: ${thrownText(e)}`, { cause: e, ...(timedOut && limit !== null ? { what: limit } : {}) });
   }
   return plyError('network', `network: ${thrownText(e)}`, { cause: e });
 }
