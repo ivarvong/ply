@@ -188,17 +188,34 @@ test('negotiate: an acknowledgment that is not an object id is the server\'s pro
   const bad = await negotiate(served('refs/heads/main'), { wants: [head], haves: [head, head], batch: 1 });
   assert.deepEqual([bad.ok, bad.error.code, bad.error.message], [false, 'protocol', 'negotiate: the server acknowledged "refs/heads/main", not an object id']);
   assert.equal(sent, 1, 'refused after the round that read it');
-  // an id is kept, and sent back as a have
+  // an id is kept, and the final request (with done) is sent. This server answers that one with acknowledgments too:
+  // git dies on it ("expected 'packfile', received 'acknowledgments'", test/fetch-lying-server.test.js), so it is the
+  // protocol error here. (This line used to expect ok with no pack: the defect, not the contract.)
   sent = 0;
   const good = await negotiate(served(head), { wants: [head], haves: [head], batch: 1, maxRounds: 1 });
-  assert.deepEqual([good.ok, good.value.common, sent], [true, [head], 2]);
+  assert.deepEqual([good.ok, good.error.code, sent], [false, 'protocol', 2]);
+  // The acknowledged id is kept in `common` and sent back as a have in the final request, which carries done. This
+  // server acknowledges every round and hands the final request to git upload-pack itself, so the pack is git's answer
+  // to the bytes ply sent. The expected request lines are the protocol's (gitprotocol-v2 fetch: want, have, done).
+  const bodies = [];
+  const real = wireTransport((kind, _service, body) => {
+    if (kind !== 'post') return undefined;
+    const text = Buffer.from(body).toString('latin1');
+    bodies.push(text);
+    return { bytes: text.includes('done\n') ? Buffer.from(uploadPack(Buffer.from(body)).out, 'latin1') : answer(head) };
+  });
+  const kept = await negotiate(real, { wants: [head], haves: [head], batch: 1, maxRounds: 1 });
+  assert.deepEqual([kept.ok, kept.value.common, bodies.length], [true, [head], 2]);
+  assert.deepEqual([bodies[0].includes(`0032have ${head}\n`), bodies[0].includes('0009done\n')], [true, false], 'the round offers the have, without done');
+  assert.deepEqual([bodies[1].includes(`0032want ${head}\n`), bodies[1].includes(`0032have ${head}\n`), bodies[1].includes('0009done\n')], [true, true, true], 'the final request: the want, the acknowledged id as a have, done');
   // a long acknowledgment is quoted cut short
   sent = 0;
   const long = await negotiate(served('x'.repeat(100)), { wants: [head], haves: [head], batch: 1 });
   assert.equal(long.error.message, `negotiate: the server acknowledged "${'x'.repeat(60)}", not an object id`);
-  // no haves: no round, only the final request
+  // no haves: no round, only the final request (done; this server's acknowledgments-only answer to it is refused)
   sent = 0;
-  assert.deepEqual([(await negotiate(served(head), { wants: [head] })).ok, sent], [true, 1]);
+  const none = await negotiate(served(head), { wants: [head] });
+  assert.deepEqual([none.ok, none.error.code, sent], [false, 'protocol', 1]);
   // git writes an acknowledged id as it writes every id, lowercase: an upper-case one is not an id this client sent
   sent = 0;
   const upper = await negotiate(served(head.toUpperCase()), { wants: [head], haves: [head], batch: 1 });

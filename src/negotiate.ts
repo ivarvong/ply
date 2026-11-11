@@ -6,7 +6,7 @@ import type { FetchPackExtra, FetchPackResult } from './fetchpack.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import type { Input } from './absent.js';
 import type { Result } from './result.js';
-import { fail } from './errors.js';
+import { fail, remoteQuoted } from './errors.js';
 import { checkLimit } from './limits.js';
 import { fetchPack } from './fetchpack.js';
 import { fetchRequest } from './fetch.js';
@@ -62,7 +62,7 @@ export async function negotiate(t: Transport, opts: NegotiateOpts, extra: Pick<F
     const r = fetched.value;
     for (const a of r.acks) {
       const id = parseOid(a);
-      if (!id.ok) return fail('protocol', `negotiate: the server acknowledged ${JSON.stringify(a.slice(0, ACK_SHOWN))}, not an object id`);
+      if (!id.ok) return fail('protocol', `negotiate: the server acknowledged ${remoteQuoted(a, ACK_SHOWN)}, not an object id`);
       acked.add(id.value);
     }
     rounds.push({ sent: sent.length, acks: r.acks, nak: r.nak, ready: r.ready, pack: Boolean(r.parsed) });
