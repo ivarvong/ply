@@ -318,7 +318,9 @@ export type EditConfig = {
 };
 export type EditOptions = EntryOptions & Input<EditConfig>;
 const editDefaults = (): { -readonly [K in keyof EditConfig]: EditConfig[K] } => ({ head: null, strictHead: false, cache: null, verify: false, allowLfsPointer: false, signer: null, retry: true });
-type Attempt = { readonly head: Oid | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null };
+// `create`: what the caller already read about `ref`, which every push of this edit asserts (editFileExpecting):
+// true, the ref is absent (zero old oid); false, it is at the parent; null, this attempt's own reads decide.
+type Attempt = { readonly head: Oid | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null; readonly create: boolean | null };
 
 // A packcache fetch reports its counters (attrs()); any other fetch has none.
 const fetchCounters = (opts: EntryOptions): Attrs => {
@@ -470,7 +472,7 @@ function streamBlobEdit({ t, tracer, root, blobOid, find, replace, allowLfsPoint
 }
 
 // oxlint-disable-next-line require-await -- async, as before: the spec's refusal is an Err the promise resolves with
-async function editOnce(url: string, s: EditPlan, options: EditOptions & { readonly limits: CheckedLimits }, cfg: EditConfig, { head, attempt, linkTo, hintWas }: Attempt): Promise<Result<EditResult, PlyError>> {
+async function editOnce(url: string, s: EditPlan, options: EditOptions & { readonly limits: CheckedLimits }, cfg: EditConfig, { head, attempt, linkTo, hintWas, create }: Attempt): Promise<Result<EditResult, PlyError>> {
   const { verify, allowLfsPointer, signer, strictHead } = cfg;
   const cache = cfg.cache === null ? new Map<string, Uint8Array>() : cfg.cache;
   const { limits } = options;
@@ -478,7 +480,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
   const held: number[] = []; // sizes of metadata objects held whole, for memAttrs
   let streamed: { readonly scan: Held; readonly inflated: number } = { scan: { chunks: 0, maxChunk: 0 }, inflated: 0 };
   let hint = hintWas;
-  let creating = s.create;
+  let creating = create === null ? s.create : create;
   const attrs = { 'git.edit.ref': s.ref, 'git.edit.base': base, 'git.edit.create': s.create, 'git.edit.path': s.path, 'git.edit.path.depth': s.comps.length, 'git.edit.find.bytes': s.find.length, 'git.edit.replace.bytes': s.replace.length, 'git.edit.head.hint': head === null ? '' : head, 'git.edit.attempt': attempt };
   // on every exit: how the hint turned out, what was held in memory, and the pack cache's counters if the fetch has them
   const onFinish = (): Attrs => ({ 'git.edit.head.outcome': hint === null ? '' : hint, ...memAttrs({ objects: held, ...streamed }), ...fetchCounters(options) });
@@ -498,13 +500,14 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
         const listed = await lsRefs(t, [s.ref]); if (!listed.ok) return listed;
         const tip = mapOption(mapGet(listed.value.refs, s.ref), r => r.oid);
         if (tip.tag === 'some' && tip.value !== b.oid) return refuseRebase(s.ref, b.oid, tip.value);
-        creating = tip.tag === 'none';
+        if (create === null) creating = tip.tag === 'none';
         return ok(b.oid);
       }
       const listed = await lsRefs(t, [b.ref]); if (!listed.ok) return listed;
       const found = mapGet(listed.value.refs, b.ref);
       if (found.tag === 'none') return fail('not_found', `ref ${b.ref} not found`, { miss: { kind: 'ref', ref: b.ref, candidates: [b.ref] } });
-      return ok(found.value.oid);
+      // another ref as the base is the commit it names: an annotated tag is peeled, as `git checkout -b <ref> <tag>` does
+      return ok(s.create ? getOrElse(fromNullish(found.value.peeled), found.value.oid) : found.value.oid);
     };
     // oxlint-disable-next-line typescript/strict-boolean-expressions -- bundle budget: the JS's own truthy test, byte for byte (head is null or a checked oid)
     const [resolvedTo, speculative] = await Promise.all([resolve(), head ? getObject(head, TYPE.COMMIT, 1) : null]);
@@ -596,7 +599,15 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
 // `retry: false` is the caller's own race handling (commitChanges): attempt 0's cas_conflict is not redone here.
 // An Err carries the attempt's tag (attempt, hint, the root span).
+// oxlint-disable-next-line require-await -- async, as before: one promise, the expecting form's
 export async function editFile(url: string, spec: EditSpec, options: EditOptions = {}): Promise<Result<EditResult, PlyError>> {
+  return editFileExpecting(url, spec, options, null);
+}
+// editFile for a caller that has already read `ref` and decided its compare-and-swap (commitChanges; not exported
+// from the package). `create` true: the ref was absent, so the push asserts the zero old oid whatever this edit's own
+// ls-refs sees later (a ref another writer made in between is a cas_conflict, never a commit on top of it). false:
+// the ref existed, and the push asserts the parent. null: editFile's own rule.
+export async function editFileExpecting(url: string, spec: EditSpec, options: EditOptions, create: boolean | null): Promise<Result<EditResult, PlyError>> {
   const cfg = withDefaults(options, editDefaults());
   const needs = needsHead(cfg.strictHead, cfg.head);
   if (!needs.ok) return needs;
@@ -607,9 +618,9 @@ export async function editFile(url: string, spec: EditSpec, options: EditOptions
   if (!planned.ok) return planned;
   const plan = planned.value;
   const checked = { ...options, limits: limits.value };
-  const first = await editOnce(url, plan, checked, cfg, { head: plan.head, attempt: 0, linkTo: null, hintWas: null });
+  const first = await editOnce(url, plan, checked, cfg, { head: plan.head, attempt: 0, linkTo: null, hintWas: null, create });
   // only attempt 0's cas_conflict is redone, once: the retry's Err is the answer
   // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
   if (first.ok || !cfg.retry || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
-  return editOnce(url, plan, checked, cfg, { head: null, attempt: 1, ...retryLink(first.error) });
+  return editOnce(url, plan, checked, cfg, { head: null, attempt: 1, create, ...retryLink(first.error) });
 }

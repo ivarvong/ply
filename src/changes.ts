@@ -27,7 +27,7 @@ import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf } from './limits.js';
 import type { CheckedLimits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import type { IdentInput, ValidatedIdent } from './validate.js';
-import { editFile, inSpan, isLfsPointerPrefix, refuseRebase } from './edit.js';
+import { editFileExpecting, inSpan, isLfsPointerPrefix, refuseRebase } from './edit.js';
 import type { Author } from './edit.js';
 import { signCommit } from './sign.js';
 import type { Signer } from './sign.js';
@@ -534,16 +534,16 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
   const inputs = parseEditInputs(target.ref, edit.path, opts.limits);
   if (!inputs.ok) return inputs;
   const { ref, path } = inputs.value;
-  // The target's own tip is named by ref, so editFile's retry reads it again. Any other base (another ref, a 40-hex
-  // commit) is the commit resolveParent resolved: the one place a base ref is peeled (an annotated tag is its commit).
-  const base = parent.baseRef === target.ref ? target.ref : parent.oid;
-  const result = await editFile(url, {
-    ref, base, path, find: edit.find, replace: edit.replace,
+  // The base goes to editFile as the caller named it (its span says so; it peels a tag as resolveParent did). The
+  // compare-and-swap does not: `creating` is what this commit read for its target, and editFile's push asserts it
+  // (zero old oid for an absent target) whatever its own later read of the ref sees.
+  const result = await editFileExpecting(url, {
+    ref, base: getOrElse(fromNullish(parent.baseOid), getOrElse(fromNullish(parent.baseRef), target.ref)), path, find: edit.find, replace: edit.replace,
     author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
   }, {
     ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,
     verify: opts.verify, allowLfsPointer: opts.allowLfs, ...(opts.signer === null ? {} : { signer: opts.signer }),
-  });
+  }, creating);
   if (!result.ok) {
     const e = result.error;
     const rebase = creating && e.code === 'bad_request' && whatIs(e, 'rebase');
