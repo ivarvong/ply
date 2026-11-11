@@ -10,10 +10,10 @@
 // callback in `what` and carries the thrown value as `cause`.
 import { test, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { editFile, commitChanges, readCommit, createTransport, Tracer } from '../src/index.js';
-import { pushDir } from '../src/tree-node.js';
+import { filesFromDir, pushDir } from '../src/tree-node.js';
 import { operation } from '../src/operation.js';
 import { tmpRoot, makeBareRepo, git, commitFiles, startGitServer } from './server.js';
 
@@ -77,3 +77,28 @@ rows.forEach(([label, run, code, what, cls], n) => {
     else assert.equal(head(), before, 'git says the ref did not move');
   });
 });
+
+// The file system's own failures are not throws either (README: never a throw). The expected `cause.code` is node:fs's
+// errno name for the condition set up here (a path that does not exist: ENOENT; a file with no read permission:
+// EACCES), not anything ply computes. Definite: the walk precedes any request, and the bare repository's ref is unmoved.
+const fsRows = [
+  ['a missing directory', () => join(root, 'no-such-dir'), 'ENOENT'],
+  ['an unreadable file', () => { const d = dir(); chmodSync(join(d, 'f'), 0o000); return d; }, 'EACCES'],
+];
+for (const [label, makeDir, errno] of fsRows) {
+  test(`pushDir and filesFromDir on ${label}: a coded Err (bad_request, what 'dir') carrying node:fs's ${errno}, never a throw`, async ctx => {
+    // root reads any file: the unreadable row cannot be set up there
+    if (errno === 'EACCES' && process.getuid?.() === 0) { ctx.skip(); return; }
+    const before = head();
+    const d = makeDir();
+    for (const run of [() => pushDir(url, { dir: d, ref: 'refs/heads/main', author, message: 'm' }, {}), () => filesFromDir(d)]) {
+      let r;
+      try { r = await run(); } catch (e) { assert.fail(`the Result API threw/rejected: ${String(e)}`); }
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, 'bad_request');
+      assert.equal(r.error.what, 'dir', 'the Err names the directory walk');
+      assert.equal(r.error.cause.code, errno, "the cause is node:fs's own error");
+    }
+    assert.equal(head(), before, 'the ref did not move');
+  });
+}

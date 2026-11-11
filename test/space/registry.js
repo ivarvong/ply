@@ -436,6 +436,7 @@ export const DECISIONS = [
   { match: 'src/otel.ts#constructor:untyped:a span has a parent or follows one, not both', excluded: 'a caller programming error (a TypeError by design, never an outcome); test/span-contract.test.js holds it' },
   // a caller-supplied callback that throws: the failure is the caller's own code, not an input ply decides on
   { match: 'src/errors.ts#callbackFailed:bad_request:caller-supplied … threw: …', excluded: "a caller's callback threw (signer, filter, any callback at operation()'s edge), not a decision on an input; test/callback-throw.test.js holds the code, `what`, `cause` and the unchanged ref (git)" },
+  { match: 'src/tree-node.ts#filesFromDir:bad_request:…: the directory could not be read: …', excluded: "node:fs refused the walk (a missing directory, an unreadable file): the file system's state, not a decision on an input; test/callback-throw.test.js holds the code, `what: 'dir'`, node's errno on `cause` (ENOENT, EACCES) and the unchanged ref" },
   { match: 'src/sign.ts#signCommit:bad_request:signer', excluded: "a caller's signer threw or rejected, not a decision on an input; test/callback-throw.test.js holds it (two rows, ref unchanged in git)" },
   { match: 'src/sign.ts#signCommit:bad_request:caller-supplied signer returned a signature that is not …', excluded: "a caller's signer broke its type (a non-string signature), a caller programming error; no test holds this branch yet" },
   // generated, reviewed

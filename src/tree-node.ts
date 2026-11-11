@@ -18,10 +18,10 @@ import type { ErrorOf, PlyError } from './errors.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
 import { MODE_BLOB, MODE_EXEC, MODE_LINK } from './format.js';
-import { err, ok } from './result.js';
+import { err, getOrElse, ok } from './result.js';
 import type { Result } from './result.js';
 import type { Input } from './absent.js';
-import { withDefaults } from './absent.js';
+import { field, withDefaults } from './absent.js';
 import { pushTree } from './tree.js';
 import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 
@@ -38,8 +38,9 @@ export type FilesFromDirConfig = { readonly limits: LimitsInput; readonly filter
 export type FilesFromDirOptions = Input<FilesFromDirConfig>;
 type DirError = ErrorOf<'bad_request' | 'limit_exceeded'>;
 
-// The walk as a value: a refused entry or bound is an Err. The file system's own failures (a missing directory, a
-// permission) reject as node:fs rejects them.
+// The walk as a value: a refused entry or bound is an Err, and so is the file system's own failure (a missing
+// directory, a permission): bad_request naming 'dir', with node:fs's error (its errno `code`, `path`) as `cause`.
+// Definite: the walk precedes any request. filesFromDir never rejects.
 export async function filesFromDir(dir: string, options: FilesFromDirOptions | null = null): Promise<Result<DirFile[], DirError>> {
   const { limits, filter } = withDefaults<FilesFromDirConfig>(options, { limits: DEFAULT_LIMITS, filter: null });
   const checked = parseLimits(limits);
@@ -78,7 +79,10 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
     }
     return ok(null);
   };
-  const walked = await walk('');
+  let walked: Result<null, DirError>;
+  try { walked = await walk(''); } catch (e) {
+    return fail('bad_request', `${dir}: the directory could not be read: ${String(getOrElse(field(e, 'message'), e))}`, { what: 'dir', cause: e });
+  }
   return walked.ok ? ok(out) : walked;
 }
 
