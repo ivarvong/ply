@@ -3,7 +3,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, initRepo } from './server.js';
 import { editFile } from '../src/edit.js';
 import { Tracer } from '../src/otel.js';
 import { unwrapAsync } from './unwrap.js';
@@ -13,7 +13,7 @@ test('same-file edit race ×1000 attempts: only ok and cas_conflict', async () =
   const srv = await startGitServer(root);
   try {
     const bare = makeBareRepo(root, 'f34');
-    const work = join(root, 'w'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    const work = join(root, 'w'); mkdirSync(work); initRepo(work);
     commitFiles(work, bare, { 'README.md': 'ply-edit-1\n' }, 'seed');
     const url = `${srv.url}/f34.git`;
     const TRIALS = 200;

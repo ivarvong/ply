@@ -15,8 +15,9 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomFillSync } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { randomFillSync, createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { scanPackIndex, scannedPackOf } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -42,7 +43,7 @@ before(async () => {
   srv = await startGitServer(root);
   work = join(root, 'source');
   mkdirSync(join(work, 'a', 'b'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   for (let i = 0; i < 8; i++) {
     const blob = new Uint8Array(40_000 + i * 700);
     randomFillSync(blob);
@@ -186,7 +187,9 @@ test('malformed with a valid check: each field a scan could not produce is refus
     ['type of a whole object', b => { b[refAt.type + firstWhole] = b[refAt.type + firstWhole] === 3 ? 2 : 3; }, 'type', firstWhole],
     ['baseIndex of a whole object', b => { dv(b).setInt32(refAt.baseIndex + firstWhole * 4, 0, true); }, 'type', firstWhole],
     ['baseIndex of a REF delta past the end', b => { dv(b).setInt32(refAt.baseIndex + firstDelta * 4, n, true); }, 'baseIndex', firstDelta],
-    ['type of a REF delta', b => { b[refAt.type + firstDelta] = 0; dv(b).setInt32(refAt.baseIndex + firstDelta * 4, firstWhole, true); b[refAt.type + firstDelta] = b[refAt.type + firstWhole] === 3 ? 2 : 3; }, 'type', firstDelta],
+    // its baseIndex is left the scan's (review R2: one moved to a whole object with another id is refused as baseIndex
+    // before its type is read; the tampered table below has that case), so only the type disagrees with its base's
+    ['type of a REF delta', b => { b[refAt.type + firstDelta] = b[refAt.type + firstDelta] === 3 ? 2 : 3; }, 'type', firstDelta],
     ['resolved.type', b => { b[refAt.rType] = 7; }, 'resolved.type', 0],
     ['resolved.base self', b => { dv(b).setInt32(refAt.rBase + 4, 1, true); }, 'resolved.base', 1],
     ['resolved.base below thin', b => { dv(b).setInt32(refAt.rBase, -3, true); }, 'resolved.base', 0],
@@ -226,6 +229,128 @@ test('malformed with a valid check: each field a scan could not produce is refus
   grown.set(fake.subarray(ofsAt.refs, fake.length - 20), ofsAt.refs + ofs.pack.count * 20);
   dv(grown).setUint16(6, 7, true);
   assert.deepEqual(decodeSavedIndex(rechecked(grown), idOf(ofs)).error, { tag: 'malformed', field: 'flags', index: -1 });
+});
+
+// Review finding saved-index-resolved-base-cycle: a saved index is stored state, so untrusted. Each tampered index below
+// has its trailing SHA-1 recomputed (the check is unkeyed), so only the structural checks can refuse it. The expected
+// refusal comes from the pack format, not from ply: a delta's object is its base's with one more delta applied (depth
+// = base depth + 1, same type), an OFS_DELTA names its base by position, a REF_DELTA by the base's id, a whole object
+// has no base, and the objects are git's own (pack-objects above).
+test('tampered resolved columns with a valid check: cycles, depth lies and bases the scan contradicts are malformed', async () => {
+  const from = await fresh(src.packs.ref);
+  const ofs = await fresh(src.packs.ofs);
+  const enc = f => must(encodeSavedIndex(f.pack, some(f.resolved)));
+  const dv = b => new DataView(b.buffer, b.byteOffset, b.byteLength);
+  // where the resolved columns start: 64 B header, 31 B per entry, 20 B of ids, 20 B of REF base ids in a REF pack
+  const rAt = (count, refs) => { const r = 64 + count * (31 + 20 + (refs ? 20 : 0)); return { size: r, base: r + count * 8, depth: r + count * 12, oid: r + count * 16, type: r + count * 36 }; };
+  const setBase = (b, at, i, v) => dv(b).setInt32(at.base + i * 4, v, true);
+  const setDepth = (b, at, i, v) => dv(b).setInt32(at.depth + i * 4, v, true);
+  const refusal = (f, edit, name) => {
+    const b = enc(f);
+    edit(b);
+    const r = decodeSavedIndex(rechecked(b), idOf(f));
+    assert.equal(r.ok, false, `${name}: accepted`);
+    assert.equal(r.error.tag, 'malformed', name);
+    return `${r.error.field}@${r.error.index}`;
+  };
+  const R = rAt(from.pack.count, true);
+  const rc = from.resolved.columns;
+  const all = [...Array(from.pack.count).keys()];
+  const deltas = all.filter(i => from.pack.columns.storedType[i] === 7);
+  const blobs = all.filter(i => from.pack.columns.storedType[i] === 3);
+  assert.ok(deltas.length >= 3 && blobs.length >= 3, 'the fixture has three REF deltas and three whole blobs');
+  const [d0, d1, d2] = deltas;
+  // the finding's bytes: two deltas resting on each other, depth 1 each
+  assert.match(refusal(from, b => { setBase(b, R, d0, d1); setBase(b, R, d1, d0); setDepth(b, R, d0, 1); setDepth(b, R, d1, 1); }, '2-cycle'), /^resolved\.(base|depth)@/u);
+  // a longer cycle whose depths agree on every link but the one that closes it
+  assert.match(refusal(from, b => { setBase(b, R, d0, d1); setBase(b, R, d1, d2); setBase(b, R, d2, d0); setDepth(b, R, d0, 3); setDepth(b, R, d1, 2); setDepth(b, R, d2, 1); }, '3-cycle'), /^resolved\.(base|depth)@/u);
+  assert.equal(refusal(from, b => { setBase(b, R, d0, d0); }, 'self base'), `resolved.base@${d0}`);
+  // depth lies with every base left honest: one more, one less, none, negative
+  for (const lie of [rc.depth[d0] + 1, rc.depth[d0] - 1, 0, -1]) assert.equal(refusal(from, b => { setDepth(b, R, d0, lie); }, `depth ${lie}`), `resolved.depth@${d0}`);
+  // a delta resolved to no base, and a whole object given one
+  assert.equal(refusal(from, b => { setBase(b, R, d0, -1); setDepth(b, R, d0, 0); }, 'delta without a base'), `resolved.base@${d0}`);
+  assert.equal(refusal(from, b => { setBase(b, R, blobs[0], blobs[1]); setDepth(b, R, blobs[0], 1); }, 'whole object with a base'), `resolved.base@${blobs[0]}`);
+  // a REF delta resting on a whole blob moved to another whole blob: depth 1 and type blob still agree, the base's id does not
+  const onWhole = deltas.find(i => from.pack.columns.storedType[rc.base[i]] === 3);
+  const otherBlob = blobs.find(i => i !== rc.base[onWhole]);
+  assert.equal(refusal(from, b => { setBase(b, R, onWhole, otherBlob); }, 'REF base with another id'), `resolved.base@${onWhole}`);
+  // the scan found that base in the pack, so it is not a thin base
+  assert.equal(from.pack.columns.baseIndex[onWhole], rc.base[onWhole]);
+  assert.equal(refusal(from, b => { setBase(b, R, onWhole, -2); setDepth(b, R, onWhole, 1); }, 'thin base the scan found in the pack'), `resolved.base@${onWhole}`);
+  // #260 review R2. The scan's own base column (after the 64 B header and three f64 columns, an i32 per entry): a REF
+  // delta's baseIndex is the whole object whose id the delta names. The fixture says so itself (both ids are in the
+  // index), and git wrote both: the REF id is in the pack's bytes, the whole object's id is its SHA-1.
+  const hex = (col, i) => Buffer.from(col.subarray(i * 20, i * 20 + 20)).toString('hex');
+  assert.equal(hex(from.pack.columns.oids, from.pack.columns.baseIndex[onWhole]), hex(from.pack.columns.refs, onWhole));
+  assert.notEqual(hex(from.pack.columns.oids, otherBlob), hex(from.pack.columns.refs, onWhole));
+  const scanBaseAt = i => 64 + from.pack.count * 24 + i * 4;
+  assert.equal(dv(enc(from)).getInt32(scanBaseAt(onWhole), true), from.pack.columns.baseIndex[onWhole], 'the offset is the scan baseIndex column');
+  // moved to a whole blob with another id: type (blob) and range still agree, and the resolved base is left honest
+  assert.equal(refusal(from, b => { dv(b).setInt32(scanBaseAt(onWhole), otherBlob, true); }, 'scan REF base with another id'), `baseIndex@${onWhole}`);
+  // the same lie told in both columns, and told with no resolved columns saved
+  assert.equal(refusal(from, b => { dv(b).setInt32(scanBaseAt(onWhole), otherBlob, true); setBase(b, R, onWhole, otherBlob); }, 'scan and resolved REF base with another id'), `baseIndex@${onWhole}`);
+  const bare = must(encodeSavedIndex(from.pack, none));
+  dv(bare).setInt32(scanBaseAt(onWhole), otherBlob, true);
+  assert.deepEqual(decodeSavedIndex(rechecked(bare), idOf(from)).error, { tag: 'malformed', field: 'baseIndex', index: onWhole });
+  // #260 re-review REQ 2 (owner decision 4). The same pack indexed without ids (scan oids: false; flags 2 refs, +4
+  // with resolved columns). A scan that keeps no ids finds no REF base: its base column is -1 for every REF delta
+  // (asserted on the scan's own output), so a recorded base is one no scan gives and has no id to be checked against.
+  // Both forgeries name a whole blob, with the type column made to agree (blob): the blob the ids-on index above shows
+  // is not the object the delta names, and the one that is. With and without resolved columns.
+  const noIds = await fresh(src.packs.ref, { oids: false });
+  assert.equal(noIds.pack.columns.oids.length, 0);
+  assert.ok(deltas.every(i => noIds.pack.columns.baseIndex[i] === -1), 'without ids the scan finds no REF base');
+  // the type column: after the base column (i32) and headerBytes, storedType (u8 each)
+  const scanTypeAt = i => 64 + from.pack.count * 30 + i;
+  for (const resolved of [some(noIds.resolved), none]) {
+    const honest = must(encodeSavedIndex(noIds.pack, resolved));
+    assert.equal(dv(honest).getUint16(6, true), resolved.tag === 'some' ? 6 : 2, 'flags: REF ids, no ids');
+    assert.equal(honest[scanTypeAt(onWhole)], 0, 'the offset is the scan type column: a REF delta with no base found has no type');
+    assert.ok(decodeSavedIndex(honest, idOf(noIds)).ok, 'the honest index without ids is used');
+    for (const to of [otherBlob, from.pack.columns.baseIndex[onWhole]]) {
+      const forged = Uint8Array.from(honest);
+      dv(forged).setInt32(scanBaseAt(onWhole), to, true);
+      forged[scanTypeAt(onWhole)] = 3;
+      const r = decodeSavedIndex(rechecked(forged), idOf(noIds));
+      assert.equal(r.ok, false, `REF scan base ${to} recorded without ids (${resolved.tag} resolved): accepted`);
+      assert.deepEqual(r.error, { tag: 'malformed', field: 'baseIndex', index: onWhole });
+    }
+  }
+  // types, ids and sizes the scan knows: a delta's type is its base's, a whole object's are the scan's
+  assert.equal(refusal(from, b => { b[R.type + onWhole] = 2; }, 'delta type'), `resolved.type@${onWhole}`);
+  assert.equal(refusal(from, b => { b[R.type + blobs[0]] = 2; }, 'whole type'), `resolved.type@${blobs[0]}`);
+  assert.equal(refusal(from, b => { b[R.oid + blobs[0] * 20] ^= 1; }, 'whole id'), `resolved.oid@${blobs[0]}`);
+  // ids are compared whole: one that differs in any single byte (each of the 20) is another id
+  for (let k = 0; k < 20; k++) assert.equal(refusal(from, b => { b[R.oid + blobs[0] * 20 + k] ^= 0x80; }, `whole id byte ${k}`), `resolved.oid@${blobs[0]}`);
+  assert.equal(refusal(from, b => { dv(b).setFloat64(R.size + blobs[0] * 8, rc.size[blobs[0]] + 1, true); }, 'whole size'), `resolved.size@${blobs[0]}`);
+  // OFS: the base is the scan's baseIndex and nothing else: a later entry, an earlier one, a cycle
+  const O = rAt(ofs.pack.count, false);
+  const oc = ofs.resolved.columns;
+  const ofsAll = [...Array(ofs.pack.count).keys()];
+  const od = ofsAll.filter(i => ofs.pack.columns.storedType[i] === 6);
+  assert.ok(od.length >= 2, 'the fixture has two OFS deltas');
+  const [o0, o1] = od;
+  const later = ofsAll.find(i => i > o0 && ofs.pack.columns.storedType[i] === 3 && i !== oc.base[o0]);
+  const earlier = ofsAll.find(i => i < o0 && ofs.pack.columns.storedType[i] === 3 && i !== oc.base[o0]);
+  assert.equal(ofs.pack.columns.baseIndex[o0], oc.base[o0]);
+  assert.ok(later !== undefined, 'a whole blob after the first OFS delta');
+  for (const to of [later, earlier]) {
+    if (to === undefined) continue;
+    assert.equal(refusal(ofs, b => { setBase(b, O, o0, to); setDepth(b, O, o0, 1); }, `OFS base ${to}`), `resolved.base@${o0}`);
+  }
+  assert.match(refusal(ofs, b => { setBase(b, O, o0, o1); setBase(b, O, o1, o0); setDepth(b, O, o0, 1); setDepth(b, O, o1, 1); }, 'OFS 2-cycle'), /^resolved\.base@/u);
+  // depth is held to the chain limit the caller resolves under: the honest index passes at its deepest chain, not below
+  const deepest = Math.max(...rc.depth);
+  assert.ok(deepest >= 1);
+  assert.ok(decodeSavedIndex(enc(from), idOf(from), deepest).ok);
+  assert.deepEqual(decodeSavedIndex(enc(from), idOf(from), deepest - 1).error, { tag: 'malformed', field: 'resolved.depth', index: all.find(i => rc.depth[i] === deepest) });
+  // the tampered index is rescanned by loadTransferPack, never used
+  const cyc = enc(from);
+  setBase(cyc, R, d0, d1); setBase(cyc, R, d1, d0); setDepth(cyc, R, d0, 1); setDepth(cyc, R, d1, 1);
+  const loaded = must(await loadTransferPack(traced().t, from.source, some(rechecked(cyc))));
+  assert.equal(loaded.loaded.tag, 'scanned');
+  assert.equal(loaded.loaded.refused.value.tag, 'malformed');
+  assertSameResolved(from.resolved, loaded.from.resolved);
 });
 
 test('encode refusals: an index short of its count, resolved columns of another length, no trailer', async () => {
@@ -286,6 +411,79 @@ test('loadTransferPack: scanned with none; saved used reading only the trailer; 
   for (const s of got) { assert.equal(s.attrs['git.pack.trailer'], scanned.from.pack.trailer === s.attrs['git.pack.trailer'] ? scanned.from.pack.trailer : other.from.pack.trailer); assert.equal(typeof s.attrs['git.transfer.load.saved_bytes'], 'number'); }
 });
 
+// #260 review R1. A hand-built pack of one chain 100 deep: 101 blobs, entry 0 whole, entry i a REF_DELTA on entry i-1
+// (the delta copies the first 40 bytes of its base and inserts the rest). Stock git is the judge that it is an honest
+// pack and of how deep it is (index-pack --strict accepts it; verify-pack -v prints each delta's depth). 64 is
+// DEFAULT_LIMITS.maxDeltaChain, so only a caller's raised limit resolves it. (git pack-objects --depth=200 over 120
+// versions of one file chained 43 deep at --window=20 and 5 at --window=2: its heuristics do not promise a depth.)
+test('loadTransferPack: a pack chained deeper than 64 is used from its saved index under the caller\'s raised maxDeltaChain (scanned -> saved -> saved)', async () => {
+  const DEPTH = 100;
+  const sha1 = b => createHash('sha1').update(b).digest();
+  const entryHeader = (type, size) => { const out = [(type << 4) | (size & 15)]; let rest = size >> 4; while (rest > 0) { out[out.length - 1] |= 0x80; out.push(rest & 0x7f); rest >>= 7; } return Buffer.from(out); };
+  const versions = Array.from({ length: DEPTH + 1 }, (_, i) => Buffer.from(`c ${'x'.repeat(40)} v${i}\n`));
+  const ids = versions.map(v => sha1(Buffer.concat([Buffer.from(`blob ${v.length}\0`), v])));
+  // base size, result size (both under 128: one byte each), copy 40 bytes from offset 0, insert the rest
+  const deltaOf = (base, target) => Buffer.concat([Buffer.from([base.length, target.length, 0x90, 40, target.length - 40]), target.subarray(40)]);
+  const head = Buffer.alloc(12);
+  head.write('PACK'); head.writeUInt32BE(2, 4); head.writeUInt32BE(DEPTH + 1, 8);
+  const parts = [head, entryHeader(3, versions[0].length), deflateSync(versions[0])];
+  for (let i = 1; i <= DEPTH; i++) { const d = deltaOf(versions[i - 1], versions[i]); parts.push(entryHeader(7, d.length), ids[i - 1], deflateSync(d)); }
+  const body = Buffer.concat(parts);
+  const bytes = new Uint8Array(Buffer.concat([body, sha1(body)]));
+  const dir = join(root, `deep${n++}`);
+  mkdirSync(dir);
+  initRepo(dir);
+  writeFileSync(join(dir, 'deep.pack'), bytes);
+  git(dir, ['index-pack', '--strict', 'deep.pack']);
+  const depths = git(dir, ['verify-pack', '-v', 'deep.idx']).split('\n').map(l => /^[0-9a-f]{40} \w+\s+\d+ \d+ \d+ (\d+) [0-9a-f]{40}$/u.exec(l)).filter(m => m !== null).map(m => Number(m[1]));
+  const deepest = Math.max(...depths);
+  assert.equal(deepest, DEPTH, 'git reads the chain as 100 deep');
+  const { t } = traced();
+  const limits = { maxDeltaChain: 200 };
+  const source = rangeFromBytes(bytes);
+  // the default limit refuses the pack itself: the raised one is what the caller needs to read it at all
+  assert.equal((await loadTransferPack(t, source, none)).error.code, 'limit_exceeded');
+  const first = must(await loadTransferPack(t, source, none, { resolve: { limits } }));
+  assert.equal(first.loaded.tag, 'scanned');
+  assert.equal(Math.max(...first.from.resolved.columns.depth), deepest);
+  const second = must(await loadTransferPack(t, source, some(first.saved), { resolve: { limits } }));
+  assert.deepEqual(second.loaded, { tag: 'saved' });
+  const third = must(await loadTransferPack(t, source, some(second.saved), { resolve: { limits } }));
+  assert.deepEqual(third.loaded, { tag: 'saved' });
+  assert.deepEqual([...third.saved], [...first.saved]);
+  assertSameResolved(first.from.resolved, third.from.resolved);
+  // the limit is the caller's, both ways: at the pack's deepest chain it loads, one below it the saved index is refused
+  // and the rescan's resolve refuses the pack, as it does with no saved index
+  assert.deepEqual(must(await loadTransferPack(t, source, some(first.saved), { resolve: { limits: { maxDeltaChain: deepest } } })).loaded, { tag: 'saved' });
+  assert.equal((await loadTransferPack(t, source, some(first.saved), { resolve: { limits: { maxDeltaChain: deepest - 1 } } })).error.code, 'limit_exceeded');
+  assert.equal((await loadTransferPack(t, source, some(first.saved))).error.code, 'limit_exceeded');
+  // limits that do not parse are refused where they enter, saved index or not
+  for (const saved of [none, some(first.saved)]) {
+    const bad = await loadTransferPack(t, source, saved, { resolve: { limits: { maxDeltaChain: -1 } } });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /limits\.maxDeltaChain/u);
+  }
+  // a direct caller of decodeSavedIndex passes the same limit; without it the default 64 applies
+  const id = { trailer: first.from.pack.trailer, bytes: first.from.pack.bytes };
+  assert.ok(decodeSavedIndex(first.saved, id, 200).ok);
+  assert.equal(decodeSavedIndex(first.saved, id).error.field, 'resolved.depth');
+  // #260 re-review REQ 1: the resolve options are read as resolvePackRange reads them (opts[key]), so one that reaches
+  // the caller's record through a prototype or a class accessor counts. The expected outcomes are not ply's: git reads
+  // this pack as 100 deep (above), so only an honoured limit of 200 resolves it, and a cache of -1 bytes is no size.
+  assert.equal(must(await loadTransferPack(t, source, none, { resolve: Object.create({ limits }) })).loaded.tag, 'scanned');
+  let cacheReads = 0;
+  class Accessors { get limits() { return limits; } get cacheBytes() { cacheReads++; return -1; } }
+  const supplied = [Object.create({ limits, cacheBytes: -1 }), Object.assign(Object.create({ cacheBytes: -1 }), { limits }), new Accessors()];
+  for (const [k, resolve] of supplied.entries()) {
+    const bad = await loadTransferPack(t, source, none, { resolve });
+    assert.equal(bad.ok, false, `inherited cacheBytes -1 (${k}) is refused`);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /cacheBytes must be a non-negative number, got -1/u);
+  }
+  assert.equal(cacheReads, 1, 'an accessor is read once');
+});
+
 test('loadTransferPack refusals: a spool too small for a pack, a spool whose read fails, a spool that is not a pack', async () => {
   const { t, spans } = traced();
   const tiny = await loadTransferPack(t, rangeFromBytes(new Uint8Array(31)), none);
@@ -319,7 +517,7 @@ test('a resumed transfer that loads the saved index every request reaches the fr
       assert.equal(loaded.loaded.tag, 'saved');
       assert.deepEqual(spool.c, { reads: 1, bytes: 20 });
       saved = loaded.saved;
-      const r = must(await runTransfer(t, loaded.from, plan, src.commit, { maxSteps: 1 }));
+      const r = must(await runTransfer(t, loaded.from, plan, src.commit, { maxSteps: 1, ref: REF }));
       requests++;
       if (r.tag === 'done') break;
     }

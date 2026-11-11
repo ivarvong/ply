@@ -197,7 +197,10 @@ function checkEntries(c: Ctx): PlyError | null {
 
 // Families: each planned entry's chain root (the whole object it rests on, or the first entry above a base outside the
 // selection), and per root the entries in chain order (depth, then index), so a base comes before its deltas.
-function families(c: Ctx): Map<number, number[]> {
+// The columns are the caller's (a ResolvedIndex can be built by hand or read from storage), so the walk to a root is
+// bounded here: a chain of distinct entries has fewer links than the pack has entries, so a walk that takes that many
+// is in a cycle, which no pack resolves to. That is refused (bad_request) having held at most one path of n indices.
+function families(c: Ctx): Result<Map<number, number[]>, PlyError> {
   const n = c.pack.count;
   const rootOf = new Int32Array(n).fill(-1);
   const root = (i: number): number => {
@@ -206,6 +209,7 @@ function families(c: Ctx): Map<number, number[]> {
     while ((rootOf[u] as number) < 0) {
       const b = inBase(c, u);
       if (b < 0) { rootOf[u] = u; break; }
+      if (path.length >= n) return -1;
       path.push(u);
       u = b;
     }
@@ -217,13 +221,14 @@ function families(c: Ctx): Map<number, number[]> {
   for (let i = 0; i < n; i++) {
     if (c.chosen[i] !== 1) continue;
     const r = root(i);
+    if (r < 0) return fail('bad_request', `resolved index is malformed: the bases from entry ${i} never reach a whole object (a cycle)`, { what: 'resolved' });
     const list = mapGet(byRoot, r);
     if (list.tag === 'none') byRoot.set(r, [i]);
     else list.value.push(i);
   }
   const depth = c.resolved.columns.depth;
   for (const list of byRoot.values()) list.sort((x, y) => (depth[x] as number) - (depth[y] as number) || x - y);
-  return byRoot;
+  return ok(byRoot);
 }
 
 type Open = { kind: BatchKind; entries: number[]; bytes: number; refRewrites: number };
@@ -348,9 +353,11 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   };
   const bad = checkEntries(c);
   if (bad !== null) return err(bad);
+  const fams = families(c);
+  if (!fams.ok) return fams;
   const blobFams: number[][] = [];
   const restFams: number[][] = [];
-  for (const [r, list] of [...families(c)].toSorted((x, y) => x[0] - y[0])) {
+  for (const [r, list] of [...fams.value].toSorted((x, y) => x[0] - y[0])) {
     if ((resolved.columns.type[r] as number) === BLOB) blobFams.push(list);
     else restFams.push(list);
   }

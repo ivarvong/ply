@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { rebaseBranch, cherryPick, revertCommit, linearChain, carriedExtra } from '../src/rebase.js';
 import { mergeBranch } from '../src/merge.js';
 import { editFile } from '../src/edit.js';
@@ -25,7 +25,7 @@ after(async () => { await srv.close(); cleanup(); });
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 'w', GIT_AUTHOR_EMAIL: 'w@x', GIT_COMMITTER_NAME: 'w', GIT_COMMITTER_EMAIL: 'w@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'commit.gpgsign', GIT_CONFIG_VALUE_0: 'false' };
 const sh = (cwd, args, input) => spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: ENV, input });
 const ok = r => { assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
-const repo = () => { const name = `r${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']); return { name, bare, work, url: `${srv.url}/${name}.git` }; };
+const repo = () => { const name = `r${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); initRepo(work); return { name, bare, work, url: `${srv.url}/${name}.git` }; };
 const commitOn = (r, branch, from, files, msg) => {
   let start = from; if (!/^[0-9a-f]{40}/.test(from)) { ok(sh(r.work, ['fetch', '-q', r.bare, `refs/heads/${from}`])); start = 'FETCH_HEAD'; }
   ok(sh(r.work, ['checkout', '-q', '-B', branch, start]));

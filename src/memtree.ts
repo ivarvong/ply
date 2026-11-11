@@ -193,7 +193,10 @@ export function replaceOnce(data: Uint8Array, find: Uint8Array, replace: Uint8Ar
 
 export type EncodedTree = { readonly oid: Oid; readonly data: Uint8Array };
 export type Encoded = { readonly oid: Oid; readonly trees: readonly EncodedTree[] };
-function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<Oid, ErrorOf<'bad_request' | 'limit_exceeded'>> {
+// The trees encoded so far, once per oid: two directories a call rebuilt to the same content are one tree object,
+// and a pack that carries one object twice is refused by a strict receiver ("unpacker error").
+type Trees = { readonly list: EncodedTree[]; readonly seen: Set<string> };
+function encodeNode(node: Mem, max: number, trees: Trees): Result<Oid, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   if (node.kind === 'lazy') return ok(node.oid);
   if (node.entries.size > max) return err(limitExceeded('tree entries', node.entries.size, max));
   const entries: EntryOf[] = [];
@@ -208,16 +211,19 @@ function encodeNode(node: Mem, max: number, trees: EncodedTree[]): Result<Oid, E
   if (!encoded.ok) return encoded;
   const data = encoded.value;
   const oid = hashObject('tree', data);
-  trees.push({ oid, data });
+  if (!trees.seen.has(oid)) {
+    trees.seen.add(oid);
+    trees.list.push({ oid, data });
+  }
   return ok(oid);
 }
-// The trees this memory holds, deepest first. A lazy node contributes its oid and no bytes.
+// The trees this memory holds, deepest first, each oid once. A lazy node contributes its oid and no bytes.
 export function encodeMem(node: Mem, limits: CheckedLimits): Result<Encoded, ErrorOf<'bad_request' | 'limit_exceeded'>> {
   if (node.kind === 'lazy') return ok({ oid: node.oid, trees: [] });
-  const trees: EncodedTree[] = [];
+  const trees: Trees = { list: [], seen: new Set() };
   const oid = encodeNode(node, limits.maxTreeEntries, trees);
   if (!oid.ok) return oid;
-  return ok({ oid: oid.value, trees });
+  return ok({ oid: oid.value, trees: trees.list });
 }
 
 export function blobOids(node: Mem, into: Set<string>): void {

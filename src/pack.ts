@@ -5,12 +5,8 @@ import { bufferSource, concat } from './bytes.js';
 import { at, fromNullish, readKey, type Input } from './absent.js';
 import { assertNever, getOrElse } from './result.js';
 import {
-  PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, BYTE_MASK,
-  OBJ_TYPE_SHIFT, OBJ_SIZE_FIRST_MASK, OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE,
-  OBJ_SIZE_FIRST_BASE, OBJ_SIZE_NEXT_BASE, BE32_SHIFTS,
-  DELTA_COPY, DELTA_COPY_MAX, DELTA_INSERT_MAX, DELTA_OFF_SHIFT,
-  DELTA_COPY_OFF1, DELTA_COPY_OFF2, DELTA_COPY_OFF3, DELTA_COPY_OFF4,
-  DELTA_COPY_LEN1, DELTA_COPY_LEN2, DELTA_COPY_LEN3,
+  PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, OBJ_TYPE_SHIFT, OBJ_SIZE_FIRST_MASK,
+  OBJ_SIZE_NEXT_MASK, OBJ_CONTINUE, OBJ_SIZE_FIRST_BASE, OBJ_SIZE_NEXT_BASE, BE32_SHIFTS,
 } from './format.js';
 // ---- varints ----
 export function encodeObjHeader(type: number, size: number): Uint8Array {
@@ -23,67 +19,10 @@ export function encodeObjHeader(type: number, size: number): Uint8Array {
   out.push(last);
   return Uint8Array.from(out);
 }
-export function encodeVarint(n: number): Uint8Array { // delta header style: 7-bit LE groups
-  const out: number[] = [];
-  let rest = n;
-  do { let b = rest & OBJ_SIZE_NEXT_MASK; rest = Math.floor(rest / OBJ_SIZE_NEXT_BASE); if (rest > 0) b |= OBJ_CONTINUE; out.push(b); } while (rest > 0);
-  return Uint8Array.from(out);
-}
-export const copyOp = (off: number, len: number): Uint8Array => {
-  let op = DELTA_COPY;
-  const b: number[] = [];
-  let o = off;
-  let l = len === DELTA_COPY_MAX ? 0 : len;
-  if (o & BYTE_MASK) { op |= DELTA_COPY_OFF1; b.push(o & BYTE_MASK); } o >>>= DELTA_OFF_SHIFT;
-  if (o & BYTE_MASK) { op |= DELTA_COPY_OFF2; b.push(o & BYTE_MASK); } o >>>= DELTA_OFF_SHIFT;
-  if (o & BYTE_MASK) { op |= DELTA_COPY_OFF3; b.push(o & BYTE_MASK); } o >>>= DELTA_OFF_SHIFT;
-  if (o & BYTE_MASK) { op |= DELTA_COPY_OFF4; b.push(o & BYTE_MASK); }
-  if (l & BYTE_MASK) { op |= DELTA_COPY_LEN1; b.push(l & BYTE_MASK); } l >>>= DELTA_OFF_SHIFT;
-  if (l & BYTE_MASK) { op |= DELTA_COPY_LEN2; b.push(l & BYTE_MASK); } l >>>= DELTA_OFF_SHIFT;
-  if (l & BYTE_MASK) { op |= DELTA_COPY_LEN3; b.push(l & BYTE_MASK); }
-  return Uint8Array.of(op, ...b);
-};
-export const copyOps = (off: number, len: number): Uint8Array[] => {
-  const parts: Uint8Array[] = [];
-  let o = off;
-  let left = len;
-  while (left > 0) { const n = Math.min(left, DELTA_COPY_MAX); parts.push(copyOp(o, n)); o += n; left -= n; }
-  return parts;
-};
-export const insertOps = (bytes: Uint8Array): Uint8Array[] => {
-  const parts: Uint8Array[] = [];
-  for (let i = 0; i < bytes.length; i += DELTA_INSERT_MAX) {
-    const chunk = bytes.subarray(i, Math.min(i + DELTA_INSERT_MAX, bytes.length));
-    parts.push(Uint8Array.of(chunk.length), chunk);
-  }
-  return parts;
-};
-
-// One delta instruction (gitformat-pack "Deltified representation"): copy `len` bytes of the source from `off`, or insert
-// the literal bytes. A copy longer than DELTA_COPY_MAX or an insert longer than DELTA_INSERT_MAX is one instruction
-// here and as many opcodes as it takes on the wire (encodeDeltaOps).
-export type DeltaOp = { readonly tag: 'copy'; readonly off: number; readonly len: number } | { readonly tag: 'insert'; readonly bytes: Uint8Array };
-// A delta's bytes from its sizes and instructions.
-export function encodeDeltaOps(srcSize: number, dstSize: number, ops: readonly DeltaOp[]): Uint8Array<ArrayBuffer> {
-  const parts = [encodeVarint(srcSize), encodeVarint(dstSize)];
-  for (const op of ops) parts.push(...(op.tag === 'copy' ? copyOps(op.off, op.len) : insertOps(op.bytes)));
-  return concat(parts);
-}
-
-// Structural delta: base with [off, off+oldLen) replaced by `insert`. Pure; needs no base bytes. The instructions are a
-// copy of the prefix, the insert, and a copy of the tail, each only when it is not empty.
-export type Splice = { readonly baseLen: number; readonly off: number; readonly oldLen: number; readonly insert: Uint8Array };
-export type SplicedDelta = { readonly delta: Uint8Array<ArrayBuffer>; readonly resultLen: number; readonly ops: { readonly copy: number; readonly insert: number }; readonly program: readonly DeltaOp[] };
-export function spliceDelta({ baseLen, off, oldLen, insert }: Splice): SplicedDelta {
-  const resultLen = baseLen - oldLen + insert.length;
-  const tail = baseLen - off - oldLen;
-  const program: DeltaOp[] = [];
-  if (off > 0) program.push({ tag: 'copy', off: 0, len: off });
-  if (insert.length > 0) program.push({ tag: 'insert', bytes: insert });
-  if (tail > 0) program.push({ tag: 'copy', off: off + oldLen, len: tail });
-  // Stryker disable next-line EqualityOperator,ConditionalExpression: an empty prefix or tail is Math.ceil(0) = 0 copies either way
-  return { delta: encodeDeltaOps(baseLen, resultLen, program), resultLen, program, ops: { copy: (off > 0 ? Math.ceil(off / DELTA_COPY_MAX) : 0) + (tail > 0 ? Math.ceil(tail / DELTA_COPY_MAX) : 0), insert: Math.ceil(insert.length / DELTA_INSERT_MAX) } };
-}
+// The delta-instruction encoders live in a leaf module (deltaenc.ts), which the resolver imports too; re-exported here,
+// where callers have always found them.
+export { encodeVarint, copyOp, copyOps, insertOps, encodeDeltaOps, spliceDelta } from './deltaenc.js';
+export type { DeltaOp, Splice, SplicedDelta } from './deltaenc.js';
 
 // ---- build ----
 // Any Uint8Array in; a Blob takes only an ArrayBuffer-backed view, which bufferSource guarantees (bytes.ts).
@@ -109,7 +48,7 @@ export type BuiltEntry = {
   readonly type: number; readonly typeName: string | null; readonly size: number; readonly compressed: number;
   readonly baseOid: string | null; readonly bytes: number; readonly offset: number;
 };
-const typeNameOf = (type: number): string | null => {
+export const typeNameOf = (type: number): string | null => {
   const named = readKey(TYPE_NAME as Readonly<Record<number, string>>, type);
   return named.tag === 'some' ? named.value : null;
 };
@@ -174,7 +113,7 @@ export async function buildPack(objects: readonly PackInput[]): Promise<BuiltPac
 
 
 // General-purpose parsing/resolution, kept out of this module so bundles of the edit path do not carry it.
-// packresolve imports spliceDelta from here: a cycle of a re-export and one function, which ES modules resolve (A1 untangles it)
+// The resolver is re-exported for callers; it imports nothing from this module (the delta encoders are deltaenc.ts).
 // oxlint-disable-next-line import/no-cycle -- see above
 export { parsePack, applyDelta, parseDelta, applyProgram, deltaOps, makeDelta, resolvePack, describePack, readObjHeader, readOfsDelta, readUint32BE, packParseOpts } from './packresolve.js';
 export type { PackLayout, PackLayoutObject, PackBase, ResolvedObjType, ObjBase, DeltaProgram, PackObjectInput, ParsedObject } from './packresolve.js';

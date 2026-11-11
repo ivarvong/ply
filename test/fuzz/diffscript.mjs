@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './prng.js';
 import { records, classifier, diffScript } from '../../src/linemerge.js';
+import { LIMIT_MERGE_WORK } from '../../src/limits.js';
+let refused = 0;
 
 import { oracleRediff } from '../gitversion.js';
 const REDIFF = process.argv.includes('--rediff') ? process.argv[process.argv.indexOf('--rediff') + 1] : oracleRediff(); // default: whatever the oracle git does
@@ -39,8 +41,17 @@ for (let c = 0; c < N; c++) {
   }
   const cl = classifier(); const enc = s => new TextEncoder().encode(s);
   let ours;
-  const sc = diffScript(records(enc(A), cl), records(enc(B), cl), { rediff: REDIFF });
-  if (!sc.ok) { counts.undecided++; continue; }
+  const ra = records(enc(A), cl), rb = records(enc(B), cl), meter = { steps: 0 };
+  const sc = diffScript(ra, rb, { rediff: REDIFF, meter });
+  if (!sc.ok) {
+    // A refusal passes only under a documented rule: --rediff undecided (the compaction re-diff), or the step budget
+    // (limits.ts), proven spent by the meter against the limit's own arithmetic. Anything else fails the run.
+    const budget = LIMIT_MERGE_WORK;
+    const ruled = (REDIFF === 'undecided' && sc.error.detail === 'compaction needs the classic-diff fallback') || (sc.error.detail === 'line diff step budget exceeded' && meter.steps > budget);
+    counts.undecided++;
+    if (!ruled) { refused++; if (refused <= 3) console.log(`REFUSED case ${c}: ${sc.error.detail} after ${meter.steps} steps (budget ${budget})`); }
+    continue;
+  }
   { const oa = [], ob = [];
     for (const x of [...sc.value].sort((p, q) => p.i1 - q.i1)) { for (let k = 0; k < x.chg1; k++) oa.push(x.i1 + k); for (let k = 0; k < x.chg2; k++) ob.push(x.i2 + k); }
     ours = { a: oa, b: ob }; }
@@ -51,4 +62,5 @@ for (let c = 0; c < N; c++) {
 }
 rmSync(dir, { recursive: true, force: true });
 console.log(`${N} diffs (seed ${SEED}, rediff ${REDIFF}): ${JSON.stringify(counts)}`);
-if (counts.differ) process.exit(1);
+// a refusal is not a pass: a diff that always declines would otherwise differ from nothing
+if (counts.differ || refused) { if (refused) console.log(`${refused} refused with no documented rule`); process.exit(1); }

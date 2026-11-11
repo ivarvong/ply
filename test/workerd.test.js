@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { git, gitBuf, gitUserinfoCred, gitWithCred, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
+import { git, gitBuf, gitUserinfoCred, gitWithCred, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems, initRepo } from './server.js';
 import { build } from './workerd/build.mjs';
 
 const candidates = [process.env.WORKERD, fileURLToPath(new URL('../node_modules/.bin/workerd', import.meta.url)), fileURLToPath(new URL('../../wd/node_modules/.bin/workerd', import.meta.url))].filter(Boolean);
@@ -79,7 +79,7 @@ test('workerd: platform features the pipeline relies on', { skip: !WORKERD }, as
 });
 
 test('workerd: edit small file, 24 MB file, cache hit on second edit; git-verified', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'e'); const work = join(root, 'we'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'e'); const work = join(root, 'we'); mkdirSync(work); initRepo(work);
   const big = Buffer.alloc(24 << 20); for (let i = 0; i < big.length; i += 4096) big.write(`line ${i}\n`, i); big.write('MARK', 12 << 20);
   commitFiles(work, bare, { 'a/b/c.txt': 'hello MARK world\n', 'big.bin': big }, 'seed');
   const url = `${srv.url}/e.git`;
@@ -102,7 +102,7 @@ test('workerd: edit small file, 24 MB file, cache hit on second edit; git-verifi
 });
 
 test('workerd: pack cache on caches.default + head hint (ls-refs skipped, CAS catches a stale hint)', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'pc'); const work = join(root, 'wpc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'pc'); const work = join(root, 'wpc'); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, { 'a/b/c.txt': 'hello MARK world\n' }, 'seed');
   const url = `${srv.url}/pc.git`;
   const head = git(bare, ['rev-parse', 'main']).trim();
@@ -128,7 +128,7 @@ test('workerd: pack cache on caches.default + head hint (ls-refs skipped, CAS ca
 });
 
 test('workerd: Ed25519 signing through the platform WebCrypto; git verifies', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'sg'); const work = join(root, 'wsg'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'sg'); const work = join(root, 'wsg'); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, { 'f.txt': 'MARK\n' }, 'seed');
   const r = await post('/edit', { url: `${srv.url}/sg.git`, path: 'f.txt', find: 'MARK', replace: 'SIGNED', sign: true });
   assert.ok(r.results[0].ok, JSON.stringify(r.results[0])); assert.match(r.signer, /^ssh-ed25519 /);
@@ -139,7 +139,7 @@ test('workerd: Ed25519 signing through the platform WebCrypto; git verifies', { 
 });
 
 test('workerd: 10 concurrent writers in one isolate converge via cas_conflict retries', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'c'); const work = join(root, 'wc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'c'); const work = join(root, 'wc'); mkdirSync(work); initRepo(work);
   const files = {}; for (let i = 0; i < 10; i++) files[`f${i}.txt`] = `v0 MARK${i}\n`;
   commitFiles(work, bare, files, 'seed');
   const url = `${srv.url}/c.git`;
@@ -177,7 +177,7 @@ test('workerd: a 3xx is never followed (redirect: manual) on the GET or the POST
 });
 
 test('workerd: a token given as the URL user authenticates the edit with the Authorization git sends; it reaches no span (#32)', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'ui'); const work = join(root, 'wui'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'ui'); const work = join(root, 'wui'); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, { 'a.txt': 'hello MARK\n' }, 'seed');
   const TOKEN = 'glpat-WorkerdUserOnlyToken';
   const gate = await startAuthGate(srv.url);
@@ -198,7 +198,7 @@ test('workerd: a token given as the URL user authenticates the edit with the Aut
 });
 
 test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob follows the root in a trace of its own (#35)', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'rd'); const work = join(root, 'wrd'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'rd'); const work = join(root, 'wrd'); mkdirSync(work); initRepo(work);
   const big = Buffer.alloc(1 << 20); for (let i = 0; i < big.length; i += 4096) big.write(`line ${i}\n`, i);
   commitFiles(work, bare, { 'big.bin': big }, 'seed');
   for (const cancel of [false, true]) {
@@ -215,7 +215,7 @@ test('workerd: readFile\'s blob stream, drained and cancelled; git.read.blob fol
 });
 
 test('workerd: a limit hit inside readFile\'s blob stream reaches the reader as limit_exceeded, as on node (#144)', { skip: !WORKERD }, async () => {
-  const bare = makeBareRepo(root, 'rdcap'); const work = join(root, 'wrdcap'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'rdcap'); const work = join(root, 'wrdcap'); mkdirSync(work); initRepo(work);
   const big = randomBytes((1 << 20) + 1); // incompressible: the pack is over 1 MiB
   commitFiles(work, bare, { 'big.bin': big }, 'seed');
   const r = await post('/read', { url: `${srv.url}/rdcap.git`, path: 'big.bin', limits: { maxPackBytes: 1 << 20 } });

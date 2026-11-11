@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync, chmodSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { oracleRediff } from './gitversion.js';
 import { cherryPick } from '../src/rebase.js';
 import { Tracer } from '../src/otel.js';
@@ -44,7 +44,7 @@ after(async () => { await srv?.close(); cleanup?.(); });
 // One cell's repository: base, the picked commit P on `src`, the target on `dst`. Returns the bare repo and P.
 function build(r, c, m) {
   const name = `cp${n++}`; const bare = makeBareRepo(root, name); const w = join(root, `w${name}`); mkdirSync(w);
-  git(w, ['init', '-q', '-b', 'main']);
+  initRepo(w);
   const put = (p, v) => writeFileSync(join(w, p), v);
   const commit = msg => { ok(w, ['add', '-A']); ok(w, ['commit', '-q', '--allow-empty', '-m', msg]); return ok(w, ['rev-parse', 'HEAD']); };
   put('a.txt', A); put('old.txt', OLD); put('x.txt', lines('o', { 5: 'P5' })); const base = commit('base');
