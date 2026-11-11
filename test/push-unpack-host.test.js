@@ -95,3 +95,88 @@ test('push(): the same failure for a delete-only push is ambiguous', async () =>
   assert.equal(r.ok, false);
   assert.equal(r.error.code, 'ambiguous', r.error.message);
 });
+
+// #266: Artifacts refuses a shallow or disconnected push with a shorter ng reason than the unpack status.
+const MISSING_UNPACK = 'reachable object is missing';
+const MISSING_NG = 'missing object';
+const TOO_LARGE = 'artifacts_git_receive_pack_request_too_large: push is 286.3 MiB, limit is 64.0 MiB';
+
+test('Artifacts missing-object alias is unpackFailed and decides push_rejected; a one-byte-off reason stays ambiguous', () => {
+  const one = cls([`unpack ${MISSING_UNPACK}\n`, `ng ${A} ${MISSING_NG}\n`]);
+  assert.deepEqual(one, { tag: 'unpackFailed', status: MISSING_UNPACK, refs: ngs(MISSING_NG, A) });
+  assert.deepEqual(decideOutcome(one), { tag: 'rejected', code: 'push_rejected', refs: [{ ref: A, reason: MISSING_NG, cls: 'rejected' }] });
+  assert.deepEqual(decideOutcome(one, { atomic: true }).tag, 'rejected');
+  assert.deepEqual(decideOutcome(one, { pack: false }), { tag: 'ambiguous', why: 'unpack failed but no pack was sent' });
+  // two refs, both the alias
+  assert.deepEqual(cls([`unpack ${MISSING_UNPACK}\n`, `ng ${B} ${MISSING_NG}\n`, `ng ${A} ${MISSING_NG}\n`], [A, B]).tag, 'unpackFailed');
+  // a reason that is not the documented alias stays malformed (SPACE.md judgment 3)
+  assert.equal(cls([`unpack ${MISSING_UNPACK}\n`, `ng ${A} object is missing\n`]).tag, 'malformed');
+  assert.equal(cls([`unpack ${MISSING_UNPACK}\n`, `ng ${A} ${MISSING_UNPACK}\n`]).tag, 'unpackFailed');
+});
+
+test('push(): Artifacts missing-object reports are push_rejected, side-band and plain, no read-back', async () => {
+  const payload = concat([unwrap(pkt(`unpack ${MISSING_UNPACK}\n`)), unwrap(pkt(`ng ${A} ${MISSING_NG}\n`)), FLUSH]);
+  const cases = [
+    { sideband: true, frames: [concat([Uint8Array.of(1), payload]), null] },
+    { sideband: false, frames: [te.encode(`unpack ${MISSING_UNPACK}\n`), te.encode(`ng ${A} ${MISSING_NG}\n`), null] },
+  ];
+  for (const c of cases) {
+    const { t, services } = transportOf(...c.frames);
+    const r = await push(t, update(c.sideband));
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, 'push_rejected', r.error.message);
+    assert.equal(r.error.message, `push rejected: ${MISSING_NG}`);
+    assert.equal(r.error.report.tag, 'unpackFailed');
+    assert.equal(r.error.report.status, MISSING_UNPACK);
+    assert.deepEqual(services, ['git-receive-pack'], 'a definite answer reads nothing back');
+  }
+});
+
+test('Artifacts 64 MiB cap is limit_exceeded with got/max in bytes, not push_rejected or ambiguous', () => {
+  const one = cls([`unpack ${TOO_LARGE}\n`, `ng ${A} ${TOO_LARGE}\n`]);
+  assert.equal(one.tag, 'unpackFailed');
+  const decided = decideOutcome(one);
+  assert.deepEqual(decided, { tag: 'rejected', code: 'limit_exceeded', refs: [{ ref: A, reason: TOO_LARGE, cls: 'rejected' }] });
+  assert.equal(decideOutcome(one, { pack: false }).tag, 'ambiguous');
+});
+
+test('push(): Artifacts too-large report is limit_exceeded with the cap, side-band and plain, no read-back', async () => {
+  const payload = concat([unwrap(pkt(`unpack ${TOO_LARGE}\n`)), unwrap(pkt(`ng ${A} ${TOO_LARGE}\n`)), FLUSH]);
+  const cases = [
+    { sideband: true, frames: [concat([Uint8Array.of(1), payload]), null] },
+    { sideband: false, frames: [te.encode(`unpack ${TOO_LARGE}\n`), te.encode(`ng ${A} ${TOO_LARGE}\n`), null] },
+  ];
+  const wantGot = Math.round(286.3 * 1024 * 1024);
+  const wantMax = 64 * 1024 * 1024;
+  for (const c of cases) {
+    const { t, services } = transportOf(...c.frames);
+    const r = await push(t, update(c.sideband));
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, 'limit_exceeded', r.error.message);
+    assert.equal(r.error.what, 'receive-pack request');
+    assert.equal(r.error.got, wantGot);
+    assert.equal(r.error.max, wantMax);
+    assert.match(r.error.message, /64\.0 MiB/);
+    assert.equal(r.error.report.tag, 'unpackFailed');
+    assert.deepEqual(services, ['git-receive-pack'], 'a definite answer reads nothing back');
+  }
+});
+
+test('an empty receive-pack report stays ambiguous (concurrent same-repo 200 with no unpack/ref lines)', async () => {
+  // no frames at all: the body was empty (HTTP 200, no pkt-lines)
+  const empty = transportOf();
+  const none = await push(empty.t, update(true));
+  assert.equal(none.ok, false);
+  assert.equal(none.error.code, 'ambiguous', none.error.message);
+  // a flush before any report line (side-band or plain)
+  const flushed = transportOf(null);
+  const early = await push(flushed.t, update(true));
+  assert.equal(early.ok, false);
+  assert.equal(early.error.code, 'ambiguous', early.error.message);
+  const plain = transportOf(null);
+  const plainEmpty = await push(plain.t, update(false));
+  assert.equal(plainEmpty.ok, false);
+  assert.equal(plainEmpty.error.code, 'ambiguous');
+  // classifyReport of zero lines is still malformed, not a rejection
+  assert.deepEqual(decideOutcome(cls([])), { tag: 'ambiguous', why: 'no git unpack line first' });
+});

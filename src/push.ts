@@ -239,10 +239,30 @@ const isGitUnpackError = (status: string): boolean => {
 const UNPACKER_ERROR = 'unpacker error';
 const PRINTABLE = /^[ -~]+$/u;
 // A host's unpack failure (not git's grammar): every commanded ref is refused with the unpack status itself as its
-// reason. Cloudflare Artifacts writes exactly this ("unpack invalid pack entry type 0", then "ng <ref> invalid pack entry
-// type 0" for each ref; observed 2026-11-10, #246). Positive evidence, not a guess: a landed or refused report is never
-// one byte from it, since the unpack status must equal every ref's reason and differ from "ok" (SPACE.md, judgment 3).
-const echoedFailure = (status: string, refs: readonly RefStatus[]): boolean => status !== 'ok' && refs.every(r => !r.ok && r.reason === status);
+// reason, or with a documented alias of that status. Cloudflare Artifacts writes the exact echo ("unpack invalid pack
+// entry type 0", then "ng <ref> invalid pack entry type 0" for each ref; observed 2026-11-10, #246) and one alias
+// ("unpack reachable object is missing", then "ng <ref> missing object"; observed 2026-11-10, #266, ray
+// a589199bca2624ad-IAD). Positive evidence, not a guess: a landed or refused report is never one byte from an exact
+// echo, and the alias is a closed table (SPACE.md, judgment 3). Any other unmatched ng reason stays malformed.
+const HOST_UNPACK_ALIASES: ReadonlyArray<readonly [string, string]> = Object.freeze([
+  ['reachable object is missing', 'missing object'],
+]);
+const unpackReasonMatches = (status: string, reason: string): boolean => {
+  if (reason === status) return true;
+  for (const [s, r] of HOST_UNPACK_ALIASES) if (status === s && reason === r) return true;
+  return false;
+};
+const echoedFailure = (status: string, refs: readonly RefStatus[]): boolean => status !== 'ok' && refs.every(r => !r.ok && unpackReasonMatches(status, r.reason));
+// Artifacts' body cap, echoed on unpack and ng (observed 2026-11-10, #266, ray a58a707c0a76c98d-IAD).
+const TOO_LARGE = /^artifacts_git_receive_pack_request_too_large: push is ([0-9]+(?:\.[0-9]+)?) MiB, limit is ([0-9]+(?:\.[0-9]+)?) MiB$/u;
+/* oxlint-disable no-magic-numbers -- 2^10 and 2^20, converting Artifacts' MiB figures to bytes */
+const KIB = 1024;
+const MIB = KIB * KIB;
+/* oxlint-enable no-magic-numbers */
+export const parseReceivePackTooLarge = (reason: string): { readonly got: number; readonly max: number } | null => {
+  const m = TOO_LARGE.exec(reason);
+  return m === null ? null : { got: Math.round(Number(m[1]) * MIB), max: Math.round(Number(m[2]) * MIB) };
+};
 const malformed = (why: string): Malformed => ({ tag: 'malformed', why });
 // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrayDeclaration: reportStep calls it on "ng <rest>" only; with no space or a leading one, every split names no commanded ref
 const splitOnce = (s: string, sep: string): readonly [string, string] => { const i = s.indexOf(sep); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + sep.length)]; };
@@ -354,7 +374,7 @@ export const ngClass = (reason: string): NgClass => {
 // anywhere wins (push_rejected), then a non-fast-forward, then a lost compare-and-swap; 'innocent' members alone refuse.
 //   { tag: 'landed' } | { tag: 'rejected', code, refs } | { tag: 'partial', landed, rejected } | { tag: 'ambiguous', why }
 export type Refused = { readonly ref: string; readonly reason: string; readonly cls: NgClass };
-export type RejectionCode = 'push_rejected' | 'not_fast_forward' | 'cas_conflict';
+export type RejectionCode = 'push_rejected' | 'not_fast_forward' | 'cas_conflict' | 'limit_exceeded';
 export type Outcome =
   | { readonly tag: 'landed' }
   | { readonly tag: 'rejected'; readonly code: RejectionCode; readonly refs: readonly Refused[] }
@@ -363,6 +383,11 @@ export type Outcome =
 const refused = (refs: readonly RefStatus[]): Refused[] => refs.flatMap(r => (r.ok ? [] : [{ ref: r.ref, reason: r.reason, cls: ngClass(r.reason) }]));
 // every ref refused, none ambiguous: which rejection
 export const rejectionCode = (ng: readonly Refused[]): RejectionCode => {
+  if (ng.length > 0) {
+    let tooLarge = true;
+    for (const r of ng) if (parseReceivePackTooLarge(r.reason) === null) { tooLarge = false; break; }
+    if (tooLarge) return 'limit_exceeded';
+  }
   const cls = new Set(ng.map(r => r.cls));
   if (cls.has('rejected')) return 'push_rejected';
   if (cls.has('nff')) return 'not_fast_forward';
@@ -373,7 +398,15 @@ export type DecideOptions = Input<{ readonly atomic: boolean; readonly pack: boo
 export function decideOutcome(shape: ReportShape | Broken, { atomic = false, pack = true }: DecideOptions = {}): Outcome {
   switch (shape.tag) {
     // receive-pack writes an unpack failure only after reading a pack (delete_only() skips unpack)
-    case 'unpackFailed': return pack ? { tag: 'rejected', code: 'push_rejected', refs: refused(shape.refs) } : { tag: 'ambiguous', why: 'unpack failed but no pack was sent' };
+    case 'unpackFailed': {
+      if (!pack) return { tag: 'ambiguous', why: 'unpack failed but no pack was sent' };
+      const refs = refused(shape.refs);
+      // a host body-cap unpack is limit_exceeded; every other unpack failure stays push_rejected (the refs may
+      // carry an unrelated reason in a test shape; the unpack itself is the refusal)
+      let tooLarge = refs.length > 0;
+      for (const r of refs) if (parseReceivePackTooLarge(r.reason) === null) { tooLarge = false; break; }
+      return { tag: 'rejected', code: tooLarge ? 'limit_exceeded' : 'push_rejected', refs };
+    }
     case 'statuses': {
       const ng = refused(shape.refs);
       if (ng.length === 0) return { tag: 'landed' };
@@ -407,7 +440,15 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
   switch (o.tag) {
     case 'landed': return ok(report);
     case 'rejected': {
-      const message = `push rejected: ${getOrElse(mapOption(at(o.refs, 0), r => r.reason), '')}`;
+      const reason = getOrElse(mapOption(at(o.refs, 0), r => r.reason), '');
+      if (o.code === 'limit_exceeded') {
+        const sizes = parseReceivePackTooLarge(reason);
+        // rejectionCode only returns limit_exceeded when every ng reason parsed
+        const got = sizes === null ? 0 : sizes.got;
+        const max = sizes === null ? 0 : sizes.max;
+        return fail('limit_exceeded', `push is too large: ${reason}`, { ...extra, what: 'receive-pack request', got, max });
+      }
+      const message = `push rejected: ${reason}`;
       if (o.code !== 'cas_conflict') return fail(o.code, message, extra);
       // what the culprit's command said the ref was (null: absent); receive-pack does not say where it is (actual: null)
       const culprit = fromNullish(o.refs.find(r => r.cls === 'cas'));

@@ -44,6 +44,7 @@ const handle = (e: PushError): string => {
   switch (e.code) {
     case 'push_rejected': case 'not_fast_forward': return e.message;
     case 'cas_conflict': return `${e.expected} ${e.actual}`;
+    case 'limit_exceeded': return `${e.what} ${e.got} ${e.max}`;
     case 'push_partial': return e.landed.join() + e.rejected.map(r => r.ref).join();
     case 'ambiguous': return String(e.original);
   }
