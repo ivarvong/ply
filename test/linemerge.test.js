@@ -113,3 +113,48 @@ test('a broken invariant of the port is a typed internal error, never a bare Err
   const ids = Int32Array.of(1, 2); const ch = new Uint8Array(4); const chO = new Uint8Array(3);
   assert.throws(() => compact(ids, ch, 2, Int32Array.of(1), chO, 1, 'myers'), e => e instanceof Error && isPlyCode(e.code) && e.code === 'internal' && retryPolicy(e) === 'no' && e.message === 'linemerge: groups out of step');
 });
+
+// ---- the work bound (review: merge/histogram-quadratic-under-blob-cap) ----
+// The reviewer's shape: base is n unique lines, ours swaps each adjacent pair, theirs appends one line. Every line occurs
+// once, so xhistogram's find_lcs takes the first common line of the region, splits two lines off the front and rescans
+// what is left of base: sum over k < n/2 of (n - 2k) ≈ n²/4 scanA steps for the base→ours diff alone, whatever the
+// implementation (git does the same work, in C). The expectations below are that arithmetic, not ply's output.
+const swapCase = n => {
+  const L = Array.from({ length: n }, (_, i) => `w${i}`), o = [...L];
+  for (let i = 0; i + 1 < n; i += 2) [o[i], o[i + 1]] = [o[i + 1], o[i]];
+  return [L, o, [...L, 'tail']].map(l => enc(l.join('\n') + '\n'));
+};
+const FLOOR_LINES = 1024; // LIMIT_MERGE_STEPS_FLOOR_LINES
+const budgetOf = (n, perLine) => perLine * (n + n + n + 1 + FLOOR_LINES); // lines of base + ours + theirs, plus the floor
+test('work bound: pair swaps past the step budget are refused as too large, within the budget', () => {
+  // n = 2000 needs ≥ 2000²/4 = 1,000,000 steps; 64 steps per line allow 64 × (6001 + 1024) = 449,600.
+  const [B, O, T] = swapCase(2000), meter = { steps: 0 };
+  assert.deepEqual(mergeLines(B, O, T, { rediff, stepsPerLine: 64, meter }), { clean: false, reason: 'too large to merge' });
+  assert.ok(meter.steps > budgetOf(2000, 64), `stopped by the budget: ${meter.steps} steps`);
+  assert.ok(meter.steps <= budgetOf(2000, 64) * 1.05, `overshoot is one region's scan at most: ${meter.steps} steps`);
+});
+test('work bound: unbudgeted steps quadruple when the input doubles, budgeted steps only double', () => {
+  const steps = (n, stepsPerLine) => { const [B, O, T] = swapCase(n), meter = { steps: 0 }; mergeLines(B, O, T, { rediff, stepsPerLine, meter }); return meter.steps; };
+  const free = [steps(1000, Infinity), steps(2000, Infinity)];
+  assert.ok(free[0] >= 1000 ** 2 / 4 && free[1] >= 2000 ** 2 / 4, `the algorithm's own cost is ≥ n²/4: ${free}`);
+  assert.ok(free[1] / free[0] > 3.5, `quadratic without the budget: ${free}`);
+  const held = [steps(2000, 64), steps(4000, 64)];
+  assert.ok(held[1] / held[0] < 2.2, `linear under the budget: ${held}`); // (12001 + 1024) / (6001 + 1024) = 1.85
+});
+test('work bound: the 20,000-line pair-swap file (120 KiB, 155 s before) is refused at the default budget', () => {
+  // needs ≥ 20000²/4 = 100,000,000 steps; the default 1024 per line allows 1024 × (60001 + 1024) = 62,489,600.
+  const [B, O, T] = swapCase(20000), meter = { steps: 0 };
+  assert.deepEqual(mergeLines(B, O, T, { rediff, meter }), { clean: false, reason: 'too large to merge' });
+  assert.ok(meter.steps > 62_489_600 && meter.steps <= 62_489_600 * 1.05, `${meter.steps} steps`);
+});
+test('work bound: the same shape under the budget is git\'s merge, byte for byte', () => {
+  // pairs swapped in the first half only, so theirs' appended line is far from ours' hunks: git merges it cleanly
+  const L = Array.from({ length: 400 }, (_, i) => `w${i}`), o = [...L];
+  for (let i = 0; i + 1 < 200; i += 2) [o[i], o[i + 1]] = [o[i + 1], o[i]];
+  const [B, O, T] = [L, o, [...L, 'tail']].map(l => enc(l.join('\n') + '\n'));
+  const g = gitMerge(B, O, T), meter = { steps: 0 }, m = mergeLines(B, O, T, { rediff, meter });
+  assert.equal(g.status, 'clean');
+  assert.equal(m.clean, true);
+  assert.deepEqual(m.data, g.data);
+  assert.ok(meter.steps > 0 && meter.steps < budgetOf(400, 1024), `${meter.steps} steps`);
+});

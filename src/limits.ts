@@ -21,6 +21,17 @@ const MIB = KIB * KIB;
  */
 export const LIMIT_MERGE_BLOB: number = 8 * MIB;
 /**
+ * The line merge's work budget: primitive diff steps per input line, summed over base + ours + theirs and counted
+ * across everything one merge runs (both histogram diffs, the classic-diff fallbacks, group compaction, conflict
+ * refinement). git's histogram diff rescans the rest of the region on every split (xhistogram.c find_lcs), so a file
+ * whose splits peel a line or two at a time costs O(n²) however short its hash chains are; the byte cap does not
+ * bound that. With the budget the work is linear in the input: a merge that would pass it is refused as
+ * `too large to merge`, never guessed. 1024 lets a merge with ~500 scattered hunks rescan the whole file for each.
+ */
+export const LIMIT_MERGE_STEPS_PER_LINE = 1024;
+/** Lines added to the count before multiplying, so a small file's budget (~1M steps) never binds on ordinary input. */
+export const LIMIT_MERGE_STEPS_FLOOR_LINES = 1024;
+/**
  * Inflated size of any single non-streamed object (trees, commits, tags, metadata blobs).
  * gitformat-pack does not cap this; 64 MiB is one object a Worker-sized heap can still inflate and hash.
  */
