@@ -10,9 +10,14 @@
 // No YAML parser (no dependencies): the assertions are on the exact lines a reviewer would read.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+// Every test/**/*.test.js on disk: the directory itself, not the planner's view of it.
+const testFiles = (dir) => readdirSync(new URL(`../${dir}/`, import.meta.url), { withFileTypes: true }).flatMap((e) => {
+  if (e.isDirectory()) return e.name === 'node_modules' ? [] : testFiles(`${dir}/${e.name}`);
+  return e.name.endsWith('.test.js') ? [`${dir}/${e.name}`] : [];
+});
 // Comments are not configuration: a `# on: push` must not satisfy or fail a check.
 const code = (text) => text.split('\n').filter((l) => !/^\s*#/u.test(l)).join('\n');
 
@@ -64,4 +69,13 @@ test('nightly: every job checks out the one sha the seed job resolved, never a m
   assert.match(y, /^ {6}sha: \$\{\{ steps\.seed\.outputs\.sha \}\}$/mu);
   assert.match(y, /git ls-remote "https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\.git" refs\/heads\/main/u);
   assert.match(y, /\[\[ "\$sha" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
+});
+
+test('every test file has a weight in test/durations.json, so the shard planner never guesses', () => {
+  // vitest.config.ts weighs a file with no entry as the heaviest known file (494 s on 2026-11-11). Two sub-second
+  // files without entries moved ci's replayed plan from 1052/1051/1051/1051 summed seconds per shard to
+  // 806/1298/805/1298. The convention (vitest.config.ts): a new file gets its local seconds, rounded up.
+  const known = JSON.parse(read('test/durations.json'));
+  assert.deepEqual(testFiles('test').filter((f) => !(f in known)), [], 'add each file with its local seconds, rounded up');
+  for (const [file, seconds] of Object.entries(known)) assert.ok(Number.isInteger(seconds) && seconds >= 0, `${file}: ${seconds}`);
 });
