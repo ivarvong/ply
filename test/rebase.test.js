@@ -333,7 +333,7 @@ test('limits: a chain over maxRebaseCommits is refused as the rebase chain (max 
   assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), tip, 'a refused rebase leaves the branch');
 });
 
-test('limits: WORKER_LIMITS.maxRebaseCommits is a chain one Worker request can replay: at the limit the rebase equals git and takes at most 800 requests; one commit over is refused as the rebase chain', async () => {
+test('limits: WORKER_LIMITS.maxRebaseCommits, the cheapest shape of chain (every commit changes one file onto did not touch): at the limit the rebase equals git and takes at most 800 requests; one commit over is refused as the rebase chain', async () => {
   const { WORKER_LIMITS } = await import('../src/limits.js');
   const N = WORKER_LIMITS.maxRebaseCommits;
   assert.ok(N <= 800, `WORKER_LIMITS.maxRebaseCommits is ${N}: a replay costs at least one request a commit`);
