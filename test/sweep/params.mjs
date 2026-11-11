@@ -24,6 +24,8 @@ export const PARAMS = [
   { key: 'maxPathComponent', limit: DEFAULT_LIMITS.maxPathComponent, probe: 'readFile of a component of that length', later: false },
   { key: 'maxMergeDepth', limit: DEFAULT_LIMITS.maxMergeDepth, probe: 'readLog limit and merge-base distance', later: false },
   { key: 'maxReportLines', limit: DEFAULT_LIMITS.maxReportLines, probe: 'pushRepo of N branches (N + 1 report lines)', later: false },
+  { key: 'maxReportReasonBytes', limit: DEFAULT_LIMITS.maxReportReasonBytes, probe: 'pushRepo under a limit of 0: the report is still read (a cap on what is kept, not on the outcome)', later: false },
+  { key: 'maxReportProgressBytes', limit: DEFAULT_LIMITS.maxReportProgressBytes, probe: 'pushRepo under a limit of 0: band 2 is dropped, the report is still read', later: false },
   { key: 'maxCommitParents', limit: DEFAULT_LIMITS.maxCommitParents, probe: 'readLog of an octopus commit', later: false },
   { key: 'maxLsRefsBytes', limit: DEFAULT_LIMITS.maxLsRefsBytes, probe: 'lsRefs with the byte cap overridden', later: false },
   { key: 'requestTimeoutMs', limit: DEFAULT_LIMITS.requestTimeoutMs, probe: 'lsRefs and readFile through a delaying or stalling shim, with the opt-in total set', later: false },
