@@ -155,7 +155,12 @@ export const KIND: Readonly<{ INTERNAL: 1; SERVER: 2; CLIENT: 3; PRODUCER: 4; CO
 
 // `onEnd`: called with each span as it ends (an EndedSpan), before the exporter. `exporter`: the OTLP/JSON line per span.
 // A tracer with only `onEnd` builds no OTLP unless a consumer calls `otlp()`; one with neither builds nothing.
-export type TracerConfig = { readonly exporter: Exporter; readonly onEnd: SpanSink | null; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
+// `onTelemetryError`: telemetry never changes an operation's outcome. A throw or a rejected promise from `onEnd`, from
+// `exporter` (or an overridden `export`) or from an operation's `onFinish` is caught where ply calls it, counted in
+// `tracer.telemetryErrors` and handed to this hook (null: only counted). What the hook itself throws is dropped.
+export type TelemetryHook = 'onEnd' | 'exporter' | 'onFinish';
+export type TelemetryErrorSink = (error: unknown, at: { readonly hook: TelemetryHook; readonly span: string }) => void;
+export type TracerConfig = { readonly exporter: Exporter; readonly onEnd: SpanSink | null; readonly onTelemetryError: TelemetryErrorSink | null; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
 export type TracerOptions = Input<TracerConfig>;
 // How a span starts: under `parent`, or following `follows` (never both), with the credential scrubber it inherits.
 export type StartConfig = { readonly parent: Span | null; readonly follows: Span | null; readonly kind: number; readonly attrs: Attrs; readonly scrub: Scrub | null };
@@ -312,14 +317,15 @@ export class Span {
     // a subclass that overrides export (a tracer that mirrors spans elsewhere) still gets every span
     // oxlint-disable-next-line no-use-before-define -- Span and Tracer are one API (see the top of this file); this runs after both exist
     const exports = tracer.exporter !== dropSpans || tracer.export !== Tracer.prototype.export;
+    // Every call below into the caller's code (onEnd, the exporter, an overridden export) is guarded: end() never throws.
     if (sink === null) {
-      if (exports) tracer.export(otlpSpan(this, end.toString()));
+      if (exports) tracer.guard('exporter', this.name, (): unknown => tracer.export(otlpSpan(this, end.toString())));
       else tracer.count++;
       return this;
     }
     const ended = endedSpan(this, end);
-    sink(ended);
-    if (exports) tracer.export(ended.otlp());
+    tracer.guard('onEnd', this.name, (): unknown => sink(ended));
+    if (exports) tracer.guard('exporter', this.name, (): unknown => tracer.export(ended.otlp()));
     else tracer.count++;
     return this;
   }
@@ -328,14 +334,19 @@ export class Span {
 export class Tracer {
   public declare exporter: Exporter;
   public declare onEnd: SpanSink | null;
+  public declare onTelemetryError: TelemetryErrorSink | null;
+  // how many calls into the caller's telemetry code (onEnd, exporter, onFinish) threw or rejected
+  public declare telemetryErrors: number;
   public declare maxEvents: number;
   public declare resource: { attributes: KeyValue[] };
   public declare scope: Scope;
   public declare count: number;
   public constructor(options: TracerOptions = {}) {
-    const { exporter, onEnd, resource, scope, maxEvents } = withDefaults(options, { exporter: dropSpans, onEnd: null, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
+    const { exporter, onEnd, onTelemetryError, resource, scope, maxEvents } = withDefaults(options, { exporter: dropSpans, onEnd: null, onTelemetryError: null, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
     this.exporter = exporter;
     this.onEnd = onEnd;
+    this.onTelemetryError = onTelemetryError;
+    this.telemetryErrors = 0;
     this.maxEvents = maxEvents;
     this.resource = { attributes: kvs({ 'service.name': 'ply', 'telemetry.sdk.name': 'ply-otel', 'telemetry.sdk.language': 'javascript', ...resource }) };
     this.scope = scope;
@@ -355,7 +366,26 @@ export class Tracer {
   }
   public export(span: OtlpSpan): void {
     this.count++;
-    this.exporter({ resourceSpans: [{ resource: this.resource, scopeSpans: [{ scope: this.scope, spans: [span] }] }] });
+    const line: ExportLine = { resourceSpans: [{ resource: this.resource, scopeSpans: [{ scope: this.scope, spans: [span] }] }] };
+    // guarded here as well as in Span.end(): an async exporter's rejection is caught where its promise is returned
+    this.guard('exporter', span.name, (): unknown => this.exporter(line));
+  }
+  // The boundary around the caller's telemetry code: run `call`; a throw, or a rejection of the promise it returns (an
+  // async exporter), is counted and reported, and never reaches the operation that ended the span.
+  public guard(hook: TelemetryHook, span: string, call: () => unknown): void {
+    try {
+      const returned = call();
+      if (returned !== undefined) Promise.resolve(returned).then(undefined, (e: unknown) => { this.telemetryFailed(e, hook, span); });
+    } catch (e) { this.telemetryFailed(e, hook, span); }
+  }
+  private telemetryFailed(error: unknown, hook: TelemetryHook, span: string): void {
+    this.telemetryErrors++;
+    const report = this.onTelemetryError;
+    if (report === null) return;
+    try {
+      const returned: unknown = report(error, { hook, span });
+      if (returned !== undefined) Promise.resolve(returned).then(undefined, () => { /* the reporter is telemetry too */ });
+    } catch { /* the reporter is telemetry too: what it throws is dropped */ }
   }
 }
 

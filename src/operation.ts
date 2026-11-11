@@ -62,7 +62,8 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   const name = `git.${op}`;
   const root = tracer.start(name, { parent, attrs: { [`${name}.url`]: transport === null ? redactUrl(url) : transport.url, ...attrs } });
   if (link !== null) root.link(link.span, { 'ply.link': link.kind });
-  const finish = (extra: Attrs): Span => { if (onFinish !== null) root.set(onFinish()); root.set(extra); return root; };
+  // onFinish only adds attributes: what it throws is telemetry's failure (tracer.onTelemetryError), never the operation's
+  const finish = (extra: Attrs): Span => { if (onFinish !== null) tracer.guard('onFinish', name, () => { root.set(onFinish()); }); root.set(extra); return root; };
   const outcome: Outcome = (kind, result, ...extra) => { const [given = {}] = extra; finish({ ...given, [`${name}.outcome`]: kind }).end(); return ok(result); };
   // An Err leaves through here: the outcome and error.type are its code (read before root.error scrubs it), the error is
   // recorded on the root, and it carries the root span for a caller's retry link.
