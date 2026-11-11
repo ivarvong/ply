@@ -311,7 +311,7 @@ const manualTimers = async run => {
     }
     T = to;
   };
-  try { await run({ advance, time: () => T }); } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; Date.now = realNow; }
+  try { await run({ advance, time: () => T, pending: () => q.size }); } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; Date.now = realNow; }
 };
 // Expected times are the documented rule worked by hand, not read from the clock: idleTimeoutMs is the longest wait on
 // the network with no progress, and the wait starts again when the consumer asks. So after an ask at A with no further
@@ -342,6 +342,27 @@ test('exchangeClock: with requestTimeoutMs set, the idle limit survives a timer 
     assert.equal(run({ ...capped, totalMs: 2000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(1500); c.feed('consumer_asked'); at(200_000); }), 'requestTimeoutMs@2000');
     // a consumer that never asks again is not charged idle time: only the total cap bounds it
     assert.equal(run({ ...capped, totalMs: 5000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'requestTimeoutMs@5000');
+  });
+});
+// What README Limits and SAFETY.md I1 say about a held chunk (re-review REQ 3): a timer may still be pending, but with
+// no total cap it cuts nothing, and once it has fired it is not set again until the consumer asks.
+test('exchangeClock: while the consumer holds a chunk a timer may be pending, and without requestTimeoutMs it cuts nothing', async () => {
+  await manualTimers(({ advance, pending }) => {
+    let fired = 'none';
+    const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, totalMs: 0 }, null, key => { fired = key; });
+    advance(10); c.feed('headers'); advance(20); c.feed('body_chunk'); c.feed('consumer_took');
+    // the one timer, set before the consumer took the chunk
+    assert.equal(pending(), 1);
+    // a day later the consumer still holds the chunk: nothing was cut, and the timer that fired was not set again
+    advance(86_400_000);
+    assert.deepEqual([fired, c.signal.aborted, pending()], ['none', false, 0]);
+    // the ask puts ply back on the network: the idle wait runs from here (86 400 000 + 60 000)
+    c.feed('consumer_asked');
+    assert.equal(pending(), 1);
+    advance(86_459_999);
+    assert.equal(fired, 'none');
+    advance(86_460_000);
+    assert.equal(fired, 'idleTimeoutMs');
   });
 });
 test('frames(): with requestTimeoutMs set, a server that stalls after the consumer held a frame across a timer firing is cut at ask + idle', async () => {
