@@ -15,6 +15,7 @@ import { GitHttp } from '../src/client.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 import { makeDelta } from '../src/pack.js';
+import * as pushEntry from '../src/push.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -72,3 +73,9 @@ for (const [config, cfg] of CONFIGS) {
     assert.deepEqual(fsckProblems(f.bare), []);
   });
 }
+
+// package.json maps './push' to this module, so each of its exports is public API ('ply/push'). The guard is push()'s
+// own: main (ec337c5) exports no such name, and the owner's decision is that none is added.
+test("the duplicate-object guard is not an export of 'ply/push'", () => {
+  assert.deepEqual(Object.keys(pushEntry).filter(k => /once|dedup|duplicate/iu.test(k)), []);
+});

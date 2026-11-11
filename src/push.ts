@@ -546,7 +546,7 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
 // already); a list with no such pair costs a map insert per object. The first of a pair is kept, in its place, and an
 // ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
 // A delta entry is kept as given: its object id is not known without applying it. Runs after checkBases.
-export function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
+function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
   const buckets = new Map<string, { readonly first: number; byOid: Map<string, number> | null }>();
   const out: PackObject[] = [];
   const keptAt: number[] = [];
