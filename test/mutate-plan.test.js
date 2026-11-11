@@ -246,18 +246,50 @@ const OWNERS = {
 // Gated whole: every top-level owner is strict, whatever it is called.
 const WHOLE = ['src/transfernames.ts', 'src/transfer.ts', 'src/transferload.ts'];
 
-// Every top-level declaration of a file with its 1-based line, read from the file's own text with a wider pattern
-// than scripts/mutate.mjs's owner rule (generators, let, var, class, export default): one the script cannot see is
-// reported as `unseen`, since its mutants would be judged as the owner above it.
-function census(file) {
+// Every line of a file that starts in column 0 is one of three things. No code: blank, a comment, a closing bracket,
+// an import, a re-export, a type, an interface or a declare; none of them starts code a mutant could sit in. `seen`: a
+// declaration the owner rule of scripts/mutate.mjs matches (function NAME or const NAME, exported or async or not),
+// written out here from that rule's two patterns; the verdict below then has to give each strict one its own name.
+// `unseen`: anything else (a generator, a destructured const, let, var, a class, an abstract class, an enum, a
+// namespace, export default, a bare statement). The script gives an unseen declaration's mutants to the owner above
+// it, exempt if that owner is, so each one fails the test (review of 3aca484b, required change 2).
+const NO_CODE = /^(?:$|\s|\/\/|\/\*|\*\/|[}\])]|import[\s{'"]|export (?:\{|\* |type[ {]|interface |declare )|type \w|interface \w|declare \w)/;
+const OWNER = /^(?:export )?(?:async )?function (\w+)|^(?:export )?const (\w+)\s*[:=]/;
+function censusOf(text) {
   const seen = [], unseen = [];
-  readFileSync(join(ROOT, file), 'utf8').split('\n').forEach((l, i) => {
-    const m = /^(?:export )?(?:default )?(?:async )?(function\*?|const|let|var|class)\s+(\w+)/.exec(l);
-    if (m) (m[1] === 'function' || m[1] === 'const' ? seen : unseen).push({ name: m[2], line: i + 1 });
-    else if (/^export default\b/.test(l)) unseen.push({ name: 'default', line: i + 1 });
+  text.split('\n').forEach((l, i) => {
+    const m = OWNER.exec(l);
+    if (m) seen.push({ name: m[1] ?? m[2], line: i + 1 });
+    else if (!NO_CODE.test(l)) unseen.push({ name: l.slice(0, 60), line: i + 1 });
   });
   return { seen, unseen };
 }
+const census = file => censusOf(readFileSync(join(ROOT, file), 'utf8'));
+
+// The forms are TypeScript's own top-level declarations and statements, written out by hand; the first five are the
+// ones the review appended after an exempt owner, of which the census before reported only the last.
+test('the census reports every top-level form the owner rule does not match, and nothing that holds no code', () => {
+  const hidden = [
+    'export function *starDecode(b: Uint8Array): Generator<number> {',
+    'export const { hiddenA, hiddenB } = pair;',
+    'export abstract class HiddenDecoder {',
+    'export enum HiddenLimit { Max = 64 }',
+    'export let counter = 0;',
+    'async function* gen() {', 'class C {', 'var v = 1;', 'const [a, b] = pair;', 'export default function f() {',
+    'export default 1;', 'namespace N {', 'if (ready) start();', 'start();', "import('./x.js');",
+  ];
+  assert.deepEqual(censusOf(hidden.join('\n')), { seen: [], unseen: hidden.map((l, i) => ({ name: l.slice(0, 60), line: i + 1 })) });
+  const quiet = [
+    '', '// a comment', '/* a comment', ' * inside it', '*/', '}', '});', '] as const;', '  const inner = 1;',
+    "import { a } from './a.js';", "import type { A } from './a.js';", "import './a.js';", "export { a } from './a.js';",
+    "export * from './a.js';", 'export type A = number;', 'export type { A };', 'export interface I {',
+    'export declare const d: number;', 'type B = string;', 'interface J {', 'declare const e: number;',
+  ];
+  assert.deepEqual(censusOf(quiet.join('\n')), { seen: [], unseen: [] });
+  const owners = ['export async function a(', 'function b(', 'export function c(', 'async function d(', 'export const e = 1;', 'const f: number = 1;'];
+  assert.deepEqual(censusOf(owners.join('\n')).seen.map(o => o.name), ['a', 'b', 'c', 'd', 'e', 'f']);
+  assert.deepEqual(censusOf(owners.join('\n')).unseen, []);
+});
 
 test('every top-level owner of an owner-gated file is listed strict or exempt, and the verdict agrees', () => {
   const problems = [];
@@ -265,7 +297,7 @@ test('every top-level owner of an owner-gated file is listed strict or exempt, a
   const mutants = {};
   for (const file of [...Object.keys(OWNERS), ...WHOLE]) {
     const { seen, unseen } = census(file);
-    for (const u of unseen) problems.push(`${file}:${u.line} ${u.name}: a top-level declaration the owner rule does not see`);
+    for (const u of unseen) problems.push(`${file}:${u.line} ${u.name}: a top-level declaration the owner rule does not match`);
     const lists = OWNERS[file] ?? { strict: seen.map(o => o.name), exempt: [] };
     const listed = new Set([...lists.strict, ...lists.exempt]);
     const names = new Set(seen.map(o => o.name));
