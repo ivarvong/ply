@@ -4,6 +4,9 @@
 //   - a push that never gets an answer and never lands, with maxSteps: the run is `ambiguous`, never `paused`
 //   - the final push applied, its response dropped, and the read after it failing: `ambiguous`, never the read's error
 //   - two runners on one plan at once, 20 times: both end done, the destination is the planned head, fsck clean
+//   - two runners on one plan, gated so the second's push of every step reaches git only after the first's landed, on
+//     a destination whose pre-receive hook refuses a push of what is already there: both end done; with the loser's
+//     reads failing after its last refusal, the loser is `ambiguous` (never paused, aborted or the refusal)
 //   - atomic off, the temp ref's delete refused by an update hook while the create lands: done with tempLeft
 // Each expectation is the fault the wrapper injected and what git shows in the bare repository, not ply's output.
 import { test, beforeAll as before, afterAll as after } from 'vitest';
@@ -159,6 +162,106 @@ test('two runners on one plan at once, 20 times: both end done; the destination 
     }
   }
 }, 240_000);
+
+// Two runners, one plan, one destination, one interleaving (no clock): per step k, runner A's push is forwarded only
+// once runner B's push of k is waiting at B's gate (so both chose step k from the same refs), and B's push is forwarded
+// only once A's has its whole answer (so git has applied A's). The destination's pre-receive hook refuses a push whose
+// new value the ref already has, a refusal that is not a compare-and-swap reason ('pre-receive hook declined':
+// push_rejected). So every push B makes is refused by real git while the refs show that step landed.
+function gatedRunners(steps, { failReadsAfterLast = false } = {}) {
+  const defer = () => { let open; const p = new Promise(r => { open = r; }); return { p, open }; };
+  const arrived = Array.from({ length: steps }, defer); // B's push k is at its gate
+  const answered = Array.from({ length: steps }, defer); // A's push k has its whole report
+  const seen = { a: 0, b: 0, reports: [], readsFailed: 0 };
+  const kind = (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const method = init?.method ?? (typeof input === 'string' ? 'GET' : input.method);
+    if (method !== 'POST') return 'other';
+    if (url.endsWith('/git-receive-pack')) return 'push';
+    return url.endsWith('/git-upload-pack') ? 'read' : 'other';
+  };
+  // the whole report read (the server has applied or refused the push) before anyone is told; the caller gets `res`
+  const whole = async res => new TextDecoder().decode(await res.clone().arrayBuffer());
+  const a = async (input, init) => {
+    if (kind(input, init) !== 'push') return fetch(input, init);
+    const k = seen.a++;
+    await arrived[k].p;
+    const res = await fetch(input, init);
+    await whole(res);
+    answered[k].open();
+    return res;
+  };
+  const b = async (input, init) => {
+    const what = kind(input, init);
+    if (what === 'read' && failReadsAfterLast && seen.reports.length === steps) { seen.readsFailed++; throw new TypeError('injected: read failed'); }
+    if (what !== 'push') return fetch(input, init);
+    const k = seen.b++;
+    arrived[k].open();
+    await answered[k].p;
+    const res = await fetch(input, init);
+    seen.reports.push(await whole(res));
+    return res;
+  };
+  // a runner that ends early must not leave the other waiting at a gate
+  const release = { a: () => answered.forEach(g => g.open()), b: () => arrived.forEach(g => g.open()) };
+  return { a, b, seen, release };
+}
+// pre-receive: refuse a command whose new value is what the ref already is (a delete is never that).
+const REFUSE_LANDED = `#!/bin/sh
+while read old new ref; do
+  [ "$new" = 0000000000000000000000000000000000000000 ] && continue
+  cur=$(git rev-parse -q --verify "$ref" 2>/dev/null)
+  if [ "$cur" = "$new" ]; then echo "already there: $ref" >&2; exit 1; fi
+done
+exit 0
+`;
+async function raceGated(p, opts) {
+  const { bare, url } = repo();
+  mkdirSync(join(bare, 'hooks'), { recursive: true });
+  writeFileSync(join(bare, 'hooks', 'pre-receive'), REFUSE_LANDED);
+  chmodSync(join(bare, 'hooks', 'pre-receive'), 0o755);
+  const g = gatedRunners(p.steps.length, opts);
+  const [runA, runB] = await Promise.all([
+    runTransfer(unwrap(createTransport(url, { fetchImpl: g.a })), from, p, src.commit, { settle: FAST }).finally(g.release.a),
+    runTransfer(unwrap(createTransport(url, { fetchImpl: g.b })), from, p, src.commit, { settle: FAST }).finally(g.release.b),
+  ]);
+  return { bare, g, runA, runB };
+}
+const say = r => (r.ok ? JSON.stringify(r.value) : `${r.error.code}: ${r.error.message}`);
+const DECLINED = /ng refs\/[^\n]*pre-receive hook declined/u;
+
+test('two gated runners, the loser\'s every push refused by git after the winner\'s landed: both done, refs as planned', async () => {
+  const p = plan();
+  const n = p.steps.length;
+  assert.ok(n >= 3);
+  const { bare, g, runA, runB } = await raceGated(p);
+  // git: the transfer is complete and nothing else is there
+  assertPublished(bare, p);
+  // the protocol: git refused every push the loser made (its own report-status); the winner made one push per step
+  assert.equal(g.seen.a, n);
+  assert.equal(g.seen.reports.length, g.seen.b);
+  for (const report of g.seen.reports) assert.match(report, DECLINED);
+  // the winner pushed every step once; the loser pushed every step once, each refused, each shown landed by the refs
+  assert.deepEqual(runA.ok && runA.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false }, `winner: ${say(runA)}`);
+  assert.equal(runB.ok, true, `git shows every step the loser pushed landed and the transfer complete; the loser said ${say(runB)}`);
+  assert.deepEqual(runB.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false });
+  assert.equal(g.seen.b, n);
+});
+
+test('two gated runners, the loser\'s reads failing after its last refused push: ambiguous with the refusal as cause, never paused or aborted', async () => {
+  const p = plan();
+  const n = p.steps.length;
+  const { bare, g, runA, runB } = await raceGated(p, { failReadsAfterLast: true });
+  assertPublished(bare, p);
+  assert.deepEqual(runA.ok && runA.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false }, `winner: ${say(runA)}`);
+  assert.equal(g.seen.b, n);
+  assert.match(g.seen.reports[n - 1], DECLINED);
+  assert.ok(g.seen.readsFailed >= 1);
+  // the loser's last push was refused and it could not read the refs: where the destination stands is unknown to it
+  assert.equal(runB.ok, false, `the loser could not read the destination after a refused push; it said ${say(runB)}`);
+  assert.equal(runB.error.code, 'ambiguous', say(runB));
+  assert.equal(runB.error.cause?.code, 'push_rejected', 'carries the push\'s own outcome');
+});
 
 test('atomic off, the temp ref\'s delete refused by a hook while the create lands: done, tempLeft', async () => {
   const p = plan({ atomic: false });
