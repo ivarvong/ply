@@ -461,6 +461,37 @@ test('cancel settles while a range read is in flight, whether or not the source 
   assert.equal(never.state.aborted, 1, 'a source that takes a signal is aborted');
 });
 
+test('the reason a cancelled range receives: the consumer\'s own, an AbortError when it gave none; the signal carries the same', async () => {
+  const idx = await scan(packs.ofs);
+  // DOM: AbortController.abort() with no reason sets an "AbortError" DOMException; a given reason is kept as it is
+  const cases = [['stop', r => r === 'stop'], [undefined, r => r instanceof DOMException && r.name === 'AbortError']];
+  for (const [given, expected] of cases) {
+    const seen = { cancels: [], aborts: [] };
+    let reached;
+    const parked = new Promise(r => { reached = r; });
+    const source = {
+      size: packs.ofs.length,
+      read(offset, length, signal) {
+        signal.addEventListener('abort', () => { seen.aborts.push(signal.reason); });
+        return Promise.resolve({ ok: true, value: new ReadableStream({ pull() { reached(); return new Promise(() => {}); }, cancel(why) { seen.cancels.push(why); } }, { highWaterMark: 0 }) });
+      },
+    };
+    const reader = unwrap(await packSubset(source, idx, [...Array(idx.count).keys()])).stream.getReader();
+    const drained = readAll(reader);
+    await parked;
+    await reader.cancel(given);
+    await drained;
+    assert.equal(seen.cancels.length, 1, String(given));
+    assert.ok(expected(seen.cancels[0]), `the range's cancel reason for ${String(given)}: ${String(seen.cancels[0])}`);
+    assert.deepEqual(seen.aborts, seen.cancels, 'read\'s signal aborts with the same reason');
+  }
+  // a range that is refused (it serves more bytes than were asked for) is cancelled with null, not with an error
+  const refused = [];
+  const long = { size: packs.ofs.length, read: (offset, length) => Promise.resolve({ ok: true, value: new ReadableStream({ pull(c) { c.enqueue(new Uint8Array(length + 1)); }, cancel(why) { refused.push(why); } }, { highWaterMark: 0 }) }) };
+  await assert.rejects(readAll(unwrap(await packSubset(long, idx, [...Array(idx.count).keys()])).stream.getReader()));
+  assert.deepEqual(refused, [null]);
+});
+
 test('a range opened after the stream was cancelled is cancelled, not left open', async () => {
   const idx = await scan(packs.ofs);
   // read() answers only when the test lets it, which is after the cancel
