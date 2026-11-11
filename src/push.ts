@@ -13,7 +13,7 @@ import type { Oid } from './oid.js';
 import type { Refname } from './refname.js';
 import { measurePack, streamPack, streamSource } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
-import { frames, coded, clientSpan, spanned, UA } from './transport.js';
+import { frames, coded, clientSpan, spanned, wrapNet, UA } from './transport.js';
 import { limitExceeded, parseLimits, LIMIT_REPORT_REASON_BYTES, LIMIT_REPORT_PROGRESS_BYTES } from './limits.js';
 import type { LimitsInput } from './limits.js';
 // oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, the parsed brands, Result
@@ -859,6 +859,10 @@ async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promis
   const { plan } = p;
   const prefix = requestBody(plan, null);
   if (!prefix.ok) return prefix;
+  // The caller's signal had fired before the send: no request is made and the pack is not locked, read or cancelled,
+  // so this is the definite 'aborted' (or 'timeout', by the signal's reason), not 'ambiguous'.
+  const signal = getOrElse<unknown>(field(t, 'signal'), null);
+  if (signal instanceof AbortSignal && signal.aborted) return err(wrapNet(signal.reason, signal));
   const body = streamSource(p.pack, prefix.value, p.length, plan.maxPack);
   const r = await readResponse(t, plan, body, span, plan.sideband);
   // read before release: abandoning the rest of a pack the server already answered is not a failure of the pack
