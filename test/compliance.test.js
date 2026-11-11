@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, fsck } from './server.js';
+import { git, gitBuf, tmpRoot, fsck, initRepo } from './server.js';
 import { validateIdent, validateRef, validatePath } from '../src/validate.js';
 import { encodeCommit, parseCommit, hashObject, encodeTree, parseTree, treeSort } from '../src/objects.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
@@ -125,7 +125,7 @@ const emptyTreeIn = sub => git(sub, ['hash-object', '-t', 'tree', '--stdin', '-w
 const blobIn = (sub, s) => git(sub, ['hash-object', '-w', '--stdin'], { input: s }).trim();
 
 test('parseCommit recovers tree/parents/author/committer/message from every commit shape git writes', () => {
-  const sub = join(root, 'c'); mkdirSync(sub); git(sub, ['init', '-q', '-b', 'main']);
+  const sub = join(root, 'c'); mkdirSync(sub); initRepo(sub);
   const env = { ...process.env, GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'C', GIT_COMMITTER_EMAIL: 'c@x', GIT_AUTHOR_DATE: '1700000000 +0100', GIT_COMMITTER_DATE: '1700000001 -0230' };
   writeFileSync(join(sub, 'f'), '1'); git(sub, ['add', 'f']); git(sub, ['commit', '-q', '-m', 'root'], { env });
   git(sub, ['checkout', '-q', '-b', 'b1']); writeFileSync(join(sub, 'g'), '2'); git(sub, ['add', 'g']); git(sub, ['commit', '-q', '-m', 'b1'], { env });

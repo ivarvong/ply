@@ -11,7 +11,7 @@ import http from 'node:http';
 import { randomFillSync } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -48,7 +48,7 @@ before(async () => {
   proxy = await countingProxy(srv.url);
   const work = join(root, 'source');
   mkdirSync(join(work, 'a'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   for (let i = 0; i < BLOBS; i++) {
     const blob = new Uint8Array(30_000);
     randomFillSync(blob);

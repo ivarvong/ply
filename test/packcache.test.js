@@ -4,7 +4,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
-import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { cachingFetch, memoryCache, isCacheableFetch, cacheKey, parseUploadPackRequest, exchangeKind, verifyFetchAnswer } from '../src/packcache.js';
@@ -27,7 +27,7 @@ const otherWriter = (files, msg) => { git(work, ['fetch', '-q', bare, 'refs/head
 const author = { name: 'pc', email: 'pc@x' };
 before(async () => {
   ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root);
-  bare = makeBareRepo(root, 'pc'); work = join(root, 'wpc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  bare = makeBareRepo(root, 'pc'); work = join(root, 'wpc'); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, { 'a/b/c/file.txt': 'hello MARK world\n', 'README.md': '# pc\n' }, 'init');
   proxy = await startProxy(srv.url, () => null);
   url = `${proxy.url}/pc.git`;
@@ -296,7 +296,7 @@ test('agent: we identify as ply, not git', async () => {
 });
 
 test('negotiation, deterministic: haves in rounds — NAK rounds of unknown oids, then ACKs of shared history, ready, and a pack of only what is new', async () => {
-  const nb = makeBareRepo(root, 'nego'); const nw = join(root, 'wnego'); mkdirSync(nw); git(nw, ['init', '-q', '-b', 'main']);
+  const nb = makeBareRepo(root, 'nego'); const nw = join(root, 'wnego'); mkdirSync(nw); initRepo(nw);
   const commits = []; for (let i = 0; i < 30; i++) commits.push(commitFiles(nw, nb, { 'f.txt': `v${i}\n` }, `c${i}`));
   const c = unwrap(GitHttp.create(`${srv.url}/nego.git`, { tracer: new Tracer() }));
   const unknown = Array.from({ length: 20 }, (_, i) => (i.toString(16).padStart(2, '0')).repeat(20));

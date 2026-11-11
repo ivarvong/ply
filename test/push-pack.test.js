@@ -14,7 +14,7 @@ import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { createTransport } from '../src/http.js';
 import { ZERO_OID, pushPackChecked, planPackPush } from '../src/push.js';
 import { pushPack, checkPushCaps } from '../src/receivecaps.js';
@@ -32,7 +32,7 @@ before(async () => {
   srv = await startGitServer(root);
   const work = join(root, 'source');
   mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   const blob = new Uint8Array(300_000);
   randomFillSync(blob);
   writeFileSync(join(work, 'random.bin'), blob);

@@ -1,7 +1,7 @@
 // Real git as the oracle: `git http-backend` behind a tiny Node HTTP→CGI shim.
 import http from 'node:http';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -197,6 +197,9 @@ export async function gitUserinfoCred(cwd, url) {
 // Environment config (GIT_CONFIG_COUNT) outranks all three; test/harness-maintenance.test.js observes them under it.
 export const NO_MAINTENANCE = [['gc.auto', '0'], ['maintenance.auto', 'false'], ['receive.autoGc', 'false']];
 export function noMaintenance(dir) { for (const [k, v] of NO_MAINTENANCE) git(dir, ['config', k, v]); }
+// A work repository (`git init -q -b main`, the directory made if absent) with background maintenance off: the one
+// place a test's non-bare repository is made, since `git commit` in it starts `git maintenance run --auto --detach`.
+export function initRepo(dir) { mkdirSync(dir, { recursive: true }); git(dir, ['init', '-q', '-b', 'main']); noMaintenance(dir); return dir; }
 
 // A bare repo configured for v2 partial fetch of arbitrary objects + push. `stock: true` leaves upload-pack at git's
 // defaults: no uploadpack.allowFilter (so `fetch=` advertises no `filter`, and upload-pack dies on one) and no

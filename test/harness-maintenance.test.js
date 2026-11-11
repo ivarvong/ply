@@ -24,7 +24,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, NO_MAINTENANCE } from './server.js';
+import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, NO_MAINTENANCE, initRepo } from './server.js';
 
 const FORCED = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'gc.auto', GIT_CONFIG_VALUE_0: '1', GIT_CONFIG_KEY_1: 'gc.autoPackLimit', GIT_CONFIG_VALUE_1: '1' };
 const MAINTENANCE = new Set(['maintenance', 'gc', 'repack']);
@@ -39,7 +39,7 @@ async function pushTwice(bare, name) {
   const srv = await startGitServer(root, { ...FORCED, GIT_TRACE2_EVENT: trace });
   try {
     const work = join(root, `work${n++}`); mkdirSync(work);
-    git(work, ['init', '-q', '-b', 'main']);
+    initRepo(work);
     for (const k of [1, 2]) {
       writeFileSync(join(work, 'f.txt'), `${k}\n`);
       git(work, ['add', 'f.txt']);
@@ -78,7 +78,7 @@ test('harness control: the same repository with the three keys unset does start 
   const srv = await startGitServer(root, { ...FORCED, GIT_TRACE2_EVENT: trace });
   try {
     const work = join(root, `work${n++}`); mkdirSync(work);
-    git(work, ['init', '-q', '-b', 'main']);
+    initRepo(work);
     writeFileSync(join(work, 'f.txt'), '1\n');
     git(work, ['add', 'f.txt']);
     git(work, ['-c', 'user.name=t', '-c', 'user.email=t@x', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'c1']);

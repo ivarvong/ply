@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { editFile, buildCommitObjects, withCommitData } from '../src/edit.js';
 import { generateSigner, signCommit, withGpgsig, armor } from '../src/sign.js';
 import { encodeCommit, hashObject, parseCommit } from '../src/objects.js';
@@ -16,7 +16,7 @@ let root, cleanup, srv, bare, work, url, signers;
 const author = { name: 'signer', email: 'signer@x' };
 before(async () => {
   ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root);
-  bare = makeBareRepo(root, 'sg'); work = join(root, 'wsg'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  bare = makeBareRepo(root, 'sg'); work = join(root, 'wsg'); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, { 'f.txt': 'hello MARK\n' }, 'seed');
   url = `${srv.url}/sg.git`;
   signers = join(root, 'allowed_signers');
