@@ -332,6 +332,101 @@ test('a consumer that cancels the stream cancels the range read', async () => {
   assert.equal(src.state.cancelled, 1);
 });
 
+// A hang is proved by a step counter, not a clock: `turns` event-loop turns pass while the promise is still pending.
+// (A cancel that works settles within a few microtasks of the call, before the first turn.)
+const settledWithin = async (promise, turns = 50) => {
+  let state = 'pending';
+  promise.then(() => { state = 'settled'; }, () => { state = 'settled'; });
+  for (let i = 0; i < turns && state === 'pending'; i++) await new Promise(r => setImmediate(r));
+  return state;
+};
+const readAll = async reader => { for (;;) { const r = await reader.read(); if (r.done) return; } };
+// A source that stops answering: `open: 'never'` leaves read() itself pending for ever; `open: 'stall'` opens a range
+// that serves `serve` bytes and then never another. `parked` resolves once the source is in that state.
+function stallingSource(bytes, { open, serve = 0 }) {
+  const state = { reads: 0, cancelled: 0, aborted: 0 };
+  let reached;
+  const parked = new Promise(r => { reached = r; });
+  return {
+    state, parked, size: bytes.length,
+    read(offset, length, signal) {
+      state.reads++;
+      signal?.addEventListener('abort', () => { state.aborted++; });
+      if (open === 'never') { reached(); return new Promise(() => {}); }
+      let at = offset;
+      return Promise.resolve({ ok: true, value: new ReadableStream({
+        pull(c) {
+          if (at - offset >= serve) { reached(); return new Promise(() => {}); }
+          const len = Math.min(serve - (at - offset), offset + length - at);
+          c.enqueue(bytes.subarray(at, at + len));
+          at += len;
+          return undefined;
+        },
+        cancel() { state.cancelled++; },
+      }, { highWaterMark: 0 }) });
+    },
+  };
+}
+
+test('cancel settles while a range read is in flight, whether or not the source ever answers', async () => {
+  const idx = await scan(packs.ofs);
+  const all = [...Array(idx.count).keys()];
+  // the range is open and has stalled: cancel settles, and the range is cancelled
+  const stalled = stallingSource(packs.ofs, { open: 'stall', serve: 1000 });
+  const a = unwrap(await packSubset(stalled, idx, all)).stream.getReader();
+  const drainA = readAll(a);
+  await stalled.parked;
+  assert.equal(await settledWithin(a.cancel('stop')), 'settled', 'cancel() with a stalled range');
+  assert.equal(await settledWithin(drainA), 'settled', 'the read that was pending');
+  assert.equal(stalled.state.cancelled, 1, 'the stalled range is cancelled');
+  assert.equal(stalled.state.aborted, 1, 'the source is told through its signal');
+  // read() itself never resolves: cancel settles all the same, and the source is told through its signal
+  const never = stallingSource(packs.ofs, { open: 'never' });
+  const b = unwrap(await packSubset(never, idx, all)).stream.getReader();
+  const drainB = readAll(b);
+  await never.parked;
+  assert.equal(await settledWithin(b.cancel('stop')), 'settled', 'cancel() with read() pending');
+  assert.equal(await settledWithin(drainB), 'settled', 'the read that was pending');
+  assert.equal(never.state.reads, 1);
+  assert.equal(never.state.aborted, 1, 'a source that takes a signal is aborted');
+});
+
+test('a range opened after the stream was cancelled is cancelled, not left open', async () => {
+  const idx = await scan(packs.ofs);
+  // read() answers only when the test lets it, which is after the cancel
+  let answer, reached, cancelled = 0;
+  const parked = new Promise(r => { reached = r; });
+  const late = { size: packs.ofs.length, read: () => new Promise(r => { answer = r; reached(); }) };
+  const s = unwrap(await packSubset(late, idx, [...Array(idx.count).keys()])).stream.getReader();
+  const drained = readAll(s);
+  await parked;
+  assert.equal(await settledWithin(s.cancel()), 'settled');
+  assert.equal(await settledWithin(drained), 'settled');
+  answer({ ok: true, value: new ReadableStream({ cancel() { cancelled++; } }) });
+  await new Promise(r => setImmediate(r));
+  assert.equal(cancelled, 1, 'the late range');
+});
+
+test('pushPack over a source that stalls mid-range: an abort returns an outcome, and the ref did not move', async () => {
+  const idx = await scan(packs.ofs);
+  const src = stallingSource(packs.ofs, { open: 'stall', serve: 100_000 });
+  const built = unwrap(await packSubset(src, idx, [...Array(idx.count).keys()]));
+  const name = `stall${n++}`;
+  const bare = makeBareRepo(root, name);
+  const ac = new AbortController();
+  const t = unwrap(createTransport(`${srv.url}/${name}.git`, { signal: ac.signal }));
+  const pushed = pushPackChecked(t, { ref: REF, oldOid: ZERO_OID, newOid: packs.head, pack: built.stream, length: built.length, sideband: false });
+  await src.parked;
+  ac.abort(new Error('caller gave up'));
+  const r = await pushed;
+  // the request was under way with part of the pack sent: what the server did with it is not known to the client
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'ambiguous', r.error.message);
+  assert.equal(src.state.cancelled, 1, 'the stalled range is cancelled');
+  // git is the witness that nothing landed: a pack cut short cannot move a ref
+  assert.throws(() => git(bare, ['rev-parse', '--verify', '-q', REF]));
+}, 20_000);
+
 test('pushPack round trip: a reordered subset pushed to git http-backend lands, fsck --strict clean', async () => {
   const idx = await scan(packs.ofs);
   const c = idx.columns;

@@ -7,7 +7,13 @@ import { fail } from './errors.js';
 import type { Result } from './result.js';
 import { ok } from './result.js';
 
-export type RangeSource = { readonly size: number; read(offset: number, length: number): Promise<Result<ReadableStream<Uint8Array>, PlyError>> };
+// `signal` aborts when the reader no longer wants the range (its consumer cancelled): a source that can abandon a read in
+// flight does; one that ignores it (a read of two parameters is still a RangeSource) is never waited for by packSubset.
+export type RangeSource = { readonly size: number; read(offset: number, length: number, signal: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>> };
+
+// The signal of a read that nothing can cancel yet: its caller takes no abort signal and has no consumer to cancel it
+// (packIdentity, resolvePackRange, loadTransferPack). A source that never answers one of these is waited for.
+export const UNCANCELLABLE: AbortSignal = new AbortController().signal;
 
 // A RangeSource over bytes in memory (tests, and a pack small enough to hold): each read is one chunk, a view (no copy).
 export function rangeFromBytes(bytes: Uint8Array): RangeSource {

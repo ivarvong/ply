@@ -21,6 +21,7 @@ import { scanPackIndex } from './packscanindex.js';
 import type { ResolveRangeOpts } from './packrangeresolve.js';
 import { resolvePackRange } from './packrangeresolve.js';
 import type { RangeSource } from './rangesource.js';
+import { UNCANCELLABLE } from './rangesource.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
 import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
@@ -41,7 +42,7 @@ async function resolved(source: RangeSource, pack: ScannedPack, cfg: LoadConfig,
   return saved.ok ? ok({ from: { source, pack, resolved: r.value }, loaded, saved: saved.value }) : saved;
 }
 async function scanned(source: RangeSource, cfg: LoadConfig, refused: Option<SavedIndexRefusal>): Promise<Result<LoadedPack, PlyError>> {
-  const whole = await source.read(0, source.size);
+  const whole = await source.read(0, source.size, UNCANCELLABLE);
   if (!whole.ok) return whole;
   const pack = await scanPackIndex(whole.value, cfg.scan);
   if (!pack.ok) return pack;

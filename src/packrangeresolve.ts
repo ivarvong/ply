@@ -33,6 +33,7 @@ import type { Oid } from './sha1.js';
 import { fromHex, toOid } from './sha1.js';
 import type { ScannedPack, ScannedType, ScanIndexOpts } from './packscanindex.js';
 import type { RangeSource } from './rangesource.js';
+import { UNCANCELLABLE } from './rangesource.js';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, declaredBound, zlibWrap } from './inflatestream.js';
 import { applyDelta } from './packresolve.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';
@@ -173,7 +174,7 @@ async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyEr
   const opened = inflateInit({ bound: declaredBound(size, isWhole(cols.storedType[i] as number) ? s.maxObject : s.maxDelta), wrap: zlibWrap(true) });
   if (!opened.ok) return opened;
   const st = opened.value;
-  const got = await s.source.read(at, length);
+  const got = await s.source.read(at, length, UNCANCELLABLE);
   if (!got.ok) return got;
   s.stats.reads += 1;
   const reader = got.value.getReader();

@@ -18,6 +18,11 @@
 // (its new offset) + 4 (its OFS base's position) + 1 (its kind), per source entry 4 + 1 (position, selected mark), the
 // extras' deflated bytes, and the chunk in flight. A source that serves fewer or more bytes than a range asks for
 // errors the stream (pack_corrupt) before the trailer, so the receiver never gets a whole pack from a short read.
+//
+// The source is the caller's storage and may never answer. Cancelling the stream settles at once all the same: no await
+// on the source (opening a range, reading it, cancelling it) is made without `Halt.race`, the range in flight is
+// cancelled and the source's abort signal fired without waiting for either, and whatever a read answers later is
+// dropped (a range that opens late is cancelled).
 import type { PlyError } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
@@ -57,6 +62,62 @@ type Plan = {
   readonly extras: ReadonlyArray<{ readonly head: Uint8Array; readonly z: Uint8Array }>;
   readonly body: number;
 };
+
+// What cancelling the stream stops. One read of the source is in flight at a time (the stream is pulled in order), so
+// one slot holds what wakes it: not Promise.race against a promise that lives as long as the stream, which would keep a
+// reaction per chunk read.
+const HALTED: unique symbol = Symbol('halted');
+type Halted = typeof HALTED;
+type Halt = {
+  // given to every source.read: a source that can abandon a read does
+  readonly signal: AbortSignal;
+  readonly halted: () => boolean;
+  // p's outcome, or HALTED as soon as the stream is cancelled, whether or not p ever settles; a value that arrives
+  // after that goes to `late`, a rejection nowhere
+  readonly race: <T>(p: Promise<T>, late: (v: T) => void) => Promise<T | Halted>;
+  // the range being read (null: none), cancelled when the stream is
+  readonly reading: (range: ReadableStreamDefaultReader<Uint8Array> | null) => void;
+  readonly halt: (reason: unknown) => void;
+};
+const drop = (): void => { /* the stream is cancelled or already refused: the outcome is decided without this */ };
+// Asks a range to stop, without waiting for the source to say it has.
+const cancelRange = (range: { readonly cancel: (reason: unknown) => Promise<void> }, reason: unknown): void => { range.cancel(reason).catch(drop); };
+const cancelled = (): PlyError => plyError('aborted', 'pack subset: the stream was cancelled');
+function halter(): Halt {
+  const abort = new AbortController();
+  let done = false;
+  let wake: (() => void) | null = null;
+  let range: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  return {
+    signal: abort.signal,
+    halted: () => done,
+    reading(r) { range = r; },
+    async race<T>(p: Promise<T>, late: (v: T) => void): Promise<T | Halted> {
+      // a fresh promise per read, held only by `wake` until the read settles or the stream is cancelled
+      const stopped = new Promise<Halted>(resolve => {
+        if (done) resolve(HALTED);
+        else wake = (): void => { resolve(HALTED); };
+      });
+      const settled = p.then(v => {
+        if (done) late(v);
+        else wake = null;
+        return v;
+      });
+      // a rejection after the halt is handled here (the race has attached to it) and goes nowhere
+      const first = await Promise.race([settled, stopped]);
+      return first;
+    },
+    halt(reason) {
+      if (done) return;
+      done = true;
+      abort.abort(reason);
+      if (range !== null) cancelRange(range, reason);
+      range = null;
+      if (wake !== null) wake();
+      wake = null;
+    },
+  };
+}
 
 const refuse = (what: string, message: string): Result<never, PlyError> => fail('bad_request', `pack subset: ${message}`, { what });
 
@@ -146,14 +207,15 @@ type Cut = {
   readonly skip: (want: number) => Promise<PlyError | null>;
   readonly end: () => Promise<PlyError | null>;
 };
-function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, length: number): Cut {
+function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, length: number, halt: Halt): Cut {
   let chunk: Uint8Array = new Uint8Array(0);
   let at = 0;
   let got = 0;
   const long = (): PlyError => plyError('pack_corrupt', `pack subset: the range at ${start} served more than its ${length} bytes`);
   // the next chunk of the range, or why there is none
   async function refill(): Promise<PlyError | null> {
-    const r = await reader.read();
+    const r = await halt.race(reader.read(), drop);
+    if (r === HALTED) return cancelled();
     if (r.done) return plyError('pack_corrupt', `pack subset: the range at ${start} ended after ${got} of ${length} bytes`);
     if (got + r.value.length > length) return long();
     chunk = r.value;
@@ -194,7 +256,8 @@ function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, 
   }
   async function end(): Promise<PlyError | null> {
     if (at < chunk.length) return long();
-    const r = await reader.read();
+    const r = await halt.race(reader.read(), drop);
+    if (r === HALTED) return cancelled();
     return r.done ? null : long();
   }
   return { take, skip, end };
@@ -228,7 +291,7 @@ async function* run(p: Plan, cut: Cut, from: number, to: number): AsyncGenerator
 }
 
 // The new pack's bytes before its trailer; null when all were written, or the refusal that stopped them.
-async function* pieces(source: RangeSource, p: Plan): AsyncGenerator<Uint8Array, PlyError | null, unknown> {
+async function* pieces(source: RangeSource, p: Plan, halt: Halt): AsyncGenerator<Uint8Array, PlyError | null, unknown> {
   const c = p.pack.columns;
   yield packHeader(p.selection.length + p.extras.length);
   for (const r of runs(p)) {
@@ -238,16 +301,19 @@ async function* pieces(source: RangeSource, p: Plan): AsyncGenerator<Uint8Array,
     const start = c.offset[first] as number;
     const length = (c.offset[last] as number) + (c.headerBytes[last] as number) + (c.compressed[last] as number) - start;
     // oxlint-disable-next-line no-await-in-loop -- one run after another, in pack order
-    const opened = await source.read(start, length);
+    const opened = await halt.race(source.read(start, length, halt.signal), late => { if (late.ok) cancelRange(late.value, null); });
+    if (opened === HALTED) return cancelled();
     if (!opened.ok) return opened.error;
     const reader = opened.value.getReader();
+    halt.reading(reader);
     let outcome: PlyError | null | 'open' = 'open';
     try {
-      outcome = yield* run(p, cutter(reader, start, length), r.from, r.to);
+      outcome = yield* run(p, cutter(reader, start, length, halt), r.from, r.to);
     } finally {
-      // a range not read to its end (a refusal, the consumer cancelling) is cancelled, not left open
-      // oxlint-disable-next-line no-await-in-loop -- see above
-      if (outcome !== null) await reader.cancel().catch(() => { /* the outcome is already decided */ });
+      halt.reading(null);
+      // a range not read to its end (a refusal, the consumer cancelling) is cancelled, not left open; the source is
+      // asked, not waited for
+      if (outcome !== null) cancelRange(reader, null);
       reader.releaseLock();
     }
     if (outcome !== null) return outcome;
@@ -266,14 +332,17 @@ export async function packSubset(source: RangeSource, pack: ScannedPack, selecti
   if (!planned.ok) return planned;
   const p = planned.value;
   const length = p.body + PACK_TRAILER_BYTES;
-  const it = pieces(source, p);
+  const halt = halter();
+  const it = pieces(source, p, halt);
   const sha = streamingSha1();
   let sent = 0;
   const stream = new ReadableStream<Uint8Array>({
     async pull(ctl): Promise<void> {
       let r: IteratorResult<Uint8Array, PlyError | null>;
       // a range reader whose stream errors (its own failure) rejects here
-      try { r = await it.next(); } catch (e) { ctl.error(e); return; }
+      try { r = await it.next(); } catch (e) { if (!halt.halted()) ctl.error(e); return; }
+      // cancelled while this read was in flight: nothing more is enqueued, whatever the read came to
+      if (halt.halted()) return;
       if (r.done === true) {
         if (r.value !== null) { ctl.error(r.value); return; }
         if (sent !== p.body) { ctl.error(plyError('internal', `pack subset: wrote ${sent} bytes, planned ${p.body}`)); return; }
@@ -283,9 +352,15 @@ export async function packSubset(source: RangeSource, pack: ScannedPack, selecti
       }
       sent += r.value.length;
       await sha.update(r.value);
+      if (halt.halted()) return;
       ctl.enqueue(r.value);
     },
-    async cancel(): Promise<void> { await it.return(null); },
+    // Settles at once, whatever the source does: the read in flight is released (Halt), and the generator unwinds
+    // behind it, or from the yield it is parked at, without being waited for.
+    cancel(reason: unknown): void {
+      halt.halt(reason);
+      it.return(null).catch(drop);
+    },
   }, { highWaterMark: 0 });
   return ok({ stream, length, count: p.selection.length + p.extras.length });
 }

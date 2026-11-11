@@ -24,6 +24,7 @@ import { fail } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, isSome, assertNever } from './result.js';
 import type { RangeSource } from './rangesource.js';
+import { UNCANCELLABLE } from './rangesource.js';
 import type { ScannedPack, ScanColumns } from './packscanindex.js';
 import { scannedPackOf, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
 import type { ResolvedIndex, ResolvedColumns, ResolveStats } from './packrangeresolve.js';
@@ -75,7 +76,7 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
 // The spool's identity: its length and its last 20 bytes, read through the source.
 export async function packIdentity(source: RangeSource): Promise<Result<PackIdentity, PlyError>> {
   if (!Number.isSafeInteger(source.size) || source.size < 32) return fail('bad_request', `saved index: a spool of ${source.size} bytes holds no pack`, { what: 'spool' });
-  const got = await source.read(source.size - PACK_TRAILER_BYTES, PACK_TRAILER_BYTES);
+  const got = await source.read(source.size - PACK_TRAILER_BYTES, PACK_TRAILER_BYTES, UNCANCELLABLE);
   if (!got.ok) return got;
   const tail = await readAll(got.value);
   if (tail.length !== PACK_TRAILER_BYTES) return fail('bad_request', `saved index: the spool's last ${PACK_TRAILER_BYTES} bytes read back as ${tail.length}`, { what: 'spool' });
