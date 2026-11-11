@@ -26,8 +26,8 @@ import { parseCommit, encodeCommitOf, encodeEntries, hashObject, TYPE } from './
 import type { EntryOf } from './objects.js';
 import type { Input } from './absent.js';
 import { at, mapGet, withDefaults } from './absent.js';
-import type { PackPlan, PushBudget } from './packplan.js';
-import { planPackBatches } from './packplan.js';
+import type { PackPlan, PlannedBatch, PushBudget } from './packplan.js';
+import { planPackBatches, planHash, PLAN_VERSION } from './packplan.js';
 import type { ScannedPack, ScannedType } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import type { Oid } from './sha1.js';
@@ -258,24 +258,54 @@ function wellFormedStep(s: TransferStepPlan): boolean {
   return s.kind === 'final' && !Reflect.has(s, 'temp');
 }
 
-// The fields the check and the key read: ids, refs, the pack plan's hash, the steps (the last the only final one).
+// A count or an entry index as JSON gives it back: a non-negative safe integer.
+const isCount = (v: unknown): boolean => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+const isCounts = (v: readonly number[]): boolean => isList(v) && v.every(n => isCount(n));
+function wellFormedBatch(b: PlannedBatch): boolean {
+  if (typeof b !== 'object' || b === null || (b.kind !== 'blobs' && b.kind !== 'final')) return false;
+  return isCount(b.packBytes) && isCount(b.objects) && isCount(b.refRewrites) && isCounts(b.entries);
+}
+function wellFormedBudget(b: PushBudget): boolean {
+  if (typeof b !== 'object' || b === null) return false;
+  return [b.maxRequestBytes, b.maxObjects, b.maxObjectBytes, b.maxCompressedObjectBytes, b.reserveBytes, b.reserveObjects].every(n => isCount(n));
+}
+// The pack plan, every field planHash and a step read: one batch per step, a blobs batch for a batch step and the
+// final batch for the final step.
+function wellFormedPack(p: PackPlan, steps: readonly TransferStepPlan[]): boolean {
+  if (typeof p !== 'object' || p === null || p.version !== PLAN_VERSION || typeof p.hash !== 'string' || typeof p.trailer !== 'string') return false;
+  if (typeof p.crossBatchRef !== 'boolean' || !isCount(p.entries) || !wellFormedBudget(p.budget)) return false;
+  if (p.select !== null && !isCounts(p.select)) return false;
+  if (!isList(p.batches) || p.batches.length !== steps.length || !p.batches.every(b => wellFormedBatch(b))) return false;
+  return p.batches.every((b, i) => {
+    const s = at(steps, i);
+    return s.tag === 'some' && (b.kind === 'final') === (s.value.kind === 'final');
+  });
+}
+
+// Every field the check, the key, the two hashes and a step read: ids, refs, the steps (each well formed before its
+// kind is read; the last the only final one), the pack plan.
 function wellFormedPlan(plan: TransferPlan): boolean {
   if (typeof plan !== 'object' || plan === null || plan.version !== TRANSFER_VERSION) return false;
   if (!isOid(plan.source) || !isOid(plan.tree) || !isOid(plan.head) || !isList(plan.steps)) return false;
-  if (!targetRef(plan.ref).ok || typeof plan.tempRef !== 'string') return false;
-  if (typeof plan.pack !== 'object' || plan.pack === null || typeof plan.pack.hash !== 'string') return false;
-  const last = at(plan.steps, plan.steps.length - 1);
-  return last.tag === 'some' && last.value.kind === 'final' && plan.steps.every((s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === plan.steps.length - 1));
+  if (!targetRef(plan.ref).ok || typeof plan.tempRef !== 'string' || typeof plan.atomic !== 'boolean' || typeof plan.hash !== 'string') return false;
+  const last = plan.steps.length - 1;
+  if (last < 0 || !plan.steps.every((s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === last))) return false;
+  return wellFormedPack(plan.pack, plan.steps);
 }
 
 // A plan as read back (JSON, a store) is untrusted input. The check, which transferStatus, transferStep and
 // runTransfer all make before they act or answer:
-//   - its ids, refs and steps are well formed, the last step the only final one;
+//   - it is total: every field the check, a hash or a later step reads (ids, refs, steps, the pack plan's budget,
+//     selection, batches and their entries) has its type and shape checked first, so a plan of any shape is answered
+//     with bad_request, never a TypeError;
 //   - its temp ref is not a free field: it must be the name tempRefOf derives from the plan's key under the caller's
 //     prefix, and never the target ref. So the only refs a plan can make a push create, move or delete are
 //     refs/ply/transfer/<key> (or the caller's prefix) and the target ref, which the caller can name on the call;
-//   - its hash matches. The hash is unkeyed (transferPlanHash is public): it is integrity against corruption and
-//     stale or partial writes, NOT authentication against whoever can write the plan store. What bounds a hostile
+//   - both hashes are recomputed and match: the pack plan's own (planHash: trailer, budget, crossBatchRef, selection,
+//     entry count, every batch and its entries) and the transfer's (ids, refs, atomic, the pack plan's hash, the
+//     steps), so every field a step reads is under a hash. The hashes are unkeyed (both functions are public): they
+//     are integrity against corruption and stale or partial writes, NOT authentication against whoever can write the
+//     plan store. What bounds a hostile
 //     plan is the temp ref rule above, the named target ref, and the destination's own checks (every update is a
 //     compare-and-swap; the server checks connectivity).
 export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): Result<TransferPlan, PlyError> {
@@ -283,7 +313,8 @@ export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): 
   if (!wellFormedPlan(plan)) return edited();
   const { hash, ...body } = plan;
   // corruption first (an honest plan, damaged), then what holds whoever wrote the hash
-  if (transferPlanHash(body) !== hash) return edited();
+  const { hash: packHash, ...packBody } = plan.pack;
+  if (planHash(packBody) !== packHash || transferPlanHash(body) !== hash) return edited();
   const named = tempRefOf(want.tempPrefix, transferKey(plan));
   if (!named.ok || plan.tempRef !== named.value || plan.tempRef === plan.ref) return fail('bad_request', 'transfer: the plan\'s temp ref is not the one its key names', { what: 'tempRef' });
   if (want.ref !== null && plan.ref !== want.ref) return fail('bad_request', `transfer: the plan is for ${plan.ref}, not the ref this call names`, { what: 'ref' });
