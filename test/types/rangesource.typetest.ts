@@ -20,3 +20,12 @@ const needsSignal = (offset: number, length: number, signal: AbortSignal): Retur
 // @ts-expect-error a read that cannot be called without its signal
 const three: RangeSource = { size: 4, read: needsSignal };
 void three;
+
+// a signal passed straight through compiles, the platform missing value included: a wrapper forwards the optional
+// signal it was given, a caller forwards an optional field of its own options, and an explicit missing value is a call
+// oxlint-disable-next-line typescript/promise-function-async -- as above
+const wrapped: RangeSource = { size: 4, read: (offset: number, length: number, signal?: AbortSignal) => bytes.read(offset, length, signal) };
+const opts: { readonly signal?: AbortSignal } = {};
+const forwarded = bytes.read(0, 4, opts.signal);
+const explicit = bytes.read(0, 4, undefined);
+void wrapped; void forwarded; void explicit;

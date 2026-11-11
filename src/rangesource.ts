@@ -2,19 +2,18 @@
 // the pack-over-a-spool code takes (#235, #248), so the same code works over a file, a memory buffer or an object store
 // (an R2 ranged GET). A read past `size`, or a negative or fractional bound, is the source's refusal to make; the stream
 // yields exactly `length` bytes or errors.
+import type { SignalArg } from './absent.js';
 import type { PlyError } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok } from './result.js';
 
 // `signal` aborts when the reader no longer wants the range (its consumer cancelled, or the operation's own signal
-// aborted): a source that can abandon a read in flight does. It is optional in the type, spelled as two call signatures:
-// an implementer may ignore it (a read of two parameters is a RangeSource) and a direct caller may omit it, so a read
-// that takes it has to work without one. ply always passes one, and never waits for a source that ignores it.
-export type RangeRead = {
-  (offset: number, length: number): Promise<Result<ReadableStream<Uint8Array>, PlyError>>;
-  (offset: number, length: number, signal: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>>;
-};
+// aborted): a source that can abandon a read in flight does. It is optional in the type (SignalArg, absent.ts): an
+// implementer may ignore it (a read of two parameters is a RangeSource), a direct caller may omit it, and a wrapper may
+// pass on the optional signal it was given, so a read that takes it has to work without one. ply always passes one, and
+// never waits for a source that ignores it.
+export type RangeRead = (offset: number, length: number, ...signal: SignalArg) => Promise<Result<ReadableStream<Uint8Array>, PlyError>>;
 export type RangeSource = { readonly size: number; readonly read: RangeRead };
 
 // The signal that never aborts: the default `signal` of an operation whose caller gave none (resolvePackRange,
