@@ -215,6 +215,9 @@ A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.jso
 `test/durations.json`) moves the unsafe way only in a commit whose message has the line
 `Ratchet-Change: <file>: <reason>`. CI's `node scripts/ratchet-guard.mjs` compares each baseline with the base
 commit's and fails without that line; a squash merge must keep the line in its message, or main's own ci run fails.
+`npm run spaces -- --ratchet` only lowers `test/space/ratchet.json`. Adding a hole to it takes
+`npm run spaces -- --ratchet --init --reason "<why>"`, which prints that line; with no reason it exits 1, lists the
+holes it would add and writes nothing.
 
 ```sh
 npm ci

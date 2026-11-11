@@ -6,7 +6,9 @@
 //   npm run spaces -- --md            regenerate SPACES.md
 //   npm run spaces -- --ratchet       lower test/space/ratchet.json to today's holes (never adds a hole; failsites
 //                                           and claims need PLY_FAILSITES, else they keep their stored ids)
-//   npm run spaces -- --ratchet --init   write today's holes as they are (bootstrapping a category only)
+//   npm run spaces -- --ratchet --init --reason "<why>"   also add today's new holes to a stored category. With no
+//                                           reason it exits 1, lists them and writes nothing; with one it prints the
+//                                           `Ratchet-Change: test/space/ratchet.json: <why>` line the commit needs
 import { writeFileSync, existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -129,16 +131,31 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const all = compute({ records });
   if (process.argv.includes('--ratchet')) {
     const init = process.argv.includes('--init');
+    const at = process.argv.indexOf('--reason');
+    const reason = at < 0 ? '' : (process.argv[at + 1] ?? '').trim();
     const old = existsSync(RATCHET) ? ratchet().categories : {};
     const categories = {};
+    const added = [];
     for (const c of CATEGORIES) {
       const now = all.holes[c];
       let ids;
       if (now === null) ids = old[c]?.ids ?? [];
-      else if (init || !old[c]) ids = now;
-      else { const keep = new Set(old[c].ids); ids = now.filter(id => keep.has(id)); }
+      else if (!old[c]) ids = now;
+      else {
+        const keep = new Set(old[c].ids);
+        ids = init ? now : now.filter(id => keep.has(id));
+        for (const id of ids) if (!keep.has(id)) added.push(`[${c}] ${id}`);
+      }
       categories[c] = { count: ids.length, ids: [...ids].sort() };
     }
+    // A hole enters an existing category only with a stated reason, and the commit must repeat it: ci's
+    // scripts/ratchet-guard.mjs compares ratchet.json with the base commit's and fails without the line.
+    const line = `Ratchet-Change: test/space/ratchet.json: ${reason === '' ? '<reason>' : reason}`;
+    if (added.length > 0 && reason === '') {
+      console.error(`spaces: --ratchet --init would add ${added.length} hole(s) to test/space/ratchet.json; nothing written:\n${added.map(a => `  ${a}`).join('\n')}\nClose them, or rerun with --reason "<why>" and put this line in the commit message:\n  ${line}`);
+      process.exit(1);
+    }
+    if (added.length > 0) console.log(`added ${added.length} hole(s):\n${added.map(a => `  ${a}`).join('\n')}\nthe commit message must carry the line:\n  ${line}`);
     writeFileSync(RATCHET, `${JSON.stringify({ note: 'Holes per category (test/space/holes.js). Only ever lowered: npm run spaces -- --ratchet. A category at 0 is enforced.', categories }, null, 1)}\n`);
     for (const c of CATEGORIES) console.log(`${c}: ${categories[c].count}`);
   }

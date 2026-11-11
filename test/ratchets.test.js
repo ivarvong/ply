@@ -3,7 +3,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, cpSync, symlinkSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -183,6 +183,53 @@ test('ratchet guard: a loosened baseline needs a Ratchet-Change line naming that
     refused('test/durations.json', {}, /test\/x\.test\.js lost its weight/u);
     // A base that cannot be resolved fails closed.
     assert.equal(guard('no-such-ref').status, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A copy of what the space scripts read, with one decision point the registry does not know. The copy differs from
+// the tree by exactly that function, so exactly two holes are new (an exported function is a point, its fail() is
+// another), with ids of the shape test/space/ratchet.json stores: `<file>#<function>:export` and `<file>#<function>:<code>:<message>`.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SNEAKY = 'src/sign.ts#decideSneaky:protocol:an unregistered decision';
+const SNEAKY_EXPORT = 'src/sign.ts#decideSneaky:export';
+// The suite's NODE_OPTIONS hook and PLY_FAILSITES belong to the tree under test, not to a child running in a copy.
+const CLEAN_ENV = { ...process.env, NODE_OPTIONS: '', PLY_FAILSITES: '', PLY_FAILSITES_GATE: '' };
+test('spaces --ratchet --init adds a hole only with --reason, and prints the Ratchet-Change line the commit needs', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-spaces-'));
+  try {
+    for (const p of ['src', 'scripts', 'test/space', 'test/ts-resolve.mjs', 'package.json']) cpSync(join(ROOT, p), join(dir, p), { recursive: true });
+    symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'));
+    appendFileSync(join(dir, 'src/sign.ts'), "\nexport function decideSneaky(n: number): unknown {\n  return n > 1 ? fail('protocol', 'an unregistered decision') : null;\n}\n");
+    const file = join(dir, 'test/space/ratchet.json');
+    const ids = () => JSON.parse(readFileSync(file, 'utf8')).categories.decisions.ids;
+    const spaces = (...args) => spawnSync(process.execPath, ['--import', './test/ts-resolve.mjs', 'scripts/spaces.mjs', ...args], { cwd: dir, encoding: 'utf8', env: CLEAN_ENV });
+    const had = ids();
+    assert.ok(!had.includes(SNEAKY));
+
+    // Lowering never adds.
+    const lowered = spaces('--ratchet');
+    assert.equal(lowered.status, 0, lowered.stderr);
+    assert.deepEqual(ids().filter(id => !had.includes(id)), []);
+
+    // --init with no reason (or a blank one): refused, ratchet.json and SPACES.md not written, the hole and the line named.
+    const before = readFileSync(file, 'utf8');
+    for (const args of [['--ratchet', '--init'], ['--ratchet', '--init', '--md'], ['--ratchet', '--init', '--reason', '  ']]) {
+      const refused = spaces(...args);
+      assert.equal(refused.status, 1, `${args.join(' ')} must fail, got exit ${refused.status}: ${refused.stdout}${refused.stderr}`);
+      assert.equal(readFileSync(file, 'utf8'), before);
+      assert.ok(!existsSync(join(dir, 'SPACES.md')));
+      assert.ok(refused.stderr.includes(SNEAKY), refused.stderr);
+      assert.ok(refused.stderr.includes('Ratchet-Change: test/space/ratchet.json: '), refused.stderr);
+    }
+
+    // With a reason: exactly those holes are added, and the output is the line ci's ratchet-guard looks for.
+    const added = spaces('--ratchet', '--init', '--reason', 'decideSneaky is tracked in #999');
+    assert.equal(added.status, 0, added.stderr);
+    assert.deepEqual(ids().filter(id => !had.includes(id)), [SNEAKY_EXPORT, SNEAKY]);
+    assert.ok(added.stdout.includes(SNEAKY), added.stdout);
+    assert.ok(added.stdout.includes('Ratchet-Change: test/space/ratchet.json: decideSneaky is tracked in #999'), added.stdout);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
