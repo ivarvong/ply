@@ -21,6 +21,7 @@ import { push, ZERO_OID } from './push.js';
 import type { PackObject } from './push.js';
 import { parseOid, parseCommitId, type Oid } from './oid.js';
 import { hashObject, TYPE } from './objects.js';
+import type { Mode } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf } from './limits.js';
 import type { CheckedLimits } from './limits.js';
@@ -315,29 +316,36 @@ async function resolveParent(t: Transport, target: Tip, base: BasePlan): Promise
   return ok({ oid: target.oid, tree: commit.value.tree, commitParent: commit.value.parent, creating: false, baseRef: target.ref, baseOid: null });
 }
 
+// What a stored tree says, by oid: read-only, so one fetch and one parse serve every path that has this tree.
+type StoredEntry = { readonly name: string; readonly mode: Mode; readonly oid: Oid };
 type Walk = {
   readonly t: Transport;
   readonly limits: CheckedLimits;
   readonly have: Set<string>;
-  readonly cache: Map<string, Dir>;
+  readonly cache: Map<string, readonly StoredEntry[]>;
   readonly allowLfs: boolean;
 };
 
+// The directory at one path, as a tree the server has. Every call builds its own Dir: an oid names content, not a
+// place, and two paths with one tree oid (template or locale copies) are two directories that change separately.
+// Only the parsed entries are cached by oid, and nothing writes to them (a Lazy is read-only, and each directory
+// gets its own).
 async function loadTree(walk: Walk, oid: Oid): Promise<Result<Dir, PlyError>> {
-  const hit = mapGet(walk.cache, oid);
-  if (hit.tag === 'some') return ok(hit.value);
-  const got = await objectAt(walk.t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
-  if (!got.ok) return got;
-  const obj = got.value;
-  const dir = emptyDir();
-  const parsed = treeEntries(obj, walk.limits);
-  if (!parsed.ok) return parsed;
-  for (const entry of parsed.value) {
-    dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
-    walk.have.add(entry.oid);
+  let stored = mapGet(walk.cache, oid);
+  if (stored.tag === 'none') {
+    const got = await objectAt(walk.t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
+    if (!got.ok) return got;
+    const parsed = treeEntries(got.value, walk.limits);
+    if (!parsed.ok) return parsed;
+    // copied: the fetched object's own entry list is not this cache's to hold a reference into
+    const entries: readonly StoredEntry[] = parsed.value.map(e => ({ name: e.name, mode: e.mode, oid: e.oid }));
+    for (const entry of entries) walk.have.add(entry.oid);
+    walk.have.add(oid);
+    walk.cache.set(oid, entries);
+    stored = some(entries);
   }
-  walk.have.add(oid);
-  walk.cache.set(oid, dir);
+  const dir = emptyDir();
+  for (const entry of stored.value) dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
   return ok(dir);
 }
 
