@@ -27,7 +27,23 @@ const REPORT = 'reports/mutation/mutation.json';
 const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVarint|applyDelta|inflate\w*|huffBuild|adler32|pktStep|pktFinish|pktHeader|spStep|spFinish|v2Step|parseSideband|sidebandStep|member[A-Z]\w*|take|assertFetched|splitHeaders|checkIdent)(Result)?$/;
 // Either extension: a file keeps its gate when it converts to TypeScript. The pull codecs (#172) are decoders in every
 // function, their step helpers included: the whole file is gated.
-const BOUNDS_FILES = new Set(['src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts', 'src/inflatestream.ts', 'src/packstream.ts']);
+// The large-repo stack reads stored and remote state (a spooled pack, a saved index, a plan read back, a host's report)
+// and bounds what it holds by configuration: the scan index, the range resolver, the subset cutter, the batch planner,
+// the pull codecs and the exchange deadline are gated whole, like the files above.
+const BOUNDS_FILES = new Set([
+  'src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts', 'src/inflatestream.ts', 'src/packstream.ts',
+  'src/packscanindex.ts', 'src/packrangeresolve.ts', 'src/packsubset.ts', 'src/packplan.ts', 'src/pullstream.ts', 'src/deadline.ts',
+]);
+// Files gated by owner rather than whole, where PARSER's names do not reach: the decode side of the saved index
+// (its encoder writes trusted state), the check of a transfer plan read back, and the classes of a host's push report
+// (unpack status, ng reasons, their tables: a wrong class turns a refusal into a retry, or a landed push into a failure).
+const STRICT_OWNERS = new Map([
+  ['src/packsaved.ts', /^(getF64s|getI32s|getBytes|readHeader|regionsOf|bad|checkEntry|checkIndex|checkResolved|statsOf|decodeSavedIndex)$/],
+  ['src/transferplan.ts', /^(edited|wellFormedStep|checkTransferPlan)$/],
+  ['src/push.ts', /^(GIT_UNPACK_ERROR_LIST|GIT_UNPACK_ERRORS|seenUnpack|isGitUnpackError|HOST_UNPACK_ALIASES|unpackReasonMatches|echoedFailure|TOO_LARGE|classifyReport|KNOWN_NG|knownNgClass|HOST_CAS|ngClass)$/],
+]);
+// The one rule both the plan (gatedRanges) and the verdict (summarize) ask: is this owner of this file judged strictly?
+const isStrict = (file, fn) => BOUNDS_FILES.has(file) || PARSER.test(fn) || (STRICT_OWNERS.get(file)?.test(fn) ?? false);
 const SRC = /\.(?:js|ts)$/;
 // A test file that exits non-zero without reporting a failed test (a mutant that throws while its module loads, or one
 // that trips Stryker's hit limit, an infinite loop, there) is a RuntimeError to the tap runner. The test failed: the
@@ -47,7 +63,7 @@ function commentProblems() {
     });
   }
   const cfg = readFileSync('stryker.conf.json', 'utf8');
-  if (/!\s*src\/(objects|bytes|format|pack|packresolve|pktline|inflate|fetch|lsrefs)\.(?:js|ts)/.test(cfg)) {
+  if (/!\s*src\/(objects|bytes|format|pack|packresolve|pktline|inflate|fetch|lsrefs|packsaved|packscanindex|packrangeresolve|packsubset|packplan|transferplan|pullstream|deadline|push)\.(?:js|ts)/.test(cfg)) {
     bad.push('stryker.conf.json excludes a parser or bounds file');
   }
   return bad;
@@ -85,7 +101,7 @@ function gatedRanges(files) {
     const last = readFileSync(file, 'utf8').split('\n').length;
     if (BOUNDS_FILES.has(file)) { out.set(file, [[1, last]]); continue; }
     const fns = functions(file);
-    const rs = fns.flatMap((fn, k) => (PARSER.test(fn.name) ? [[fn.line, (fns[k + 1]?.line ?? last + 1) - 1]] : []));
+    const rs = fns.flatMap((fn, k) => (isStrict(file, fn.name) ? [[fn.line, (fns[k + 1]?.line ?? last + 1) - 1]] : []));
     if (rs.length) out.set(file, rs);
   }
   return out;
@@ -438,7 +454,7 @@ function summarize(report) {
       else survived++;
       const line = m.location?.start?.line ?? 0;
       const fn = owner(fns, line);
-      const strict = BOUNDS_FILES.has(file) || PARSER.test(fn);
+      const strict = isStrict(file, fn);
       if (strict && (status === 'Survived' || status === 'NoCoverage')) {
         violations.push(`${file}:${line} ${fn} ${m.mutatorName} ${status}${m.replacement ? ` → ${String(m.replacement).slice(0, 60)}` : ''}`);
       }

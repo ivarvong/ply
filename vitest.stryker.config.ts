@@ -42,6 +42,16 @@ const MUTATION_FILES = [
   'test/lsrefs-step.test.js',
   'test/path-trees-unit.test.js',
   'test/pullstream.test.js',
+  // The large-repo stack (scripts/mutate.mjs gates its decoders and bound checks strictly): without its own tests here
+  // every mutant in it ended NoCoverage. Each is a few seconds at the quick sizes.
+  'test/pack-saved.test.js',
+  'test/scan-pack-index.test.js',
+  'test/pack-range-resolve.test.js',
+  'test/pack-subset.test.js',
+  'test/pack-plan.test.js',
+  'test/transfer.test.js',
+  'test/deadline.test.js',
+  'test/push-unpack-host.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

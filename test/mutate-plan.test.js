@@ -6,7 +6,7 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,3 +88,97 @@ test('a pull request that only moves code past a parser still mutates every line
     rmSync(dir, { recursive: true, force: true });
   }
 }, 60_000);
+
+// The large-repo stack (saved index, scan index, range resolve, subset, pack plan, transfer plan, pull codecs, deadline,
+// host report classes) decodes stored and remote state. Until this test its mutants could only end NoCoverage or
+// Survived without failing anything: none of its tests were in the mutation suite (vitest.stryker.config.ts) and none of
+// its owners were judged strictly (review finding tests-gates/mutation-gate-blind-to-new-stack). The expectations are
+// the owner's list, written out here by hand: [file, an owner that decodes or bounds untrusted input, its test file].
+const STACK = [
+  ['src/packsaved.ts', 'checkEntry', 'test/pack-saved.test.js'],
+  ['src/packsaved.ts', 'decodeSavedIndex', 'test/pack-saved.test.js'],
+  ['src/packscanindex.ts', 'scanPackIndex', 'test/scan-pack-index.test.js'],
+  ['src/packrangeresolve.ts', 'readMember', 'test/pack-range-resolve.test.js'],
+  ['src/packsubset.ts', 'headerOf', 'test/pack-subset.test.js'],
+  ['src/packplan.ts', 'checkBudget', 'test/pack-plan.test.js'],
+  ['src/transferplan.ts', 'checkTransferPlan', 'test/transfer.test.js'],
+  ['src/pullstream.ts', 'scanPack', 'test/pullstream.test.js'],
+  ['src/deadline.ts', 'exchangeClock', 'test/deadline.test.js'],
+  ['src/push.ts', 'ngClass', 'test/push-unpack-host.test.js'],
+  ['src/push.ts', 'unpackReasonMatches', 'test/push-unpack-host.test.js'],
+];
+const STACK_FILES = [...new Set(STACK.map(([file]) => file))];
+
+// 1-based line of a top-level declaration, found in the file's own text (not by scripts/mutate.mjs)
+function declaredAt(file, name) {
+  const text = readFileSync(join(ROOT, file), 'utf8').split('\n');
+  const at = text.findIndex(l => new RegExp(`^(?:export )?(?:async )?(?:function|const) ${name}\\b`).test(l));
+  assert.ok(at >= 0, `${file}: no top-level ${name}`);
+  return at + 1;
+}
+
+function stackCheckout() {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-mutate-stack-'));
+  mkdirSync(join(dir, 'src'));
+  copyFileSync(join(ROOT, 'stryker.conf.json'), join(dir, 'stryker.conf.json'));
+  for (const file of STACK_FILES) copyFileSync(join(ROOT, file), join(dir, file));
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'config', 'user.email', 't@example.com');
+  git(dir, 'config', 'user.name', 't');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'base');
+  return dir;
+}
+
+test('the mutation suite runs the large-repo stack\'s tests', () => {
+  const suite = readFileSync(join(ROOT, 'vitest.stryker.config.ts'), 'utf8');
+  const missing = [...new Set(STACK.map(([, , t]) => t))].filter(t => !suite.includes(`'${t}'`));
+  assert.deepEqual(missing, []);
+});
+
+test('a pull request that changes nothing still mutates the large-repo stack\'s decoders', () => {
+  const dir = stackCheckout();
+  try {
+    const env = { ...process.env, GITHUB_EVENT_NAME: 'pull_request', MUTATE_BASE: 'HEAD' };
+    delete env.MUTATE_FULL;
+    // one shard: no unit is cut, so a gated owner is one range from its declaration line
+    const r = spawnSync(process.execPath, [SCRIPT, '--plan', '1'], { cwd: dir, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const plan = JSON.parse(r.stdout);
+    assert.equal(plan.full, false);
+    const ungated = STACK.filter(([file, name]) => {
+      const at = declaredAt(file, name);
+      return !unitRanges(plan, file).some(([a, b]) => a <= at && b >= at);
+    }).map(([file, name]) => `${file} ${name}`);
+    assert.deepEqual(ungated, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test('a surviving or uncovered mutant in a large-repo stack decoder fails the verdict; a killed one passes', () => {
+  const dir = stackCheckout();
+  try {
+    mkdirSync(join(dir, 'reports/mutation'), { recursive: true });
+    // a pull request's verdict: the parser/bounds rule alone, without the full-library break threshold
+    const env = { ...process.env, GITHUB_EVENT_NAME: 'pull_request' };
+    delete env.MUTATE_FULL;
+    const judge = (file, line, status) => {
+      const mutant = { id: '1', mutatorName: 'EqualityOperator', replacement: 'x', status, location: { start: { line, column: 1 }, end: { line, column: 2 } } };
+      writeFileSync(join(dir, 'reports/mutation/mutation.json'), JSON.stringify({ files: { [file]: { mutants: [mutant] } } }));
+      return spawnSync(process.execPath, [SCRIPT, '--check'], { cwd: dir, env, encoding: 'utf8' });
+    };
+    const wrong = [];
+    for (const [file, name] of STACK) {
+      const at = declaredAt(file, name);
+      for (const [status, want] of [['Survived', 1], ['NoCoverage', 1], ['Killed', 0], ['Timeout', 0]]) {
+        const r = judge(file, at, status);
+        if (r.status !== want) wrong.push(`${file}:${at} ${name} ${status}: exit ${r.status}, want ${want}`);
+        else if (want === 1 && !r.stderr.includes(`${file}:${at} ${name} EqualityOperator ${status}`)) wrong.push(`${file}:${at} ${name} ${status}: not named in ${r.stderr}`);
+      }
+    }
+    assert.deepEqual(wrong, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 120_000);
