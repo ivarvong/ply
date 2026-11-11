@@ -61,6 +61,16 @@ export type Scrub = (s: string) => string;
 export type TreeFilter = 'tree:0' | 'blob:none' | 'none';
 export type Quirks = { treeFilter: TreeFilter; blobWants: 'many' | 'single' };
 export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'many' });
+// Whether the remote takes `deepen`: not once an advertisement read for this quirks record listed no `shallow` on its
+// fetch= line (discover, or the read after a refused request: fetch.ts filterUnadvertised). Kept beside the record, not
+// in it, so the public Quirks shape (callers build and persist it as JSON) is unchanged. A record not yet taught is
+// taken to take it (git's upload-pack always lists `shallow`); a server that does not costs one refused request and one
+// advertisement read per record (fetch.ts objectAt).
+const shallowless = new WeakSet<Quirks>();
+export function learnShallow(t: Transport, advertised: boolean): void {
+  if (advertised) shallowless.delete(t.quirks); else shallowless.add(t.quirks);
+}
+export const takesShallow = (q: Quirks): boolean => !shallowless.has(q);
 // What an upload-pack advertisement says about `filter`, kept: absent is 'none'; present undoes an earlier 'none' (the
 // host turned it on) and leaves a learned blob:none alone (Artifacts advertises `filter` and refuses tree:0).
 export function learnFilter(t: Transport, advertised: boolean): void {

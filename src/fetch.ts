@@ -31,7 +31,7 @@ import { DEFAULT_LIMITS, limitExceeded } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 import { parseOid, type Oid } from './oid.js';
-import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, probing, spanned } from './transport.js';
+import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, learnShallow, takesShallow, probing, spanned } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
 
@@ -552,7 +552,7 @@ export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boo
   if (!isEmptyResponse(e)) return false;
   const attrs = { 'git.command': 'discover', 'git.protocol.version': PROTOCOL_V2 };
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
-  const read = await coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, attrs), async (span: Span): Promise<Result<boolean, PlyError>> => {
+  const read = await coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, attrs), async (span: Span): Promise<Result<{ readonly filter: boolean; readonly shallow: boolean }, PlyError>> => {
     const buf = await advertise(t, 'git-upload-pack', span);
     if (!buf.ok) return buf;
     const framed = pktStep(pktInit(), buf.value);
@@ -563,12 +563,15 @@ export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boo
     if (!lines.ok) return lines;
     const features = capLookup(lines.value).features('fetch');
     const filter = features.includes('filter');
-    span.set({ ...pktAttrs(finished.value), 'git.server.fetch': features, 'git.server.filter': filter });
-    return ok(filter);
+    const shallow = features.includes('shallow');
+    span.set({ ...pktAttrs(finished.value), 'git.server.fetch': features, 'git.server.filter': filter, 'git.server.shallow': shallow });
+    return ok({ filter, shallow });
   }));
   if (!read.ok) return false;
-  learnFilter(t, read.value);
-  return !read.value;
+  learnFilter(t, read.value.filter);
+  // the same line says whether the server takes `deepen`: objectAt asks again without the depth it added
+  learnShallow(t, read.value.shallow);
+  return !read.value.filter;
 }
 
 // Check a wide (blob:none) pack's commits, trees and tags before any of it is returned or harvested (#18, #46).
@@ -641,9 +644,14 @@ async function onceMore<T>(once: (bust: boolean) => Promise<Result<T, PlyError>>
 }
 
 // One object wanted by oid. `expectType` (a TYPE id) is checked against what arrives; null takes any type.
-export type ObjectWantConfig = { readonly filter: string; readonly deepen: number; readonly expectType: number | null };
+// `deepen`: the depth sent with the want. Left out (or null) it is 1 for a want that may be a commit (expectType null,
+// commit or tag) on a server that takes `deepen`, so one object costs one object of pack whatever the history behind it:
+// with no depth a commit want is answered with every commit reachable from it. A number is sent as given: n for the
+// commit and n - 1 generations of ancestors, 0 for no `deepen` line (the whole history). A want the caller names a tree
+// or a blob gets none: no history is reachable from one.
+export type ObjectWantConfig = { readonly filter: string; readonly deepen: number | null; readonly expectType: number | null };
 export type ObjectWant = { readonly oid: string } & Input<ObjectWantConfig>;
-const objectWantDefaults = (): ObjectWantConfig => ({ filter: 'tree:0', deepen: 0, expectType: null });
+const objectWantDefaults = (): ObjectWantConfig => ({ filter: 'tree:0', deepen: null, expectType: null });
 // The entries of a fetched tree as its check (assertFetched) parsed them, and the entry cap they were parsed under: the
 // only limit parseTree reads (#208).
 export type CheckedTree = { readonly entries: TreeEntry[]; readonly maxTreeEntries: number };
@@ -1009,26 +1017,48 @@ export function objectId(oid: unknown): Result<Oid, BadRequest> {
 // fetchObject of a parsed id: ply's own callers, which hold an Oid, start here.
 // oxlint-disable-next-line typescript/promise-function-async -- probing's promise (or the harvest's answer), passed through
 export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig> = {}): Promise<Result<FetchedObject, PlyError>> {
-  const { filter, deepen, expectType } = withDefaults(options, objectWantDefaults());
+  const { filter, deepen: asked, expectType } = withDefaults(options, objectWantDefaults());
+  // The depth to send (ObjectWantConfig): the caller's, else 1 when the want may be a commit and the server is not known
+  // to lack `shallow`. Read at each send: the advertisement may be read between two of them.
+  const mayBeCommit = expectType !== TYPE.TREE && expectType !== TYPE.BLOB;
+  const depth = (): number => {
+    if (asked !== null) return asked;
+    return mayBeCommit && takesShallow(t.quirks) ? 1 : 0;
+  };
+  // run(depth). When it fails carrying a depth this call added, an empty response sends ply to the advertisement (as for
+  // a refused filter: filterUnadvertised learns `shallow` from the same line), and a server that lists no `shallow` is
+  // asked once more with no `deepen`, as before the default: the answer is then the history, held to the pack limits.
+  const ask = async (run: (deepen: number) => Promise<Result<FetchedObject, PlyError>>): Promise<Result<FetchedObject, PlyError>> => {
+    const sent = depth();
+    const first = await run(sent);
+    if (first.ok || asked !== null || sent === 0) return first;
+    await filterUnadvertised(t, first.error);
+    return depth() === sent ? first : run(depth());
+  };
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
   if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, tree: none, harvested: true }));
-  // oxlint-disable-next-line typescript/promise-function-async -- fetchWide's promise, passed through
-  const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter });
-  if (filter === '') return fetchSingle(t, { oid, filter, deepen, expectType });
+  // oxlint-disable-next-line typescript/promise-function-async -- ask's promise, passed through
+  const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => ask(deepen => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter }));
+  // oxlint-disable-next-line typescript/promise-function-async -- fetchSingle's promise, passed through
+  if (filter === '') return ask(deepen => fetchSingle(t, { oid, filter, deepen, expectType }));
   // one probe at a time per quirks record (transport.ts probing): the checks below read it after any wait
   return probing(t.quirks, narrow ? 'tree:0' : 'filter', async (): Promise<Result<FetchedObject, PlyError>> => {
     const harvested = narrow ? mapGet(t.objects, oid) : none;
     if (harvested.tag === 'some' && (expectType === null || harvested.value.type === expectType)) return ok({ type: harvested.value.type, data: harvested.value.data, oid, size: harvested.value.data.length, bust: false, tree: none, harvested: true });
     if (t.quirks.treeFilter === 'none') return wide('', false);
     if (narrow && t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
-    const single = await fetchSingle(t, { oid, filter, deepen, expectType });
+    const sent = depth();
+    const single = await fetchSingle(t, { oid, filter, deepen: sent, expectType });
     if (single.ok) return single;
     if (narrow && isFilterRejection(single.error)) {
       t.quirks.treeFilter = 'blob:none';
       return wide('blob:none', true);
     }
-    return (await filterUnadvertised(t, single.error)) ? wide('', true) : single;
+    if (await filterUnadvertised(t, single.error)) return wide('', true);
+    // the advertisement was just read: `filter` is the server's, and a depth this call added that the server does not
+    // take is dropped (see `ask`)
+    return depth() === sent ? single : fetchSingle(t, { oid, filter, deepen: depth(), expectType });
   });
 }
 // One object by oid: a bad oid, a fetch failure, a verification failure are the Err.
