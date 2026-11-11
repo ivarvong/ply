@@ -8,9 +8,20 @@
 //
 // How: from each whole object, depth first over the deltas that rest on it (OFS children by base index, REF children by
 // the base's oid). A delta's bytes are read back through the source, inflated and applied to its base. Nothing holds a
-// chain: a base is either in a small LRU (`cacheBytes`) or rebuilt from its chain root on demand, each frame holding
-// nothing while its base is made. The peak is one base + one result + one delta's instructions + the LRU: at most
-// 2 x maxObjectSize + maxDeltaResult + cacheBytes, whatever the pack's size or depth.
+// chain. All the deltas resting on a base are applied while that base is held; of the results that something rests on,
+// the last is pinned (it is the next base, so a linear chain builds every object exactly once whatever its size) and
+// the others go to a small LRU (`cacheBytes`). A base in neither is rebuilt from its chain root on demand, each frame
+// holding nothing while its base is made.
+//
+// Memory: one base + one pinned result + one result + one delta's instructions + the LRU, at most
+// max(maxObjectSize, maxDeltaResult) + 3 x maxDeltaResult + cacheBytes, whatever the pack's size, depth or shape.
+//
+// Work (bytes inflated from the source + bytes of delta results produced) is bounded by what the pack declares, not by
+// its compressed size (delta-compressed history is legitimately hundreds of times its pack). The floor is every member
+// inflated once (the scan's sizes) plus every delta applied once (its header's result size, capped by maxDeltaResult).
+// A work budget allows LIMIT_RESOLVE_FACTOR x the floor reached so far (the factor is the room for rebuilds), never
+// less than maxInflatedTotal and never more than `maxWork` (LIMIT_RESOLVE_WORK): CPU is at most the factor times the
+// declared sizes and at most the ceiling. A retain budget allows maxInflatedTotal, flat.
 //
 // Verified: each member's zlib checksum, length and declared size; every delta against its base's size; every oid
 // computed from the bytes (never taken from the pack); a base read back a second time rehashed against the oid it had
@@ -28,7 +39,7 @@ import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
 import { withDefaults, fromNullish, mapGet } from './absent.js';
 import type { LimitsInput } from './limits.js';
-import { DEFAULT_LIMITS, LIMIT_WORK_RATIO, limitExceeded, parseLimits } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_WORK_RATIO, LIMIT_RESOLVE_FACTOR, LIMIT_RESOLVE_WORK, checkLimit, limitExceeded, parseLimits } from './limits.js';
 import type { Oid } from './sha1.js';
 import { fromHex, toOid } from './sha1.js';
 import type { ScannedPack, ScannedType, ScanIndexOpts } from './packscanindex.js';
@@ -38,7 +49,8 @@ import { applyDelta } from './packresolve.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';
 
 type ScanBudget = ScanIndexOpts['budget'];
-// packstream.ts WORK_BUDGET: work charged at LIMIT_WORK_RATIO x the pack's bytes (or maxInflatedTotal, if larger)
+// packstream.ts WORK_BUDGET (the scan's default). Here its tag selects the bound from declared sizes (top of this file);
+// its ratio is the scan's and is only checked.
 const WORK_BUDGET: ScanBudget = Object.freeze({ tag: 'work', ratio: LIMIT_WORK_RATIO, capObjects: false });
 const OID_BYTES = 20;
 const { COMMIT: OBJ_COMMIT, TREE: OBJ_TREE, BLOB: OBJ_BLOB, TAG: OBJ_TAG, OFS_DELTA: OBJ_OFS_DELTA, REF_DELTA: OBJ_REF_DELTA } = TYPE;
@@ -55,9 +67,11 @@ export type ResolveRangeOpts = {
   // bytes of resolved bases kept for the deltas resting on them; a base not kept is rebuilt from its chain when needed
   readonly cacheBytes: number;
   readonly bases: ThinBaseLookup | null;
+  // the hard ceiling on work bytes under a work budget, whatever sizes the pack declares
+  readonly maxWork: number;
 };
 export const RESOLVE_CACHE_BYTES: number = 16 * 1024 * 1024;
-const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null });
+const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null, maxWork: LIMIT_RESOLVE_WORK });
 
 // oid 20 + type 1 + base 4 + depth 4 + size 8 + byOid 4
 export const RESOLVED_ENTRY_BYTES = 41;
@@ -135,8 +149,14 @@ type State = {
   readonly maxObject: number;
   readonly maxDelta: number;
   readonly maxChain: number;
-  readonly workMax: number;
+  // the work bound: min(ceiling, max(flat, factor x floor)); floor grows by each delta result made for the first time
+  readonly flat: number;
+  readonly factor: number;
+  readonly ceiling: number;
+  floor: number;
   work: number;
+  // the result the next entry popped rests on, held outside the cache (always the top of the stack, or null)
+  pin: { readonly index: number; readonly data: Uint8Array } | null;
   readonly oid: Uint8Array;
   readonly known: Uint8Array;
   readonly type: Uint8Array;
@@ -157,10 +177,15 @@ type State = {
   readonly stats: Stats;
 };
 
+const workMaxOf = (s: State): number => Math.min(s.ceiling, Math.max(s.flat, s.factor * s.floor));
 function charge(s: State, bytes: number): PlyError | null {
   s.work += bytes;
-  return s.work > s.workMax ? limitExceeded('resolve work bytes', s.work, s.workMax) : null;
+  const max = workMaxOf(s);
+  return s.work > max ? limitExceeded('resolve work bytes', s.work, max) : null;
 }
+// A source (or a thin-base lookup) that throws, rejects or errors its stream failed the read: a coded error, never a
+// rejection of resolvePackRange.
+const readFailed = (what: string, e: unknown): PlyError => plyError('network', `pack: ${what} failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
 
 // The zlib member of entry i, inflated to its declared size, read back through the source.
 async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyError>> {
@@ -173,10 +198,15 @@ async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyEr
   const opened = inflateInit({ bound: declaredBound(size, isWhole(cols.storedType[i] as number) ? s.maxObject : s.maxDelta), wrap: zlibWrap(true) });
   if (!opened.ok) return opened;
   const st = opened.value;
-  const got = await s.source.read(at, length);
-  if (!got.ok) return got;
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    const got = await s.source.read(at, length);
+    if (!got.ok) return got;
+    reader = got.value.getReader();
+  } catch (e) {
+    return err(readFailed(`range read of entry ${i}`, e));
+  }
   s.stats.reads += 1;
-  const reader = got.value.getReader();
   const out = new Uint8Array(size);
   let o = 0;
   let fed = 0;
@@ -196,8 +226,13 @@ async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyEr
         s.stats.inflated += o;
         return ok(out);
       }
-      // oxlint-disable-next-line no-await-in-loop -- one member, read in order
-      const r = await reader.read();
+      let r: ReadableStreamReadResult<Uint8Array>;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one member, read in order
+        r = await reader.read();
+      } catch (e) {
+        return err(readFailed(`range read of entry ${i}`, e));
+      }
       if (r.done) {
         ended = true;
         continue;
@@ -227,7 +262,13 @@ function checkAgain(s: State, i: number, data: Uint8Array): PlyError | null {
 type Thin = { readonly tag: 'absent' } | { readonly tag: 'found'; readonly type: ScannedType; readonly data: Uint8Array };
 // The caller's object for `want`: absent, or checked (a stored type, and its bytes hash to `want`).
 async function thinData(s: State, want: Oid): Promise<Result<Thin, PlyError>> {
-  const asked = fromNullish(s.bases === null ? null : await s.bases(want));
+  let found: ThinBase | null;
+  try {
+    found = s.bases === null ? null : await s.bases(want);
+  } catch (e) {
+    return err(readFailed(`thin base lookup of ${want}`, e));
+  }
+  const asked = fromNullish(found);
   if (asked.tag === 'none') return ok({ tag: 'absent' });
   const got = asked.value;
   if (!isWhole(got.type)) return fail('pack_corrupt', `pack: ref delta base ${want} has type ${got.type}`);
@@ -236,13 +277,15 @@ async function thinData(s: State, want: Oid): Promise<Result<Thin, PlyError>> {
   return ok({ tag: 'found', type: got.type, data: got.data });
 }
 
-// Entry i's delta, read back and applied to `base`, the result charged as work.
-async function applyEntry(s: State, i: number, base: Uint8Array): Promise<Result<Uint8Array, PlyError>> {
+// Entry i's delta, read back and applied to `base`, the result charged as work. `first`: the entry is being resolved
+// (not made again), so its result joins the floor the budget is measured against.
+async function applyEntry(s: State, i: number, base: Uint8Array, first: boolean): Promise<Result<Uint8Array, PlyError>> {
   const delta = await readMember(s, i);
   if (!delta.ok) return delta;
   const applied = applyDelta(base, delta.value, { maxResult: s.maxDelta });
   if (!applied.ok) return applied;
   const out = applied.value.out;
+  if (first) s.floor += out.length;
   const charged = charge(s, out.length);
   if (charged !== null) return err(charged);
   s.stats.applied += out.length;
@@ -265,11 +308,11 @@ async function materialize(s: State, i: number): Promise<Result<Uint8Array, PlyE
     const thin = await thinData(s, want);
     if (!thin.ok) return thin;
     if (thin.value.tag === 'absent') return fail('pack_corrupt', `pack: ref delta base ${want} not found when asked again`);
-    made = await applyEntry(s, i, thin.value.data);
+    made = await applyEntry(s, i, thin.value.data, false);
   } else {
     const base = await materialize(s, b);
     if (!base.ok) return base;
-    made = await applyEntry(s, i, base.value);
+    made = await applyEntry(s, i, base.value, false);
   }
   if (!made.ok) return made;
   const bad = checkAgain(s, i, made.value);
@@ -300,7 +343,7 @@ function hasKids(s: State, i: number): boolean {
 // ids[idAt ..].
 type Parent = { readonly index: number; readonly type: ScannedType; readonly depth: number; readonly data: Uint8Array; readonly ids: Uint8Array; readonly idAt: number };
 // Every not-yet-resolved delta resting on `p`, applied to its bytes: each gets its oid, type, depth and base; one that
-// something rests on is kept (cache) and pushed.
+// something rests on is pushed and kept: the last such is pinned (it is popped next), the earlier ones go to the cache.
 async function resolveKids(s: State, p: Parent, stack: number[]): Promise<PlyError | null> {
   const kids: number[] = [];
   if (p.index >= 0) for (let k = s.ofsStart[p.index] as number; k < (s.ofsStart[p.index + 1] as number); k++) kids.push(s.ofsKids[k] as number);
@@ -311,7 +354,7 @@ async function resolveKids(s: State, p: Parent, stack: number[]): Promise<PlyErr
     if (s.known[c] === 1) continue;
     if (depth > s.maxChain) return limitExceeded('delta chain depth', depth, s.maxChain);
     // oxlint-disable-next-line no-await-in-loop -- each child is applied in turn against the one base held
-    const out = await applyEntry(s, c, p.data);
+    const out = await applyEntry(s, c, p.data, true);
     if (!out.ok) return out.error;
     hashTo(p.type, out.value, s.oid, c * OID_BYTES);
     s.known[c] = 1;
@@ -320,18 +363,22 @@ async function resolveKids(s: State, p: Parent, stack: number[]): Promise<PlyErr
     s.size[c] = out.value.length;
     s.base[c] = p.index;
     if (hasKids(s, c)) {
-      cachePut(s.cache, c, out.value);
+      if (s.pin !== null) cachePut(s.cache, s.pin.index, s.pin.data);
+      s.pin = { index: c, data: out.value };
       stack.push(c);
     }
   }
   return null;
 }
-// Depth first: each entry popped is made (normally a cache hit) and the deltas resting on it applied.
+// Depth first: each entry popped is made (the pinned result, else a cache hit, else rebuilt) and the deltas resting on
+// it applied.
 async function drain(s: State, stack: number[]): Promise<PlyError | null> {
   while (stack.length > 0) {
     const u = stack.pop() as number;
+    const pinned = s.pin;
+    s.pin = null;
     // oxlint-disable-next-line no-await-in-loop -- one chain at a time, in order
-    const data = await materialize(s, u);
+    const data = pinned !== null && pinned.index === u ? ok(pinned.data) : await materialize(s, u);
     if (!data.ok) return data.error;
     const p: Parent = { index: u, type: s.type[u] as ScannedType, depth: s.depth[u] as number, data: data.value, ids: s.oid, idAt: u * OID_BYTES };
     // oxlint-disable-next-line no-await-in-loop -- as above
@@ -342,7 +389,7 @@ async function drain(s: State, stack: number[]): Promise<PlyError | null> {
 }
 
 // OFS children by base index (counting sort), REF deltas sorted by base id, whole oids the scan computed.
-function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, caps: { readonly maxObject: number; readonly maxDelta: number; readonly maxChain: number; readonly workMax: number }): State {
+function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, caps: { readonly maxObject: number; readonly maxDelta: number; readonly maxChain: number; readonly flat: number; readonly factor: number; readonly ceiling: number }): State {
   const cols = pack.columns;
   const n = cols.offset.length;
   const ofsStart = new Int32Array(n + 1);
@@ -391,7 +438,7 @@ function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, c
     refEntry[k] = refAt[from] as number;
   }
   return {
-    pack, source, bases: opts.bases, n, ...caps, work: 0, oid, known,
+    pack, source, bases: opts.bases, n, ...caps, floor: cols.size.reduce((a, b) => a + b, 0), work: 0, pin: null, oid, known,
     type: new Uint8Array(n), base: new Int32Array(n).fill(NO_BASE), depth: new Int32Array(n), size: Float64Array.from(pack.columns.size), ofsStart, ofsKids,
     refEntry, refOid, thinOf: new Int32Array(n).fill(-1), thinOids: new Uint8Array(0), thinCount: 0,
     cache: { map: new Map(), bytes: 0, cap: opts.cacheBytes },
@@ -512,7 +559,7 @@ export function resolvedIndexOf(columns: ResolvedColumns, stats: ResolveStats): 
   };
 }
 function finish(s: State): ResolvedIndex {
-  return resolvedIndexOf({ oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size }, { ...s.stats, work: s.work, workMax: s.workMax });
+  return resolvedIndexOf({ oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size }, { ...s.stats, work: s.work, workMax: workMaxOf(s) });
 }
 
 // Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
@@ -523,9 +570,17 @@ export async function resolvePackRange(pack: ScannedPack, source: RangeSource, i
   if (source.size !== pack.bytes) return fail('bad_request', `range source is ${source.size} bytes, the index read ${pack.bytes}`);
   if (!Number.isFinite(opts.cacheBytes) || opts.cacheBytes < 0) return fail('bad_request', `cacheBytes must be a non-negative number, got ${opts.cacheBytes}`);
   const budget = opts.budget;
+  const work = budget.tag === 'work';
+  if (work) {
+    const ratio = checkLimit(budget.ratio, 'workRatio');
+    if (!ratio.ok) return ratio;
+  }
+  const maxWork = checkLimit(opts.maxWork, 'maxWork');
+  if (!maxWork.ok) return maxWork;
   const l = limits.value;
-  const workMax = budget.tag === 'work' ? Math.max(l.maxInflatedTotal, budget.ratio * pack.bytes) : l.maxInflatedTotal;
-  const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, workMax });
+  const flat = l.maxInflatedTotal;
+  const bound = work ? { flat, factor: LIMIT_RESOLVE_FACTOR, ceiling: maxWork.value } : { flat, factor: 0, ceiling: flat };
+  const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, ...bound });
   const roots = await fromRoots(s);
   if (roots !== null) return err(roots);
   const thin = await fromThin(s);

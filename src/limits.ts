@@ -126,6 +126,19 @@ export const LIMIT_OBJECT_OVERHEAD: number = 3 * KIB;
  * 1032:1; real packs measure far below this (deltas inflate only their instructions).
  */
 export const LIMIT_WORK_RATIO = 32;
+/**
+ * resolvePackRange's work bound. Resolving a pack honestly costs its floor: every member inflated once and every delta
+ * applied once, which is the sum of sizes the pack itself declares (each capped by maxObjectSize / maxDeltaResult), and
+ * has nothing to do with its compressed size: 80 one-line edits of a 4 MB file are a pack of about 1 MB and a floor of
+ * over 256 MiB. LIMIT_RESOLVE_FACTOR is the work allowed per floor byte: the room for bases made again after a cache
+ * miss. Measured by the test's own RangeSource (test/pack-range-resolve.test.js): that history resolves at about 1x the
+ * sum of its object sizes on the default cache.
+ * LIMIT_RESOLVE_WORK is the hard ceiling whatever the pack declares (a pack of 64 MiB delta bombs declares a floor as
+ * large as it likes): 256 maximum-size objects built once, 16 GiB, about a minute of CPU at the 3.6 ns per work byte
+ * measured in the review of ec337c5 (447,572,107 work bytes in 1,602 ms). `maxWork` on the call lowers or raises it.
+ */
+export const LIMIT_RESOLVE_FACTOR = 4;
+export const LIMIT_RESOLVE_WORK: number = LIMIT_OBJECT * 256;
 /* oxlint-enable no-magic-numbers */
 
 export type Limits = {
