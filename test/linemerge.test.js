@@ -237,7 +237,12 @@ test('work bound: no meter and no maxWork switches the bound off', () => {
 const lowVariety = (n, seed) => { let s = seed; const rnd = () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s % 3; }; return Array.from({ length: n }, () => 'abc'[rnd()]); };
 const scanFloor = n => 2 * (4950 + 100 * (n - 100)); // both files
 const diffSteps = (base, side, options = {}) => { const cl = classifier(), meter = { steps: 0 }; const d = diffScript(records(enc(base.join('\n') + '\n'), cl), records(enc(side.join('\n') + '\n'), cl), { rediff, meter, ...options }); return { d, steps: meter.steps }; };
-const LOWVAR_10K_STEPS = 5_370_282; // measured: the two 10,000-line files below (main counted nothing; 23f01d1 counted the diagonals only)
+// measured: the two 10,000-line files below (main counted nothing; 23f01d1 counted the diagonals only). The count is a
+// function of the input, and `rediff` is part of the input: 'myers' (the library's default; git >= 2.54) also runs the
+// classic diff over each group compaction shifted, 2,379 steps here, and 'skip' (older git) does not. The pin names
+// each mode itself: `rediff` above follows the installed git (2.50 here, 2.56 on CI's ubuntu-latest), and a pin read
+// through it held one number on one machine and the other on the next. Each is equal on Node 20, 22 and 24.
+const LOWVAR_10K_STEPS = { skip: 5_370_282, myers: 5_372_661 };
 test('work bound: the classic-Myers fallback counts the cleanup scan, not only the diagonals', () => {
   // a 3000-line a/b/c file with its first and last lines changed: nothing trims, every line is frequent in the other
   // file (about 1000 times against a threshold of bogosqrt(3000) = 64), and the two-line edit itself is one long snake
@@ -254,7 +259,7 @@ test('work bound: a low-variety file (random a/b/c) costs under 3x when it doubl
   const [s1, s2] = [at(10000), at(20000)];
   assert.ok(s1 >= scanFloor(10000) - 2 * 100 * 100, `${s1} steps`); // up to 100 lines of each file may trim
   assert.ok(s2 / s1 > 1.8 && s2 / s1 < 3, `doubling ratio ${s2 / s1}: ${s1} -> ${s2}`);
-  assert.equal(s1, LOWVAR_10K_STEPS, 'the fixed case\'s count (pinned: a change here is a change in what is counted)');
+  for (const [mode, pinned] of Object.entries(LOWVAR_10K_STEPS)) assert.equal(diffSteps(lowVariety(10000, 0x9e3779b9), lowVariety(10000, 0x1234567), { rediff: mode }).steps, pinned, `the fixed case's count under rediff ${mode} (pinned: a change here is a change in what is counted)`);
   // the same files under a budget of (20000 + 1024) x 64 = 1,345,536 steps: the stop is within 5% of it
   const held = diffSteps(lowVariety(10000, 0x9e3779b9), lowVariety(10000, 0x1234567), { maxWork: 1_345_536 });
   assert.deepEqual(held.d, { ok: false, error: { undecided: true, detail: 'line diff step budget exceeded' } });
