@@ -28,17 +28,23 @@
 // repositories up to a few hundred MB. The resident set is bounded by limits.maxInflatedTotal (the objects held), the
 // object count by limits.maxPackObjects, each object by limits.maxObjectSize, the pack sent by limits.maxPackBytes and
 // the refs by limits.maxRefs: past any of them the answer is `limit_exceeded`, never a partial push. The defaults hold
-// a repository of about 256 MiB of objects; raise maxInflatedTotal (and maxPackObjects) for a larger one.
+// a repository of about 256 MiB of objects; raise maxInflatedTotal (and maxPackObjects) for a larger one. A packfile is
+// held whole while it is parsed, so each is bounded by limits.maxPackBytes before a byte of it is read (its size from
+// the open handle; `limit_exceeded`, what: 'local pack bytes'). A packfile the file system will not give (EACCES, EIO,
+// EISDIR, …) is `unsupported`, kind 'filesystem', what: 'local pack', with the path, the operation and the system's
+// code in the message and the thrown error as `cause`: pushRepo never rejects with a node:fs error for a packfile.
 //
 // Refused as `bad_request` with `what`: SHA-256 repositories (objectFormat), reftable (refStorage), partial clones
 // (partialClone), objects/info/alternates (alternates) and shallow repositories (shallow).
 /* oxlint-disable no-await-in-loop -- the walks read one object at a time from the local repository, under the bounds */
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
-import { readFile, readdir, lstat } from 'node:fs/promises';
+import { open, readFile, readdir, lstat } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a tree path throughout this file
 import { join, resolve } from 'node:path';
-import { fail } from './errors.js';
-import type { PlyError } from './errors.js';
+import { fail, plyError } from './errors.js';
+import type { ErrorOf, PlyError } from './errors.js';
+import { thrownCode } from './boundary.js';
 import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, lowered } from './limits.js';
 import type { CheckedLimits } from './limits.js';
 import { inflate } from './inflate.js';
@@ -61,7 +67,7 @@ import { decodeBytes } from './bytes.js';
 import type { Input } from './absent.js';
 import { at, mapGet, readKey, withDefaults } from './absent.js';
 import { err, getOrElse, ok } from './result.js';
-import type { Option, Result } from './result.js';
+import type { Err, Option, Result } from './result.js';
 
 const OID = /^[0-9a-f]{40}$/u;
 const SYMREF = 'ref: ';
@@ -89,6 +95,42 @@ const maybeRead = (path: string): Promise<Buffer | null> => readFile(path).then(
 const maybeText = async (path: string): Promise<string | null> => { const b = await maybeRead(path); return b === null ? null : b.toString('utf8'); };
 // oxlint-disable-next-line typescript/promise-function-async -- lstat's own promise, mapped to a boolean
 const exists = (path: string): Promise<boolean> => lstat(path).then(() => true, () => false);
+
+// A file system failure as a value: `unsupported`, kind 'filesystem' (the shape checkout-node.ts gives the same class
+// of failure), naming the file, the operation and the system's own code (EACCES, EISDIR, …); the thrown error is `cause`.
+type FilesystemError = ErrorOf<'unsupported'> & { readonly kind: 'filesystem' };
+const filesystem = (what: string, op: string, path: string, e: unknown): Err<FilesystemError> => {
+  const code = thrownCode(e);
+  const named = code.tag === 'some' && typeof code.value === 'string' ? code.value : 'no error code';
+  return err(Object.assign(plyError('unsupported', `${what}: ${op} of ${JSON.stringify(path)} failed (${named})`, { what, path, cause: e }), { kind: 'filesystem' as const }));
+};
+
+// A local file's bytes, held to `max`: the size comes from the open handle, a file past the bound is refused before a
+// byte of it is read, and no more than the size seen is read even when the file grows meanwhile (one that shrank is
+// what was there). Never rejects.
+async function readBounded(path: string, max: number, what: string): Promise<Result<Uint8Array, PlyError>> {
+  let op = 'open';
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(path, 'r');
+    op = 'stat';
+    const { size } = await handle.stat();
+    if (size > max) return err(limitExceeded(`${what} bytes`, size, max));
+    op = 'read';
+    const buf = new Uint8Array(size);
+    let got = 0;
+    while (got < size) {
+      const { bytesRead } = await handle.read(buf, got, size - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    return ok(buf.subarray(0, got));
+  } catch (e) {
+    return filesystem(what, op, path, e);
+  } finally {
+    if (handle !== null) await handle.close().then(() => null, () => null);
+  }
+}
 
 // The git directory of a work tree (`.git`, a directory or a `gitdir:` file) or a bare repository; null for neither.
 async function findGitDir(dir: string): Promise<string | null> {
@@ -220,7 +262,9 @@ async function openStore(repo: Repo, limits: CheckedLimits): Promise<Result<Stor
   const packDir = join(objectsDir, 'pack');
   const packs = (await readdir(packDir).then(n => n, () => [])).filter(n => n.endsWith('.pack')).toSorted();
   for (const name of packs) {
-    const buf = await readFile(join(packDir, name));
+    const read = await readBounded(join(packDir, name), limits.maxPackBytes, 'local pack');
+    if (!read.ok) return read;
+    const buf = read.value;
     // the room the packs and objects held so far leave: a pack that would pass the bound fails while it is parsed
     const room = lowered(lowered(limits, 'maxInflatedTotal', maxTotal - charged), 'maxPackObjects', maxObjects - held.size);
     const parsed = parsePack(buf, { limits: room });
