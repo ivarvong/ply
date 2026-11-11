@@ -223,3 +223,63 @@ test('a generated corpus over every field of a multi-batch plan (missing, wrong 
   assert.ok(corpus.length > 1000, `the corpus covers the plan (${corpus.length} plans)`);
   await allRefusedUnsent(corpus);
 });
+
+// A hole in an array of the plan (an index below its length that is not an element). JSON cannot hold one, but a
+// structured-clone store (Durable Object storage, IndexedDB) hands one back: structuredClone below is that round trip,
+// and the hole is asserted to survive it. Expected value, by the rule and not from the code: a plan with a hole is not
+// one planTransfer made (it writes every element), so it is a corrupt plan: bad_request, what 'plan', from every
+// entry point, no throw, no request, with the hashes as stored and with everything a writer can recompute recomputed.
+const HOLED = {
+  steps: p => p.steps,
+  'pack.batches': p => p.pack.batches,
+  'pack.select': p => p.pack.select,
+  'a blobs batch\'s entries': p => p.pack.batches[0].entries,
+  'the final batch\'s entries': p => final(p).entries,
+};
+// The hashes and the temp ref over a plan with a hole, as a writer of the store recomputes them (the public, unkeyed
+// functions; a hole is hashed as JSON writes it, null).
+function resealed(plan) {
+  const { hash: _packHash, ...packBody } = plan.pack;
+  plan.pack.hash = planHash(packBody);
+  plan.tempRef = `${TRANSFER_REF_PREFIX}${transferKey(plan)}`;
+  const { hash: _hash, ...body } = plan;
+  plan.hash = transferPlanHash(body);
+  return plan;
+}
+test('a plan with a hole in steps, pack.batches, pack.select or a batch\'s entries is refused as a corrupt plan by every entry point: no throw, no request', async () => {
+  const { bare, t } = destination();
+  const sentBefore = proxy.count();
+  const wrong = [];
+  let cases = 0;
+  for (const [name, arrayOf] of Object.entries(HOLED)) {
+    const length = arrayOf(honest).length;
+    // the first element, the last, and one past the end (a trailing hole: the length is one more than the elements)
+    for (const place of new Set([0, length - 1, length])) {
+      for (const reseal of [false, true]) {
+        const plan = structuredClone(honest);
+        const list = arrayOf(plan);
+        if (place === length) list.length = length + 1;
+        else delete list[place];
+        const stored = structuredClone(reseal ? resealed(plan) : plan);
+        assert.equal(Object.hasOwn(arrayOf(stored), place), false, `${name}: the hole at ${place} survives a structured clone`);
+        assert.equal(arrayOf(stored).length, Math.max(length, place + 1));
+        cases++;
+        for (const [entry, call] of Object.entries(ENTRY_POINTS)) {
+          let got;
+          try {
+            const r = await call(t, stored);
+            got = r.ok ? `ok ${JSON.stringify(r.value)}` : `${r.error.code} ${r.error.what}`;
+          } catch (e) {
+            got = `threw ${String(e)}`;
+          }
+          if (got !== 'bad_request plan') wrong.push(`${name}[${place}]${reseal ? ' resealed' : ''}: ${entry}: ${got}`);
+        }
+      }
+    }
+  }
+  // 5 arrays, 3 places each (2 where an array has one element), hashes as stored and recomputed
+  assert.ok(cases >= 20, `cases: ${cases}`);
+  assert.deepEqual({ count: wrong.length, first: wrong.slice(0, 12) }, { count: 0, first: [] });
+  assert.equal(proxy.count() - sentBefore, 0, 'no request was sent');
+  assert.equal(refsOf(bare), '', 'the destination has no refs');
+});

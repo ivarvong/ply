@@ -261,7 +261,19 @@ function wellFormedStep(s: TransferStepPlan): boolean {
 
 // A count or an entry index as JSON gives it back: a non-negative safe integer.
 const isCount = (v: unknown): boolean => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-const isCounts = (v: readonly number[]): boolean => isList(v) && v.every(n => isCount(n));
+// Every element of a list read back passes, a hole included. Array#every skips a hole (an index below the length that
+// is not an element: a structured-clone store can hand one back, JSON cannot); for...of visits it, as a value that
+// is no number and no object, which no element check here passes. So a plan with a hole in its steps, batches,
+// selection or a batch's entries is not well formed, and nothing after the shape check meets one.
+function everyOf<T>(list: readonly T[], pass: (v: T, i: number) => boolean): boolean {
+  let i = 0;
+  for (const v of list) {
+    if (!pass(v, i)) return false;
+    i += 1;
+  }
+  return true;
+}
+const isCounts = (v: readonly number[]): boolean => isList(v) && everyOf(v, n => isCount(n));
 function wellFormedBatch(b: PlannedBatch): boolean {
   if (typeof b !== 'object' || b === null || (b.kind !== 'blobs' && b.kind !== 'final')) return false;
   return isCount(b.packBytes) && isCount(b.objects) && isCount(b.refRewrites) && isCounts(b.entries);
@@ -276,8 +288,8 @@ function wellFormedPack(p: PackPlan, steps: readonly TransferStepPlan[]): boolea
   if (typeof p !== 'object' || p === null || p.version !== PLAN_VERSION || typeof p.hash !== 'string' || typeof p.trailer !== 'string') return false;
   if (typeof p.crossBatchRef !== 'boolean' || !isCount(p.entries) || !wellFormedBudget(p.budget)) return false;
   if (p.select !== null && !isCounts(p.select)) return false;
-  if (!isList(p.batches) || p.batches.length !== steps.length || !p.batches.every(b => wellFormedBatch(b))) return false;
-  return p.batches.every((b, i) => {
+  if (!isList(p.batches) || p.batches.length !== steps.length || !everyOf(p.batches, b => wellFormedBatch(b))) return false;
+  return everyOf(p.batches, (b, i) => {
     const s = at(steps, i);
     return s.tag === 'some' && (b.kind === 'final') === (s.value.kind === 'final');
   });
@@ -310,7 +322,7 @@ function wellFormedPlan(plan: TransferPlan): boolean {
   if (!isOid(plan.source) || !isOid(plan.tree) || !isOid(plan.head) || !isList(plan.steps)) return false;
   if (!targetRef(plan.ref).ok || typeof plan.tempRef !== 'string' || typeof plan.atomic !== 'boolean' || typeof plan.hash !== 'string') return false;
   const last = plan.steps.length - 1;
-  if (last < 0 || !plan.steps.every((s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === last))) return false;
+  if (last < 0 || !everyOf(plan.steps, (s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === last))) return false;
   return wellFormedPack(plan.pack, plan.steps);
 }
 
@@ -318,7 +330,7 @@ function wellFormedPlan(plan: TransferPlan): boolean {
 // runTransfer all make before they act or answer:
 //   - it is total: every field the check, a hash or a later step reads (ids, refs, steps, the pack plan's budget,
 //     selection, batches and their entries) has its type and shape checked first, so a plan of any shape is answered
-//     with bad_request, never a TypeError;
+//     with bad_request, never a TypeError. A hole in any of its arrays is such a shape (everyOf): what 'plan';
 //   - its temp ref is not a free field: it must be the name tempRefOf derives from the plan's key under the caller's
 //     prefix, and never the target ref. So the only refs a plan can make a push create, move or delete are
 //     refs/ply/transfer/<key> (or the caller's prefix) and the target ref;
