@@ -21,8 +21,9 @@
 // its compressed size (delta-compressed history is legitimately hundreds of times its pack). The floor is every member
 // inflated once (the scan's sizes) plus every delta applied once (its header's result size, capped by maxDeltaResult).
 // A work budget allows LIMIT_RESOLVE_FACTOR x the floor reached so far (the factor is the room for rebuilds), never
-// less than maxInflatedTotal and never more than limits.maxResolveWork (8 x maxInflatedTotal unless the caller sets
-// it): CPU is at most the factor times the declared sizes and at most the ceiling, which is what stops a delta bomb
+// less than maxInflatedTotal and never more than the ceiling, max(limits.maxResolveWork, maxInflatedTotal)
+// (maxResolveWork is 8 x maxInflatedTotal unless the caller sets it; a record that sets it below its own
+// maxInflatedTotal is bounded at maxInflatedTotal): CPU is at most the factor times the declared sizes and at most the ceiling, which is what stops a delta bomb
 // (every first-time result raises the floor). A retain budget allows maxInflatedTotal, flat.
 //
 // Verified: each member's zlib checksum, length and declared size; every delta against its base's size; every oid
@@ -580,7 +581,8 @@ export async function resolvePackRange(pack: ScannedPack, source: RangeSource, i
   }
   const l = limits.value;
   const flat = l.maxInflatedTotal;
-  const bound = work ? { flat, factor: LIMIT_RESOLVE_FACTOR, ceiling: l.maxResolveWork } : { flat, factor: 0, ceiling: flat };
+  // the ceiling is never below the record's maxInflatedTotal: a preset spread with maxInflatedTotal raised keeps that room
+  const bound = work ? { flat, factor: LIMIT_RESOLVE_FACTOR, ceiling: Math.max(l.maxResolveWork, flat) } : { flat, factor: 0, ceiling: flat };
   const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, ...bound });
   const roots = await fromRoots(s);
   if (roots !== null) return err(roots);

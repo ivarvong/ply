@@ -387,8 +387,9 @@ test('budget fields are checked where they enter: a ratio or work ceiling that i
     assert.equal(ceiling.ok, false, `maxResolveWork ${bad} was accepted`);
     assert.equal(ceiling.error.code, 'bad_request');
   }
-  // the ceiling is hard: a chain that needs more work than it allows is refused
-  const low = await resolved(pack, { limits: { maxResolveWork: 10 } });
+  // the ceiling is hard: a chain that needs more work than it allows is refused. The ceiling is never below the
+  // record's maxInflatedTotal, so both are lowered: max(10, 10) = 10
+  const low = await resolved(pack, { limits: { maxResolveWork: 10, maxInflatedTotal: 10 } });
   assert.equal(low.error.code, 'limit_exceeded');
   assert.equal(low.error.what, 'resolve work bytes');
 });

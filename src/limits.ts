@@ -134,7 +134,9 @@ export const LIMIT_WORK_RATIO = 32;
  * miss. Measured by the test's own RangeSource (test/pack-range-resolve.test.js): that history resolves at about 1x the
  * sum of its object sizes on the default cache.
  * The hard ceiling, whatever the pack declares (a pack of maximum-size delta bombs declares a floor as large as it
- * likes), is the Limits key maxResolveWork. Left out of a caller's record it is LIMIT_RESOLVE_TOTALS x that record's
+ * likes), is the Limits key maxResolveWork, or the record's maxInflatedTotal when that is larger (the bound is never
+ * below maxInflatedTotal: a preset spread with maxInflatedTotal raised resolves what it did before the key existed).
+ * Left out of a caller's record it is LIMIT_RESOLVE_TOTALS x that record's
  * maxInflatedTotal, so it follows the preset: 2 GiB on DEFAULT_LIMITS, 512 MiB on WORKER_LIMITS. Measured on a 40 KB
  * bomb (test/pack-range-resolve-bound.test.js): refused after 512 MiB in about 2 s of CPU and after 2 GiB in about 8 s
  * (about 4 ns per work byte, most of it hashing each result). An honest pack whose objects sum past the ceiling is

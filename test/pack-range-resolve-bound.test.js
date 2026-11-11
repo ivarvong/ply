@@ -5,6 +5,11 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { TYPE } from '../src/objects.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -81,11 +86,13 @@ test('the work ceiling follows the limits a caller gives: left out, it is 8 x th
   const partial = { maxInflatedTotal: 4 * MIB, maxDeltaResult: MIB, maxObjectSize: MIB };
   assertRefusedAt(await resolveBomb(pack, partial), 33_554_432, MIB);
   assertRefusedAt(await resolveBomb(pack, withLimits(partial)), 33_554_432, MIB);
-  // given, it is what was given: 40 MiB of results pass under 64 MiB and are refused under 2 MiB
+  // given, it is what was given: 40 MiB of results pass under 64 MiB and are refused under 6 MiB
   const roomy = await resolveBomb(pack, { ...partial, maxResolveWork: 64 * MIB });
   assert.equal(roomy.ok, true);
   assert.equal(roomy.value.stats.workMax, 64 * MIB);
-  assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 2 * MIB }), 2 * MIB, MIB);
+  assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 6 * MIB }), 6 * MIB, MIB);
+  // given below the record's maxInflatedTotal (4 MiB), the bound is maxInflatedTotal: by hand, max(2 MiB, 4 MiB) = 4,194,304
+  assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 2 * MIB }), 4_194_304, MIB);
   assert.equal(DEFAULT_LIMITS.maxResolveWork, 2_147_483_648);
   assert.equal(WORKER_LIMITS.maxResolveWork, 536_870_912);
 });
@@ -139,4 +146,41 @@ test('a forked family larger than the cache: a sibling that missed the cache cos
   assert.equal(want.length, 151);
   assert.ok(reads <= 2 * 151, `${reads} range reads for 151 entries`);
   assert.ok(r.value.stats.work <= 2 * 151 * S, `${r.value.stats.work} work bytes for ${151 * S} bytes of objects`);
+});
+
+test('a spread of WORKER_LIMITS with maxInflatedTotal raised to 1 GiB resolves a real git history of more than 512 MiB: the work bound is never below the record\'s maxInflatedTotal', { timeout: 600_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-range-spread-'));
+  try {
+    const git = (args, input) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'core.compression=1', ...args], { cwd: dir, input, maxBuffer: 1 << 30 });
+    git(['init', '-q', '.']);
+    // a lockfile-like text file of about 13 MB (under WORKER_LIMITS.maxObjectSize, 16 MiB); each commit changes one line
+    const lines = Array.from({ length: 108_000 }, (_, i) => `    "pkg-${i}": { "version": "1.0.${i}", "integrity": "sha512-${((i * 2654435761) >>> 0).toString(16).padStart(8, '0').repeat(8)}" },`);
+    for (let c = 0; c < 48; c++) {
+      lines[(c * 449) % lines.length] = `    "edited-${c}": { "version": "2.0.${c}" },`;
+      writeFileSync(join(dir, 'package-lock.json'), lines.join('\n'));
+      git(['add', 'package-lock.json']);
+      git(['commit', '-q', '-m', `edit ${c}`]);
+    }
+    const pack = new Uint8Array(git(['pack-objects', '--all', '--stdout', '-q', '--delta-base-offset'], ''));
+    // git's own list of the repository's objects: oid, type, size
+    const want = git(['cat-file', '--batch-all-objects', '--batch-check']).toString().trim().split('\n');
+    const sum = want.reduce((a, l) => a + Number(l.split(' ')[2]), 0);
+    // the case needs objects summing past the preset's maxResolveWork (512 MiB) and under the raised maxInflatedTotal (1 GiB)
+    assert.ok(sum > 536_870_912 && sum < 1_073_741_824, `history ${sum} bytes in a pack of ${pack.length}`);
+    // a consumer that never heard of maxResolveWork: the preset, with one key raised
+    const limits = { ...WORKER_LIMITS, maxInflatedTotal: 1024 * MIB };
+    const idx = await scanPackIndex(streamOf(pack), { limits });
+    assert.equal(idx.ok, true, idx.ok ? '' : idx.error.message);
+    const r = await resolvePackRange(idx.value, rangeFromBytes(pack), { limits });
+    assert.equal(r.ok, true, r.ok ? '' : `${r.error.code}: ${r.error.message}`);
+    const nameOf = { [TYPE.COMMIT]: 'commit', [TYPE.TREE]: 'tree', [TYPE.BLOB]: 'blob', [TYPE.TAG]: 'tag' };
+    const got = Array.from({ length: r.value.count }, (_, i) => `${r.value.oid(i).value} ${nameOf[r.value.type(i).value]} ${r.value.columns.size[i]}`);
+    assert.deepEqual(got.toSorted(), want.toSorted());
+    // by hand: max(maxResolveWork 512 MiB, maxInflatedTotal 1 GiB) = 1,073,741,824, the bound main ec337c5 gave this record
+    assert.equal(r.value.stats.workMax, 1_073_741_824);
+    assert.ok(r.value.stats.work > 536_870_912, `work ${r.value.stats.work} did not pass the preset's 512 MiB`);
+    console.log(`spread history: pack ${pack.length} B, ${r.value.count} objects, sum of sizes ${sum}, work ${r.value.stats.work}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
