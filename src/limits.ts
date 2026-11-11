@@ -86,6 +86,18 @@ export const LIMIT_MERGE_DEPTH = 1024;
  */
 export const LIMIT_REPORT_LINES: number = LIMIT_REFS;
 /**
+ * The bytes of one report-status line beyond its ref name: the reason of "ng <ref> <reason>", or the status of
+ * "unpack <status>". git's own are under 100 bytes and the longest host reason observed is 86 (Cloudflare Artifacts),
+ * so 4 KiB is room for a host that explains itself. push.ts reportLineBytes adds the longest ref commanded; a line
+ * over that ends the read (the push is 'ambiguous': its body was sent).
+ */
+export const LIMIT_REPORT_REASON_BYTES = 4096;
+/**
+ * Band-2 bytes (progress, hook output) read from one receive-pack answer. Only a 4 KiB tail is kept, so this bounds
+ * what is read, not what is held: git's progress is a few KiB and a talkative hook some hundreds; 8 MiB is past both.
+ */
+export const LIMIT_REPORT_PROGRESS_BYTES = 8_388_608;
+/**
  * Parents on one commit. An octopus is a handful; a commit that lists more parents than the ref cap is not
  * a history bestBases will walk.
  */

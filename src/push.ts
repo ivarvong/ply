@@ -14,7 +14,7 @@ import type { Refname } from './refname.js';
 import { measurePack, streamPack, streamSource } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
 import { frames, coded, clientSpan, spanned, UA } from './transport.js';
-import { limitExceeded, parseLimits } from './limits.js';
+import { limitExceeded, parseLimits, LIMIT_REPORT_REASON_BYTES, LIMIT_REPORT_PROGRESS_BYTES } from './limits.js';
 import type { LimitsInput } from './limits.js';
 // oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, the parsed brands, Result
 import { validatePushRef, validateWire } from './validate.js';
@@ -601,8 +601,21 @@ const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array
 // forced-update), so a push maxRefs allows is never cut off by its own honest report (#144: maxRefs commands read
 // maxRefs + 1 lines). A larger cap is for a proc-receive hook that reports one command as several refs.
 export const REPORT_V2_OPTION_LINES = 4;
+const honestReportLines = (plan: Pick<PushPlan, 'commands' | 'caps'>): number => 1 + plan.commands.length * (plan.caps.includes('report-status-v2') ? 1 + REPORT_V2_OPTION_LINES : 1);
 export const reportLineCap = (plan: Pick<PushPlan, 'maxReportLines' | 'commands' | 'caps'>): number =>
-  Math.max(plan.maxReportLines, 1 + plan.commands.length * (plan.caps.includes('report-status-v2') ? 1 + REPORT_V2_OPTION_LINES : 1));
+  Math.max(plan.maxReportLines, honestReportLines(plan));
+// What an honest answer can be, from the commands sent (the server chooses none of it). One line: "ng <ref> <reason>\n"
+// with the longest ref commanded (a character is at most 3 UTF-8 bytes) and a reason of LIMIT_REPORT_REASON_BYTES.
+// All of band 1 (or of a plain answer): that many bytes for every line git sends, and one more line's worth for the
+// framing (4 bytes a pkt, 1 a side-band frame) and the 1-byte keepalives sent while hooks run.
+const UTF8_MAX_PER_CHAR = 3;
+const PKT_AND_BAND = 5;
+export const reportLineBytes = (plan: Pick<PushPlan, 'commands'>): number => {
+  let longest = 0;
+  for (const c of plan.commands) longest = Math.max(longest, c.ref.length);
+  return NG_REF.length + UTF8_MAX_PER_CHAR * longest + 1 + LIMIT_REPORT_REASON_BYTES + 1;
+};
+export const reportByteCap = (plan: Pick<PushPlan, 'commands' | 'caps'>): number => (honestReportLines(plan) + 1) * (reportLineBytes(plan) + PKT_AND_BAND);
 
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the
 // response end the read as `lost`; the stream otherwise ends as a report or broken. `reading` is the last reading state.
@@ -630,11 +643,29 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody,
   let lost: { readonly cause: unknown } | null = null;
   let answered = false;
   const maxLines = reportLineCap(plan);
+  // The answer is held to what an honest one can be (reportByteCap, reportLineBytes) and classified as its lines
+  // arrive: the read ends, and leaving the loop cancels the response body, the moment the report cannot be git's (its
+  // first line is not an unpack line, a status for a ref not commanded or already answered, a line over the cap). So
+  // what is kept is at most one line a command, each under the line cap, whatever the server goes on to send.
+  const lineBytes = reportLineBytes(plan);
+  const statusCap = reportByteCap(plan);
+  let statusBytes = 0;
+  let progressBytes = 0;
+  let report = reportInit(plan.commands);
+  let fed = 0;
   try {
     for await (const f of frames(t, 'git-receive-pack', body, span)) {
       answered = true;
-      reportBytes += f.kind === 'data' ? f.payload.length : 0;
+      const size = f.kind === 'data' ? f.payload.length : 0;
+      reportBytes += size;
       if (reportBytes > plan.maxPack) { lost = { cause: limitExceeded('report bytes', reportBytes, plan.maxPack) }; break; }
+      if (sideband && f.kind === 'data' && f.payload[0] === SIDEBAND_PROGRESS) {
+        progressBytes += size;
+        if (progressBytes > LIMIT_REPORT_PROGRESS_BYTES) { lost = { cause: limitExceeded('report progress bytes', progressBytes, LIMIT_REPORT_PROGRESS_BYTES) }; break; }
+      } else {
+        statusBytes += size;
+        if (statusBytes > statusCap) { lost = { cause: limitExceeded('report status bytes', statusBytes, statusCap) }; break; }
+      }
       const stepped = streamStep(st, f);
       if (!stepped.ok) { lost = { cause: stepped.error }; break; }
       st = stepped.value;
@@ -642,9 +673,17 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody,
       if (st.tag !== 'reading') break;
       reading = st;
       if (st.lines.length > maxLines) { lost = { cause: limitExceeded('report lines', st.lines.length, maxLines) }; break; }
+      for (const line of st.lines.slice(fed)) {
+        if (line.length > lineBytes) { lost = { cause: limitExceeded('report line bytes', line.length, lineBytes) }; break; }
+        report = reportStep(report, line);
+      }
+      fed = st.lines.length;
+      if (lost !== null || report.tag === 'malformed') break;
     }
   } catch (e) { lost = { cause: e }; }
-  return lost === null ? { done: streamFinish(st), reading } : { ...lost, answered };
+  if (lost !== null) return { ...lost, answered };
+  // a report that cannot be git's is that report, as far as it was read: decide() classifies the same lines to the same verdict
+  return { done: report.tag === 'malformed' ? { tag: 'report', lines: reading.lines } : streamFinish(st), reading };
 }
 
 // The span's view of the outcome, from the classified report (no second parser).

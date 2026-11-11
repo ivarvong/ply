@@ -1772,6 +1772,20 @@ test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const flood = { limits: withLimits({ maxPackBytes: 10_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) { pulled++; yield band(SIDEBAND_PROGRESS, 999); } } };
   await assert.rejects(unwrapAsync(push(flood, { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
   assert.equal(pulled, 11, 'ten 1,000-byte frames fit, the eleventh crosses the cap');
+  // Under the default maxPackBytes the answer is held to what an honest one can be, each cap by its own name
+  // (test/push-report-bound.test.js counts the bytes of a real response body). The figures, by hand, for the one
+  // command refs/heads/a (12 characters): a line is "ng " (3) + 3 bytes a character (36) + " " (1) + a 4,096-byte
+  // reason + LF (1) = 4,137 bytes; band 1 is (unpack + 1 status + 1 more line) = 3 lines of 4,137 + 5 framing bytes =
+  // 12,426 bytes; band 2 is 8 MiB = 8,388,608 bytes.
+  const endless = frame => ({ limits: withLimits({}), tracer: tracerStub, parent: null, async *frames() { for (;;) yield frame; } });
+  const capped = (what, max) => e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === what && e.cause.max === max;
+  await assert.rejects(unwrapAsync(push(endless(band(SIDEBAND_PROGRESS, 60_000)), { commands: del, sideband: true })), capped('report progress bytes', 8_388_608));
+  // a keepalive is one band byte: 12,426 of them fit, the next one is over
+  await assert.rejects(unwrapAsync(push(endless(band(SIDEBAND_PACK, 0)), { commands: del, sideband: true })), e => capped('report status bytes', 12_426)(e) && e.cause.got === 12_427);
+  const unpackLine = n => ({ kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), unwrap(pkt(`unpack ${'x'.repeat(n - 8)}\n`))]) });
+  await assert.rejects(unwrapAsync(push(endless(unpackLine(4138)), { commands: del, sideband: true })), e => capped('report line bytes', 4137)(e) && e.cause.got === 4138);
+  // a line at the cap is read as a line: this one is no git unpack status, and the next copy of it is no ref status
+  await assert.rejects(unwrapAsync(push(endless(unpackLine(4137)), { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === undefined && e.message === 'push outcome unknown: a line is not a ref status');
 });
 
 test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare', async () => {
