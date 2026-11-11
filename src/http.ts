@@ -387,6 +387,11 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   // `new URL` puts what it was given on the TypeError (`input`): a credential in a malformed URL would ride out on it.
   let u: URL;
   try { u = new URL(url); } catch { return fail('bad_request', 'invalid url: not an absolute URL', { what: 'url' }); }
+  // The base is held to the rule redirect targets and allowUrl results already are: only http: and https: are ever
+  // fetched. Anything else (file:, data:, blob:, ssh:, git:, ext::) is refused here, before any I/O and before the
+  // fetch implementation sees it, as a definite failure and not a retry-shaped `network`. The message is fixed text:
+  // the URL may carry a credential.
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return fail('bad_request', 'invalid url: only http: and https: remotes are supported', { what: 'url' });
   // userinfo in the URL becomes the Basic credential git sends for it, byte for byte: `user:password`; a user alone is
   // `user:` (a token given as the user, which GitHub and GitLab accept; git sends it without asking for a password and
   // asks only once it is refused), a password alone `:password`, an empty userinfo `:`. Explicit `auth` wins. It never
