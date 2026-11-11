@@ -283,3 +283,43 @@ test('a plan with a hole in steps, pack.batches, pack.select or a batch\'s entri
   assert.equal(proxy.count() - sentBefore, 0, 'no request was sent');
   assert.equal(refsOf(bare), '', 'the destination has no refs');
 });
+
+// The pack check's two other refusals (planFitsPack), through the entry points that hold the pack. Expected values, by
+// hand, from the rule above (a transfer pushes the pack's trees and blobs, each once, held to the pack before any
+// request; SAFETY.md and the README's transfer section say the plan is untrusted):
+//   - a selection of every tree and blob of the pack in pack order, then one index past the pack's last entry
+//     (entries are 0..count-1, so `count` names nothing), put in the final batch as well so the batches still partition
+//     the selection, both hashes recomputed. The plan store's own check passes it (it holds no pack); with the pack in
+//     hand it selects something the pack does not hold: bad_request, no request, no ref
+//   - the honest plan with a resolved index that is not this pack's: git's empty pack (pack-objects given no object:
+//     the 12-byte header with count 0 and the 20-byte trailer, 32 bytes), scanned and resolved, has no entry at all,
+//     while the pack has several. The type of the pack's first entry (0) cannot be read, so the selection cannot be
+//     held to the pack: bad_request naming entry 0, no request, no ref
+test('a selection with an entry past the pack, and a resolved index without the pack\'s entries, are refused by a step and a run before any request', async () => {
+  const { bare, t } = destination();
+  const sentBefore = proxy.count();
+  const past = from.pack.count;
+  const [, extra] = edit('an entry past the pack selected and pushed', p => { p.pack.select = [...p.pack.select, past]; p.pack.entries += 1; final(p).entries.push(past); final(p).objects += 1; });
+  assert.equal(checkTransferPlan(extra, { ref: COPY }).ok, true, 'hashes and partition hold: only the pack can refuse this plan');
+  const emptyPack = new Uint8Array(gitBuf(join(root, 'source'), ['pack-objects', '--stdout', '-q'], ''));
+  assert.equal(emptyPack.length, 32);
+  const scannedEmpty = unwrap(await scanPackIndex(streamOf(emptyPack)));
+  const unresolved = { ...from, resolved: unwrap(await resolvePackRange(scannedEmpty, rangeFromBytes(emptyPack))) };
+  const last = honest.steps.length - 1;
+  const cells = [
+    ['past the pack: transferStep', () => transferStep(t, from, extra, 0, { commit, ref: COPY }), /selects entries the pack does not hold/],
+    ['past the pack: transferStep (last)', () => transferStep(t, from, extra, last, { commit, ref: COPY }), /selects entries the pack does not hold/],
+    ['past the pack: runTransfer', () => runTransfer(t, from, extra, commit, { maxSteps: 1, retries: 0, ref: COPY }), /selects entries the pack does not hold/],
+    ['another index: transferStep', () => transferStep(t, unresolved, honest, 0, { commit, ref: COPY }), /entry 0 is not in the resolved index/],
+    ['another index: transferStep (last)', () => transferStep(t, unresolved, honest, last, { commit, ref: COPY }), /entry 0 is not in the resolved index/],
+    ['another index: runTransfer', () => runTransfer(t, unresolved, honest, commit, { maxSteps: 1, retries: 0, ref: COPY }), /entry 0 is not in the resolved index/],
+  ];
+  for (const [label, run, message] of cells) {
+    const r = await run();
+    assert.equal(r.ok, false, label);
+    assert.equal(r.error.code, 'bad_request', `${label}: ${r.error.message}`);
+    assert.match(r.error.message, message, label);
+  }
+  assert.equal(proxy.count() - sentBefore, 0, 'no request was sent');
+  assert.equal(refsOf(bare), '', 'the destination has no refs');
+});
