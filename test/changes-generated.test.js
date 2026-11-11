@@ -171,7 +171,8 @@ function byGit(seedWork, work, changes, model) {
       writeFileSync(join(work, c.path), model.at(c)); // git has no find/replace: the model's bytes after this edit
       git(work, ['add', '--', c.path]);
     } else if (c.kind === 'delete') {
-      git(work, ['rm', '-r', '-q', '--', c.path]);
+      // -f: git rm refuses a path whose staged content differs from HEAD (an earlier change of this list) without it
+      git(work, ['rm', '-r', '-q', '-f', '--', c.path]);
     } else {
       git(work, ['mv', '--', c.from, c.to]);
       prune(work, c.from);
