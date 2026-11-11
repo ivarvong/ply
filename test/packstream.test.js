@@ -85,9 +85,20 @@ const cuts = (buf, rng) => [
   splitRandom(rng, buf, { maxChunks: 40 }),
 ];
 // The pull (in every chunking) and inflate() against the oracle on the same bytes: the same answer.
+// The oracle is the decoder ply had before, and it builds a table from any code lengths. zlib refuses an over-subscribed
+// or incomplete set (inftrees.c), and so does the pull now: where node:zlib refuses the bytes with one of those three
+// messages, ply must refuse too, and with zlib's message unless it refused earlier for a reason the oracle shares
+// (a declared size, the input bound). zlib is the expected value there; the oracle everywhere else.
+const CODE_SETS = ['invalid code lengths set', 'invalid literal/lengths set', 'invalid distances set'];
+function zlibCodeSet(buf, o) {
+  try { (o.raw ? zlib.inflateRawSync : zlib.inflateSync)(buf); } catch (e) { return CODE_SETS.includes(e.message) ? e.message : null; }
+  return null;
+}
 function same(buf, o = {}, rng = new Rng(7)) {
-  const want = inflateRef(buf, 0, o);
   const whole = inflate(buf, 0, o);
+  const set = zlibCodeSet(buf, o);
+  if (set !== null) assert.equal(whole.ok, false, `zlib refuses (${set}), inflate() accepts`);
+  const want = set !== null && refusal(whole) === `pack_corrupt: inflate: ${set}` ? whole : inflateRef(buf, 0, o);
   assert.equal(refusal(whole), refusal(want), 'inflate()');
   if (want.ok) {
     assert.deepEqual(new Uint8Array(whole.value.out), new Uint8Array(want.value.out), 'inflate(): output');
@@ -212,15 +223,23 @@ test('inflate pull == inflate() on every hand-built member the buffered tests re
     for (const [v, n] of extras.body) put(v, n);
     return packBits(bits);
   };
-  assert.equal(refusal(same(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), { raw: true })), 'pack_corrupt: inflate: repeat with no previous');
-  assert.equal(refusal(same(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), { raw: true })), 'pack_corrupt: inflate: repeat overflow');
-  assert.equal(refusal(same(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), { raw: true })), 'pack_corrupt: inflate: no end-of-block code');
-  // code-length codes for 16 (repeat previous, 2 bits) and 17 (zeros, 3 bits) as well as 18 and a length of 1
-  assert.equal(refusal(same(repeat({ head: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], body: [[0, 2], [3, 2], [1, 2], [7, 3], [0, 2]] }), { raw: true })), refusal(inflateRef(repeat({ head: [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2], body: [[0, 2], [3, 2], [1, 2], [7, 3], [0, 2]] }), 0, { raw: true })));
+  // The code-length sets are complete (zlib refuses any other: test/inflate-codesets.test.js), so each member reaches
+  // the refusal it is here for. head is the lengths of the code-length symbols 16, 17, 18, 0. With 16 or 18 and 0 at one
+  // bit each, the canonical codes are 0 → `0` and the other → `1`.
+  assert.equal(refusal(same(repeat({ head: [1, 0, 0, 1], body: [[1, 1]] }), { raw: true })), 'pack_corrupt: inflate: repeat with no previous');
+  assert.equal(refusal(same(repeat({ head: [0, 0, 1, 1], body: [[1, 1], [127, 7], [1, 1], [127, 7]] }), { raw: true })), 'pack_corrupt: inflate: repeat overflow');
+  assert.equal(refusal(same(repeat({ head: [0, 0, 1, 1], body: [[1, 1], [127, 7], [1, 1], [120 - 11, 7]] }), { raw: true })), 'pack_corrupt: inflate: no end-of-block code');
+  // all four at two bits: 0 → `00`, 16 → `01`, 17 → `10`, 18 → `11` (a code's first bit is sent first, so put() takes
+  // it reversed). A zero, 16 repeating it 3 times, 17 for 10 zeros, 18 for 138 and 18 for 106: 258 zero lengths, the
+  // whole of the 257 + 1 the header declares, and so no end-of-block code.
+  assert.equal(refusal(same(repeat({ head: [2, 2, 2, 2], body: [[0, 2], [2, 2], [0, 2], [1, 2], [7, 3], [3, 2], [127, 7], [3, 2], [106 - 11, 7]] }), { raw: true })), 'pack_corrupt: inflate: no end-of-block code');
   const hole = [];
   const putHole = (v, n) => { for (let i = 0; i < n; i++) hole.push((v >> i) & 1); };
-  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(6, 4);
-  for (const n of [0, 0, 0, 1, 1, 0, 0, 0, 0, 0]) putHole(n, 3);
+  // A hole in a code zlib permits: the literal/length set is the end-of-block code alone at one bit (inftrees.c lets a
+  // single 1-bit code be incomplete; any other incomplete set is refused at the header), and the bit read is the unused
+  // `1`. 18 code-length lengths in the RFC's order: symbols 0 (4th) and 1 (18th) at one bit, so 0 → `0`, 1 → `1`.
+  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(14, 4);
+  for (const n of [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) putHole(n, 3);
   for (let i = 0; i < 256; i++) putHole(0, 1);
   putHole(1, 1); putHole(0, 1);
   for (let i = 0; i < 15; i++) putHole(1, 1);

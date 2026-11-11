@@ -14,6 +14,9 @@
 //
 // The one deflate decoder in ply: inflate() (inflate.ts) is a collector over this pull, so the buffered and the streamed
 // paths give the same answer by construction. On input no git writes, the decoder refuses what zlib and git refuse:
+//   - a dynamic block whose code-length, literal/length or distance code set is over-subscribed or incomplete is
+//     pack_corrupt with zlib's message (`invalid code lengths set`, `invalid literal/lengths set`, `invalid distances
+//     set`), by zlib's own rule (huffComplete); test/inflate-codesets.test.js holds acceptance to node:zlib;
 //   - a back-reference past the window CINFO declares is pack_corrupt, and CINFO > 7 is `zlib: window size N is not a
 //     zlib window` (after the method check and before the header checksum);
 //   - a stored block whose declared length is past the output cap is refused at its header, before its bytes arrive;
@@ -71,6 +74,31 @@ export function huffBuild(lengths: ArrayLike<number>): Huffman {
   // Stryker disable next-line EqualityOperator: lengths[lengths.length] is past the end and the if skips it
   for (let s = 0; s < lengths.length; s++) { const l = lengths[s] as number; if (l) { const at = offs[l] as number; symbol[at] = s; offs[l] = at + 1; } }
   return { count, symbol };
+}
+
+// zlib's check of a code set before it builds a table (inftrees.c inflate_table, zlib 1.3.1), which is what git's
+// inflate applies to every dynamic block:
+//     left = 1;
+//     for (len = 1; len <= MAXBITS; len++) { left <<= 1; left -= count[len]; if (left < 0) return -1; }  /* over-subscribed */
+//     if (left > 0 && (type == CODES || max != 1)) return -1;                                           /* incomplete set */
+// and, before it, `if (max == 0) { ... return 0; }  /* no symbols, but wait for decoding to report error */`.
+// So an over-subscribed set is always refused, and an incomplete one is refused except in the two cases zlib permits:
+//   - no code at all (max == 0), in any of the three sets: the table is built and the first symbol decoded from it is
+//     the error (here decode finds no code: `invalid huffman code`). A literal/length set never gets here that way (the
+//     end-of-block check comes first); a distance set with no codes is what a block of literals alone may carry;
+//   - one code of one bit (max == 1), in the literal/length and distance sets only, never in the code-length set
+//     (`single` is false for it). The unused 1-bit code is refused when it is read.
+// 15 steps over the count array huffBuild already filled: no allocation, once per table, nothing in the symbol loop.
+export function huffComplete(h: Huffman, single: boolean): boolean {
+  let left = 1;
+  let max = 0;
+  for (let len = 1; len < DEFLATE_BIT_TABLE; len++) {
+    const c = h.count[len] as number;
+    if (c !== 0) max = len;
+    left = (left << 1) - c;
+    if (left < 0) return false;
+  }
+  return left === 0 || max === 0 || (single && max === 1);
 }
 
 // lengths 0-143: 8, 144-255: 9, 256-279: 7, 280-287: 8
@@ -503,6 +531,7 @@ function stepDynClen(st: InflateStream): Drive {
     st.lensI += 1;
   }
   st.lencode = huffBuild(st.lengths.subarray(0, DEFLATE_CODELEN_CODES));
+  if (!huffComplete(st.lencode, false)) return refuse(st, plyError('pack_corrupt', 'inflate: invalid code lengths set'));
   st.lenFast = huffFast(st.lencode, st.litTab);
   st.lensI = 0;
   st.phase = 'dyn-lens';
@@ -513,8 +542,11 @@ function stepDynLens(st: InflateStream): Drive {
   const total = st.nlen + st.ndist;
   if (st.lensI >= total) {
     if (st.lengths[DEFLATE_EOB] === 0) return refuse(st, plyError('pack_corrupt', 'inflate: no end-of-block code'));
+    // zlib's order (inflate.c CODELENS): the end-of-block check, the literal/length set, then the distance set
     st.lit = huffBuild(Array.from(st.lengths.subarray(0, st.nlen)));
+    if (!huffComplete(st.lit, true)) return refuse(st, plyError('pack_corrupt', 'inflate: invalid literal/lengths set'));
     st.dist = huffBuild(Array.from(st.lengths.subarray(st.nlen, total)));
+    if (!huffComplete(st.dist, true)) return refuse(st, plyError('pack_corrupt', 'inflate: invalid distances set'));
     st.litFast = huffFast(st.lit, st.litTab);
     st.distFast = huffFast(st.dist, st.distTab);
     st.phase = 'codes';
