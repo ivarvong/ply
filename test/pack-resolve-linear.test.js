@@ -302,3 +302,78 @@ test('`external` is asked once per distinct missing base id, in pack order, howe
   assert.ok(!partly.ok);
   assert.deepEqual(some.asked, order);
 });
+
+test('a thin REF delta whose bytes do not apply to the base `external` gives is the patch error, not a missing base and not ok', () => {
+  // By the pack format a delta opens with the size of the base it was made against; this one says 12 for an 11-byte
+  // base, so no object can be built from it. The base was found, so the defect is the delta: main at ec337c5 returns
+  // pack_corrupt 'delta: base size 12 != 11' for each of these inputs (not `ref delta base … not found`). The base is
+  // asked for once: one id (the rule pinned above; main asked once per waiting delta).
+  const BAD_DELTA = 'delta: base size 12 != 11';
+  const bad ={ offset: 2, type: REF, data: replaceDelta(content(9).length + 1, content(1)), base: { tag: 'ref', oid: blobId(9) } };
+  for (const objects of [[bad], [bad, ofsAt(3, 2, 2)], [refAt(1, 9, 3), bad]]) {
+    const c = counting(oid => (oid === blobId(9) ? blobBase(9) : null));
+    let r;
+    assert.doesNotThrow(() => { r = resolvePack({ objects }, c.external); });
+    assert.ok(!r.ok);
+    assert.equal(r.error.code, 'pack_corrupt');
+    assert.equal(r.error.message, BAD_DELTA);
+    assert.deepEqual(c.asked, [blobId(9)]);
+  }
+});
+
+test('a REF delta whose base is built from an external base is in the pack after all: `external` is not asked for it', () => {
+  // By hand: content(1) is made in this pack (a REF delta on content(9), which the caller holds), so the second delta's
+  // base is not missing and only content(9) is asked for. Main at ec337c5 asks [content(9)] too.
+  for (const objects of [[refAt(2, 9, 1), refAt(3, 1, 2)], [refAt(2, 9, 1), refAt(3, 1, 2), refAt(4, 2, 3), ofsAt(5, 4, 4)]]) {
+    const c = counting(oid => (oid === blobId(9) ? blobBase(9) : null));
+    const r = resolvePack({ objects }, c.external);
+    assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+    assert.deepEqual(c.asked, [blobId(9)]);
+    assert.equal(r.value.objects.size, objects.length);
+    assert.equal(r.value.stats.externalBases, 1);
+  }
+});
+
+test('stats.steps on thin packs is the count the visit rule gives: three per delta that waits on an external base, one per object that does not wait', () => {
+  // The rule (README, stats.steps): a whole object is visited once; a delta whose base has resolved when it is reached
+  // is visited once (patched); a delta that waits is visited three times: filed, walked once to the id it waits on,
+  // patched once the base is given. The expected numbers below are that rule applied to each pack's shape by hand.
+  {
+    // one thin REF root and 2,000 OFS deltas in a chain above it: 2,001 deltas, all waiting on the one external base
+    const K = 2000;
+    const objects = [refAt(100, 0, 1)];
+    for (let i = 2; i <= K + 1; i++) objects.push(ofsAt(99 + i, 98 + i, i));
+    const c = counting(oid => (oid === blobId(0) ? blobBase(0) : null));
+    const r = resolvePack({ objects }, c.external, withLimits({ maxDeltaChain: 1e6 }));
+    assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+    assert.equal(r.value.objects.size, K + 1);
+    assert.equal(r.value.stats.steps, 3 * (K + 1));
+    assert.equal(r.value.stats.maxChain, K + 1);
+    assert.deepEqual(c.asked, [blobId(0)]);
+  }
+  {
+    // 10 whole blobs, each with a 5-delta OFS chain after it (60 objects that never wait: 60 steps), then 3 thin REF
+    // roots, each with 4 OFS deltas above it (15 deltas that wait: 45 steps)
+    const objects = [];
+    let at = 1, next = 100;
+    for (let g = 0; g < 10; g++) {
+      objects.push({ offset: at, type: BLOB, data: content(next++) });
+      for (let j = 0; j < 5; j++) { objects.push(ofsAt(at + 1, at, next++)); at++; }
+      at++;
+    }
+    const bases = [900, 901, 902];
+    for (const b of bases) {
+      objects.push(refAt(at, b, next++));
+      for (let j = 0; j < 4; j++) { objects.push(ofsAt(at + 1, at, next++)); at++; }
+      at++;
+    }
+    const c = counting(oid => { const i = bases.findIndex(b => blobId(b) === oid); return i < 0 ? null : blobBase(bases[i]); });
+    const r = resolvePack({ objects }, c.external);
+    assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+    assert.equal(r.value.objects.size, 75);
+    assert.equal(r.value.stats.steps, 60 + 3 * 15);
+    assert.equal(r.value.stats.externalBases, 3);
+    assert.equal(r.value.stats.maxChain, 5);
+    assert.deepEqual(c.asked, bases.map(blobId));
+  }
+});
