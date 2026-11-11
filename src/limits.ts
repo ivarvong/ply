@@ -83,7 +83,8 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
 /**
  * Objects in one buffered pack. gitformat-pack stores the count as a uint32, which is not a memory or CPU bound.
  * 100_000 is above a blob:none listing of a large repository's trees (the kernel is on the order of 10^4 trees)
- * and is the ceiling for a REF_DELTA fixpoint: one Map lookup per object per pass, not a scan of the pack.
+ * and is the ceiling for resolvePack's work: each entry is visited at most three times in any pack order (a delta is
+ * filed under its base and resolved when the base lands), a REF_DELTA base is one Map lookup, never a scan or a pass.
  */
 export const LIMIT_PACK_OBJECTS = 100_000;
 /** ls-refs lines, and the rebase chain walked from them. */

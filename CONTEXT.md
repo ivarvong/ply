@@ -51,7 +51,7 @@ Layers, bottom up (each depends only on the ones below):
 
 | Layer | Modules | Notes |
 |---|---|---|
-| Codecs (pure) | `bytes`, `pktline`, `inflate`, `sha1`, `objects`, `pack`, `packresolve`, `validate` | streaming where it matters (inflate reports bytes consumed; SHA-1 is incremental) |
+| Codecs (pure) | `bytes`, `pktline`, `inflate`, `sha1`, `objects`, `deltaenc`, `pack`, `packresolve`, `validate` | streaming where it matters (inflate reports bytes consumed; SHA-1 is incremental) |
 | Errors & limits | `errors`, `errors-doc`, `limits` | 27 codes, each with a retry policy (`yes`/`fresh`/`no`/`read`); docs kept apart so the edit bundle does not carry them |
 | Transport contract | `transport`, `http` | a transport is a plain record `{ frames(service, body, span, hints), advertise(service, span) }`; one implementation (HTTP), no dispatch |
 | Protocol | `lsrefs`, `fetch`, `fetchpack`, `negotiate`, `push`, `receivecaps`, `discover`, `packcache` | v2 fetch as a pure state machine (`v2Init`/`v2Step`); push report parsing pure |

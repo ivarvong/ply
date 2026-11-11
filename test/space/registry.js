@@ -351,7 +351,7 @@ export const DECISIONS = [
   { match: "src/packresolve.ts#parseBase:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/packresolve.ts#packEntry:*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/packresolve.ts#parseDelta:export", space: 'unit', axisTag: 'case' },
-  { match: "src/packresolve.ts#resolveObj:limit_exceeded:delta chain depth", space: 'unit', axisTag: 'case' },
+  { match: "src/packresolve.ts#fixpoint:limit_exceeded:delta chain depth", space: 'unit', axisTag: 'case' },
   { match: "src/packresolve.ts#findBase:pack_corrupt:pack: ofs delta base not at object boundary …", space: 'pack-cut', axisTag: 'corrupt' },
   { match: "src/packresolve.ts#patch:limit_exceeded:delta chain depth", space: 'pack-cut', axisTag: 'cap' },
   { match: "src/packresolve.ts#patch:limit_exceeded:pack inflated bytes", space: 'pack-cut', axisTag: 'cap' },

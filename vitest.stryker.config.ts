@@ -23,6 +23,8 @@ const MUTATION_FILES = [
   'test/mutant-kill-tree.test.js',
   'test/mutant-kill-packs.test.js',
   'test/packstream.test.js',
+  'test/pack-resolve-linear.test.js',
+  'test/delta-bound.test.js',
   'test/packwrite.test.js',
   'test/push-commands.test.js',
   'test/push-unpack-host.test.js',
