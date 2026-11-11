@@ -430,6 +430,8 @@ export const DECISIONS = [
   { match: 'src/objects.ts#parseTree:decode:lossless:nameBytes', space: 'git-bytes', axisTag: 'field' },
   { match: 'src/push.ts#reportStep:decode:lossless:payload', space: 'git-bytes', axisTag: 'field' },
   { match: 'src/push.ts#cutReportLine:decode:lossless:line', space: 'git-bytes', axisTag: 'field' },
+  { match: 'src/push.ts#wholeReason:decode:lossless:line', space: 'git-bytes', axisTag: 'field' },
+  { match: 'src/push.ts#classifyNew:decode:lossless:whole', space: 'git-bytes', axisTag: 'field' },
   { match: 'src/push.ts#streamStep:decode:replacement:body', excluded: 'display-only: the band 3 message, quoted into the error' },
   { match: 'src/sign.ts#withGpgsig:decode:lossless:commitBytes', space: 'sign', axisTag: 'case' },
   { match: 'src/push.ts#classifyReport:export', space: 'push-outcome', axisTag: 'status' },

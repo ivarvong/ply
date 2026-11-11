@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **714** (629 fail sites, 20 produced codes, 2 untyped throws, 37 exported parse/decode/classify/decide functions). Covered by a merged space 614, by a pending PR 45, excluded 29, unregistered 26. Fail sites no cell reaches: 30 of 629. Of the registered points, 221 are claimed by an enumerated space, 9 only by a random one and 429 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **716** (629 fail sites, 20 produced codes, 2 untyped throws, 37 exported parse/decode/classify/decide functions). Covered by a merged space 616, by a pending PR 45, excluded 29, unregistered 26. Fail sites no cell reaches: 30 of 629. Of the registered points, 223 are claimed by an enumerated space, 9 only by a random one and 429 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -48,7 +48,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `cherry-pick-rename` | pending #106 | enumerated | rename(6) × content(4) × mode(3) | 72 | 72 / 0 | git cherry-pick in a clone: outcome class (clean / empty / conflict) and tree oid (#103 item 3); one named disagreement (same/same/ours) | 0 | 0 | ci (`test/cherrypick-rename.test.js`) | — |
 | `stamps` | pending #106 | enumerated | pair(3) × op(7) | 21 | 21 / 0 | git cat-file -p byte-equality with GIT_AUTHOR_* / GIT_COMMITTER_* (#103 item 4) | 2 | 0 | ci (`test/stamps.test.js`) | — |
 | `commit-changes` | pending #147 | enumerated | start(2) × place(7) × op(15) | 210 | 210 / 0 | git cat-file commit byte-equality and fsck --strict over http-backend (#103 item 2). Named disagreement: create of a path that exists (git add overwrites; ply bad_request). A new ref whose tree matches the parent is bad_request and stays absent | 43 | 0 | ci (`test/changes.test.js`) | — |
-| `git-bytes` | main | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 11 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
+| `git-bytes` | main | enumerated | content(8) × field(6) × op(6) | 288 (product) | — | ls-tree -z, cat-file, for-each-ref, merge-tree, check-attr over http-backend (#43) | 13 | 0 | ci (`test/git-bytes.test.js`) | dependent¹ |
 | `streamed-body` | main | enumerated | path(6) × shape(7) × size(5) × rel(3) | 680 (630 matrix + 50 lie and cap cells) | 680 / 0 | the stated code per cell; never `timeout`; served ≤ cap + one frame (#36). Declared size against the inflated length (through and one past), a header that fails before the body, and the blob:none cap one under, at, and one past the base header, the delta header, and the resolved length: git index-pack and cat-file on the same bytes | 11 | 0 | ci (`test/adversarial.test.js`, `test/space/streamed-lies.test.js`) | — |
 | `tree-dups` | main | enumerated | relation(5) × modeA(5) × modeB(5) × position(2) × order(2) | 500 | 500 / 0 | git fsck --strict (duplicateEntries, treeNotSorted) cell by cell (#34) | 0 | 4 | ci (`test/git-differential.test.js`) | — |
 | `fsck-tree` | main | enumerated | trigger(19) × mode(14) × name(48) × position(2) × content | 24,864 (5,056 wrong on main, 4,094 on train/1) | 24,864 / 0 | git fsck --strict (both streams, exit code, msgId) on every cell (packed + a loose hash-object --literally sample); git ls-tree modes; git read-tree with protectHFS+protectNTFS; git check-attr --source | 12 | 27 | ci (`test/space/fsck-tree.test.js`) | — |
@@ -115,7 +115,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 - `checkout-tree`: writes the tree to the local filesystem: case-insensitive (APFS default) and Unicode-normalizing filesystems collide names Linux keeps apart
 - `edit-fuzz`: the harness writes generated paths to disk: on a case-insensitive filesystem `a` and `A` collide (EEXIST, observed on macOS 2026-10-31)
 
-## Decode sites (26: lossless 11, strict 3, replacement 12)
+## Decode sites (28: lossless 13, strict 3, replacement 12)
 
 git passes ref names, tree entry names, messages, idents and paths through as raw bytes. A **strict** decode (fatal TextDecoder, decodeURIComponent) refuses what git accepts; a **replacement** decode (the default TextDecoder) turns non-UTF-8 into U+FFFD and loses it. Either is a severity-1 hole unless the registry excludes it as display text or protocol keywords; the fix is a lossless decode and a space with a non-UTF-8 content axis.
 
@@ -138,6 +138,8 @@ git passes ref names, tree entry names, messages, idents and paths through as ra
 | `src/push.ts` streamStep() | replacement | td | excluded: display-only: the band 3 message, quoted into the error |
 | `src/push.ts` reportStep() | lossless | decodeBytes | `git-bytes` / field |
 | `src/push.ts` cutReportLine() | lossless | decodeBytes | `git-bytes` / field |
+| `src/push.ts` wholeReason() | lossless | decodeBytes | `git-bytes` / field |
+| `src/push.ts` classifyNew() | lossless | decodeBytes | `git-bytes` / field |
 | `src/push.ts` outcomeAttrs() | lossless | decodeBytes | excluded: display-only: the report lines recorded on the span |
 | `src/push.ts` decide() | replacement | td | excluded: display-only: band 2 progress and the band 3 message |
 | `src/receivecaps.ts` serviceHeaderEnd() | replacement | td | excluded: protocol: the "# service=" keyword git defines |
