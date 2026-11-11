@@ -28,7 +28,7 @@ import type { Oid } from './oid.js';
 import type { ObjType } from './format.js';
 import type { InflateStats, InflateStream } from './inflatestream.js';
 export type { InflateStats };
-import { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, inflateConsumed, declaredBound, zlibWrap } from './inflatestream.js';
+import { inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateTakeUnread, inflateConsumed, declaredBound, zlibWrap } from './inflatestream.js';
 import type { Attrs } from './otel.js';
 import {
   PACK_SIGNATURE, PACK_VERSION, PACK_HEADER_BYTES, PACK_TRAILER_BYTES, OID_BYTES, UINT32_BYTES, BE32_SHIFTS,
@@ -300,6 +300,9 @@ function hashLagged(st: PackScan, bytes: Uint8Array): void {
 
 // Append input. Inside an object body it goes straight to the inflate record; elsewhere an exhausted carry is replaced
 // by `bytes` (no copy) and a leftover tail (an object header cut by the chunk) is copied in front of it once.
+// `bytes` is read until the pull that answers `need` (or the end, or a refusal) returns, and not after: that pull
+// copies the few unread bytes it must keep (ownCarry, and the inflate record's own), so a reader may refill one buffer
+// for every chunk.
 // @decoder parsePackFeed prefix=pack
 export function parsePackFeed(st: PackScan, bytes: Uint8Array): void {
   hashLagged(st, bytes);
@@ -442,8 +445,8 @@ function stepBody(st: PackScan): Step {
       if (!chargeWork(st, got.bytes.length)) return FAILED;
       return piece({ kind: 'chunk', index: st.index, bytes: got.bytes });
     case 'end': {
-      // what followed the member is the scan's again
-      st.carry = inflateUnread(stream);
+      // what followed the member is the scan's again, and the inflate record keeps no view of it
+      st.carry = inflateTakeUnread(stream);
       st.p = 0;
       st.at += got.consumed;
       const index = st.index;
@@ -457,6 +460,9 @@ function stepBody(st: PackScan): Step {
 }
 // The trailer is the 20 bytes after the last object and nothing after them: known when the input closes.
 function stepTrailer(st: PackScan): Step {
+  // past the objects nothing reads the carry (the trailer is the hash lag): drop the view of the last chunk
+  st.carry = EMPTY;
+  st.p = 0;
   if (!st.ended) return NEED;
   if (st.at + PACK_TRAILER_BYTES !== st.total) return refuse(st, plyError('pack_corrupt', `pack: expected trailer at ${st.at}, pack length ${st.total}`));
   const trailer = toHex(st.lag);
@@ -482,13 +488,24 @@ function step(st: PackScan): Step {
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st.phase);
 }
+// Before a pull asks for input, the unread tail outside an object body (a pack header, an object header, an OFS
+// distance or a REF base oid cut by the chunk: under MIN_PACK bytes) becomes the scan's own copy. Inside a body the
+// carry is empty and the inflate record owns its tail the same way (inflatestream.ts own). So once a pull has answered
+// `need`, the scan holds no view of any chunk it was fed.
+function ownCarry(st: PackScan): void {
+  st.carry = st.p < st.carry.length ? st.carry.slice(st.p) : EMPTY;
+  st.p = 0;
+}
 // The next event, or the refusal (every later pull returns it again).
 // @decoder parsePackPull prefix=pack
 export function parsePackPull(st: PackScan): Result<PackPiece, PackError> {
   for (;;) {
     if (st.halt.tag === 'failed') return err(st.halt.error);
     const s = step(st);
-    if (s.kind === 'piece') return ok(s.piece);
+    if (s.kind === 'piece') {
+      if (s.piece.kind === 'need') ownCarry(st);
+      return ok(s.piece);
+    }
   }
 }
 // Close the input and pull.

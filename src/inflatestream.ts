@@ -661,6 +661,14 @@ function truncated(st: InflateStream): ErrorOf<'pack_corrupt'> {
 }
 
 const NEED_PIECE: InflatePiece = { kind: 'need' };
+// Before a pull asks for input, the unread tail (the few bytes of a symbol, a block header or the Adler-32 that the
+// chunk cut) becomes the record's own copy: once a pull has answered `need` the record holds no view of anything it
+// was fed, so a reader may refill the same buffer for its next chunk. `base + p` (consumedOf) is unchanged.
+function own(st: InflateStream): void {
+  st.base += st.p;
+  st.carry = st.p < st.carry.length ? st.carry.slice(st.p) : EMPTY;
+  st.p = 0;
+}
 // The next piece: a chunk when one is full (or the input ran out with output pending), the end, or a request for input.
 // A refusal (FAILED) is on the record: the loop goes round once more and returns it.
 export function inflatePull(st: InflateStream): Result<InflatePiece, InflateError> {
@@ -676,7 +684,10 @@ export function inflatePull(st: InflateStream): Result<InflatePiece, InflateErro
     if (d === END) return ok({ kind: 'end', consumed: consumedOf(st), stats: { ...st.stats } });
     if (d === NEED) {
       if (st.outLen > 0) return ok({ kind: 'chunk', bytes: takeChunk(st) });
-      if (!st.ended) return ok(NEED_PIECE);
+      if (!st.ended) {
+        own(st);
+        return ok(NEED_PIECE);
+      }
       refuse(st, truncated(st));
     }
   }
@@ -707,6 +718,15 @@ export function inflateFeed(st: InflateStream, bytes: Uint8Array): void {
 // Bytes fed and not consumed: after the end, what follows the member. A view, valid until the next feed or reset.
 export function inflateUnread(st: InflateStream): Uint8Array {
   return st.carry.subarray(st.p);
+}
+// The same bytes, handed over: the record keeps no view of them (the pack scan takes what follows a member this way,
+// so an ended member does not hold the chunk it ended in). `base + p` (consumedOf) is unchanged.
+export function inflateTakeUnread(st: InflateStream): Uint8Array {
+  const rest = st.carry.subarray(st.p);
+  st.base += st.p;
+  st.carry = EMPTY;
+  st.p = 0;
+  return rest;
 }
 
 const freshStats = (): InflateStats => ({ blocks: 0, stored: 0, fixed: 0, dynamic: 0, literals: 0, matches: 0, matchBytes: 0, maxDist: 0, maxLen: 0 });

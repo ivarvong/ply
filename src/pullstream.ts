@@ -15,6 +15,10 @@
 // - Cancelling (a `break` or a throw in a `for await` body, reader.cancel()) cancels the source: a ReadableStream's
 //   reader is cancelled (its underlying source sees cancel(reason)), an AsyncIterable's iterator gets return().
 // - A pack chunk and an inflate chunk are the caller's (copies); a pkt-line payload is a copy too (pktStep).
+// - A source chunk is read only until the adapter asks for the next one: a decoder that answers `need` has copied the
+//   few unread bytes it keeps (packstream.ts ownCarry, inflatestream.ts own; pktStep copies its carry), so a source may
+//   refill one buffer for every chunk. test/scan-pack-index.test.js holds scanPackIndex to git on such a source;
+//   scanPack shares its decoder. (A ReadableStream that queues ahead of its reader must not reuse a queued chunk.)
 import type { ErrorOf } from './errors.js';
 import { plyError } from './errors.js';
 import type { Option, Result } from './result.js';

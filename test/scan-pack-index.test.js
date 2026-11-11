@@ -317,3 +317,90 @@ test('maxPackObjects refuses at the header; the columns never exceed the count t
   assert.equal(idx.heldBytes, 3000 * (SCAN_INDEX_ENTRY_BYTES + 20));
   assert.equal(idx.columns.size.length, 3000);
 });
+
+// A reader that reuses one buffer for every chunk (the usual loop over a file or a socket): each chunk is overwritten
+// before the next is handed over, so a scan that kept a view of an earlier chunk reads the later one's bytes through it.
+// Expected values are git's: `git index-pack` + `git verify-pack -v` on the same bytes (offset, type, size, oid, and a
+// delta's base oid from the line's last column).
+function gitEntries(pack) {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-scan-reuse-'));
+  try {
+    const file = join(dir, 'p.pack');
+    writeFileSync(file, pack);
+    gitIn(dir, ['index-pack', file]);
+    const out = gitIn(dir, ['verify-pack', '-v', join(dir, 'p.idx')]).toString();
+    const byOffset = new Map();
+    for (const line of out.split('\n')) {
+      const m = /^([0-9a-f]{40}) (commit|tree|blob|tag)\s+(\d+) (\d+) (\d+)(?: \d+ ([0-9a-f]{40}))?$/.exec(line);
+      if (m) byOffset.set(Number(m[5]), { oid: m[1], type: TYPE[m[2].toUpperCase()], size: Number(m[3]), inPack: Number(m[4]), base: m[6] ?? null });
+    }
+    return byOffset;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+// The buffer is filled with 0xa5 before each refill and after the last, so a stale byte is never right by luck.
+async function* reusingIter(bytes, size) {
+  const buf = new Uint8Array(size);
+  for (let at = 0; at < bytes.length; at += size) {
+    const n = Math.min(size, bytes.length - at);
+    buf.fill(0xa5);
+    buf.set(bytes.subarray(at, at + n));
+    yield buf.subarray(0, n);
+  }
+  buf.fill(0xa5);
+}
+// The same as a stream that produces only when read (high-water mark 0: it never queues a chunk it will overwrite).
+function reusingStream(bytes, size) {
+  const buf = new Uint8Array(size);
+  let at = 0;
+  return new ReadableStream({
+    pull(c) {
+      buf.fill(0xa5);
+      if (at >= bytes.length) { c.close(); return; }
+      const n = Math.min(size, bytes.length - at);
+      buf.set(bytes.subarray(at, at + n));
+      at += n;
+      c.enqueue(buf.subarray(0, n));
+    },
+  }, { highWaterMark: 0 });
+}
+async function assertReuseMatchesGit(name, pack, sizes) {
+  const git = gitEntries(pack);
+  for (const size of sizes) {
+    for (const [kind, source] of [['iterable', reusingIter(pack, size)], ['stream', reusingStream(pack, size)]]) {
+      const where = `${name}, one reused ${size}-byte buffer, ${kind}`;
+      const r = await scanPackIndex(source, { oids: true });
+      assert.equal(r.ok, true, `${where}: ${r.ok ? '' : `${r.error.code}: ${r.error.message}`}`);
+      const idx = r.value;
+      assert.equal(idx.count, git.size, where);
+      assert.equal(idx.bytes, pack.length, where);
+      for (const e of idx.entries()) {
+        const g = git.get(e.offset);
+        assert.ok(g, `${where}: git has no object at ${e.offset}`);
+        assert.equal(e.size, g.size, `${where}: size at ${e.offset}`);
+        assert.equal(e.headerBytes + e.compressed, g.inPack, `${where}: size in pack at ${e.offset}`);
+        // a base inside the pack is the one git names; a thin pack's is outside it and git index-pack would not take it
+        if (e.base.tag === 'ref') assert.equal(e.base.oid, g.base, `${where}: REF base at ${e.offset}`);
+        if (e.base.tag === 'ofs') assert.equal(git.get(e.base.offset).oid, g.base, `${where}: OFS base at ${e.offset}`);
+        // a whole object's type and oid are always known; a delta's only where the scan can know them, and never wrong
+        if (e.base.tag === 'none') {
+          assert.equal(e.type, g.type, `${where}: type at ${e.offset}`);
+          assert.equal(e.oid, g.oid, `${where}: oid at ${e.offset}`);
+        }
+        if (e.type !== null) assert.equal(e.type, g.type, `${where}: type at ${e.offset}`);
+        if (e.oid !== null) assert.equal(e.oid, g.oid, `${where}: oid at ${e.offset}`);
+      }
+    }
+  }
+}
+
+test('a source that reuses one buffer for every chunk scans to what git verify-pack reports, at 1 byte and up', async () => {
+  const { packs } = buildPacks();
+  // small packs at every size down to one byte: every header, base oid and trailer is cut by a chunk boundary
+  for (const name of ['full', 'ofs', 'ref', 'chain']) await assertReuseMatchesGit(name, packs[name].bytes, [1, 2, 3, 7, 19, 20, 21, 64, 4096]);
+  // this repository's objects with REF deltas (base oids in the pack) and with OFS deltas, at reader-sized buffers
+  const objects = gitIn(process.cwd(), ['rev-list', '--objects', 'HEAD', '-n', '400']);
+  for (const args of [[], ['--delta-base-offset']]) {
+    const pack = new Uint8Array(gitIn(process.cwd(), ['pack-objects', '--stdout', '-q', ...args], objects));
+    await assertReuseMatchesGit(`repo ${args.join(' ')}`, pack, [509, 4096, 65536]);
+  }
+});
