@@ -34,9 +34,11 @@ export type Signer = {
   // namespace: 'git' when none is given (ssh-keygen -Y sign -n git)
   sign(message: Uint8Array, ...namespace: [] | [string]): Promise<string>;
 };
-// WebCrypto's key, named through the value every supported lib declares (the type `CryptoKey` and `CryptoKeyPair` are
-// DOM-lib names a Node consumer with lib ES2022 + @types/node does not have; see src/bytes.ts).
-type WebCryptoKey = InstanceType<typeof CryptoKey>;
+// WebCrypto's key, named through the one thing every supported lib declares: the global `crypto` and the key its
+// `subtle.sign` takes. The type names `CryptoKey` and `CryptoKeyPair` are DOM-lib names a Node consumer with lib ES2022
+// + @types/node does not have, and the global `CryptoKey` value exists only from @types/node 24 (20 and 22 declare
+// `crypto` alone), so neither can appear in the declarations. test/dist-types.test.js compiles them on each.
+type WebCryptoKey = Parameters<typeof crypto.subtle.sign>[1];
 type WebCryptoKeyPair = { privateKey: WebCryptoKey; publicKey: WebCryptoKey };
 export type SignerKey = { readonly privateKey: WebCryptoKey; readonly publicKeyRaw: Uint8Array };
 
