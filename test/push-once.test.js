@@ -6,7 +6,7 @@
 // (both accept it without --strict), which receive-pack reports as "unpacker error".
 // Judge: git. The objects are git's own (a commit made by git, read back with cat-file); the server decides whether
 // the pack is acceptable, and the ref must then be the commit git made.
-import { test, beforeAll as before, afterAll as after } from 'vitest';
+import { test, vi, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -16,6 +16,7 @@ import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
 import { makeDelta } from '../src/pack.js';
 import * as pushEntry from '../src/push.js';
+import { Sha1 } from '../src/sha1.js';
 
 let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
@@ -93,6 +94,37 @@ test('push: an objects list with a null or undefined entry is a protocol error, 
     assert.equal(pushEntry.planPush({ ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40), objects }, null).ok, true);
   }
   assert.equal(calls, 0);
+});
+
+// A list with no repeated object costs no object hash. A pack holds no object id (gitformat-pack: entries, then one
+// SHA-1 trailer over the pack), so main hashes no object to push; an object id is SHA-1 over "<type> <size>\0" and the
+// bytes (git hash-object), which makes each object hash visible as a SHA-1 update of exactly that header. Counted,
+// not timed: 24 blobs of one length (8 bytes, all distinct) beside git's commit and tree.
+test('push: a list with no repeated object hashes no object, though every blob has the same length', async () => {
+  const name = `once${n++}`;
+  const bare = makeBareRepo(root, name);
+  const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const head = commitFiles(work, bare, { 'seed.txt': 'seed\n' }, 'seed');
+  const files = Array.from({ length: 24 }, (_, i) => `f${String(i).padStart(2, '0')}.txt`);
+  for (const f of files) writeFileSync(join(work, f), `${f.slice(0, 3)}:one\n`);
+  git(work, ['add', '-A']); git(work, ['commit', '-q', '-m', 'next']);
+  const next = git(work, ['rev-parse', 'HEAD']).trim();
+  const raw = (type, rev) => ({ type: TYPE[type.toUpperCase()], data: new Uint8Array(gitBuf(work, ['cat-file', type, rev])) });
+  const objects = [raw('commit', 'HEAD'), raw('tree', 'HEAD^{tree}'), ...files.map(f => raw('blob', `HEAD:${f}`))];
+  assert.deepEqual([...new Set(objects.slice(2).map(o => o.data.length))], [8]);
+  const c = GitHttp.create(`${srv.url}/${name}.git`, { tracer: new Tracer() });
+  assert.equal(c.ok, true);
+  const spy = vi.spyOn(Sha1.prototype, 'update');
+  let hashed;
+  try {
+    const r = await c.value.push({ ref: 'refs/heads/main', oldOid: head, newOid: next, objects });
+    hashed = spy.mock.calls.map(([b]) => Buffer.from(b.subarray(0, 32)).toString('latin1')).filter(s => /^(?:blob|tree|commit|tag) \d+\0$/u.test(s));
+    assert.equal(r.ok ? 'ok' : `${r.error.code}: ${r.error.message}`, 'ok');
+    assert.equal(r.value.entries.length, 26); // git's commit, its tree and the 24 blobs: nothing dropped
+  } finally { spy.mockRestore(); }
+  assert.deepEqual(hashed, []);
+  assert.equal(git(bare, ['rev-parse', 'refs/heads/main']).trim(), next);
+  assert.deepEqual(fsckProblems(bare), []);
 });
 
 test("the duplicate-object guard is not an export of 'ply/push'", () => {

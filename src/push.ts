@@ -542,11 +542,24 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
 // caller's own). A pack that holds one object twice is refused by a strict receiver: git index-pack --strict says
 // "The same object <oid> appears twice in the pack", unpack-objects --strict "tried to add buffer twice!", and
 // receive-pack reports either as "unpacker error" (git 2.50). Two whole objects are one object when type and bytes
-// are equal, so only objects that share a type and a length with another are hashed (their producer hashed each once
-// already); a list with no such pair costs a map insert per object. The first of a pair is kept, in its place, and an
+// are equal, so only objects that share a type, a length and a fingerprint (below) with another are hashed, each at
+// most once, and two are one object when their ids are equal; a list with no such pair costs a fingerprint and a map
+// insert per object and no SHA-1. The first of a pair is kept, in its place, and an
 // ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
 // A delta entry is kept as given: its object id is not known without applying it. Runs in send, on a list planPush
 // passed (checkBases), before the pack is measured.
+// FNV-1a (32 bits) over at most 2 * FINGERPRINT_SAMPLES bytes of an object, evenly spaced: every byte of an object
+// shorter than that. Equal bytes give equal fingerprints; it decides only which objects are hashed, never which are equal.
+const FINGERPRINT_SAMPLES = 64;
+const FNV_OFFSET = 0x81_1c_9d_c5;
+const FNV_PRIME = 0x01_00_01_93;
+const fingerprint = (data: Uint8Array): number => {
+  const step = Math.max(1, Math.floor(data.length / FINGERPRINT_SAMPLES));
+  let h = FNV_OFFSET;
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < data.length: the read is in range (`as`, not the `!` src/ forbids)
+  for (let i = 0; i < data.length; i += step) h = Math.imul(h ^ (data[i] as number), FNV_PRIME);
+  return h >>> 0;
+};
 function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
   const buckets = new Map<string, { readonly first: number; byOid: Map<string, number> | null }>();
   const out: PackObject[] = [];
@@ -559,7 +572,7 @@ function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
       out.push(base.tag === 'ofs' && out.length !== i ? { ...obj, base: { tag: 'ofs', index: atOr(keptAt, base.index, base.index) } } : obj);
       continue;
     }
-    const key = `${obj.type}:${obj.data.length}`;
+    const key = `${obj.type}:${obj.data.length}:${fingerprint(obj.data)}`;
     const bucket = mapGet(buckets, key);
     if (bucket.tag === 'none') {
       buckets.set(key, { first: out.length, byOid: null });
