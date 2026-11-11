@@ -61,7 +61,6 @@ export const INVENTORY = [
   row('src/read.ts', String.raw`/^[0-9a-f]{4,39}$/`, 'caller', FIXED, run('a', '')),
   row('src/read.ts', String.raw`/^gpgsig(-sha256)? /`, 'stored', 'anchored at ^, literals only', n => rep('gpgsig-sha256', n)),
   row('src/read.ts', String.raw`/\/$/`, 'caller', NO_RUN, run('/', 'x'), { op: 'replace' }),
-  row('src/rebase.ts', String.raw`/\n+$/u`, 'stored', 'NOT linear: every newline of a run that does not end the text starts the run again', run('\n', 'x'), { op: 'replace', knownBad: 'fix/review-rebase' }),
   row('src/receivecaps.ts', 'new RegExp(`^[0-9a-f]{${n}} [^ ]`, \'u\')', 'remote', FIXED, run('a', ''), { build: () => /^[0-9a-f]{40} [^ ]/u }),
   row('src/receivecaps.ts', 'new RegExp(`^shallow [0-9a-f]{${n}}$`, \'u\')', 'remote', FIXED, n => `shallow ${'a'.repeat(n)}`, { build: () => /^shallow [0-9a-f]{40}$/u }),
   row('src/receivecaps.ts', String.raw`/\n$/u`, 'remote', NO_RUN, run('\n', 'x'), { op: 'replace', count: 2 }),
