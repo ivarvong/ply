@@ -634,6 +634,7 @@ type Classifying = { report: ReportState; status: string; statusCut: boolean; cu
 // (echoedFailure) is read from the whole lines, before the cut: where the unpack status or a ref's reason is cut,
 // anything but the status repeated whole is no unpack failure, however the kept parts compare.
 function classifyNew(c: Classifying, lines: Uint8Array[], from: number, max: number): void {
+  let { report } = c;
   for (let i = from; i < lines.length; i += 1) {
     const whole = lines[i];
     // Stryker disable next-line ConditionalExpression: unreachable, i < lines.length
@@ -645,8 +646,9 @@ function classifyNew(c: Classifying, lines: Uint8Array[], from: number, max: num
       c.statusCut = line !== whole;
     } else if ((c.statusCut || line !== whole) && wholeReason(whole) !== c.status) c.cutNoEcho = true;
     if (line !== whole) lines[i] = line;
-    c.report = reportStep(c.report, line);
+    report = reportStep(report, line);
   }
+  c.report = report;
 }
 // An unpack failure read only because a cut made two different lines agree is none: whole, that report is not git's.
 const classified = (c: Classifying): ReportShape => {
