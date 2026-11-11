@@ -101,7 +101,7 @@ function headerOf(p: Plan, k: number): Uint8Array {
 // The values are a JavaScript caller's, so they are checked as unknown: buildPack's encoder checks none of this
 // (pack.ts), and an extra it would write wrong is a pack of the declared length that no git can parse.
 function checkExtra(j: number, given: PackInput): Result<null, PlyError> {
-  // not an object at all (null, undefined, a number): refused before a property of it is read
+  // not an object at all (null, a missing value, a number): refused before a property of it is read
   const o: unknown = given;
   if (typeof o !== 'object' || o === null) return refuse('pack subset extras', `extra ${j} is not an object`);
   const data: unknown = given.data;
