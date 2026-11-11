@@ -282,6 +282,26 @@ function wellFormedPack(p: PackPlan, steps: readonly TransferStepPlan[]): boolea
   });
 }
 
+// The batches partition the selection: the selection is entry indices in pack order (ascending, as planTransfer
+// selects them), every selected entry is in exactly one batch, no batch holds anything else, and each count is the
+// length it counts. A hash cannot hold this (whoever wrote the plan wrote the hash), so it is checked directly.
+// Memory: one set of the selection, which the plan already holds.
+function partitions(p: PackPlan): boolean {
+  const { select } = p;
+  if (select === null || p.entries !== select.length) return false;
+  let prev = -1;
+  for (const i of select) {
+    if (i <= prev) return false;
+    prev = i;
+  }
+  const left = new Set(select);
+  for (const b of p.batches) {
+    if (b.objects !== b.entries.length) return false;
+    for (const i of b.entries) if (!left.delete(i)) return false;
+  }
+  return left.size === 0;
+}
+
 // Every field the check, the key, the two hashes and a step read: ids, refs, the steps (each well formed before its
 // kind is read; the last the only final one), the pack plan.
 function wellFormedPlan(plan: TransferPlan): boolean {
@@ -306,8 +326,11 @@ function wellFormedPlan(plan: TransferPlan): boolean {
 //     steps), so every field a step reads is under a hash. The hashes are unkeyed (both functions are public): they
 //     are integrity against corruption and stale or partial writes, NOT authentication against whoever can write the
 //     plan store. What bounds a hostile
-//     plan is the temp ref rule above, the named target ref, and the destination's own checks (every update is a
-//     compare-and-swap; the server checks connectivity).
+//     plan is the temp ref rule above, the named target ref, the partition rule below and the destination's own
+//     checks (every update is a compare-and-swap; the server checks connectivity);
+//   - what the steps push is not a free field either: the batches partition the selection (every selected entry in
+//     exactly one batch, nothing else in any), and transferStep and runTransfer, which hold the pack, check the
+//     selection is exactly the pack's trees and blobs (planFitsPack) before any request.
 export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): Result<TransferPlan, PlyError> {
   const want = withDefaults<PlanExpectConfig>(expect, { tempPrefix: TRANSFER_REF_PREFIX, ref: null });
   if (!wellFormedPlan(plan)) return edited();
@@ -315,8 +338,27 @@ export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): 
   // corruption first (an honest plan, damaged), then what holds whoever wrote the hash
   const { hash: packHash, ...packBody } = plan.pack;
   if (planHash(packBody) !== packHash || transferPlanHash(body) !== hash) return edited();
+  if (!partitions(plan.pack)) return fail('bad_request', 'transfer: the plan\'s batches are not its selection, each entry in one batch', { what: 'batches' });
   const named = tempRefOf(want.tempPrefix, transferKey(plan));
   if (!named.ok || plan.tempRef !== named.value || plan.tempRef === plan.ref) return fail('bad_request', 'transfer: the plan\'s temp ref is not the one its key names', { what: 'tempRef' });
   if (want.ref !== null && plan.ref !== want.ref) return fail('bad_request', `transfer: the plan is for ${plan.ref}, not the ref this call names`, { what: 'ref' });
   return ok(plan);
+}
+
+// The plan is for this pack: its trailer, and its selection exactly the pack's trees and blobs in pack order (what
+// planTransfer selects). With the partition checkTransferPlan makes, this holds what a run pushes to the pack's trees
+// and blobs, each once, whatever hashes the plan carries: transferStep and runTransfer make it before any request.
+// One pass over the index, nothing allocated.
+export function planFitsPack(plan: TransferPlan, pack: ScannedPack, resolved: ResolvedIndex): Result<TransferPlan, PlyError> {
+  if (pack.trailer !== plan.pack.trailer) return fail('bad_request', `transfer: the pack (trailer ${pack.trailer}) is not the planned one (${plan.pack.trailer})`, { what: 'pack' });
+  const select = getOrElse<readonly number[]>(plan.pack.select === null ? none : some(plan.pack.select), []);
+  let k = 0;
+  for (let i = 0; i < pack.count; i++) {
+    const e = entryAt(resolved, i);
+    if (!e.ok) return e;
+    if (e.value.type !== OBJ_TREE && e.value.type !== OBJ_BLOB) continue;
+    if (getOrElse(at(select, k), -1) !== i) return fail('bad_request', `transfer: the plan's selection is not the pack's trees and blobs (entry ${i}); the pack is not the one planned`, { what: 'pack' });
+    k++;
+  }
+  return k === select.length ? ok(plan) : fail('bad_request', 'transfer: the plan selects entries the pack does not hold as trees or blobs; the pack is not the one planned', { what: 'pack' });
 }

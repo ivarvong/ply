@@ -26,7 +26,7 @@ import type { Input } from './absent.js';
 import { at, mapGet, withDefaults } from './absent.js';
 import { ZERO_OID } from './oid.js';
 import type { TransferOpts, TransferPack, TransferPlan, TransferStepPlan, GeneratedObject, PlanExpect } from './transferplan.js';
-import { checkTransferPlan, planTransfer, rootCommit, tempFor, transferKey, TRANSFER_REF_PREFIX } from './transferplan.js';
+import { checkTransferPlan, planFitsPack, planTransfer, rootCommit, tempFor, transferKey, TRANSFER_REF_PREFIX } from './transferplan.js';
 import { packSubset } from './packsubset.js';
 import { pushPack, pushWithOptions } from './receivecaps.js';
 import { lsRefs } from './lsrefs.js';
@@ -131,7 +131,6 @@ function commandsOf(plan: TransferPlan, s: TransferStepPlan): readonly [Command,
 // What one push reads: the plan, the spool and the source commit's bytes (the final step rebuilds the new commit).
 type StepInput = { readonly from: TransferPack; readonly plan: TransferPlan; readonly step: number; readonly commit: Uint8Array };
 async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }: StepInput): Promise<Result<{ readonly step: number }, PlyError>> {
-  if (from.pack.trailer !== plan.pack.trailer) return fail('bad_request', `transfer: the pack (trailer ${from.pack.trailer}) is not the planned one (${plan.pack.trailer})`, { what: 'pack' });
   const extras = generated(from, plan, step, commit);
   if (!extras.ok) return extras;
   const { s, batch, objects } = extras.value;
@@ -144,7 +143,7 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
   return pushed.ok ? ok({ step }) : pushed;
 }
 
-// One push: step `step` of `plan`, its entries read from `from.source`. `commit` is the source commit's bytes (the
+// One push: step `step` of `plan` (checked, and held to the pack: planFitsPack), its entries read from `from.source`. `commit` is the source commit's bytes (the
 // final step rebuilds the new commit from them). Every update is a compare-and-swap, so a step that already landed is
 // refused by the server (`ng … stale ref`), never applied twice.
 async function pushStep(dst: Transport, { from, plan, step, commit }: StepInput): Promise<Result<{ readonly step: number }, PlyError>> {
@@ -162,6 +161,8 @@ export async function transferStep(dst: Transport, from: TransferPack, plan: Tra
   const expect: PlanExpect = given instanceof Uint8Array ? {} : given;
   const checked = checkTransferPlan(plan, expect);
   if (!checked.ok) return checked;
+  const fits = planFitsPack(checked.value, from.pack, from.resolved);
+  if (!fits.ok) return fits;
   const sent = await pushStep(dst, { from, plan: checked.value, step, commit: given instanceof Uint8Array ? given : given.commit });
   return sent;
 }
@@ -229,6 +230,8 @@ export async function runTransfer(dst: Transport, from: TransferPack, stored: Tr
   const checked = checkTransferPlan(stored, { tempPrefix: opts.tempPrefix, ref: opts.ref });
   if (!checked.ok) return checked;
   const plan = checked.value;
+  const fits = planFitsPack(plan, from.pack, from.resolved);
+  if (!fits.ok) return fits;
   const root = rootCommit(commit);
   if (!root.ok) return root;
   if (root.value.commit.oid !== plan.head) return fail('bad_request', 'transfer: the commit does not give the planned head', { what: 'commit' });
