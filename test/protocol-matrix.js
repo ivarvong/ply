@@ -18,6 +18,22 @@ import { unwrap, unwrapAsync } from './unwrap.js';
 
 let root, srv, hookLog;
 
+// The cell plan, without a repository: the four enumerated dimensions by key, and the flags that cycle with the cell
+// number. test/protocol.test.js holds this plan to a stated rule (no flag is a function of an enumerated dimension)
+// before the matrix runs it, so the plan the guard judges is the plan the cells follow.
+export const WANT_KEYS = ['tip', 'old', 'tag', 'tree', 'blob', 'tip+old', 'tip+tree', 'tag+blob'];
+export const HAVE_KEYS = ['none', 'ancestor', 'old', 'branch', 'tip', 'tree', 'blob', 'tag', 'unknown', 'tip+old', 'old+tip'];
+export const DEEPEN_KEYS = ['none', 'd1', 'd2', 'd99', 'since', 'not'];
+export const FILTER = [undefined, 'blob:none', 'blob:limit=100', 'blob:limit=1', 'tree:0', 'tree:1', 'tree:2', 'combine:blob:none+tree:1', 'combine:blob:limit=100+tree:2'];
+// Periods 13, 17 and 5 are coprime to each other, to every stride of the product (1, 9, 54, 594) and to the 7 and 11
+// of the client-shallow cycle, so no flag is a function of a dimension or of another flag. (`i % 3` and `i % 2` under
+// the 9-value filter loop asked for thin-pack with three filters only and gave each (deepen, filter) pair one ofs value.)
+export const flagsOf = i => ({ thinPack: (i % 13) < 6, ofsDelta: (i % 17) < 8, done: (i % 5) !== 0 });
+export function* plan() {
+  let i = 0;
+  for (const wk of WANT_KEYS) for (const hk of HAVE_KEYS) for (const dk of DEEPEN_KEYS) for (const filter of FILTER) { i++; yield { i, wk, hk, dk, filter, ...flagsOf(i) }; }
+}
+
 function makeServer(mode) {
   const name = `m-${mode}`;
   const bare = makeBareRepo(root, name);
@@ -47,13 +63,11 @@ export async function runMode(mode) {
   const WANTS = { tip: [tip], old: [old], tag: [tag], tree: [subtree], blob: [blob], 'tip+old': [tip, old], 'tip+tree': [tip, subtree], 'tag+blob': [tag, blob] };
   const HAVES = { none: [], ancestor: [mid], old: [old], branch: [branch], tip: [tip], tree: [subtree], blob: [oldBlob], tag: [tag], unknown: ['e'.repeat(40)], 'tip+old': [tip, old], 'old+tip': [old, tip] };
   const DEEPEN = { none: {}, d1: { deepen: 1 }, d2: { deepen: 2 }, d99: { deepen: 99 }, since: { deepenSince: model.commits.get(old).date - 500 }, not: { deepenNot: ['refs/tags/v1'] } };
-  const FILTER = [undefined, 'blob:none', 'blob:limit=100', 'blob:limit=1', 'tree:0', 'tree:1', 'tree:2', 'combine:blob:none+tree:1', 'combine:blob:limit=100+tree:2'];
   const client = unwrap(GitHttp.create(`${srv.url}/${S.name}.git`, { tracer: new Tracer() }));
   const external = oid => (model.type.has(oid) ? { type: { blob: 3, tree: 2, commit: 1, tag: 4 }[model.type.get(oid)], data: new Uint8Array(gitBuf(bare, ['cat-file', model.type.get(oid), oid])) } : undefined);
-  let i = 0;
-  for (const [wk, wants] of Object.entries(WANTS)) for (const [hk, haves] of Object.entries(HAVES)) for (const [dk, d] of Object.entries(DEEPEN)) for (const filter of FILTER) {
-    i++;
-    const thinPack = (i % 3) === 0, ofsDelta = (i % 2) === 0, done = (i % 5) !== 0;
+  assert.deepEqual([Object.keys(WANTS), Object.keys(HAVES), Object.keys(DEEPEN)], [WANT_KEYS, HAVE_KEYS, DEEPEN_KEYS], 'the plan names every dimension value');
+  for (const { i, wk, hk, dk, filter, thinPack, ofsDelta, done } of plan()) {
+    const wants = WANTS[wk], haves = HAVES[hk], d = DEEPEN[dk];
     // client shallow state cycles: none / the have is shallow / the tip is shallow (only meaningful with deepen)
     const shallow = (i % 7) === 0 && haves.length && model.commits.has(haves[0]) ? [haves[0]] : (i % 11) === 0 && dk !== 'none' ? [tip] : [];
     const req = { wants, haves, ...d, filter, thinPack, ofsDelta, done, shallows: shallow };
