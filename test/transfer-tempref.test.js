@@ -14,7 +14,7 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -49,7 +49,7 @@ before(async () => {
   proxy = await countingProxy(srv.url);
   const work = join(root, 'source');
   mkdirSync(join(work, 'a'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   writeFileSync(join(work, 'a', 'one.txt'), 'one\n');
   writeFileSync(join(work, 'two.txt'), 'two\n');
   git(work, ['add', '.']);
@@ -69,7 +69,7 @@ function destination() {
   const bare = makeBareRepo(root, name);
   const other = join(root, `${name}-other`);
   mkdirSync(other);
-  git(other, ['init', '-q', '-b', 'main']);
+  initRepo(other);
   writeFileSync(join(other, 'precious.txt'), 'only copy\n');
   git(other, ['add', '.']);
   git(other, [...ident, 'commit', '-q', '-m', 'victim']);

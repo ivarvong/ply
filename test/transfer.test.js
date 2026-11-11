@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -46,7 +46,7 @@ before(async () => {
   srv = await startGitServer(root);
   work = join(root, 'source');
   mkdirSync(join(work, 'a', 'b'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   for (let i = 0; i < 10; i++) {
     const blob = new Uint8Array(40_000 + i * 500);
     randomFillSync(blob);

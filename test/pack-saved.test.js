@@ -17,7 +17,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync, createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { scanPackIndex, scannedPackOf } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -43,7 +43,7 @@ before(async () => {
   srv = await startGitServer(root);
   work = join(root, 'source');
   mkdirSync(join(work, 'a', 'b'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   for (let i = 0; i < 8; i++) {
     const blob = new Uint8Array(40_000 + i * 700);
     randomFillSync(blob);
@@ -432,7 +432,7 @@ test('loadTransferPack: a pack chained deeper than 64 is used from its saved ind
   const bytes = new Uint8Array(Buffer.concat([body, sha1(body)]));
   const dir = join(root, `deep${n++}`);
   mkdirSync(dir);
-  git(dir, ['init', '-q', '-b', 'main']);
+  initRepo(dir);
   writeFileSync(join(dir, 'deep.pack'), bytes);
   git(dir, ['index-pack', '--strict', 'deep.pack']);
   const depths = git(dir, ['verify-pack', '-v', 'deep.idx']).split('\n').map(l => /^[0-9a-f]{40} \w+\s+\d+ \d+ \d+ (\d+) [0-9a-f]{40}$/u.exec(l)).filter(m => m !== null).map(m => Number(m[1]));

@@ -7,7 +7,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { cpSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, chmodSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, noMaintenance } from './server.js';
 import { commitChanges } from '../src/changes.js';
 import { editFile } from '../src/edit.js';
 import {
@@ -47,7 +47,7 @@ after(async () => { await srv.close(); cleanup(); });
 const gitEnv = (cwd, args, env = {}) => git(cwd, ['-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args], { env: { ...process.env, ...env } });
 function seedLinear(bare) {
   const work = join(root, 'seed-linear');
-  git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]);
+  git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]); noMaintenance(work);
   git(work, ['config', 'commit.gpgsign', 'false']);
   git(work, ['config', 'core.autocrlf', 'false']);
   writeFileSync(join(work, 'a.txt'), 'old\n');
@@ -122,6 +122,7 @@ function workFrom(bare, kind) {
   const work = join(root, `w${n++}`);
   if (kind === 'tip') git(root, ['-c', 'core.autocrlf=false', 'clone', '-q', bare, work]);
   else git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]);
+  noMaintenance(work);
   git(work, ['config', 'commit.gpgsign', 'false']);
   git(work, ['config', 'core.autocrlf', 'false']);
   return work;

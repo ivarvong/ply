@@ -15,7 +15,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { cpSync, writeFileSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { commitChanges } from '../src/changes.js';
 import { Tracer } from '../src/otel.js';
 
@@ -29,7 +29,7 @@ before(async () => {
   ({ root, cleanup } = tmpRoot());
   srv = await startGitServer(root);
   const seed = join(root, 'seed');
-  git(root, ['init', '-q', '-b', 'main', seed]);
+  initRepo(seed);
   for (const [k, v] of [['user.name', 's'], ['user.email', 's@x'], ['commit.gpgsign', 'false']]) git(seed, ['config', k, v]);
   writeFileSync(join(seed, 'plain.txt'), 'plain\n');
   git(seed, ['add', '-A']); git(seed, ['commit', '-q', '-m', 'seed']);

@@ -3,7 +3,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, initRepo } from './server.js';
 import { Rng } from './fuzz/prng.js';
 import { genBlob } from './fuzz/gen.js';
 import { parseTree, encodeTree, hashObject, TYPE_NAME } from '../src/objects.js';
@@ -18,7 +18,7 @@ let root, cleanup, srv, bare, work;
 before(async () => {
   ({ root, cleanup } = tmpRoot());
   bare = makeBareRepo(root, 'o');
-  work = join(root, 'work'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  work = join(root, 'work'); mkdirSync(work); initRepo(work);
   srv = await startGitServer(root);
 });
 after(async () => { await srv.close(); cleanup(); });
@@ -65,7 +65,7 @@ test('blob/commit oids == git hash-object', () => {
 test('git pack-objects (ofs-delta, varied window/depth/compression) parses and resolves to git cat-file truth', async () => {
   const rng = new Rng(SEED + 2);
   // repo with history so deltas exist
-  const sub = join(root, 'packrepo'); mkdirSync(sub); git(sub, ['init', '-q', '-b', 'main']);
+  const sub = join(root, 'packrepo'); mkdirSync(sub); initRepo(sub);
   let text = genBlob(rng, 'text');
   for (let i = 0; i < 6; i++) {
     const files = {};

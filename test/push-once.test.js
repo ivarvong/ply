@@ -10,7 +10,7 @@ import { test, vi, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, commitFiles, initRepo } from './server.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
@@ -32,7 +32,7 @@ function fixture(cfg) {
   const name = `once${n++}`;
   const bare = makeBareRepo(root, name);
   for (const [k, v] of cfg) git(bare, ['config', k, v]);
-  const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const work = join(root, `w${name}`); mkdirSync(work); initRepo(work);
   const head = commitFiles(work, bare, { 'a/f.txt': 'one\n', 'b/f.txt': 'one\n' }, 'seed');
   writeFileSync(join(work, 'a/f.txt'), 'two\n'); writeFileSync(join(work, 'b/f.txt'), 'two\n'); writeFileSync(join(work, 'c.txt'), 'c\n');
   git(work, ['add', '-A']); git(work, ['commit', '-q', '-m', 'next']);
@@ -108,7 +108,7 @@ test('push: an objects list with a null or undefined entry is a protocol error, 
 test('push: a list with no repeated object hashes no object, though every blob has the same length', async () => {
   const name = `once${n++}`;
   const bare = makeBareRepo(root, name);
-  const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const work = join(root, `w${name}`); mkdirSync(work); initRepo(work);
   const head = commitFiles(work, bare, { 'seed.txt': 'seed\n' }, 'seed');
   const files = Array.from({ length: 24 }, (_, i) => `f${String(i).padStart(2, '0')}.txt`);
   for (const f of files) writeFileSync(join(work, f), `${f.slice(0, 3)}:one\n`);

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { commitChanges } from '../src/changes.js';
@@ -35,7 +35,7 @@ const noise = len => { const out = Buffer.alloc(len); for (let i = 0, b = Buffer
 
 before(async () => {
   ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root);
-  work = join(root, 'work'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  work = join(root, 'work'); mkdirSync(work); initRepo(work);
   const put = files => { for (const [p, v] of Object.entries(files)) { mkdirSync(join(work, p, '..'), { recursive: true }); writeFileSync(join(work, p), v); } };
   const commit = (msg, i) => { git(work, ['add', '-A']); git(work, ['commit', '-q', '-m', msg], { env: { ...process.env, GIT_AUTHOR_DATE: `${T - 100 + i} +0000`, GIT_COMMITTER_DATE: `${T - 100 + i} +0000` } }); return git(work, ['rev-parse', 'HEAD']).trim(); };
   put({ 'README.md': '# readme\n', 'a/b/c.txt': 'deep MARK\n', 'x.txt': 'x1\nx2\nx3\n', 'y.txt': 'y1\n', 'd/z.txt': 'z\n', 'big.bin': noise(200_000), 'run.sh': '#!/bin/sh\necho hi\n' });

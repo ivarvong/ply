@@ -22,7 +22,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { cpSync, mkdirSync, writeFileSync, chmodSync, rmdirSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems, noMaintenance } from './server.js';
 import { Rng } from './fuzz/prng.js';
 import { commitChanges } from '../src/changes.js';
 import { Tracer } from '../src/otel.js';
@@ -211,7 +211,7 @@ before(async () => {
     const listRngs = Array.from({ length: LISTS }, () => rng.fork());
     const { files, twins, subTwins } = genRepo(repoRng);
     const work = join(root, `seed${r}`);
-    git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]);
+    git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]); noMaintenance(work);
     for (const [k, v] of [['user.name', 's'], ['user.email', 's@x'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false'], ['core.fileMode', 'true']]) git(work, ['config', k, v]);
     for (const [p, f] of files) {
       mkdirSync(dirname(join(work, p)), { recursive: true });
