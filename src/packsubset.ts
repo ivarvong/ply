@@ -100,10 +100,13 @@ function headerOf(p: Plan, k: number): Uint8Array {
 // the delta types are not whole objects) or a REF_DELTA to a 40-hex id, whose own type is the delta's and is not read.
 // The values are a JavaScript caller's, so they are checked as unknown: buildPack's encoder checks none of this
 // (pack.ts), and an extra it would write wrong is a pack of the declared length that no git can parse.
-function checkExtra(j: number, o: PackInput): Result<null, PlyError> {
-  const data: unknown = o.data;
+function checkExtra(j: number, given: PackInput): Result<null, PlyError> {
+  // not an object at all (null, undefined, a number): refused before a property of it is read
+  const o: unknown = given;
+  if (typeof o !== 'object' || o === null) return refuse('pack subset extras', `extra ${j} is not an object`);
+  const data: unknown = given.data;
   if (!(data instanceof Uint8Array)) return refuse('pack subset extras', `extra ${j} has data that is not a Uint8Array`);
-  const base = inputBase(o);
+  const base = inputBase(given);
   const tag: unknown = base.tag;
   if (tag === 'ofs') return refuse('pack subset extras', `extra ${j} has an OFS base; give a REF base or none`);
   if (tag === 'ref') {
@@ -111,7 +114,7 @@ function checkExtra(j: number, o: PackInput): Result<null, PlyError> {
     return parseOid(oid).ok ? ok(null) : refuse('pack subset extras', `extra ${j} has a REF base that is not a 40-hex object id`);
   }
   if (tag !== 'none') return refuse('pack subset extras', `extra ${j} has a base that is neither none nor a REF`);
-  const type: unknown = o.type;
+  const type: unknown = given.type;
   if (typeof type !== 'number' || !Number.isInteger(type) || type < OBJ_COMMIT || type > OBJ_TAG) return refuse('pack subset extras', `extra ${j} has type ${String(type)}; a whole object is a commit (1), tree (2), blob (3) or tag (4)`);
   return ok(null);
 }

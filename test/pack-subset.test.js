@@ -341,6 +341,10 @@ test('an extra a pack cannot hold is refused before the source sees a read', asy
     ['a REF base of 39 hex digits', { type: TYPE.BLOB, data, base: { tag: 'ref', oid: 'a'.repeat(39) } }],
     ['a base of no known tag', { type: TYPE.BLOB, data, base: { tag: 'offset', index: 0 } }],
     ['data that is not bytes', { type: TYPE.BLOB, data: 'an extra\n' }],
+    // not an object at all: there is no entry to write, and packSubset returns a Result (it never throws or rejects)
+    ['an extra that is null', null],
+    ['an extra that is undefined', undefined],
+    ['an extra that is a number', 7],
   ];
   for (const [name, extra] of invalid) {
     const src = countingSource(packs.ofs);
