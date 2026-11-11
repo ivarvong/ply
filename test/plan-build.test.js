@@ -126,4 +126,8 @@ test('a resolved index that cannot name a cut base fails the plan (nothing is pu
   const built = await packSubset(rangeFromBytes(src.bytes), src.idx, [cut], { outsideBase: 'ref', resolved: noIds });
   assert.equal(built.ok, false);
   assert.equal(built.error.code, 'bad_request');
+  // a resolved index of another pack (another entry count) is refused before anything is read
+  const other = await packSubset(rangeFromBytes(src.bytes), src.idx, [0], { resolved: { ...src.resolved, count: src.idx.count + 1 } });
+  assert.equal(other.ok, false);
+  assert.equal(other.error.what, 'pack subset resolved');
 });

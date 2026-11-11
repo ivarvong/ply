@@ -77,6 +77,8 @@ export function entryWrite(stored: number, baseWritten: boolean, baseIdKnown: bo
   if (baseWritten) return WRITE_OFS;
   return outsideBase === 'ref' && baseIdKnown ? WRITE_REF_FROM_OFS : WRITE_REFUSED;
 }
+// Bytes an OFS_DELTA header spends on a distance (the planner counts written headers with it).
+export const ofsDistanceBytes = (distance: number): number => encodeOfsDistance(distance).length;
 
 type Plan = {
   readonly pack: ScannedPack;

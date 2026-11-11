@@ -36,8 +36,7 @@ import { limitExceeded } from './limits.js';
 import type { ScannedPack } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import { NO_BASE, THIN_BASE } from './packrangeresolve.js';
-import { encodeOfsDistance } from './pack.js';
-import { entryWrite, baseId, WRITE_OFS, WRITE_REFUSED } from './packsubset.js';
+import { entryWrite, baseId, ofsDistanceBytes, WRITE_OFS, WRITE_REFUSED } from './packsubset.js';
 import { Sha1 } from './sha1.js';
 import { te } from './bytes.js';
 import { withDefaults, mapGet, at } from './absent.js';
@@ -98,7 +97,7 @@ const COMMIT = OBJ_COMMIT;
 const OFS_DELTA = OBJ_OFS_DELTA;
 const TAG = OBJ_TAG;
 const TREE = OBJ_TREE;
-const ofsLen = (distance: number): number => encodeOfsDistance(distance).length;
+const ofsLen = ofsDistanceBytes;
 
 function checkBudget(b: PushBudget): PlyError | null {
   const fields: ReadonlyArray<readonly [string, number]> = [
