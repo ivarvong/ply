@@ -1558,3 +1558,38 @@ test('inflateTakeUnread hands over what follows the member: the record keeps no 
   // node:zlib's member length: the count does not move when the bytes after it are taken
   assert.equal(inflateConsumed(st), member.length);
 });
+
+// A stored member laid down by hand (RFC 1950: 78 01; RFC 1951 3.2.4: a header byte, LEN, NLEN, then LEN bytes), cut
+// inside its last block, which declares 1000 bytes more than follow: the input holds INFLATE_CHUNK + 999 bytes of
+// output and no end. `whole` keeps a short chunk back only while the input is open (the next feed may fill it); once
+// the input is closed nothing more can come, so the pending bytes are handed over, and then the cut is refused.
+test('inflatePull whole: open input keeps a short chunk back, closed input hands it over before the refusal', () => {
+  const data = new Uint8Array(INFLATE_CHUNK + 999);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 31 + (i >>> 8)) & 0xff;
+  const parts = [Uint8Array.of(0x78, 0x01)];
+  const stored = (bytes, len) => parts.push(Uint8Array.of(0, len & 0xff, len >>> 8, ~len & 0xff, (~len >>> 8) & 0xff), bytes);
+  let at = 0;
+  for (; data.length - at > 30000; at += 30000) stored(data.subarray(at, at + 30000), 30000);
+  stored(data.subarray(at), data.length - at + 1000);
+  const cut = concat(parts);
+  const bytesOf = p => Buffer.from(Uint8Array.from(p.bytes));
+
+  const open = must(inflateInit(streamOpts()));
+  inflateFeed(open, cut);
+  const full = must(inflatePull(open, true));
+  assert.equal(full.kind, 'chunk');
+  assert.deepEqual(bytesOf(full), Buffer.from(data.subarray(0, INFLATE_CHUNK)), 'the first chunk is INFLATE_CHUNK bytes of the data');
+  assert.deepEqual(must(inflatePull(open, true)), { kind: 'need' }, '999 bytes pending, input open: whole keeps them back');
+  assert.deepEqual(must(inflatePull(open, true)), { kind: 'need' }, 'and again, with nothing fed');
+  const rest = must(inflatePull(open));
+  assert.equal(rest.kind, 'chunk', 'without whole the same record hands the pending bytes over');
+  assert.deepEqual(bytesOf(rest), Buffer.from(data.subarray(INFLATE_CHUNK)));
+
+  const closed = must(inflateInit(streamOpts()));
+  inflateFeed(closed, cut);
+  assert.equal(must(inflateEnd(closed)).bytes.length, INFLATE_CHUNK, 'closing the input: the first full chunk');
+  const last = must(inflatePull(closed, true));
+  assert.equal(last.kind, 'chunk', 'closed input: the pending bytes are handed over, whole or not');
+  assert.deepEqual(bytesOf(last), Buffer.from(data.subarray(INFLATE_CHUNK)));
+  assert.equal(refusal(inflatePull(closed, true)), 'pack_corrupt: inflate: truncated stored block');
+});
