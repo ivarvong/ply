@@ -319,7 +319,7 @@ test('a resumed transfer that loads the saved index every request reaches the fr
       assert.equal(loaded.loaded.tag, 'saved');
       assert.deepEqual(spool.c, { reads: 1, bytes: 20 });
       saved = loaded.saved;
-      const r = must(await runTransfer(t, loaded.from, plan, src.commit, { maxSteps: 1 }));
+      const r = must(await runTransfer(t, loaded.from, plan, src.commit, { maxSteps: 1, ref: REF }));
       requests++;
       if (r.tag === 'done') break;
     }

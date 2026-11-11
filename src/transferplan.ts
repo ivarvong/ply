@@ -245,10 +245,11 @@ export function planTransfer(pack: ScannedPack, resolved: ResolvedIndex, input: 
 // The key a plan's temp commits and temp ref are named by.
 export const transferKey = (plan: TransferPlan): string => sha1Hex(JSON.stringify([plan.pack.hash, plan.head, plan.ref]));
 
-// What the caller of this call holds a plan read back to: the prefix its temp ref was planned under (default
-// refs/ply/transfer/) and, when named, the one ref this transfer may create (null: the plan's own).
-export type PlanExpectConfig = { readonly tempPrefix: string; readonly ref: string | null };
-export type PlanExpect = Input<PlanExpectConfig>;
+// What the caller of this call holds a plan read back to: the one ref this transfer may create, named on every call
+// (a stored plan is never trusted to choose it), and the prefix its temp ref was planned under (default
+// refs/ply/transfer/; a plan made with a custom tempPrefix is resumed by naming it again).
+export type PlanExpectConfig = { readonly tempPrefix: string; readonly ref: string };
+export type PlanExpect = Pick<PlanExpectConfig, 'ref'> & Input<Omit<PlanExpectConfig, 'ref'>>;
 
 const edited = (): Result<never, PlyError> => fail('bad_request', 'transfer: the plan does not match its hash', { what: 'plan' });
 // A step read back: one of the two variants, its ids well formed, its prev an Option of one.
@@ -320,7 +321,9 @@ function wellFormedPlan(plan: TransferPlan): boolean {
 //     with bad_request, never a TypeError;
 //   - its temp ref is not a free field: it must be the name tempRefOf derives from the plan's key under the caller's
 //     prefix, and never the target ref. So the only refs a plan can make a push create, move or delete are
-//     refs/ply/transfer/<key> (or the caller's prefix) and the target ref, which the caller can name on the call;
+//     refs/ply/transfer/<key> (or the caller's prefix) and the target ref;
+//   - its target ref is not a free field: the caller names the ref on every call (`expect.ref`), the plan's must
+//     equal it, and a call that names none is refused;
 //   - both hashes are recomputed and match: the pack plan's own (planHash: trailer, budget, crossBatchRef, selection,
 //     entry count, every batch and its entries) and the transfer's (ids, refs, atomic, the pack plan's hash, the
 //     steps), so every field a step reads is under a hash. The hashes are unkeyed (both functions are public): they
@@ -331,8 +334,10 @@ function wellFormedPlan(plan: TransferPlan): boolean {
 //   - what the steps push is not a free field either: the batches partition the selection (every selected entry in
 //     exactly one batch, nothing else in any), and transferStep and runTransfer, which hold the pack, check the
 //     selection is exactly the pack's trees and blobs (planFitsPack) before any request.
-export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): Result<TransferPlan, PlyError> {
-  const want = withDefaults<PlanExpectConfig>(expect, { tempPrefix: TRANSFER_REF_PREFIX, ref: null });
+export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect): Result<TransferPlan, PlyError> {
+  const want = withDefaults<PlanExpectConfig>(expect, { tempPrefix: TRANSFER_REF_PREFIX, ref: '' });
+  // the caller's own argument first: no ref named, nothing is read from the plan
+  if (typeof want.ref !== 'string' || want.ref === '') return fail('bad_request', 'transfer: name the ref this transfer creates (`ref`) on every call with a stored plan; the plan is not trusted to choose it', { what: 'ref' });
   if (!wellFormedPlan(plan)) return edited();
   const { hash, ...body } = plan;
   // corruption first (an honest plan, damaged), then what holds whoever wrote the hash
@@ -340,8 +345,8 @@ export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): 
   if (planHash(packBody) !== packHash || transferPlanHash(body) !== hash) return edited();
   if (!partitions(plan.pack)) return fail('bad_request', 'transfer: the plan\'s batches are not its selection, each entry in one batch', { what: 'batches' });
   const named = tempRefOf(want.tempPrefix, transferKey(plan));
-  if (!named.ok || plan.tempRef !== named.value || plan.tempRef === plan.ref) return fail('bad_request', 'transfer: the plan\'s temp ref is not the one its key names', { what: 'tempRef' });
-  if (want.ref !== null && plan.ref !== want.ref) return fail('bad_request', `transfer: the plan is for ${plan.ref}, not the ref this call names`, { what: 'ref' });
+  if (!named.ok || plan.tempRef !== named.value || plan.tempRef === plan.ref) return fail('bad_request', 'transfer: the plan\'s temp ref is not the one its key names under this call\'s `tempPrefix` (a plan made with a custom tempPrefix is resumed by naming it)', { what: 'tempRef' });
+  if (plan.ref !== want.ref) return fail('bad_request', `transfer: the plan is for ${plan.ref}, not the ref this call names`, { what: 'ref' });
   return ok(plan);
 }
 

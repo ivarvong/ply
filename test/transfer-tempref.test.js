@@ -5,10 +5,13 @@
 //     checkTransferPlan, transferStatus, transferStep and runTransfer before any request is sent, and the branch is
 //     still where git put it
 //   - a temp ref under the transfer prefix that is not the one the plan's key names is refused the same way
-//   - a plan for another ref than the one the caller names on the call is refused the same way
+//   - a plan for another ref than the one the caller names on the call is refused the same way, and so is every call
+//     that names no ref: the caller, never the stored plan, says which ref the pushes create
+//   - each refusal is by the rule it states (the error's `what`: tempRef, ref, plan, commit)
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
@@ -82,46 +85,95 @@ function rehashed(plan) {
   plan.hash = transferPlanHash(body);
   return plan;
 }
-// Every entry point refuses `plan` with bad_request, sends nothing, and leaves the destination's refs as git shows them.
-async function refusedUnsent(plan, opts = {}) {
+// Every entry point refuses `plan` with bad_request and the stated `what` (which rule refused it), sends nothing, and
+// leaves the destination's refs as git shows them. Each call names the ref, as every stored-plan call must.
+const answerOf = r => (r.ok ? JSON.stringify(r.value) : [r.error.code, r.error.what]);
+async function refusedUnsent(plan, what, opts = { ref: COPY }) {
   const { bare, victim, t } = destination();
   const before = proxy.count();
   const answers = [
+    checkTransferPlan(plan, opts),
     await transferStatus(t, plan, opts),
     await transferStep(t, from, plan, 0, { ...opts, commit }),
     await transferStep(t, from, plan, 1, { ...opts, commit }),
-    // the bare-bytes form of the last argument holds the plan to the defaults: only asked when the call names nothing
-    ...(Object.keys(opts).length === 0 ? [await transferStep(t, from, plan, 0, commit)] : []),
     await runTransfer(t, from, plan, commit, opts),
   ];
-  for (const [i, r] of answers.entries()) assert.equal(r.ok ? JSON.stringify(r.value) : r.error.code, 'bad_request', `entry point ${i}`);
+  for (const [i, r] of answers.entries()) assert.deepEqual(answerOf(r), ['bad_request', what], `entry point ${i}`);
   assert.equal(proxy.count() - before, 0, 'no request was sent');
   assert.equal(refsOf(bare), `${VICTIM} ${victim}`, 'the destination is as git left it');
 }
+const planned = (opts = {}) => unwrap(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: COPY, commit, ...opts }));
 
 test('a stored plan whose temp ref is an existing branch, hashes recomputed, is refused before any request and the branch stays', async () => {
-  const honest = unwrap(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: COPY, commit }));
+  const honest = planned();
   const { victim } = destination();
   const stored = structuredClone(honest);
   stored.tempRef = VICTIM;
   stored.steps = [{ kind: 'batch', temp: victim, prev: { tag: 'none' } }, { kind: 'final', prev: { tag: 'some', value: victim } }];
   stored.pack.batches = [{ kind: 'blobs', entries: [], packBytes: 32, objects: 0, refRewrites: 0 }, ...stored.pack.batches];
   rehashed(stored);
-  assert.equal(checkTransferPlan(stored).ok, false, 'checkTransferPlan refuses it');
-  await refusedUnsent(stored);
+  await refusedUnsent(stored, 'tempRef');
 });
 
 test('a temp ref under the prefix that the plan\'s key does not name, and a plan for another ref than the caller names, are refused unsent', async () => {
-  const honest = unwrap(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: COPY, commit }));
+  const honest = planned();
   const moved = structuredClone(honest);
   moved.tempRef = `refs/ply/transfer/${'a'.repeat(40)}`;
-  await refusedUnsent(rehashed(moved));
+  await refusedUnsent(rehashed(moved), 'tempRef');
   // the honest plan is for refs/heads/copy; this call names another ref
   assert.ok(checkTransferPlan(structuredClone(honest), { ref: COPY }).ok);
-  assert.equal(checkTransferPlan(structuredClone(honest), { ref: VICTIM }).ok, false);
-  await refusedUnsent(structuredClone(honest), { ref: 'refs/heads/elsewhere' });
+  await refusedUnsent(structuredClone(honest), 'ref', { ref: 'refs/heads/elsewhere' });
+  // the store's plan swapped for a whole, self-consistent one that creates another ref (planTransfer made it: every
+  // hash, key and temp ref is right); the caller still names refs/heads/copy
+  for (const ref of ['refs/heads/main', 'refs/tags/v9.9.9']) await refusedUnsent(planned({ ref }), 'ref');
   // a plan made with another temp prefix is this plan only to a caller that names that prefix
-  const custom = unwrap(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: COPY, commit, tempPrefix: 'refs/x/y/' }));
-  assert.equal(checkTransferPlan(custom).ok, false);
-  assert.ok(checkTransferPlan(custom, { tempPrefix: 'refs/x/y/' }).ok);
+  const custom = planned({ tempPrefix: 'refs/x/y/' });
+  await refusedUnsent(custom, 'tempRef');
+  assert.ok(checkTransferPlan(custom, { ref: COPY, tempPrefix: 'refs/x/y/' }).ok);
+  const { bare, t } = destination();
+  assert.equal(unwrap(await runTransfer(t, from, custom, commit, { ref: COPY, tempPrefix: 'refs/x/y/' })).tag, 'done');
+  assert.equal(git(bare, ['rev-parse', COPY]).trim(), custom.head);
+});
+
+test('a call that does not name the ref is refused unsent: a stored plan never chooses the ref its pushes create', async () => {
+  // owner decision: transferStatus, transferStep and runTransfer take the destination ref from the caller on every
+  // call. The plan here is honest and would run, so the only reason to refuse is the missing name
+  const honest = planned();
+  const { bare, victim, t } = destination();
+  const before = proxy.count();
+  const answers = [
+    checkTransferPlan(honest), checkTransferPlan(honest, {}), checkTransferPlan(honest, { ref: '' }), checkTransferPlan(honest, { ref: 5 }), checkTransferPlan(honest, null),
+    await transferStatus(t, honest), await transferStatus(t, honest, {}),
+    // the bare-bytes form of the last argument names no ref
+    await transferStep(t, from, honest, 0, commit), await transferStep(t, from, honest, 0, { commit }),
+    await runTransfer(t, from, honest, commit), await runTransfer(t, from, honest, commit, { maxSteps: 1 }),
+  ];
+  for (const [i, r] of answers.entries()) assert.deepEqual(answerOf(r), ['bad_request', 'ref'], `call ${i}`);
+  assert.equal(proxy.count() - before, 0, 'no request was sent');
+  assert.equal(refsOf(bare), `${VICTIM} ${victim}`, 'the destination is as git left it');
+});
+
+test('on a finished destination a plan that does not pass is still refused, not answered done; a commit that does not give the planned head is refused unsent', async () => {
+  const honest = planned();
+  const { bare, victim, t } = destination();
+  assert.equal(unwrap(await runTransfer(t, from, honest, commit, { ref: COPY })).tag, 'done');
+  const finished = refsOf(bare);
+  assert.equal(finished, `${COPY} ${honest.head}\n${VICTIM} ${victim}`);
+  const before = proxy.count();
+  const badHash = { ...structuredClone(honest), hash: 'f'.repeat(40) };
+  const otherRef = { ...structuredClone(honest), ref: 'refs/heads/other' };
+  const { pack: _pack, ...noPack } = structuredClone(honest);
+  const { steps: _steps, ...noSteps } = structuredClone(honest);
+  for (const [label, plan] of [['hash', badHash], ['ref edited', otherRef], ['no pack', noPack], ['no steps', noSteps]]) {
+    for (const r of [await transferStatus(t, plan, { ref: COPY }), await runTransfer(t, from, plan, commit, { ref: COPY })]) {
+      assert.deepEqual(answerOf(r), ['bad_request', 'plan'], label);
+    }
+  }
+  // the source commit with more message is another commit: git hash-object gives its id, which is not the planned head
+  const other = new Uint8Array([...commit, ...new TextEncoder().encode('more\n')]);
+  const otherHead = execFileSync('git', ['hash-object', '-t', 'commit', '--stdin'], { input: other, encoding: 'utf8' }).trim();
+  assert.notEqual(otherHead, honest.head);
+  assert.deepEqual(answerOf(await runTransfer(t, from, honest, other, { ref: COPY })), ['bad_request', 'commit']);
+  assert.equal(proxy.count() - before, 0, 'no request was sent');
+  assert.equal(refsOf(bare), finished);
 });

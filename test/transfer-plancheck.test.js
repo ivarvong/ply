@@ -71,10 +71,10 @@ const refsOf = bare => git(bare, ['for-each-ref', '--format=%(refname) %(objectn
 // What each entry point answers for `plan`: the error code, or what it did instead (an ok value, a throw).
 async function answers(t, plan) {
   const calls = [
-    ['checkTransferPlan', () => checkTransferPlan(plan)],
-    ['transferStatus', () => transferStatus(t, plan)],
-    ['transferStep', () => transferStep(t, from, plan, 0, commit)],
-    ['runTransfer', () => runTransfer(t, from, plan, commit, { maxSteps: 1, retries: 0 })],
+    ['checkTransferPlan', () => checkTransferPlan(plan, { ref: COPY })],
+    ['transferStatus', () => transferStatus(t, plan, { ref: COPY })],
+    ['transferStep', () => transferStep(t, from, plan, 0, { commit: commit, ref: COPY })],
+    ['runTransfer', () => runTransfer(t, from, plan, commit, { maxSteps: 1, retries: 0, ref: COPY })],
   ];
   const out = [];
   for (const [name, call] of calls) {
@@ -159,9 +159,9 @@ test('a right-typed edit of any field a step reads, both hashes left as stored, 
 
 test('the honest plan, read back from JSON, passes the check and runs: git shows the ref at the source tree', async () => {
   const stored = JSON.parse(JSON.stringify(honest));
-  assert.ok(checkTransferPlan(stored).ok);
+  assert.ok(checkTransferPlan(stored, { ref: COPY }).ok);
   const { bare, t } = destination();
-  const run = unwrap(await runTransfer(t, from, stored, commit));
+  const run = unwrap(await runTransfer(t, from, stored, commit, { ref: COPY }));
   assert.equal(run.tag, 'done');
   assert.equal(git(bare, ['rev-parse', `${COPY}^{tree}`]).trim(), sourceTree);
   git(bare, ['fsck', '--strict']);

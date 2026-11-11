@@ -69,13 +69,13 @@ export type { ScannedPack, ScannedEntry, ScannedBase, ScannedType, ScannedObject
 export { packSubset } from './packsubset.js';
 export type { PackSubset, PackSubsetOpts, OutsideBase } from './packsubset.js';
 export { planTransfer, checkTransferPlan, transferPlanHash, TRANSFER_VERSION, TRANSFER_REF_PREFIX, TRANSFER_IDENT } from './transferplan.js';
-export type { TransferPlan, TransferStepPlan, BatchStep, FinalStep, TempRef, TransferOpts, TransferPack } from './transferplan.js';
+export type { TransferPlan, TransferStepPlan, BatchStep, FinalStep, TempRef, TransferOpts, TransferPack, PlanExpect, PlanExpectConfig } from './transferplan.js';
 export { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers, SETTLE_DEFAULTS } from './transfer.js';
 export { encodeSavedIndex, decodeSavedIndex, describeRefusal as describeSavedIndexRefusal, packIdentity, SAVED_INDEX_VERSION, SAVED_INDEX_ENTRY_BYTES, SAVED_INDEX_FIXED_BYTES } from './packsaved.js';
 export type { PackIdentity, SavedIndex, SavedIndexRefusal } from './packsaved.js';
 export { loadTransferPack } from './transferload.js';
 export type { Loaded as TransferPackLoaded, LoadedPack, LoadOpts as TransferLoadOpts } from './transferload.js';
-export type { TransferNext, TransferRun, RunOpts, SettleConfig } from './transfer.js';
+export type { TransferNext, TransferRun, RunOpts, SettleConfig, StepCommit } from './transfer.js';
 export { sidebandStep } from './fetch.js';
 export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';

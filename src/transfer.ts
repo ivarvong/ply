@@ -1,7 +1,7 @@
 // Resumable transfer, the effects (#238): each function is one exchange with one outcome; the plan is transferplan.ts.
 //
-//   transferStatus(dst, plan)               ls-refs on the target and temp refs → the next step, or done
-//   transferStep(dst, from, plan, step)     one push: that batch's entries, read from the spool, plus its generated
+//   transferStatus(dst, plan, { ref })      ls-refs on the target and temp refs → the next step, or done
+//   transferStep(dst, from, plan, step, { commit, ref })   one push: that batch's entries, read from the spool, plus its generated
 //                                           objects; a batch moves the temp ref one temp commit on (compare-and-swap),
 //                                           the final push creates the ref and deletes the temp ref (atomic)
 //   runTransfer(dst, from, plan, opts)      the loop: status, step, status... until done or `maxSteps`. After every push
@@ -48,7 +48,8 @@ export type TransferRun =
 export type SettleConfig = { readonly reads: number; readonly delayMs: number };
 // maxSteps: pushes this run may make (default no limit); retries: sends of one step that may stay unsettled (default 2)
 export type RunConfig = { readonly maxSteps: number; readonly retries: number; readonly settle: SettleConfig };
-// with what the plan is held to (PlanExpect): the temp prefix it was planned under and, when named, the ref to create
+// with what the plan is held to (PlanExpect): the ref to create, named on every call, and the temp prefix the plan was
+// made under when it is not the default
 export type RunOpts = Input<RunConfig> & PlanExpect;
 export type SweepOpts = Input<{ readonly prefix: string; readonly keep: readonly string[] }>;
 // Measured on Cloudflare Artifacts (2026-11-10, n=64 pushes): the first ls-refs after every ack showed the push (reads
@@ -94,7 +95,7 @@ async function readStatus(dst: Transport, plan: TransferPlan): Promise<Result<Tr
 
 // Where the transfer stands on `dst`, from its refs alone. The plan is checked first (checkTransferPlan): nothing is
 // read for, and no answer is given from, a plan that does not pass.
-export async function transferStatus(dst: Transport, plan: TransferPlan, expect: PlanExpect = {}): Promise<Result<TransferNext, PlyError>> {
+export async function transferStatus(dst: Transport, plan: TransferPlan, expect: PlanExpect): Promise<Result<TransferNext, PlyError>> {
   const checked = checkTransferPlan(plan, expect);
   if (!checked.ok) return checked;
   const next = await readStatus(dst, checked.value);
@@ -154,16 +155,17 @@ async function pushStep(dst: Transport, { from, plan, step, commit }: StepInput)
   });
   return r;
 }
-// The plan is checked first (checkTransferPlan). `commit` is the source commit's bytes, or those with what the plan is
-// held to on this call (PlanExpect: the temp prefix it was planned under, the ref it may create).
-export type StepCommit = Uint8Array | (PlanExpect & { readonly commit: Uint8Array });
+// The plan is checked first (checkTransferPlan). `given` is the source commit's bytes with what the plan is held to on
+// this call (PlanExpect: the ref it creates, the temp prefix it was planned under). A call that names no ref (the bare
+// bytes an earlier version took) is refused.
+export type StepCommit = PlanExpect & { readonly commit: Uint8Array };
 export async function transferStep(dst: Transport, from: TransferPack, plan: TransferPlan, step: number, given: StepCommit): Promise<Result<{ readonly step: number }, PlyError>> {
-  const expect: PlanExpect = given instanceof Uint8Array ? {} : given;
-  const checked = checkTransferPlan(plan, expect);
+  const checked = checkTransferPlan(plan, given);
   if (!checked.ok) return checked;
+  if (!(given.commit instanceof Uint8Array)) return fail('bad_request', 'transfer: `commit` is the source commit\'s bytes', { what: 'commit' });
   const fits = planFitsPack(checked.value, from.pack, from.resolved);
   if (!fits.ok) return fits;
-  const sent = await pushStep(dst, { from, plan: checked.value, step, commit: given instanceof Uint8Array ? given : given.commit });
+  const sent = await pushStep(dst, { from, plan: checked.value, step, commit: given.commit });
   return sent;
 }
 
@@ -225,9 +227,9 @@ async function turn(run: Run, known: Option<TransferNext>, st: Loop): Promise<Re
 // after a lagging read) stands only if the refs, settled, do not show the step landed. The plan is checked first
 // (checkTransferPlan, held to `opts.tempPrefix` and `opts.ref`), and `commit` must give the planned head, so `done` is
 // never answered from a plan that does not pass or for a head the caller's commit does not give.
-export async function runTransfer(dst: Transport, from: TransferPack, stored: TransferPlan, commit: Uint8Array, opts: RunOpts = {}): Promise<Result<TransferRun, PlyError>> {
+export async function runTransfer(dst: Transport, from: TransferPack, stored: TransferPlan, commit: Uint8Array, opts: RunOpts): Promise<Result<TransferRun, PlyError>> {
   const cfg = withDefaults<RunConfig>(opts, { maxSteps: Number.POSITIVE_INFINITY, retries: 2, settle: SETTLE_DEFAULTS });
-  const checked = checkTransferPlan(stored, { tempPrefix: opts.tempPrefix, ref: opts.ref });
+  const checked = checkTransferPlan(stored, opts);
   if (!checked.ok) return checked;
   const plan = checked.value;
   const fits = planFitsPack(plan, from.pack, from.resolved);
