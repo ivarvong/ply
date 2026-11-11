@@ -118,7 +118,14 @@ export class Sha1 {
   }
   /* oxlint-enable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style, unicorn/prefer-math-trunc */
 
+  // A snapshot: the SHA-1 of the bytes fed so far, and the hasher is left as it was, so digest()/hex() may be called any
+  // number of times and update() continues (a running pack checksum reads the hash so far and keeps hashing). The
+  // padding goes through update(), which moves the five words, bufLen and len; those seven numbers are saved and put
+  // back. The buffered bytes buf[0..bufLen) need no copy: the padding only writes buf at and after bufLen (with fewer
+  // than 56 buffered it fills the block exactly; with more, the second padding block is hashed from `tail` itself).
+  // Before this held, a second digest() hashed the message plus its padding and returned that as a digest.
   public digest(): Uint8Array {
+    const { h0, h1, h2, h3, h4, bufLen, len } = this;
     const bits = this.len * 8;
     const padLen = this.bufLen < 56 ? 56 - this.bufLen : 120 - this.bufLen;
     const tail = new Uint8Array(padLen + 8);
@@ -133,6 +140,9 @@ export class Sha1 {
     const odv = new DataView(out.buffer);
     // setInt32 writes the same four bytes setUint32 wrote for the unsigned word
     odv.setInt32(0, this.h0); odv.setInt32(4, this.h1); odv.setInt32(8, this.h2); odv.setInt32(12, this.h3); odv.setInt32(16, this.h4);
+    this.h0 = h0; this.h1 = h1; this.h2 = h2; this.h3 = h3; this.h4 = h4;
+    this.bufLen = bufLen;
+    this.len = len;
     return out;
   }
 
@@ -156,9 +166,18 @@ export function streamingSha1(): StreamingSha1 {
   if (native.tag === 'some' && isDigestStream(native.value)) {
     const ds = new native.value('SHA-1'); // it IS a WritableStream; `digest` is a promise of the ArrayBuffer
     const w = ds.getWriter();
+    // hex() ends the native stream (it cannot be read without closing it), once: a second hex() is the same promise,
+    // not a second close (which rejects). Unlike Sha1, an update after hex() is not possible here; it rejects.
+    let end: { readonly tag: 'open' } | { readonly tag: 'closed'; readonly oid: Promise<Oid> } = { tag: 'open' };
+    const finish = async (): Promise<Oid> => { await w.close(); return digestOid(toHex(new Uint8Array(await ds.digest))); };
+    // oxlint-disable-next-line typescript/promise-function-async -- hands back the one stored promise
+    const hex = (): Promise<Oid> => {
+      if (end.tag === 'open') end = { tag: 'closed', oid: finish() };
+      return end.oid;
+    };
     // update hands back the writer's own promise (no extra tick per chunk)
     // oxlint-disable-next-line typescript/promise-function-async -- see above
-    return { kind: 'digeststream', update: b => w.write(b), hex: async () => { await w.close(); return digestOid(toHex(new Uint8Array(await ds.digest))); } };
+    return { kind: 'digeststream', update: b => w.write(b), hex };
   }
   const h = new Sha1();
   // async to match the native hasher's interface

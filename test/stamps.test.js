@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { oracleRediff } from './gitversion.js';
 import { mergeBranch } from '../src/merge.js';
 import { rebaseBranch, cherryPick, revertCommit } from '../src/rebase.js';
@@ -39,7 +39,7 @@ after(async () => { await srv?.close(); cleanup?.(); });
 function build() {
   const name = `st${n++}`; const bare = makeBareRepo(root, name); const w = join(root, `w${name}`); mkdirSync(w);
   const env = as(ORIG, ORIG);
-  git(w, ['init', '-q', '-b', 'main']);
+  initRepo(w);
   const commit = (file, msg) => { writeFileSync(join(w, file), `${file}\n`); run(w, ['add', '-A'], env); run(w, ['commit', '-q', '-m', msg], env); return run(w, ['rev-parse', 'HEAD'], env); };
   const base = commit('f.txt', 'base');
   const main = commit('m.txt', 'm');

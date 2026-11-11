@@ -7,7 +7,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { readFile, listTree } from '../src/read.js';
@@ -32,7 +32,7 @@ before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer
 after(async () => { await srv.close(); cleanup(); });
 const A = { name: 'c', email: 'c@x' };
 async function repo(files, fault = artifactsFault()) {
-  const name = `a${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const name = `a${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, files, 'seed');
   const proxy = await startProxy(srv.url, fault);
   return { name, bare, work, url: `${proxy.url}/${name}.git`, proxy };

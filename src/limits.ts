@@ -8,7 +8,7 @@ import { plyError } from './errors.js';
 import type { Result } from './result.js';
 import { err, getOrElse, ok } from './result.js';
 import type { Input } from './absent.js';
-import { fromNullish, withDefaults } from './absent.js';
+import { fromNullish, isMissing, withDefaults } from './absent.js';
 
 /* oxlint-disable no-magic-numbers -- these are the cap definitions; parsers import the names */
 
@@ -20,6 +20,32 @@ const MIB = KIB * KIB;
  * 8 MiB is large enough for a source file and small enough to reject a blob the merger cannot hold twice.
  */
 export const LIMIT_MERGE_BLOB: number = 8 * MIB;
+/**
+ * The line merge's work budget: primitive diff steps for one merged file, counted across everything that merge runs
+ * (both histogram diffs, the classic-diff fallbacks, group compaction, conflict refinement). git's histogram diff
+ * rescans the rest of the region on every split (xhistogram.c find_lcs), so a file whose splits peel a line or two at
+ * a time costs O(n²) however short its hash chains are; the byte cap does not bound that. The budget does, whatever
+ * the content: a merge that would pass it is refused as `too large to merge`, never guessed.
+ * A step is ~6-7 ns of CPU on the histogram path and ~12-15 ns on the classic fallback (measured: linemerge.ts,
+ * classicDiff), so the CPU bound is the fallback's rate times the budget.
+ * Sized at 7cfa0b7, on a 16-core machine running about 25 other test processes (process.cpuUsage medians; the cases
+ * are pinned in test/linemerge.test.js, which asserts the counts, not the times):
+ * - Default 2^32: what git itself merges cleanly in about 5 s is merged, on both shapes measured. git merge-file
+ *   (2.50) takes 3.4 s on 40,000 lines of swapped pairs (0.75 n² = 1.2e9 steps here) and 7.9 s on 60,000 (2.7e9),
+ *   about 2.9 ns a step, so its 5 s is ~1.7e9 steps there; 2^30 refused the first of those. A bulk edit costs git
+ *   less per step (about 1.7 ns), so its 5 s is more steps: 130,000 lines with every 10th changed is 4.1 s in git and
+ *   2,451,130,516 steps here, 143,000 lines 5.0 s and 2,965,798,566, so ~3e9; 2^31, sized from the swaps alone,
+ *   refused the first of those (measured at 1b9f578). It is also 11.9 times the 361,702,266 steps of the 70,000-line
+ *   / 3,500-hunk bulk edit (1.75 s here, 0.76 s in git). A refusal at this budget costs ~25 s of CPU (131,074 lines
+ *   of swapped pairs: 24,920 ms, one run, 5.8 ns a step).
+ * - Worker 2^26: the worst inputs found under WORKER_LIMITS.maxMergeBlobBytes are refused in 1.04 s (250,000 swapped
+ *   lines, histogram), 1.40 s (1,048,576 random a/b/c lines, classic fallback) and 1.74 s (60 copies each of 8,733
+ *   lines, shuffled); at 2^27 the first two took 1.45 s and 1.48 s and the third ran to its end in 2.27 s. The budget
+ *   does not cover splitting the three sides into records (0.43 s for 3 x 250,000 lines, 0.89 s for 3 x 1,048,576),
+ *   so a budget of 0 still costs 0.55 s and 1.06 s on those inputs: the rest of the second is maxMergeBlobBytes'.
+ */
+export const LIMIT_MERGE_WORK: number = 2 ** 32;
+export const LIMIT_MERGE_WORK_WORKER: number = 2 ** 26;
 /**
  * Inflated size of any single non-streamed object (trees, commits, tags, metadata blobs).
  * gitformat-pack does not cap this; 64 MiB is one object a Worker-sized heap can still inflate and hash.
@@ -57,7 +83,8 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
 /**
  * Objects in one buffered pack. gitformat-pack stores the count as a uint32, which is not a memory or CPU bound.
  * 100_000 is above a blob:none listing of a large repository's trees (the kernel is on the order of 10^4 trees)
- * and is the ceiling for a REF_DELTA fixpoint: one Map lookup per object per pass, not a scan of the pack.
+ * and is the ceiling for resolvePack's work: each entry is visited at most three times in any pack order (a delta is
+ * filed under its base and resolved when the base lands), a REF_DELTA base is one Map lookup, never a scan or a pass.
  */
 export const LIMIT_PACK_OBJECTS = 100_000;
 /** ls-refs lines, and the rebase chain walked from them. */
@@ -85,6 +112,21 @@ export const LIMIT_MERGE_DEPTH = 1024;
  * commands never trips this cap; a larger value admits a proc-receive hook that reports one command as several refs.
  */
 export const LIMIT_REPORT_LINES: number = LIMIT_REFS;
+/**
+ * The bytes kept of one report-status reason: the reason of "ng <ref> <reason>", or the status of "unpack <status>".
+ * git's own are under 50 bytes and the longest host reason observed is 86 (Cloudflare Artifacts), so 4 KiB is room for
+ * a host that explains itself. A longer reason is cut here and its ref keeps its status (push.ts cutReportLine): the cap
+ * bounds what is held (one reason a command), never the outcome. Never below git's own longest (push.ts reportReasonCap).
+ */
+export const LIMIT_REPORT_REASON_BYTES = 4096;
+/** The same for a 128 MiB isolate: 10 000 refused refs hold 10 MiB of reasons (and as much again decoded), not 40 MiB. */
+export const LIMIT_REPORT_REASON_BYTES_WORKER = 1024;
+/**
+ * Band-2 bytes (progress, hook output) decoded from one receive-pack answer. A frame past it is dropped unread and the
+ * report is still read (the answer as a whole is held to maxPackBytes). Only a 4 KiB tail is ever kept, so this bounds
+ * the decoding, not the memory: git's progress is a few KiB and a talkative hook some hundreds; 8 MiB is past both.
+ */
+export const LIMIT_REPORT_PROGRESS_BYTES = 8_388_608;
 /**
  * Parents on one commit. An octopus is a handful; a commit that lists more parents than the ref cap is not
  * a history bestBases will walk.
@@ -126,10 +168,37 @@ export const LIMIT_OBJECT_OVERHEAD: number = 3 * KIB;
  * 1032:1; real packs measure far below this (deltas inflate only their instructions).
  */
 export const LIMIT_WORK_RATIO = 32;
+/**
+ * resolvePackRange's work bound. Resolving a pack honestly costs its floor: every member inflated once and every delta
+ * applied once, which is the sum of sizes the pack itself declares (each capped by maxObjectSize / maxDeltaResult), and
+ * has nothing to do with its compressed size: 80 one-line edits of a 4 MB file are a pack of about 1 MB and a floor of
+ * over 256 MiB. LIMIT_RESOLVE_FACTOR is the work allowed per floor byte: the room for bases made again after a cache
+ * miss. Measured by the test's own RangeSource (test/pack-range-resolve.test.js): that history resolves at about 1x the
+ * sum of its object sizes on the default cache.
+ * The hard ceiling, whatever the pack declares (a pack of maximum-size delta bombs declares a floor as large as it
+ * likes), is the Limits key maxResolveWork, or the record's maxInflatedTotal when that is larger (the bound is never
+ * below maxInflatedTotal: a preset spread with maxInflatedTotal raised resolves what it did before the key existed).
+ * Left out of a caller's record it is LIMIT_RESOLVE_TOTALS x that record's
+ * maxInflatedTotal, so it follows the preset: 2 GiB on DEFAULT_LIMITS, 512 MiB on WORKER_LIMITS. Measured on a 40 KB
+ * bomb (test/pack-range-resolve-bound.test.js): refused after 512 MiB in about 2 s of CPU and after 2 GiB in about 8 s
+ * (about 4 ns per work byte, most of it hashing each result). An honest pack whose objects sum past the ceiling is
+ * refused too (limit_exceeded, `resolve work bytes`): raise maxResolveWork for it.
+ */
+export const LIMIT_RESOLVE_FACTOR = 4;
+export const LIMIT_RESOLVE_TOTALS = 8;
+export const LIMIT_RESOLVE_WORK: number = LIMIT_INFLATED_TOTAL * LIMIT_RESOLVE_TOTALS;
+/**
+ * What memoryCache() (packcache.ts) retains unless told otherwise: the body bytes and header text of all its entries.
+ * One object's worth: a process that keeps a cache beside its work holds at most one more LIMIT_OBJECT.
+ */
+export const LIMIT_MEMORY_CACHE_BYTES: number = LIMIT_OBJECT;
+/** Entries memoryCache() keeps unless told otherwise, however small: its eviction pass walks them on a put. */
+export const LIMIT_MEMORY_CACHE_ENTRIES = 1024;
 /* oxlint-enable no-magic-numbers */
 
 export type Limits = {
   readonly maxMergeBlobBytes: number;
+  readonly maxMergeWork: number;
   readonly maxObjectSize: number;
   readonly maxHarvestBytes: number;
   readonly maxPackBytes: number;
@@ -137,6 +206,7 @@ export type Limits = {
   readonly maxDeltaResult: number;
   readonly maxDeltaChain: number;
   readonly maxInflatedTotal: number;
+  readonly maxResolveWork: number;
   readonly maxPackObjects: number;
   readonly maxRefs: number;
   readonly maxRebaseCommits: number;
@@ -146,6 +216,8 @@ export type Limits = {
   readonly maxPathComponent: number;
   readonly maxMergeDepth: number;
   readonly maxReportLines: number;
+  readonly maxReportReasonBytes: number;
+  readonly maxReportProgressBytes: number;
   readonly maxCommitParents: number;
   readonly maxLsRefsBytes: number;
   readonly requestTimeoutMs: number;
@@ -159,8 +231,10 @@ export type LimitKey = keyof Limits;
 // is a plain record again and is parsed afresh. Internal code takes CheckedLimits and reads its keys directly.
 const CHECKED_LIMITS: unique symbol = Symbol('checkedLimits');
 export type CheckedLimits = Limits & { readonly [CHECKED_LIMITS]: true };
-// What a caller passes: any subset of the keys (a missing key is the default), or none.
-export type LimitsInput = Input<Limits>;
+// What a caller passes: any subset of the keys (a missing key is the default), or none. maxResolveWork may also be
+// null: derived from the record's own maxInflatedTotal, the same as leaving it out (no other key takes null).
+type LimitsGiven = Omit<Limits, 'maxResolveWork'> & { readonly maxResolveWork: number | null };
+export type LimitsInput = Input<LimitsGiven>;
 
 // The brand on a record whose every value is a finite non-negative number (each caller's check, or arithmetic on checked
 // values). Frozen: the record is shared by every read past the edge.
@@ -174,6 +248,7 @@ const isChecked = (value: LimitsInput): value is CheckedLimits => Object.hasOwn(
 
 export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxMergeBlobBytes: LIMIT_MERGE_BLOB,
+  maxMergeWork: LIMIT_MERGE_WORK,
   maxObjectSize: LIMIT_OBJECT,
   maxHarvestBytes: LIMIT_HARVEST,
   maxPackBytes: LIMIT_PACK_WIRE,
@@ -181,6 +256,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxDeltaResult: LIMIT_DELTA_RESULT,
   maxDeltaChain: LIMIT_DELTA_CHAIN,
   maxInflatedTotal: LIMIT_INFLATED_TOTAL,
+  maxResolveWork: LIMIT_RESOLVE_WORK,
   maxPackObjects: LIMIT_PACK_OBJECTS,
   maxRefs: LIMIT_REFS,
   maxRebaseCommits: LIMIT_REBASE_COMMITS,
@@ -190,6 +266,8 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxPathComponent: LIMIT_PATH_COMPONENT,
   maxMergeDepth: LIMIT_MERGE_DEPTH,
   maxReportLines: LIMIT_REPORT_LINES,
+  maxReportReasonBytes: LIMIT_REPORT_REASON_BYTES,
+  maxReportProgressBytes: LIMIT_REPORT_PROGRESS_BYTES,
   maxCommitParents: LIMIT_COMMIT_PARENTS,
   maxLsRefsBytes: LIMIT_LS_REFS_BYTES,
   requestTimeoutMs: LIMIT_REQUEST_TIMEOUT_MS,
@@ -202,8 +280,10 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
  * peaks near twice its size (the inflate output and the buffer the caller holds), so the object and delta caps are
  * 16 MiB and the inflated total, which also pays LIMIT_OBJECT_OVERHEAD per object, is 64 MiB: half the isolate, about
  * 21 000 tiny objects. The wire caps (pack, push, ls-refs) are two objects, as in the defaults. maxHarvestBytes is half an
- * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), and maxTreeEntries 32 768
- * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140). Every other cap
+ * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), maxMergeWork 2^26 steps per merged
+ * file (LIMIT_MERGE_WORK_WORKER: CPU, not memory), maxTreeEntries 32 768
+ * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140), and
+ * maxReportReasonBytes 1 KiB (a push of maxRefs refused refs holds one reason each). Every other cap
  * is the default. The limit sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells):
  * each refuses or succeeds, none runs out of memory.
  */
@@ -215,15 +295,27 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxPushBytes: 32 * MIB,
   maxLsRefsBytes: 32 * MIB,
   maxInflatedTotal: 64 * MIB,
+  maxResolveWork: 64 * MIB * LIMIT_RESOLVE_TOTALS,
   maxDeltaResult: 16 * MIB,
   maxHarvestBytes: 8 * MIB,
   maxMergeBlobBytes: 2 * MIB,
+  maxMergeWork: LIMIT_MERGE_WORK_WORKER,
   maxTreeEntries: 32_768,
+  maxReportReasonBytes: LIMIT_REPORT_REASON_BYTES_WORKER,
 });
 /* oxlint-enable no-magic-numbers */
 
 // A caller's overrides on top of the defaults, as a plain record: it is checked where it enters (parseLimits).
-export const withLimits = (o: Partial<Limits> = {}): Limits => Object.freeze({ ...DEFAULT_LIMITS, ...o });
+// maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits.
+const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS);
+// maxResolveWork: null is left out too (a spread of a preset, or a JSON record, has no other way to ask for the derived value)
+const hasWork = (record: LimitsGiven): record is Limits => record.maxResolveWork !== null;
+export const withLimits = (o: Partial<LimitsGiven> = {}): Limits => {
+  // null from an untyped caller is no overrides, as the missing value is: the frozen defaults, not a throw
+  const given = getOrElse<Partial<LimitsGiven>>(fromNullish(o), {});
+  const filled = { ...DEFAULT_LIMITS, ...given };
+  return Object.freeze(hasWork(filled) && !isMissing(given.maxResolveWork) ? filled : { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) });
+};
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
 export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf<'bad_request'>> =>
@@ -231,19 +323,27 @@ export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
 
+// The largest delay a platform timer holds: a signed 32-bit count of ms (24.8 days). The exchange's three timeouts.
+export const MAX_TIMER_MS = 2_147_483_647;
+const TIMER_KEYS: ReadonlySet<string> = new Set(['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs']);
+
 // The caller's limits record (any subset), or none (null), parsed once where it enters. A key it gives must pass
 // checkLimit (the refusal names the key, `got` is what was passed; keys are checked in DEFAULT_LIMITS order); a key it
-// leaves out, or passes as the missing value, is DEFAULT_LIMITS's. Keys this version does not read are ignored. A
+// leaves out, or passes as the missing value, is DEFAULT_LIMITS's (maxResolveWork: 8 x the record's maxInflatedTotal). Keys this version does not read are ignored. A
 // record parseLimits already returned is returned as it is; none (null) is DEFAULT_LIMITS.
 // @decoder parseLimits prefix=limits
 export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, ErrorOf<'bad_request'>> {
   if (input === null) return ok(DEFAULT_LIMITS);
   if (isChecked(input)) return ok(input);
   // A spread of DEFAULT_LIMITS: its keys (the brand is not enumerable), in order, each filled from the input where given.
-  const filled = withDefaults<Limits>(input, { ...DEFAULT_LIMITS });
+  const given = withDefaults<LimitsGiven>(input, { ...DEFAULT_LIMITS });
+  // the resolve work ceiling a caller leaves out (or gives as null) follows the maxInflatedTotal of its own record, not the default's
+  const filled: Limits = hasWork(given) && !isMissing(input.maxResolveWork) ? given : { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) };
   for (const [key, value] of Object.entries(filled)) {
     const checked = checkLimit(value, key);
     if (!checked.ok) return checked;
+    // a timer holds at most MAX_TIMER_MS: above it the platform's timer fires at once (Node: 1 ms, with a warning)
+    if (TIMER_KEYS.has(key) && checked.value > MAX_TIMER_MS) return err(plyError('bad_request', `limits.${key} must be at most ${MAX_TIMER_MS} ms (0 turns the timer off)`, { what: key, got: value }));
   }
   return ok(grant(filled));
 }

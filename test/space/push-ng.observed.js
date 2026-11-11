@@ -11,7 +11,7 @@ import { isMainThread, parentPort, workerData, Worker } from 'node:worker_thread
 import { availableParallelism } from 'node:os';
 import { mkdirSync, writeFileSync, chmodSync, cpSync, rmSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { git, gitBuf, tmpRoot } from '../server.js';
+import { git, gitBuf, tmpRoot, noMaintenance } from '../server.js';
 import { pkt, FLUSH } from '../../src/pktline.js';
 import { concat, te } from '../../src/bytes.js';
 import * as space from './push-ng.space.js';
@@ -50,10 +50,10 @@ function fixture(root) {
   const objects = { C: objectsOf(C), X: objectsOf(X), W: objectsOf(W), D: [], R: objectsOf(R), [BAD_PACK_SEND]: objectsOf(D) };
   // the bare template: refs main, r0, r1, r2 at B, HEAD → main; the non-bare one: the same, main checked out
   const bare = join(root, 'bare.git');
-  g(root, ['init', '-q', '--bare', '-b', 'main', bare]);
+  g(root, ['init', '-q', '--bare', '-b', 'main', bare]); noMaintenance(bare);
   g(src, ['push', '-q', bare, `${B}:refs/heads/main`, `${B}:refs/heads/r0`, `${B}:refs/heads/r1`, `${B}:refs/heads/r2`]);
   const wt = join(root, 'wt');
-  g(root, ['clone', '-q', bare, wt]);
+  g(root, ['clone', '-q', bare, wt]); noMaintenance(wt);
   for (const r of ['r0', 'r1', 'r2']) g(wt, ['update-ref', `refs/heads/${r}`, B]);
   g(wt, ['remote', 'remove', 'origin']);
   return { src, oids, objects, bare, wt };

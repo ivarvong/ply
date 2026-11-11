@@ -60,9 +60,13 @@ export function thrownCacheStatus(error: unknown): unknown {
   return Reflect.get(error, 'cacheStatus');
 }
 
-// True only for pack_corrupt served from a cache HIT: the one case fetch retries once.
+// True only for an answer the client's parse refused (pack_corrupt, protocol, remote_error) that was served from a
+// cache HIT: the one case fetch retries once, past the cache. The store is untrusted, so the stored bytes are the
+// suspect (a flipped pack byte, an ERR, a cut, an empty body, a wrong pack trailer). A limit, a timeout, an abort or a
+// transport failure says nothing about the stored bytes and is not retried.
 export function corruptCacheHit(error: unknown): boolean {
   if (typeof error !== 'object' || error === null || !Object.hasOwn(error, 'code')) return false;
-  if (Reflect.get(error, 'code') !== 'pack_corrupt') return false;
+  const code: unknown = Reflect.get(error, 'code');
+  if (code !== 'pack_corrupt' && code !== 'protocol' && code !== 'remote_error') return false;
   return isCacheHit(thrownCacheStatus(error));
 }

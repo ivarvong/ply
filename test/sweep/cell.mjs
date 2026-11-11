@@ -7,6 +7,9 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { GitHttp } from '../../src/client.js';
 import { parsePack, resolvePack } from '../../src/pack.js';
+import { scanPackIndex } from '../../src/packscanindex.js';
+import { resolvePackRange } from '../../src/packrangeresolve.js';
+import { rangeFromBytes } from '../../src/rangesource.js';
 import { pushRepo } from '../../src/repo-node.js';
 import { Tracer } from '../../src/otel.js';
 import { unwrap, unwrapAsync } from '../unwrap.js';
@@ -52,6 +55,13 @@ const ops = {
     const parsed = unwrap(parsePack(buf, { limits: opts.limits }));
     const resolved = unwrap(resolvePack(parsed, () => null, opts.limits));
     return { n: resolved.objects.size, maxChain: resolved.stats.maxChain, oidsHash: oidsHash(resolved.objects.keys()) };
+  },
+  // resolvePackRange over the pack's bytes. The index is scanned on the defaults; the cell's limits bound the resolve.
+  async resolveRange() {
+    const buf = new Uint8Array(readFileSync(cell.pack));
+    const index = unwrap(await scanPackIndex(new Blob([buf]).stream()));
+    const resolved = unwrap(await resolvePackRange(index, rangeFromBytes(buf), { limits: opts.limits }));
+    return { n: resolved.count, work: resolved.stats.work };
   },
   // A thin fetch: the server deltas against the haves, and the bases come from the local store (`cell.store`, a bare
   // repo holding the haves) through the external lookup, the way a client with those objects resolves them.

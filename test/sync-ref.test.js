@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { git, tmpRoot, makeBareRepo, startGitServer, startAuthGate, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, startAuthGate, fsckProblems, initRepo } from './server.js';
 import * as ply from '../src/index.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 
@@ -65,7 +65,7 @@ function pair(stock) {
   const src = makeBareRepo(root, `src${id}`, { stock });
   const dst = makeBareRepo(root, `dst${id}`, { stock });
   const work = join(root, `work${id}`);
-  git(root, ['init', '-q', '-b', 'main', work]);
+  initRepo(work);
   return { src, dst, work, srcUrl: `${srv.url}/src${id}.git`, dstUrl: `${srv.url}/dst${id}.git` };
 }
 const body = (seed, count) => Array.from({ length: count }, (_, i) => `export const v${i} = ${(i * 2654435761 + seed) >>> 0};`);
@@ -176,7 +176,7 @@ for (const stock of [false, true]) describe(stock ? 'stock upload-pack' : 'defau
     pushTo(p.work, p.src, 'HEAD:refs/heads/main');
     const tip = rev(p.work, 'HEAD');
     const other = join(root, `other${n++}`);
-    git(root, ['init', '-q', '-b', 'main', other]);
+    initRepo(other);
     commit(other, 50, 'unrelated');
     pushTo(other, p.dst, 'HEAD:refs/heads/main');
     const theirs = rev(other, 'HEAD');

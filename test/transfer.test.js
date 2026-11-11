@@ -22,7 +22,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -46,7 +46,7 @@ before(async () => {
   srv = await startGitServer(root);
   work = join(root, 'source');
   mkdirSync(join(work, 'a', 'b'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   for (let i = 0; i < 10; i++) {
     const blob = new Uint8Array(40_000 + i * 500);
     randomFillSync(blob);
@@ -130,8 +130,8 @@ test('end to end, REF-only and OFS packs: several pushes under the cap, fsck --s
     // deterministic: planned again, the same plan and hash
     assert.deepEqual(must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit })), plan);
     // a plan survives JSON (a store between Worker requests)
-    assert.ok(checkTransferPlan(JSON.parse(JSON.stringify(plan))).ok);
-    assert.deepEqual(must(await transferStatus(t, plan)), { tag: 'done', head: plan.head, tempLeft: false });
+    assert.ok(checkTransferPlan(JSON.parse(JSON.stringify(plan)), { ref: REF }).ok);
+    assert.deepEqual(must(await transferStatus(t, plan, { ref: REF })), { tag: 'done', head: plan.head, tempLeft: false });
   }
 });
 
@@ -156,7 +156,7 @@ test('resume: paused after every push and resumed, the same head; a step already
   const { bare, t } = repo();
   let runs = 0;
   for (;;) {
-    const r = must(await runTransfer(t, from, plan, src.commit, { maxSteps: 1 }));
+    const r = must(await runTransfer(t, from, plan, src.commit, { maxSteps: 1, ref: REF }));
     runs++;
     if (r.tag === 'done') break;
     assert.equal(r.pushes, 1);
@@ -164,7 +164,7 @@ test('resume: paused after every push and resumed, the same head; a step already
     // the step the destination is on, sent again: refused (stale ref), the refs unchanged
     if (at > 0) {
       const before = refsOf(bare);
-      const again = await transferStep(t, from, plan, at - 1, src.commit);
+      const again = await transferStep(t, from, plan, at - 1, { commit: src.commit, ref: REF });
       assert.equal(again.ok, false);
       assert.equal(refsOf(bare), before);
     }
@@ -178,7 +178,7 @@ test('a push that dies mid-stream moves nothing; the next run finishes; a step t
   const from = await spooled(src.packs.ref);
   const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
   const { bare, t } = repo();
-  must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2 }));
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2, ref: REF }));
   const before = refsOf(bare);
   // a spool that fails partway through every read: the pack stream errors, the push cannot have landed
   const dying = { ...from, source: { size: from.source.size, read: async (o, l) => {
@@ -194,15 +194,15 @@ test('a push that dies mid-stream moves nothing; the next run finishes; a step t
       c.enqueue(value);
     } }) };
   } } };
-  const died = await transferStep(t, dying, plan, must(await transferStatus(t, plan)).step, src.commit);
+  const died = await transferStep(t, dying, plan, must(await transferStatus(t, plan, { ref: REF })).step, { commit: src.commit, ref: REF });
   assert.equal(died.ok, false);
   assert.equal(refsOf(bare), before, 'the refs where they were');
-  const stuck = await runTransfer(t, dying, plan, src.commit, { retries: 1 });
+  const stuck = await runTransfer(t, dying, plan, src.commit, { retries: 1, ref: REF });
   assert.equal(stuck.ok, false);
   assert.equal(stuck.error.code, 'ambiguous');
   assert.match(stuck.error.message, /did not land after 2 tries/);
   assert.equal(refsOf(bare), before);
-  const done = must(await runTransfer(t, from, plan, src.commit));
+  const done = must(await runTransfer(t, from, plan, src.commit, { ref: REF }));
   assert.equal(done.tag, 'done');
   assertCopied(bare, plan);
 });
@@ -225,27 +225,27 @@ test('refusals at a step and at status: an edited plan, another pack, other ids,
   const other = await spooled(src.packs.ofs);
   const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
   const { bare, t } = repo();
-  const edited = await transferStep(t, from, { ...plan, ref: 'refs/heads/other' }, 0, src.commit);
+  const edited = await transferStep(t, from, { ...plan, ref: 'refs/heads/other' }, 0, { commit: src.commit, ref: REF });
   assert.match(edited.error.message, /does not match its hash/);
-  assert.match((await transferStep(t, other, plan, 0, src.commit)).error.message, /is not the planned one/);
+  assert.match((await transferStep(t, other, plan, 0, { commit: src.commit, ref: REF })).error.message, /is not the planned one/);
   const ids = Uint8Array.from(from.resolved.columns.oid);
   ids.fill(0x11, 0, 20 * from.resolved.count);
   const lyingOid = i => (Number.isInteger(i) && i >= 0 && i < from.resolved.count ? { tag: 'some', value: '11'.repeat(20) } : { tag: 'none' });
   const lying = { ...from, resolved: { ...from.resolved, oid: lyingOid, columns: { ...from.resolved.columns, oid: ids } } };
-  assert.match((await transferStep(t, lying, plan, 0, src.commit)).error.message, /the pack is not the one planned/);
+  assert.match((await transferStep(t, lying, plan, 0, { commit: src.commit, ref: REF })).error.message, /the pack is not the one planned/);
   const last = plan.steps.length - 1;
   const wrongCommit = te.encode(new TextDecoder().decode(src.commit).replace('two', 'three'));
-  assert.match((await transferStep(t, from, plan, last, wrongCommit)).error.message, /does not give the planned head/);
-  assert.equal((await transferStep(t, from, plan, last, te.encode('junk'))).error.code, 'pack_corrupt');
-  assert.match((await transferStep(t, from, plan, plan.steps.length, src.commit)).error.message, /is not in the plan/);
+  assert.match((await transferStep(t, from, plan, last, { commit: wrongCommit, ref: REF })).error.message, /does not give the planned head/);
+  assert.equal((await transferStep(t, from, plan, last, { commit: te.encode('junk'), ref: REF })).error.code, 'pack_corrupt');
+  assert.match((await transferStep(t, from, plan, plan.steps.length, { commit: src.commit, ref: REF })).error.message, /is not in the plan/);
   assert.equal(refsOf(bare), '', 'nothing pushed');
   // a temp ref this plan never writes, then the target taken by another commit
   git(work, ['push', '-q', bare, `${src.head}:${plan.tempRef}`]);
-  const foreign = await transferStatus(t, plan);
+  const foreign = await transferStatus(t, plan, { ref: REF });
   assert.equal(foreign.error.code, 'cas_conflict');
   git(bare, ['update-ref', '-d', plan.tempRef]);
   git(work, ['push', '-q', bare, `${src.head}:${REF}`]);
-  const taken = await runTransfer(t, from, plan, src.commit);
+  const taken = await runTransfer(t, from, plan, src.commit, { ref: REF });
   assert.equal(taken.error.code, 'cas_conflict');
   assert.match(taken.error.message, /already exists/);
 });
@@ -279,7 +279,7 @@ test('sweepTransfers: removes an abandoned transfer\'s temp ref, keeps what it i
   const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
   const { bare, t } = repo();
   assert.deepEqual(must(await sweepTransfers(t)), []);
-  must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2 }));
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: 2, ref: REF }));
   assert.deepEqual(must(await sweepTransfers(t, { keep: [plan.tempRef] })), []);
   assert.deepEqual(must(await sweepTransfers(t)), [plan.tempRef]);
   assert.equal(git(bare, ['for-each-ref', 'refs/ply']).trim(), '');
@@ -330,9 +330,9 @@ test('the plan: a tagged step per batch, prev an Option, refs git would push; a 
   for (const edit of bad) {
     const p = structuredClone(json);
     edit(p);
-    assert.equal(checkTransferPlan(p).ok, false, String(edit));
+    assert.equal(checkTransferPlan(p, { ref: REF }).ok, false, String(edit));
   }
-  assert.ok(checkTransferPlan(json).ok);
+  assert.ok(checkTransferPlan(json, { ref: REF }).ok);
 });
 
 test('ls-refs that lags a push: settled by reading again, not by sending again; a longer lag pauses; a resend refused after a lag goes on', async () => {
@@ -342,7 +342,7 @@ test('ls-refs that lags a push: settled by reading again, not by sending again; 
   {
     const { bare, t } = repo();
     const lag = lagging(t, () => 2);
-    const run = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 3, delayMs: 0 } }));
+    const run = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 3, delayMs: 0 }, ref: REF }));
     assert.deepEqual(run, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
     assertCopied(bare, plan);
   }
@@ -350,14 +350,14 @@ test('ls-refs that lags a push: settled by reading again, not by sending again; 
   const { bare, t } = repo();
   let lagNext = 4;
   const lag = lagging(t, () => lagNext);
-  const paused = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 2, delayMs: 0 } }));
-  assert.deepEqual(paused, { tag: 'paused', step: 0, pushes: 1, reason: 'settling' });
+  const paused = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 2, delayMs: 0 }, ref: REF }));
+  assert.deepEqual(paused, { tag: 'paused', step: 0, pushes: 1, reason: 'settling', lastPush: 'acknowledged', lastStep: 'not_shown' });
   assert.equal(git(bare, ['rev-parse', plan.tempRef]).trim(), plan.steps[0].temp, 'the push landed');
   // the next run's first read still lags: it sends step 0 again, the server refuses it (stale), the refs settled show
   // step 0 landed, and the run goes on to the end
   lagNext = 0;
   const before = lag.reads();
-  const resumed = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 3, delayMs: 0 } }));
+  const resumed = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 3, delayMs: 0 }, ref: REF }));
   assert.equal(resumed.tag, 'done');
   assert.equal(resumed.pushes, plan.steps.length, 'one resend, refused, then every other step once');
   assert.ok(lag.reads() > before);
@@ -365,7 +365,7 @@ test('ls-refs that lags a push: settled by reading again, not by sending again; 
   // a refusal the refs do not explain stands: the target taken by another commit, read after the push
   const other = repo();
   git(work, ['push', '-q', other.bare, `${src.head}:${REF}`]);
-  assert.equal((await runTransfer(other.t, from, plan, src.commit)).error.code, 'cas_conflict');
+  assert.equal((await runTransfer(other.t, from, plan, src.commit, { ref: REF })).error.code, 'cas_conflict');
 });
 
 test('done reports a temp ref left behind; the spans: run > status, step, settle, each with the plan hash and an outcome', async () => {
@@ -373,7 +373,7 @@ test('done reports a temp ref left behind; the spans: run > status, step, settle
   const plan = must(planTransfer(from.pack, from.resolved, { budget: BUDGET, ref: REF, commit: src.commit }));
   const ex = arrayExporter();
   const { bare, t } = repo({ tracer: new Tracer({ exporter: ex }) });
-  const run = must(await runTransfer(t, from, plan, src.commit, { settle: { reads: 1, delayMs: 0 } }));
+  const run = must(await runTransfer(t, from, plan, src.commit, { settle: { reads: 1, delayMs: 0 }, ref: REF }));
   assert.equal(run.tempLeft, false);
   const spans = ex.lines.flatMap(flattenLine);
   const named = name => spans.filter(s => s.name === name);
@@ -399,7 +399,7 @@ test('done reports a temp ref left behind; the spans: run > status, step, settle
   assert.ok(named('git.transfer.status').every(s => s.attrs['git.transfer.plan.hash'] === plan.hash && typeof s.attrs['git.transfer.status.outcome'] === 'string'));
   // a temp ref still on the destination after the ref was created (a host that kept it): done, tempLeft
   git(bare, ['update-ref', plan.tempRef, plan.steps[0].temp]);
-  assert.deepEqual(must(await runTransfer(t, from, plan, src.commit)), { tag: 'done', head: plan.head, pushes: 0, tempLeft: true });
+  assert.deepEqual(must(await runTransfer(t, from, plan, src.commit, { ref: REF })), { tag: 'done', head: plan.head, pushes: 0, tempLeft: true });
   assert.deepEqual(must(await sweepTransfers(t)), [plan.tempRef]);
   const [sweep] = named('git.transfer.sweep').length ? named('git.transfer.sweep') : ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.transfer.sweep');
   assert.equal(sweep.attrs['git.transfer.sweep.deleted'], 1);

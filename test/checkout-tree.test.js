@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, symlinkSync, readdirSync, lstatSync, readlinkSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { checkoutTree, treeFiles, canonMode } from '../src/checkout.js';
 import { CHECKOUT_BATCH, checkoutDir, writeFiles } from '../src/checkout-node.js';
@@ -58,7 +58,7 @@ const wants = body => (body.match(/^[0-9a-f]{4}want [0-9a-f]{40}$/gm) ?? []).len
 // an empty file, one blob at two paths, a 3 MiB file, sort-order neighbours (a.b, a/, a0, a-b)
 before(async () => {
   ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root);
-  const bare = makeBareRepo(root, 'r'); const work = join(root, 'wr'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'r'); const work = join(root, 'wr'); mkdirSync(work); initRepo(work);
   const big = Buffer.alloc(3 << 20); for (let i = 0; i < big.length; i += 7) big[i] = (i * 2654435761) >>> 24;
   const files = {
     'README.md': '# fixture\n', 'empty.txt': '', 'big.bin': big,
