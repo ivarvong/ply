@@ -211,6 +211,11 @@ and `notify-ply-web` tells ply-web about a commit only after `ci` passed for tha
 npm run check             # typecheck + lint + registry test + dist check; run before every push
 ```
 
+A ratchet baseline (`scripts/throw-baseline.json`, `scripts/absence-baseline.json`, `test/space/ratchet.json`,
+`test/durations.json`) moves the unsafe way only in a commit whose message has the line
+`Ratchet-Change: <file>: <reason>`. CI's `node scripts/ratchet-guard.mjs` compares each baseline with the base
+commit's and fails without that line; a squash merge must keep the line in its message, or main's own ci run fails.
+
 ```sh
 npm ci
 npm test                  # 113 deterministic tests + 16 fuzz stages (≈29 min)

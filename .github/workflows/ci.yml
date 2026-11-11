@@ -100,6 +100,12 @@ jobs:
         env:
           RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: npm run typecheck
+      # Each ratchet compares the tree with its baseline, so a change that edits both passes it. This compares the
+      # baselines with the base commit's: one that moved the unsafe way needs `Ratchet-Change: <file>: <reason>`.
+      - name: ratchet baselines loosen only with a Ratchet-Change line
+        env:
+          RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/ratchet-guard.mjs
       - run: npm run lint
       - name: dist is what consumers import
         run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"
