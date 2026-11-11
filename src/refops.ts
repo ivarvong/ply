@@ -25,7 +25,7 @@ import { fail } from './errors.js';
 import { ok } from './result.js';
 import { withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
-import { push, ZERO_OID } from './push.js';
+import { push, refusedInPlace, ZERO_OID } from './push.js';
 import { parseOid } from './oid.js';
 import { operation, verifyRef } from './operation.js';
 import { encodeTag, hashObject, ident, TYPE } from './objects.js';
@@ -60,7 +60,8 @@ async function commitOf(t: OpContext['t'], from: string, what: string): Promise<
 }
 
 // Effect: the create push (old id zero, nothing but `objects`). A refused create re-reads the ref: present, it is the
-// ref that already existed (cas_conflict naming its tip); absent, the server's own refusal stands.
+// ref that already existed (cas_conflict naming its tip); absent, the create's precondition held and the refusal is the
+// server's own (push_rejected: a D/F name conflict, a held lock).
 type Create = { readonly prefix: string; readonly ref: string; readonly newOid: string; readonly objects: readonly PushObject[]; readonly verify: boolean };
 async function createRef({ t, root }: Pick<OpContext, 't' | 'root'>, { prefix, ref, newOid, objects, verify }: Create): Promise<Result<number, PlyError>> {
   const pushed = await push(t, { ref, oldOid: ZERO_OID, newOid, objects });
@@ -69,7 +70,7 @@ async function createRef({ t, root }: Pick<OpContext, 't' | 'root'>, { prefix, r
     const now = await lsRefs(t, [ref]);
     if (!now.ok) return now;
     const tip = refOid(now.value.refs, ref);
-    return tip.tag === 'some' ? exists(ref, tip.value) : pushed;
+    return tip.tag === 'some' ? exists(ref, tip.value) : refusedInPlace(pushed.error);
   }
   if (verify) { const seen = await verifyRef(t, root, prefix, ref, newOid); if (!seen.ok) return seen; }
   return ok(pushed.value.packBytes);
