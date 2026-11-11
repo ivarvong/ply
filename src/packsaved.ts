@@ -18,7 +18,8 @@
 // not give (truncated), a check that does not match (corrupt), an index of another pack (the caller's expected
 // trailer and length: a stale index is never used), and columns no scan plus resolve could produce (malformed: entries
 // not contiguous from the pack header to the trailer, a type or base out of range, a REF delta's base that is not the
-// whole object its REF id names (where the index carries ids), resolved columns the index
+// whole object its REF id names (where the index carries ids) or any base at all (where it carries none: a scan
+// without ids finds no REF base), resolved columns the index
 // contradicts or whose bases do not form chains ending at a whole object or a thin base: see checkResolved).
 // loadTransferPack (transferload.ts) turns any refusal into a fresh scan and says why on its span.
 import type { PlyError } from './errors.js';
@@ -203,11 +204,12 @@ function sameId(v: DataView, a: number, b: number): boolean {
 }
 // A REF delta's scan base: none (-1: the scan found no whole object with the delta's REF id), or a whole object in the
 // pack, and where the index carries both ids the one whose id the delta names: the scan finds a REF base by id and no
-// other way. With the ids flag and no REF ids the columns are not compared here; checkIndex refuses those flags.
+// other way. So an index without ids has none: a base recorded there is refused, there is no id to hold it to. With
+// the ids flag and no REF ids the columns are not compared here; checkIndex refuses those flags.
 const IDS_AND_REFS = FLAG_OIDS | FLAG_REFS;
 function refBaseOk(v: DataView, h: Header, at: Regions, i: number, base: number): boolean {
   if (base === -1) return true;
-  if (base < -1 || base >= h.n || !isWhole(v.getUint8(at.storedType + base))) return false;
+  if (base < -1 || base >= h.n || (h.flags & FLAG_OIDS) === 0 || !isWhole(v.getUint8(at.storedType + base))) return false;
   return (h.flags & IDS_AND_REFS) !== IDS_AND_REFS || sameId(v, at.oids + base * OID_BYTES, at.refs + i * OID_BYTES);
 }
 function checkEntry(v: DataView, h: Header, at: Regions, i: number, start: number): EntryCheck {

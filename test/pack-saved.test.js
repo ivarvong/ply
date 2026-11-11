@@ -292,6 +292,30 @@ test('tampered resolved columns with a valid check: cycles, depth lies and bases
   const bare = must(encodeSavedIndex(from.pack, none));
   dv(bare).setInt32(scanBaseAt(onWhole), otherBlob, true);
   assert.deepEqual(decodeSavedIndex(rechecked(bare), idOf(from)).error, { tag: 'malformed', field: 'baseIndex', index: onWhole });
+  // #260 re-review REQ 2 (owner decision 4). The same pack indexed without ids (scan oids: false; flags 2 refs, +4
+  // with resolved columns). A scan that keeps no ids finds no REF base: its base column is -1 for every REF delta
+  // (asserted on the scan's own output), so a recorded base is one no scan gives and has no id to be checked against.
+  // Both forgeries name a whole blob, with the type column made to agree (blob): the blob the ids-on index above shows
+  // is not the object the delta names, and the one that is. With and without resolved columns.
+  const noIds = await fresh(src.packs.ref, { oids: false });
+  assert.equal(noIds.pack.columns.oids.length, 0);
+  assert.ok(deltas.every(i => noIds.pack.columns.baseIndex[i] === -1), 'without ids the scan finds no REF base');
+  // the type column: after the base column (i32) and headerBytes, storedType (u8 each)
+  const scanTypeAt = i => 64 + from.pack.count * 30 + i;
+  for (const resolved of [some(noIds.resolved), none]) {
+    const honest = must(encodeSavedIndex(noIds.pack, resolved));
+    assert.equal(dv(honest).getUint16(6, true), resolved.tag === 'some' ? 6 : 2, 'flags: REF ids, no ids');
+    assert.equal(honest[scanTypeAt(onWhole)], 0, 'the offset is the scan type column: a REF delta with no base found has no type');
+    assert.ok(decodeSavedIndex(honest, idOf(noIds)).ok, 'the honest index without ids is used');
+    for (const to of [otherBlob, from.pack.columns.baseIndex[onWhole]]) {
+      const forged = Uint8Array.from(honest);
+      dv(forged).setInt32(scanBaseAt(onWhole), to, true);
+      forged[scanTypeAt(onWhole)] = 3;
+      const r = decodeSavedIndex(rechecked(forged), idOf(noIds));
+      assert.equal(r.ok, false, `REF scan base ${to} recorded without ids (${resolved.tag} resolved): accepted`);
+      assert.deepEqual(r.error, { tag: 'malformed', field: 'baseIndex', index: onWhole });
+    }
+  }
   // types, ids and sizes the scan knows: a delta's type is its base's, a whole object's are the scan's
   assert.equal(refusal(from, b => { b[R.type + onWhole] = 2; }, 'delta type'), `resolved.type@${onWhole}`);
   assert.equal(refusal(from, b => { b[R.type + blobs[0]] = 2; }, 'whole type'), `resolved.type@${blobs[0]}`);
