@@ -748,6 +748,12 @@ function headerOid(value: string, what: 'tree' | 'parent'): Result<Oid, BadReque
   const id = parseOid(value.toLowerCase());
   return id.ok ? id : fail('bad_request', `commit: ${what}: ${id.error.message}`, { what, got: value });
 }
+const COMMIT_FIELDS = ['tree', 'parents', 'author', 'committer', 'encoding', 'extra', 'message'] as const;
+// A commit field read back against the one given: a string or null, or a list of strings, element for element.
+function sameField(back: string | null | readonly string[], given: string | null | readonly string[]): boolean {
+  if (typeof back === 'string' || back === null || typeof given === 'string' || given === null) return back === given;
+  return back.length === given.length && back.every((line, i) => line === given[i]);
+}
 export function encodeCommitOf({ tree, parents, author, committer = author, encoding = null, message = null, extra = [] }: CommitIds): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const values: Array<readonly [unknown, string]> = [[author, 'author'], [committer, 'committer']];
   if (encoding !== null) values.push([encoding, 'encoding']);
@@ -764,7 +770,20 @@ export function encodeCommitOf({ tree, parents, author, committer = author, enco
   ];
   if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
   lines.push(...extra);
-  return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
+  const bytes = encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
+  if (!bytes.ok) return bytes;
+  // Held to the reader, as encodeTag is: what parseCommit refuses (an ident fsck refuses, an extra line that shadows
+  // tree, parent, author, committer or encoding) is the caller's bad request, and so is a commit that would read back
+  // as another one (an empty extra line ends the header; an `encoding ` extra line is the encoding). The parent bound
+  // is the reader's own choice, so it is not applied here. Every message below is fixed text.
+  const parsed = parseCommit(bytes.value, parents.length > DEFAULT_LIMITS.maxCommitParents ? { maxCommitParents: parents.length } : DEFAULT_LIMITS);
+  if (!parsed.ok) return fail('bad_request', parsed.error.message, { what: 'commit' });
+  const back = parsed.value;
+  const given: Commit = { tree, parents: [...parents], author, committer, encoding, extra: [...extra], message };
+  for (const field of COMMIT_FIELDS) {
+    if (!sameField(back[field], given[field])) return fail('bad_request', `commit: ${field} would not read back as given`, { what: field });
+  }
+  return bytes;
 }
 
 // A caller's commit, its ids parsed once: the tree and parent header values are checked first (a NUL or newline is that
