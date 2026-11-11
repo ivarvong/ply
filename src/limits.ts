@@ -145,6 +145,13 @@ export const LIMIT_WORK_RATIO = 32;
 export const LIMIT_RESOLVE_FACTOR = 4;
 export const LIMIT_RESOLVE_TOTALS = 8;
 export const LIMIT_RESOLVE_WORK: number = LIMIT_INFLATED_TOTAL * LIMIT_RESOLVE_TOTALS;
+/**
+ * What memoryCache() (packcache.ts) retains unless told otherwise: the body bytes and header text of all its entries.
+ * One object's worth: a process that keeps a cache beside its work holds at most one more LIMIT_OBJECT.
+ */
+export const LIMIT_MEMORY_CACHE_BYTES: number = LIMIT_OBJECT;
+/** Entries memoryCache() keeps unless told otherwise, however small: its eviction pass walks them on a put. */
+export const LIMIT_MEMORY_CACHE_ENTRIES = 1024;
 /* oxlint-enable no-magic-numbers */
 
 export type Limits = {

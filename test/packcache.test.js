@@ -12,8 +12,9 @@ import { pkt, pktInit, pktStep, FLUSH, DELIM } from '../src/pktline.js';
 import { lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { parsePack, resolvePack } from '../src/packresolve.js';
 import { te, concat } from '../src/bytes.js';
-import { DEFAULT_LIMITS } from '../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES } from '../src/limits.js';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
@@ -228,6 +229,23 @@ test('buffered fetchPack (general client): poisoned cache entry → one bust →
   assert.equal(b.parsed.stats.count, 1); assert.equal(f.stats.bust, 1);
   const spans = spansOf(ex).filter(s => s.name === 'git.upload-pack fetch');
   assert.deepEqual(spans.map(s => s.attrs['git.pack.cache.bust']), [false, false, true]); assert.deepEqual(spans.map(s => s.attrs['git.response.cache']), ['MISS', 'HIT', 'BUST']);
+  // The same retry against any cache tier: a HIT whose pack the client refuses is asked for once more with
+  // `x-ply-cache: bust`. The tier below serves git's answer with one flipped byte as a HIT.
+  let tierBusts = 0;
+  const tier = async (u, init) => {
+    const res = await fetch(u, init);
+    if (!String(u).endsWith('git-upload-pack') || !isCacheableFetch(init.body)) return res;
+    const h = new Headers(res.headers);
+    if (new Headers(init.headers).get('x-ply-cache') === 'bust') { tierBusts++; h.set('x-ply-pack-cache', 'BUST'); return new Response(res.body, { status: 200, headers: h }); }
+    const bytes = new Uint8Array(await res.arrayBuffer()); bytes[bytes.length - 30] ^= 0xff; h.set('x-ply-pack-cache', 'HIT');
+    return new Response(bytes, { status: 200, headers: h });
+  };
+  const ex2 = arrayExporter();
+  const c2 = unwrap(GitHttp.create(url, { tracer: new Tracer({ exporter: ex2 }), fetchImpl: tier }));
+  const viaTier = await unwrapAsync(c2.fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 }));
+  assert.equal(viaTier.parsed.stats.count, 1); assert.equal(tierBusts, 1);
+  const spans2 = spansOf(ex2).filter(s => s.name === 'git.upload-pack fetch');
+  assert.deepEqual(spans2.map(s => s.attrs['git.pack.cache.bust']), [false, true]); assert.deepEqual(spans2.map(s => s.attrs['git.response.cache']), ['HIT', 'BUST']);
   // the wrapper delegates to the same functions (getters + one of each family)
   assert.equal(c.url, url); assert.equal(c.limits.maxRefs > 0, true); assert.equal(c.tracer instanceof Tracer, true); assert.equal(c.parent, null);
   const o = await unwrapAsync(c.fetchObject({ oid: head, deepen: 1 })); assert.equal(o.oid, head);
@@ -421,11 +439,393 @@ test('cachingFetch verifyBeforeStore: an answer over the cap, a request that is 
   const run = async (f, body) => { await (await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body })).arrayBuffer(); await Promise.all(pending.splice(0)); };
   const small = memoryCache(); const fs = cachingFetch(globalThis.fetch, small, opts({ limits: { ...DEFAULT_LIMITS, maxPackBytes: 8 } }));
   await run(fs, fetchBody({ wants: [blobOid()] }));
-  assert.equal(small.entries.size, 0); assert.match(fs.stats.verifyError, /cached answer bytes/);
+  assert.equal(small.entries.size, 0); assert.equal(fs.stats.verifyFailed, 1); assert.match(fs.stats.verifyError, /exceeds limit 8/);
   const ls = memoryCache(); const fl = cachingFetch(globalThis.fetch, ls, opts({ shouldCache: () => true }));
   await run(fl, unwrap(lsRefsBodyR([])));
-  assert.equal(ls.entries.size, 0); assert.match(fl.stats.verifyError, /the request is not a fetch/);
+  // ls-refs under a caller's own rule: framed to its flush and no ERR, so it is stored (as on main), and replayed
+  assert.equal(ls.entries.size, 1); assert.equal(fl.stats.verifyOk, 1); assert.equal(fl.stats.verifyFailed, 0);
+  await run(fl, unwrap(lsRefsBodyR([]))); assert.equal(fl.stats.hit, 1);
   const nan = memoryCache(); const fn = cachingFetch(globalThis.fetch, nan, opts({ limits: { ...DEFAULT_LIMITS, maxPackBytes: Number.NaN } }));
   await run(fn, fetchBody({ wants: [blobOid()] }));
   assert.equal(nan.entries.size, 0); assert.equal(fn.stats.verifyFailed, 1);
+});
+
+// gitprotocol-pack: error-line = PKT-LINE("ERR" SP explanation-text). upload-pack reports its own failures in-band,
+// inside an HTTP 200 with the upload-pack content type. The frame is built by hand: 4 hex digits of length, then the text.
+const ERR_TEXT = 'ERR upload-pack: internal error, try again\n';
+const ERR_ANSWER = te.encode((ERR_TEXT.length + 4).toString(16).padStart(4, '0') + ERR_TEXT);
+const RESULT = { 'content-type': 'application/x-git-upload-pack-result' };
+const rawCall = async (f, body) => new Uint8Array(await (await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body })).arrayBuffer());
+
+test('cachingFetch (default rule): an origin that answers an in-band ERR once and then recovers is not remembered as failed', async () => {
+  const head = headOf();
+  let origin = 0;
+  const flaky = async (u, init) => (origin++ === 0 ? new Response(ERR_ANSWER, { status: 200, headers: RESULT }) : fetch(u, init));
+  const cache = memoryCache(); const pending = [];
+  const f = cachingFetch(flaky, cache, { waitUntil: p => { pending.push(p); } });
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: f }));
+  const req = { wants: [head], filter: 'tree:0', deepen: 1 };
+  const first = await c.fetchPack(req); await Promise.all(pending.splice(0));
+  assert.equal(first.ok, false); assert.equal(first.error.code, 'remote_error', 'the failure itself is reported honestly');
+  assert.equal(cache.entries.size, 0, 'a failed answer is never stored');
+  assert.equal(f.stats.putOk, 0);
+  const second = await c.fetchPack(req); await Promise.all(pending.splice(0));
+  assert.equal(second.ok, true, 'the recovered origin answers the second call');
+  // tree:0 at depth 1 of one commit is that one commit (git's own answer, as in the buffered fetchPack test above)
+  assert.equal(second.value.parsed.stats.count, 1);
+  assert.equal(origin, 2, 'the second call went to the origin, not to a stored failure');
+  assert.equal(f.stats.hit, 0);
+  // the good answer is what the cache holds now: one entry, and its pack is exactly the wanted commit
+  assert.equal(cache.entries.size, 1);
+  assert.deepEqual(objectSet(cache.entries.values().next().value.body), [head]);
+});
+
+test('cachingFetch: an origin body that fails part way is not stored and does not reject the store; a stored entry with no body is evicted', async () => {
+  const head = headOf();
+  const body = fetchBody({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const pending = [];
+  const waitUntil = p => { pending.push(p); };
+  // the origin sends the first 10 bytes of git's answer, then the connection drops
+  const dropped = async (u, init) => {
+    const whole = new Uint8Array(await (await fetch(u, init)).arrayBuffer());
+    let sent = false;
+    const stream = new ReadableStream({ pull(ctl) { if (sent) { ctl.error(new Error('connection reset')); return; } sent = true; ctl.enqueue(whole.slice(0, 10)); } });
+    return new Response(stream, { status: 200, headers: RESULT });
+  };
+  const cache = memoryCache();
+  const f = cachingFetch(dropped, cache, { waitUntil });
+  await assert.rejects(rawCall(f, body), /connection reset/, 'the caller sees the drop');
+  // every store promise settles without rejecting (an unawaited rejection would take a node process down)
+  assert.deepEqual((await Promise.allSettled(pending.splice(0))).map(s => s.status), ['fulfilled']);
+  assert.equal(cache.entries.size, 0); assert.equal(f.stats.putOk, 0); assert.equal(f.stats.verifyFailed, 1);
+  assert.match(f.stats.verifyError, /the body failed while it was read: .*connection reset/);
+  // a store that answers a match with a bodiless response: the cache layer does not look inside a HIT. It is handed on
+  // as the store gave it, unparsed, and the caller's own reader is what refuses it (an empty body is not an answer).
+  const hollowDeleted = [];
+  const hollow = { match: async () => new Response(null, { status: 200, headers: RESULT }), put: async () => null, delete: async k => { hollowDeleted.push(k); return true; } };
+  const g = cachingFetch(globalThis.fetch, hollow, { waitUntil });
+  const before = counts();
+  const res = await g(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+  assert.equal(res.headers.get('x-ply-pack-cache'), 'HIT'); assert.equal((await res.arrayBuffer()).byteLength, 0);
+  assert.equal(delta(before, counts()).fetch, 0); assert.equal(g.stats.hit, 1); assert.equal(g.counters.parsed, 0);
+  // ply's client refuses the empty HIT, the key is deleted, and the origin is asked exactly once: the caller gets the
+  // origin's own answer (one commit for this want), never the empty body
+  const viaClient = await unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: g })).fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
+  assert.equal(viaClient.ok, true, 'the empty body is never the answer: the refused HIT is retried past the cache');
+  assert.equal(viaClient.value.parsed.stats.count, 1, 'the origin\'s answer for this want is one commit');
+  assert.equal(delta(before, counts()).fetch, 1, 'the origin was asked exactly once');
+  assert.equal(hollowDeleted.length, 1, 'the refused key was deleted'); assert.equal(g.stats.bust, 1);
+});
+
+test('cachingFetch: a stored entry is untrusted; a tampered pack is served at most once, deleted, and refetched once (the client\'s parse is the check)', async () => {
+  const head = headOf();
+  const req = { wants: [head], filter: 'tree:0', deepen: 1 };
+  const inner = memoryCache(); const pending = [];
+  // the store, counted: what each match served and which keys were deleted
+  const served = []; const deleted = [];
+  const cache = {
+    entries: inner.entries,
+    match: async k => { const r = await inner.match(k); if (r) { const b = new Uint8Array(await r.clone().arrayBuffer()); served.push(b); } return r; },
+    put: (k, r) => inner.put(k, r),
+    delete: async k => { deleted.push(k); return inner.delete(k); },
+  };
+  const f = cachingFetch(globalThis.fetch, cache, { waitUntil: p => { pending.push(p); } });
+  const settle = async () => { await Promise.all(pending.splice(0)); };
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: f }));
+  const first = await unwrapAsync(c.fetchPack(req)); await settle();
+  assert.equal(first.parsed.stats.count, 1); assert.equal(inner.entries.size, 1);
+  const [key] = [...inner.entries.keys()];
+  const good = inner.entries.get(key).body.slice();
+  assert.deepEqual(objectSet(good), [head]);
+  // one flipped byte inside the pack (30 bytes from the end: before the 20-byte trailer and the final flush)
+  const flipped = good.slice(); flipped[flipped.length - 30] ^= 0xff;
+  let busts = 0;
+  // and one flipped bit further in (still inside the single commit's deflate stream)
+  const flipped2 = good.slice(); flipped2[flipped2.length - 40] ^= 0x01;
+  for (const [name, poison] of [['flipped byte', flipped], ['flipped bit', flipped2]]) {
+    inner.entries.set(key, { body: poison.slice(), headers: { ...RESULT } });
+    served.length = 0; deleted.length = 0;
+    const before = counts(); const parsedBefore = f.counters.parsed; const hitsBefore = f.stats.hit;
+    // oxlint-disable-next-line no-await-in-loop -- one poison at a time
+    const got = await c.fetchPack(req); await settle();
+    assert.equal(got.ok, true, `${name}: the caller gets a good answer`);
+    assert.equal(got.value.parsed.stats.count, 1, `${name}: git's answer for this want is one commit`);
+    assert.equal(f.stats.hit, hitsBefore + 1, `${name}: the stored entry was served as a HIT, unparsed by the cache`);
+    assert.equal(served.filter(b => Buffer.compare(b, poison) === 0).length, 1, `${name}: the poisoned bytes were served exactly once`);
+    assert.deepEqual(deleted, [key], `${name}: the entry was deleted`);
+    assert.equal(delta(before, counts()).fetch, 1, `${name}: refetched from the origin exactly once`);
+    assert.equal(f.stats.bust, ++busts, `${name}: counted as a bust`);
+    assert.deepEqual(objectSet(inner.entries.get(key).body), [head], `${name}: the entry now holds a verified answer`);
+    // the only chunks the cache layer parsed are the refetched answer's, on their way to the store
+    assert.ok(f.counters.parsed > parsedBefore, `${name}: the refetch went through the store-side verifier`);
+    served.length = 0; const again = counts();
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    assert.equal((await unwrapAsync(c.fetchPack(req))).parsed.stats.count, 1);
+    assert.equal(delta(again, counts()).fetch, 0, `${name}: the repaired entry is served`);
+    assert.equal(served.filter(b => Buffer.compare(b, poison) === 0).length, 0, `${name}: the poisoned bytes are never served again`);
+  }
+});
+
+test('cachingFetch: a stored entry tampered into an ERR, a cut, an empty body or a wrong pack trailer is served at most once, deleted, and refetched once', async () => {
+  const head = headOf();
+  const req = { wants: [head], filter: 'tree:0', deepen: 1 };
+  const inner = memoryCache(); const pending = [];
+  // the store, counted: what each match served and which keys were deleted
+  const served = []; const deleted = [];
+  const cache = {
+    entries: inner.entries,
+    match: async k => { const r = await inner.match(k); if (r) served.push(new Uint8Array(await r.clone().arrayBuffer())); return r; },
+    put: (k, r) => inner.put(k, r),
+    delete: async k => { deleted.push(k); return inner.delete(k); },
+  };
+  const f = cachingFetch(globalThis.fetch, cache, { waitUntil: p => { pending.push(p); } });
+  const settle = async () => { await Promise.all(pending.splice(0)); };
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: f }));
+  await unwrapAsync(c.fetchPack(req)); await settle();
+  const [key] = [...inner.entries.keys()];
+  const good = inner.entries.get(key).body.slice();
+  // a pkt-line by hand (gitprotocol-common): four hex digits of the length, themselves included, then the payload
+  const line = text => Buffer.concat([Buffer.from((text.length + 4).toString(16).padStart(4, '0')), Buffer.from(text)]);
+  const err = Uint8Array.from(Buffer.concat([line('ERR upload-pack: not our ref\n'), Buffer.from('0000')]));
+  // the answer ends with the pack's 20-byte SHA-1 trailer and the 4-byte final flush: 10 from the end is inside the trailer
+  const trailer = good.slice(); trailer[trailer.length - 10] ^= 0xff;
+  const poisons = [['ERR packet', err], ['cut', good.slice(0, good.length - 40)], ['empty body', new Uint8Array(0)], ['wrong pack trailer', trailer]];
+  let busts = 0;
+  for (const [name, poison] of poisons) {
+    inner.entries.set(key, { body: poison.slice(), headers: { ...RESULT } });
+    served.length = 0; deleted.length = 0;
+    const before = counts();
+    // oxlint-disable-next-line no-await-in-loop -- one poison at a time
+    const got = await c.fetchPack(req); await settle();
+    assert.equal(got.ok, true, `${name}: the caller gets the origin's answer, not the stored failure`);
+    assert.equal(got.value.parsed.stats.count, 1, `${name}: the origin's answer for this want is one commit`);
+    assert.equal(served.filter(b => Buffer.compare(b, poison) === 0).length, 1, `${name}: the poisoned bytes were served exactly once`);
+    assert.deepEqual(deleted, [key], `${name}: the entry was deleted`);
+    assert.equal(delta(before, counts()).fetch, 1, `${name}: refetched from the origin exactly once`);
+    assert.equal(f.stats.bust, ++busts, `${name}: counted as a bust`);
+    assert.deepEqual(objectSet(inner.entries.get(key).body), [head], `${name}: the entry now holds a verified answer`);
+    served.length = 0; const again = counts();
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    assert.equal((await unwrapAsync(c.fetchPack(req))).parsed.stats.count, 1);
+    assert.equal(delta(again, counts()).fetch, 0, `${name}: the repaired entry is served`);
+    assert.equal(served.filter(b => Buffer.compare(b, poison) === 0).length, 0, `${name}: the poisoned bytes are never served again`);
+  }
+});
+
+test('cachingFetch: a HIT is streamed from the store with no pass in the cache layer (counters, not time)', async () => {
+  const head = headOf();
+  const body = fetchBody({ wants: [head], filter: 'tree:0', deepen: 1 });
+  const inner = memoryCache(); const pending = [];
+  // the store serves its entry 16 bytes per pull, and counts the pulls
+  let pulls = 0;
+  const cache = {
+    match: async k => {
+      const e = inner.entries.get(k);
+      if (!e) return null;
+      let at = 0;
+      const stream = new ReadableStream({ pull(ctl) { pulls++; if (at >= e.body.length) { ctl.close(); return; } ctl.enqueue(e.body.slice(at, at + 16)); at += 16; } }, { highWaterMark: 0 });
+      return new Response(stream, { status: 200, headers: e.headers });
+    },
+    put: (k, r) => inner.put(k, r), delete: k => inner.delete(k),
+  };
+  const f = cachingFetch(globalThis.fetch, cache, { waitUntil: p => { pending.push(p); } });
+  const miss = await rawCall(f, body); await Promise.all(pending.splice(0));
+  assert.deepEqual(objectSet(miss), [head]); assert.equal(inner.entries.size, 1);
+  const parsed = f.counters.parsed;
+  assert.ok(parsed > 0, 'the MISS went through the store-side verifier');
+  const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+  assert.equal(res.headers.get('x-ply-pack-cache'), 'HIT');
+  // the response is there before a single byte of the entry was read: nothing was buffered or checked first
+  assert.equal(pulls, 0, 'no byte of the entry is read before the response is returned');
+  const reader = res.body.getReader();
+  const firstChunk = await reader.read();
+  // 16 bytes per pull: the first chunk the caller sees is the store's first chunk, not the whole entry
+  assert.equal(firstChunk.value.length, 16); assert.ok(pulls <= 2, `pulls after the first read: ${pulls}`);
+  const parts = [firstChunk.value];
+  for (;;) { const r = await reader.read(); if (r.done) break; parts.push(r.value); }
+  assert.deepEqual(concat(parts), miss, 'byte-identical to the stored answer');
+  assert.equal(f.counters.parsed, parsed, 'a HIT parses nothing in the cache layer');
+  assert.equal(f.stats.hit, 1);
+});
+
+// A synthetic v2 fetch answer, generated a frame at a time: `packfile\n`, then sideband-1 frames carrying a pack of
+// `packBytes` bytes (12-byte header, filler, 20-byte trailer), then a flush. The trailer is node:crypto's SHA-1 of the
+// pack bytes before it (gitformat-pack: "20-byte SHA-1 checksum of all of the above"). `lie` flips the trailer.
+const sideband1 = payload => { const f = new Uint8Array(5 + payload.length); f.set(te.encode((payload.length + 5).toString(16).padStart(4, '0'))); f[4] = 1; f.set(payload, 5); return f; };
+const syntheticAnswer = (packBytes, meter, { lie = false, endless = false } = {}) => {
+  const sha = createHash('sha1');
+  let sent = -1; // -1: the section header is next
+  return new ReadableStream({
+    pull(ctl) {
+      let frame;
+      if (sent === -1) { frame = unwrap(pkt('packfile\n')); sent = 0; }
+      else if (sent === 0) { const h = new Uint8Array([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 1]); sha.update(h); frame = sideband1(h); sent = 12; }
+      else if (endless || sent < packBytes - 20) { const n = endless ? 65515 : Math.min(65515, packBytes - 20 - sent); const filler = new Uint8Array(n).fill(sent & 0xff); sha.update(filler); frame = sideband1(filler); sent += n; }
+      else if (sent === packBytes - 20) { const t = new Uint8Array(sha.digest()); if (lie) t[0] ^= 1; frame = sideband1(t); sent = packBytes; }
+      else { ctl.enqueue(FLUSH.slice()); ctl.close(); meter.produced += 4; return; }
+      meter.produced += frame.length; ctl.enqueue(frame);
+    },
+    cancel() { meter.cancelled = true; },
+  }, { highWaterMark: 0 });
+};
+
+test('cachingFetch memory: a 64 MiB answer streams through the verifier into the store; ply holds a few frames, never the answer', async () => {
+  const body = fetchBody({ wants: [headOf()], filter: 'tree:0', deepen: 1 });
+  const PACK = 64 * 1024 * 1024;
+  for (const lie of [false, true]) {
+    const meter = { produced: 0, cancelled: false };
+    const origin = async () => new Response(syntheticAnswer(PACK, meter, { lie }), { status: 200, headers: RESULT });
+    // a store that holds nothing, as the Cache API does from ply's point of view: it reads the body and counts
+    let stored = 0, maxHeld = 0, putRejected = null; const deleted = [];
+    // the counter: bytes the origin has produced that the store has not been handed yet, sampled at every chunk on either side
+    const sample = () => { maxHeld = Math.max(maxHeld, meter.produced - stored); };
+    const store = {
+      match: async () => null,
+      put: async (k, res) => { const r = res.body.getReader(); try { for (;;) { const { value, done } = await r.read(); if (done) return; stored += value.length; sample(); } } catch (e) { putRejected = e; throw e; } },
+      delete: async k => { deleted.push(k); return true; },
+    };
+    const pending = [];
+    const f = cachingFetch(origin, store, { waitUntil: p => { pending.push(p); } });
+    const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+    let client = 0;
+    // oxlint-disable-next-line no-await-in-loop -- one stream
+    for (const r = res.body.getReader(); ;) { const { value, done } = await r.read(); if (done) break; client += value.length; sample(); }
+    assert.deepEqual((await Promise.allSettled(pending)).map(x => x.status), ['fulfilled']);
+    // frames: 13 (packfile) + ceil(PACK / 65515) pack frames of 5 bytes overhead each + the header's own frame + flush
+    assert.ok(client > PACK && client === meter.produced, `the client got the whole answer (${client})`);
+    // What sits between the origin and the store is ply's whole cache path (the verifier and the cache branch's queue):
+    // bounded by the lag window (CACHE_LAG_BYTES, 1 MiB) plus the frame in flight on each side, not by the 64 MiB
+    // answer. A design that reads the answer whole before the put holds all 64 MiB here.
+    assert.ok(maxHeld <= 1024 * 1024 + 2 * 65520, `${lie ? 'lie' : 'honest'}: at most ${maxHeld} bytes between origin and store`);
+    if (lie) {
+      // the trailer is wrong: the put's body errors at the end, the put never completes, the key is deleted, counted
+      assert.ok(putRejected !== null, 'the body handed to put was errored'); assert.match(String(putRejected), /pack trailer .* is not the SHA-1 of the pack/);
+      assert.equal(f.stats.verifyFailed, 1); assert.equal(f.stats.verifyOk, 0); assert.equal(f.stats.putOk, 0); assert.equal(deleted.length, 1);
+    } else {
+      assert.equal(putRejected, null); assert.equal(stored, client, 'every byte reached the store');
+      assert.equal(f.stats.verifyOk, 1); assert.equal(f.stats.putOk, 1); assert.equal(f.stats.verifyFailed, 0); assert.equal(deleted.length, 0);
+    }
+  }
+}, 120_000);
+
+test('cachingFetch: a client that abandons the answer cancels the cache branch and the origin; nothing is drained', async () => {
+  const body = fetchBody({ wants: [headOf()], filter: 'tree:0', deepen: 1 });
+  const meter = { produced: 0, cancelled: false };
+  // a hostile origin, but a finite one: 32 MiB of packfile section, 64 times the allowance below. An origin that never
+  // ends would make an implementation that drains spin in microtasks for ever (a hung worker, not a red test); this
+  // one lets the drain finish, so the byte count below fails it.
+  const ORIGIN = 32 * 1024 * 1024;
+  const origin = async () => new Response(syntheticAnswer(ORIGIN, meter), { status: 200, headers: RESULT });
+  let stored = 0; const deleted = [];
+  const store = {
+    match: async () => null,
+    put: async (k, res) => { const r = res.body.getReader(); for (;;) { const { value, done } = await r.read(); if (done) return; stored += value.length; } },
+    delete: async k => { deleted.push(k); return true; },
+  };
+  const pending = [];
+  const f = cachingFetch(origin, store, { waitUntil: p => { pending.push(p); }, limits: { ...DEFAULT_LIMITS, maxPackBytes: 8 * 1024 * 1024 } });
+  const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+  const reader = res.body.getReader();
+  await reader.read(); await reader.read(); await reader.read();
+  await reader.cancel(new Error('the client refused the answer'));
+  // The store promise settles within a counted number of event-loop turns (no clock): at head it settles in the
+  // cancel's own microtasks; an implementation that neither cancels nor drains never settles it, and fails here.
+  let outcome = null;
+  void Promise.allSettled(pending).then(s => { outcome = s.map(x => x.status); });
+  // oxlint-disable-next-line no-await-in-loop -- counted turns
+  for (let turn = 0; turn < 1000 && outcome === null; turn++) await new Promise(r => { setImmediate(r); });
+  assert.deepEqual(outcome, ['fulfilled'], 'the store promise settled, fulfilled, within 1000 turns of the cancel');
+  // three reads by the client; the split and the store may each be a few frames ahead (8 frames allowed). Draining
+  // reads the origin to its end: 32 MiB and its framing.
+  assert.ok(meter.produced <= 8 * 65520, `origin bytes pulled: ${meter.produced}`);
+  assert.equal(meter.cancelled, true, 'the origin was cancelled');
+  assert.equal(f.stats.verifyFailed, 1); assert.match(f.stats.verifyError, /the client abandoned it/); assert.equal(f.stats.putOk, 0);
+  assert.equal(deleted.length, 1, 'the key is deleted: a store that kept a partial entry does not keep it');
+});
+
+test('cachingFetch: a store whose delete fails after a refused answer, by throwing or by rejecting, never rejects the store promise', async () => {
+  const body = fetchBody({ wants: [headOf()], filter: 'tree:0', deepen: 1 });
+  const outcomes = {};
+  for (const kind of ['rejects', 'throws']) {
+    const meter = { produced: 0, cancelled: false };
+    // a wrong pack trailer: the answer is refused at its end, so the key is deleted
+    const origin = async () => new Response(syntheticAnswer(200_000, meter, { lie: true }), { status: 200, headers: RESULT });
+    let deletes = 0;
+    const store = {
+      match: async () => null,
+      put: async (k, res) => { for (const r = res.body.getReader(); ;) { const { done } = await r.read(); if (done) return; } },
+      delete: kind === 'throws' ? () => { deletes++; throw new Error('delete threw'); } : async () => { deletes++; throw new Error('delete rejected'); },
+    };
+    const pending = [];
+    const f = cachingFetch(origin, store, { waitUntil: p => { pending.push(p); } });
+    const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+    await res.arrayBuffer();
+    outcomes[kind] = { settled: (await Promise.allSettled(pending)).map(x => x.status), deletes, verifyFailed: f.stats.verifyFailed, putOk: f.stats.putOk };
+  }
+  // From the contract, not from the code: the promise handed to waitUntil is fulfilled whichever way delete fails, the
+  // delete was attempted once, and the refusal is counted once.
+  const want = { settled: ['fulfilled'], deletes: 1, verifyFailed: 1, putOk: 0 };
+  assert.deepEqual(outcomes.rejects, want, 'a delete that rejects');
+  assert.deepEqual(outcomes.throws, want, 'a delete that throws synchronously ends the same way');
+});
+
+test('memoryCache: a fractional budget is floored, never replaced by the default; a value that is not a budget is the default', async () => {
+  const fill = async c => {
+    for (let i = 0; i < 12; i++) await c.put(`big${i}`, new Response(new Uint8Array(40_000)));
+    for (let i = 0; i < 5; i++) await c.put(`small${i}`, new Response(new Uint8Array(40)));
+    return { bytes: [...c.entries.values()].reduce((n, e) => n + e.body.length, 0), entries: c.entries.size };
+  };
+  // 100.5 -> 100 bytes: no 40,000-byte entry fits; two 40-byte entries do (80), a third would make 120
+  assert.deepEqual(await fill(memoryCache({ maxBytes: 100.5 })), { bytes: 80, entries: 2 });
+  // 1e6/3 -> 333,333 bytes: eight 40,000-byte entries (320,000; a ninth would make 360,000), then five of 40 (320,200)
+  assert.deepEqual(await fill(memoryCache({ maxBytes: 1e6 / 3 })), { bytes: 320_200, entries: 13 });
+  // 2.5 -> 2 entries: the last two puts
+  assert.deepEqual(await fill(memoryCache({ maxEntries: 2.5 })), { bytes: 80, entries: 2 });
+  // 0.5 -> 0: nothing is kept
+  assert.deepEqual(await fill(memoryCache({ maxBytes: 0.5 })), { bytes: 0, entries: 0 });
+  // not a budget (NaN, negative, infinite): the documented default, 64 MiB and 1024 entries, which holds all 17
+  for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) assert.deepEqual(await fill(memoryCache({ maxBytes: bad, maxEntries: bad })), { bytes: 480_200, entries: 17 });
+});
+
+// The test's own accounting of what a memoryCache retains: every byte of every body it still holds, plus its header text.
+const retained = cache => [...cache.entries.values()].reduce((n, e) => n + e.body.length + Object.entries(e.headers).reduce((m, [k, v]) => m + k.length + v.length, 0), 0);
+test('memoryCache: a byte budget and an entry cap; the least recently used entry goes first', async () => {
+  // a Uint8Array body sets no content-type, so an entry is exactly its body bytes
+  const put = (c, k, n) => c.put(k, new Response(new Uint8Array(n)));
+  const c = memoryCache({ maxBytes: 100 });
+  await put(c, 'a', 40); await put(c, 'b', 40);
+  assert.deepEqual([...c.entries.keys()].sort(), ['a', 'b']); assert.equal(retained(c), 80);
+  await put(c, 'c', 40); // 120 > 100: a, the least recently used, goes; b + c = 80
+  assert.deepEqual([...c.entries.keys()].sort(), ['b', 'c']); assert.equal(retained(c), 80);
+  assert.equal((await c.match('b')).status, 200); // a read makes b the most recently used
+  await put(c, 'd', 40); // so c goes, not b
+  assert.deepEqual([...c.entries.keys()].sort(), ['b', 'd']); assert.equal(retained(c), 80);
+  await put(c, 'e', 101); // larger than the whole budget: not stored, and nothing is evicted for it
+  assert.deepEqual([...c.entries.keys()].sort(), ['b', 'd']); assert.ok(!(await c.match('e')));
+  await put(c, 'b', 100); // a put replaces: the old b (40) is gone, the new b (100) fills the budget, d goes
+  assert.deepEqual([...c.entries.keys()], ['b']); assert.equal(retained(c), 100);
+  // header text counts: 'x-a' + 97 characters is 100 bytes of headers, so a 1-byte body is over the budget of 100
+  await c.put('h', new Response(new Uint8Array(1), { headers: { 'x-a': 'v'.repeat(97) } }));
+  assert.ok(!c.entries.has('h'));
+  // the entry cap: four 1-byte entries under a cap of three
+  const few = memoryCache({ maxBytes: 100, maxEntries: 3 });
+  for (const k of ['p', 'q', 'r', 's']) await put(few, k, 1); // oxlint-disable-line no-await-in-loop -- in order
+  assert.deepEqual([...few.entries.keys()].sort(), ['q', 'r', 's']);
+  // a long run never retains more than the budget: 200 puts of 1000 bytes under 10,000 keep the last ten
+  const run = memoryCache({ maxBytes: 10_000 });
+  let peak = 0;
+  for (let i = 0; i < 200; i++) { await put(run, `k${i}`, 1000); peak = Math.max(peak, retained(run)); } // oxlint-disable-line no-await-in-loop -- in order
+  assert.equal(peak, 10_000);
+  assert.deepEqual([...run.entries.keys()].sort(), Array.from({ length: 10 }, (_, i) => `k${190 + i}`));
+  // a body over the budget is not read to its end: 1000 chunks of 1 KiB offered, the budget is 4 KiB
+  let pulled = 0;
+  const endless = new ReadableStream({ pull(ctl) { if (pulled++ < 1000) ctl.enqueue(new Uint8Array(1024)); else ctl.close(); } });
+  const tiny = memoryCache({ maxBytes: 4096 });
+  await tiny.put('big', new Response(endless));
+  assert.equal(tiny.entries.size, 0); assert.ok(pulled < 10, `read ${pulled} of 1000 chunks`);
+  // the named defaults, and a budget that is not a non-negative integer falls back to them (never unbounded)
+  assert.equal(LIMIT_MEMORY_CACHE_BYTES, 64 * 1024 * 1024); assert.equal(LIMIT_MEMORY_CACHE_ENTRIES, 1024);
+  const dflt = memoryCache({ maxBytes: Number.POSITIVE_INFINITY, maxEntries: Number.NaN });
+  for (let i = 0; i < 1030; i++) await put(dflt, `n${i}`, 1); // oxlint-disable-line no-await-in-loop -- in order
+  assert.equal(dflt.entries.size, 1024);
 });
