@@ -6,7 +6,7 @@
 //      builds dist/ with the checkout's installed typescript);
 //   2. the tarball is installed with `npm install --ignore-scripts` into an empty project: exactly one package, `ply`;
 //   3. the root and every subpath in package.json "exports" are imported under the running Node;
-//   4. `require('ply')` is run under the running Node and compared with what README.md Install states for that major;
+//   4. `require('ply')` is run under the running Node and compared with what README.md Install states for that version;
 //   5. (CLI only) the setup command examples/README.md documents is run in a second fresh export, then each example
 //      is started without arguments: it must reach its own usage line (exit 2), not ERR_MODULE_NOT_FOUND.
 // `--out <dir>` keeps the tarball there (CI uploads it as a workflow artifact); `--tarball <file>` runs steps 2 to 4
@@ -80,6 +80,13 @@ export function requireRoot(consumerDir, node = process.execPath) {
   return run.out.trim();
 }
 
+// What README Install states `require('ply')` does on a Node version: 'ok' where Node loads an ES module with require()
+// by default, 'ERR_REQUIRE_ESM' before that. That is 22.12.0 and later, and on the 20 line 20.19.0 and later (Node's
+// CHANGELOG_V20.md, 20.19.0: "require(esm) is now enabled by default").
+export function requireExpected({ major, minor }) {
+  return major > 22 || (major === 22 && minor >= 12) || (major === 20 && minor >= 19) ? 'ok' : 'ERR_REQUIRE_ESM';
+}
+
 export function nodeVersion(node = process.execPath) {
   const [major, minor] = sh(node, ['-p', 'process.versions.node']).out.trim().split('.').map(Number);
   return { major: major ?? 0, minor: minor ?? 0 };
@@ -122,8 +129,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     check(Object.keys(imported).length === SUBPATHS.length, `node ${process.versions.node}: imported ${Object.keys(imported).length} of ${SUBPATHS.length} subpaths`);
     const { major, minor } = nodeVersion();
     const required = requireRoot(consumer.dir);
-    // README Install: require() throws ERR_REQUIRE_ESM before Node 22.12, works from 22.12 on
-    const expected = major > 22 || (major === 22 && minor >= 12) ? 'ok' : 'ERR_REQUIRE_ESM';
+    const expected = requireExpected({ major, minor });
     check(required === expected, `node ${process.versions.node}: require('ply') -> ${required} (README states ${expected})`);
   } finally { consumer.cleanup(); }
   if (given < 0) {

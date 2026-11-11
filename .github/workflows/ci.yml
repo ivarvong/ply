@@ -190,6 +190,9 @@ jobs:
   # require('ply') compared with README Install, under Node 22 and then the same tarball under Node 20 and 24
   # (scripts/pack-check.mjs). On Node 22 it also runs the setup command examples/README.md documents in a fresh export
   # and starts each example. The tarball is uploaded as the artifact `ply-tarball`.
+  # It runs on every pull request and every push to main, and it does not gate: it is not in `test`'s needs, because it
+  # has not yet been seen green on a GitHub runner. The repository owner adds it to `test`'s needs after seeing it green
+  # in the merge train's pull request.
   pack:
     name: pack + install
     runs-on: ubuntu-latest
@@ -223,10 +226,10 @@ jobs:
           if-no-files-found: error
 
   # The gate. Its name stays `test` so anything waiting on that check still works. It runs even when a shard fails or
-  # is cancelled (a skipped check would count as passing), and fails unless every shard, lint + fuzz and pack succeeded.
+  # is cancelled (a skipped check would count as passing), and fails unless every shard and lint + fuzz succeeded.
   test:
     name: test
-    needs: [test-shard, lint-fuzz, pack]
+    needs: [test-shard, lint-fuzz]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -237,10 +240,9 @@ jobs:
         env:
           SHARDS: ${{ needs.test-shard.result }}
           LINT_FUZZ: ${{ needs.lint-fuzz.result }}
-          PACK: ${{ needs.pack.result }}
         run: |
-          if [ "$SHARDS" != success ] || [ "$LINT_FUZZ" != success ] || [ "$PACK" != success ]; then
-            echo "test-shard: $SHARDS, lint-fuzz: $LINT_FUZZ, pack: $PACK"
+          if [ "$SHARDS" != success ] || [ "$LINT_FUZZ" != success ]; then
+            echo "test-shard: $SHARDS, lint-fuzz: $LINT_FUZZ"
             exit 1
           fi
       # gate c over every shard's records: each fail site reached by a cell, each merged space's claims reached by it, and
