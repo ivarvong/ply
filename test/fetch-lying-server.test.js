@@ -9,15 +9,16 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
 import { GitHttp } from '../src/client.js';
-import { v2Init, v2Step, v2End } from '../src/fetch.js';
+import { v2Init, v2Step, v2End, fetchBody } from '../src/fetch.js';
 import { Tracer } from '../src/otel.js';
 
 // a pkt-line by hand (not ply's writer)
 const pkt = s => { const b = Buffer.from(s); return Buffer.concat([Buffer.from((b.length + 4).toString(16).padStart(4, '0')), b]); };
 const FLUSH = Buffer.from('0000');
 
-// mode(body) => a Buffer to answer an upload-pack POST with, or null to pass the request to the real server
-function lyingProxy(upstream, mode) {
+// mode(body) => a Buffer to answer an upload-pack POST with, or null to pass the request to the real server;
+// tamper(body, answer) => the bytes to send in place of the real server's answer to an upload-pack POST
+function lyingProxy(upstream, mode, tamper = (_body, answer) => answer) {
   const seen = [];
   const server = http.createServer(async (req, res) => {
     const chunks = []; for await (const c of req) chunks.push(c);
@@ -28,7 +29,8 @@ function lyingProxy(upstream, mode) {
     if (lie) { res.writeHead(200, { 'content-type': 'application/x-git-upload-pack-result' }); res.end(lie); return; }
     const headers = { ...req.headers }; delete headers.host; delete headers['content-length']; delete headers['transfer-encoding'];
     const up = await fetch(upstream + req.url, { method: req.method, headers, body: req.method === 'POST' ? body : undefined });
-    const out = Buffer.from(await up.arrayBuffer());
+    const real = Buffer.from(await up.arrayBuffer());
+    const out = isUpload ? tamper(body.toString('latin1'), real) : real;
     const h = {}; for (const [k, v] of up.headers) if (!['content-length', 'transfer-encoding', 'content-encoding', 'connection'].includes(k)) h[k] = v;
     res.writeHead(up.status, h); res.end(out);
   });
@@ -79,4 +81,27 @@ test('v2 end: without done, acknowledgments alone end a round; ready with no pac
   assert.equal(code(end(['acknowledgments\n', 'NAK\n'], true)), 'protocol', 'done was sent: the answer must be a pack');
   assert.equal(code(end(['acknowledgments\n', `ACK ${A}\n`, 'ready\n'], false)), 'protocol', 'ready, then no packfile');
   assert.equal(code(end(['acknowledgments\n', 'hello\n'], false)), 'protocol', 'not an acknowledgment line');
+});
+
+test('done is read once: what is not a boolean is refused before any request; false is a round, left out is done', async () => {
+  // A server that answers every fetch sent WITHOUT done with acknowledgments only (a legitimate negotiation round) and
+  // passes a fetch sent with done to real git. Expected values are the owner's rule (done is true, false or left out;
+  // anything else is bad_request) and the protocol: the request's own bytes say whether `done` was sent.
+  const p = await lyingProxy(srv.url, body => (body.includes('command=fetch') && !body.includes('done\n') ? Buffer.concat([pkt('acknowledgments\n'), pkt('NAK\n'), FLUSH]) : null));
+  try {
+    const c = client(`${p.url}/src.git`);
+    const fetches = () => p.seen.filter(b => b.includes('command=fetch'));
+    for (const done of [null, 0, '', 1, 'true']) {
+      const before = fetches().length;
+      // oxlint-disable-next-line no-await-in-loop -- one request at a time: the count is per call
+      const r = await c.fetchPack({ wants: [C], haves: [A], done });
+      assert.deepEqual([r.ok, r.ok ? null : r.error.code, fetches().length - before], [false, 'bad_request', 0], `done: ${JSON.stringify(done)}`);
+      const b = fetchBody({ wants: [C], done });
+      assert.deepEqual([b.ok, b.ok ? null : b.error.code], [false, 'bad_request'], `fetchBody done: ${JSON.stringify(done)}`);
+    }
+    const round = await c.fetchPack({ wants: [C], haves: [A], done: false });
+    assert.deepEqual([round.ok, round.ok && Boolean(round.value.parsed), fetches().at(-1).includes('done\n')], [true, false, false], 'done: false is a round without a pack');
+    const full = await c.fetchPack({ wants: [C], haves: [A] });
+    assert.deepEqual([full.ok, full.ok && Boolean(full.value.parsed), fetches().at(-1).includes('0009done\n')], [true, true, true], 'done left out is sent, and answered with a pack');
+  } finally { await p.close(); }
 });

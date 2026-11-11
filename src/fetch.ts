@@ -55,6 +55,10 @@ const countField = (value: number, what: string): Result<number, BadRequest> => 
   if (!Number.isSafeInteger(value) || value < 0) return fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
   return ok(value);
 };
+// done is true, false or left out (the default, true). Anything else is refused: a null, 0 or '' from a JavaScript
+// caller used to leave `done` off the request while the answer was judged as the answer to a done request.
+const doneField = (value: unknown): Result<boolean, BadRequest> =>
+  typeof value === 'boolean' ? ok(value) : fail('bad_request', 'invalid done: must be true, false or left out', { what: 'done' });
 // deepen-since is a unix timestamp on the wire (a number from callers, or a digit string). Either way it is one token.
 const sinceField = (value: number | string, what: string): Result<number | WireField, BadRequest> =>
   typeof value === 'number' ? countField(value, what) : validateWire(value, what);
@@ -130,7 +134,9 @@ export type FetchRequest = {
   readonly done: boolean;
 };
 
-// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since.
+// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since,
+// done. The parsed `done` is the only one read afterwards: it decides the request's `done` line (fetchRequestBody) and
+// how the answer is judged (packStream, v2End).
 // An empty filter, a zero (or NaN) deepen and a falsy deepen-since are left out, as they always have been.
 // oxlint-disable-next-line complexity -- one check per fetch argument
 export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> {
@@ -150,7 +156,9 @@ export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> 
   let since: number | WireField = 0;
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- 0, '' and NaN mean no deepen-since, as they always have
   if (deepenSince) { const c = sinceField(deepenSince, 'deepen-since'); if (!c.ok) return c; since = c.value; }
-  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done });
+  const sentDone = doneField(done);
+  if (!sentDone.ok) return sentDone;
+  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done: sentDone.value });
 }
 
 // The command=fetch body of a parsed request.
@@ -392,11 +400,11 @@ export type PackFetch = AsyncGenerator<Uint8Array, V2State, unknown>;
 // The response read frame by frame: band-1 bytes yielded as they arrive, the v2 state or the first Err returned. A
 // caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too, and so is
 // whatever the transport's stream raised (it is re-raised, scrubbed).
-async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
-  const body = fetchBody(opts);
+async function* v2Frames(t: Transport, req: FetchRequest, bypassCache: boolean, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
+  const body = fetchRequestBody(req);
   if (!body.ok) return body;
   // the exchange (no request yet: the frames are pulled below), then the limits it runs under
-  const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) });
+  const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache });
   let st = v2Init(t.limits);
   try { for await (const f of exchange) {
     const r = v2Step(st, f);
@@ -410,8 +418,11 @@ async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenera
 // raised through it (the iterator rejects with the PlyError).
 export async function* packStream(t: Transport, opts: FetchOpts, span: Span): PackFetch {
   span.set(fetchAttrs(opts));
-  const read = yield* v2Frames(t, opts, span);
-  const end = read.ok ? v2End(read.value, opts.done !== false) : read;
+  // the request parsed once: its `done` is the line that is sent and the one the answer is judged against
+  const req = fetchRequest(opts);
+  if (!req.ok) throw req.error;
+  const read = yield* v2Frames(t, req.value, Boolean(opts.bypassCache), span);
+  const end = read.ok ? v2End(read.value, req.value.done) : read;
   if (!end.ok) throw end.error;
   span.set(v2Attrs(end.value));
   return end.value;
