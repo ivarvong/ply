@@ -599,11 +599,7 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
 // `retry: false` is the caller's own race handling (commitChanges): attempt 0's cas_conflict is not redone here.
 // An Err carries the attempt's tag (attempt, hint, the root span).
-// oxlint-disable-next-line require-await -- async, as before: one promise, the expecting form's
-export async function editFile(url: string, spec: EditSpec, options: EditOptions = {}): Promise<Result<EditResult, PlyError>> {
-  return editFileExpecting(url, spec, options, null);
-}
-// editFile for a caller that has already read `ref` and decided its compare-and-swap (commitChanges; not exported
+// editFileExpecting is editFile for a caller that has already read `ref` and decided its compare-and-swap (commitChanges; not exported
 // from the package). `create` true: the ref was absent, so the push asserts the zero old oid whatever this edit's own
 // ls-refs sees later (a ref another writer made in between is a cas_conflict, never a commit on top of it). false:
 // the ref existed, and the push asserts the parent. null: editFile's own rule.
@@ -623,4 +619,9 @@ export async function editFileExpecting(url: string, spec: EditSpec, options: Ed
   // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
   if (first.ok || !cfg.retry || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
   return editOnce(url, plan, checked, cfg, { head: null, attempt: 1, create, ...retryLink(first.error) });
+}
+// The public edit (the rules above): no expectation from a caller, so the edit's own reads decide create or update.
+// oxlint-disable-next-line require-await -- async, as before: one promise, the expecting form's
+export async function editFile(url: string, spec: EditSpec, options: EditOptions = {}): Promise<Result<EditResult, PlyError>> {
+  return editFileExpecting(url, spec, options, null);
 }
