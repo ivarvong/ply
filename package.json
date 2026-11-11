@@ -112,7 +112,7 @@
     "test:push-full": "PUSH_MATRIX=full vitest run test/push.test.js",
     "test:space": "vitest run test/space/push-outcome.test.js test/space/push-outcome-boundary.plan.test.js test/space/push-outcome-boundary.0.test.js test/space/push-outcome-boundary.1.test.js test/space/push-outcome-boundary.2.test.js test/space/push-outcome-boundary.3.test.js test/space/fsck-tree.test.js test/space/advertisement.test.js test/space/pack-cut.test.js test/space/pkt-frame.test.js test/space/push-ng.test.js test/space/refname.test.js",
     "test:pack-cut-full": "PACK_SPACE=full vitest run test/space/pack-cut.test.js",
-    "space:md": "node scripts/space-md.mjs --write",
+    "space:md": "node --import ./test/ts-resolve.mjs scripts/space-md.mjs --write",
     "fuzz:packs": "node --import ./test/ts-resolve.mjs test/fuzz/packs.mjs",
     "fuzz:linemerge": "node --import ./test/ts-resolve.mjs test/fuzz/linemerge.mjs",
     "fuzz:diffscript": "node --import ./test/ts-resolve.mjs test/fuzz/diffscript.mjs",
