@@ -170,6 +170,75 @@ test('an OFS pack cut below a delta base (crossBatchRef): the transfer finishes 
   assertCopied(bare, plan);
 });
 
+test('a `resolved` whose oid() answers an id, then something else: one id asked per rewritten entry; too few is a coded refusal, never a rejection', async () => {
+  const from = await spooled(src.packs.ofs);
+  const c = from.pack.columns;
+  const budget = { ...BUDGET, maxObjects: 261 };
+  const plan = must(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit, crossBatchRef: true }));
+  // from git's pack columns and the plan: an OFS_DELTA whose base is not in its own batch is rewritten as a REF_DELTA,
+  // and each rewrite needs one id. Counted per batch.
+  const batchOf = new Map(plan.pack.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const rewrites = plan.pack.batches.map((b, k) => b.entries.filter(i => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== k).length);
+  const total = rewrites.reduce((a, b) => a + b, 0);
+  assert.ok(total >= 1, `rewrites: ${total}`);
+  const lastCut = rewrites.findLastIndex(r => r > 0);
+  const isRewrite = (i, k) => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== k;
+  // How often each entry's id is needed to push `steps`, by hand: once for its line in its batch's temp tree
+  // (transferplan's entryAt, as on main), and once for each REF_DELTA header that names it as a base.
+  const needed = steps => {
+    const m = new Map();
+    const add = i => m.set(i, (m.get(i) ?? 0) + 1);
+    for (const k of steps) for (const i of plan.pack.batches[k].entries) { add(i); if (isRewrite(i, k)) add(c.baseIndex[i]); }
+    return m;
+  };
+  // an index that answers honestly as often as `allow` says (one time fewer for `shortOn`), then with what is not an id
+  const flipping = (allow, shortOn = -1) => {
+    const state = { lies: 0 };
+    const asked = new Map();
+    const oid = i => {
+      const nth = (asked.get(i) ?? 0) + 1;
+      asked.set(i, nth);
+      if (nth <= (allow.get(i) ?? 0) - (i === shortOn ? 1 : 0)) return from.resolved.oid(i);
+      state.lies++;
+      return { tag: 'some', value: 'z'.repeat(40) };
+    };
+    return { state, from: { ...from, resolved: { ...from.resolved, oid } } };
+  };
+  const everyStep = plan.pack.batches.map((_, k) => k);
+  // a base a rewritten entry of the last cut batch rests on
+  const lastBase = c.baseIndex[plan.pack.batches[lastCut].entries.find(i => isRewrite(i, lastCut))];
+  // runTransfer with exactly the answers needed: done without one lie told, and git holds exactly the tree
+  const whole = repo();
+  const enough = flipping(needed(everyStep));
+  const run = await runTransfer(whole.t, enough.from, plan, src.commit);
+  assert.equal(run.ok, true, run.ok ? '' : `${run.error.code}: ${run.error.message}`);
+  assert.deepEqual(run.value, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
+  assert.equal(enough.state.lies, 0, 'an id was asked for more often than once per use');
+  assertCopied(whole.bare, plan);
+  // one honest answer too few for that base: the run ends with the builder's refusal (a Result); the ref is not created
+  const short = repo();
+  const few = await runTransfer(short.t, flipping(needed(everyStep), lastBase).from, plan, src.commit);
+  assert.equal(few.ok, false);
+  assert.equal(few.error.code, 'bad_request');
+  assert.equal(few.error.what, 'pack subset base');
+  assert.equal(git(short.bare, ['for-each-ref', REF]).trim(), '');
+  // transferStep on the last cut batch: too few answers is the same refusal and nothing moves; enough, and it lands
+  const { bare, t } = repo();
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut }));
+  const step = must(await transferStatus(t, plan)).step;
+  assert.equal(step, lastCut);
+  const before = refsOf(bare);
+  const refused = await transferStep(t, flipping(needed([lastCut]), lastBase).from, plan, step, src.commit);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.code, 'bad_request');
+  assert.equal(refused.error.what, 'pack subset base');
+  assert.equal(refsOf(bare), before);
+  const landed = await transferStep(t, flipping(needed([lastCut])).from, plan, step, src.commit);
+  assert.equal(landed.ok, true, landed.ok ? '' : `${landed.error.code}: ${landed.error.message}`);
+  assert.equal(must(await runTransfer(t, from, plan, src.commit)).tag, 'done');
+  assertCopied(bare, plan);
+});
+
 test('everything in one push: no temp ref; atomic off: one plain push', async () => {
   const from = await spooled(src.packs.ref);
   const big = { ...BUDGET, maxRequestBytes: 10_000_000 };

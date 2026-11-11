@@ -28,8 +28,8 @@
 //
 // `length` is exact before the first byte, so the stream feeds pushPack (#234) with a known length. Consecutive source
 // entries are read with one range read; the SHA-1 trailer is computed while streaming. Held: per selected entry 8 bytes
-// (its new offset) + 4 (its OFS base's position) + 1 (its kind), per source entry 4 + 1 (position, selected mark), the
-// extras' deflated bytes, and the chunk in flight. A source that serves fewer or more bytes than a range asks for
+// (its new offset) + 4 (its OFS base's position) + 1 (its kind), per source entry 4 + 1 (position, selected mark), per
+// entry rewritten as a REF_DELTA its base's 20-byte id, the extras' deflated bytes, and the chunk in flight. A source that serves fewer or more bytes than a range asks for
 // errors the stream (pack_corrupt) before the trailer, so the receiver never gets a whole pack from a short read.
 import type { PlyError } from './errors.js';
 import { fail, plyError } from './errors.js';
@@ -94,6 +94,8 @@ type Plan = {
   readonly kind: Uint8Array;
   readonly basePos: Int32Array;
   readonly newOffset: Float64Array;
+  // by position, the base id of each entry rewritten as a REF_DELTA: the answer plan() checked, asked for once
+  readonly baseIds: Map<number, Uint8Array>;
   readonly extras: ReadonlyArray<{ readonly head: Uint8Array; readonly z: Uint8Array }>;
   readonly body: number;
 };
@@ -141,7 +143,7 @@ function headerOf(p: Plan, k: number): Uint8Array {
   switch (p.kind[k] as number) {
     case KIND_OFS: return concat([encodeObjHeader(OBJ_OFS_DELTA, size), encodeOfsDistance((p.newOffset[k] as number) - (p.newOffset[p.basePos[k] as number] as number))]);
     case KIND_REF: return concat([encodeObjHeader(OBJ_REF_DELTA, size), fromHex(refOid(p.pack, i) as string)]);
-    case KIND_REF_FROM_OFS: return concat([encodeObjHeader(OBJ_REF_DELTA, size), fromHex(baseId(p.pack, p.resolved, c.baseIndex[i] as number) as string)]);
+    case KIND_REF_FROM_OFS: return concat([encodeObjHeader(OBJ_REF_DELTA, size), p.baseIds.get(k) as Uint8Array]);
     default: return encodeObjHeader(c.storedType[i] as number, size);
   }
 }
@@ -190,7 +192,7 @@ async function plan(pack: ScannedPack, asked: readonly number[], opts: PackSubse
   const { selection, pos, selected } = order.value;
   const c = pack.columns;
   const n = selection.length;
-  const p: Plan = { pack, selection, resolved: opts.resolved, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), extras: [], body: 0 };
+  const p: Plan = { pack, selection, resolved: opts.resolved, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), baseIds: new Map(), extras: [], body: 0 };
   let offset = PACK_HEADER_BYTES;
   for (let k = 0; k < n; k++) {
     const i = selection[k] as number;
@@ -198,13 +200,16 @@ async function plan(pack: ScannedPack, asked: readonly number[], opts: PackSubse
     if (stored === OBJ_OFS_DELTA) {
       const b = c.baseIndex[i] as number;
       const at = pos[b] as number;
-      // the id is asked for only when it would be written: the base is not earlier in this pack
-      const write = entryWrite(stored, at !== NOT_WRITTEN, at !== NOT_WRITTEN || baseId(pack, opts.resolved, b) !== null, opts.outsideBase);
+      // the id is asked for only when it would be written (the base is not earlier in this pack), and once: the
+      // answer checked here is the one the header carries, so a `resolved` that answers otherwise later changes nothing
+      const id = at === NOT_WRITTEN ? baseId(pack, opts.resolved, b) : null;
+      const write = entryWrite(stored, at !== NOT_WRITTEN, id !== null, opts.outsideBase);
       if (write === WRITE_OFS) {
         p.kind[k] = KIND_OFS;
         p.basePos[k] = at;
-      } else if (write === WRITE_REF_FROM_OFS) {
+      } else if (write === WRITE_REF_FROM_OFS && id !== null) {
         p.kind[k] = KIND_REF_FROM_OFS;
+        p.baseIds.set(k, fromHex(id));
       } else {
         const where = selected[b] === 1 ? 'is written after it' : 'is not selected';
         const hint = opts.outsideBase === 'ref' ? ' and its id is unknown (a delta and no `resolved`, a `resolved` with no valid id for it, or oids off)' : '; outsideBase: \'ref\' writes it as a REF_DELTA when the base id is known';

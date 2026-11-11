@@ -223,3 +223,34 @@ test('a resolved index whose oid() is missing, throws, or answers anything but 4
   gitBuf(dst, ['index-pack', '--stdin'], Buffer.from(src.bytes));
   gitBuf(dst, ['index-pack', '--strict', '--fix-thin', '--stdin'], out);
 });
+
+test('an id is asked of `resolved` once per rewritten entry, and the answer that was checked is the one the header carries', async () => {
+  const c = src.idx.columns;
+  const type = src.resolved.columns.type;
+  const blobs = [...Array(src.idx.count).keys()].filter(i => type[i] === TYPE.BLOB);
+  const cut = blobs.find(i => c.storedType[i] === TYPE.OFS_DELTA && c.storedType[c.baseIndex[i]] === TYPE.OFS_DELTA);
+  assert.ok(cut !== undefined);
+  // the base's id as git names it (verify-pack -v: "<oid> <type> <size> <size-in-pack> <offset> ..."), not ply
+  const dir = join(work, '.git', 'objects', 'pack');
+  const listed = git(work, ['verify-pack', '-v', join(dir, readdirSync(dir).find(f => f.endsWith('.idx')))]).split('\n').map(l => l.split(/\s+/u));
+  const real = listed.find(f => Number(f[4]) === c.offset[c.baseIndex[cut]])[0];
+  assert.match(real, /^[0-9a-f]{40}$/u);
+  // oid() answers git's id on its first `valid` calls, then `later`: not an id, or the well-formed id of no object
+  for (const [valid, later] of [[1, 'z'.repeat(40)], [2, 'z'.repeat(40)], [1, '1'.repeat(40)]]) {
+    const label = `${valid} valid, then ${later.slice(0, 4)}`;
+    let calls = 0;
+    const resolved = { ...src.resolved, oid: () => ({ tag: 'some', value: ++calls <= valid ? real : later }) };
+    // a Result API: a rejection (a TypeError out of the layout) fails the test here, an errored stream at drain
+    const built = await packSubset(rangeFromBytes(src.bytes), src.idx, [cut], { outsideBase: 'ref', resolved });
+    assert.equal(built.ok, true, `${label}: ${built.ok ? '' : built.error.message}`);
+    const out = await drain(built.value.stream);
+    // by hand: one entry is selected and it is rewritten, so one id is asked for, once
+    assert.equal(calls, 1, `${label}: oid() calls`);
+    assert.equal(out.length, built.value.length, label);
+    // the 20 bytes git names the base by are in the one header written
+    assert.ok(out.includes(Buffer.from(real, 'hex')), `${label}: the header carries git's id`);
+    const dst = makeBareRepo(root, `w${n++}`);
+    gitBuf(dst, ['index-pack', '--stdin'], Buffer.from(src.bytes));
+    gitBuf(dst, ['index-pack', '--strict', '--fix-thin', '--stdin'], out);
+  }
+});
