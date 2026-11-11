@@ -21,12 +21,14 @@ import { push, ZERO_OID } from './push.js';
 import type { PackObject } from './push.js';
 import { parseOid, parseCommitId, type Oid } from './oid.js';
 import { hashObject, TYPE } from './objects.js';
+import type { Mode } from './objects.js';
 import { bytesOf } from './bytes.js';
 import { LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf } from './limits.js';
 import type { CheckedLimits } from './limits.js';
 import { validateIdent, validateRef, validatePushRef, validatePath, validateMessage } from './validate.js';
 import type { IdentInput, ValidatedIdent } from './validate.js';
 import { editFile, inSpan, isLfsPointerPrefix, refuseRebase } from './edit.js';
+import { expecting } from './editexpect.js';
 import type { Author } from './edit.js';
 import { signCommit } from './sign.js';
 import type { Signer } from './sign.js';
@@ -53,7 +55,9 @@ const HEX40 = /^[0-9a-fA-F]{40}$/u;
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export type { BlobMode };
-// `mode` left out is a regular file (100644). Paths are plain strings, checked (validatePath) before any I/O.
+// `mode` given always wins. `mode` left out: a `write` over an existing regular file keeps that file's mode (100644
+// or 100755), as rewriting a file's content does in git; a `create`, and a `write` where there is no regular file
+// (a new path, or a symlink being replaced), is 100644. Paths are plain strings, checked (validatePath) before any I/O.
 type Content = { readonly path: string; readonly content: string | Uint8Array } & Input<{ readonly mode: BlobMode }>;
 export type Change =
   | ({ readonly kind: 'create' } & Content)
@@ -85,7 +89,8 @@ export type CommitChangesResult = {
   readonly created: boolean;
 };
 
-type Stored = { readonly path: string; readonly comps: readonly string[]; readonly mode: BlobMode; readonly data: Uint8Array };
+// `mode` null: not given; decided where the change is applied (modeFor), against the tree the earlier changes left.
+type Stored = { readonly path: string; readonly comps: readonly string[]; readonly mode: BlobMode | null; readonly data: Uint8Array };
 type Norm =
   | (Stored & { readonly kind: 'create' })
   | (Stored & { readonly kind: 'write' })
@@ -115,8 +120,8 @@ type Parent = {
 type Applied = { readonly tree: Oid; readonly objects: readonly PackObject[] };
 type BadRequest = ErrorOf<'bad_request'>;
 
-function modeOf(mode: Option<unknown>, path: string): Result<BlobMode, BadRequest> {
-  if (mode.tag === 'none') return ok('100644');
+function modeOf(mode: Option<unknown>, path: string): Result<BlobMode | null, BadRequest> {
+  if (mode.tag === 'none') return ok(null);
   const given = mode.value;
   if (given === '100644' || given === '100755' || given === '120000') return ok(given);
   return fail('bad_request', `${path}: mode ${JSON.stringify(given)} is not 100644, 100755 or 120000`, { what: 'mode', path });
@@ -138,7 +143,7 @@ function normalize(raw: unknown, limits: CheckedLimits): Result<Norm, PlyError> 
     const comps = pathOf(rec['path'], limits);
     if (!comps.ok) return comps;
     const joined = comps.value.join('/');
-    // a mode left out is a regular file; any other value (null included) is the caller's, and checked
+    // a mode left out is decided when the change is applied; any other value (null included) is the caller's, and checked
     const mode = modeOf(fromNullable(rec['mode']), joined);
     if (!mode.ok) return mode;
     const data = bytes(rec['content'], joined, 'content');
@@ -315,29 +320,36 @@ async function resolveParent(t: Transport, target: Tip, base: BasePlan): Promise
   return ok({ oid: target.oid, tree: commit.value.tree, commitParent: commit.value.parent, creating: false, baseRef: target.ref, baseOid: null });
 }
 
+// What a stored tree says, by oid: read-only, so one fetch and one parse serve every path that has this tree.
+type StoredEntry = { readonly name: string; readonly mode: Mode; readonly oid: Oid };
 type Walk = {
   readonly t: Transport;
   readonly limits: CheckedLimits;
   readonly have: Set<string>;
-  readonly cache: Map<string, Dir>;
+  readonly cache: Map<string, readonly StoredEntry[]>;
   readonly allowLfs: boolean;
 };
 
+// The directory at one path, as a tree the server has. Every call builds its own Dir: an oid names content, not a
+// place, and two paths with one tree oid (template or locale copies) are two directories that change separately.
+// Only the parsed entries are cached by oid, and nothing writes to them (a Lazy is read-only, and each directory
+// gets its own).
 async function loadTree(walk: Walk, oid: Oid): Promise<Result<Dir, PlyError>> {
-  const hit = mapGet(walk.cache, oid);
-  if (hit.tag === 'some') return ok(hit.value);
-  const got = await objectAt(walk.t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
-  if (!got.ok) return got;
-  const obj = got.value;
-  const dir = emptyDir();
-  const parsed = treeEntries(obj, walk.limits);
-  if (!parsed.ok) return parsed;
-  for (const entry of parsed.value) {
-    dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
-    walk.have.add(entry.oid);
+  let stored = mapGet(walk.cache, oid);
+  if (stored.tag === 'none') {
+    const got = await objectAt(walk.t, oid, { filter: 'tree:0', expectType: TYPE.TREE });
+    if (!got.ok) return got;
+    const parsed = treeEntries(got.value, walk.limits);
+    if (!parsed.ok) return parsed;
+    // copied: the fetched object's own entry list is not this cache's to hold a reference into
+    const entries: readonly StoredEntry[] = parsed.value.map(e => ({ name: e.name, mode: e.mode, oid: e.oid }));
+    for (const entry of entries) walk.have.add(entry.oid);
+    walk.have.add(oid);
+    walk.cache.set(oid, entries);
+    stored = some(entries);
   }
-  walk.have.add(oid);
-  walk.cache.set(oid, dir);
+  const dir = emptyDir();
+  for (const entry of stored.value) dir.entries.set(entry.name, lazyNode(entry.mode, entry.oid));
   return ok(dir);
 }
 
@@ -417,6 +429,17 @@ async function applyEdit(walk: Walk, root: Dir, change: Extract<Norm, { readonly
   return putLeaf(walk, root, { comps: change.comps, mode, data: next.value, path: change.path, overwrite: true }, created);
 }
 
+// The mode a create or write stores. Given: that one. Not given: a write over a regular file keeps the file's mode
+// (git: new content does not change a mode); anything else is a plain file. Read after descend, so the parent
+// directory is expanded and the entry is what the earlier changes of this list left there.
+function modeFor(root: Dir, change: Extract<Norm, { readonly kind: 'create' | 'write' }>): BlobMode {
+  if (change.mode !== null) return change.mode;
+  if (change.kind === 'create') return '100644';
+  const there = leafAt(root, change.comps);
+  if (there.ok && there.value.kind === 'lazy' && there.value.mode === '100755') return '100755';
+  return '100644';
+}
+
 // Each change walks the tree the previous change left, so the steps cannot run together.
 /* oxlint-disable no-await-in-loop */
 async function applyChange(walk: Walk, root: Dir, change: Norm, created: Map<string, Uint8Array>): Promise<Result<null, PlyError>> {
@@ -425,7 +448,7 @@ async function applyChange(walk: Walk, root: Dir, change: Norm, created: Map<str
     case 'write': {
       const walked = await descend(walk, root, change.comps.slice(0, -1), true);
       if (!walked.ok) return walked;
-      return putLeaf(walk, root, { comps: change.comps, mode: change.mode, data: change.data, path: change.path, overwrite: change.kind === 'write' }, created);
+      return putLeaf(walk, root, { comps: change.comps, mode: modeFor(root, change), data: change.data, path: change.path, overwrite: change.kind === 'write' }, created);
     }
     case 'edit': return applyEdit(walk, root, change, created);
     case 'delete': {
@@ -489,12 +512,16 @@ const lostRace = (e: PlyError): boolean => isPlyError(e) && e.code === 'cas_conf
 const lostAt = (listed: Result<LsRefsResult, PlyError>, ref: string, expected: string, cause: unknown): Err<PlyError> =>
   (listed.ok ? lost(ref, expected, tipOf(listed.value.refs, ref), cause) : listed);
 
+// What one attempt answers on either path: the commit, or `retry` (an unpinned commit on a ref that existed lost its
+// push to another writer: the call reads the target again and redoes it once).
+type MemOutcome = { readonly retry: false; readonly done: CommitChangesResult; readonly objects: number } | { readonly retry: true };
 type StreamJob = {
   readonly plan: Plan;
   readonly target: Tip;
   readonly parent: Parent & { readonly oid: string };
   readonly edit: Extract<Norm, { readonly kind: 'edit' }>;
   readonly opts: StreamOpts;
+  readonly attempt: number;
 };
 function parseEditInputs(targetRef: string, editPath: string, limits: CheckedLimits): Result<{ readonly ref: Refname; readonly path: Path }, BadRequest> {
   const branded = parseRefname(targetRef);
@@ -503,36 +530,42 @@ function parseEditInputs(targetRef: string, editPath: string, limits: CheckedLim
   return map(parsePath(editPath, limits), p => ({ ref: branded.value, path: p.path }));
 }
 // The single edit of an existing file, streamed by editFile. Its Err is read here: a lost race (or a rebase refusal on a
-// new ref) is this commit's cas_conflict; any other Err is the commit's as it is.
-async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob): Promise<Result<CommitChangesResult, PlyError>> {
-  const { plan, target, parent, edit, opts } = job;
+// new ref) is this commit's cas_conflict; any other Err is the commit's as it is. editFile never redoes a lost push
+// itself (`retry: false`): the redo is this commit's, from its own fresh read of the target, as on the in-memory path
+// (writeMem), so both paths answer one race the same way and every push asserts what the commit read.
+async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob): Promise<Result<MemOutcome, PlyError>> {
+  const { plan, target, parent, edit, opts, attempt } = job;
   const creating = parent.creating;
   const strict = opts.pinned && !creating && parent.baseOid === null;
   root.set({ 'git.commit.stream': true });
   const inputs = parseEditInputs(target.ref, edit.path, opts.limits);
   if (!inputs.ok) return inputs;
   const { ref, path } = inputs.value;
+  // The base goes to editFile as the caller named it (its span says so; it peels a tag as resolveParent did). The
+  // compare-and-swap does not: `creating` is what this commit read for its target, and editFile's push asserts it
+  // (zero old oid for an absent target) whatever its own later read of the ref sees.
   const result = await editFile(url, {
     ref, base: getOrElse(fromNullish(parent.baseOid), getOrElse(fromNullish(parent.baseRef), target.ref)), path, find: edit.find, replace: edit.replace,
     author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
-  }, {
-    ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,
+  }, expecting({
+    ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: false,
     verify: opts.verify, allowLfsPointer: opts.allowLfs, ...(opts.signer === null ? {} : { signer: opts.signer }),
-  });
+  }, creating));
   if (!result.ok) {
     const e = result.error;
     const rebase = creating && e.code === 'bad_request' && whatIs(e, 'rebase');
     if (e.code !== 'cas_conflict' && !rebase) return result;
+    if (lostRace(e) && attempt === 0 && !opts.pinned && !creating) return ok({ retry: true });
     if (e.code === 'cas_conflict' && !creating && actualKnown(e)) return result;
     return lostAt(await lsRefs(t, [target.ref]), target.ref, creating ? ZERO_OID : parent.oid, e);
   }
   const edited = result.value;
   if (edited.noop) {
     if (creating) return nothing();
-    return ok(resultOf(target.ref, parent, { tree: edited.oldTree, oid: edited.oldCommit, pushBytes: 0, outcome: 'noop' }));
+    return ok({ retry: false, objects: 0, done: resultOf(target.ref, parent, { tree: edited.oldTree, oid: edited.oldCommit, pushBytes: 0, outcome: 'noop' }) });
   }
-  // editFile may have retried against a tip that moved. That commit's parent is the tip it won on.
-  return ok(resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' }));
+  // editFile corrects a stale head hint before it pushes. That commit's parent is the tip it won on.
+  return ok({ retry: false, objects: 0, done: resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' }) });
 }
 
 function treeDecision(parent: Parent, tree: string): 'noop' | 'empty' | 'commit' {
@@ -554,7 +587,6 @@ type MemJob = {
   readonly pinned: boolean;
   readonly attempt: number;
 };
-type MemOutcome = { readonly retry: false; readonly done: CommitChangesResult; readonly objects: number } | { readonly retry: true };
 function oldOidOf(parent: Parent): string {
   if (parent.creating || parent.oid === null) return ZERO_OID;
   return parent.oid;
@@ -599,13 +631,13 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
   if (verify) { const seen = await verifyRef(t, root, 'git.commit', target.ref, oid); if (!seen.ok) return seen; }
   return ok({ retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid, pushBytes: pushed.value.packBytes, outcome: 'commit' }) });
 }
-type StreamTry = { readonly plan: Plan; readonly target: Tip; readonly parent: Parent; readonly opts: StreamOpts };
+type StreamTry = { readonly plan: Plan; readonly target: Tip; readonly parent: Parent; readonly opts: StreamOpts; readonly attempt: number };
 // One edit of a file that exists on a parent that exists: streamed (Some). Anything else is the in-memory tree (None).
-async function streamIfEdit(url: string, t: Transport, root: Span, job: StreamTry): Promise<Result<Option<CommitChangesResult>, PlyError>> {
-  const { plan, target, parent, opts } = job;
+async function streamIfEdit(url: string, t: Transport, root: Span, job: StreamTry): Promise<Result<Option<MemOutcome>, PlyError>> {
+  const { plan, target, parent, opts, attempt } = job;
   const only = at(plan.changes, 0);
   if (plan.changes.length !== 1 || only.tag === 'none' || only.value.kind !== 'edit' || parent.oid === null) return ok(none);
-  const edited = await streamEdit(url, t, root, { plan, target, parent: { ...parent, oid: parent.oid }, edit: only.value, opts });
+  const edited = await streamEdit(url, t, root, { plan, target, parent: { ...parent, oid: parent.oid }, edit: only.value, opts, attempt });
   return edited.ok ? ok(some(edited.value)) : edited;
 }
 
@@ -639,9 +671,12 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
       const parent = await resolveParent(t, tip, plan.base);
       if (!parent.ok) return parent;
       root.set({ 'git.commit.creating': parent.value.creating, 'git.commit.parent': parent.value.oid === null ? '' : parent.value.oid });
-      const streamed = await streamIfEdit(url, t, root, { plan, target: tip, parent: parent.value, opts });
+      const streamed = await streamIfEdit(url, t, root, { plan, target: tip, parent: parent.value, opts, attempt });
       if (!streamed.ok) return streamed;
-      if (streamed.value.tag === 'some') return finish(streamed.value.value, 0);
+      if (streamed.value.tag === 'some') {
+        if (streamed.value.value.retry) return run(1);
+        return finish(streamed.value.value.done, 0);
+      }
       const wrote = await writeMem({ t, root, plan, target: tip, parent: parent.value, limits, verify, signer, allowLfs: allowLfsPointer, pinned, attempt });
       if (!wrote.ok) return wrote;
       if (wrote.value.retry) return run(1);

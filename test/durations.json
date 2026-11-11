@@ -3,6 +3,7 @@
   "test/artifacts-compat.test.js": 5,
   "test/blobcache.test.js": 0,
   "test/bundle.test.js": 1,
+  "test/changes-generated.test.js": 10,
   "test/changes.test.js": 18,
   "test/checkout-tree.test.js": 11,
   "test/cherrypick-rename.test.js": 22,
