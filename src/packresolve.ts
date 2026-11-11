@@ -2,7 +2,7 @@
 // applyDelta is git's patch_delta, resolvePack resolves OFS/REF chains by dependency (a delta resolves when its base
 // lands) with external bases as a last resort, describePack reports that layout the way `git verify-pack -v` prints it (a thin base is data, not an error),
 // makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
-// pack.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
+// deltaenc.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
 import type { ErrorOf } from './errors.js';
 import { fail } from './errors.js';
 import type { Err, Result } from './result.js';
@@ -13,10 +13,8 @@ import { parseOid } from './oid.js';
 import { TYPE, TYPE_NAME, hashObject, nameOfTypeId } from './objects.js';
 import type { CheckedLimits, LimitKey, LimitsInput } from './limits.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitError, checkLimit, parseLimits } from './limits.js';
-// pack.js re-exports this module's parsers: a cycle of a re-export and one function, which ES modules resolve
-// oxlint-disable-next-line import/no-cycle -- see above
-import { spliceDelta } from './pack.js';
-import type { DeltaOp, SplicedDelta } from './pack.js';
+import { spliceDelta } from './deltaenc.js';
+import type { DeltaOp, SplicedDelta } from './deltaenc.js';
 import { shortRead } from './bytes.js';
 import type { ObjType, ObjectTypeName, PackKind } from './format.js';
 import type { InflateStats, ObjBase, ObjHeader, ObjSize, OfsDelta, PackCaps, PackError, PackPiece, PackScan } from './packstream.js';
