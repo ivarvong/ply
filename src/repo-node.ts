@@ -28,9 +28,14 @@
 // repositories up to a few hundred MB. The resident set is bounded by limits.maxInflatedTotal (the objects held), the
 // object count by limits.maxPackObjects, each object by limits.maxObjectSize, the pack sent by limits.maxPackBytes and
 // the refs by limits.maxRefs: past any of them the answer is `limit_exceeded`, never a partial push. The defaults hold
-// a repository of about 256 MiB of objects; raise maxInflatedTotal (and maxPackObjects) for a larger one. A packfile is
+// a repository of about 256 MiB of objects whose packs are each at most 128 MiB; for a larger one raise
+// maxInflatedTotal, maxPackObjects and (for a single pack over 128 MiB) maxPackBytes. All of it is then held in
+// memory: a repository that does not fit goes through the range-reader pipeline instead (scanPackIndex,
+// resolvePackRange, planPackBatches, packSubset over a RangeSource), which holds no pack whole. A packfile is
 // held whole while it is parsed, so each is bounded by limits.maxPackBytes before a byte of it is read (its size from
-// the open handle; `limit_exceeded`, what: 'local pack bytes'). A packfile the file system will not give (EACCES, EIO,
+// the open handle; `limit_exceeded`, what: 'local pack bytes'; one exactly at the bound is read). No read call is
+// asked for more than 1 GiB (READ_CHUNK), so a pack of 2 GiB or more under a raised bound is read in pieces, and one
+// the runtime has no buffer for is `limit_exceeded`, what: 'local pack buffer bytes'. A packfile the file system will not give (EACCES, EIO,
 // EISDIR, …) is `unsupported`, kind 'filesystem', what: 'local pack', with the path, the operation and the system's
 // code in the message and the thrown error as `cause`: pushRepo never rejects with a node:fs error for a packfile.
 //
@@ -105,9 +110,21 @@ const filesystem = (what: string, op: string, path: string, e: unknown): Err<Fil
   return err(Object.assign(plyError('unsupported', `${what}: ${op} of ${JSON.stringify(path)} failed (${named})`, { what, path, cause: e }), { kind: 'filesystem' as const }));
 };
 
+// The most one read call is asked for (1 GiB). node's fs binding takes the length as an int32 and aborts the process
+// on more (node_file.cc fs.Read: `args[3]->IsInt32()`, SIGABRT, which no caller can catch), so a file of 2 GiB or more
+// under a raised limit is read in pieces.
+const READ_CHUNK = 1024 * 1024 * 1024;
+
+// One buffer of `size` bytes, or null when the runtime will not give one (a RangeError: past the largest typed array,
+// or no memory for it).
+const allocate = (size: number): Uint8Array | null => {
+  try { return new Uint8Array(size); } catch { return null; }
+};
+
 // A local file's bytes, held to `max`: the size comes from the open handle, a file past the bound is refused before a
 // byte of it is read, and no more than the size seen is read even when the file grows meanwhile (one that shrank is
-// what was there). Never rejects.
+// what was there). No read call is asked for more than READ_CHUNK, and a file one buffer cannot hold is
+// `limit_exceeded` (what: '<what> buffer bytes'). Never rejects.
 async function readBounded(path: string, max: number, what: string): Promise<Result<Uint8Array, PlyError>> {
   let op = 'open';
   let handle: FileHandle | null = null;
@@ -117,10 +134,11 @@ async function readBounded(path: string, max: number, what: string): Promise<Res
     const { size } = await handle.stat();
     if (size > max) return err(limitExceeded(`${what} bytes`, size, max));
     op = 'read';
-    const buf = new Uint8Array(size);
+    const buf = allocate(size);
+    if (buf === null) return fail('limit_exceeded', `${what}: no buffer of ${size} bytes could be allocated (the file is within the limit ${max}, the process cannot hold it)`, { what: `${what} buffer bytes`, got: size, max });
     let got = 0;
     while (got < size) {
-      const { bytesRead } = await handle.read(buf, got, size - got, got);
+      const { bytesRead } = await handle.read(buf, got, Math.min(size - got, READ_CHUNK), got);
       if (bytesRead === 0) break;
       got += bytesRead;
     }

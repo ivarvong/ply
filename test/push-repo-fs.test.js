@@ -106,3 +106,25 @@ test.skipIf(process.getuid?.() === 0)('a pack the process cannot read is a coded
     assert.match(r.error.message, /open|read/u);
   } finally { chmodSync(path, 0o644); }
 });
+
+// node's fs binding takes a read's length as an int32 and aborts the process on more (node_file.cc, fs.Read:
+// `args[3]->IsInt32()`, SIGABRT), so a caller who raises maxPackBytes past 2 GiB for a pack of 2^31 bytes or more must
+// still get an answer. The expected values are hand-derived: the file is 2 GiB + 1 zeros (truncate), which is not a
+// pack ('PACK' is 50 41 43 4b), so the answer is pack_corrupt; every byte was read (the sum equals the truncate
+// size), and no single read was asked for more than 1 GiB (2^30).
+test('a local pack of 2 GiB or more under a raised maxPackBytes is read in pieces of at most 1 GiB: an answer, never a process abort', async () => {
+  const GIB = 1024 * MIB;
+  const dir = localRepo();
+  const url = remoteRepo();
+  const big = join(packDir(dir), 'pack-big.pack');
+  writeFileSync(big, '');
+  truncateSync(big, 2 * GIB + 1);
+  reads.log.length = 0;
+  const r = await pushRepo(dir, url, { refspecs: ['main'], dryRun: true }, { limits: withLimits({ maxPackBytes: 4 * GIB }) });
+  truncateSync(big, 0);
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'pack_corrupt');
+  assert.equal(totalRead(big), 2 * GIB + 1, 'the whole file was read');
+  assert.ok(largestRead(big) <= GIB, `largest single read: ${largestRead(big)} bytes, the cap is ${GIB}`);
+  assert.ok(reads.log.filter(x => x.path === big).length >= 3, 'more than two reads were needed for 2 GiB + 1 at 1 GiB each');
+});
