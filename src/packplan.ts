@@ -147,14 +147,18 @@ function inBase(c: Ctx, i: number): number {
   return b >= 0 && c.chosen[b] === 1 ? b : -1;
 }
 // Bytes the entry takes in a batch whose number is `batch`: its header as it will be written, then its compressed bytes.
-function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; readonly rewrite: boolean; readonly refused: boolean } {
+// Only an OFS_DELTA written outside its base's batch carries `refused` (the builder's rule cannot write it there): a
+// whole object, a REF_DELTA and an OFS_DELTA beside its base return the two fields alone, so their path costs nothing more.
+type Wire = { readonly bytes: number; readonly rewrite: boolean };
+type CutWire = Wire & { readonly refused: boolean };
+function wireBytes(c: Ctx, i: number, batch: number): Wire | CutWire {
   const cols = c.pack.columns;
   const compressed = cols.compressed[i] as number;
   const header = cols.headerBytes[i] as number;
   const stored = cols.storedType[i] as number;
   const b = inBase(c, i);
   const isDelta = (c.resolved.columns.base[i] as number) !== NO_BASE;
-  if (!isDelta) return { bytes: header + compressed, rewrite: false, refused: false };
+  if (!isDelta) return { bytes: header + compressed, rewrite: false };
   const sameBatch = b >= 0 && (c.batchOf[b] as number) === batch;
   if (stored === OFS_DELTA) {
     const storedBase = cols.baseIndex[i] as number;
@@ -165,11 +169,11 @@ function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; 
     if (id !== null && typeof id !== 'string' && c.threw.length === 0) c.threw.push(id);
     const write = entryWrite(stored, sameBatch, sameBatch || typeof id === 'string', c.cross ? 'ref' : 'refuse');
     return write === WRITE_OFS
-      ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false, refused: false }
+      ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false }
       : { bytes: typeSize + OID_BYTES + compressed, rewrite: true, refused: write === WRITE_REFUSED };
   }
   // a REF_DELTA is written as it is stored, wherever its base is
-  return { bytes: header + compressed, rewrite: !sameBatch, refused: false };
+  return { bytes: header + compressed, rewrite: !sameBatch };
 }
 
 // Every planned entry checked against the per-object budget and the type it resolved to.
@@ -240,8 +244,9 @@ function place(c: Ctx, b: Open, batch: number, i: number): void {
   const w = wireBytes(c, i, batch);
   b.entries.push(i);
   b.bytes += w.bytes;
-  if (w.rewrite) b.refRewrites += 1;
-  if (w.refused) c.unbuildable.push(i);
+  if (!w.rewrite) return;
+  b.refRewrites += 1;
+  if ('refused' in w && w.refused) c.unbuildable.push(i);
 }
 const done = (b: Open): PlannedBatch => ({ kind: b.kind, entries: b.entries, packBytes: b.bytes, objects: b.entries.length, refRewrites: b.refRewrites });
 
