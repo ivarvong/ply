@@ -23,7 +23,7 @@
 // and may add transport-specific detail under http.*. Implementation: http.ts (an SSH one was removed 2026-10-31;
 // history on branch archive/ssh).
 import type { Code, ErrorOf, PlyError } from './errors.js';
-import { fail, plyError } from './errors.js';
+import { callbackFailed, describeThrown, fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
 import { err, ok } from './result.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
@@ -228,9 +228,51 @@ export function asTransport(t: TransportInput, limits: CheckedLimits): Transport
   return Object.create(t, { quirks: { value: quirks, enumerable: true }, objects: { value: objects, enumerable: true }, scrub: { value: scrub, enumerable: true }, limits: { value: limits, enumerable: true } }) as Transport;
 }
 
+// A transport handed in is the caller's code. What its frames() or advertise() raises that is not one of ply's typed
+// errors (a transport that wraps ply's own passes those through) is raised instead as the Err that names the method
+// (`what`) and carries the raised value untouched as `cause`: ply writes nothing on the caller's value. The class
+// follows the request: upload-pack and the advertisement only read, so the failure is definite (bad_request: the
+// caller's code); a request for any other service is a push handed to the transport, which may have sent it: ambiguous.
+const READ_SERVICE = 'git-upload-pack';
+// Reading a raised value can itself throw (a revoked Proxy): that one is not a typed error.
+const isTyped = (e: unknown): boolean => { try { return isPlyThrown(e); } catch { return false; } };
+function framesFailed(service: string, e: unknown): PlyError {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- it carries one of ply's codes: a PlyError's shape
+  if (isTyped(e)) return e as PlyError;
+  if (service === READ_SERVICE) return callbackFailed('transport.frames', e);
+  return plyError('ambiguous', `caller-supplied transport.frames threw after the request was handed to it, outcome unknown: ${describeThrown(e)}`, { what: 'transport.frames', cause: e });
+}
+// A stream reports a failure by rejecting a read (the stream protocol): the named Err is that rejection.
+async function* guardedFrames(inner: Result<AsyncIterable<Frame>, PlyError>, service: string): AsyncGenerator<Frame, void, unknown> {
+  if (!inner.ok) { await Promise.reject(inner.error); return; }
+  try { yield* inner.value; } catch (e) { await Promise.reject(framesFailed(service, e)); }
+}
+// The frames() and advertise() ply made itself (createTransport's, the guards below, operation()'s hand-over view): none
+// of the caller's code runs unguarded in them. A transport whose two methods are these is kept as it is: one ply made,
+// handed back in, is that transport, and an operation inside an operation does not guard a second time.
+const PLY_MADE = new WeakSet<object>();
+export const plyMade = <T extends Transport>(t: T): T => { PLY_MADE.add(t.frames); PLY_MADE.add(t.advertise); return t; };
+// Reading a handed-in transport's methods can itself throw (a getter): then they are not ply's.
+const isPlyMade = (t: Transport): boolean => { try { return PLY_MADE.has(t.frames) && PLY_MADE.has(t.advertise); } catch { return false; } };
+// A view, like withParent: the caller's methods run on the receiver ply called (a further view: `this.parent`).
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; the view is `given` with its two methods guarded
+const guarded = (given: Transport): Transport => isPlyMade(given) ? given : plyMade(Object.create(given, {
+  frames: { enumerable: true, value: function frames(this: Transport, service: string, body: RequestBody, span: Span, hints: Hints): AsyncIterable<Frame> {
+    // called now, as the caller's own frames() was (it may start its request when called); what it throws when called
+    // is the stream's first read failing
+    let inner: Result<AsyncIterable<Frame>, PlyError>;
+    try { inner = ok(given.frames.call(this, service, body, span, hints)); } catch (e) { inner = err(framesFailed(service, e)); }
+    return guardedFrames(inner, service);
+  } },
+  advertise: { enumerable: true, value: async function advertise(this: Transport, service: string, span: Span): Promise<Result<Uint8Array, PlyError>> {
+    // advertise answers with a Result: what the caller's raises is its Err (a typed error as it is)
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- it carries one of ply's codes: a PlyError's shape
+    try { return await given.advertise.call(this, service, span); } catch (e) { return err(isTyped(e) ? (e as PlyError) : callbackFailed('transport.advertise', e)); }
+  } },
+}) as Transport);
 export function transportFrom(t: TransportInput): Result<Transport, ErrorOf<'bad_request'>> {
   const limits = parseLimits(t.limits);
-  return limits.ok ? ok(asTransport(t, limits.value)) : limits;
+  return limits.ok ? ok(guarded(asTransport(t, limits.value))) : limits;
 }
 
 // We are not git and do not claim to be: servers that branch on the agent string get the truth.
@@ -281,17 +323,21 @@ export const spanned = <T>(t: Transport, name: string, opts: SpanOpts, fn: (span
 // A thrown value's `name` is `want` (an AbortError, a TimeoutError). Any value may be thrown: a primitive has no name.
 const nameIs = (e: unknown, want: string): boolean => { const n = field(e, 'name'); return n.tag === 'some' && n.value === want; };
 // A platform fetch failure → the PlyError it is: aborted or timeout when the signal fired or the error says so, else
-// network. A typed error passes through.
-export function wrapNet(e: unknown, signal: AbortSignal | null = null): PlyError {
+// network. A typed error passes through. `what` names the caller's function that raised it (a supplied fetchImpl), on
+// the network error only. Never throws: a value that cannot be read or described (a revoked Proxy, a null-prototype
+// object) is the network error it would be, carried as the cause.
+export function wrapNet(e: unknown, signal: AbortSignal | null = null, what: string | null = null): PlyError {
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- it carries one of ply's codes: a PlyError's shape
-  if (isPlyThrown(e)) return e as PlyError;
+  if (isTyped(e)) return e as PlyError;
   const aborted = signal !== null && signal.aborted;
-  if (aborted || nameIs(e, 'AbortError') || nameIs(e, 'TimeoutError')) {
-    const timedOut = nameIs(e, 'TimeoutError') || (signal !== null && nameIs(signal.reason, 'TimeoutError'));
-    // the limit that fired (src/deadline.ts), on the thrown value or on the signal's reason
-    const thrown = timeoutLimit(e);
-    const limit = thrown !== null || signal === null ? thrown : timeoutLimit(signal.reason);
-    return plyError(timedOut ? 'timeout' : 'aborted', `request aborted: ${thrownText(e)}`, { cause: e, ...(timedOut && limit !== null ? { what: limit } : {}) });
-  }
-  return plyError('network', `network: ${thrownText(e)}`, { cause: e });
+  try {
+    if (aborted || nameIs(e, 'AbortError') || nameIs(e, 'TimeoutError')) {
+      const timedOut = nameIs(e, 'TimeoutError') || (signal !== null && nameIs(signal.reason, 'TimeoutError'));
+      // the limit that fired (src/deadline.ts), on the thrown value or on the signal's reason
+      const thrown = timeoutLimit(e);
+      const limit = thrown !== null || signal === null ? thrown : timeoutLimit(signal.reason);
+      return plyError(timedOut ? 'timeout' : 'aborted', `request aborted: ${describeThrown(e)}`, { cause: e, ...(timedOut && limit !== null ? { what: limit } : {}) });
+    }
+  } catch { /* the value cannot be read: not an abort */ }
+  return plyError('network', `network: ${describeThrown(e)}`, { cause: e, ...(what === null ? {} : { what }) });
 }

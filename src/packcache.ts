@@ -25,7 +25,7 @@ import type { PlyError } from './errors.js';
 import type { FetchRequest } from './uprequest.js';
 import type { Option, Result } from './result.js';
 import { te, concat } from './bytes.js';
-import { fail } from './errors.js';
+import { callbackFailed, fail } from './errors.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { v2Init, v2Step, v2End } from './fetch.js';
@@ -215,6 +215,16 @@ async function verifiedStore(toCache: ReadableStream<Uint8Array>, body: Uint8Arr
   await store(bytes.value.slice());
 }
 
+// One of the caller's own callbacks (shouldCache, the cache's match, delete and put, waitUntil), called. A fetch reports a
+// failure by rejecting, so what the callback throws when called is this fetch's rejection: the Err that names the
+// callback and carries the thrown value (bad_request: the caller's code, not the network; the transport returns a typed
+// error as it is). The answer is boxed: a promise the callback returns stays the call site's (a match that rejects is
+// a miss, as before).
+// oxlint-disable-next-line typescript/promise-function-async -- not async: the rejection is built here, as a value
+const calling = <T>(what: string, call: () => T): Promise<{ readonly got: T }> => {
+  try { return Promise.resolve({ got: call() }); } catch (e) { return Promise.reject(callbackFailed(what, e)); }
+};
+
 export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: CachingOptions = {}): CachingFetch {
   const { waitUntil, namespace, shouldCache, maxAge, verifyBeforeStore, limits } = withDefaults(options, cachingDefaults(getOrElse(readKey(options, 'verifyBeforeStore'), false)));
   const inner = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
@@ -222,14 +232,16 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
   const f = async (url: string | URL, init: RequestInit = {}): Promise<Response> => {
     const { init: wire, names } = peelRecordHeaders(init);
     const body = wire.body;
-    if (wire.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !shouldCache(body)) { stats.bypass++; return inner(url, wire); }
+    if (wire.method !== 'POST' || !String(url).endsWith('/git-upload-pack') || !(body instanceof Uint8Array) || !(await calling('shouldCache', () => shouldCache(body))).got) { stats.bypass++; return inner(url, wire); }
     const mode = headerOf(headersOf(wire), CACHE_CONTROL_HEADER);
     const key = await cacheKey(String(url), headerOf(headersOf(wire), 'authorization'), body, namespace);
     // a failed delete is ignored
-    if (mode === 'bust') { stats.bust++; await cache.delete(key).catch(() => null); }
+    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+    if (mode === 'bust') { stats.bust++; await (await calling('cache.delete', () => cache.delete(key))).got.catch(() => null); }
     else {
       // a failed match is a miss
-      const hit = await cache.match(key).then(fromNullish, (): Option<Response> => none);
+      // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+      const hit = await (await calling('cache.match', () => cache.match(key))).got.then(fromNullish, (): Option<Response> => none);
       // oxlint-disable-next-line typescript/strict-boolean-expressions -- a falsy answer is a miss, as before
       if (hit.tag === 'some' && hit.value) {
         stats.hit++;
@@ -247,13 +259,20 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
     for (const name of names) { const v = res.headers.get(name); if (v !== null) stored.set(name, v); }
     stored.set('content-type', ct);
     stored.set('cache-control', `public, max-age=${maxAge}, immutable`);
+    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+    const putting = (entry: BodyInit): Promise<{ readonly got: Promise<unknown> }> => calling('cache.put', () => cache.put(key, new Response(entry, { status: 200, headers: stored })));
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
-    const store = async (entry: BodyInit): Promise<void> => {
+    const counted = async (called: Promise<unknown>): Promise<void> => {
       // oxlint-disable-next-line promise/always-return -- the counters are the outcome; the promise's value is unused (waitUntil)
-      await cache.put(key, new Response(entry, { status: 200, headers: stored })).then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = thrownText(e).slice(0, 200); });
+      await called.then(() => { stats.putOk++; }, (e: unknown) => { stats.putFailed++; stats.putError = thrownText(e).slice(0, 200); });
     };
-    const put = verifyBeforeStore ? verifiedStore(toCache, body, limits, stats, store) : store(toCache);
-    if (waitUntil) waitUntil(put);
+    // A put that throws when called. Without verifyBeforeStore it is called here, inside this fetch: its throw is this
+    // fetch's rejection (the named Err, like match). With it the put is called after this fetch has answered, so there
+    // is no fetch left to reject: it is counted, like a put that rejects.
+    // oxlint-disable-next-line typescript/promise-function-async -- the cache's own promise, passed through
+    const store = async (entry: BodyInit): Promise<void> => { await counted(putting(entry).then(called => called.got)); };
+    const put = verifyBeforeStore ? verifiedStore(toCache, body, limits, stats, store) : counted((await putting(toCache)).got);
+    if (waitUntil) await calling('waitUntil', () => { waitUntil(put); });
     return new Response(toClient, { status: 200, headers: h });
   };
   Object.defineProperty(f, CACHING_FETCH_BRAND, { value: true });

@@ -21,7 +21,7 @@ import { scrubber, secretShaped, secretUser } from './scrub.js';
 import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
-import { exchangeClock, readAbortable, watchedUpload, NO_HINTS, UA, forgetRedirect, freshQuirks, quirksKeyOf, recalledRedirect, rememberRedirect, rememberedQuirks, wrapNet } from './transport.js';
+import { exchangeClock, readAbortable, watchedUpload, NO_HINTS, UA, forgetRedirect, freshQuirks, quirksKeyOf, recalledRedirect, rememberRedirect, rememberedQuirks, plyMade, wrapNet } from './transport.js';
 
 export const redactUrl = (u: string | URL): string => { try { const x = new URL(u); x.username = ''; x.password = ''; return x.toString(); } catch { return '<invalid url>'; } };
 export type HttpCode = Extract<Code, 'auth' | 'not_found' | 'rate_limited' | 'upstream_5xx' | 'http'>;
@@ -357,6 +357,8 @@ export type HttpSettings = {
   readonly quirks: Quirks;
   // the caller's fetch, bound when it is the platform's (Workers: "Illegal invocation" with another `this`, SAFETY.md)
   readonly fetch: FetchLike;
+  // 'fetchImpl' when the caller supplied the fetch: its failure names it (error.what); the platform's own names none
+  readonly fetchWhat: string | null;
   readonly tracer: Tracer | null;
   readonly parent: Span | null;
   readonly signal: AbortSignal | null;
@@ -412,7 +414,7 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   return ok({
     [CHECKED_HTTP]: true, url: approved.value, crossOrigin: approved.value.origin !== offeredOrigin, policy: checkedPolicy.value,
     userAgent: agent.value, recordNames: names.value, given, authorization, explicitBasic, quirks,
-    fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, tracer, parent, signal, allowUrl, limits: checkedLimits.value,
+    fetch: fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl, fetchWhat: fetchImpl === globalThis.fetch ? null : 'fetchImpl', tracer, parent, signal, allowUrl, limits: checkedLimits.value,
     requestTimeoutMs: checkedLimits.value.requestTimeoutMs, firstByteTimeoutMs: checkedLimits.value.firstByteTimeoutMs, idleTimeoutMs: checkedLimits.value.idleTimeoutMs, maxPackBytes: checkedLimits.value.maxPackBytes, streamRedirect: streamRedirect(),
   });
 }
@@ -423,7 +425,7 @@ const protocolHeader = (service: string): Record<string, string> => (service ===
 
 // oxlint-disable-next-line max-lines-per-function -- the transport's state and its two methods share one closure
 function transportOf(settings: HttpSettings): HttpTransport {
-  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs, maxPackBytes } = settings;
+  const { policy, userAgent, recordNames, given, authorization, explicitBasic, quirks, fetch: f, fetchWhat, tracer, parent, signal, allowUrl, limits, requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs, maxPackBytes } = settings;
   const startBase = settings.url.toString().replace(/\/$/, '');
   let base = startBase;
   // cachingFetch reads this and strips it (packcache.ts). Any other fetchImpl must not see it: it would go to the origin.
@@ -524,7 +526,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
   // 'follow' by cloning the request, which tees the body and holds every chunk the unread branch never takes (a 64 MiB
   // push held 64 MiB, measured). 'error' takes no clone; a 3xx then fails the request as a network error. Neither follows.
   const send = async (target: string, init: RequestInit, sig: AbortSignal, redirect: StreamRedirect = 'manual'): Promise<Result<Response, PlyError>> => {
-    try { return ok(await f(target, { ...init, signal: sig, redirect })); } catch (e) { return err(wrapNet(e, sig)); }
+    try { return ok(await f(target, { ...init, signal: sig, redirect })); } catch (e) { return err(wrapNet(e, sig, fetchWhat)); }
   };
 
   const fetchAdvertisement = async (asked: string, service: string, span: Span, sig: AbortSignal): Promise<Result<Response, PlyError>> => {
@@ -701,7 +703,8 @@ function transportOf(settings: HttpSettings): HttpTransport {
     } finally { sig.cancel(); }
   }
 
-  return {
+  // plyMade: these frames() and advertise() are ply's own (transportFrom keeps the transport as it is, unguarded)
+  return plyMade({
     // quirks: what this server was found to need (shared by every view of the transport; a caller may pass one object to
     // many transports for the same server). objects: commits/trees harvested from over-wide packs (fetch.js).
     // scrub: the credential's forms → '[redacted]' (null without auth); spans under this transport apply it (otel.js).
@@ -722,7 +725,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     },
     // GET info/refs?service=… (capability advertisements). Returns the whole body; advertisements are small.
     advertise,
-  };
+  });
 }
 
 // The transport for `url`: its options parsed (parseHttpOptions), then built from the settings, which nothing re-checks.

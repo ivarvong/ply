@@ -12,7 +12,7 @@ import { test, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { editFile, commitChanges, readCommit, checkoutTree, createTransport, Tracer } from '../src/index.js';
+import { editFile, commitChanges, readCommit, checkoutTree, createTransport, cachingFetch, memoryCache, Tracer } from '../src/index.js';
 import { filesFromDir, pushDir } from '../src/tree-node.js';
 import { operation } from '../src/operation.js';
 import { tmpRoot, makeBareRepo, git, commitFiles, startGitServer } from './server.js';
@@ -44,15 +44,29 @@ const rows = [
   ['signer.sign rejects (editFile)', n => edit({ signer: { sign: async () => { await null; throw boom; }, publicKey: 'x' } }, n), 'bad_request', 'signer', 'definite'],
   ['signer.sign throws synchronously (commitChanges)', n => write({ signer: { sign: () => { throw boom; }, publicKey: 'x' } }, n), 'bad_request', 'signer', 'definite'],
   ['pushDir filter throws', () => pushDir(url, { dir: dir(), ref: 'refs/heads/main', author, message: 'm', filter: () => { throw boom; } }, {}), 'bad_request', 'filter', 'definite'],
-  ['caller transport: frames throws on upload-pack', n => write({ transport: transportWith(() => ({ frames: () => { throw boom; } })) }, n), null, null, 'definite'],
+  // A caller's transport, fetchImpl and pack-cache callbacks are named like the signer (README "Your own code failing").
+  // Hand-derived: an upload-pack request only reads, so a frames() failure there is definite (bad_request: the caller's
+  // code); a receive-pack request was handed to the transport when frames() was called for it, so it is ambiguous.
+  ['caller transport: frames throws on upload-pack', n => write({ transport: transportWith(() => ({ frames: () => { throw boom; } })) }, n), 'bad_request', 'transport.frames', 'definite'],
+  ['caller transport: frames rejects on iteration (upload-pack)', n => write({ transport: transportWith(() => ({ frames: () => (async function* () { await null; throw boom; })() })) }, n), 'bad_request', 'transport.frames', 'definite'],
+  ['caller transport: frames throws when called for receive-pack', n => write({ transport: transportWith(real => ({ frames: (service, body, span, hints) => { if (service === 'git-receive-pack') throw boom; return real.frames(service, body, span, hints); } })) }, n), 'ambiguous', 'transport.frames', 'handed-over'],
   ['caller transport: frames throws after delivering the push', n => write({ transport: transportWith(real => ({
     // the real request is made and fully read (the push lands), then the caller's code throws
     frames: (service, body, span, hints) => service !== 'git-receive-pack' ? real.frames(service, body, span, hints) : (async function* () { const all = []; for await (const f of real.frames(service, body, span, hints)) all.push(f); throw boom; })(),
-  })) }, n), 'ambiguous', null, 'landed'],
+  })) }, n), 'ambiguous', 'transport.frames', 'landed'],
   // advertise is consulted only to confirm a refused push; a healthy push never calls it, so its failure changes nothing
   ['caller transport: advertise rejects', n => write({ transport: transportWith(() => ({ advertise: async () => { await null; throw boom; } })) }, n), 'ok', null, 'ok'],
-  ['fetchImpl throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: () => { throw boom; } }), null, null, 'definite'],
-  ['fetchImpl rejects (write)', n => write({ fetchImpl: async () => { await null; throw boom; } }, n), null, null, 'definite'],
+  // an advertise() that ply does call: the body asks the caller's transport for the upload-pack advertisement
+  ['caller transport: advertise rejects when called', () => operation('probe', url, { transport: transportWith(() => ({ advertise: async () => { await null; throw boom; } })) }, async ({ t, root: span }) => t.advertise('git-upload-pack', span)), 'bad_request', 'transport.advertise', 'definite'],
+  // A fetch that fails is a network failure (README's error table: `network`), whoever supplied the fetch; a supplied one is named.
+  ['fetchImpl throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: () => { throw boom; } }), 'network', 'fetchImpl', 'definite'],
+  ['fetchImpl rejects (write)', n => write({ fetchImpl: async () => { await null; throw boom; } }, n), 'network', 'fetchImpl', 'definite'],
+  // the pack cache's callbacks run on upload-pack (read) requests only: definite, the caller's code (bad_request)
+  ['cachingFetch: shouldCache throws (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, memoryCache(), { shouldCache: () => { throw boom; } }) }), 'bad_request', 'shouldCache', 'definite'],
+  ['cachingFetch: cache.match throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), match: () => { throw boom; } }) }), 'bad_request', 'cache.match', 'definite'],
+  ['cachingFetch: waitUntil throws (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, memoryCache(), { shouldCache: () => true, waitUntil: () => { throw boom; } }) }), 'bad_request', 'waitUntil', 'definite'],
+  // the put of a miss is called inside the fetch that missed, before it answers
+  ['cachingFetch: cache.put throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw boom; } }) }), 'bad_request', 'cache.put', 'definite'],
   // operation()'s own edge, for any callback not wrapped where it is called: the body stands in for one
   ['operation(): a foreign throw before any request', () => operation('probe', url, {}, async () => { await null; throw boom; }), 'bad_request', 'callback', 'definite'],
   ['operation(): a foreign throw after an upload-pack request only', () => operation('probe', url, {}, async ({ t, root: span }) => { await null; t.frames('git-upload-pack', new Uint8Array(0), span, {}); throw boom; }), 'bad_request', 'callback', 'definite'],
@@ -72,10 +86,44 @@ rows.forEach(([label, run, code, what, cls], n) => {
     if (what !== null) {
       assert.equal(r.error.what, what, 'the Err names the callback');
       assert.equal(r.error.cause, boom, 'the Err carries the very value the callback threw as its cause');
+      assert.notEqual(r.error, boom, "the Err is ply's own object, not the caller's thrown value");
+      // a fresh Error has no own enumerable keys (the language): ply wrote none on the caller's object
+      assert.deepEqual(Object.keys(boom), [], "ply wrote nothing on the caller's thrown Error");
     }
     if (cls === 'landed') assert.notEqual(head(), before, 'this row delivers the push before throwing: git says the ref moved, so only ambiguous is honest');
     else assert.equal(head(), before, 'git says the ref did not move');
   });
+});
+
+// The cache's delete is called only on a bust (the transport's one refetch after a poisoned hit, `x-ply-cache: bust`),
+// so the fetch is called here as the transport calls it. A fetch reports a failure by rejecting: the rejection is the
+// named Err, which the transport returns as it is (the cache.match row above shows that path end to end).
+test("cachingFetch: cache.delete throws synchronously on a bust: the fetch rejects with bad_request naming 'cache.delete'", async () => {
+  const thrown = new Error('boom delete');
+  const f = cachingFetch(globalThis.fetch, { ...memoryCache(), delete: () => { throw thrown; } }, { shouldCache: () => true });
+  const e = await f(`${url}/git-upload-pack`, { method: 'POST', headers: { 'x-ply-cache': 'bust' }, body: new Uint8Array(4) }).then(() => assert.fail('the fetch resolved'), x => x);
+  assert.deepEqual([e.code, e.what], ['bad_request', 'cache.delete']);
+  assert.equal(e.cause, thrown, 'the Err carries the very value the callback threw as its cause');
+  assert.notEqual(e, thrown, "the Err is ply's own object, not the caller's thrown value");
+  assert.deepEqual(Object.keys(thrown), [], "ply wrote nothing on the caller's thrown Error");
+});
+
+// With verifyBeforeStore the put is called after the answer was handed back to the read, so a put that throws then
+// cannot be the read's failure: it is counted like a put that rejects (README), and the promise handed to waitUntil
+// does not reject (one put per miss: the expected count is the cache's own miss counter, at least the commit fetch).
+test('cachingFetch verifyBeforeStore: a put that throws when called is counted (putFailed, putError) and the read is ok', async () => {
+  const before = head();
+  const thrown = new Error('boom put');
+  const pending = [];
+  const f = cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw thrown; } }, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+  const r = await readCommit(url, { ref: 'main' }, { fetchImpl: f });
+  assert.equal(r.ok, true);
+  assert.equal(r.value.oid, before, 'git: the commit read is the ref');
+  await Promise.all(pending).catch(e => assert.fail(`the put's promise rejected: ${String(e)}`));
+  assert.ok(f.stats.miss >= 1, 'the commit fetch missed');
+  assert.deepEqual([f.stats.putFailed, f.stats.putOk], [f.stats.miss, 0]);
+  assert.equal(f.stats.putError, 'caller-supplied cache.put threw: boom put');
+  assert.deepEqual(Object.keys(thrown), [], "ply wrote nothing on the caller's thrown Error");
 });
 
 // operation() hands the body a view of the caller's transport (it records the push hand-over), and ply hands each
@@ -133,6 +181,10 @@ const sites = [
   ['operation() after the push request was handed to the transport', v => operation('probe', url, {}, async ({ t, root: span }) => { await null; t.frames('git-receive-pack', new Uint8Array(0), span, {}); throw v; }), 'ambiguous', 'callback'],
   ['signer.sign (editFile)', (v, n) => edit({ signer: { sign: () => { throw v; }, publicKey: 'x' } }, `hostile-${n}`), 'bad_request', 'signer'],
   ['the filesFromDir filter', v => filesFromDir(dir(), { filter: () => { throw v; } }), 'bad_request', 'filter'],
+  ["a caller transport's frames() (readCommit)", v => readCommit(url, { ref: 'main' }, { transport: transportWith(() => ({ frames: () => { throw v; } })) }), 'bad_request', 'transport.frames'],
+  ["a caller transport's frames() (commitChanges)", (v, n) => write({ transport: transportWith(() => ({ frames: () => { throw v; } })) }, `hostile-${n}`), 'bad_request', 'transport.frames'],
+  ['fetchImpl (readCommit)', v => readCommit(url, { ref: 'main' }, { fetchImpl: () => { throw v; } }), 'network', 'fetchImpl'],
+  ['a rejecting fetchImpl (commitChanges)', (v, n) => write({ fetchImpl: async () => { await null; throw v; } }, `hostile-${n}`), 'network', 'fetchImpl'],
 ];
 Object.entries(hostile).forEach(([name, make], i) => {
   sites.forEach(([where, run, code, what], j) => {

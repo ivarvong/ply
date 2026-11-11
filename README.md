@@ -289,13 +289,27 @@ is a `PlyError`: an `Error` with a `code` from a closed union, so `switch (r.err
 exhaustive by the compiler. A stream (`readFile`'s `stream`, `checkoutTree`'s `files`) reports a failure the way a
 stream does: it errors, with that same `PlyError`.
 
-Your own code failing is an `Err` too. When a function you passed throws or rejects, the `Err` names it in
-`error.what` and carries the thrown value, untouched, as `error.cause`: a `signer` whose `sign` fails (or returns a
-non-string) is `bad_request` with `what: 'signer'`; a `pushDir` / `filesFromDir` `filter` is `bad_request` with
-`what: 'filter'`; any other throw that reaches the end of an operation (`editFile`, `commitChanges`, `pushTree`,
-merge, rebase, pick) is `what: 'callback'`. The outcome class follows the push: before the push request was handed to
-the transport nothing can have moved, so the failure is definite (`bad_request`, retry `no`); once it was, the ref may
-have moved, so it is `ambiguous` (read the ref back), with the replaced code, if the thrown value had one, in
+Your own code failing is an `Err` too. When a function you passed throws or rejects, the `Err` carries the thrown
+value, untouched, as `error.cause` (ply writes nothing on it), and `error.what` says whose it was. These are named:
+
+| you passed | `error.what` | `error.code` |
+| --- | --- | --- |
+| `signer` (its `sign` fails, or returns a non-string) | `'signer'` | `bad_request` |
+| `filter` (`pushDir` / `filesFromDir`) | `'filter'` | `bad_request` |
+| `transport`: `frames()` throws, or its stream rejects | `'transport.frames'` | `bad_request` on a read request; `ambiguous` on the push request |
+| `transport`: `advertise()` throws or rejects | `'transport.advertise'` | `bad_request` |
+| `fetchImpl` throws or rejects | `'fetchImpl'` | `network` (a fetch that fails is a network failure); `aborted` / `timeout` instead when the request's signal fired, and those are not named `fetchImpl` |
+| `cachingFetch`'s `shouldCache`, `waitUntil`, or the cache's `match` / `delete` / `put` throws when called | `'shouldCache'`, `'waitUntil'`, `'cache.match'`, `'cache.delete'`, `'cache.put'` | `bad_request` |
+
+Every other function you pass ends in the backstop: a throw from it that reaches the end of an operation (`editFile`,
+`commitChanges`, `pushTree`, merge, rebase, pick) is `what: 'callback'` with the thrown value as `error.cause`. Three things are not failures of the operation: a cache
+whose `match` or `delete` promise rejects is a miss, a `put` that rejects is counted in `stats` (`putFailed`,
+`putError`; so is a `put` that throws under `verifyBeforeStore`, where it is called after the answer was handed back),
+and an `advertise()` ply calls only to confirm a refused push or an empty answer confirms nothing when it fails. A thrown value that already carries one of ply's codes (a transport or fetch that wraps ply's own) is that
+error, as it is. The outcome class follows the push: before the push request was handed to the transport nothing can
+have moved, so the failure is definite (the code in the table; the backstop is `bad_request`, retry `no`); once it
+was, the ref may have moved, so it is `ambiguous` (read the ref back): a named failure on a later read is then the
+`cause` of that `ambiguous`, and the backstop puts the replaced code, if the thrown value had one, in
 `error.original`. `pushDir` and `filesFromDir` also return node:fs's own failures (a missing directory, an unreadable
 file) as `bad_request` with `what: 'dir'` and the node error (its `code` such as `ENOENT` or `EACCES`, its `path`) as
 `error.cause`. This holds whatever the thrown value is: one that cannot be described (a null-prototype object, an

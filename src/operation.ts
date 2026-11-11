@@ -15,7 +15,7 @@ import { Tracer, guardTelemetry } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, RequestBody, Transport, TransportInput } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
-import { transportFrom, withParent } from './transport.js';
+import { plyMade, transportFrom, withParent } from './transport.js';
 import { lsRefs } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 import { callbackFailed, describeThrown, fail, isPlyError, plyError } from './errors.js';
@@ -100,11 +100,12 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     const given = made.value;
     // frames() is called with the receiver it was called on, not `given`: ply hands each exchange a further view
     // (withParent(t, span); merge lowers `limits` the same way), and a caller's frames() reads `this.parent` from it.
+    // plyMade: this frames() is ply's own over an already guarded `given`, so an operation handed `t` guards nothing again.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; a view of `given` (like withParent) whose frames() records the hand-over
-    const t = Object.create(given, { frames: { enumerable: true, value: function frames(this: Transport, service: string, sent: RequestBody, span: Span, hints: Hints): AsyncIterable<Frame> {
+    const t = plyMade(Object.create(given, { frames: { enumerable: true, value: function frames(this: Transport, service: string, sent: RequestBody, span: Span, hints: Hints): AsyncIterable<Frame> {
       if (service !== UPLOAD_PACK) pushHandedOver = true;
       return given.frames.call(this, service, sent, span, hints);
-    } } }) as Transport;
+    } } }) as Transport);
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
     if (t.scrub !== null) root.scrub = t.scrub;
     r = await body({ t, root, outcome, limits: checked.value });
