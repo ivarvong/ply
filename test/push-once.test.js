@@ -135,7 +135,9 @@ test('push: a list with no repeated object hashes no object, though every blob h
 // The same count on the second review's own shape (bench-planpush.mjs): blobs of one length filled from a 32-bit LCG,
 // four bytes a step. An LCG's low byte repeats every 256 steps, so bytes read at a regular stride are the same in
 // every blob although no two blobs are equal: a guard that told objects apart by such bytes hashed all of them.
-// Nothing is sent (the fetch throws after the pack is measured), so the outcome is 'ambiguous'; no object is hashed.
+// Nothing is sent: the fetch throws after the pack is measured and before any chunk of the body is pulled (512 KiB of
+// blobs; a pack over 16 KiB is streamed). README "Errors": such a request is that failure itself, 'network', because
+// the server received no command list ('ambiguous' starts at the first pull). No object is hashed.
 test('push: equal-length blobs that agree at every regular stride are still not hashed', async () => {
   let seed = 12345;
   const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed; };
@@ -151,7 +153,7 @@ test('push: equal-length blobs that agree at every regular stride are still not 
   try {
     const r = await c.value.push({ ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40), objects });
     hashed = spy.mock.calls.map(([b]) => Buffer.from(b.subarray(0, 32)).toString('latin1')).filter(s => /^(?:blob|tree|commit|tag) \d+\0$/u.test(s));
-    assert.equal(r.ok ? 'ok' : r.error.code, 'ambiguous');
+    assert.equal(r.ok ? 'ok' : r.error.code, 'network');
   } finally { spy.mockRestore(); }
   assert.deepEqual(hashed, []);
 });
