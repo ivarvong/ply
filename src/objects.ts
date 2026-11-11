@@ -546,9 +546,10 @@ function fsckIdent(s: string, p: number, kind: string, role: string): Result<rea
   if (!DIGIT.test(s.charAt(q))) return bad('badDate', 'bad date');
   if (s[q] === '0' && s[q + 1] !== ' ') return bad('zeroPaddedDate', 'zero-padded date');
   const start = q;
-  while (DIGIT.test(s.charAt(q))) q++;
-  // By length first: the run has no leading zero (above), so more digits than the limit has is past the limit. The
-  // run is the remote's and as long as the object; BigInt of it is superlinear, so it only ever sees a short one.
+  // By length first: the run has no leading zero (above), so more digits than the limit has is past the limit, and
+  // fsck reports the overflow before it reads what follows the digits. The run is the remote's and as long as the
+  // object, so it is read one digit past the limit's and no further, and BigInt (superlinear) only ever sees a short one.
+  while (q - start <= IDENT_TIMESTAMP_DIGITS && DIGIT.test(s.charAt(q))) q++;
   if (q - start > IDENT_TIMESTAMP_DIGITS || BigInt(s.slice(start, q)) > IDENT_TIMESTAMP_MAX) return bad('badDateOverflow', 'date causes integer overflow');
   if (s[q] !== ' ') return bad('badDate', 'bad date');
   q++;

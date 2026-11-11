@@ -55,6 +55,40 @@ test('a huge timestamp costs no more conversion work than a benign object of the
   }
 });
 
+// The second work counter: every character the parse classifies with a regex (RegExp.prototype.test). The digit run
+// was still walked to its end one regex test a digit after BigInt stopped seeing it: linear, but about 200 times the
+// CPU of a same-size benign object (the reviewer's exp6-cputime.mjs on 91f0e71: 64 ms against 0.3 ms at 4M digits).
+// The expected bound is git's rule, not ply's code: with no leading zero a 20th digit is already past 2^63 - 1, and
+// fsck_ident reports the overflow before it reads what follows the digits, so 20 digits of one timestamp decide it.
+function charsClassified(fn) {
+  const real = RegExp.prototype.test;
+  let tests = 0;
+  // oxlint-disable-next-line no-extend-native -- a counter for the length of this call, restored in finally
+  RegExp.prototype.test = function test(s) { tests++; return real.call(this, s); };
+  try { return { value: fn(), tests }; } finally { RegExp.prototype.test = real; }
+}
+
+test('a huge timestamp is not walked to its end: the characters classified do not grow with the digit run', () => {
+  for (const [parse, text] of [[parseCommit, commitText], [parseTag, tagText]]) {
+    const counts = [];
+    for (const n of [100_000, 200_000, 400_000]) {
+      const benign = charsClassified(() => parse(latin1(text('1700000000', `${'9'.repeat(n - 10)}m\n`))));
+      assert.equal(benign.value.ok, true, 'benign object parses');
+      // the counter is live: the 10 digits of a benign time are each classified
+      assert.ok(benign.tests >= 10, `${parse.name} benign n=${n}: ${benign.tests} characters classified`);
+      const hostile = charsClassified(() => parse(latin1(text('9'.repeat(n)))));
+      assert.equal(hostile.value.ok, false);
+      assert.equal(hostile.value.error.msgId, 'badDateOverflow');
+      // the hostile object is refused at its first ident: it can never need more than the benign one, which reads
+      // every ident to the end, plus the 10 further digits (20 against 10) that decide the overflow
+      assert.ok(hostile.tests <= benign.tests + 10,
+        `${parse.name} n=${n}: ${hostile.tests} characters classified for the hostile object, ${benign.tests} for the same-size benign one`);
+      counts.push(hostile.tests);
+    }
+    assert.deepEqual(counts, [counts[0], counts[0], counts[0]], `${parse.name}: the same work at 100k, 200k and 400k digits`);
+  }
+});
+
 function git(dir, args, input) {
   const r = spawnSync('git', ['-C', dir, ...args], { input, maxBuffer: 1 << 28 });
   return { code: r.status ?? 1, out: `${r.stdout ?? ''}`, err: `${r.stderr ?? ''}` };
