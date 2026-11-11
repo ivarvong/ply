@@ -253,15 +253,37 @@ const unpackReasonMatches = (status: string, reason: string): boolean => {
   return false;
 };
 const echoedFailure = (status: string, refs: readonly RefStatus[]): boolean => status !== 'ok' && refs.every(r => !r.ok && unpackReasonMatches(status, r.reason));
-// Artifacts' body cap, echoed on unpack and ng (observed 2026-11-10, #266, ray a58a707c0a76c98d-IAD).
-const TOO_LARGE = /^artifacts_git_receive_pack_request_too_large: push is ([0-9]+[.]?[0-9]*) MiB, limit is ([0-9]+[.]?[0-9]*) MiB$/u;
-/* oxlint-disable no-magic-numbers -- 2^10 and 2^20, converting Artifacts' MiB figures to bytes */
+// Artifacts' body cap, echoed on unpack and ng (observed 2026-11-10, #266, ray a58a707c0a76c98d-IAD):
+//   artifacts_git_receive_pack_request_too_large: push is 286.3 MiB, limit is 64.0 MiB
+// A reason is host-written, up to a pkt-line long, so it is parsed by hand in time linear in what is examined, and
+// what is examined is capped: a reason over TOO_LARGE_CHARS is not this message (the real one is 86 characters). The
+// literal parts are compared in place; each figure is under TOO_LARGE_CHARS characters matched against MIB_FIGURE: two
+// anchored alternatives, every quantifier bounded, the two digit runs separated by a required '.', so a digit run
+// matches one way only. (The pattern this
+// replaces, `[0-9]+[.]?[0-9]*` twice, split a digit run every possible way: 12.9 s for a 2,492-byte reason.)
+const TOO_LARGE_HEAD = 'artifacts_git_receive_pack_request_too_large: push is ';
+const TOO_LARGE_MID = ' MiB, limit is ';
+const TOO_LARGE_TAIL = ' MiB';
+// At most 9 integer digits and 6 decimals: under 10^9 MiB, about 2^50 bytes, so the byte count is a safe integer.
+const MIB_FIGURE = /^[0-9]{1,9}$|^[0-9]{1,9}[.][0-9]{1,6}$/u;
+/* oxlint-disable no-magic-numbers -- 2^10 and 2^20, converting Artifacts' MiB figures to bytes; the longest reason examined */
 const KIB = 1024;
 const MIB = KIB * KIB;
+const TOO_LARGE_CHARS = 128;
 /* oxlint-enable no-magic-numbers */
+// One figure in bytes, or null: not a decimal figure, or not a positive exact byte count.
+const mibBytes = (figure: string): number | null => {
+  if (!MIB_FIGURE.test(figure)) return null;
+  const bytes = Math.round(Number(figure) * MIB);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null;
+};
 export const parseReceivePackTooLarge = (reason: string): { readonly got: number; readonly max: number } | null => {
-  const m = TOO_LARGE.exec(reason);
-  return m === null ? null : { got: Math.round(Number(m[1]) * MIB), max: Math.round(Number(m[2]) * MIB) };
+  if (reason.length > TOO_LARGE_CHARS || !reason.startsWith(TOO_LARGE_HEAD) || !reason.endsWith(TOO_LARGE_TAIL)) return null;
+  const mid = reason.indexOf(TOO_LARGE_MID, TOO_LARGE_HEAD.length);
+  if (mid < 0) return null;
+  const got = mibBytes(reason.slice(TOO_LARGE_HEAD.length, mid));
+  const max = mibBytes(reason.slice(mid + TOO_LARGE_MID.length, reason.length - TOO_LARGE_TAIL.length));
+  return got === null || max === null ? null : { got, max };
 };
 const malformed = (why: string): Malformed => ({ tag: 'malformed', why });
 // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrayDeclaration: reportStep calls it on "ng <rest>" only; with no space or a leading one, every split names no commanded ref

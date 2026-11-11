@@ -6,7 +6,7 @@
 // the status, or an "ok" beside it. A delete-only push answered with any unpack failure stays ambiguous (no pack sent).
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { classifyReport, decideOutcome, push, ZERO_OID } from '../src/push.js';
+import { classifyReport, decideOutcome, parseReceivePackTooLarge, push, ZERO_OID } from '../src/push.js';
 import { DEFAULT_LIMITS } from '../src/limits.js';
 import { pkt, FLUSH } from '../src/pktline.js';
 import { concat, te } from '../src/bytes.js';
@@ -179,4 +179,70 @@ test('an empty receive-pack report stays ambiguous (concurrent same-repo 200 wit
   assert.equal(plainEmpty.error.code, 'ambiguous');
   // classifyReport of zero lines is still malformed, not a rejection
   assert.deepEqual(decideOutcome(cls([])), { tag: 'ambiguous', why: 'no git unpack line first' });
+});
+
+// Review ec337c5 (push/too-large-regex-cubic-redos, hostile/too-large-regex-quadratic): the #266 pattern was
+// `[0-9]+[.]?[0-9]*` twice, so a digit run that never reaches " MiB" was split every possible way: quadratic for one
+// run (65,000 digits: 2.3 s), cubic for two (2,492 bytes: 12.9 s), on a reason any host writes in one pkt-line.
+// Host text is classified in time linear in its length. Proved by ratio, not by a clock threshold: 64 times the input
+// may cost at most 300 times the best run (linear is 64; quadratic 4,096; cubic 262,144).
+const HEAD = 'artifacts_git_receive_pack_request_too_large: push is ';
+const adversarial = [
+  ['one digit run, no " MiB"', n => HEAD + '1'.repeat(n)],
+  ['two digit runs, a wrong last byte', n => `${HEAD}${'1'.repeat(Math.floor(n / 3))} MiB, limit is ${'1'.repeat(n - Math.floor(n / 3))}X`],
+  ['digits and dots', n => `${HEAD}${'1.'.repeat(n / 2)} MiB, limit is 1 MiB`],
+];
+// ns per call, the best of `rounds` batches (the minimum is the run least disturbed by the machine)
+const best = (fn, batch, rounds) => {
+  let b = Infinity;
+  for (let i = 0; i < rounds; i++) {
+    const t0 = process.hrtime.bigint();
+    for (let j = 0; j < batch; j++) fn();
+    b = Math.min(b, Number(process.hrtime.bigint() - t0) / batch);
+  }
+  return b;
+};
+// a call that already takes over a millisecond is timed alone (the pre-fix pattern takes seconds); the verdict is the ratio
+const cost = fn => { const probe = best(fn, 1, 1); return probe > 1e6 ? Math.min(probe, best(fn, 1, 2)) : best(fn, 20, 9); };
+const SMALL = 1000, BIG = 64000, MAX_RATIO = 300;
+
+test('a host-written reason is classified in linear time: 64,000 adversarial digits cost under 300 times 1,000', { timeout: 120_000 }, () => {
+  for (const [name, make] of adversarial) {
+    const small = make(SMALL), big = make(BIG);
+    assert.equal(parseReceivePackTooLarge(big), null, name);
+    const direct = cost(() => parseReceivePackTooLarge(big)) / cost(() => parseReceivePackTooLarge(small));
+    assert.ok(direct < MAX_RATIO, `${name}: parseReceivePackTooLarge ${BIG} digits cost ${direct.toFixed(0)}x ${SMALL} digits`);
+    // the whole path a report line takes: reportStep's printable check, ngClass, rejectionCode, as ng and as an echoed unpack
+    const decide = reason => () => {
+      assert.equal(decideOutcome(cls([`unpack ok\n`, `ng ${A} ${reason}\n`])).code, 'push_rejected');
+      assert.equal(decideOutcome(cls([`unpack ${reason}\n`, `ng ${A} ${reason}\n`])).code, 'push_rejected');
+    };
+    const whole = cost(decide(big)) / cost(decide(small));
+    assert.ok(whole < MAX_RATIO, `${name}: classifyReport + decideOutcome ${BIG} digits cost ${whole.toFixed(0)}x ${SMALL} digits`);
+  }
+});
+
+test('parseReceivePackTooLarge: the observed Artifacts text parses to the same bytes; near misses and insane figures do not', () => {
+  // By hand, 1 MiB = 1,048,576 bytes: 286.3 MiB = 286 * 1,048,576 + 0.3 * 1,048,576 = 299,892,736 + 314,572.8
+  // = 300,207,308.8, rounded 300,207,309; 64.0 MiB = 67,108,864.
+  assert.deepEqual(parseReceivePackTooLarge(TOO_LARGE), { got: 300207309, max: 67108864 });
+  // whole MiB figures (no fraction): 65 * 1,048,576 = 68,157,440
+  assert.deepEqual(parseReceivePackTooLarge(`${HEAD}65 MiB, limit is 64 MiB`), { got: 68157440, max: 67108864 });
+  // 0.5 MiB = 524,288; 1.25 MiB = 1,310,720
+  assert.deepEqual(parseReceivePackTooLarge(`${HEAD}1.25 MiB, limit is 0.5 MiB`), { got: 1310720, max: 524288 });
+  const no = [
+    '', HEAD, `${HEAD} MiB, limit is  MiB`, `${HEAD}286.3 MiB, limit is 64.0 MiB `, ` ${TOO_LARGE}`, `${TOO_LARGE}\n`, TOO_LARGE.replace('MiB,', 'GiB,'),
+    `${HEAD}286.3 MiB, limit is 64.0`, `${HEAD}.3 MiB, limit is 64.0 MiB`, `${HEAD}286. MiB, limit is 64.0 MiB`, `${HEAD}2.8.6 MiB, limit is 64.0 MiB`,
+    `${HEAD}-1 MiB, limit is 64.0 MiB`, `${HEAD}1e3 MiB, limit is 64.0 MiB`, `${HEAD}Infinity MiB, limit is 64.0 MiB`, `${HEAD}0x10 MiB, limit is 64.0 MiB`,
+    // a limit of nothing is not a size cap
+    `${HEAD}286.3 MiB, limit is 0 MiB`, `${HEAD}286.3 MiB, limit is 0.0 MiB`,
+    // more digits than any byte count ply can hold exactly: 10^10 MiB is over 2^53 bytes
+    `${HEAD}10000000000 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is ${'9'.repeat(400)} MiB`,
+    // the right shape after a megabyte of padding is still not examined
+    `${HEAD}${'0'.repeat(300)}286.3 MiB, limit is 64.0 MiB`,
+  ];
+  for (const reason of no) assert.equal(parseReceivePackTooLarge(reason), null, JSON.stringify(reason.slice(0, 120)));
+  // every figure that parses is a safe, positive byte count
+  const top = parseReceivePackTooLarge(`${HEAD}999999999.999999 MiB, limit is 999999999.999999 MiB`);
+  assert.ok(top !== null && Number.isSafeInteger(top.got) && top.got === top.max && top.got > 0, JSON.stringify(top));
 });
