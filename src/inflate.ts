@@ -3,6 +3,7 @@
 // streams with no length prefix; `consumed` is what positions a buffered reader at the next object header.
 import type { Result } from './result.js';
 import { ok, assertNever } from './result.js';
+import { fail } from './errors.js';
 import { fromNullable, fromNullish, type Input } from './absent.js';
 import { DEFAULT_LIMITS } from './limits.js';
 import type { InflateStats, InflateError } from './inflatestream.js';
@@ -29,8 +30,13 @@ export type Inflated = { readonly out: Uint8Array; readonly consumed: number; re
 
 // The member at buf[pos..], whole: the input is closed once it is fed, so the pull ends the member or says where it was
 // cut. With a declared size the output is one buffer of that size; without one, the chunks joined once at the end.
+// pos is a position in buf: a non-negative safe integer no greater than buf.length (at the end there are no bytes, a
+// cut member). Anything else is `bad_request` before a byte is read: subarray reads a negative offset from the end of
+// the buffer and coerces a string or a fraction, so an unchecked pos inflated bytes the caller never named (or threw).
 // @decoder inflate prefix=inflate
 export function inflate(buf: Uint8Array, pos = 0, opts: InflateOptions = {}): Result<Inflated, InflateError> {
+  // isSafeInteger is false for every non-number (no coercion); the message names the type, never an unbounded value
+  if (!Number.isSafeInteger(pos) || pos < 0 || pos > buf.length) return fail('bad_request', `inflate: pos (${typeof pos === 'number' ? String(pos) : typeof pos}) is not a position in a buffer of ${buf.length} bytes`);
   const { verifyAdler = true, raw = false } = opts;
   const expected = fromNullish(opts.expectedSize);
   // Omitted means the object cap; a given cap is checked by the pull (inflateInit), so `null` is bad_request there.

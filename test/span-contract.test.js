@@ -18,7 +18,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { Tracer, arrayExporter, KIND } from '../src/otel.js';
 import { createTransport as createTransportR } from '../src/http.js';
 import { editFile } from '../src/edit.js';
@@ -140,7 +140,7 @@ after(async () => { await srv?.close(); cleanup?.(); });
 
 const repo = () => {
   const name = `c${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`);
-  mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  mkdirSync(work); initRepo(work);
   return { bare, work, url: `${srv.url}/${name}.git` };
 };
 const G = ['-c', 'user.name=seed', '-c', 'user.email=seed@x', '-c', 'commit.gpgsign=false'];

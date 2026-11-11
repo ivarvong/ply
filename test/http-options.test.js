@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { createTransport, parseHttpOptions } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
 import { readFile } from '../src/read.js';
-import { DEFAULT_LIMITS, withLimits } from '../src/limits.js';
+import { DEFAULT_LIMITS, withLimits, parseLimits } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
 const counting = () => { const c = { n: 0 }; c.fetchImpl = async () => { c.n++; return new Response('', { status: 500 }); }; return c; };
@@ -227,6 +227,28 @@ test('a URL that does not parse, and a NUL, CR or LF in its userinfo, are refuse
   }
   // explicit auth wins: the URL's userinfo is not read, so it is not refused either
   assert.equal(parseHttpOptions('https://u%0a@h/r.git', { auth: { token: 't' } }).ok, true);
+});
+
+// security/url-slash-run-regex-quadratic: the memo key was made with /\/+$/ on the caller's path, which rescans a slash
+// run from each of its slashes when the run does not end the path (quadratic). The keys below are worked by hand from
+// the stated rule (origin + path; query, fragment, userinfo and trailing slashes dropped), not read off ply.
+import { quirksKey, quirksKeyOf } from '../src/transport.js';
+test('quirksKeyOf: the key drops only trailing slashes, in time linear in the path (64x the slashes costs under 300x)', () => {
+  assert.equal(quirksKey('http://h.example/a/b///'), 'http://h.example/a/b');
+  assert.equal(quirksKey('http://h.example/'), 'http://h.example');
+  assert.equal(quirksKey('http://h.example////'), 'http://h.example');
+  assert.equal(quirksKey('http://h.example///x'), 'http://h.example///x');
+  assert.equal(quirksKey('http://h.example/a//b/'), 'http://h.example/a//b');
+  assert.equal(quirksKey('https://u:p@h.example:8443/r.git/?q=1#f'), 'https://h.example:8443/r.git');
+  // A run of slashes that does not end the path. One call on 64n slashes against 64 calls on n: linear work is equal,
+  // quadratic work is 64 times more. Best of 5 each, so load only ever narrows the ratio's noise, never widens it.
+  const N = 500;
+  const small = new URL(`http://h.example/${'/'.repeat(N)}x`);
+  const big = new URL(`http://h.example/${'/'.repeat(64 * N)}x`);
+  const best = (fn) => { let b = Infinity; for (let i = 0; i < 5; i++) { const t0 = performance.now(); fn(); b = Math.min(b, performance.now() - t0); } return b; };
+  const smallMs = best(() => { for (let i = 0; i < 64; i++) quirksKeyOf(small); }) / 64;
+  const bigMs = best(() => quirksKeyOf(big));
+  assert.ok(bigMs < 300 * smallMs, `64x the slashes cost ${(bigMs / smallMs).toFixed(0)}x the time (${bigMs.toFixed(3)} ms against ${smallMs.toFixed(5)} ms)`);
 });
 
 // The redirect memo (ply-web#117), against a fetch double. `moves` maps a path prefix to where its info/refs (and, with
@@ -550,4 +572,76 @@ test('the POST span: status, content type, a time to first byte from the request
   assert.equal(plain.attrs['http.response.header.x-tag'], undefined);
   assert.equal(plain.attrs['http.response.headers.from_cache'], undefined, 'no recorded names: no recorded-header attributes at all');
   assert.equal(recorded.attrs['http.response.headers.from_cache'], true);
+});
+
+test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the options enter; 0 (off) and 2^31-1 pass', () => {
+  // setTimeout's delay is a signed 32-bit count of ms: 2147483647 is the largest it holds (HTML timers; Node warns)
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+    for (const bad of [2 ** 31, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
+      const r = createTransport('https://h/r', { limits: { [key]: bad } });
+      assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.got], [false, 'bad_request', key, bad], `${key}=${bad}`);
+    }
+    for (const fine of [0, 1, 2 ** 31 - 1]) assert.equal(createTransport('https://h/r', { limits: { [key]: fine } }).ok, true, `${key}=${fine}`);
+  }
+});
+
+// The refusal's text reaches the caller: the key by its name, the bound written out (2^31 - 1 = 2147483647), and the
+// way to turn the timer off. Hand-written here, not read from src. The bound is the timers' alone: a limit that is not
+// a timer passes above it.
+test('a timeout above 2^31-1 ms is refused with a message naming the key and the bound; a limit that is no timer passes above it', () => {
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+    const message = `limits.${key} must be at most 2147483647 ms (0 turns the timer off)`;
+    for (const r of [createTransport('https://h/r', { limits: { [key]: 2147483648 } }), parseHttpOptions('https://h/r', { limits: { [key]: 2147483648 } }), parseLimits({ [key]: 2147483648 })]) {
+      assert.deepEqual([r.ok, r.error?.code, r.error?.message, r.error?.what, r.error?.got], [false, 'bad_request', message, key, 2147483648], key);
+    }
+  }
+  const big = parseLimits({ maxPackBytes: 2147483648 });
+  assert.deepEqual([big.ok, big.value?.maxPackBytes], [true, 2147483648]);
+});
+
+// The scheme rule (src/http.ts parseHttpOptions), in the suite the mutation gate runs. ply speaks git smart HTTP only
+// (SAFETY.md), so the rule itself gives every expectation: http: and https: pass, in any letter case (WHATWG URL
+// lowercases the scheme); anything else is a definite bad_request about the url, before any I/O. The message is the
+// fixed text README documents, and the allowUrl rows are the train head's verdicts (607691d1) recorded by the probe in
+// scratch (fix9/http-scheme-mutants-kill/probe-before.txt), not read back from the code under test here.
+import { listRefs } from '../src/index.js';
+const SCHEME_MESSAGE = 'invalid url: only http: and https: remotes are supported';
+const NOT_HTTP = ['file:///etc/passwd', 'data:text/plain,hi', 'blob:nodedata:abc', 'ssh://git@127.0.0.1/repo.git', 'git://127.0.0.1/repo.git', 'ext::sh -c "touch /tmp/pwned"'];
+
+test('a base URL that is not http(s) is bad_request, what: url, with the fixed message, and the fetch implementation is never called', async () => {
+  for (const url of NOT_HTTP) {
+    const c = counting();
+    for (const r of [createTransport(url, { fetchImpl: c.fetchImpl }), parseHttpOptions(url, { fetchImpl: c.fetchImpl }), await listRefs(url, {}, { fetchImpl: c.fetchImpl })]) {
+      assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.message], [false, 'bad_request', 'url', SCHEME_MESSAGE], url);
+    }
+    assert.equal(c.n, 0, url);
+  }
+});
+
+test('http: and https: bases pass the scheme rule, in any letter case, and are the URL requested', () => {
+  for (const [url, href] of [['http://127.0.0.1/r.git', 'http://127.0.0.1/r.git'], ['HTTP://127.0.0.1/r.git', 'http://127.0.0.1/r.git'], ['https://127.0.0.1/r.git', 'https://127.0.0.1/r.git'], ['HtTpS://127.0.0.1/r.git', 'https://127.0.0.1/r.git']]) {
+    const settings = parseHttpOptions(url, {});
+    assert.equal(settings.ok, true, url);
+    assert.equal(settings.value.url.href, href, url);
+    assert.equal(createTransport(url, {}).ok, true, url);
+  }
+});
+
+test('an allowUrl that maps an http(s) base to another scheme is refused as allowUrl\'s fault before any fetch; one that maps a caller\'s scheme to https passes', () => {
+  for (const target of NOT_HTTP) {
+    for (const base of ['https://127.0.0.1/r.git', 'http://127.0.0.1/r.git']) {
+      const c = counting();
+      const allowUrl = () => ({ ok: true, value: new URL(target) });
+      // no transport exists after the refusal, so nothing can fetch (the one-call entry points take no allowUrl)
+      for (const r of [createTransport(base, { fetchImpl: c.fetchImpl, allowUrl }), parseHttpOptions(base, { fetchImpl: c.fetchImpl, allowUrl })]) {
+        assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.message], [false, 'bad_request', 'allowUrl', 'allowUrl must return an http(s) URL'], `${base} -> ${target}`);
+      }
+      assert.equal(c.n, 0, target);
+    }
+  }
+  for (const url of [...NOT_HTTP, 'repo://alias/team/r.git']) {
+    const settings = parseHttpOptions(url, { allowUrl: () => ({ ok: true, value: new URL('https://real.example/team/r.git') }) });
+    assert.equal(settings.ok, true, url);
+    assert.equal(settings.value.url.href, 'https://real.example/team/r.git', url);
+  }
 });

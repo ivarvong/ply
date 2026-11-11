@@ -34,7 +34,13 @@ export type Signer = {
   // namespace: 'git' when none is given (ssh-keygen -Y sign -n git)
   sign(message: Uint8Array, ...namespace: [] | [string]): Promise<string>;
 };
-export type SignerKey = { readonly privateKey: CryptoKey; readonly publicKeyRaw: Uint8Array };
+// WebCrypto's key, named through the one thing every supported lib declares: the global `crypto` and the key its
+// `subtle.sign` takes. The type names `CryptoKey` and `CryptoKeyPair` are DOM-lib names a Node consumer with lib ES2022
+// + @types/node does not have, and the global `CryptoKey` value exists only from @types/node 24 (20 and 22 declare
+// `crypto` alone), so neither can appear in the declarations. test/dist-types.test.js compiles them on each.
+type WebCryptoKey = Parameters<typeof crypto.subtle.sign>[1];
+type WebCryptoKeyPair = { privateKey: WebCryptoKey; publicKey: WebCryptoKey };
+export type SignerKey = { readonly privateKey: WebCryptoKey; readonly publicKeyRaw: Uint8Array };
 
 export function ed25519Signer({ privateKey, publicKeyRaw }: SignerKey): Signer {
   const pub = sshPublicKey(publicKeyRaw);
@@ -58,13 +64,17 @@ export function withGpgsig(commitBytes: Uint8Array, signatureText: string): Resu
   // decodeBytes/encodeBytes: a Latin-1 message or ident goes back out as its own bytes, and so is what was signed (#43)
   const text: string = decodeBytes(commitBytes);
   const nl = text.indexOf('\n\n');
-  const headers = (nl < 0 ? text : text.slice(0, nl)).split('\n');
+  // The header lines end at the blank line or, in a commit with no body section, at its final newline. Everything
+  // from there on goes back out as it came in: the object without its gpgsig header is the object that was signed.
+  const noBodyEnd = text.endsWith('\n') ? text.length - 1 : text.length;
+  const headEnd = nl < 0 ? noBodyEnd : nl;
+  const headers = text.slice(0, headEnd).split('\n');
   let i = headers.findIndex(l => l.startsWith(`${COMMIT_HEADER_COMMITTER} `));
   if (i < 0) return fail('bad_request', 'commit has no committer line');
   if (atOr(headers, i + 1, '').startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
   // the gpgsig header: the armored signature, its continuation lines prefixed by a space
   headers.splice(i + 1, 0, `gpgsig ${signatureText.replace(/\n$/u, '').split('\n').join('\n ')}`);
-  return encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit');
+  return encodeBytes(headers.join('\n') + text.slice(headEnd), 'commit');
 }
 
 // Sign an encoded (unsigned) commit: the signed commit bytes. The message signed is the unsigned commit. The signer is
@@ -74,7 +84,7 @@ export async function signCommit(commitBytes: Uint8Array, signer: Signer, namesp
 }
 
 // Convenience for node/tests: a fresh Ed25519 key pair as a signer.
-export type GeneratedSigner = { readonly signer: Signer; readonly keyPair: CryptoKeyPair; readonly publicKeyRaw: Uint8Array };
+export type GeneratedSigner = { readonly signer: Signer; readonly keyPair: WebCryptoKeyPair; readonly publicKeyRaw: Uint8Array };
 export async function generateSigner(): Promise<GeneratedSigner> {
   const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));

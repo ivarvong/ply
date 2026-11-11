@@ -112,8 +112,10 @@ export async function measurePack(objects: readonly PackInput[], keep: number = 
 // Pass 2: `prefix` (the commands, and push options) and then the pack, as a stream read at the reader's pace. `failure`
 // is null until this pass refuses to finish the pack (a length or SHA-1 that is not pass 1's) or the deflate fails; the
 // stream is then errored before the trailer, whatever the runtime does with an errored request body (undici aborts the
-// request; workerd ends it as if complete, measured), so the server never gets a whole pack.
-export type StreamedPack = { readonly stream: ReadableStream<Uint8Array>; readonly length: number; readonly failure: () => ErrorOf<'internal'> | null };
+// request; workerd ends it as if complete, measured), so the server never gets a whole pack. `pulled` is whether the
+// transport ever asked the body for a byte: until it has, nothing of this push left the process (the first pull hands
+// over the command list).
+export type StreamedPack = { readonly stream: ReadableStream<Uint8Array>; readonly length: number; readonly failure: () => ErrorOf<'internal'> | null; readonly pulled: () => boolean };
 export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
   const it = pieces(m.objects);
   let failed: ErrorOf<'internal'> | null = null;
@@ -144,7 +146,7 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
     // Stryker disable next-line ObjectLiteral,ArrayDeclaration: equivalent, see above
     async cancel(): Promise<void> { await it.return({ entries: [], body: 0, digest: new Uint8Array(0) }); },
   }, { highWaterMark: 0 });
-  return { stream, length: prefix.length + m.bytes, failure: () => failed };
+  return { stream, length: prefix.length + m.bytes, failure: () => failed, pulled: () => started };
 }
 
 // A pack the caller already has, as the request body after `prefix` (commands, and push options): read at the reader's
@@ -156,9 +158,14 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
 // with an errored request body (undici aborts the request; workerd ends it as if complete, measured: streamPack above).
 // `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish
 // (asked once, not waited for).
+// `pulled` is whether the transport ever asked the body for a byte. Until it has, nothing of this push left the
+// process (the first pull hands over the command list), and `giveBack` then returns the source as it came: unlocked,
+// unread and not cancelled (after a pull it does nothing). A body given back errors if it is pulled after all, so it
+// sends nothing. A transport that cancels the body itself still cancels the source, pulled or not.
 export type SourcedPack = {
   readonly stream: ReadableStream<Uint8Array>; readonly length: number;
   readonly failure: () => PlyError | null; readonly sent: () => number; readonly release: () => Promise<void>;
+  readonly pulled: () => boolean; readonly giveBack: () => void;
 };
 export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Array, length: number | null, maxPack: number): SourcedPack {
   const reader = source.getReader();
@@ -177,12 +184,20 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
     // a cancel() that throws where it stands, or answers with something that is not a promise, changes nothing either
     try { Promise.resolve(reader.cancel(why)).catch(() => null); } catch { /* the source's own failure to cancel: nothing waits on it */ }
   };
+  const giveBack = (): void => {
+    if (!open || started) return;
+    open = false;
+    reader.releaseLock();
+  };
   const refuse = async (c: ReadableStreamDefaultController<Uint8Array>, e: PlyError): Promise<void> => { failed = e; c.error(e); await release(e); };
   const mismatch = (want: number): ErrorOf<'bad_request'> => plyError('bad_request', `pushPack: the pack stream yielded ${read} bytes where length said ${want}; it was not sent whole`, { what: 'push pack length', got: read, max: want });
   const emit = (c: ReadableStreamDefaultController<Uint8Array>, chunk: Uint8Array): void => { sent += chunk.length; c.enqueue(chunk); };
   const stream = new ReadableStream<Uint8Array>({
     async pull(c): Promise<void> {
-      if (!started) { started = true; c.enqueue(prefix); return; }
+      if (!started) {
+        if (!open) { failed = plyError('internal', 'pushPack: the request body was pulled after the push had ended; nothing was sent', { what: 'push pack' }); c.error(failed); return; }
+        started = true; c.enqueue(prefix); return;
+      }
       for (;;) {
         let r: ReadableStreamReadResult<Uint8Array>;
         // oxlint-disable-next-line no-await-in-loop -- one chunk at a time, at the request's pace
@@ -212,5 +227,5 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
     },
     async cancel(why): Promise<void> { await release(why); },
   }, { highWaterMark: 0 });
-  return { stream, length: prefix.length + (length === null ? 0 : length), failure: () => failed, sent: () => sent, release };
+  return { stream, length: prefix.length + (length === null ? 0 : length), failure: () => failed, sent: () => sent, release, pulled: () => started, giveBack };
 }

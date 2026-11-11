@@ -5,7 +5,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync, cpSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { GitHttp, ZERO_OID } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { TYPE } from '../src/objects.js';
@@ -37,7 +37,7 @@ const CONFIG = {
 // Build a twin: bare repo pair (ours / git's) seeded identically, plus a work clone holding the candidate commits.
 function twins(cfg, hook) {
   const id = n++;
-  const seedWork = join(root, `w${id}`); mkdirSync(seedWork); git(seedWork, ['init', '-q', '-b', 'main']);
+  const seedWork = join(root, `w${id}`); mkdirSync(seedWork); initRepo(seedWork);
   const env = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@x', GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000' };
   writeFileSync(join(seedWork, 'f.txt'), 'base content\nMARK\n'); git(seedWork, ['add', '-A']); git(seedWork, ['commit', '-q', '-m', 'base'], { env });
   const base = git(seedWork, ['rev-parse', 'HEAD']).trim();
@@ -142,7 +142,7 @@ test(`push matrix: configs × hooks × commands × caps, parity with git push ($
 });
 
 test('push default: side-band-64k is requested unless disabled, and band 2 lands in git.push.remote.messages', async () => {
-  const bare = makeBareRepo(root, 'sbdef'); const work = join(root, 'wsbdef'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'sbdef'); const work = join(root, 'wsbdef'); mkdirSync(work); initRepo(work);
   const { commitFiles } = await import('./server.js');
   const head = commitFiles(work, bare, { 'f.txt': 'x\n' }, 'seed');
   const hooks = join(bare, 'hooks'); mkdirSync(hooks, { recursive: true });

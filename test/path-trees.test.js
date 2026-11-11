@@ -8,7 +8,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { readFile, listTree, walkCommit } from '../src/read.js';
 import { createTransport } from '../src/http.js';
@@ -45,7 +45,7 @@ after(async () => { await srv.close(); cleanup(); });
 // A repository behind a recording proxy. `config`: upload-pack settings on top of makeBareRepo's. `lie(ctx)`: a fault
 // for a deep fetch's answer (or null to pass it).
 async function repo({ config = [], fault = null } = {}) {
-  const name = `p${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const name = `p${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); initRepo(work);
   for (const [k, v] of config) git(bare, ['config', k, v]);
   commitFiles(work, bare, FILES, 'seed');
   const seen = [];

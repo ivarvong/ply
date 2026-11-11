@@ -13,10 +13,13 @@ import { none, some } from '../src/result.js';
 // ---- the model: src/lsrefs.ts at c91c9cf, with parseOid's rule spelled out (40 lowercase hex after lowercasing) ----
 const R_OK = (value) => ({ ok: true, value });
 const R_ERR = (code, message, extra = {}) => ({ ok: false, error: { code, message, ...extra } });
+// SAFETY.md "Remote text": an ERR message carries no control character and no lone surrogate; each is written as its
+// UTF-16 unit, \uXXXX (tab and newline stay). Stated here by code-unit ranges, not with the helper under test.
+const shownModel = s => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 const malformed = (line) => R_ERR('protocol', `ls-refs: malformed line ${JSON.stringify(line.slice(0, 60))}`);
 const sha1Model = (text) => { const l = text.toLowerCase(); return /^[0-9a-f]{40}$/.test(l) ? l : null; };
 function parseModel(line) {
-  if (line.startsWith('ERR ')) return R_ERR('remote_error', `remote: ${line.slice(4)}`);
+  if (line.startsWith('ERR ')) return R_ERR('remote_error', `remote: ${shownModel(line.slice(4))}`);
   const sp = line.indexOf(' ');
   if (sp < 0) return malformed(line);
   const oid = line.slice(0, sp);

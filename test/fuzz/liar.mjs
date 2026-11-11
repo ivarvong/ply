@@ -11,7 +11,7 @@
 import { join } from 'node:path';
 import { mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { Rng } from './prng.js';
 import { genDag, readModel } from './dag.js';
@@ -150,7 +150,7 @@ try {
   const names = Object.keys(LIES);
   const seeds = ONLY !== null ? [ONLY] : Array.from({ length: N }, (_, i) => (SEED * 7919 + i * 104729) >>> 0);
   // the unrelated commit for mb:extra-foreign, made once
-  const dbare0 = makeBareRepo(root, 'decoy0'); const dwork0 = join(root, 'decoy0w'); mkdirSync(dwork0); git(dwork0, ['init', '-q', '-b', 'main']);
+  const dbare0 = makeBareRepo(root, 'decoy0'); const dwork0 = join(root, 'decoy0w'); mkdirSync(dwork0); initRepo(dwork0);
   const decoy = obj(dbare0, commitFiles(dwork0, dbare0, { 'decoy.txt': 'decoy\n' }, 'decoy'));
   for (let i = 0; i < seeds.length; i++) {
     const rng = new Rng(seeds[i]);
@@ -166,12 +166,12 @@ try {
     const lie = names[rng.int(0, names.length - 1)];
     const name = `l${i}`;
     // real repo: two commits so there is an "older" version of everything
-    const bare = makeBareRepo(root, name); const work = join(root, `w${i}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    const bare = makeBareRepo(root, name); const work = join(root, `w${i}`); mkdirSync(work); initRepo(work);
     const older = commitFiles(work, bare, { [FILE]: 'old MARK old\n', 'z.txt': 'z' }, 'older');
     const head = commitFiles(work, bare, { [FILE]: ORIG }, 'head');
     const R = { bare, head, older, rootTree: git(bare, ['rev-parse', 'main^{tree}']).trim(), blob: git(bare, ['rev-parse', 'main:' + FILE]).trim(), olderBlob: git(bare, [`rev-parse`, `${older}:${FILE}`]).trim(), leafLevel: 1 + 2, blobFetch: 1 + 3 };
     // decoy repo: same path, different content
-    const dbare = makeBareRepo(root, 'd' + name); const dwork = join(root, `dw${i}`); mkdirSync(dwork); git(dwork, ['init', '-q', '-b', 'main']);
+    const dbare = makeBareRepo(root, 'd' + name); const dwork = join(root, `dw${i}`); mkdirSync(dwork); initRepo(dwork);
     const dhead = commitFiles(dwork, dbare, { [FILE]: 'decoy MARK decoy\n' }, 'decoy');
     const D = { bare: dbare, head: dhead, leafTree: git(dbare, ['rev-parse', 'main:a/b']).trim() };
     const proxy = await startProxy(srv.url, LIES[lie](R, D));

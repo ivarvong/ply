@@ -16,7 +16,7 @@ import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync, createHash } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { packSubset } from '../src/packsubset.js';
 import { rangeFromBytes } from '../src/rangesource.js';
 import * as rangesource from '../src/rangesource.js';
@@ -40,7 +40,7 @@ before(async () => {
   srv = await startGitServer(root);
   work = join(root, 'source');
   mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   // versions of one text file make deltas; a 300 KB random blob sits between them, so moving an entry across it moves
   // its OFS distance across a varint byte boundary
   const lines = Array.from({ length: 3000 }, (_, i) => `line ${i} of a file that changes a little each commit\n`).join('');
