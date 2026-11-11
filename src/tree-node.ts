@@ -29,10 +29,29 @@ import type { PushTreeOptions, PushTreeResult, TreeSpec } from './tree.js';
 /* oxlint-disable no-await-in-loop -- the walk reads one entry at a time, in sorted order, under the byte bound */
 
 const OWNER_EXEC = 0o100;
-// The name a tree records for a directory entry. On macOS it is the precomposed (NFC) form: the file system keeps a
-// name as it was created, often decomposed, and `git add` under the configuration `git init` writes there
-// (core.precomposeunicode = true, compat/precompose_utf8.c) records it precomposed. Elsewhere it is the name as read.
-const recorded: (name: string) => string = platform === 'darwin' ? name => name.normalize('NFC') : name => name;
+// The name a tree records for a directory entry. On macOS it is the name `git add` records under the configuration
+// `git init` writes there (core.precomposeunicode = true): the file system keeps a name as it was created, often
+// decomposed, and compat/precompose_utf8.c passes each entry through iconv UTF-8-MAC → UTF-8. That is not Unicode NFC.
+// As git 2.50 does on macOS (test/push-tree.test.js, darwin only, against git add): a code point joins the one recorded
+// just before it when the two are exactly a precomposed character's canonical pair; marks are not reordered; a
+// character standing alone is never rewritten (KELVIN SIGN, U+0958, U+F900 stay); a name holding a code point beyond
+// the BMP is kept as read; the Balinese pairs (U+1B00 block, Unicode 5.0, later than iconv's table) are not joined.
+// Elsewhere it is the name as read.
+const NON_ASCII = /[\u0080-\u{10FFFF}]/u;
+const BEYOND_BMP = /[\u{10000}-\u{10FFFF}]/u;
+function precomposed(name: string): string {
+  if (!NON_ASCII.test(name) || BEYOND_BMP.test(name)) return name;
+  let out = '';
+  for (const ch of name) {
+    const last = out.slice(-1);
+    const pair = (last + ch).normalize('NFC');
+    const joins = last !== '' && pair.length === 1 && last.normalize('NFC') === last
+      && pair.normalize('NFD') === last.normalize('NFD') + ch && (pair < 'ᬀ' || pair > '᭿');
+    out = joins ? out.slice(0, -1) + pair : out + ch;
+  }
+  return out;
+}
+const recorded: (name: string) => string = platform === 'darwin' ? precomposed : name => name;
 
 // A file of the directory, as pushTree takes it.
 export type DirFile = { readonly path: string; readonly mode: string; readonly data: Uint8Array };
