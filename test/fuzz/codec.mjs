@@ -18,6 +18,13 @@ import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200000', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
+// --oracle-timeout-s is a whole number of seconds, 1 or more. To execFileSync a timeout of 0 means none, and a
+// negative or non-numeric one is a RangeError on every oracle call: each is a usage error here, before anything runs.
+const ORACLE_TIMEOUT_S = String(args['oracle-timeout-s'] ?? '120');
+if (!/^\d+$/.test(ORACLE_TIMEOUT_S) || Number(ORACLE_TIMEOUT_S) < 1 || !Number.isSafeInteger(Number(ORACLE_TIMEOUT_S) * 1000)) {
+  console.error(`usage: --oracle-timeout-s takes a whole number of seconds, 1 or more; got ${JSON.stringify(args['oracle-timeout-s'])}`);
+  process.exit(2);
+}
 // The seed is printed on start and in every FAIL line, with the command that replays it: with no --seed it comes
 // from the clock, and a failure nobody can replay is lost. One stream is drawn from the seed, so case #i is the
 // (i+1)th case of `--n <i+1> --seed <seed>`.
@@ -52,7 +59,7 @@ execFileSync('git', ['-C', dir, 'init', '-q']);
 // waits in kevent inside SyncProcessRunner, git waits in read(0)). That happens with no ply code loaded (5 of about
 // 27 000 calls, all five at 250 kB), and it hung this fuzzer without judging anything. Every oracle call also has a
 // timeout: a git that does not exit is killed and the case fails saying so, instead of hanging the run.
-const ORACLE_TIMEOUT_MS = parseInt(args['oracle-timeout-s'] ?? '120', 10) * 1000;
+const ORACLE_TIMEOUT_MS = Number(ORACLE_TIMEOUT_S) * 1000;
 const feed = `${dir}.stdin`;
 class OracleHang extends Error {}
 function git(args, stdin = null) {

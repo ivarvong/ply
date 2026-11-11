@@ -231,3 +231,25 @@ test('below-hash: prints its seed on start, and a failure names the seed and the
     }
   } finally { rmSync(bin, { recursive: true, force: true }); }
 }, 300_000);
+
+// Owner decision (4). To execFileSync a timeout of 0 means no timeout, so `--oracle-timeout-s 0` switched the hang
+// guard off; a negative or non-numeric value reached it as an invalid timeout and came back as one RangeError FAIL
+// line per judged case; `5abc` and `1.5` were read as 5 and 1. The flag takes a whole number of seconds, 1 or more.
+// Anything else is a usage error before any case runs: one line on stderr naming the flag, exit status 2, nothing
+// on stdout. The deaf oracle is on PATH so that a value that slips through shows as a FAIL line or a hang, not as
+// a clean run.
+test('codec: --oracle-timeout-s 0, negative, fractional or non-numeric is a one-line usage error, exit 2', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'ply-deaf-git-'));
+  try {
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor a in "$@"; do [ "$a" = init ] && exit 0; done\nexec sleep 600\n');
+    chmodSync(join(bin, 'git'), 0o755);
+    for (const bad of [['0'], ['-1'], ['abc'], ['5abc'], ['1.5'], ['']]) {
+      const r = spawnSync(process.execPath, ['--import', './test/ts-resolve.mjs', 'test/fuzz/codec.mjs', '--n', '150', '--seed', '1', '--oracle-timeout-s', ...bad],
+        { cwd: ROOT, encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+      const what = `--oracle-timeout-s ${JSON.stringify(bad[0])}: status=${r.status} signal=${r.signal} stdout=${r.stdout.slice(0, 300)} stderr=${r.stderr.slice(0, 300)}`;
+      assert.equal(r.status, 2, what);
+      assert.match(r.stderr, /^[^\n]*--oracle-timeout-s[^\n]*\n$/, what);
+      assert.equal(r.stdout, '', what);
+    }
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+}, 300_000);
