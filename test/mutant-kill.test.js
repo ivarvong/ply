@@ -570,7 +570,7 @@ test('pack header, ofs base, delta opcodes, and trailer', async () => {
   assert.throws(() => unwrap(parsePack(flipped)), e => e.code === 'pack_corrupt' && /^pack: trailer sha mismatch [0-9a-f]{40} != [0-9a-f]{40}$/.test(e.message));
   assert.equal(unwrap(parsePack(flipped, { verify: false })).objects.length, 2);
   const extra = concat([pack, Uint8Array.of(0)]);
-  assert.throws(() => unwrap(parsePack(extra)), /expected trailer at/);
+  throws(() => unwrap(parsePack(extra)), 'pack_corrupt', `pack: bytes after the trailer at ${pack.length}`);
 
   assert.equal(unwrap(readUint32BE(Uint8Array.of(0, 0, 1, 2), 0)), 258);
   const hdr = unwrap(readObjHeader(encodeObjHeader(TYPE.BLOB, 300), 0));

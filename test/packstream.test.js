@@ -465,7 +465,7 @@ test('pack scan: each refusal, where parsePack makes it', () => {
   assert.equal(sameScan(one, { limits: fits }, packScanOpts(fits)).ok, true);
   // the trailer: missing, long, wrong; with verify off a wrong one is the trailer read
   assert.equal(refusal(sameScan(one.subarray(0, one.length - 1), {}, packScanOpts())), `pack_corrupt: pack: expected trailer at ${one.length - 20}, pack length ${one.length - 1}`);
-  assert.equal(refusal(sameScan(concat([one, Uint8Array.of(0)]), {}, packScanOpts())), `pack_corrupt: pack: expected trailer at ${one.length - 20}, pack length ${one.length + 1}`);
+  assert.equal(refusal(sameScan(concat([one, Uint8Array.of(0)]), {}, packScanOpts())), `pack_corrupt: pack: bytes after the trailer at ${one.length}`);
   const wrong = one.slice(); wrong[wrong.length - 1] ^= 1;
   assert.match(refusal(sameScan(wrong, {}, packScanOpts())), /^pack_corrupt: pack: trailer sha mismatch [0-9a-f]{40} != [0-9a-f]{40}$/);
   assert.equal(must(scan([wrong], packScanOpts(DEFAULT_LIMITS, false))).trailer, sameScan(wrong, { verify: false }, packScanOpts(DEFAULT_LIMITS, false)).value.trailer);
@@ -508,13 +508,14 @@ test('pack scan: events in order, the attrs, and an object read without keeping 
   assert.deepEqual(kinds.filter(k => k.startsWith('chunk1')), [`chunk1:${b.length}`]);
   assert.deepEqual(must(parsePackPull(st)), { kind: 'end' });
   assert.deepEqual(streamPackAttrs(st), { 'git.pack.phase': 'end', 'git.pack.objects': 2, 'git.pack.offset': pack.length - 20, 'git.pack.bytes': pack.length, 'git.pack.ended': true });
-  // bytes fed after the objects end are counted, not kept: a long tail is the trailer refusal at close
+  // bytes fed after the trailer are counted, not kept, and refused by the next pull: no number in it but the pack's length
   const tailed = must(parsePackInit(packScanOpts()));
   parsePackFeed(tailed, pack);
   for (let p = must(parsePackPull(tailed)); p.kind !== 'need'; p = must(parsePackPull(tailed))) { /* drain */ }
   parsePackFeed(tailed, new Uint8Array(5000));
   assert.equal(tailed.carry.length < 5000, true);
-  assert.equal(refusal(parsePackEnd(tailed)), `pack_corrupt: pack: expected trailer at ${pack.length - 20}, pack length ${pack.length + 5000}`);
+  assert.equal(refusal(parsePackPull(tailed)), `pack_corrupt: pack: bytes after the trailer at ${pack.length}`);
+  assert.equal(refusal(parsePackEnd(tailed)), `pack_corrupt: pack: bytes after the trailer at ${pack.length}`);
 });
 
 // ---- pkt-line and sideband ----
@@ -1299,6 +1300,34 @@ test('work budget: one pack, any chunking, one outcome and one work count, just 
       assert.equal(got, want, `${pieces.length} pieces, floor ${maxInflatedTotal}, ratio ${budget.ratio}`);
     }
   }
+});
+
+// Owner decision (same review): after the trailer one more byte is a refusal, as `git index-pack` refuses junk at the
+// end of a pack (test/scan-pack-index.test.js asks git), and its message names only the pack's own length, so it is the
+// same however the bytes arrive. A source that never ends is therefore not read past the first byte after the trailer.
+test('pack scan: a byte after the trailer is refused by the pull after it is fed, the same in every chunking', () => {
+  const rng = new Rng(77);
+  const pack = packOf([te.encode('hello pack scan'), new Uint8Array(3000).fill(7)]);
+  const want = `pack_corrupt: pack: bytes after the trailer at ${pack.length}`;
+  for (const junk of [Uint8Array.of(0), new Uint8Array(5000), rng.bytes(21)]) {
+    const long = concat([pack, junk]);
+    for (const pieces of chunkings(long, rng)) assert.equal(refusal(scan(pieces)), want, `${junk.length} junk bytes in ${pieces.length} pieces`);
+    assert.equal(refusal(parsePack(long)), want);
+  }
+  // zeros that never end, a byte at a time: the scan asks once after the trailer, and the answer to that byte is no
+  const st = must(parsePackInit(packScanOpts()));
+  parsePackFeed(st, pack);
+  let fed = 0;
+  let r = parsePackPull(st);
+  for (; r.ok && fed < 100; r = parsePackPull(st)) {
+    assert.notEqual(r.value.kind, 'trailer', 'the trailer is known only when the input closes');
+    if (r.value.kind === 'need') { parsePackFeed(st, new Uint8Array(1)); fed += 1; }
+  }
+  assert.equal(fed, 1);
+  assert.equal(refusal(r), want);
+  assert.equal(refusal(parsePackEnd(st)), want);
+  // exactly the trailer, then the close, is still the pack
+  assert.equal(must(scan(chunkings(pack, rng)[1])).objects.length, 2);
 });
 
 test('work budget: charges accumulate across objects, with no per-object overhead and no declared-size charge', () => {

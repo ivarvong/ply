@@ -461,13 +461,18 @@ function stepBody(st: PackScan): Step {
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(got);
 }
-// The trailer is the 20 bytes after the last object and nothing after them: known when the input closes.
+// The trailer is the 20 bytes after the last object and nothing after them. A byte past them is junk at the end of the
+// pack (git index-pack: "pack has junk at the end"): refused by the pull after it is fed, open input or closed, so a
+// source that never ends is read at most one chunk past the trailer. The message names where the pack ends, never how
+// much had been fed, so it is the same in every chunking. Fewer than 20 bytes is known only when the input closes.
 function stepTrailer(st: PackScan): Step {
   // past the objects nothing reads the carry (the trailer is the hash lag): drop the view of the last chunk
   st.carry = EMPTY;
   st.p = 0;
+  const end = st.at + PACK_TRAILER_BYTES;
+  if (st.total > end) return refuse(st, plyError('pack_corrupt', `pack: bytes after the trailer at ${end}`));
   if (!st.ended) return NEED;
-  if (st.at + PACK_TRAILER_BYTES !== st.total) return refuse(st, plyError('pack_corrupt', `pack: expected trailer at ${st.at}, pack length ${st.total}`));
+  if (st.total < end) return refuse(st, plyError('pack_corrupt', `pack: expected trailer at ${st.at}, pack length ${st.total}`));
   const trailer = toHex(st.lag);
   if (st.hash.kind === 'on') {
     const computed = st.hash.sha.hex();

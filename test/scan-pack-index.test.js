@@ -307,6 +307,41 @@ test('refusals: OFS base off an entry boundary, truncation at every cut, a bad t
   assert.equal(badLimits.ok, false);
 });
 
+// git is the judge of junk at the end of a pack: `git index-pack` takes the pack and dies on the same bytes plus one
+// ("pack has junk at the end"). The scan refuses that byte when it arrives, so a source that never ends is not read
+// on: the source counts the bytes it was asked for after the pack (one chunk), and is cancelled.
+test('junk after the trailer: git index-pack refuses the pack plus one byte; the scan refuses it and stops reading a source that never ends', async () => {
+  const pack = await packOf([{ type: TYPE.BLOB, data: te.encode('hello') }, { type: TYPE.BLOB, data: te.encode('alpha '.repeat(30)) }]);
+  const junked = concat([pack, Uint8Array.of(0)]);
+  const dir = mkdtempSync(join(tmpdir(), 'ply-scan-junk-'));
+  try {
+    writeFileSync(join(dir, 'ok.pack'), pack);
+    writeFileSync(join(dir, 'junk.pack'), junked);
+    gitIn(dir, ['index-pack', join(dir, 'ok.pack')]);
+    assert.throws(() => execFileSync('git', ['index-pack', join(dir, 'junk.pack')], { cwd: dir, stdio: 'pipe' }), /junk at the end/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const want = `pack_corrupt: pack: bytes after the trailer at ${pack.length}`;
+  const said = r => (r.ok ? 'ok' : `${r.error.code}: ${r.error.message}`);
+  assert.equal((await scanPackIndex(streamOf([pack]))).ok, true);
+  assert.equal(said(await scanPackIndex(streamOf([junked]))), want);
+  assert.equal(said(await scanPackIndex(streamOf(Array.from(junked, b => Uint8Array.of(b))))), want);
+  for (const size of [1, 7, 4096]) {
+    let after = 0, returned = false;
+    // zeros for ever (the test's own stop, 64 chunks, is what a scan that reads on would hit)
+    const endless = (async function* () {
+      try {
+        yield pack;
+        while (after < 64 * size) { after += size; yield new Uint8Array(size); }
+      } finally { returned = true; }
+    })();
+    assert.equal(said(await scanPackIndex(endless)), want, `${size}-byte chunks`);
+    assert.equal(after, size, `${size}-byte chunks: bytes asked for after the pack`);
+    assert.equal(returned, true, 'the source is cancelled');
+  }
+});
+
 test('maxPackObjects refuses at the header; the columns never exceed the count that arrived', async () => {
   const pack = await packOf(Array.from({ length: 3000 }, (_, i) => ({ type: TYPE.BLOB, data: te.encode(`${i}`) })));
   const r = await scanPackIndex(streamOf([pack]), { limits: withLimits({ maxPackObjects: 2999 }) });
