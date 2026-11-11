@@ -85,7 +85,7 @@ const SLASH = 0x2f;
 export const quirksKeyOf = (u: URL): string => {
   const path = u.pathname;
   let end = path.length;
-  while (end > 0 && path.charCodeAt(end - 1) === SLASH) end -= 1;
+  while (end > 0 && path.codePointAt(end - 1) === SLASH) end -= 1;
   return `${u.origin}${path.slice(0, end)}`;
 };
 // The memo key of a remote URL, or null for a URL that does not parse (createTransport refuses it first).
