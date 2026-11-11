@@ -159,9 +159,14 @@ export const KIND: Readonly<{ INTERNAL: 1; SERVER: 2; CLIENT: 3; PRODUCER: 4; CO
 // `onTelemetryError`: telemetry never changes an operation's outcome. A throw or a rejected promise from `onEnd`, from
 // `exporter` (or an overridden `export`) or from an operation's `onFinish` is caught where ply calls it, counted in
 // `tracer.telemetryErrors` and handed to this hook (null: only counted). What the hook itself throws is dropped.
-export type TelemetryHook = 'onEnd' | 'exporter' | 'onFinish';
+// The hook 'internal' is ply's own failure, never the caller's: building the span (its OTLP encoding, its EndedSpan) threw.
+export type TelemetryHook = 'onEnd' | 'exporter' | 'onFinish' | 'internal';
 export type TelemetryErrorSink = (error: unknown, at: { readonly hook: TelemetryHook; readonly span: string }) => unknown;
-export type TracerConfig = { readonly exporter: Exporter; readonly onEnd: SpanSink | null; readonly onTelemetryError: TelemetryErrorSink | null; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
+// The tracer's settings, total (what the constructor holds after defaults).
+type TracerSettings = { readonly exporter: Exporter; readonly onEnd: SpanSink | null; readonly onTelemetryError: TelemetryErrorSink | null; readonly resource: Attrs; readonly scope: Scope; readonly maxEvents: number };
+// The exported config: `onTelemetryError` may be left out (a consumer that builds a whole TracerConfig written before
+// the hook existed still type-checks); every other key is required here and optional in TracerOptions.
+export type TracerConfig = Omit<TracerSettings, 'onTelemetryError'> & Input<Pick<TracerSettings, 'onTelemetryError'>>;
 export type TracerOptions = Input<TracerConfig>;
 // How a span starts: under `parent`, or following `follows` (never both), with the credential scrubber it inherits.
 export type StartConfig = { readonly parent: Span | null; readonly follows: Span | null; readonly kind: number; readonly attrs: Attrs; readonly scrub: Scrub | null };
@@ -235,6 +240,34 @@ function endedSpan(span: Span, end: bigint): EndedSpan {
     events: fields.events.map(ev => flatEvent(ev, s)), links: fields.links.map(flatLink),
     startTimeUnixNano: span.start, endTimeUnixNano, otlp,
   };
+}
+
+// The boundary around the caller's telemetry code, as functions of this module and not methods of the tracer: ply calls
+// no method on a caller's tracer that operation()'s entry check does not guarantee (a wrapper with only start/span, a
+// Tracer built by another copy of ply). A failure is counted on `telemetryErrors` where the object has that counter and
+// handed to its `onTelemetryError` where that is a function; both are read, neither is required.
+function telemetryFailed(tracer: object, thrown: unknown, hook: TelemetryHook, span: string): void {
+  const counted = getOrElse(field(tracer, 'telemetryErrors'), null);
+  if (typeof counted === 'number') Reflect.set(tracer, 'telemetryErrors', counted + 1);
+  const report = getOrElse(field(tracer, 'onTelemetryError'), null);
+  if (typeof report !== 'function') return;
+  try {
+    const returned: unknown = Reflect.apply(report, tracer, [thrown, { hook, span }]);
+    if (typeof returned === 'object' && returned !== null) Promise.resolve(returned).catch(() => { /* the reporter is telemetry too */ });
+  } catch { /* the reporter is telemetry too: what it throws is dropped */ }
+}
+// Run `call`; a throw, or a rejection of the promise it returns (an async exporter), is counted and reported, and never
+// reaches the operation that ended the span.
+export function guardTelemetry(tracer: object, hook: TelemetryHook, span: string, call: () => unknown): void {
+  try {
+    const returned = call();
+    // an async exporter returns a promise (any thenable is an object): its rejection is this hook's failure too
+    if (typeof returned === 'object' && returned !== null) Promise.resolve(returned).catch((e: unknown) => { telemetryFailed(tracer, e, hook, span); });
+  } catch (e) { telemetryFailed(tracer, e, hook, span); }
+}
+// ply's own span-building step: null when it threw (reported as 'internal'; the span is counted, not exported).
+function buildSpan<T>(tracer: { count: number }, span: string, make: () => T): T | null {
+  try { return make(); } catch (e) { tracer.count++; telemetryFailed(tracer, e, 'internal', span); return null; }
 }
 
 // `declare` fields: assigned in the constructor, so they emit nothing (the JS is the constructor body as before).
@@ -319,17 +352,22 @@ export class Span {
     // oxlint-disable-next-line no-use-before-define -- Span and Tracer are one API (see the top of this file); this runs after both exist
     const exports = tracer.exporter !== dropSpans || tracer.export !== Tracer.prototype.export;
     // Every call below into the caller's code (onEnd, the exporter, an overridden export) is guarded: end() never throws.
+    // Building the span is ply's code: what it throws is reported as 'internal', not as the caller's exporter.
+    const name = this.name;
     if (sink === null) {
-      // oxlint-disable-next-line typescript/no-confusing-void-expression -- an override of export may be async: guard watches what it returns
-      if (exports) tracer.guard('exporter', this.name, (): unknown => tracer.export(otlpSpan(this, end.toString())));
-      else tracer.count++;
+      if (!exports) { tracer.count++; return this; }
+      const span = buildSpan(tracer, name, () => otlpSpan(this, end.toString()));
+      // oxlint-disable-next-line typescript/no-confusing-void-expression -- an override of export may be async: the guard watches what it returns
+      if (span !== null) guardTelemetry(tracer, 'exporter', name, (): unknown => tracer.export(span));
       return this;
     }
-    const ended = endedSpan(this, end);
-    tracer.guard('onEnd', this.name, (): unknown => sink(ended));
+    const ended = buildSpan(tracer, name, () => endedSpan(this, end));
+    if (ended === null) return this;
+    guardTelemetry(tracer, 'onEnd', name, (): unknown => sink(ended));
+    if (!exports) { tracer.count++; return this; }
+    const span = buildSpan(tracer, name, () => ended.otlp());
     // oxlint-disable-next-line typescript/no-confusing-void-expression -- as above
-    if (exports) tracer.guard('exporter', this.name, (): unknown => tracer.export(ended.otlp()));
-    else tracer.count++;
+    if (span !== null) guardTelemetry(tracer, 'exporter', name, (): unknown => tracer.export(span));
     return this;
   }
 }
@@ -345,7 +383,7 @@ export class Tracer {
   public declare scope: Scope;
   public declare count: number;
   public constructor(options: TracerOptions = {}) {
-    const { exporter, onEnd, onTelemetryError, resource, scope, maxEvents } = withDefaults(options, { exporter: dropSpans, onEnd: null, onTelemetryError: null, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
+    const { exporter, onEnd, onTelemetryError, resource, scope, maxEvents } = withDefaults<TracerSettings>(options, { exporter: dropSpans, onEnd: null, onTelemetryError: null, resource: {}, scope: { name: 'ply', version: '0.2.0' }, maxEvents: 256 });
     this.exporter = exporter;
     this.onEnd = onEnd;
     this.onTelemetryError = onTelemetryError;
@@ -371,26 +409,10 @@ export class Tracer {
     this.count++;
     const line: ExportLine = { resourceSpans: [{ resource: this.resource, scopeSpans: [{ scope: this.scope, spans: [span] }] }] };
     // guarded here as well as in Span.end(): an async exporter's rejection is caught where its promise is returned
-    this.guard('exporter', span.name, (): unknown => this.exporter(line));
+    guardTelemetry(this, 'exporter', span.name, (): unknown => this.exporter(line));
   }
-  // The boundary around the caller's telemetry code: run `call`; a throw, or a rejection of the promise it returns (an
-  // async exporter), is counted and reported, and never reaches the operation that ended the span.
-  public guard(hook: TelemetryHook, span: string, call: () => unknown): void {
-    try {
-      const returned = call();
-      // an async exporter returns a promise (any thenable is an object): its rejection is this hook's failure too
-      if (typeof returned === 'object' && returned !== null) Promise.resolve(returned).catch((e: unknown) => { this.telemetryFailed(e, hook, span); });
-    } catch (e) { this.telemetryFailed(e, hook, span); }
-  }
-  private telemetryFailed(thrown: unknown, hook: TelemetryHook, span: string): void {
-    this.telemetryErrors++;
-    const report = this.onTelemetryError;
-    if (report === null) return;
-    try {
-      const returned = report(thrown, { hook, span });
-      if (typeof returned === 'object' && returned !== null) Promise.resolve(returned).catch(() => { /* the reporter is telemetry too */ });
-    } catch { /* the reporter is telemetry too: what it throws is dropped */ }
-  }
+  // The telemetry boundary as a method (guardTelemetry above): ply itself never calls it on a caller's tracer.
+  public guard(hook: TelemetryHook, span: string, call: () => unknown): void { guardTelemetry(this, hook, span, call); }
 }
 
 // ---- exporters ----

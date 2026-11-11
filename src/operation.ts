@@ -11,7 +11,7 @@
 import type { ErrorOf, Extra, PlyError } from './errors.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
-import { Tracer } from './otel.js';
+import { Tracer, guardTelemetry } from './otel.js';
 import type { Attrs, Frame, Hints, Quirks, RequestBody, Transport, TransportInput } from './transport.js';
 import type { FetchLike, HttpAuth } from './http.js';
 import { createTransport, redactUrl } from './http.js';
@@ -66,8 +66,10 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   const name = `git.${op}`;
   const root = tracer.start(name, { parent, attrs: { [`${name}.url`]: transport === null ? redactUrl(url) : transport.url, ...attrs } });
   if (link !== null) root.link(link.span, { 'ply.link': link.kind });
-  // onFinish only adds attributes: what it throws is telemetry's failure (tracer.onTelemetryError), never the operation's
-  const finish = (extra: Attrs): Span => { if (onFinish !== null) tracer.guard('onFinish', name, () => { root.set(onFinish()); }); root.set(extra); return root; };
+  // onFinish only adds attributes: what it throws is telemetry's failure (reported to the tracer's onTelemetryError when
+  // it has one), never the operation's. The guard is ply's function, not a method of `tracer`: the check above
+  // guarantees start() and nothing else (a start/span wrapper, a Tracer from another copy of ply).
+  const finish = (extra: Attrs): Span => { if (onFinish !== null) guardTelemetry(tracer, 'onFinish', name, () => { root.set(onFinish()); }); root.set(extra); return root; };
   const outcome: Outcome = (kind, result, ...extra) => { const [given = {}] = extra; finish({ ...given, [`${name}.outcome`]: kind }).end(); return ok(result); };
   // An Err leaves through here: the outcome and error.type are its code (read before root.error scrubs it), the error is
   // recorded on the root, and it carries the root span for a caller's retry link.
