@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as S from './advertisement.space.js';
-import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer } from '../server.js';
+import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, noMaintenance, initRepo } from '../server.js';
 // ADV_SPACE_SRC=<dir>: run the space against another copy of src/ (e.g. `git archive train/1 src`) to see where it disagrees
 const SRC = process.env.ADV_SPACE_SRC ?? '../../src';
 const { createTransport, GitHttp } = await import(`${SRC}/client.js`);
@@ -160,7 +160,7 @@ before(async () => {
   writeFileSync(hookCfg, `[uploadpack]\n\tpackObjectsHook = ${fileURLToPath(new URL('../fuzz/pack-objects-hook.sh', import.meta.url))}\n`);
   backend = await startGitServer(root, { GIT_CONFIG_GLOBAL: hookCfg, PLY_HOOK_LOG: hookLog });
   front = await startFront(backend.url);
-  const work = join(root, 'work'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const work = join(root, 'work'); mkdirSync(work); initRepo(work);
   const commit = (f, m) => { writeFileSync(join(work, f), `${m}\n`.repeat(40)); git(work, ['add', f]); git(work, ['-c', 'user.name=a', '-c', 'user.email=a@b', 'commit', '-q', '-m', m]); return git(work, ['rev-parse', 'HEAD']).trim(); };
   commit('a', 'one'); const two = commit('b', 'two');
   git(work, ['-c', 'user.name=a', '-c', 'user.email=a@b', 'tag', '-a', '-m', 'v1', 'v1', two]);
@@ -206,7 +206,7 @@ test('real git http-backend configurations advertise exactly what the renderer w
   for (const rc of REAL_CONFIGS) {
     const name = `real-${rc.name.replace(/\W+/g, '-')}`;
     const bare = join(root, `${name}.git`);
-    git(root, ['init', '--bare', '-q', '-b', 'main', ...(rc.sha256 ? ['--object-format=sha256'] : []), bare]);
+    git(root, ['init', '--bare', '-q', '-b', 'main', ...(rc.sha256 ? ['--object-format=sha256'] : []), bare]); noMaintenance(bare);
     for (const [k, v] of [['uploadpack.allowFilter', 'true'], ['http.receivepack', 'true'], ...rc.config]) git(bare, ['config', k, v]);
     const res = await fetch(`${backend.url}/${name}.git/info/refs?service=git-upload-pack`, { headers: { 'Git-Protocol': 'version=2' } });
     assert.equal(res.headers.get('content-type'), 'application/x-git-upload-pack-advertisement');
@@ -286,7 +286,7 @@ test('refs: every cell, judged by git ls-remote; a duplicate ref resolves to its
 });
 
 test('push: request × advertised atomic × advertised push-options × object-format, judged by git push', async t => {
-  const work = join(root, 'pushwork'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const work = join(root, 'pushwork'); mkdirSync(work); initRepo(work);
   git(work, ['-c', 'user.name=a', '-c', 'user.email=a@b', 'commit', '-q', '--allow-empty', '-m', 'base']);
   const base = git(work, ['rev-parse', 'HEAD']).trim();
   git(work, ['-c', 'user.name=a', '-c', 'user.email=a@b', 'commit', '-q', '--allow-empty', '-m', 'next']);
@@ -296,7 +296,7 @@ test('push: request × advertised atomic × advertised push-options × object-fo
   for (const c of S.pushCells()) {
     const want = S.expectedPush(c);
     const name = `push-${observed.push}`; const bare = join(root, `${name}.git`);
-    git(root, ['init', '--bare', '-q', '-b', 'main', `--object-format=${c.format.tag}`, bare]);
+    git(root, ['init', '--bare', '-q', '-b', 'main', `--object-format=${c.format.tag}`, bare]); noMaintenance(bare);
     for (const [k, v] of [['http.receivepack', 'true'], ['receive.advertiseAtomic', String(c.atomic.tag === 'on')], ['receive.advertisePushOptions', String(c.options.tag === 'on')]]) git(bare, ['config', k, v]);
     if (c.format.tag === 'sha1') git(work, ['push', '-q', bare, `${base}:refs/heads/main`]);
     const refsBefore = git(bare, ['for-each-ref']);

@@ -14,7 +14,7 @@
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { readLog, logWindow, logOn } from '../src/log.js';
 import { fetchPackFiltered } from '../src/fetchpack.js';
@@ -312,7 +312,7 @@ test('readLog on blob:none: the trees are harvested; a following listTree on the
 test('bytes: a 10-commit window on a wide repository, tree:0 vs blob:none', async () => {
   const bare = makeBareRepo(root, 'log-wide'); const work = join(root, 'wwide');
   const { mkdirSync, writeFileSync } = await import('node:fs');
-  mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  mkdirSync(work); initRepo(work);
   for (let d = 0; d < 48; d++) { mkdirSync(join(work, `dir${d}`)); for (let f = 0; f < 80; f++) writeFileSync(join(work, `dir${d}`, `file-with-a-longish-name-${f}.c`), `/* ${d}/${f} */\n`); }
   const id = ['-c', 'user.name=w', '-c', 'user.email=w@x'];
   git(work, ['add', '-A']); git(work, [...id, 'commit', '-q', '-m', 'seed']);

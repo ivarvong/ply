@@ -14,7 +14,7 @@ import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { createTransport } from '../src/http.js';
 import { ZERO_OID, pushPackChecked, planPackPush } from '../src/push.js';
 import { pushPack, checkPushCaps } from '../src/receivecaps.js';
@@ -32,7 +32,7 @@ before(async () => {
   srv = await startGitServer(root);
   const work = join(root, 'source');
   mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   const blob = new Uint8Array(300_000);
   randomFillSync(blob);
   writeFileSync(join(work, 'random.bin'), blob);
@@ -285,9 +285,13 @@ test('a stale old oid is cas_conflict, as push reports it', async () => {
 
 test('a lost response after the body went out is ambiguous, and the unfinished source is cancelled', async () => {
   const { url } = repo();
-  const fetchImpl = routed(async () => { throw new TypeError('network gone'); });
+  // the body went out: the transport took its first chunk (the command list) before the connection was lost. A
+  // failure before that first pull is the definite one (test/push-pack-preabort.test.js).
+  let taken = 0;
+  const fetchImpl = routed(async init => { taken += (await init.body.getReader().read()).value.length; throw new TypeError('network gone'); });
   const { stream, state } = streamOf(source.pack);
   const r = await pushPack(transport(url, { fetchImpl }), { ...create(), pack: stream });
+  assert.ok(taken > 0);
   assertAmbiguous(r, 'network');
   assert.equal(state.cancelled, 1);
 });
@@ -421,3 +425,27 @@ test('memory: a pack far larger than held memory holds about two chunks', async 
   assert.ok(out.samples >= 10, JSON.stringify(out));
   assert.ok(out.liveDelta < 3 * chunk, JSON.stringify(out));
 }, 180_000);
+
+// A transport that keeps the request body of a push that failed unsent, and pulls it afterwards. Expected values from
+// the README (pushPack): a `fetchImpl` that rejects without reading the body is that failure itself (a rejected
+// fetch() is a network error), the server received no command list, and the stream stays unread and unlocked: the
+// caller still owns it. So the late pull must hand over nothing (not the command list, no byte of the pack): the read
+// rejects, as ply's own fault-free refusal of a use outside the contract ('internal'), and the caller's stream is
+// still unpulled, uncancelled, unlocked and readable from its first byte; git shows no ref.
+test('a transport that rejects without reading the body and pulls it afterwards is handed nothing; the pack is still the caller\'s', async () => {
+  const { url, bare } = repo();
+  let kept = null;
+  const fetchImpl = routed(async init => { kept = init.body; throw new TypeError('fetch failed'); });
+  const { stream, state } = streamOf(source.pack);
+  const r = await pushPack(transport(url, { fetchImpl }), { ...create(), pack: stream, length: source.pack.length });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'network', r.error.message);
+  assert.deepEqual({ ...state, locked: stream.locked }, { pulls: 0, cancelled: 0, locked: false });
+  const late = await kept.getReader().read().then(chunk => ({ chunk }), error => ({ error }));
+  assert.equal('chunk' in late, false, 'the late pull was handed a chunk');
+  assert.equal(late.error.code, 'internal');
+  assert.deepEqual({ ...state, locked: stream.locked }, { pulls: 0, cancelled: 0, locked: false });
+  assert.equal(tipOf(bare), null);
+  const first = await stream.getReader().read();
+  assert.deepEqual([...first.value], [...source.pack.slice(0, 4096)]);
+});

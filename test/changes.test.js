@@ -7,7 +7,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { cpSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, chmodSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, noMaintenance } from './server.js';
 import { commitChanges } from '../src/changes.js';
 import { editFile } from '../src/edit.js';
 import {
@@ -47,7 +47,7 @@ after(async () => { await srv.close(); cleanup(); });
 const gitEnv = (cwd, args, env = {}) => git(cwd, ['-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args], { env: { ...process.env, ...env } });
 function seedLinear(bare) {
   const work = join(root, 'seed-linear');
-  git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]);
+  git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]); noMaintenance(work);
   git(work, ['config', 'commit.gpgsign', 'false']);
   git(work, ['config', 'core.autocrlf', 'false']);
   writeFileSync(join(work, 'a.txt'), 'old\n');
@@ -122,6 +122,7 @@ function workFrom(bare, kind) {
   const work = join(root, `w${n++}`);
   if (kind === 'tip') git(root, ['-c', 'core.autocrlf=false', 'clone', '-q', bare, work]);
   else git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', work]);
+  noMaintenance(work);
   git(work, ['config', 'commit.gpgsign', 'false']);
   git(work, ['config', 'core.autocrlf', 'false']);
   return work;
@@ -732,4 +733,25 @@ test('verify re-reads the ref, and a signer produces a commit git verify-commit 
   const edited = await commit(signedEdit.url, { ref: 'refs/heads/main', changes: changesOf('edit'), author: AUTHOR, message: 'c' }, { signer });
   const verifiedEdit = spawnSync('git', ['-C', signedEdit.bare, '-c', 'gpg.format=ssh', '-c', 'gpg.ssh.program=ssh-keygen', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-commit', edited.oid], { encoding: 'utf8' });
   assert.equal(verifiedEdit.status, 0, verifiedEdit.stdout + verifiedEdit.stderr);
+});
+
+// git branches from an annotated tag by peeling it (`git checkout -b from-tag v1`). One edit takes the streamed path
+// and two changes the in-memory one: both must start from the commit the tag names, not from the tag object.
+test('a single edit from an annotated-tag base is the commit git makes from that tag', async () => {
+  const { bare, url } = copy(linearBare);
+  gitEnv(bare, ['tag', '-a', '-m', 'v1', 'v1', 'refs/heads/main'], STAMP);
+  const peeled = git(bare, ['rev-parse', 'refs/tags/v1^{commit}']).trim();
+  assert.notEqual(git(bare, ['rev-parse', 'refs/tags/v1']).trim(), peeled);
+  const work = join(root, `tagwork${n++}`);
+  git(root, ['clone', '-q', bare, work]);
+  git(work, ['checkout', '-q', '-b', 'from-tag', 'v1']);
+  writeFileSync(join(work, 'a.txt'), 'v2\n');
+  git(work, ['add', 'a.txt']);
+  gitEnv(work, ['commit', '-q', '-m', 'edit from tag'], STAMP);
+  const want = git(work, ['cat-file', 'commit', 'HEAD']);
+  const r = await commit(url, { ref: 'refs/heads/from-tag', base: 'refs/tags/v1', author: AUTHOR, message: 'edit from tag', changes: [{ kind: 'edit', path: 'a.txt', find: 'v1', replace: 'v2' }] });
+  assert.equal(git(bare, ['cat-file', 'commit', 'refs/heads/from-tag']), want);
+  assert.equal(r.parent, peeled);
+  assert.equal(r.created, true);
+  assert.deepEqual(fsckProblems(bare), []);
 });

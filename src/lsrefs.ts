@@ -3,10 +3,10 @@
 /* oxlint-disable require-unicode-regexp -- ASCII wire text; `u` costs a byte per literal */
 import type { ErrorOf, PlyError } from './errors.js';
 import type { Span } from './otel.js';
-import type { Frame, Transport } from './transport.js';
+import type { Frame, Scrub, Transport } from './transport.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
-import { fail } from './errors.js';
+import { fail, remoteQuoted, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import { pkts, pktInit, pktStep } from './pktline.js';
 import { decodeBytes } from './bytes.js';
 import { limitExceeded } from './limits.js';
@@ -79,17 +79,18 @@ export type LsRefsResult = { readonly refs: Map<string, LsRef>; readonly head: s
 const PEELED_KEY = `${PEELED}:`, SYMREF_KEY = `${SYMREF_TARGET}:`;
 // The line is read by index, in place: one slice for the oid, one for the name, one per kept attribute's value, and
 // nothing for the attributes it skips (#209: a large listing paid a split array, and a key and a value per attribute).
+// scrub: the transport's credential scrubber (or null), applied to an ERR line's text before it is cut (errors.ts remoteText).
 // @decoder parseLsRefLine prefix=ls-ref
-export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
-  if (line.startsWith(ERR)) return fail('remote_error', `remote: ${line.slice(ERR.length)}`);
+export function parseLsRefLine(line: string, scrub: Scrub | null = null): Result<LsRef | null, PlyError> {
+  if (line.startsWith(ERR)) return fail('remote_error', `remote: ${remoteText(line.slice(ERR.length), REMOTE_TEXT_MAX, scrub)}`);
   const sp = line.indexOf(' ');
   // Stryker disable next-line EqualityOperator: a leading space still fails the oid check with this same malformed-line error
-  if (sp < 0) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  if (sp < 0) return proto(`ls-refs: malformed line ${remoteQuoted(line, LINE_PREVIEW)}`);
   const oid = line.slice(0, sp);
   if (oid === UNBORN) return ok(null);
   // 40 hex digits is a sha1 oid; 64 is a sha256 repository's, refused as such; anything else is malformed.
   const parsed = sha1Of(oid);
-  if (!parsed.ok) return OID_SHA256.test(oid) ? fail('unsupported', 'unsupported object-format: only sha1 repositories are supported') : proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  if (!parsed.ok) return OID_SHA256.test(oid) ? fail('unsupported', 'unsupported object-format: only sha1 repositories are supported') : proto(`ls-refs: malformed line ${remoteQuoted(line, LINE_PREVIEW)}`);
   // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
   const nameEnd = fieldEnd(line, sp + 1);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
@@ -103,7 +104,7 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
     end = fieldEnd(line, from);
     if (line.startsWith(PEELED_KEY, from)) {
       const peeled = sha1Of(line.slice(from + PEELED_KEY.length, end));
-      if (!peeled.ok) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+      if (!peeled.ok) return proto(`ls-refs: malformed line ${remoteQuoted(line, LINE_PREVIEW)}`);
       rec[PEELED] = peeled.value;
     } else if (line.startsWith(SYMREF_KEY, from)) rec[SYMREF_TARGET] = line.slice(from + SYMREF_KEY.length, end);
   }
@@ -169,7 +170,7 @@ export const lsInit = (): LsListing => ({ tag: 'open', refs: new Map(), counted:
 // One frame of the listing. gitprotocol-v2 ls-refs: output = *ref flush-pkt. A refusal leaves the listing as it was
 // before the frame (every check comes before the first update) and the caller stops reading: the ref limit refuses the
 // first ref past maxRefs as it arrives, and the byte limit the frame that crosses it, before that frame is decoded.
-export function lsRefsStep(st: LsListing, f: Frame, caps: LsCaps): Result<LsListing, PlyError> {
+export function lsRefsStep(st: LsListing, f: Frame, caps: LsCaps, scrub: Scrub | null = null): Result<LsListing, PlyError> {
   switch (st.tag) {
     case 'ended': return proto(`ls-refs: ${f.kind} after the terminating flush-pkt`);
     case 'open': {
@@ -181,7 +182,7 @@ export function lsRefsStep(st: LsListing, f: Frame, caps: LsCaps): Result<LsList
       // and only the LF comes off, as connect.c's packet reader chomps it. trim() also ate a trailing U+FEFF or U+00A0 (#43).
       const text = decodeBytes(f.payload);
       const line = text.endsWith('\n') ? text.slice(0, text.length - 1) : text;
-      const parsed = parseLsRefLine(line);
+      const parsed = parseLsRefLine(line, scrub);
       if (!parsed.ok) return parsed;
       const rec = parsed.value;
       if (rec === null) {
@@ -253,7 +254,7 @@ export async function lsRefs(t: Transport, prefixes: readonly string[] = [], opt
     let seen = 0;
     for await (const f of frames(t, 'git-upload-pack', body.value, span)) {
       seen += 1;
-      const next = lsRefsStep(st, f, caps);
+      const next = lsRefsStep(st, f, caps, t.scrub);
       if (!next.ok) return next;
       st = next.value;
     }

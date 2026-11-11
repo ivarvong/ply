@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomFillSync, createHash } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange, NO_BASE, THIN_BASE } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -41,7 +41,7 @@ before(async () => {
   srv = await startGitServer(root);
   work = join(root, 'source');
   mkdirSync(join(work, 'a', 'b'), { recursive: true });
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   for (let i = 0; i < 12; i++) {
     const blob = new Uint8Array(40_000 + i * 1000);
     randomFillSync(blob);
@@ -362,6 +362,24 @@ function synthetic(count) {
   const res = { count, columns: { oid: new Uint8Array(count * 20), type, base: rbase, depth, size: rsize } };
   return { idx, res };
 }
+
+// Review finding saved-resolved-cycle-oom: planPackBatches is public and takes the caller's columns, so a base column
+// with a cycle must end in a Result. No pack gives one (a delta's base is resolved before it), so every such input is
+// refused; the walk is bounded by the entry count (before the fix this test ended in a heap out-of-memory abort).
+test('a resolved base column with a cycle is refused, not walked forever', () => {
+  for (const [name, cycle] of [['2-cycle', [1, 2]], ['3-cycle', [1, 2, 3]], ['self', [1]], ['the whole family', [1, 2, 3, 4]]]) {
+    const { idx, res } = synthetic(200);
+    // entries 1..4 are REF deltas of one family (synthetic); close a cycle among them, depths left as they were
+    cycle.forEach((i, k) => { res.columns.base[i] = cycle[(k + 1) % cycle.length]; });
+    const r = planPackBatches(idx, res, { budget: BIG, crossBatchRef: true });
+    assert.equal(r.ok, false, name);
+    assert.equal(r.error.code, 'bad_request', name);
+    assert.match(r.error.message, /resolved index is malformed/u, name);
+  }
+  // the same columns without the cycle still plan
+  const { idx, res } = synthetic(200);
+  assert.ok(planPackBatches(idx, res, { budget: BIG }).ok);
+});
 
 test('planning time and memory at 200,000 entries', () => {
   const N = 200_000;

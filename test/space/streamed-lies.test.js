@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { tmpRoot, makeBareRepo, startGitServer, commitFiles, git } from '../server.js';
+import { tmpRoot, makeBareRepo, startGitServer, commitFiles, git, initRepo } from '../server.js';
 import { editFile } from '../../src/edit.js';
 import { readFile, openBlob } from '../../src/read.js';
 import { fetchObject as fetchObjectR } from '../../src/fetch.js';
@@ -101,7 +101,7 @@ test('declared size one under, at, and one over the inflated length, on read and
     const bare = makeBareRepo(root, name);
     const work = join(root, `w${name}`);
     mkdirSync(work);
-    git(work, ['init', '-q', '-b', 'main']);
+    initRepo(work);
     const head = commitFiles(work, bare, { 'a.bin': Buffer.from(data) }, 'lie');
     const oid = hashObject('blob', data);
     const url = `${srv.url}/${name}.git`;
