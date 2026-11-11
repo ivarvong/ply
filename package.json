@@ -93,6 +93,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "tsc -p tsconfig.json",
+    "check:dist": "node scripts/dist-check.mjs",
+    "check:pack": "node scripts/pack-check.mjs",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.isolated.json && node scripts/ts-ratchet.mjs && node scripts/absence-ratchet.mjs && node scripts/throw-ratchet.mjs",
     "lint": "oxlint --type-aware --deny-warnings src && oxlint -c oxlint.loose.json src test scripts examples bench && node scripts/exhaustive.mjs && node scripts/regex-gate.mjs",
     "test": "rm -rf .failsites && PLY_FAILSITES=.failsites NODE_OPTIONS=--import=$PWD/test/space/failsite-hook.mjs vitest run && PLY_FAILSITES=.failsites PLY_FAILSITES_GATE=1 vitest run test/space/failsites.test.js && npm run test:fuzz-pinned",
@@ -153,12 +155,15 @@
   },
   "devDependencies": {
     "@babel/parser": "8.0.8",
+    "@cloudflare/workers-types": "5.20260916.1",
     "@stryker-mutator/core": "10.1.1",
     "@stryker-mutator/vitest-runner": "10.1.1",
     "@types/node": "24.19.2",
     "esbuild": "0.28.2",
     "oxlint": "1.90.0",
     "oxlint-tsgolint": "7.0.2005",
+    "types-node-20": "npm:@types/node@20.19.43",
+    "types-node-22": "npm:@types/node@22.20.5",
     "typescript": "7.0.2",
     "vitest": "5.0.5",
     "workerd": "1.20261018.1"

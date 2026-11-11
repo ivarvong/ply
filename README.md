@@ -17,6 +17,19 @@ npm install github:ivarvong/ply#<commit-sha>  # recommended: pin a commit for re
 
 It installs as `ply`, so imports read `from 'ply'` and `from 'ply/<subpath>'` (`ply/edit`, `ply/read`, `ply/tree`, `ply/checkout-node`, …). Types ship with it (`dist/*.d.ts`); JavaScript and TypeScript use the same calls.
 
+ply is ESM-only: there is no CommonJS build and no `require` export condition. The Node floor is 20 (`engines.node` is `>=20`; all 19 entry points import on 20.17.0). From a CommonJS file, `await import('ply')` works on every supported Node. `require('ply')` depends on the Node version: it works where Node loads an ES module with `require()` by default, which is Node 20.19.0 and later on the 20 line (Node's changelog for 20.19.0: "require(esm) is now enabled by default"; measured on 20.19.0 and 20.20.2) and Node 22.12 and later (measured on 22.15.0, 24.2.0, 24.16.0, 24.18.0 and 25.2.1). Before that it throws `ERR_REQUIRE_ESM`: on Node 20.18 and earlier (measured on 20.17.0, 20.18.0 and 20.18.3) and on Node 22 before 22.12 (Node's documented boundary, not measured here). CI job `pack` packs the tarball, installs it with `--ignore-scripts` into an empty project, and checks every import and this `require()` behaviour under Node 20, 22 and 24 (`npm run check:pack`, `test/pack-install.test.js`).
+
+The git install above needs the package manager to run ply's `prepare` script: `dist/` is not in git, and `prepare` builds it (npm first installs ply's dev tools in a temporary clone). Not every package manager runs it, and none of them fails when it does not run. Measured in an empty project at commit 77048fb:
+
+| package manager | default | `--ignore-scripts` |
+|---|---|---|
+| npm 11.16.0 | builds `dist/`; imports work | exits 0, no `dist/` |
+| pnpm 8.15.9 | builds `dist/`; imports work; installs the whole repository (7.8 MB), where npm installs `files` only (1.7 MB) | exits 0 with the warning `has to be built but the build scripts were ignored`, no `dist/` |
+| yarn 1.22.22 | exits 0 without running `prepare`, no `dist/` | exits 0, no `dist/` |
+| bun 1.2.18 | exits 0 with `Blocked 1 postinstall`, no `dist/`; `bun pm trust ply` then fails (`tsc: command not found`) | exits 0, no `dist/` |
+
+With no `dist/`, every import fails with `ERR_MODULE_NOT_FOUND`. So the git install works with npm and with pnpm 8, scripts on; it does not work with yarn 1 or bun 1.2, or with scripts off. pnpm, yarn and bun were given `github:ivarvong/ply#<sha>`, npm a local clone of the same commit (`git+file://`); pnpm 9 and later and yarn 2 and later were not measured. The packed tarball contains `dist/` and installs with scripts off (measured with npm; CI job `pack`). CI uploads it as the workflow artifact `ply-tarball`, which needs a GitHub login and expires; there is no install URL for it yet.
+
 ## Beta
 
 ply is pre-1.0 (0.2.0). The API can change between commits without a deprecation period, and there are no tagged releases yet: pin a commit sha, read the commit log before moving the pin, and let your type checker or tests catch a changed signature. Span names and attributes are a stated contract (see [Telemetry contract](#telemetry-contract)).
@@ -24,6 +37,7 @@ ply is pre-1.0 (0.2.0). The API can change between commits without a deprecation
 ## Requirements
 
 - **Runtime**: Node ≥ 20, Cloudflare Workers, or any runtime with `fetch`, `CompressionStream`/`DecompressionStream`, `crypto.getRandomValues` and `Uint8Array` (a browser works behind a CORS proxy). `ply/tree-node`, `ply/checkout-node` and `ply/repo-node` are Node only (`node:fs`).
+- **TypeScript** (optional): the shipped declarations compile with `skipLibCheck: false` under `lib: ["ES2022"]` with `@types/node` 20, 22 or 24, under the `DOM` lib, and under `@cloudflare/workers-types`. `npm run check:dist` and `test/dist-types.test.js` compile each of those five consumers (pinned: `@types/node` 20.19.43, 22.20.5 and 24.19.2, `@cloudflare/workers-types` 5.20260916.1, TypeScript 7.0.2, `nodenext` resolution) and fail when a type package is missing; none is skipped. They need the web globals one of those provides (`ReadableStream`, `Response`, `AbortSignal`, `URL`); `lib: ["ES2022"]` with no types package is not enough.
 - **A git smart-HTTP server**: GitHub, GitLab, Gitea/Forgejo, Cloudflare Artifacts, or self-hosted `git http-backend` (`http.receivepack true` to push; nothing else). A stock git server works: without `uploadpack.allowFilter` its advertisement has no `filter`, and ply learns that from the server (`quirks.treeFilter = 'none'`, learned once per remote: see the Artifacts notes below) and fetches unfiltered: the same results, with more bytes per read. The quick start below runs on both. ply speaks protocol v2 for reads and receive-pack for pushes; SHA-1 repositories only. A server that answers only v0/v1 is refused as `unsupported` (`what: 'protocol version'`) on the first ls-refs.
 - **Auth**, per call in `opts.auth`: `{ token }` (HTTP Basic with user `x-access-token`, which GitHub tokens use), `{ token, user }` (a host that wants a username: GitLab `oauth2` for an OAuth token, your Gitea/Forgejo user), `{ bearer }`, or `{ header }` (an `Authorization` value sent as is). Or userinfo in the URL (`https://<token>@host/…`), sent as git sends it. No `auth` and no userinfo: anonymous. Credentials never reach a span or an error message; redirects are not followed. Details in "Credentials" under [More detail](#more-detail).
 
