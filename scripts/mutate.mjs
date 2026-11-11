@@ -40,7 +40,8 @@ const BOUNDS_FILES = new Set([
 // Files gated by owner. The rule is fail-safe: every top-level owner of a file listed here is strict (the lines above
 // the first one too, as <module>) unless its name is exempt, so a new or renamed function is judged strictly until
 // someone writes down why it is not. Each entry says what is exempt and why a survivor there is left to the full run's
-// threshold. test/mutate-plan.test.js holds both lists by hand and fails when a file gains an owner that is in neither.
+// threshold. test/mutate-plan.test.js pins the exempt names by hand, each with its reason, and fails when this list
+// and that one differ or an exempt name no longer exists; it does not list the strict ones.
 const EXEMPT_OWNERS = new Map([
   // The saved index. Exempt: its encoder (it writes this process's own, trusted state; decodeSavedIndex round-trips
   // it in test/pack-saved.test.js) and the refusal's text for people (no decision reads it). Strict: everything the

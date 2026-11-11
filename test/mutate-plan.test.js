@@ -206,42 +206,34 @@ test('a surviving or uncovered mutant in a large-repo stack decoder fails the ve
 }, 120_000);
 
 // The owner rule is fail-safe (review of a8b920fc, required change 3): in an owner-gated file every top-level owner is
-// strict unless scripts/mutate.mjs names it exempt. These are the two lists written out by hand, from reading each
-// file: `exempt` is what a survivor may live in (encoders of trusted state, request building from the caller's own
-// options, drivers, text and span attributes); `strict` is everything that decodes or classifies stored or remote
-// state. A new or renamed top-level declaration is in neither list and fails the test below until someone decides.
+// strict unless scripts/mutate.mjs names it exempt. Only the exempt owners are pinned here, by hand from reading each
+// file, each with the reason a survivor may live in it: [reason, names]. The strict owners are not listed: every other
+// top-level owner of these files is strict, so a function a later change adds or renames is strict by default with no
+// edit here, and the verdict below has to name it. An exempt name that no longer exists fails the test: the function
+// it excused was renamed or removed, and whoever did that decides again.
 const words = s => s.split(/\s+/).filter(Boolean);
-const OWNERS = {
-  'src/packsaved.ts': {
-    strict: words(`SAVED_INDEX_VERSION MAGIC HEADER CHECK FLAG_OIDS FLAG_REFS FLAG_RESOLVED FLAGS_KNOWN PACK_HEADER_BYTES
-      RESOLVED_BYTES STATS STATS_BYTES SAVED_INDEX_ENTRY_BYTES SAVED_INDEX_FIXED_BYTES refused malformed isWhole isStored
-      readAll packIdentity layoutOf cursorOf getF64s getI32s getBytes readHeader regionsOf bad checkEntry checkIndex
-      checkResolved statsOf decodeSavedIndex`),
-    exempt: words('putF64s putI32s putBytes encodeSavedIndex describeRefusal'),
-  },
-  'src/transferplan.ts': {
-    strict: words('TRANSFER_VERSION optionJson stepJson canonical transferPlanHash edited wellFormedStep checkTransferPlan'),
-    exempt: words(`OBJ_BLOB OBJ_COMMIT OBJ_TREE MODE_BLOB MODE_TREE TRANSFER_REF_PREFIX TRANSFER_IDENT
-      TRANSFER_GENERATED_OBJECTS GEN_BYTES_PER_OBJECT GEN_BYTES_FIXED SIGNATURE_HEADERS outOfRange entryAt batchTrees
-      commitObject tempCommit unsigned rootCommit reserved treeEntries tempFor planSteps planTransfer transferKey`),
-  },
-  'src/push.ts': {
-    strict: words(`BAND_TAIL BAND_ATTR REPORT_KEEP UNPACK OK_REF NG_REF parseCommand parseEach parseCommands parseSideband
-      broken streamInit streamStep streamFinish GIT_UNPACK_ERROR_LIST GIT_UNPACK_ERRORS seenUnpack isGitUnpackError
-      UNPACKER_ERROR PRINTABLE HOST_UNPACK_ALIASES unpackReasonMatches echoedFailure TOO_LARGE KIB MIB
-      parseReceivePackTooLarge malformed splitOnce reportInit reportStep reportFinish classifyReport KNOWN_NG knownNgClass
-      HOST_CAS ngClass refused rejectionCode decideOutcome outcomeResult bandLines REPORT_V2_OPTION_LINES reportLineCap
-      NOT_RUN codeOf refusedBeforeReceivePack serviceRefused unpackOf resolveAmbiguousByTip isEmptyBand3Ambiguous
-      finishPush decide readResponse send sendSource`),
-    exempt: words(`SHORT_OID isParsed nonEmpty pkts pushBody pushDefaults requestCap requestCaps unchecked checkBases
-      planPush requestBody outcomeAttrs objectTypeAttr bodyOf receivePack push isPackLength planPackPush
-      pushPackChecked`),
-  },
-  'src/receivecaps.ts': {
-    strict: words(`frameAt dataAt serviceHeaderEnd SHA1_HEX OID_HEX refLine shallowLine FORMAT objectFormat
-      parseReceiveAdvert receiveCaps noWants capsProblem checkPushCaps pushWithOptions pushPack`),
-    exempt: words('LINE_PREVIEW problemText'),
-  },
+const EXEMPT = {
+  'src/packsaved.ts': [
+    ['the encoder: it writes this process\'s own, trusted state, and decodeSavedIndex round-trips it in test/pack-saved.test.js',
+      'putF64s putI32s putBytes encodeSavedIndex'],
+    ['the refusal\'s text for people: no decision reads it', 'describeRefusal'],
+  ],
+  'src/transferplan.ts': [
+    ['the planner and its constants: it builds a plan from the caller\'s own resolved index, and its objects and steps are compared with real ones in test/transfer.test.js',
+      `OBJ_BLOB OBJ_COMMIT OBJ_TREE MODE_BLOB MODE_TREE TRANSFER_REF_PREFIX TRANSFER_IDENT TRANSFER_GENERATED_OBJECTS
+      GEN_BYTES_PER_OBJECT GEN_BYTES_FIXED SIGNATURE_HEADERS outOfRange entryAt batchTrees commitObject tempCommit
+      unsigned rootCommit reserved treeEntries tempFor planSteps planTransfer transferKey`],
+  ],
+  'src/push.ts': [
+    ['building the request from the caller\'s own options: commands, caps, bodies, the plan',
+      `isParsed nonEmpty pkts pushBody pushDefaults requestCap requestCaps unchecked checkBases planPush requestBody
+      bodyOf isPackLength planPackPush`],
+    ['an entry point that only plans, opens the span and hands over to send or sendSource', 'receivePack push pushPackChecked'],
+    ['span attributes, and the oid length shown in them', 'SHORT_OID outcomeAttrs objectTypeAttr'],
+  ],
+  'src/receivecaps.ts': [
+    ['the problem\'s text for people and the length of the line preview inside it', 'LINE_PREVIEW problemText'],
+  ],
 };
 // Gated whole: every top-level owner is strict, whatever it is called.
 const WHOLE = ['src/transfernames.ts', 'src/transfer.ts', 'src/transferload.ts'];
@@ -291,23 +283,23 @@ test('the census reports every top-level form the owner rule does not match, and
   assert.deepEqual(censusOf(owners.join('\n')).unseen, []);
 });
 
-test('every top-level owner of an owner-gated file is listed strict or exempt, and the verdict agrees', () => {
+test('the exempt owners are the pinned ones and each exists; every other top-level owner is strict in the verdict', () => {
   const problems = [];
   const want = [];
   const mutants = {};
-  for (const file of [...Object.keys(OWNERS), ...WHOLE]) {
+  for (const file of [...Object.keys(EXEMPT), ...WHOLE]) {
     const { seen, unseen } = census(file);
     for (const u of unseen) problems.push(`${file}:${u.line} ${u.name}: a top-level declaration the owner rule does not match`);
-    const lists = OWNERS[file] ?? { strict: seen.map(o => o.name), exempt: [] };
-    const listed = new Set([...lists.strict, ...lists.exempt]);
+    const exempt = new Set();
+    for (const [reason, names] of EXEMPT[file] ?? []) {
+      if (reason.trim() === '') problems.push(`${file} ${names}: exempt without a reason`);
+      for (const n of words(names)) exempt.add(n);
+    }
     const names = new Set(seen.map(o => o.name));
-    for (const o of seen) if (!listed.has(o.name)) problems.push(`${file}:${o.line} ${o.name}: neither strict nor exempt (decide, and list it here)`);
-    for (const n of listed) if (!names.has(n)) problems.push(`${file} ${n}: listed, but no such top-level owner (renamed or removed)`);
-    for (const n of lists.strict) if (lists.exempt.includes(n)) problems.push(`${file} ${n}: listed both strict and exempt`);
-    if (lists.strict.length === 0) problems.push(`${file}: no strict owner`);
-    const strict = new Set(lists.strict);
+    for (const n of exempt) if (!names.has(n)) problems.push(`${file} ${n}: exempt, but no such top-level owner (renamed or removed)`);
+    if (seen.every(o => exempt.has(o.name))) problems.push(`${file}: no strict owner`);
     mutants[file] = seen.map((o, k) => ({ id: String(k), mutatorName: 'ConditionalExpression', replacement: 'false', status: 'Survived', location: { start: { line: o.line, column: 1 }, end: { line: o.line, column: 2 } } }));
-    for (const o of seen) if (strict.has(o.name)) want.push(`${file}:${o.line} ${o.name}`);
+    for (const o of seen) if (!exempt.has(o.name)) want.push(`${file}:${o.line} ${o.name}`);
   }
   assert.deepEqual(problems, []);
 
