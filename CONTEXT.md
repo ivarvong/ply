@@ -202,6 +202,15 @@ This session (2026-10-19 → 20):
 Requirements: Node ≥ 22, git ≥ 2.43 on PATH, OpenSSH `ssh-keygen` for the signing suites, `workerd` (npm,
 pinned) for the Workers suite (skipped if absent).
 
+Before every push, run the fast gate. It is what CI's `lint + fuzz` job and the registry test reject first:
+types and the ratchets, lint, the space registry (gate a, SPACES.md freshness), and the built `dist` importing
+the way consumers import it. It needs no network. There are no git hooks: running it is the contributor's step,
+and `notify-ply-web` tells ply-web about a commit only after `ci` passed for that commit on main.
+
+```sh
+npm run check             # typecheck + lint + registry test + dist check; run before every push
+```
+
 ```sh
 npm ci
 npm test                  # 113 deterministic tests + 16 fuzz stages (≈29 min)
