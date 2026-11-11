@@ -543,6 +543,63 @@ const ERR_ANSWER = te.encode((ERR_TEXT.length + 4).toString(16).padStart(4, '0')
 const RESULT = { 'content-type': 'application/x-git-upload-pack-result' };
 const rawCall = async (f, body) => new Uint8Array(await (await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body })).arrayBuffer());
 
+// The store gate's own refusals, one cell each (gate c: these five fail sites are the packcache space's). The contract
+// is README "cachingFetch": what reaches cache.put has pkt-line framing complete to the final flush, no ERR packet and,
+// when there is a packfile section, a PACK v2/v3 header and a trailing SHA-1 of the pack bytes; an answer that fails
+// is not stored, and the caller still gets the origin's bytes. Every answer here is built by hand from the protocol:
+// a pkt-line is 4 hex digits of its own length (the 4 included) and the payload (gitprotocol-common), a flush is 0000.
+test('cachingFetch: the store gate refuses an ERR packet, a missing flush, a cut pkt-line, a packfile section that is no pack and a pack with no trailer; the caller gets every byte', async () => {
+  const frame = bytes => concat([te.encode((bytes.length + 4).toString(16).padStart(4, '0')), bytes]);
+  const flush = te.encode('0000');
+  // gitprotocol-v2 ls-refs output: `<oid> SP <refname> LF` per ref, then a flush-pkt
+  const ref = frame(te.encode(`${'1'.repeat(40)} refs/heads/main\n`));
+  assert.equal(ref.length, 4 + 40 + 1 + 15 + 1);
+  // gitprotocol-v2 fetch output: the section header `packfile LF`, then sideband pkt-lines (band 1 is pack data), then
+  // a flush-pkt
+  const band1 = bytes => frame(concat([Uint8Array.of(1), bytes]));
+  const packfile = pack => concat([frame(te.encode('packfile\n')), band1(pack), flush]);
+  // gitformat-pack: "PACK", a 4-byte big-endian version (2), a 4-byte object count (0), then the entries (none), then
+  // the SHA-1 of everything before it. So the smallest pack is these 12 bytes and their 20-byte SHA-1 (node:crypto).
+  const header = Uint8Array.of(0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 0);
+  const emptyPack = concat([header, new Uint8Array(createHash('sha1').update(header).digest())]);
+  const lsRefs = unwrap(lsRefsBodyR([]));
+  const fetchReq = fetchBody({ wants: ['2'.repeat(40)] });
+  const pending = [];
+  const run = async (answer, body) => {
+    let origin = 0;
+    const cache = memoryCache();
+    const f = cachingFetch(async () => { origin++; return new Response(answer.slice(), { status: 200, headers: RESULT }); }, cache, { verifyBeforeStore: true, shouldCache: () => true, waitUntil: p => { pending.push(p); } });
+    const got = [];
+    for (let i = 0; i < 2; i++) { got.push(await rawCall(f, body)); await Promise.all(pending.splice(0)); }
+    return { origin, cache, f, got };
+  };
+  const refusedCell = async (name, answer, body, error) => {
+    const { origin, cache, f, got } = await run(answer, body);
+    assert.deepEqual(got, [answer, answer], `${name}: the caller gets the origin's bytes, both times`);
+    assert.equal(cache.entries.size, 0, `${name}: nothing stored`);
+    assert.equal(origin, 2, `${name}: the second call asked the origin again`);
+    assert.deepEqual([f.stats.hit, f.stats.miss, f.stats.putOk, f.stats.verifyOk, f.stats.verifyFailed], [0, 2, 0, 0, 2], name);
+    assert.match(f.stats.verifyError, error, name);
+  };
+  // the builders are sound: the same shapes, complete, are stored and the second call is a hit
+  for (const [name, answer, body] of [['ls-refs', concat([ref, flush]), lsRefs], ['empty pack', packfile(emptyPack), fetchReq]]) {
+    const { origin, cache, f, got } = await run(answer, body);
+    assert.deepEqual(got, [answer, answer], name);
+    assert.deepEqual([origin, cache.entries.size, f.stats.hit, f.stats.putOk, f.stats.verifyFailed], [1, 1, 1, 1, 0], `${name}: ${f.stats.verifyError}`);
+  }
+  // an answer that is not a fetch's: upload-pack's in-band error-line instead of the refs
+  await refusedCell('ERR packet', ERR_ANSWER, lsRefs, /answer: an ERR packet/);
+  // the ref line and no flush-pkt after it: the output never ended
+  await refusedCell('no flush', ref, lsRefs, /answer: ended without a flush/);
+  // the ref line cut 5 bytes short (its length prefix says 61, 56 arrived): the framing is not complete
+  await refusedCell('cut pkt-line', ref.slice(0, ref.length - 5), lsRefs, /trailing 56 bytes after last pkt-line/);
+  // a packfile section whose band 1 is 32 bytes that do not begin "PACK" (the empty pack with its first byte changed)
+  const notPack = emptyPack.slice(); notPack[0] = 0x51;
+  await refusedCell('no PACK header', packfile(notPack), fetchReq, /answer: the packfile section does not start with a PACK v2\/v3 header/);
+  // a packfile section that holds the 12-byte header and ends: 12 bytes are fewer than the 20 of a trailer
+  await refusedCell('no trailer', packfile(header), fetchReq, /answer: the pack ends before its trailer/);
+});
+
 test('cachingFetch (default rule): an origin that answers an in-band ERR once and then recovers is not remembered as failed', async () => {
   const head = headOf();
   let origin = 0;
