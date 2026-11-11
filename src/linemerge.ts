@@ -46,15 +46,22 @@ export type Undecided = { readonly undecided: true; readonly detail: string };
 type Diffed<T> = Result<T, Undecided>;
 const DONE: Diffed<null> = ok(null);
 // The work bound. Every loop of the diff adds its primitive steps (a line scanned, a candidate tried, a diagonal
-// advanced) to one meter per merge; past `max` the diff stops and the merge is refused. `max` is a multiple of the
+// advanced) to one counter per merge; past `max` the diff stops and the merge is refused. `max` is a multiple of the
 // input's line count (limits.ts: LIMIT_MERGE_STEPS_PER_LINE), so the work is linear in the input whatever its content.
-// A caller may pass its own meter to read the count afterwards.
+// The counter is the module's own, made per call and starting at zero: nothing a caller passes is read to decide a
+// refusal. A caller's meter is written once, when the call returns, with that call's total.
 export type Meter = { steps: number };
-export type Budget = { readonly meter: Meter; readonly max: number };
-const unbounded = (): Budget => ({ meter: { steps: 0 }, max: Infinity });
-const spent = (budget: Budget): boolean => budget.meter.steps > budget.max;
+export type Budget = { steps: number; readonly max: number };
+const unbounded = (): Budget => ({ steps: 0, max: Infinity });
+const spent = (budget: Budget): boolean => budget.steps > budget.max;
 const OVER_BUDGET = 'line diff step budget exceeded';
-const stepBudget = (meter: Meter, stepsPerLine: number, lines: number): Budget => ({ meter, max: stepsPerLine * (lines + LIMIT_MERGE_STEPS_FLOOR_LINES) });
+// stepsPerLine as a caller gave it: a non-negative finite number, or the default. A value that would bound nothing
+// (NaN, Infinity, a negative, a non-number) never switches the bound off and never refuses everything.
+export const stepsPerLineOf = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : LIMIT_MERGE_STEPS_PER_LINE);
+const stepBudget = (stepsPerLine: unknown, lines: number): Budget => ({ steps: 0, max: stepsPerLineOf(stepsPerLine) * (lines + LIMIT_MERGE_STEPS_FLOOR_LINES) });
+// The call's total, copied out to the caller's meter. The meter is never read; one that is not an object, or will not
+// take the write (frozen), is left alone: no option value makes mergeLines or diffScript throw.
+const report = (meter: unknown, budget: Budget): void => { if (typeof meter === 'object' && meter !== null) Reflect.set(meter, 'steps', budget.steps); };
 // compact's invariant: the two sides' change groups move in step (equal counts of unchanged lines). Broken, it is a
 // programmer bug, so thrown, and typed (#80); the stack names the site.
 const broken = (): Error => plyError('internal', 'linemerge: groups out of step');
@@ -118,7 +125,6 @@ function scanRegion(a: Int32Array, b: Int32Array, line1: number, count1: number,
   const END1 = line1 + count1 - 1;
   const END2 = line2 + count2 - 1;
   const { first, count, next } = ix;
-  const { meter } = budget;
   // scanA: first = first occurrence, next chains forward
   let distinct = 0;
   for (let ptr = END1; ptr >= line1; ptr--) {
@@ -159,7 +165,7 @@ function scanRegion(a: Int32Array, b: Int32Array, line1: number, count1: number,
           let rc = recCnt;
           while (line1 < as && line2 < bs && a[as - 2] === b[bs - 2]) { as--; bs--; if (rc > 1) rc = Math.min(rc, CNT(as)); }
           while (ae < END1 && be < END2 && a[ae] === b[be]) { ae++; be++; if (rc > 1) rc = Math.min(rc, CNT(ae)); }
-          meter.steps += ae - as + 1; // the candidate's extension
+          budget.steps += ae - as + 1; // the candidate's extension
           if (bNext <= be) bNext = be + 1;
           if (lcs.end1 - lcs.begin1 < ae - as || rc < cnt) { lcs.begin1 = as; lcs.begin2 = bs; lcs.end1 = ae; lcs.end2 = be; cnt = rc; }
           let np = np0;
@@ -178,7 +184,7 @@ function scanRegion(a: Int32Array, b: Int32Array, line1: number, count1: number,
   return lcs.begin1 === 0 && lcs.begin2 === 0 ? { tag: 'none' } : lcs;
 }
 function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number, ix: Index, budget: Budget): Found {
-  budget.meter.steps += count1 + count2; // scanA over file 1's region, one lookup per line of file 2's
+  budget.steps += count1 + count2; // scanA over file 1's region, one lookup per line of file 2's
   if (spent(budget)) return { tag: 'over-budget' };
   const found = scanRegion(a, b, line1, count1, line2, count2, ix, budget);
   for (let ptr = line1; ptr < line1 + count1; ptr++) ix.count[Number(a[ptr - 1])] = 0; // leave the tables clean for the next region
@@ -227,8 +233,7 @@ type Box = [off1: number, lim1: number, off2: number, lim2: number, needMin: boo
 /* oxlint-disable eslint/max-depth, eslint/complexity, eslint/max-params, eslint/no-param-reassign -- a line-for-line port of xdiffi.c's xdl_split / xdl_recs_cmp over C's argument list */
 // false: the step budget was spent before the diff finished, and nothing was marked.
 export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1: number, line2: number, count2: number, CH1: Uint8Array, CH2: Uint8Array, budget: Budget = unbounded()): boolean {
-  const { meter } = budget;
-  meter.steps += count1 + count2; // trim, cleanup and the class counts each pass over both ranges
+  budget.steps += count1 + count2; // trim, cleanup and the class counts each pass over both ranges
   if (spent(budget)) return false;
   const a = A.subarray(line1 - 1, line1 - 1 + count1);
   const b = B.subarray(line2 - 1, line2 - 1 + count2);
@@ -305,7 +310,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
         i1 = kf(d - 1) >= kf(d + 1) ? kf(d - 1) + 1 : kf(d + 1);
         prev1 = i1; i2 = i1 - d;
         for (; i1 < lim1 && i2 < lim2 && h1[i1] === h2[i2]; i1++, i2++);
-        meter.steps += i1 - prev1 + 1; // one diagonal and its snake
+        budget.steps += i1 - prev1 + 1; // one diagonal and its snake
         if (i1 - prev1 > SNAKE_CNT) gotSnake = true;
         setF(d, i1);
         if (odd && bmin <= d && d <= bmax && kb(d) <= i1) return { i1, i2, minLo: true, minHi: true };
@@ -316,7 +321,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
         i1 = kb(d - 1) < kb(d + 1) ? kb(d - 1) : kb(d + 1) - 1;
         prev1 = i1; i2 = i1 - d;
         for (; i1 > off1 && i2 > off2 && h1[i1 - 1] === h2[i2 - 1]; i1--, i2--);
-        meter.steps += prev1 - i1 + 1;
+        budget.steps += prev1 - i1 + 1;
         if (prev1 - i1 > SNAKE_CNT) gotSnake = true;
         setB(d, i1);
         if (!odd && fmin <= d && d <= fmax && i1 <= kf(d)) return { i1, i2, minLo: true, minHi: true };
@@ -417,7 +422,6 @@ function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8
 type Group = { start: number; end: number };
 /* oxlint-disable eslint/max-params, eslint/no-param-reassign, eslint/complexity, eslint/max-depth -- a line-for-line port of xdiffi.c's xdl_change_compact and its group helpers, which advance the group in place */
 export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32Array, chO: Uint8Array, nO: number, rediff: Rediff, budget: Budget = unbounded()): Diffed<null> {
-  const { meter } = budget;
   const C = (i: number): boolean => ch[i + 1] === 1;
   const CO = (i: number): boolean => chO[i + 1] === 1;
   const set = (i: number, v: number): void => { ch[i + 1] = v ? 1 : 0; };
@@ -426,8 +430,8 @@ export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32A
   const init = (G: Group, c: (i: number) => boolean): void => { G.start = G.end = 0; while (c(G.end)) G.end++; };
   const nextG = (G: Group, c: (i: number) => boolean, nn: number): boolean => { if (G.end === nn) return false; G.start = G.end + 1; for (G.end = G.start; c(G.end); G.end++); return true; };
   const prevG = (G: Group, c: (i: number) => boolean): boolean => { if (G.start === 0) return false; G.end = G.start - 1; for (G.start = G.end; c(G.start - 1); G.start--); return true; };
-  const slideDown = (): boolean => { if (g.end < n && ids[g.start] === ids[g.end]) { meter.steps++; set(g.start++, 0); set(g.end++, 1); while (C(g.end)) g.end++; return true; } return false; };
-  const slideUp = (): boolean => { if (g.start > 0 && ids[g.start - 1] === ids[g.end - 1]) { meter.steps++; set(--g.start, 1); set(--g.end, 0); while (C(g.start - 1)) g.start--; return true; } return false; };
+  const slideDown = (): boolean => { if (g.end < n && ids[g.start] === ids[g.end]) { budget.steps++; set(g.start++, 0); set(g.end++, 1); while (C(g.end)) g.end++; return true; } return false; };
+  const slideUp = (): boolean => { if (g.start > 0 && ids[g.start - 1] === ids[g.end - 1]) { budget.steps++; set(--g.start, 1); set(--g.end, 0); while (C(g.start - 1)) g.start--; return true; } return false; };
   init(g, C); init(go, CO);
   for (;;) {
     if (g.end !== g.start) {
@@ -453,7 +457,7 @@ export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32A
       }
       // histogram: a moved group facing a non-empty group on the other side is re-diffed with classic Myers in git.
       // A JS caller's unknown rediff reads as 'skip', as it always has (blobMerger refuses one before this).
-let within = true;
+      let within = true;
       if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end) && !applyRediff(rediff, () => { within = classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1), budget); })) return undecided('compaction needs the classic-diff fallback');
       if (!within || spent(budget)) return undecided(OVER_BUDGET);
     }
@@ -506,11 +510,15 @@ function diffWith(base: Lines, side: Lines, rediff: Rediff, budget: Budget): Dif
   return ok(buildScript(ch1, n1, ch2, n2));
 }
 // stepsPerLine: the work budget per line of base + side (limits.ts); past it the diff is declined, detail
-// 'line diff step budget exceeded'. meter: the caller's step counter, to read the work done.
+// 'line diff step budget exceeded'. One that is not a non-negative finite number reads as the default. meter: an
+// object whose `steps` is set to this call's work when it returns (never read; anything else is ignored).
 export type DiffConfig = { readonly rediff: Rediff; readonly stepsPerLine: number; readonly meter: Meter };
 export function diffScript(base: Lines, side: Lines, options: Input<DiffConfig> = {}): Diffed<Change[]> {
   const { rediff, stepsPerLine, meter } = withDefaults<DiffConfig>(options, { rediff: 'myers', stepsPerLine: LIMIT_MERGE_STEPS_PER_LINE, meter: { steps: 0 } });
-  return diffWith(base, side, rediff, stepBudget(meter, stepsPerLine, base.n + side.n));
+  const budget = stepBudget(stepsPerLine, base.n + side.n);
+  const script = diffWith(base, side, rediff, budget);
+  report(meter, budget);
+  return script;
 }
 
 // ---- xdl_do_merge + xdl_append_merge ----
@@ -646,19 +654,8 @@ function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[],
 
 // A diff stopped by the step budget is the input being too large to merge; any other is undecided, with its detail.
 const declined = ({ detail }: Undecided): MergeLinesResult => (detail === OVER_BUDGET ? { clean: false, reason: 'too large to merge' } : { clean: false, reason: 'undecided', detail });
-// The merge. `maxBytes` bounds each input (git's MAX_XDIFF_SIZE is ~1 GiB; a Worker's is much smaller).
-// driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
-// -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
-// driver, as in ll_xdl_merge.
-function mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine, meter }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff; readonly stepsPerLine: number; readonly meter: Meter }): MergeLinesResult {
-  if (Math.max(base.length, ours.length, theirs.length) > maxBytes) return { clean: false, reason: 'too large to merge' };
-  if ([base, ours, theirs].some(f => isBinary(f))) return { clean: false, reason: 'binary' };
-  const cl = classifier();
-  const B = records(base, cl);
-  const O = records(ours, cl);
-  const T = records(theirs, cl);
-  // one budget for everything this merge diffs: both sides against base, then the conflicts' refinement
-  const budget = stepBudget(meter, stepsPerLine, B.n + O.n + T.n);
+// The three files' records under one budget: both sides against base, then the conflicts' refinement.
+function mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget }: { readonly driver: 'text' | 'union'; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly B: Records; readonly O: Records; readonly T: Records; readonly rediff: Rediff; readonly budget: Budget }): MergeLinesResult {
   const s1 = diffWith(B, O, rediff, budget); if (!s1.ok) return declined(s1.error);
   const s2 = diffWith(B, T, rediff, budget); if (!s2.ok) return declined(s2.error);
   const hunks = { ours: s1.value.length, theirs: s2.value.length };
@@ -674,8 +671,26 @@ function mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine,
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(driver);
 }
+// The merge. `maxBytes` bounds each input (git's MAX_XDIFF_SIZE is ~1 GiB; a Worker's is much smaller).
+// driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
+// -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
+// driver, as in ll_xdl_merge.
+function mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine, meter }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff; readonly stepsPerLine: unknown; readonly meter: unknown }): MergeLinesResult {
+  if (Math.max(base.length, ours.length, theirs.length) > maxBytes) return { clean: false, reason: 'too large to merge' };
+  if ([base, ours, theirs].some(f => isBinary(f))) return { clean: false, reason: 'binary' };
+  const cl = classifier();
+  const B = records(base, cl);
+  const O = records(ours, cl);
+  const T = records(theirs, cl);
+  const budget = stepBudget(stepsPerLine, B.n + O.n + T.n);
+  const merged = mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget });
+  report(meter, budget);
+  return merged;
+}
 // stepsPerLine x (lines of base + ours + theirs + LIMIT_MERGE_STEPS_FLOOR_LINES) is the merge's step budget: past it
-// the answer is 'too large to merge', as for an input over maxBytes. meter: the caller's step counter.
+// the answer is 'too large to merge', as for an input over maxBytes. A stepsPerLine that is not a non-negative finite
+// number reads as the default. meter: an object whose `steps` is set to this call's work when it returns; it is never
+// read, so a reused or malformed one changes no result (anything that is not an object is ignored).
 export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Rediff; readonly driver: Driver; readonly stepsPerLine: number; readonly meter: Meter };
 export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, options: Input<MergeLinesConfig> = {}): MergeLinesResult {
   const { maxBytes, rediff, driver, stepsPerLine, meter } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text', stepsPerLine: LIMIT_MERGE_STEPS_PER_LINE, meter: { steps: 0 } });

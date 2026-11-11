@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mergeLines, isBinary, records, classifier, diffScript, compact } from '../src/linemerge.js';
+import { mergeLines, isBinary, records, classifier, diffScript, compact, stepsPerLineOf } from '../src/linemerge.js';
 import { retryPolicy, isPlyCode } from '../src/errors.js';
 import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
@@ -135,7 +135,7 @@ test('work bound: pair swaps past the step budget are refused as too large, with
 });
 test('work bound: unbudgeted steps quadruple when the input doubles, budgeted steps only double', () => {
   const steps = (n, stepsPerLine) => { const [B, O, T] = swapCase(n), meter = { steps: 0 }; mergeLines(B, O, T, { rediff, stepsPerLine, meter }); return meter.steps; };
-  const free = [steps(1000, Infinity), steps(2000, Infinity)];
+  const free = [steps(1000, Number.MAX_SAFE_INTEGER), steps(2000, Number.MAX_SAFE_INTEGER)];
   assert.ok(free[0] >= 1000 ** 2 / 4 && free[1] >= 2000 ** 2 / 4, `the algorithm's own cost is ≥ n²/4: ${free}`);
   assert.ok(free[1] / free[0] > 3.5, `quadratic without the budget: ${free}`);
   const held = [steps(2000, 64), steps(4000, 64)];
@@ -157,4 +157,39 @@ test('work bound: the same shape under the budget is git\'s merge, byte for byte
   assert.equal(m.clean, true);
   assert.deepEqual(m.data, g.data);
   assert.ok(meter.steps > 0 && meter.steps < budgetOf(400, 1024), `${meter.steps} steps`);
+});
+
+// ---- the budget is the module's own counter (review R4): a caller's meter is written, never read ----
+// a/b/c/d/e with line 1 changed on ours and line 5 on theirs: git merges it cleanly (the oracle below), and two diffs
+// of 5 lines against 5 are a few dozen steps, so under 1000 by any count.
+const five = () => ['a\nb\nc\nd\ne\n', 'A\nb\nc\nd\ne\n', 'a\nb\nc\nd\nE\n'].map(enc);
+test('work bound: a caller\'s meter never decides a merge: reused, pre-loaded or malformed, the answer is git\'s and nothing throws', () => {
+  const [b, o, t] = five(), g = gitMerge(b, o, t);
+  assert.equal(g.status, 'clean');
+  for (const meter of [{ steps: 1e12 }, { steps: NaN }, {}, null, 7, 'x', Object.freeze({ steps: 0 })]) {
+    const m = mergeLines(b, o, t, { rediff, meter });
+    assert.equal(m.clean, true, `meter ${JSON.stringify(meter)}: ${JSON.stringify(m.reason)}`);
+    assert.deepEqual(m.data, g.data);
+    assert.equal(diffScript(records(b, classifier()), records(o, classifier()), { rediff, meter }).ok, true);
+  }
+  // one meter over two files: the first is refused (2000 swapped pairs need >= 1,000,000 steps, 449,600 allowed), the
+  // second is git's clean merge, and the meter then holds the second call's own total
+  const meter = { steps: 0 }, [B, O, T] = swapCase(2000);
+  assert.deepEqual(mergeLines(B, O, T, { rediff, stepsPerLine: 64, meter }), { clean: false, reason: 'too large to merge' });
+  assert.ok(meter.steps > budgetOf(2000, 64));
+  assert.equal(mergeLines(b, o, t, { rediff, stepsPerLine: 64, meter }).clean, true);
+  assert.ok(meter.steps > 0 && meter.steps < 1000, `${meter.steps} steps`);
+});
+test('work bound: no meter and no stepsPerLine switches the bound off', () => {
+  const [B, O, T] = swapCase(2000); // >= 1,000,000 steps against 449,600
+  for (const meter of [{}, { steps: NaN }, { steps: -1e12 }, null, 7]) assert.deepEqual(mergeLines(B, O, T, { rediff, stepsPerLine: 64, meter }), { clean: false, reason: 'too large to merge' }, `meter ${JSON.stringify(meter)}`);
+  // a stepsPerLine that is not a non-negative finite number is the default (1024): neither no bound nor a zero budget
+  for (const bad of [NaN, Infinity, -1, null, '64', {}]) assert.equal(stepsPerLineOf(bad), 1024, String(bad));
+  assert.equal(stepsPerLineOf(0), 0); assert.equal(stepsPerLineOf(64), 64);
+  const [b, o, t] = five();
+  for (const stepsPerLine of [NaN, -1, null, '64']) assert.equal(mergeLines(b, o, t, { rediff, stepsPerLine }).clean, true, String(stepsPerLine));
+  // 6000 swapped pairs need >= 6000^2/4 = 9,000,000 steps for the scan alone and the default allows
+  // 1024 x (18001 + 1024) = 19,481,600; the reviewer measured 27,036,000 steps of work with the bound off (NaN)
+  const [B6, O6, T6] = swapCase(6000);
+  for (const stepsPerLine of [NaN, Infinity]) assert.deepEqual(mergeLines(B6, O6, T6, { rediff, stepsPerLine }), { clean: false, reason: 'too large to merge' }, String(stepsPerLine));
 });
