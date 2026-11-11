@@ -229,6 +229,28 @@ test('a URL that does not parse, and a NUL, CR or LF in its userinfo, are refuse
   assert.equal(parseHttpOptions('https://u%0a@h/r.git', { auth: { token: 't' } }).ok, true);
 });
 
+// security/url-slash-run-regex-quadratic: the memo key was made with /\/+$/ on the caller's path, which rescans a slash
+// run from each of its slashes when the run does not end the path (quadratic). The keys below are worked by hand from
+// the stated rule (origin + path; query, fragment, userinfo and trailing slashes dropped), not read off ply.
+import { quirksKey, quirksKeyOf } from '../src/transport.js';
+test('quirksKeyOf: the key drops only trailing slashes, in time linear in the path (64x the slashes costs under 300x)', () => {
+  assert.equal(quirksKey('http://h.example/a/b///'), 'http://h.example/a/b');
+  assert.equal(quirksKey('http://h.example/'), 'http://h.example');
+  assert.equal(quirksKey('http://h.example////'), 'http://h.example');
+  assert.equal(quirksKey('http://h.example///x'), 'http://h.example///x');
+  assert.equal(quirksKey('http://h.example/a//b/'), 'http://h.example/a//b');
+  assert.equal(quirksKey('https://u:p@h.example:8443/r.git/?q=1#f'), 'https://h.example:8443/r.git');
+  // A run of slashes that does not end the path. One call on 64n slashes against 64 calls on n: linear work is equal,
+  // quadratic work is 64 times more. Best of 5 each, so load only ever narrows the ratio's noise, never widens it.
+  const N = 500;
+  const small = new URL(`http://h.example/${'/'.repeat(N)}x`);
+  const big = new URL(`http://h.example/${'/'.repeat(64 * N)}x`);
+  const best = (fn) => { let b = Infinity; for (let i = 0; i < 5; i++) { const t0 = performance.now(); fn(); b = Math.min(b, performance.now() - t0); } return b; };
+  const smallMs = best(() => { for (let i = 0; i < 64; i++) quirksKeyOf(small); }) / 64;
+  const bigMs = best(() => quirksKeyOf(big));
+  assert.ok(bigMs < 300 * smallMs, `64x the slashes cost ${(bigMs / smallMs).toFixed(0)}x the time (${bigMs.toFixed(3)} ms against ${smallMs.toFixed(5)} ms)`);
+});
+
 // The redirect memo (ply-web#117), against a fetch double. `moves` maps a path prefix to where its info/refs (and, with
 // `all`, every request) is sent with a 301; everything else answers an advertisement or an empty upload-pack result.
 // Each test uses its own host name, so the module memo is not shared between tests.
