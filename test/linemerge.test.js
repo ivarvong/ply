@@ -166,6 +166,26 @@ test('work bound: the same shape under the budget is git\'s merge, byte for byte
   assert.deepEqual(m.data, g.data);
   assert.ok(meter.steps > 0 && meter.steps < budgetOf(400, 1024), `${meter.steps} steps`);
 });
+// ---- an ordinary bulk edit merges under the defaults (review R3) ----
+// The reviewer's case, from fixed constants: 70,000 lines, ours changes every 20th line (3,500 one-line hunks: a sed
+// across a big file), theirs changes line 6. git merges it cleanly, and the expected bytes are `git merge-file`'s
+// (xdiff with the histogram diff, which is what merge-ort runs), not ply's.
+test('work bound: the 70,000-line / 3,500-hunk bulk edit merges cleanly under DEFAULT_LIMITS, byte for byte git merge-file', () => {
+  const N = 70000, EVERY = 20;
+  const L = Array.from({ length: N }, (_, i) => `line ${i} of the file`), o = [...L], t = [...L];
+  for (let i = EVERY - 1; i < N; i += EVERY) o[i] = `changed ${i}`;
+  t[5] = 'theirs edit';
+  const [B, O, T] = [L, o, t].map(l => enc(l.join('\n') + '\n'));
+  for (const [name, bytes] of [['bulk-base', B], ['bulk-ours', O], ['bulk-theirs', T]]) writeFileSync(join(dir, name), bytes);
+  const g = spawnSync(process.env.GIT_BIN ?? 'git', ['merge-file', '-p', '--diff-algorithm=histogram', join(dir, 'bulk-ours'), join(dir, 'bulk-base'), join(dir, 'bulk-theirs')], { maxBuffer: 1 << 26 });
+  assert.equal(g.status, 0, `git merge-file merges it cleanly: ${g.stderr}`);
+  const meter = { steps: 0 };
+  const m = mergeLines(B, O, T, { rediff, maxBytes: DEFAULT_LIMITS.maxMergeBlobBytes, maxWork: DEFAULT_LIMITS.maxMergeWork, meter });
+  assert.equal(m.clean, true, `ply: ${m.reason} after ${meter.steps} steps of ${DEFAULT_LIMITS.maxMergeWork}`);
+  assert.ok(Buffer.from(m.data).equals(g.stdout), `merged bytes are git's (${m.data.length} against ${g.stdout.length})`);
+  // the sizing rule: the default is at least twice what this case counts
+  assert.ok(DEFAULT_LIMITS.maxMergeWork >= 2 * meter.steps, `${meter.steps} steps against a default of ${DEFAULT_LIMITS.maxMergeWork}`);
+});
 
 // ---- the budget is the module's own counter (review R4): a caller's meter is written, never read ----
 // a/b/c/d/e with line 1 changed on ours and line 5 on theirs: git merges it cleanly (the oracle below), and two diffs
