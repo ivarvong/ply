@@ -85,7 +85,10 @@ test('with the idle and first-byte limits off, requestTimeoutMs ends an upload t
     assert.deepEqual(r1, { frames: 0, code: 'timeout', what: 'requestTimeoutMs' });
     assert.ok(large.pulls.n < 64, `the source was read to its end (${large.pulls.n} chunks): the upload did not stall`);
     const small = { pieces: [], pulls: { n: 0 } };
-    const r2 = await push(createTransport(srv.url, { fetchImpl: observed(small.pieces, () => 0), limits }).value, source(1, 65_536, small.pulls));
+    // This case asserts that the platform took the piece before the limit fired, so its limit is seconds, not 300 ms:
+    // the first pull was measured at most 10 ms after the request began on a loaded machine.
+    const seconds = withLimits({ firstByteTimeoutMs: 0, idleTimeoutMs: 0, requestTimeoutMs: 5_000 });
+    const r2 = await push(createTransport(srv.url, { fetchImpl: observed(small.pieces, () => 0), limits: seconds }).value, source(1, 65_536, small.pulls));
     assert.deepEqual(r2, { frames: 0, code: 'timeout', what: 'requestTimeoutMs' });
     assert.deepEqual(small.pieces.map(p => p.bytes), [65_536]);
   } finally { srv.close(); }
