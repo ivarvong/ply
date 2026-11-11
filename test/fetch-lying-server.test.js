@@ -130,3 +130,25 @@ test('a fetch sent with done and answered with acknowledgments before its packfi
   assert.equal(code(end(acksThenPack(true), false)), 'ok', 'no done: ready, then the pack');
   assert.equal(code(end([data('shallow-info\n'), { kind: 'delim' }, data('packfile\n'), { kind: 'flush' }], true)), 'ok', 'done: shallow-info, then the pack');
 });
+
+test('an acknowledgment for an id the client never offered is a protocol error: git fails the same exchange', async () => {
+  // The first fetch sent without done is answered `ACK <C>`. C is the want; the client holds A and offers only A.
+  // upload-pack acknowledges only a have line it was sent (upload-pack.c process_haves / send_acks), so this is a lie.
+  // Each client gets its own proxy: the lie is told once per proxy.
+  const lie = () => { let told = false; return body => { if (told || !body.includes('command=fetch') || body.includes('done\n')) return null; told = true; return Buffer.concat([pkt('acknowledgments\n'), pkt(`ACK ${C}\n`), FLUSH]); }; };
+  const pg = await lyingProxy(srv.url, lie());
+  try {
+    // the oracle: real git holding A, told the same lie, does not end with a successful fetch
+    const g = await gitFetch(haveA, `${pg.url}/src.git`);
+    assert.equal(pg.seen.some(b => b.includes('command=fetch') && !b.includes('done\n')), true, 'git was told the lie');
+    assert.equal(g.failed, true, 'git fails the fetch');
+  } finally { await pg.close(); }
+  const p = await lyingProxy(srv.url, lie());
+  try {
+    const r = await client(`${p.url}/src.git`).negotiate({ wants: [C], haves: [A] });
+    assert.deepEqual([r.ok, r.ok ? null : r.error.code], [false, 'protocol']);
+    assert.match(r.error.message, new RegExp(`acknowledged ${C}, which was never offered`));
+    // and no request claims to have the id that was never offered
+    assert.deepEqual(p.seen.filter(b => b.includes(`have ${C}`)), []);
+  } finally { await p.close(); }
+});
