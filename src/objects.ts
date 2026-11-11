@@ -493,6 +493,8 @@ function oidLine(s: string, p: number, kind: string, msgId: string, what: string
 // newline]. The checks and their order are git's: a leading '<', a '>' before the '<', no '<', no space before '<',
 // no '>' after the email, no space after '>', then spaces or tabs, a digit, no leading zero unless the date is "0",
 // no overflow past git's timestamp range, one space, a sign, IDENT_TZ_DIGITS digits, and the newline.
+// The digits of the greatest timestamp fsck accepts (2^63 - 1: 19).
+const IDENT_TIMESTAMP_DIGITS = String(IDENT_TIMESTAMP_MAX).length;
 // oxlint-disable-next-line eslint/complexity -- fsck_ident line for line, inline: a helper costs bytes on every entry
 function fsckIdent(s: string, p: number, kind: string, role: string): Result<readonly [ident: string, next: number], Corrupt> {
   const eol = s.indexOf('\n', p);
@@ -516,7 +518,9 @@ function fsckIdent(s: string, p: number, kind: string, role: string): Result<rea
   if (s[q] === '0' && s[q + 1] !== ' ') return bad('zeroPaddedDate', 'zero-padded date');
   const start = q;
   while (DIGIT.test(s.charAt(q))) q++;
-  if (BigInt(s.slice(start, q)) > IDENT_TIMESTAMP_MAX) return bad('badDateOverflow', 'date causes integer overflow');
+  // By length first: the run has no leading zero (above), so more digits than the limit has is past the limit. The
+  // run is the remote's and as long as the object; BigInt of it is superlinear, so it only ever sees a short one.
+  if (q - start > IDENT_TIMESTAMP_DIGITS || BigInt(s.slice(start, q)) > IDENT_TIMESTAMP_MAX) return bad('badDateOverflow', 'date causes integer overflow');
   if (s[q] !== ' ') return bad('badDate', 'bad date');
   q++;
   if (s[q] !== '+' && s[q] !== '-') return bad('badTimezone', 'bad time zone');
