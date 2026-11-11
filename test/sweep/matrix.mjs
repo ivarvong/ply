@@ -316,6 +316,13 @@ function build() {
   add({ id: 'inflate.under', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, expectFrom: 'inflated-under' });
   add({ id: 'inflate.zero', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, limits: { maxInflatedTotal: 0 }, expect: refused('limit_exceeded', { what: 'pack inflated bytes' }) });
 
+  // ---- maxResolveWork: resolvePackRange of the chain git packed (d1-ofs: 80 revisions of a 2 KiB file, every delta one
+  // deep). The two cells differ in this key alone; maxInflatedTotal is 0 in both because the bound applied is never
+  // below it. A ceiling of 0 refuses the first delta read back (a delta inflates at least one byte); the default ceiling
+  // (2 GiB) is four orders of magnitude past everything this pack declares.
+  add({ id: 'resolve.work.default', param: 'maxResolveWork', op: 'resolveRange', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, limits: { maxInflatedTotal: 0, maxResolveWork: DEFAULT_LIMITS.maxResolveWork }, expect: ok });
+  add({ id: 'resolve.work.zero', param: 'maxResolveWork', op: 'resolveRange', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, limits: { maxInflatedTotal: 0, maxResolveWork: 0 }, expect: refused('limit_exceeded', { what: 'resolve work bytes' }) });
+
   pass2(add);
   // ---- Every key, parsed where it enters (#156 parseLimits). A value that bounds nothing is refused when the client
   // is made, before any request, whichever operation would read it: lsRefs reads only maxRefs and maxLsRefsBytes, and
