@@ -520,8 +520,11 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
   const inputs = parseEditInputs(target.ref, edit.path, opts.limits);
   if (!inputs.ok) return inputs;
   const { ref, path } = inputs.value;
+  // The target's own tip is named by ref, so editFile's retry reads it again. Any other base (another ref, a 40-hex
+  // commit) is the commit resolveParent resolved: the one place a base ref is peeled (an annotated tag is its commit).
+  const base = parent.baseRef === target.ref ? target.ref : parent.oid;
   const result = await editFile(url, {
-    ref, base: getOrElse(fromNullish(parent.baseOid), getOrElse(fromNullish(parent.baseRef), target.ref)), path, find: edit.find, replace: edit.replace,
+    ref, base, path, find: edit.find, replace: edit.replace,
     author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
   }, {
     ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,

@@ -733,3 +733,24 @@ test('verify re-reads the ref, and a signer produces a commit git verify-commit 
   const verifiedEdit = spawnSync('git', ['-C', signedEdit.bare, '-c', 'gpg.format=ssh', '-c', 'gpg.ssh.program=ssh-keygen', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-commit', edited.oid], { encoding: 'utf8' });
   assert.equal(verifiedEdit.status, 0, verifiedEdit.stdout + verifiedEdit.stderr);
 });
+
+// git branches from an annotated tag by peeling it (`git checkout -b from-tag v1`). One edit takes the streamed path
+// and two changes the in-memory one: both must start from the commit the tag names, not from the tag object.
+test('a single edit from an annotated-tag base is the commit git makes from that tag', async () => {
+  const { bare, url } = copy(linearBare);
+  gitEnv(bare, ['tag', '-a', '-m', 'v1', 'v1', 'refs/heads/main'], STAMP);
+  const peeled = git(bare, ['rev-parse', 'refs/tags/v1^{commit}']).trim();
+  assert.notEqual(git(bare, ['rev-parse', 'refs/tags/v1']).trim(), peeled);
+  const work = join(root, `tagwork${n++}`);
+  git(root, ['clone', '-q', bare, work]);
+  git(work, ['checkout', '-q', '-b', 'from-tag', 'v1']);
+  writeFileSync(join(work, 'a.txt'), 'v2\n');
+  git(work, ['add', 'a.txt']);
+  gitEnv(work, ['commit', '-q', '-m', 'edit from tag'], STAMP);
+  const want = git(work, ['cat-file', 'commit', 'HEAD']);
+  const r = await commit(url, { ref: 'refs/heads/from-tag', base: 'refs/tags/v1', author: AUTHOR, message: 'edit from tag', changes: [{ kind: 'edit', path: 'a.txt', find: 'v1', replace: 'v2' }] });
+  assert.equal(git(bare, ['cat-file', 'commit', 'refs/heads/from-tag']), want);
+  assert.equal(r.parent, peeled);
+  assert.equal(r.created, true);
+  assert.deepEqual(fsckProblems(bare), []);
+});
