@@ -226,3 +226,29 @@ test('a thin REF root with maxDeltaChain OFS deltas on it is a missing base; one
     assert.deepEqual(coded(d), ['limit_exceeded', 'delta chain depth', CHAIN + 1, CHAIN]);
   }
 });
+
+// ---- hand-built input parsePack cannot produce ----
+const blobId = i => sha1('blob', content(i)).toString('hex');
+const ofsAt = (offset, baseOffset, i) => ({ offset, type: OFS, data: replaceDelta(content(i - 1).length, content(i)), base: { tag: 'ofs', offset: baseOffset } });
+const refAt = (offset, baseI, i) => ({ offset, type: REF, data: replaceDelta(content(baseI).length, content(i)), base: { tag: 'ref', oid: blobId(baseI) } });
+const blobBase = i => ({ type: BLOB, data: new Uint8Array(content(i)) });
+
+test('a cycle of OFS bases (hand-built) is the coded chain-depth error from resolvePack, never a throw', () => {
+  // By hand: a cycle of bases is a chain with no end, so it is past maxDeltaChain (64) at its 65th link, and a Result
+  // API reports that as a value. parsePack cannot produce one (an OFS base is strictly earlier in the pack).
+  const cycles = {
+    'self-loop': [ofsAt(10, 10, 1)],
+    '2-cycle': [ofsAt(10, 11, 1), ofsAt(11, 10, 2)],
+    '3-cycle with a tail': [ofsAt(10, 12, 1), ofsAt(11, 10, 2), ofsAt(12, 11, 3), ofsAt(13, 10, 4), ofsAt(14, 13, 5)],
+    'a tail first, then the cycle it rests on': [ofsAt(14, 13, 5), ofsAt(13, 10, 4), ofsAt(10, 11, 1), ofsAt(11, 10, 2)],
+    'a cycle beside a whole object and its delta': [{ offset: 1, type: BLOB, data: content(0) }, ofsAt(2, 1, 1), ofsAt(10, 11, 1), ofsAt(11, 10, 2)],
+  };
+  for (const [name, objects] of Object.entries(cycles)) {
+    const c = counting(() => null);
+    let r;
+    assert.doesNotThrow(() => { r = resolvePack({ objects }, c.external); }, name);
+    assert.ok(!r.ok, name);
+    assert.deepEqual(coded(r), ['limit_exceeded', 'delta chain depth', 65, 64], name);
+    assert.deepEqual(c.asked, [], name);
+  }
+});
