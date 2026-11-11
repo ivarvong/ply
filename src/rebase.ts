@@ -65,19 +65,32 @@ export function squashMessage(messages: ReadonlyArray<string | null>): string {
 
 // a walk that reached every parent it names: deepening it fetches nothing new
 const whole = (m: ReadonlyMap<Oid, Commit>): boolean => { for (const c of m.values()) for (const p of c.parents) if (!m.has(p)) return false; return true; };
+// Pure: the single-parent commits from `tip` that walk A holds and walk B does not, counted no further than max + 1
+const chainOutside = (A: ReadonlyMap<Oid, Commit>, B: ReadonlyMap<Oid, Commit>, tip: Oid, max: number): number => {
+  let over = 0;
+  let id: Oid = tip;
+  for (let c = mapGet(A, id); c.tag === 'some' && c.value.parents.length === 1 && !B.has(id) && over <= max; over++) { id = getOrElse(at(c.value.parents, 0), id); c = mapGet(A, id); }
+  return over;
+};
 // Effect: the merge base of a rebase. Two walks, each under its own limit: the branch walk (from the tip) is the chain
 // walk, to maxRebaseCommits + 2 commits (the base of a chain of n commits is n + 1 from the tip, and one more shows a
-// chain one over the limit); the onto walk is the merge-base search, to maxMergeDepth, as mergeBranch's. Both double
+// chain one over the limit) or to maxMergeDepth where that is deeper; the onto walk is the merge-base search, to
+// maxMergeDepth, as mergeBranch's. Both double
 // from 8; a walk that is whole or at its cap is not fetched again. When neither walk can go deeper and the graph is
-// still cut: a branch walk holding more than maxRebaseCommits single-parent commits from the tip that the onto walk
-// did not reach is `rebase chain` (got = max + 1: the search stops one past the limit, it does not count the chain);
-// anything else is `merge-base search depth` against maxMergeDepth. Every max is a field of the caller's limits.
+// still cut, the chain is known to be over its limit only if the onto walk is whole: every commit it does not hold is
+// then outside onto's history, so more than maxRebaseCommits single-parent commits from the tip are `rebase chain`
+// (got = max + 1: the search stops one past the limit, it does not count the chain). With the onto walk cut, a commit
+// of the branch walk may be an ancestor of onto beyond the cut (a short branch far behind onto looks the same as a
+// long one), and no request is spent to tell: the refusal is `merge-base search depth` against maxMergeDepth, with the
+// fields mergeBaseOf reports (got: twice the depth searched). Every max is a field of the caller's limits.
 export async function rebaseBaseOf(t: Transport, tip: Oid, target: Oid): Promise<Result<MergeBase, PlyError>> {
   const { maxRebaseCommits, maxMergeDepth } = t.limits;
-  const capA = Math.floor(maxRebaseCommits) + 2;
   const capB = Math.floor(maxMergeDepth);
   // maxMergeDepth under 1 allows no search, as in mergeBase: refused before any fetch
   if (capB < 1) return err(limitError('merge-base search depth', 1, maxMergeDepth));
+  // never shallower than the merge-base search (mergeBaseOf walks both sides to maxMergeDepth): a base that search
+  // finds is found here, so a chain over its limit is named wherever it was, and raising maxMergeDepth settles a cut
+  const capA = Math.max(Math.floor(maxRebaseCommits) + 2, capB);
   const top = Math.max(capA, capB);
   let A = new Map<Oid, Commit>(); let B = new Map<Oid, Commit>();
   let atA = 0; let atB = 0;
@@ -100,9 +113,7 @@ export async function rebaseBaseOf(t: Transport, tip: Oid, target: Oid): Promise
   }
   switch (s.tag) {
     case 'capped': {
-      let over = 0;
-      let id: Oid = tip;
-      for (let c = mapGet(A, id); c.tag === 'some' && c.value.parents.length === 1 && !B.has(id) && over <= maxRebaseCommits; over++) { id = getOrElse(at(c.value.parents, 0), id); c = mapGet(A, id); }
+      const over = whole(B) ? chainOutside(A, B, tip, maxRebaseCommits) : 0;
       if (over > maxRebaseCommits) return err(limitError('rebase chain', over, maxRebaseCommits));
       return err(limitError('merge-base search depth', capB * 2, maxMergeDepth));
     }

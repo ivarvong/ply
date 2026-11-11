@@ -257,6 +257,44 @@ test('limits: maxRebaseCommits governs a rebase above maxMergeDepth too: a chain
   assert.deepEqual(fsckProblems(r.bare), []);
 });
 
+// A stale short branch in a long linear history: 40 commits, a 3-commit branch on the 40th, main 20 commits further.
+// The base is 21 commits from onto, past maxMergeDepth 8, and the branch's own history (43 commits) is longer than
+// the branch walk (maxRebaseCommits + 2). Both walks end cut and share no commit, so nothing shows the chain to be
+// over its limit: git counts 3. The refusal is the merge-base search's, with the fields that search has always
+// reported for this repository (max: the caller's maxMergeDepth; got: the doubling it would have needed next, 2 x 8).
+test('limits: a short branch whose onto is further than maxMergeDepth is refused by maxMergeDepth, never as a rebase chain it does not have; raising the limit named rebases it as git does', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const r = repo();
+  const L = []; let at = 1_700_000_000; let mark = 0;
+  const commit = (ref, from, path, body) => { mark++; L.push(`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, 'data 1', 'c', ...(from ? [`from :${from}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body); return mark; };
+  let base = 0; for (let i = 1; i <= 40; i++) base = commit('refs/heads/main', base, 'a.txt', `a${i}`);
+  let prev = base; for (let i = 1; i <= 3; i++) prev = commit('refs/heads/short', prev, 's.txt', `${i}`);
+  prev = base; for (let i = 1; i <= 20; i++) prev = commit('refs/heads/main', prev, 'm.txt', `${i}`);
+  prev = base; for (let i = 1; i <= 10; i++) prev = commit('refs/heads/long', prev, 'l.txt', `${i}`);
+  commit('refs/heads/main1', base, 'm.txt', '1');
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+  const tip = ok(sh(r.bare, ['rev-parse', 'short']));
+  // git: the chain is 3 commits, onto is 20 past the base, the branch's history is 43 commits
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..short'])), '3');
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'short..main'])), '20');
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'short'])), '43');
+  const run = async (limits) => { const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/short', onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, ...limits } })).then(() => null, x => x); return { code: e?.code, what: e?.what, got: e?.got, max: e?.max }; };
+  // the chain limit above the chain (12), exactly the chain (3), and far above the history (5000): never the limit named
+  for (const maxRebaseCommits of [12, 3, 5000]) assert.deepEqual(await run({ maxMergeDepth: 8, maxRebaseCommits }), { code: 'limit_exceeded', what: 'merge-base search depth', got: 16, max: 8 }, `maxRebaseCommits ${maxRebaseCommits}`);
+  assert.equal(ok(sh(r.bare, ['rev-parse', 'short'])), tip, 'a refused rebase leaves the branch');
+  // following the error (a merge depth that reaches the base, 21 from onto) rebases the 3 commits; the tree is git's
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'short'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/short', onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 32, maxRebaseCommits: 12 } }));
+  assert.equal(res.outcome, 'rebase'); assert.equal(res.commits, 3); assert.equal(treeOf(r.bare, 'short'), gitTree);
+  // The other side of the same cut: a chain that is over its limit (git counts 10, the limit is 4) on an onto whose
+  // history is cut at maxMergeDepth 16. The base is 11 commits from the tip: inside a merge-base search of 16, past a
+  // branch walk of only maxRebaseCommits + 2 = 6. The branch is walked as deep as that search, so the base is found
+  // and the limit named is the chain's (got = max + 1, the documented one-past), as before the walks were separated.
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main1..long'])), '10');
+  const over = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/long', onto: 'refs/heads/main1', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 16, maxRebaseCommits: 4 } })).then(() => null, x => x);
+  assert.deepEqual({ code: over?.code, what: over?.what, got: over?.got, max: over?.max }, { code: 'limit_exceeded', what: 'rebase chain', got: 5, max: 4 });
+});
+
 // git rebase leaves out a commit whose patch id equals an upstream commit's before it replays anything (its default,
 // --no-reapply-cherry-picks). ply has no patch ids: it replays every commit and drops the ones that come out empty.
 // The two agree while the upstream copy is in place and differ once upstream has reverted it; this pins both, each

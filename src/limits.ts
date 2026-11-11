@@ -62,7 +62,7 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
 export const LIMIT_PACK_OBJECTS = 100_000;
 /**
  * ls-refs lines, and the rebase chain walked from them. rebaseBranch walks the branch as deep as this chain bound
- * needs (maxRebaseCommits + 2) and `onto` to LIMIT_MERGE_DEPTH (rebaseBaseOf, src/rebase.ts): each walk has its limit.
+ * needs (maxRebaseCommits + 2, or LIMIT_MERGE_DEPTH where that is deeper) and `onto` to LIMIT_MERGE_DEPTH (rebaseBaseOf, src/rebase.ts): each walk has its limit.
  */
 export const LIMIT_REFS = 10_000;
 export const LIMIT_REBASE_COMMITS: number = LIMIT_REFS;
