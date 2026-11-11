@@ -377,3 +377,29 @@ test('stats.steps on thin packs is the count the visit rule gives: three per del
     assert.deepEqual(c.asked, bases.map(blobId));
   }
 });
+
+test('every REF delta filed under an id `external` gives is patched on that base, also when the pack then builds that id itself', () => {
+  // Hand-built (parsePack can produce the shape from wire bytes; git does not write it):
+  //   REF@2 on c9 -> c1,  OFS@3 on offset 2 -> c9,  REF@4 on c9 -> c5,   `external` holds c9 only.
+  // Nothing resolves from the pack alone, so c9 is asked for, once. Both REF deltas were filed under c9 before it was
+  // asked for, and the README rule is that every REF_DELTA waiting on an id `external` gives is patched directly on that
+  // base. Applied by hand: @2 is one delta above the given c9 (chain 1, external base 1); landing it lets @3 resolve on
+  // it, which builds c9 again inside the pack (chain 2); @4 is still patched on the given base (chain 1, external base
+  // 2), not on the pack's copy at @3 (which would be chain 3 and external base 1). So: 3 objects, externalBases 2,
+  // maxChain 2, c5 at chain 1, and a limit of 2 deltas is enough. Ids are node:crypto's.
+  // ofsAt(offset, baseOffset, i) writes content(i - 1).length as its delta's source size while the base here is
+  // content(1): every content(i) is 11 bytes, so the size matches and the delta applies.
+  assert.equal(content(8).length, content(1).length);
+  const objects = [refAt(2, 9, 1), ofsAt(3, 2, 9), refAt(4, 9, 5)];
+  for (const limits of [undefined, withLimits({ maxDeltaChain: 2 })]) {
+    const c = counting(oid => (oid === blobId(9) ? blobBase(9) : null));
+    const r = resolvePack({ objects }, c.external, limits);
+    assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+    assert.deepEqual(c.asked, [blobId(9)]);
+    assert.equal(r.value.objects.size, 3);
+    assert.deepEqual([...r.value.objects.keys()].sort(), [blobId(1), blobId(5), blobId(9)].sort());
+    assert.equal(r.value.stats.externalBases, 2);
+    assert.equal(r.value.stats.maxChain, 2);
+    assert.equal(r.value.objects.get(blobId(5)).chain, 1);
+  }
+});
