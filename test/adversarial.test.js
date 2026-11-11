@@ -14,7 +14,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, gitWithCred, gitUserinfoCred, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems } from './server.js';
+import { git, gitBuf, gitWithCred, gitUserinfoCred, tmpRoot, makeBareRepo, startGitServer, startAuthGate, commitFiles, fsckProblems, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './fuzz/mutate.js';
 import { Rng } from './fuzz/prng.js';
@@ -60,7 +60,7 @@ after(async () => { await srv.close(); cleanup(); });
 function freshRepo() {
   const name = `adv${n++}`;
   const bare = makeBareRepo(root, name);
-  const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const work = join(root, `w${name}`); mkdirSync(work); initRepo(work);
   commitFiles(work, bare, { [FILE]: ORIG, 'a/sibling.txt': 'x'.repeat(3000), 'c.txt': 'c' }, 'one');
   const head = commitFiles(work, bare, { 'c.txt': 'c2' }, 'two');
   return { name, bare, work, head };
@@ -694,7 +694,7 @@ test('#16 ls-refs attributes never override the parsed oid or name: oid:/name: e
 // P ← X ← M is main; feat = merge(Q, y10) with Q ← P and y10 ← … ← y1 ← X. git's base is X (via y1); with y1..y3 cut
 // the only common ancestor in view is P. X sets g=2 and y1 sets it back to 1: base X → g=1 (git), base P → g=2.
 function cutHistoryRepo() {
-  const name = `cut${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const name = `cut${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); initRepo(work);
   const g = args => git(work, ['-c', 'user.name=c', '-c', 'user.email=c@x', ...args]).trim();
   const put = (files, msg) => { for (const [p, v] of Object.entries(files)) writeFileSync(join(work, p), v); g(['add', '-A']); g(['commit', '-q', '--allow-empty', '-m', msg]); return g(['rev-parse', 'HEAD']); };
   const P = put({ g: '1\n', f: 'f\n' }, 'P'), X = put({ g: '2\n' }, 'X');
@@ -1227,7 +1227,7 @@ test('I4 #36 matrix: path × body shape × declared size × cap, every cell, nev
   const repos = new Map();
   for (const S of MX.sizes) {
     const name = `mx${S}`, bare = makeBareRepo(root, name), work = join(root, `w${name}`);
-    mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    mkdirSync(work); initRepo(work);
     const data = mxContent(S);
     const head = commitFiles(work, bare, { 'a.bin': Buffer.from(data), 'z.txt': Buffer.from(COMPANION) }, 'mx');
     repos.set(S, { url: `${srv.url}/${name}.git`, bare, head, data, oid: hashObject('blob', data) });

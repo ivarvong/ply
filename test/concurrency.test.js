@@ -4,7 +4,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { editFile } from '../src/edit.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrapAsync } from './unwrap.js';
@@ -14,7 +14,7 @@ test('concurrent CAS writers converge; conflicts are observed and retried, never
   const srv = await startGitServer(root);
   try {
     const bare = makeBareRepo(root, 'cc');
-    const work = join(root, 'w'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    const work = join(root, 'w'); mkdirSync(work); initRepo(work);
     const K = 6, ROUNDS = 3;
     const files = Object.fromEntries(Array.from({ length: K }, (_, i) => [`dir${i % 2}/f${i}.txt`, `v0 marker${i} end\n`]));
     const base = commitFiles(work, bare, files, 'seed');

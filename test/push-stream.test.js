@@ -16,7 +16,7 @@ import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { randomFillSync } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { createTransport } from '../src/http.js';
 import { push, ZERO_OID } from '../src/push.js';
 import { pushRepo } from '../src/repo-node.js';
@@ -172,7 +172,7 @@ test('a 3xx on the streamed POST is not followed: nothing reaches the other orig
 test('pushRepo streams its delta pack: the history lands, fsck clean', async () => {
   const { bare, url } = repo();
   const work = join(root, `w${n++}`); mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   const base = Buffer.from(random(512 << 10));
   for (let i = 0; i < 3; i++) {
     base.write(`version ${i}\n`, 1000 * i);

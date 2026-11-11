@@ -4,6 +4,7 @@
 import { spawn } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { NO_MAINTENANCE } from '../server.js';
 
 const STAMP = 'sweep-3';
 const WHEN = 1700000000;
@@ -64,7 +65,7 @@ async function bare(dir) {
     ['uploadpack.allowAnySHA1InWant', 'true'],
     ['http.receivepack', 'true'],
     ['protocol.version', '2'],
-    ['gc.auto', '0'],
+    ...NO_MAINTENANCE,
     ['core.bigFileThreshold', '2g'],
   ];
   for (const [key, value] of cfg) await git(['-C', dir, 'config', key, value]);

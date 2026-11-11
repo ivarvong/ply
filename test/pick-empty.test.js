@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { oracleRediff } from './gitversion.js';
 import { cherryPick, revertCommit, pickCommit } from '../src/rebase.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -36,7 +36,7 @@ let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
 after(async () => { await srv?.close(); cleanup?.(); });
 
-const workOf = () => { const name = `pe${n++}`; const bare = makeBareRepo(root, name); const w = join(root, `w${name}`); mkdirSync(w); const env = envOf(ORIG, ORIG); git(w, ['init', '-q', '-b', 'main']); return { name, bare, w, env, url: `${srv.url}/${name}.git` }; };
+const workOf = () => { const name = `pe${n++}`; const bare = makeBareRepo(root, name); const w = join(root, `w${name}`); mkdirSync(w); const env = envOf(ORIG, ORIG); initRepo(w); return { name, bare, w, env, url: `${srv.url}/${name}.git` }; };
 const commit = (b, msg) => { ok(b.w, ['add', '-A'], b.env); ok(b.w, ['commit', '-q', '--allow-empty', '-m', msg], b.env); return ok(b.w, ['rev-parse', 'HEAD'], b.env); };
 const put = (b, file, text) => writeFileSync(join(b.w, file), text);
 const clone = (bare, branch) => { const d = mkdtempSync(join(tmpdir(), 'pe-')); ok(d, ['clone', '-q', '-b', branch, bare, '.']); return d; };

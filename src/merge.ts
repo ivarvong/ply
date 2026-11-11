@@ -588,7 +588,7 @@ const refused = (reason: ContentReason): Ok<BlobMerge> => ok({ kind: 'conflict',
 const lost = (r: Err<PlyError>): Result<BlobMerge, PlyError> => (r.error.code === 'limit_exceeded' ? refused('too large to merge') : r);
 
 // Effect: the content half of a both-sides-changed file — git's shortcuts first (one side equal to base or both equal),
-// then the three blobs (bounded by maxMergeBlobBytes) through the ported xdiff merge. Shared by merge, rebase,
+// then the three blobs (bounded by maxMergeBlobBytes, their diff steps by maxMergeWork) through the ported xdiff merge. Shared by merge, rebase,
 // cherry-pick and revert. Refused (bad_request) before any merge: a rediff that is not one of the three, or a blob cap
 // that bounds nothing (the transport's object cap was checked where the transport was made). Blobs are read under the
 // lower of the two caps.
@@ -616,7 +616,7 @@ export function blobMerger(t: Transport, maxMergeBlobBytes: unknown, rediff: Red
     if (!rO.ok) return lost(rO);
     if (!rT.ok) return lost(rT);
     const [B, O, T] = [rB.value, rO.value, rT.value];
-    const m = mergeLines(B, O, T, { maxBytes: blobCapped.value, rediff, driver });
+    const m = mergeLines(B, O, T, { maxBytes: blobCapped.value, maxWork: t.limits.maxMergeWork, rediff, driver });
     if (!m.clean) {
       if (m.reason === 'undecided') { stats.undecided++; return refused('content (git would decide this with a classic-diff fallback ply does not implement)'); }
       return refused(m.reason === 'content' ? 'content (both sides changed the same lines)' : m.reason);

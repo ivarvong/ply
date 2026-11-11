@@ -574,7 +574,9 @@ property('limits', 'a prefix of a limits record is that record with the defaults
       const r = parseLimits(prefix);
       if (i > badAt) { assert.deepEqual([r.ok, r.error?.code, r.error?.what], [false, 'bad_request', keys[badAt]], String(i)); continue; }
       assert.equal(r.ok, true, String(i));
-      for (const [j, k] of keys.entries()) assert.equal(r.value[k], j < i ? record[k] : DEFAULT_LIMITS[k], `${i} ${k}`);
+      // a key left out is the default, but maxResolveWork left out is derived: 8 x the maxInflatedTotal of the same record
+      const inflated = keys.indexOf('maxInflatedTotal') < i ? record.maxInflatedTotal : DEFAULT_LIMITS.maxInflatedTotal;
+      for (const [j, k] of keys.entries()) assert.equal(r.value[k], j < i ? record[k] : k === 'maxResolveWork' ? 8 * inflated : DEFAULT_LIMITS[k], `${i} ${k}`);
     }
   }
 });

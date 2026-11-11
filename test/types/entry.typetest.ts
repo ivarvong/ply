@@ -4,7 +4,26 @@ import {
   fetchObject, packStream, spInit, spStep, spFinish, inflate, commitView, entryType, lsMode, refCandidates,
   isFilterRejection, isPlyCode, DEFAULT_LIMITS, parseRefname,
   type Transport, type ExportLine, type Exporter, type Limits, type FetchOpts, type SpState, type PackObject, type OperationOpts,
+  type TransferRun, type LastPush, type LastStep,
 } from '../../src/index.js';
+
+// A paused transfer's two facts (LastPush and LastStep, public beside TransferRun). The unions and the paused shape are
+// written out here from README's transfer section, not read from src/transfer.ts: a member added, dropped or renamed
+// there, a field renamed, or either export removed from the entry fails this file (tsconfig.check.json compiles it).
+type Same<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+const lastPushIs: Same<LastPush, 'none' | 'acknowledged' | 'refused' | 'unanswered'> = true;
+const lastStepIs: Same<LastStep, 'none' | 'landed' | 'not_shown'> = true;
+const pausedIs: Same<Extract<TransferRun, { readonly tag: 'paused' }>, {
+  readonly tag: 'paused'; readonly step: number; readonly pushes: number; readonly reason: 'max_steps' | 'settling';
+  readonly lastPush: 'none' | 'acknowledged' | 'refused' | 'unanswered'; readonly lastStep: 'none' | 'landed' | 'not_shown';
+}> = true;
+void lastPushIs; void lastStepIs; void pausedIs;
+// a consumer reads both fields off a pause with no cast, and a done run has neither
+const pauseFacts = (run: TransferRun): readonly [LastPush, LastStep] | null => (run.tag === 'paused' ? [run.lastPush, run.lastStep] : null);
+void pauseFacts;
+// @ts-expect-error a done run states no last push
+const doneFacts = (run: Extract<TransferRun, { readonly tag: 'done' }>): LastPush => run.lastPush;
+void doneFacts;
 
 declare const transport: Transport;
 declare const anyBytes: Uint8Array;
