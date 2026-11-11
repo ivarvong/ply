@@ -38,6 +38,7 @@ import type { Err, Result } from './result.js';
 import { DEFAULT_REF } from './refname.js';
 import type { Refname } from './refname.js';
 import { buildCommitObjects, withCommitData } from './commit-build.js';
+import { expectedCreate } from './editexpect.js';
 import type { Author, Level as BuiltLevel, NewTree as BuiltNewTree } from './commit-build.js';
 
 /* oxlint-disable no-await-in-loop -- a stream is consumed in order: each write waits for the inflate side (back-pressure) */
@@ -318,7 +319,7 @@ export type EditConfig = {
 };
 export type EditOptions = EntryOptions & Input<EditConfig>;
 const editDefaults = (): { -readonly [K in keyof EditConfig]: EditConfig[K] } => ({ head: null, strictHead: false, cache: null, verify: false, allowLfsPointer: false, signer: null, retry: true });
-// `create`: what the caller already read about `ref`, which every push of this edit asserts (editFileExpecting):
+// `create`: what commitChanges already read about `ref`, which every push of this edit asserts (editexpect.ts):
 // true, the ref is absent (zero old oid); false, it is at the parent; null, this attempt's own reads decide.
 type Attempt = { readonly head: Oid | null; readonly attempt: number; readonly linkTo: Span | null; readonly hintWas: HintOutcome | null; readonly create: boolean | null };
 
@@ -599,11 +600,13 @@ async function editOnce(url: string, s: EditPlan, options: EditOptions & { reado
 // anything is pushed, and it is not retried (the caller asked for exactly that parent).
 // `retry: false` is the caller's own race handling (commitChanges): attempt 0's cas_conflict is not redone here.
 // An Err carries the attempt's tag (attempt, hint, the root span).
-// editFileExpecting is editFile for a caller that has already read `ref` and decided its compare-and-swap (commitChanges; not exported
-// from the package). `create` true: the ref was absent, so the push asserts the zero old oid whatever this edit's own
-// ls-refs sees later (a ref another writer made in between is a cas_conflict, never a commit on top of it). false:
-// the ref existed, and the push asserts the parent. null: editFile's own rule.
-export async function editFileExpecting(url: string, spec: EditSpec, options: EditOptions, create: boolean | null): Promise<Result<EditResult, PlyError>> {
+// commitChanges has already read `ref` and decided its compare-and-swap; it says so through editexpect.ts, which no
+// package entry exports, so a consumer's editFile always decides by its own reads (`create` null). `create` true: the
+// ref was absent, so the push asserts the zero old oid whatever this edit's own ls-refs sees later (a ref another
+// writer made in between is a cas_conflict, never a commit on top of it). false: the ref existed, and the push
+// asserts the parent.
+export async function editFile(url: string, spec: EditSpec, options: EditOptions = {}): Promise<Result<EditResult, PlyError>> {
+  const create = expectedCreate(options);
   const cfg = withDefaults(options, editDefaults());
   const needs = needsHead(cfg.strictHead, cfg.head);
   if (!needs.ok) return needs;
@@ -619,9 +622,4 @@ export async function editFileExpecting(url: string, spec: EditSpec, options: Ed
   // Only ply's own error is a lost race: a look-alike object a transport raises is returned as it is, not retried.
   if (first.ok || !cfg.retry || !isPlyError(first.error) || first.error.code !== 'cas_conflict' || cfg.strictHead) return first;
   return editOnce(url, plan, checked, cfg, { head: null, attempt: 1, create, ...retryLink(first.error) });
-}
-// The public edit (the rules above): no expectation from a caller, so the edit's own reads decide create or update.
-// oxlint-disable-next-line require-await -- async, as before: one promise, the expecting form's
-export async function editFile(url: string, spec: EditSpec, options: EditOptions = {}): Promise<Result<EditResult, PlyError>> {
-  return editFileExpecting(url, spec, options, null);
 }
