@@ -156,8 +156,9 @@ function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; 
   if (stored === OFS_DELTA) {
     const storedBase = cols.baseIndex[i] as number;
     const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[storedBase] as number));
-    // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know
-    const write = entryWrite(stored, sameBatch, baseId(c.pack, c.resolved, storedBase) !== null, c.cross ? 'ref' : 'refuse');
+    // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know. The
+    // id is asked for only when it would be written (the base is outside this batch): this runs per entry per try
+    const write = entryWrite(stored, sameBatch, sameBatch || baseId(c.pack, c.resolved, storedBase) !== null, c.cross ? 'ref' : 'refuse');
     return write === WRITE_OFS
       ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false, refused: false }
       : { bytes: typeSize + OID_BYTES + compressed, rewrite: true, refused: write === WRITE_REFUSED };

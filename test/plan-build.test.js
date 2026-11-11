@@ -151,3 +151,25 @@ test('a resolved index that cannot name a cut base fails the plan (nothing is pu
   assert.equal(other.ok, false);
   assert.equal(other.error.what, 'pack subset resolved');
 });
+
+test('an id is asked of `resolved` only for a base outside the batch: none when every base is written beside its delta', async () => {
+  // Expected values by hand: with one batch (or the whole pack selected) every OFS base is written in the same pack,
+  // so no entry is rewritten as a REF_DELTA and no base id is ever needed: 0 lookups. main read an id only there.
+  let asked = 0;
+  const counting = { ...src.resolved, oid: i => { asked++; return src.resolved.oid(i); } };
+  const whole = unwrap(planPackBatches(src.idx, counting, { budget: BIG, crossBatchRef: false }));
+  assert.equal(whole.batches.reduce((a, b) => a + b.refRewrites, 0), 0);
+  assert.equal(asked, 0, 'planPackBatches, families whole');
+  unwrap(planPackBatches(src.idx, counting, { budget: BIG, crossBatchRef: true }));
+  assert.equal(asked, 0, 'planPackBatches, crossBatchRef on, nothing cut');
+  const all = [...Array(src.idx.count).keys()];
+  const built = unwrap(await packSubset(rangeFromBytes(src.bytes), src.idx, all, { outsideBase: 'ref', resolved: counting }));
+  assert.equal(asked, 0, 'packSubset, the whole pack');
+  await built.stream.cancel();
+  // and when the chain is cut the ids are asked for (the lookup is lazy, not gone)
+  const type = src.resolved.columns.type;
+  const blobs = all.filter(i => type[i] === TYPE.BLOB);
+  const cut = unwrap(planPackBatches(src.idx, counting, { budget: { ...BIG, maxObjects: 2 }, select: blobs, crossBatchRef: true }));
+  assert.ok(cut.batches.some(b => b.refRewrites > 0));
+  assert.ok(asked > 0, 'a cut base is looked up');
+});

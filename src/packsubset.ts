@@ -183,7 +183,8 @@ async function plan(pack: ScannedPack, asked: readonly number[], opts: PackSubse
     if (stored === OBJ_OFS_DELTA) {
       const b = c.baseIndex[i] as number;
       const at = pos[b] as number;
-      const write = entryWrite(stored, at !== NOT_WRITTEN, baseId(pack, opts.resolved, b) !== null, opts.outsideBase);
+      // the id is asked for only when it would be written: the base is not earlier in this pack
+      const write = entryWrite(stored, at !== NOT_WRITTEN, at !== NOT_WRITTEN || baseId(pack, opts.resolved, b) !== null, opts.outsideBase);
       if (write === WRITE_OFS) {
         p.kind[k] = KIND_OFS;
         p.basePos[k] = at;
