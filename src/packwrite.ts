@@ -155,9 +155,14 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
 // `length` or `maxPack` is never released, so a refused pack never reaches the server whole, whatever the runtime does
 // with an errored request body (undici aborts the request; workerd ends it as if complete, measured: streamPack above).
 // `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish.
+// `pulled` is whether the transport ever asked the body for a byte. Until it has, nothing of this push left the
+// process (the first pull hands over the command list), and `giveBack` then returns the source as it came: unlocked,
+// unread and not cancelled (after a pull it does nothing). A body given back errors if it is pulled after all, so it
+// sends nothing. A transport that cancels the body itself still cancels the source, pulled or not.
 export type SourcedPack = {
   readonly stream: ReadableStream<Uint8Array>; readonly length: number;
   readonly failure: () => PlyError | null; readonly sent: () => number; readonly release: () => Promise<void>;
+  readonly pulled: () => boolean; readonly giveBack: () => void;
 };
 export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Array, length: number | null, maxPack: number): SourcedPack {
   const reader = source.getReader();
@@ -172,12 +177,20 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
     open = false;
     await reader.cancel(why).catch(() => null); // the pack is already abandoned: a source that fails to cancel changes nothing
   };
+  const giveBack = (): void => {
+    if (!open || started) return;
+    open = false;
+    reader.releaseLock();
+  };
   const refuse = async (c: ReadableStreamDefaultController<Uint8Array>, e: PlyError): Promise<void> => { failed = e; c.error(e); await release(e); };
   const mismatch = (want: number): ErrorOf<'bad_request'> => plyError('bad_request', `pushPack: the pack stream yielded ${read} bytes where length said ${want}; it was not sent whole`, { what: 'push pack length', got: read, max: want });
   const emit = (c: ReadableStreamDefaultController<Uint8Array>, chunk: Uint8Array): void => { sent += chunk.length; c.enqueue(chunk); };
   const stream = new ReadableStream<Uint8Array>({
     async pull(c): Promise<void> {
-      if (!started) { started = true; c.enqueue(prefix); return; }
+      if (!started) {
+        if (!open) { failed = plyError('internal', 'pushPack: the request body was pulled after the push had ended; nothing was sent', { what: 'push pack' }); c.error(failed); return; }
+        started = true; c.enqueue(prefix); return;
+      }
       for (;;) {
         let r: ReadableStreamReadResult<Uint8Array>;
         // oxlint-disable-next-line no-await-in-loop -- one chunk at a time, at the request's pace
@@ -207,5 +220,5 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
     },
     async cancel(why): Promise<void> { await release(why); },
   }, { highWaterMark: 0 });
-  return { stream, length: prefix.length + (length === null ? 0 : length), failure: () => failed, sent: () => sent, release };
+  return { stream, length: prefix.length + (length === null ? 0 : length), failure: () => failed, sent: () => sent, release, pulled: () => started, giveBack };
 }

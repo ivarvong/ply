@@ -835,7 +835,9 @@ export function push(t: PushTransport, opts: PushOptions): Promise<Result<PushRe
 
 // ---- a pack the caller already has (#234) ----
 // `pack` is a complete pack: header, entries, trailer. It is read once and never retried. A refusal here leaves it
-// unread and unlocked; from the first request byte it is spent, and every failure is 'ambiguous'.
+// unread and unlocked, and so does a request that failed before the transport pulled the body's first chunk (a signal
+// already fired, a connect or DNS failure): that is the failure itself, definite. From the first pull the pack is
+// spent, and every failure is 'ambiguous'.
 // `length` is the pack's own length, without the commands, when the caller knows it (default null). It is checked against
 // maxPackBytes before anything is sent and against the bytes as they go. The request is chunked either way.
 export type PackPushOptions = Input<Omit<PushConfig, 'objects'> & { readonly length: number | null }> & { readonly pack: ReadableStream<Uint8Array> };
@@ -865,6 +867,14 @@ async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promis
   if (signal instanceof AbortSignal && signal.aborted) return err(wrapNet(signal.reason, signal));
   const body = streamSource(p.pack, prefix.value, p.length, plan.maxPack);
   const r = await readResponse(t, plan, body, span, plan.sideband);
+  // The exchange failed with no answer and the transport never pulled the body: the command list did not leave this
+  // process, so no ref can have moved. The failure is its own cause (network, aborted, timeout), not 'ambiguous', and
+  // the pack goes back to the caller unread, unlocked and uncancelled. 'ambiguous' starts at the first pull.
+  if ('cause' in r && !r.answered && !body.pulled()) {
+    body.giveBack();
+    span.set({ 'git.push.ok': false, 'git.push.unsent': true });
+    return err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null));
+  }
   // read before release: abandoning the rest of a pack the server already answered is not a failure of the pack
   const cut = body.failure();
   await body.release();
