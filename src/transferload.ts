@@ -23,7 +23,7 @@ import { withDefaults } from './absent.js';
 import type { ScanIndexOpts, ScannedPack } from './packscanindex.js';
 import { scanPackIndex } from './packscanindex.js';
 import type { ResolveRangeOpts } from './packrangeresolve.js';
-import { resolvePackRange, resolveLimitsOf } from './packrangeresolve.js';
+import { resolvePackRange, resolveOptsOf } from './packrangeresolve.js';
 import type { RangeSource } from './rangesource.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
@@ -72,14 +72,15 @@ export async function loadTransferPack(dst: Transport, source: RangeSource, save
   const input = withDefaults<LoadConfig>(opts, { scan: {}, resolve: {} });
   const span0 = { parent: dst.parent, kind: KIND.INTERNAL, attrs: { 'git.transfer.load.saved_in': saved.tag === 'some' ? saved.value.length : 0, 'git.transfer.spool.bytes': source.size }, scrub: dst.scrub };
   const r = await spanned(dst, 'git.transfer.load', span0, async (span: Span): Promise<Result<LoadedPack, PlyError>> => {
-    // the caller's limits, parsed once: the saved index is held to the chain limit its resolve would run under
-    const limits = resolveLimitsOf(input.resolve);
-    if (!limits.ok) return limits;
-    const cfg: LoadConfig = { scan: input.scan, resolve: { ...input.resolve, limits: limits.value } };
+    // the caller's resolve options, read once as the resolver reads them (an inherited one counts), limits parsed:
+    // the saved index is held to the chain limit its resolve would run under
+    const resolve = resolveOptsOf(input.resolve);
+    if (!resolve.ok) return resolve;
+    const cfg: LoadConfig = { scan: input.scan, resolve: resolve.value };
     const id = await packIdentity(source);
     if (!id.ok) return id;
     span.set({ 'git.pack.trailer': id.value.trailer });
-    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, limits.value.maxDeltaChain));
+    const out = saved.tag === 'none' ? await scanned(source, cfg, none) : await fromSaved(source, cfg, span, saved.value, decodeSavedIndex(saved.value, id.value, resolve.value.limits.maxDeltaChain));
     if (out.ok) span.set({ 'git.transfer.load.from': out.value.loaded.tag, 'git.transfer.load.saved_bytes': out.value.saved.length, 'git.transfer.load.entries': out.value.from.pack.count });
     return out;
   });

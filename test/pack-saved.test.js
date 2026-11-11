@@ -442,6 +442,20 @@ test('loadTransferPack: a pack chained deeper than 64 is used from its saved ind
   const id = { trailer: first.from.pack.trailer, bytes: first.from.pack.bytes };
   assert.ok(decodeSavedIndex(first.saved, id, 200).ok);
   assert.equal(decodeSavedIndex(first.saved, id).error.field, 'resolved.depth');
+  // #260 re-review REQ 1: the resolve options are read as resolvePackRange reads them (opts[key]), so one that reaches
+  // the caller's record through a prototype or a class accessor counts. The expected outcomes are not ply's: git reads
+  // this pack as 100 deep (above), so only an honoured limit of 200 resolves it, and a cache of -1 bytes is no size.
+  assert.equal(must(await loadTransferPack(t, source, none, { resolve: Object.create({ limits }) })).loaded.tag, 'scanned');
+  let cacheReads = 0;
+  class Accessors { get limits() { return limits; } get cacheBytes() { cacheReads++; return -1; } }
+  const supplied = [Object.create({ limits, cacheBytes: -1 }), Object.assign(Object.create({ cacheBytes: -1 }), { limits }), new Accessors()];
+  for (const [k, resolve] of supplied.entries()) {
+    const bad = await loadTransferPack(t, source, none, { resolve });
+    assert.equal(bad.ok, false, `inherited cacheBytes -1 (${k}) is refused`);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /cacheBytes must be a non-negative number, got -1/u);
+  }
+  assert.equal(cacheReads, 1, 'an accessor is read once');
 });
 
 test('loadTransferPack refusals: a spool too small for a pack, a spool whose read fails, a spool that is not a pack', async () => {
