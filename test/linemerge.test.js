@@ -185,6 +185,8 @@ test('work bound: the 70,000-line / 3,500-hunk bulk edit merges cleanly under DE
   assert.ok(Buffer.from(m.data).equals(g.stdout), `merged bytes are git's (${m.data.length} against ${g.stdout.length})`);
   // the sizing rule: the default is at least twice what this case counts
   assert.ok(DEFAULT_LIMITS.maxMergeWork >= 2 * meter.steps, `${meter.steps} steps against a default of ${DEFAULT_LIMITS.maxMergeWork}`);
+  // under the Worker preset it does not fit (README says so): the same input is refused there, never merged wrongly
+  assert.deepEqual(mergeLines(B, O, T, { rediff, maxBytes: WORKER_LIMITS.maxMergeBlobBytes, maxWork: WORKER_LIMITS.maxMergeWork }), { clean: false, reason: 'too large to merge' });
 });
 
 // ---- the budget is the module's own counter (review R4): a caller's meter is written, never read ----
@@ -257,6 +259,54 @@ test('work bound: a low-variety file (random a/b/c) costs under 3x when it doubl
   const held = diffSteps(lowVariety(10000, 0x9e3779b9), lowVariety(10000, 0x1234567), { maxWork: 1_345_536 });
   assert.deepEqual(held.d, { ok: false, error: { undecided: true, detail: 'line diff step budget exceeded' } });
   assert.ok(held.steps > 1_345_536 && held.steps <= 1_345_536 * 1.05, `${held.steps} steps`);
+});
+
+// ---- the two presets, sized (decisions 2 and 6) ----
+// WORKER_LIMITS: the worst inputs under its 2 MiB blob cap, one per path, each needing far more than any budget near it:
+//   histogram: 250,000 lines with every adjacent pair swapped (1.80 MiB): the base->ours scan alone is >= n²/4 =
+//     1.56e10 steps (swapCase, above);
+//   classic fallback: three unrelated random a/b/c files of 1,048,576 lines (2 MiB exactly, the most lines the cap
+//     admits): the neighbour scans alone are scanFloor(n) = 209,705,100 line visits.
+// Both are refused, and by the counter: at most 2^26 steps (the sized value, written out here so that a larger preset
+// fails this test) plus one loop's slack, which is one pass over the two files being diffed plus two neighbour windows
+// of 100 lines.
+// CPU to the refusal at 2^26, this machine (16 cores, about 25 other test processes; process.cpuUsage, median of 3):
+// 1,037 ms for the swaps and 1,397 ms for a/b/c (1,744 ms for the slowest shape found, 60 copies each of 8,733
+// three-byte lines shuffled three ways, which finishes in 113,620,667 steps without a budget). Of that, parsing the
+// three sides into records, which no step budget covers, is 434 ms and 894 ms; a budget of 0 refuses them in 553 ms
+// and 1,058 ms. At 2^27 the same refusals took 1,452 ms and 1,478 ms.
+const WORKER_SIZED = 2 ** 26;
+test('work bound: the worst inputs under the Worker blob cap, on each path, are refused within WORKER_LIMITS.maxMergeWork steps and one loop', () => {
+  const max = WORKER_LIMITS.maxMergeWork, cap = WORKER_LIMITS.maxMergeBlobBytes;
+  const text = l => enc(l.join('\n') + '\n');
+  const shapes = [
+    ['pair swaps', 250000, swapCase(250000)],
+    ['random a/b/c', 1048576, [lowVariety(1048576, 0x9e3779b9), lowVariety(1048576, 0x1234567), lowVariety(1048576, 0x7654321)].map(text)],
+  ];
+  assert.ok(250000 ** 2 / 4 > 4 * WORKER_SIZED && scanFloor(1048576) > 2 * WORKER_SIZED, 'each needs more than the budget, by arithmetic');
+  for (const [name, lines, [B, O, T]] of shapes) {
+    assert.ok(Math.max(B.length, O.length, T.length) <= cap, `${name}: under the Worker blob cap, so only the work budget refuses it`);
+    const meter = { steps: 0 };
+    assert.deepEqual(mergeLines(B, O, T, { rediff, maxBytes: cap, maxWork: max, meter }), { clean: false, reason: 'too large to merge' }, name);
+    assert.ok(meter.steps > max, `${name}: stopped by the budget, ${meter.steps} steps`);
+    assert.ok(meter.steps <= WORKER_SIZED + 2 * lines + 200, `${name}: ${meter.steps} steps against ${WORKER_SIZED} and one loop`);
+  }
+});
+// DEFAULT_LIMITS: what git merges cleanly in about 5 s here is merged. 40,000 lines with every adjacent pair swapped
+// but the last four, and a line appended on theirs: `git merge-file` exits 0 in 3.4 s on this machine (60,000 lines:
+// 7.9 s, so about 48,000 lines is git's 5 s), and the two scans are 0.75 n² = 1.2e9 steps (10,000 lines: 74,970,022
+// counted, 0.7497 n²), which is over 2^30. The expected bytes are git's.
+test('work bound: 40,000 lines of swapped pairs, which git merges cleanly in under 5 s, merge under DEFAULT_LIMITS byte for byte', () => {
+  const N = 40000, L = Array.from({ length: N }, (_, i) => `w${i}`), o = [...L];
+  for (let i = 0; i + 1 < N - 8; i += 2) [o[i], o[i + 1]] = [o[i + 1], o[i]];
+  const [B, O, T] = [L, o, [...L, 'tail']].map(l => enc(l.join('\n') + '\n'));
+  for (const [name, bytes] of [['swap-base', B], ['swap-ours', O], ['swap-theirs', T]]) writeFileSync(join(dir, name), bytes);
+  const g = spawnSync(process.env.GIT_BIN ?? 'git', ['merge-file', '-p', '--diff-algorithm=histogram', join(dir, 'swap-ours'), join(dir, 'swap-base'), join(dir, 'swap-theirs')], { maxBuffer: 1 << 26 });
+  assert.equal(g.status, 0, `git merge-file merges it cleanly: ${g.stderr}`);
+  const meter = { steps: 0 };
+  const m = mergeLines(B, O, T, { rediff, maxBytes: DEFAULT_LIMITS.maxMergeBlobBytes, maxWork: DEFAULT_LIMITS.maxMergeWork, meter });
+  assert.equal(m.clean, true, `ply: ${m.reason} after ${meter.steps} steps of ${DEFAULT_LIMITS.maxMergeWork}`);
+  assert.ok(Buffer.from(m.data).equals(g.stdout), `merged bytes are git's (${m.data.length} against ${g.stdout.length})`);
 });
 
 // ---- the meter write-out (re-review REQ 4 and REQ 5): it cannot throw, and every return path writes ----

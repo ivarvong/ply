@@ -28,13 +28,20 @@ export const LIMIT_MERGE_BLOB: number = 8 * MIB;
  * the content: a merge that would pass it is refused as `too large to merge`, never guessed.
  * A step is ~6-7 ns of CPU on the histogram path and ~12-15 ns on the classic fallback (measured: linemerge.ts,
  * classicDiff), so the CPU bound is the fallback's rate times the budget.
- * PROVISIONAL (the sizing step replaces both numbers, from measurements with the fallback metered): the default is
- * 2^30, at least twice the 361,702,266 steps the 70,000-line / 3,500-hunk bulk edit counts at babb1b0 (git merges it
- * cleanly; test/linemerge.test.js pins it); the Worker preset is 2^27, about 0.8 s of the pair-swap scan at the
- * 6 ns per step measured at f184a93.
+ * Sized at 7cfa0b7, on a 16-core machine running about 25 other test processes (process.cpuUsage medians; the cases
+ * are pinned in test/linemerge.test.js, which asserts the counts, not the times):
+ * - Default 2^31: what git itself merges cleanly in about 5 s is merged. git merge-file (2.50) takes 3.4 s on 40,000
+ *   lines of swapped pairs (0.75 n² = 1.2e9 steps here) and 7.9 s on 60,000 (2.7e9), about 2.9 ns a step, so its 5 s
+ *   is ~1.7e9 steps; 2^30 refused the first of those. It is also 5.9 times the 361,702,266 steps of the 70,000-line /
+ *   3,500-hunk bulk edit (1.75 s here, 0.76 s in git). A refusal at this budget costs ~13 s of CPU.
+ * - Worker 2^26: the worst inputs found under WORKER_LIMITS.maxMergeBlobBytes are refused in 1.04 s (250,000 swapped
+ *   lines, histogram), 1.40 s (1,048,576 random a/b/c lines, classic fallback) and 1.74 s (60 copies each of 8,733
+ *   lines, shuffled); at 2^27 the first two took 1.45 s and 1.48 s and the third ran to its end in 2.27 s. The budget
+ *   does not cover splitting the three sides into records (0.43 s for 3 x 250,000 lines, 0.89 s for 3 x 1,048,576),
+ *   so a budget of 0 still costs 0.55 s and 1.06 s on those inputs: the rest of the second is maxMergeBlobBytes'.
  */
-export const LIMIT_MERGE_WORK: number = 2 ** 30;
-export const LIMIT_MERGE_WORK_WORKER: number = 2 ** 27;
+export const LIMIT_MERGE_WORK: number = 2 ** 31;
+export const LIMIT_MERGE_WORK_WORKER: number = 2 ** 26;
 /**
  * Inflated size of any single non-streamed object (trees, commits, tags, metadata blobs).
  * gitformat-pack does not cap this; 64 MiB is one object a Worker-sized heap can still inflate and hash.
@@ -219,7 +226,7 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
  * peaks near twice its size (the inflate output and the buffer the caller holds), so the object and delta caps are
  * 16 MiB and the inflated total, which also pays LIMIT_OBJECT_OVERHEAD per object, is 64 MiB: half the isolate, about
  * 21 000 tiny objects. The wire caps (pack, push, ls-refs) are two objects, as in the defaults. maxHarvestBytes is half an
- * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), maxMergeWork 2^27 steps per merged
+ * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), maxMergeWork 2^26 steps per merged
  * file (LIMIT_MERGE_WORK_WORKER: CPU, not memory), and maxTreeEntries 32 768
  * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140). Every other cap
  * is the default. The limit sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells):
