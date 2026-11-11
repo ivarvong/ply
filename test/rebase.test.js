@@ -295,6 +295,41 @@ test('limits: a short branch whose onto is further than maxMergeDepth is refused
   assert.deepEqual({ code: over?.code, what: over?.what, got: over?.got, max: over?.max }, { code: 'limit_exceeded', what: 'rebase chain', got: 5, max: 4 });
 });
 
+// What a refusal costs in requests where onto's history is deeper than maxMergeDepth, so the onto walk is not whole
+// after one request (as it is in the tests below, whose onto history is two commits): 10,100 linear commits, a
+// 10,001-commit branch on the last of them, onto one commit past it. Bounds by hand, from the walks (both double
+// from 8 to their cap):
+//   the merge-base search alone, what a refusal cost before the chain limit governed it: ls-refs + two walks at each
+//     of the 8 depths 8, 16, ... 1024 = 17
+//   WORKER_LIMITS: the branch walk is max(256 + 2, 1024) = 1024 deep, the same 8 depths: 1 + 8 + 8 = 17, no more
+//   DEFAULT_LIMITS: the branch walk goes on at 2048, 4096, 8192 and 10,002 (12 depths), the onto walk stops at 1024
+//     (8 depths): 1 + 12 + 8 = 21, four more (accepted; README, Limits)
+test('limits: refusing an over-long chain on a deep onto history costs no more requests than the merge-base search under WORKER_LIMITS (17), and at most 4 more under DEFAULT_LIMITS (21)', async () => {
+  const { DEFAULT_LIMITS, WORKER_LIMITS } = await import('../src/limits.js');
+  const r = repo();
+  const L = []; let at = 1_700_000_000; let mark = 0;
+  const commit = (ref, from, path, body) => { mark++; L.push(`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, 'data 1', 'c', ...(from ? [`from :${from}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body); return mark; };
+  let base = 0; for (let i = 1; i <= 10_100; i++) base = commit('refs/heads/main', base, 'a.txt', `a${i}`);
+  let prev = base; for (let i = 1; i <= 10_001; i++) prev = commit('refs/heads/long', prev, 'l.txt', `${i}`);
+  commit('refs/heads/main', base, 'm.txt', '1');
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+  // git: the chain is 10,001 commits (over both presets' limits), and onto's history is deeper than maxMergeDepth
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..long'])), '10001');
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main'])), '10101');
+  assert.ok(DEFAULT_LIMITS.maxMergeDepth < 10_101 && WORKER_LIMITS.maxMergeDepth < 10_101);
+  const run = async (limits) => { const c = counting(); const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/long', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: c.fetchImpl, limits })).then(() => null, x => x); return { code: e?.code, what: e?.what, got: e?.got, max: e?.max, requests: c.n }; };
+  // WORKER_LIMITS: the base is 10,002 commits from the tip, past a walk of 1024, and the onto walk is cut, so the
+  // chain is not known to be over 256: the refusal is the merge-base search's, with its fields
+  const w = await run(WORKER_LIMITS);
+  assert.deepEqual({ code: w.code, what: w.what, got: w.got, max: w.max }, { code: 'limit_exceeded', what: 'merge-base search depth', got: 2048, max: 1024 });
+  assert.ok(w.requests <= 17, `WORKER_LIMITS refusal took ${w.requests} requests`);
+  // DEFAULT_LIMITS: the branch walk reaches the base at 10,002 commits; the chain is one over 10,000
+  const d = await run(DEFAULT_LIMITS);
+  assert.deepEqual({ code: d.code, what: d.what, got: d.got, max: d.max }, { code: 'limit_exceeded', what: 'rebase chain', got: 10_001, max: 10_000 });
+  assert.ok(d.requests <= 21, `DEFAULT_LIMITS refusal took ${d.requests} requests`);
+  console.log(`refusing a 10,001-commit chain on a 10,101-commit onto history: WORKER_LIMITS ${w.requests} requests, DEFAULT_LIMITS ${d.requests}`);
+}, 120_000);
+
 // git rebase leaves out a commit whose patch id equals an upstream commit's before it replays anything (its default,
 // --no-reapply-cherry-picks). ply has no patch ids: it replays every commit and drops the ones that come out empty.
 // The two agree while the upstream copy is in place and differ once upstream has reverted it; this pins both, each
