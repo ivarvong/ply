@@ -6,8 +6,11 @@
 //                                           the final push creates the ref and deletes the temp ref (atomic)
 //   runTransfer(dst, from, plan, opts)      the loop: status, step, status... until done or `maxSteps`. After every push
 //                                           the refs are read back until they show it (settling: a host's ls-refs can
-//                                           lag a push it acknowledged); an `ambiguous` push that never shows is sent
-//                                           again, a refusal that the refs do not explain ends the run with its reason
+//                                           lag a push it acknowledged). A push that is not a clean ok (ambiguous,
+//                                           rejected, partial) is judged by those refs: the step landed (by this push
+//                                           or another runner's) is progress; it did not and the push was refused is
+//                                           that refusal; it did not and the push was ambiguous is sent again, then
+//                                           `ambiguous`; the refs could not be read is `ambiguous`
 //   copyTree(dst, from, opts)               planTransfer then runTransfer
 //   sweepTransfers(dst, opts)               delete temp refs left by abandoned transfers
 //
@@ -21,7 +24,7 @@
 import type { PlyError } from './errors.js';
 import { fail } from './errors.js';
 import type { Option, Result } from './result.js';
-import { ok, some, none, isSome, getOrElse } from './result.js';
+import { assertNever, ok, some, none, isSome, getOrElse } from './result.js';
 import type { Input } from './absent.js';
 import { at, mapGet, withDefaults } from './absent.js';
 import { ZERO_OID } from './oid.js';
@@ -41,9 +44,13 @@ export type TransferNext = { readonly tag: 'step'; readonly step: number } | { r
 // done: the ref is at the planned head; tempLeft: a temp ref is still on the destination (a non-atomic last push that
 // did not delete it, or a host that kept it), for sweepTransfers. paused: `step` is next; 'max_steps' when this run used
 // its pushes, 'settling' when the last push was acknowledged but the refs had not shown it after `settle.reads` reads.
+// `last` is what this run's last push came to: 'none' it made no push; 'landed' the refs show its step ('max_steps'
+// pauses only there); 'acknowledged' the server reported ok and the refs do not show it yet ('settling'). A push whose
+// outcome is unknown is never a pause: the run ends `ambiguous` (the push's own error is its `cause`).
+export type LastPush = 'none' | 'landed' | 'acknowledged';
 export type TransferRun =
   | { readonly tag: 'done'; readonly head: Oid; readonly pushes: number; readonly tempLeft: boolean }
-  | { readonly tag: 'paused'; readonly step: number; readonly pushes: number; readonly reason: 'max_steps' | 'settling' };
+  | { readonly tag: 'paused'; readonly step: number; readonly pushes: number; readonly reason: 'max_steps' | 'settling'; readonly last: LastPush };
 // After a push, reads of the refs (at most `reads`, `delayMs` apart) until they show it.
 export type SettleConfig = { readonly reads: number; readonly delayMs: number };
 // maxSteps: pushes this run may make (default no limit); retries: sends of one step that may stay unsettled (default 2)
@@ -120,7 +127,10 @@ function commandsOf(plan: TransferPlan, s: TransferStepPlan): readonly [Command,
 
 // What one push reads: the plan, the spool and the source commit's bytes (the final step rebuilds the new commit).
 type StepInput = { readonly from: TransferPack; readonly plan: TransferPlan; readonly step: number; readonly commit: Uint8Array };
-async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }: StepInput): Promise<Result<{ readonly step: number }, PlyError>> {
+// Err: refused here, before any request to the destination (nothing can have landed). Ok: the push was made, and
+// `pushed` is what it came to.
+type Pushed = Result<{ readonly step: number }, PlyError>;
+async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }: StepInput): Promise<Result<{ readonly pushed: Pushed }, PlyError>> {
   const checked = checkTransferPlan(plan);
   if (!checked.ok) return checked;
   if (from.pack.trailer !== plan.pack.trailer) return fail('bad_request', `transfer: the pack (trailer ${from.pack.trailer}) is not the planned one (${plan.pack.trailer})`, { what: 'pack' });
@@ -133,81 +143,127 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
   span.set({ 'git.transfer.batch.bytes': subset.value.length, 'git.transfer.batch.objects': subset.value.count });
   const commands = commandsOf(plan, s);
   const pushed = await pushPack(dst, { commands, pack: subset.value.stream, length: subset.value.length, atomic: commands.length > 1 && plan.atomic });
-  return pushed.ok ? ok({ step }) : pushed;
+  return ok({ pushed: pushed.ok ? ok({ step }) : pushed });
 }
 
 // One push: step `step` of `plan`, its entries read from `from.source`. `commit` is the source commit's bytes (the
 // final step rebuilds the new commit from them). Every update is a compare-and-swap, so a step that already landed is
 // refused by the server (`ng … stale ref`), never applied twice.
-export async function transferStep(dst: Transport, from: TransferPack, plan: TransferPlan, step: number, commit: Uint8Array): Promise<Result<{ readonly step: number }, PlyError>> {
-  const r = await spanned(dst, 'git.transfer.step', internal(dst, { ...planAttrs(plan), 'git.transfer.step': step }), async (span: Span): Promise<Result<{ readonly step: number }, PlyError>> => {
-    const sent = await sendStep(withParent(dst, span), span, { from, plan, step, commit });
-    span.set({ 'git.transfer.step.outcome': sent.ok ? 'landed' : sent.error.code });
+async function stepSpan(dst: Transport, input: StepInput): Promise<Result<{ readonly pushed: Pushed }, PlyError>> {
+  const r = await spanned(dst, 'git.transfer.step', internal(dst, { ...planAttrs(input.plan), 'git.transfer.step': input.step }), async (span: Span): Promise<Result<{ readonly pushed: Pushed }, PlyError>> => {
+    const sent = await sendStep(withParent(dst, span), span, input);
+    const outcome: Pushed = sent.ok ? sent.value.pushed : sent;
+    span.set({ 'git.transfer.step.outcome': outcome.ok ? 'landed' : outcome.error.code });
+    if (sent.ok && !sent.value.pushed.ok) span.error(sent.value.pushed.error);
     return sent;
   });
   return r;
 }
+export async function transferStep(dst: Transport, from: TransferPack, plan: TransferPlan, step: number, commit: Uint8Array): Promise<Result<{ readonly step: number }, PlyError>> {
+  const r = await stepSpan(dst, { from, plan, step, commit });
+  return r.ok ? r.value.pushed : r;
+}
 
 const pause = async (ms: number): Promise<void> => { if (ms > 0) await new Promise<void>(resolve => { setTimeout(resolve, ms); }); };
+// transferStatus fails two ways: the refs were read and show a state this plan cannot go on from (`cas_conflict`, which
+// no read returns), or they could not be read.
+const refsConflict = (e: PlyError): boolean => e.code === 'cas_conflict';
 // Settling: the refs read back after a push of `step` until they show it (the transfer past `step`, or done), at most
-// `left` reads. 'moved' carries the status that showed it; 'still' the last one that did not.
-type Settled = { readonly tag: 'moved'; readonly next: TransferNext } | { readonly tag: 'still'; readonly reads: number };
-async function settleFrom(dst: Transport, plan: TransferPlan, step: number, cfg: SettleConfig, reads: number): Promise<Result<Settled, PlyError>> {
-  if (reads >= cfg.reads) return ok({ tag: 'still', reads });
+// `cfg.reads` reads. 'moved' carries the status that showed it; 'still' the reads that did not; 'conflict' the refs
+// show another writer's state; 'unread' a read failed: where the destination stands is not known.
+type Settled =
+  | { readonly tag: 'moved'; readonly next: TransferNext }
+  | { readonly tag: 'still'; readonly reads: number }
+  | { readonly tag: 'conflict'; readonly error: PlyError }
+  | { readonly tag: 'unread'; readonly error: PlyError };
+async function settleFrom(dst: Transport, plan: TransferPlan, step: number, cfg: SettleConfig, reads: number): Promise<Settled> {
+  if (reads >= cfg.reads) return { tag: 'still', reads };
   if (reads > 0) await pause(cfg.delayMs);
   const next = await transferStatus(dst, plan);
-  if (!next.ok) return next;
-  if (next.value.tag === 'done' || next.value.step > step) return ok({ tag: 'moved', next: next.value });
+  if (!next.ok) return { tag: refsConflict(next.error) ? 'conflict' : 'unread', error: next.error };
+  if (next.value.tag === 'done' || next.value.step > step) return { tag: 'moved', next: next.value };
   return settleFrom(dst, plan, step, cfg, reads + 1);
 }
-async function settle(dst: Transport, plan: TransferPlan, step: number, cfg: SettleConfig): Promise<Result<Settled, PlyError>> {
+async function settle(dst: Transport, plan: TransferPlan, step: number, cfg: SettleConfig): Promise<Settled> {
   const settled = await spanned(dst, 'git.transfer.settle', internal(dst, { ...planAttrs(plan), 'git.transfer.step': step }), async (span: Span): Promise<Result<Settled, PlyError>> => {
     const r = await settleFrom(withParent(dst, span), plan, step, cfg, 0);
-    if (r.ok) span.set({ 'git.transfer.settle.outcome': r.value.tag, 'git.transfer.settle.reads': r.value.tag === 'still' ? r.value.reads : 0 });
-    return r;
+    span.set({ 'git.transfer.settle.outcome': r.tag, 'git.transfer.settle.reads': r.tag === 'still' ? r.reads : 0 });
+    if (r.tag === 'conflict' || r.tag === 'unread') span.error(r.error);
+    return ok(r);
   });
-  return settled;
+  // the span's function never fails; a tracer that does leaves the destination unread
+  return settled.ok ? settled.value : { tag: 'unread', error: settled.error };
 }
 
-// A refusal a lagging read can explain: the step was sent again because the refs had not shown it landing yet.
-const refusedResend = (e: PlyError): boolean => e.code === 'cas_conflict' || e.code === 'not_fast_forward';
-
-type Loop = { readonly pushes: number; readonly unsettled: number; readonly last: number };
+type Loop = { readonly pushes: number; readonly tries: number };
 type Run = { readonly dst: Transport; readonly span: Span; readonly from: TransferPack; readonly plan: TransferPlan; readonly commit: Uint8Array; readonly cfg: RunConfig };
-// One turn of the loop, then the next by recursion (each push waits on the status the last one left).
-async function turn(run: Run, known: Option<TransferNext>, st: Loop): Promise<Result<TransferRun, PlyError>> {
+type Turn = { readonly step: number; readonly pushes: number; readonly tries: number };
+// The step's outcome is unknown: its push's is, and the refs do not show it (or could not be read).
+const unknown = (step: number, why: string, cause: PlyError): Result<TransferRun, PlyError> =>
+  fail('ambiguous', `transfer: step ${step} ${why}`, { what: 'step', cause, original: cause.code });
+// What the run does after a push and the refs read back: end with `result`, or go on from `next` (`tries`: sends of
+// that step so far whose outcome is unknown).
+type After = { readonly tag: 'end'; readonly result: Result<TransferRun, PlyError> } | { readonly tag: 'go'; readonly next: TransferNext; readonly tries: number };
+const end = (result: Result<TransferRun, PlyError>): After => ({ tag: 'end', result });
+
+// A push the server acknowledged, then the refs: shown, the run goes on; not shown yet, a later run reads them again
+// (never sent again on a lagging read); unread after the final push, the acknowledgement is the outcome (every command
+// ok: the ref created, the temp ref deleted); unread after a batch, the read's failure (the transfer is not done).
+function acknowledged(plan: TransferPlan, settled: Settled, { step, pushes }: Turn): After {
+  switch (settled.tag) {
+    case 'moved': return { tag: 'go', next: settled.next, tries: 0 };
+    case 'still': return end(ok({ tag: 'paused', step, pushes, reason: 'settling', last: 'acknowledged' }));
+    case 'unread': return end(step === plan.steps.length - 1 ? ok({ tag: 'done', head: plan.head, pushes, tempLeft: false }) : { ok: false, error: settled.error });
+    case 'conflict': return end({ ok: false, error: settled.error });
+  }
+  return assertNever(settled);
+}
+// A push that was not a clean ok (ambiguous, rejected, partial), judged by the destination: the step landed (this push
+// or another runner's) is progress; the refs could not be read is ambiguous, carrying the push's own error; it did not
+// land and the push was refused is that refusal; it did not land and the push was ambiguous is sent again, at most
+// `retries` times and within `maxSteps`, then ambiguous (never a pause: the caller owns the retry policy).
+function unclean(cfg: RunConfig, error: PlyError, settled: Settled, { step, pushes, tries }: Turn): After {
+  const refused = error.code !== 'ambiguous';
+  switch (settled.tag) {
+    case 'moved': return { tag: 'go', next: settled.next, tries: 0 };
+    case 'unread': return end(unknown(step, `was pushed (${error.code}) and the refs could not be read: whether it landed is not known`, error));
+    case 'conflict': return end({ ok: false, error: refused ? error : settled.error });
+    case 'still': {
+      if (refused) return end({ ok: false, error });
+      if (tries > cfg.retries) return end(unknown(step, `did not land after ${tries} tries`, error));
+      if (pushes >= cfg.maxSteps) return end(unknown(step, `did not land: its push's outcome is not known and the refs do not show it (${tries} sent, maxSteps reached)`, error));
+      return { tag: 'go', next: { tag: 'step', step }, tries };
+    }
+  }
+  return assertNever(settled);
+}
+
+// One turn of the loop, then the next by recursion (each push waits on the status the last one left). `next` is where
+// the destination stands; a pause here follows a landed push or none (an unknown one never reaches it).
+async function turn(run: Run, next: TransferNext, st: Loop): Promise<Result<TransferRun, PlyError>> {
   const { dst, span, from, plan, commit, cfg } = run;
-  const read = known.tag === 'some' ? ok(known.value) : await transferStatus(dst, plan);
-  if (!read.ok) return read;
-  const next = read.value;
   if (next.tag === 'done') return ok({ tag: 'done', head: next.head, pushes: st.pushes, tempLeft: next.tempLeft });
   const { step } = next;
-  if (st.pushes >= cfg.maxSteps) return ok({ tag: 'paused', step, pushes: st.pushes, reason: 'max_steps' });
-  const unsettled = step === st.last ? st.unsettled + 1 : 0;
-  if (unsettled > cfg.retries) return fail('ambiguous', `transfer: step ${step} did not land after ${unsettled} tries`, { what: 'step' });
-  const sent = await transferStep(dst, from, plan, step, commit);
+  if (st.pushes >= cfg.maxSteps) return ok({ tag: 'paused', step, pushes: st.pushes, reason: 'max_steps', last: st.pushes === 0 ? 'none' : 'landed' });
+  const sent = await stepSpan(dst, { from, plan, step, commit });
+  // refused here, before any request: nothing to read
+  if (!sent.ok) return sent;
   const pushes = st.pushes + 1;
   span.set({ 'git.transfer.pushes': pushes });
-  // a refusal no lagging read can explain, or a failure before the push went out: the run's answer
-  if (!sent.ok && sent.error.code !== 'ambiguous' && !refusedResend(sent.error)) return sent;
   const settled = await settle(dst, plan, step, cfg.settle);
-  if (!settled.ok) return settled;
-  const loop = { pushes, unsettled, last: step };
-  if (settled.value.tag === 'moved') return turn(run, some(settled.value.next), loop);
-  // the refs still show `step`: acknowledged, a later run reads them again; refused, the refusal stands; ambiguous, send again
-  if (sent.ok) return ok({ tag: 'paused', step, pushes, reason: 'settling' });
-  if (sent.error.code !== 'ambiguous') return sent;
-  return turn(run, none, loop);
+  const { pushed } = sent.value;
+  const after = pushed.ok ? acknowledged(plan, settled, { step, pushes, tries: 0 }) : unclean(cfg, pushed.error, settled, { step, pushes, tries: st.tries + 1 });
+  return after.tag === 'end' ? after.result : turn(run, after.next, { pushes, tries: after.tries });
 }
 
-// The loop (see the top of this file). After a push the refs are read back (settle) until they show it: an
-// acknowledged push the refs never show pauses the run ('settling'), so the step is not sent again on a lagging read; an
-// `ambiguous` push the refs do not show is sent again, at most `retries` times in a row; a refusal (a step sent again
-// after a lagging read) stands only if the refs, settled, do not show the step landed.
+// The loop (see the top of this file). The destination is the only commit point, so after every push the refs are read
+// back (settle) and the run's result is what they show: see `acknowledged` and `unclean`.
 export async function runTransfer(dst: Transport, from: TransferPack, plan: TransferPlan, commit: Uint8Array, opts: RunOpts = {}): Promise<Result<TransferRun, PlyError>> {
   const cfg = withDefaults<RunConfig>(opts, { maxSteps: Number.POSITIVE_INFINITY, retries: 2, settle: SETTLE_DEFAULTS });
   const run = await spanned(dst, 'git.transfer.run', internal(dst, { ...planAttrs(plan), 'git.transfer.ref': plan.ref, 'git.transfer.head': plan.head }), async (span: Span): Promise<Result<TransferRun, PlyError>> => {
-    const r = await turn({ dst: withParent(dst, span), span, from, plan, commit, cfg }, none, { pushes: 0, unsettled: 0, last: -1 });
+    const t = withParent(dst, span);
+    const first = await transferStatus(t, plan);
+    const r = first.ok ? await turn({ dst: t, span, from, plan, commit, cfg }, first.value, { pushes: 0, tries: 0 }) : first;
     if (r.ok) span.set({ 'git.transfer.outcome': r.value.tag === 'done' ? 'done' : `paused_${r.value.reason}`, 'git.transfer.pushes': r.value.pushes, 'git.transfer.temp_left': r.value.tag === 'done' && r.value.tempLeft });
     else span.set({ 'git.transfer.outcome': r.error.code });
     return r;
