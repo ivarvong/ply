@@ -4,7 +4,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createTransport } from '../src/http.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
-import { exchangeClock, watchedUpload, timeoutLimit } from '../src/deadline.js';
+import { exchangeClock, watchedUpload, timeoutLimit, transition, deadlineOf } from '../src/deadline.js';
 import { pushPack } from '../src/receivecaps.js';
 import { ZERO_OID } from '../src/push.js';
 
@@ -129,7 +129,7 @@ test('a long steady upload passes; the first-byte wait starts when the upload en
   assert.deepEqual([frames, seen.bytes], [2, 12 * 1024]);
 });
 
-test('a stalled upload is refused by the idle timeout', async () => {
+test('a request body whose source stops producing is refused as idleTimeoutMs: no more pieces reach the platform', async () => {
   const t = createTransport('https://h/r', { fetchImpl: reading(0), limits: withLimits(T) }).value;
   const t0 = Date.now();
   const e = await refusal(drain(t, { stream: uploading(12, 10, 2), length: 12 * 1024 }));
@@ -137,14 +137,14 @@ test('a stalled upload is refused by the idle timeout', async () => {
   assert.ok(Date.now() - t0 < 1500);
 });
 
-test('pushPack: a pack stream that stalls mid-upload ends at the idle timeout, as the ambiguous push it is', async () => {
+test('pushPack: a pack stream that stops producing partway ends as idleTimeoutMs, as the ambiguous push it is', async () => {
   const t = createTransport('https://h/r', { fetchImpl: reading(0), limits: withLimits({ ...T, maxPackBytes: 1 << 20 }) }).value;
   const t0 = Date.now();
   const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: 'a'.repeat(40), pack: uploading(64, 5, 4), length: 64 * 1024 });
   assert.equal(r.ok, false);
   assert.ok(Date.now() - t0 < 1500, `${Date.now() - t0} ms`);
-  const chain = [r.error, r.error.original, r.error.cause].filter(Boolean);
-  assert.ok(chain.some(e => e.code === 'timeout' || e === 'timeout') || /idleTimeoutMs/.test(r.error.message), JSON.stringify({ code: r.error.code, original: r.error.original, message: r.error.message }));
+  // the pack was partly sent: the server may have applied it, so the outcome is ambiguous, never the retryable `timeout`
+  assert.deepEqual([r.error.code, r.error.original, r.error.cause?.code, r.error.cause?.what], ['ambiguous', 'timeout', 'timeout', 'idleTimeoutMs']);
 });
 
 test('the caller signal aborts as aborted, not timeout', async () => {
@@ -167,7 +167,7 @@ test('0 turns a timer off: a stalled body with idle 0 runs until the opt-in tota
 test('exchangeClock: progress while waiting for headers does not extend the first-byte wait; cancel fires nothing', async () => {
   let fired = null;
   const c = exchangeClock({ firstByteMs: 80, idleMs: 1000, totalMs: 0 }, null, k => { fired = k; });
-  const iv = setInterval(() => c.progress(), 10);
+  const iv = setInterval(() => c.feed('upload_bytes'), 10);
   await sleep(200);
   clearInterval(iv);
   assert.equal(fired, 'firstByteTimeoutMs');
@@ -183,8 +183,8 @@ test('exchangeClock: progress while waiting for headers does not extend the firs
 test('exchangeClock: idle progress re-arms; the body phase fires only after a real gap', async () => {
   let fired = null;
   const c = exchangeClock({ firstByteMs: 50, idleMs: 60, totalMs: 0 }, null, k => { fired = k; });
-  c.phase('body');
-  for (let i = 0; i < 8; i++) { await sleep(30); c.progress(); }
+  c.feed('headers');
+  for (let i = 0; i < 8; i++) { await sleep(30); c.feed('body_chunk'); }
   assert.equal(fired, null);
   await sleep(150);
   assert.equal(fired, 'idleTimeoutMs');
@@ -205,4 +205,188 @@ test('watchedUpload: no buffer of its own, the source locked only from the first
   const untouched = new ReadableStream({ cancel(r) { cancelled = `untouched:${r}`; } });
   await watchedUpload(untouched, c).cancel('x');
   assert.equal(cancelled, 'untouched:x');
+});
+
+// The machine, every state and event pair. Written by hand from the rules, not from the code:
+//   - nothing moves a state backwards; an event a state has no use for leaves it as it is
+//   - headers seen (from any state before them) is `streaming`: the first byte is satisfied for good
+//   - `restart` (the wait starts again) only on network progress: the request sent again, upload bytes while uploading
+//     or streaming, the upload's end before the headers, the headers, a body chunk, the consumer asking for more
+//   - consumer_took parks the clock (`held`); only consumer_asked resumes it; `ended` and `done` are final
+const STATES = ['connecting', 'uploading', 'awaiting_first_byte', 'streaming', 'held', 'done'];
+const EVENTS = ['request_sent', 'upload_started', 'upload_bytes', 'upload_ended', 'headers', 'body_chunk', 'consumer_took', 'consumer_asked', 'ended'];
+// next state per event, in EVENTS order; a trailing `!` is a restart
+const TABLE = {
+  connecting: ['connecting!', 'uploading!', 'connecting', 'connecting', 'streaming!', 'connecting', 'connecting', 'connecting', 'done'],
+  uploading: ['uploading', 'uploading', 'uploading!', 'awaiting_first_byte!', 'streaming!', 'uploading', 'uploading', 'uploading', 'done'],
+  awaiting_first_byte: ['awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'streaming!', 'awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'done'],
+  streaming: ['streaming', 'streaming', 'streaming!', 'streaming', 'streaming', 'streaming!', 'held', 'streaming', 'done'],
+  held: ['held', 'held', 'held', 'held', 'held', 'held', 'held', 'streaming!', 'done'],
+  done: ['done', 'done', 'done', 'done', 'done', 'done', 'done', 'done', 'done'],
+};
+test('transition: every state and event pair', () => {
+  assert.deepEqual(Object.keys(TABLE), STATES);
+  for (const state of STATES) {
+    assert.equal(TABLE[state].length, EVENTS.length);
+    EVENTS.forEach((event, i) => {
+      const want = TABLE[state][i];
+      assert.deepEqual(transition(state, event), { state: want.replace('!', ''), restart: want.endsWith('!') }, `${state} + ${event}`);
+    });
+  }
+});
+
+test('transition: no event moves a state backwards', () => {
+  // the order of an exchange; `streaming` and `held` alternate, so they share a rank
+  const rank = { connecting: 0, uploading: 1, awaiting_first_byte: 2, streaming: 3, held: 3, done: 4 };
+  for (const state of STATES) for (const event of EVENTS) assert.ok(rank[transition(state, event).state] >= rank[state], `${state} + ${event}`);
+});
+
+test('deadlineOf: first byte before the headers, idle while on the network, nothing while held, the total throughout', () => {
+  const t = { firstByteMs: 100, idleMs: 20, totalMs: 0 };
+  // mark 1000, start 400: the step deadline is mark + its limit
+  const at = state => { const d = deadlineOf(state, 1000, 400, t); return d === null ? null : [d.key, d.at, d.ms]; };
+  assert.deepEqual(STATES.map(at), [['firstByteTimeoutMs', 1100, 100], ['idleTimeoutMs', 1020, 20], ['firstByteTimeoutMs', 1100, 100], ['idleTimeoutMs', 1020, 20], null, null]);
+  // an opt-in total of 650 from start 400 is 1050: earlier than the first-byte wait, later than the idle one, and the
+  // only limit while the consumer holds a chunk
+  const capped = state => { const d = deadlineOf(state, 1000, 400, { ...t, totalMs: 650 }); return d === null ? null : [d.key, d.at]; };
+  assert.deepEqual(STATES.map(capped), [['requestTimeoutMs', 1050], ['idleTimeoutMs', 1020], ['requestTimeoutMs', 1050], ['idleTimeoutMs', 1020], ['requestTimeoutMs', 1050], null]);
+  // 0 turns a limit off
+  assert.equal(deadlineOf('streaming', 1000, 400, { firstByteMs: 100, idleMs: 0, totalMs: 0 }), null);
+});
+
+// The hot loop (#255 review, R2). One timer is left pending: past the headers a deadline only moves later, so the
+// pending timer is early enough and re-arms for what is left when it fires. The expected count is the rule's: zero
+// timer calls per chunk (main ec337c5 made none either), whatever the limits.
+const countingTimers = async run => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout;
+  const calls = { set: 0, clear: 0 };
+  globalThis.setTimeout = (...a) => { calls.set++; return realSet(...a); };
+  globalThis.clearTimeout = (...a) => { calls.clear++; return realClear(...a); };
+  try { await run(calls); } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
+};
+test('a consumer that keeps up costs no setTimeout and no clearTimeout per body chunk', async () => {
+  await countingTimers(calls => {
+    for (const totalMs of [0, 120_000]) {
+      const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, totalMs }, null, () => {});
+      c.feed('headers');
+      calls.set = 0; calls.clear = 0;
+      for (let i = 0; i < 1000; i++) { c.feed('body_chunk'); c.feed('consumer_took'); c.feed('consumer_asked'); }
+      assert.deepEqual([totalMs, calls.set, calls.clear], [totalMs, 0, 0]);
+      c.cancel();
+    }
+  });
+});
+test('frames() makes the same number of timer calls for 10 body chunks as for 1000', async () => {
+  const fetchOf = n => () => { let i = 0; return Promise.resolve(new Response(new ReadableStream({ pull(c) { if (i++ === n) { c.enqueue(te.encode('0000')); c.close(); return; } c.enqueue(te.encode('0008abcd')); } }, { highWaterMark: 0 }), { status: 200, headers: RESULT })); };
+  const timerCalls = async n => {
+    const seen = { set: 0, clear: 0, frames: 0 };
+    await countingTimers(async calls => {
+      const t = createTransport('https://h/r', { fetchImpl: fetchOf(n) }).value;
+      for await (const _ of t.frames('git-upload-pack', new Uint8Array(4), spanOf(), { bypassCache: false })) seen.frames++;
+      seen.set = calls.set; seen.clear = calls.clear;
+    });
+    return seen;
+  };
+  const few = await timerCalls(10), many = await timerCalls(1000);
+  assert.deepEqual([few.frames, many.frames], [11, 1001]);
+  assert.deepEqual([many.set, many.clear], [few.set, few.clear]);
+});
+
+// A manual scheduler (#255 re-review, REQ 1): setTimeout, clearTimeout and Date.now are replaced and time moves only in
+// `advance`, so nothing sleeps and every fire time is exact.
+const manualTimers = async run => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout, realNow = Date.now;
+  let T = 0;
+  const q = new Map();
+  globalThis.setTimeout = (fn, ms) => { const id = { unref() {} }; q.set(id, { at: T + (ms ?? 0), fn }); return id; };
+  globalThis.clearTimeout = id => { q.delete(id); };
+  Date.now = () => T;
+  // run every timer due by `to`, earliest first, each at its own time
+  const advance = to => {
+    for (;;) {
+      let best = null;
+      for (const e of q) if (e[1].at <= to && (best === null || e[1].at < best[1].at)) best = e;
+      if (best === null) break;
+      q.delete(best[0]); T = Math.max(T, best[1].at); best[1].fn();
+    }
+    T = to;
+  };
+  try { await run({ advance, time: () => T, pending: () => q.size }); } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; Date.now = realNow; }
+};
+// Expected times are the documented rule worked by hand, not read from the clock: idleTimeoutMs is the longest wait on
+// the network with no progress, and the wait starts again when the consumer asks. So after an ask at A with no further
+// bytes the cut is at A + idle, named idleTimeoutMs, unless start + requestTimeoutMs is earlier; a consumer that never
+// asks is cut only at start + requestTimeoutMs.
+test('exchangeClock: with requestTimeoutMs set, the idle limit survives a timer that fires while the consumer holds a chunk', async () => {
+  await manualTimers(({ advance, time }) => {
+    const run = (t, script) => {
+      const t0 = time();
+      let fired = 'none';
+      const c = exchangeClock(t, null, key => { fired = `${key}@${time() - t0}`; });
+      script(c, ms => { advance(t0 + ms); });
+      c.cancel();
+      return fired;
+    };
+    const capped = { firstByteMs: 1000, idleMs: 1000, totalMs: 100_000 };
+    // headers at 10, a chunk taken at 20; the timer set for 10 + 1000 fires while the consumer holds; ask at 1500, then
+    // silence: 1500 + 1000
+    assert.equal(run(capped, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('body_chunk'); c.feed('consumer_took'); at(1500); c.feed('consumer_asked'); at(200_000); }), 'idleTimeoutMs@2500');
+    // five holds of 1490 ms, each across a firing, each followed by 10 ms on the network; the last ask is at
+    // 10 + 4 * 1500 + 1490 = 7500, then silence: 7500 + 1000
+    assert.equal(run(capped, (c, at) => {
+      at(10); c.feed('headers');
+      for (let i = 0; i < 5; i++) { c.feed('consumer_took'); at(10 + i * 1500 + 1490); c.feed('consumer_asked'); at(10 + (i + 1) * 1500); }
+      at(200_000);
+    }), 'idleTimeoutMs@8500');
+    // the total cap is earlier than ask + idle (1500 + 1000): the cap fires, at its own time
+    assert.equal(run({ ...capped, totalMs: 2000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(1500); c.feed('consumer_asked'); at(200_000); }), 'requestTimeoutMs@2000');
+    // a consumer that never asks again is not charged idle time: only the total cap bounds it
+    assert.equal(run({ ...capped, totalMs: 5000 }, (c, at) => { at(10); c.feed('headers'); at(20); c.feed('consumer_took'); at(200_000); }), 'requestTimeoutMs@5000');
+  });
+});
+// What README Limits and SAFETY.md I1 say about a held chunk (re-review REQ 3): a timer may still be pending, but with
+// no total cap it cuts nothing, and once it has fired it is not set again until the consumer asks.
+test('exchangeClock: while the consumer holds a chunk a timer may be pending, and without requestTimeoutMs it cuts nothing', async () => {
+  await manualTimers(({ advance, pending }) => {
+    let fired = 'none';
+    const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, totalMs: 0 }, null, key => { fired = key; });
+    advance(10); c.feed('headers'); advance(20); c.feed('body_chunk'); c.feed('consumer_took');
+    // the one timer, set before the consumer took the chunk
+    assert.equal(pending(), 1);
+    // a day later the consumer still holds the chunk: nothing was cut, and the timer that fired was not set again
+    advance(86_400_000);
+    assert.deepEqual([fired, c.signal.aborted, pending()], ['none', false, 0]);
+    // the ask puts ply back on the network: the idle wait runs from here (86 400 000 + 60 000)
+    c.feed('consumer_asked');
+    assert.equal(pending(), 1);
+    advance(86_459_999);
+    assert.equal(fired, 'none');
+    advance(86_460_000);
+    assert.equal(fired, 'idleTimeoutMs');
+  });
+});
+test('frames(): with requestTimeoutMs set, a server that stalls after the consumer held a frame across a timer firing is cut at ask + idle', async () => {
+  await manualTimers(async ({ advance, time }) => {
+    // the server: one frame at once, then silence
+    let pulls = 0;
+    const body = new ReadableStream({ pull(c) { if (pulls++ === 0) { c.enqueue(te.encode('0008abcd')); return undefined; } return new Promise(() => {}); } }, { highWaterMark: 0 });
+    const t = createTransport('https://h/r', { fetchImpl: () => Promise.resolve(new Response(body, { status: 200, headers: RESULT })), limits: withLimits({ firstByteTimeoutMs: 300, idleTimeoutMs: 300, requestTimeoutMs: 6000 }) }).value;
+    let firedAt = null;
+    const attrs = {};
+    const span = { attrs, set: a => { if ('git.timeout.limit' in a) firedAt = time(); Object.assign(attrs, a); }, event() {}, error() {} };
+    const frames = t.frames('git-upload-pack', new Uint8Array(4), span, { bypassCache: false })[Symbol.asyncIterator]();
+    // everything up to the first frame happens at time 0; the consumer then holds it for 700 ms, across the timer set
+    // for 0 + 300
+    assert.equal((await frames.next()).done, false);
+    advance(700);
+    assert.equal(firedAt, null, 'the consumer is not charged idle time');
+    // the ask, at 700: the server has 300 ms from here, so the cut is at 1000 (the total cap is 6000)
+    const next = refusal(frames.next());
+    await new Promise(r => setImmediate(r));
+    advance(999);
+    assert.equal(firedAt, null);
+    advance(200_000);
+    const e = await next;
+    assert.deepEqual([firedAt, e.code, e.what, attrs['git.timeout.limit']], [1000, 'timeout', 'idleTimeoutMs', 'idleTimeoutMs']);
+  });
 });

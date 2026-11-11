@@ -160,19 +160,25 @@ test('otel: a follows span is the root of its own trace, linked both ways while 
 });
 
 test('inflate: an incomplete huffman table with a hole is rejected (invalid huffman code), and zlib agrees', () => {
-  // Dynamic block whose lit/len table has a single code (EOB, length 8): the table is incomplete, so a bit pattern that is
-  // not that code decodes to nothing. Built bit by bit, LSB-first as deflate reads it.
-  const bits = []; const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
-  put(1, 1); put(2, 2);                                   // BFINAL=1, BTYPE=dynamic
-  put(0, 5); put(0, 5); put(1, 4);                        // HLIT=257, HDIST=1, HCLEN=5 → code-length symbols in order 16,17,18,0,8
-  put(0, 3); put(0, 3); put(0, 3); put(1, 3); put(1, 3);  // symbol 0 → length 1 (code 0), symbol 8 → length 1 (code 1)
-  for (let i = 0; i < 256; i++) put(0, 1);                // literals 0..255: length 0
-  put(1, 1);                                              // symbol 256 (EOB): length 8
-  put(0, 1);                                              // the one distance symbol: length 0
-  for (let i = 0; i < 16; i++) put(1, 1);                 // data: 1111…, which is not the EOB code (00000000)
-  const raw = Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
-  assert.throws(() => unwrap(inflate(raw, 0, { raw: true, maxOutput: 1024 })), e => e.code === 'pack_corrupt' && /invalid huffman code/.test(e.message));
-  assert.throws(() => zlib.inflateRawSync(raw), /invalid|incomplete|Z_DATA_ERROR/i, 'node zlib rejects it too');
+  // Dynamic block whose lit/len table has a single code (EOB, length 1): the one incomplete literal/length set zlib
+  // accepts (inftrees.c: a single 1-bit code), so the bit that is not that code decodes to nothing. Built bit by bit,
+  // LSB-first as deflate reads it. (This fixture had EOB at length 8, which zlib refuses at the header as `invalid
+  // literal/lengths set`, and so does ply now: asserted below.)
+  const member = eobLen => {
+    const bits = []; const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+    put(1, 1); put(2, 2);                                   // BFINAL=1, BTYPE=dynamic
+    put(0, 5); put(0, 5); put(14, 4);                       // HLIT=257, HDIST=1, HCLEN=18 → code-length symbols 16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1
+    for (const n of [0, 0, 0, 1, eobLen === 8 ? 1 : 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, eobLen === 1 ? 1 : 0]) put(n, 3); // symbol 0 → `0`, symbol eobLen → `1`
+    for (let i = 0; i < 256; i++) put(0, 1);                // literals 0..255: length 0
+    put(1, 1);                                              // symbol 256 (EOB): length eobLen
+    put(0, 1);                                              // the one distance symbol: length 0
+    for (let i = 0; i < 16; i++) put(1, 1);                 // data: 1111…, which is not the EOB code (0, or 00000000)
+    return Uint8Array.from(Array.from({ length: Math.ceil(bits.length / 8) }, (_, i) => bits.slice(i * 8, i * 8 + 8).reduce((b, v, j) => b | (v << j), 0)));
+  };
+  assert.throws(() => unwrap(inflate(member(1), 0, { raw: true, maxOutput: 1024 })), e => e.code === 'pack_corrupt' && /invalid huffman code/.test(e.message));
+  assert.throws(() => zlib.inflateRawSync(member(1)), /invalid literal\/length code/, 'node zlib rejects the code, not the set');
+  assert.throws(() => zlib.inflateRawSync(member(8)), /invalid literal\/lengths set/, 'node zlib rejects the set');
+  assert.throws(() => unwrap(inflate(member(8), 0, { raw: true, maxOutput: 1024 })), e => e.code === 'pack_corrupt' && e.message === 'inflate: invalid literal/lengths set');
 });
 
 test('parsePack: reserved object types 0 and 5 are rejected', async () => {

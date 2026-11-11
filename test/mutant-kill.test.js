@@ -667,6 +667,26 @@ test('inflate stored, fixed, dynamic, and the header checks', () => {
   throws(() => unwrap(inflate(rawCut, 0, { raw: true })), 'pack_corrupt', 'inflate: unexpected end of input');
 });
 
+// The acknowledgments section (src/fetch.ts v2Step), in the suite the mutation gate runs. Expected values are git's
+// (fetch-pack.c process_ack): it reads "NAK", "ACK <oid>" (the prefix "ACK " with its space) and "ready", and dies
+// "unexpected acknowledgment line" on anything else. The message is ply's fixed text with the line in JSON quotes,
+// written out here by hand.
+test('v2 acknowledgments: NAK and ACK <oid> are kept; any other line is a protocol error that quotes it', () => {
+  const data = s => ({ kind: 'data', payload: te.encode(s) });
+  const inAcks = () => unwrap(v2StepR(v2Init(), data('acknowledgments\n'))).state;
+  const id = 'ab'.repeat(20);
+  const nak = v2StepR(inAcks(), data('NAK\n'));
+  assert.deepEqual([nak.ok, nak.value?.state.acks], [true, ['NAK']]);
+  const ack = v2StepR(inAcks(), data(`ACK ${id}\n`));
+  assert.deepEqual([ack.ok, ack.value?.state.acks], [true, [`ACK ${id}`]]);
+  for (const [sent, quoted] of [
+    ['hello\n', '"hello"'], ['\n', '""'], ['ACK\n', '"ACK"'], [`ACK${id}\n`, `"ACK${id}"`], ['NAKed\n', '"NAKed"'], ['nak\n', '"nak"'], [` ACK ${id}\n`, `" ACK ${id}"`],
+  ]) {
+    const r = v2StepR(inAcks(), data(sent));
+    assert.deepEqual([r.ok, r.error?.code, r.error?.message], [false, 'protocol', `v2: unexpected acknowledgment line ${quoted}`], JSON.stringify(sent));
+  }
+});
+
 test('v2 sections, sideband, and the single-object pack stream', async () => {
   const limits = withLimits({ maxSectionLines: 2 });
   let st = v2Init(limits);
@@ -1127,8 +1147,10 @@ test('asymmetric boundaries a symmetric fixture hides', async () => {
 
   const bits = []; const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
   put(1, 1); put(2, 2);
-  put(0, 5); put(0, 5); put(1, 4);
-  put(0, 3); put(0, 3); put(0, 3); put(1, 3); put(1, 3);
+  // the end-of-block code alone at one bit: the one incomplete literal/length set zlib accepts (inftrees.c); any other
+  // is refused at the header (test/inflate-codesets.test.js). Code-length symbols 0 and 1 at one bit: 0 → `0`, 1 → `1`.
+  put(0, 5); put(0, 5); put(14, 4);
+  for (const n of [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) put(n, 3);
   for (let i = 0; i < 256; i++) put(0, 1);
   put(1, 1);
   put(0, 1);
@@ -1244,15 +1266,21 @@ test('parser edges a symmetric or unreachable fixture left alive', async () => {
     for (const [v, n] of extras.body) put(v, n);
     return packBits(bits);
   };
-  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat with no previous');
-  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [127, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat overflow');
-  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 0], body: [[0, 1], [127, 7], [0, 1], [120 - 11, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: no end-of-block code');
+  // head: the lengths of the code-length symbols 16, 17, 18, 0. Each set is complete (two 1-bit codes: 0 → `0`, the
+  // other → `1`); zlib refuses a one-code code-length set as `invalid code lengths set` before any symbol is read.
+  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 1], body: [[1, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat with no previous');
+  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 1], body: [[1, 1], [127, 7], [1, 1], [127, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: repeat overflow');
+  throws(() => unwrap(inflate(repeat({ head: [0, 0, 1, 1], body: [[1, 1], [127, 7], [1, 1], [120 - 11, 7]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: no end-of-block code');
+  // and the one-code set itself is refused as zlib refuses it
+  throws(() => unwrap(inflate(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] }), 0, { raw: true })), 'pack_corrupt', 'inflate: invalid code lengths set');
+  assert.throws(() => zlib.inflateRawSync(repeat({ head: [1, 0, 0, 0], body: [[0, 1]] })), /invalid code lengths set/);
 
   // 15 data bits end on the last bit of the buffer, so one more Huffman step has nothing to read.
   const hole = [];
   const putHole = (v, n) => { for (let i = 0; i < n; i++) hole.push((v >> i) & 1); };
-  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(6, 4);
-  for (const n of [0, 0, 0, 1, 1, 0, 0, 0, 0, 0]) putHole(n, 3);
+  // the end-of-block code alone at one bit (the incomplete set zlib accepts), read as the unused `1`
+  putHole(1, 1); putHole(2, 2); putHole(0, 5); putHole(0, 5); putHole(14, 4);
+  for (const n of [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) putHole(n, 3);
   for (let i = 0; i < 256; i++) putHole(0, 1);
   putHole(1, 1); putHole(0, 1);
   for (let i = 0; i < 15; i++) putHole(1, 1);
@@ -1772,6 +1800,18 @@ test('push holds band 2 to maxPackBytes, counted with its report', async () => {
   const flood = { limits: withLimits({ maxPackBytes: 10_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) { pulled++; yield band(SIDEBAND_PROGRESS, 999); } } };
   await assert.rejects(unwrapAsync(push(flood, { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === 'report bytes' && e.cause.max === 10_000);
   assert.equal(pulled, 11, 'ten 1,000-byte frames fit, the eleventh crosses the cap');
+  // The report's own caps bound what is kept, never the outcome (owner decision 5; test/push-report-bound.test.js reads
+  // real response bodies): maxPackBytes is the one byte cap on the answer, so an endless band 2 or an endless run of
+  // keepalives (one band byte each) ends there, by that name, under the default reason and progress limits.
+  const endless = frame => ({ limits: withLimits({ maxPackBytes: 100_000 }), tracer: tracerStub, parent: null, async *frames() { for (;;) yield frame; } });
+  const capped = (what, max) => e => e.code === 'ambiguous' && e.original === 'limit_exceeded' && e.cause.what === what && e.cause.max === max;
+  await assert.rejects(unwrapAsync(push(endless(band(SIDEBAND_PROGRESS, 60_000)), { commands: del, sideband: true })), capped('report bytes', 100_000));
+  // 100,000 keepalives fit, the next one is over
+  await assert.rejects(unwrapAsync(push(endless(band(SIDEBAND_PACK, 0)), { commands: del, sideband: true })), e => capped('report bytes', 100_000)(e) && e.cause.got === 100_001);
+  // an unpack status past maxReportReasonBytes (4,096) is cut and read as a line, as one under it is: neither is a git
+  // unpack status, and the next copy of it is no ref status
+  const unpackLine = n => ({ kind: 'data', payload: concat([Uint8Array.of(SIDEBAND_PACK), unwrap(pkt(`unpack ${'x'.repeat(n - 8)}\n`))]) });
+  for (const n of [4137, 4138, 20_000]) await assert.rejects(unwrapAsync(push(endless(unpackLine(n)), { commands: del, sideband: true })), e => e.code === 'ambiguous' && e.original === undefined && e.message === 'push outcome unknown: a line is not a ref status');
 });
 
 test('push outcome (SAFETY.md I36): the exact report shapes, the decision, and the fields the enumerator does not compare', async () => {

@@ -67,6 +67,10 @@ const rows = [
   ['cachingFetch: waitUntil throws (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, memoryCache(), { shouldCache: () => true, waitUntil: () => { throw boom; } }) }), 'bad_request', 'waitUntil', 'definite'],
   // the put of a miss is called inside the fetch that missed, before it answers
   ['cachingFetch: cache.put throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw boom; } }) }), 'bad_request', 'cache.put', 'definite'],
+  // main's split store calls the put inside the fetch on every miss, verifyBeforeStore or not (the verified bytes are
+  // streamed to it as the client reads), so a put or waitUntil that throws when called is this read's own named Err
+  ['cachingFetch verifyBeforeStore: cache.put throws synchronously (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw boom; } }, { verifyBeforeStore: true }) }), 'bad_request', 'cache.put', 'definite'],
+  ['cachingFetch verifyBeforeStore: waitUntil throws (read)', () => readCommit(url, { ref: 'main' }, { fetchImpl: cachingFetch(globalThis.fetch, memoryCache(), { verifyBeforeStore: true, waitUntil: () => { throw boom; } }) }), 'bad_request', 'waitUntil', 'definite'],
   // operation()'s own edge, for any callback not wrapped where it is called: the body stands in for one
   ['operation(): a foreign throw before any request', () => operation('probe', url, {}, async () => { await null; throw boom; }), 'bad_request', 'callback', 'definite'],
   ['operation(): a foreign throw after an upload-pack request only', () => operation('probe', url, {}, async ({ t, root: span }) => { await null; t.frames('git-upload-pack', new Uint8Array(0), span, {}); throw boom; }), 'bad_request', 'callback', 'definite'],
@@ -105,24 +109,6 @@ test("cachingFetch: cache.delete throws synchronously on a bust: the fetch rejec
   assert.deepEqual([e.code, e.what], ['bad_request', 'cache.delete']);
   assert.equal(e.cause, thrown, 'the Err carries the very value the callback threw as its cause');
   assert.notEqual(e, thrown, "the Err is ply's own object, not the caller's thrown value");
-  assert.deepEqual(Object.keys(thrown), [], "ply wrote nothing on the caller's thrown Error");
-});
-
-// With verifyBeforeStore the put is called after the answer was handed back to the read, so a put that throws then
-// cannot be the read's failure: it is counted like a put that rejects (README), and the promise handed to waitUntil
-// does not reject (one put per miss: the expected count is the cache's own miss counter, at least the commit fetch).
-test('cachingFetch verifyBeforeStore: a put that throws when called is counted (putFailed, putError) and the read is ok', async () => {
-  const before = head();
-  const thrown = new Error('boom put');
-  const pending = [];
-  const f = cachingFetch(globalThis.fetch, { ...memoryCache(), put: () => { throw thrown; } }, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
-  const r = await readCommit(url, { ref: 'main' }, { fetchImpl: f });
-  assert.equal(r.ok, true);
-  assert.equal(r.value.oid, before, 'git: the commit read is the ref');
-  await Promise.all(pending).catch(e => assert.fail(`the put's promise rejected: ${String(e)}`));
-  assert.ok(f.stats.miss >= 1, 'the commit fetch missed');
-  assert.deepEqual([f.stats.putFailed, f.stats.putOk], [f.stats.miss, 0]);
-  assert.equal(f.stats.putError, 'caller-supplied cache.put threw: boom put');
   assert.deepEqual(Object.keys(thrown), [], "ply wrote nothing on the caller's thrown Error");
 });
 

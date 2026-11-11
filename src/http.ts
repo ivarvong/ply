@@ -13,7 +13,7 @@ import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
 import type { Attrs, ExchangeClock, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
-import { fail, plyError } from './errors.js';
+import { fail, plyError, remoteQuoted, remoteText } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
@@ -276,10 +276,10 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
 // A non-2xx answer: a prefix of the body for the message (credential-scrubbed), the rest cancelled. A truncating read
 // keeps a prefix: its only error is the body read failing, and that is the exchange's error.
 async function statusError(res: Response, service: string, scrub: Scrub | null, clock: ExchangeClock): Promise<PlyError> {
-  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal: clock.signal, progress: clock.progress });
+  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal: clock.signal, progress: () => { clock.feed('body_chunk'); } });
   if (!read.ok) return read.error;
   const preview = td.decode(read.value);
-  const quoted = (scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE);
+  const quoted = remoteText(scrub ? scrub(preview) : preview, ERROR_QUOTE);
   const miss = res.status === 404 ? { miss: { kind: 'repository' as const } } : {};
   return plyError(httpCode(res.status), `HTTP ${res.status} ${service}: ${quoted}`, { status: res.status, ...miss } as Detail['http'] & Extra);
 }
@@ -404,6 +404,12 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   const offeredOrigin = u.origin;
   const approved = useAllowed(allowUrl, u);
   if (!approved.ok) return approved;
+  // Only http: and https: are ever fetched, and the rule is held on the URL that will be requested: after allowUrl,
+  // so a caller's own scheme that allowUrl maps to https still works and a caller's refusal is still the answer as
+  // given (useAllowed holds an allowUrl result to http(s) itself; without an allowUrl the URL here is the base).
+  // Anything else (file:, data:, blob:, ssh:, git:, ext::) is refused before any I/O and before the fetch
+  // implementation sees it, as a definite failure and not a retry-shaped `network`. The message is fixed text.
+  if (approved.value.protocol !== 'http:' && approved.value.protocol !== 'https:') return fail('bad_request', 'invalid url: only http: and https: remotes are supported', { what: 'url' });
   // The explicit credential, checked before anything is built from it.
   // urlCredential reads the URL only when there is no auth, so a URL credential implies auth === null
   const explicit = auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
@@ -547,7 +553,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
       case 'body': {
-        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: clock.signal, progress: clock.progress });
+        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: clock.signal, progress: () => { clock.feed('body_chunk'); } });
         if (buf.ok) span.set({ 'git.response.bytes': buf.value.length, 'http.response.body.size': buf.value.length, ...redirectAttrs() });
         return buf;
       }
@@ -591,7 +597,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
       try {
         const res = await fetchAdvertisement(asked, service, span, sig.signal);
         if (!res.ok) return res;
-        sig.phase('body');
+        sig.feed('headers');
         if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
         // A stale memo: this GET is replayable, so the exchange starts over from the original base.
         if (memoUnconfirmed && isRedirect(res.value)) { await cancelBody(res.value.body); unsettle(service); continue; }
@@ -622,7 +628,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
     if (!res.ok) return err(await statusError(res, service, scrub, clock));
     const ct = headerText(res, 'content-type');
-    if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${JSON.stringify(ct)} from ${service}`);
+    if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${remoteQuoted(ct)} from ${service}`);
     const body = bodyOf(res);
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service}: HTTP ${res.status} response has no body`);
@@ -639,8 +645,9 @@ function transportOf(settings: HttpSettings): HttpTransport {
     const target = `${base}/${service}`;
     const bytes = body instanceof Uint8Array ? body : null;
     const sig = clock.signal;
-    // A streamed body's pulls are the upload's progress (idle timer); its end starts the wait for the headers.
-    if (bytes === null) clock.phase('upload');
+    // A streamed body's pulls by the platform are the clock's progress marks (what ply can see, not what reached the
+    // server); its end starts the wait for the headers, unless they are already here.
+    if (bytes === null) clock.feed('upload_started');
     const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: watchedUpload(body.stream, clock), duplex: 'half' };
     const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig, bytes === null ? settings.streamRedirect : 'manual');
     const stale = memoUnconfirmed && (res.ok ? isRedirect(res.value) : bytes === null);
@@ -652,7 +659,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (!ad.ok) return ad;
     const again = `${base}/${service}`;
     span.set({ 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
-    clock.phase('first_byte');
+    clock.feed('request_sent');
     const retried = await send(again, { method: 'POST', headers: headers(service, extra), body: bufferSource(bytes) }, sig, 'manual');
     return retried.ok ? ok({ res: retried.value, target: again }) : retried;
   }
@@ -679,7 +686,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     try {
       const sent = await sendPost(service, body, extra, span, sig);
       if (!sent.ok) { yield sent; return; }
-      sig.phase('body');
+      sig.feed('headers');
       const res = sent.value.res;
       const posted = sent.value.target;
       memoUnconfirmed = false;
@@ -692,10 +699,13 @@ function transportOf(settings: HttpSettings): HttpTransport {
       // The body read: a platform failure mid-stream is the network error it is.
       const read = readAbortable(stream.value, sig.signal);
       try { for await (const chunk of read.chunks) {
-        sig.progress();
         if (chunks === 0) first = Date.now() - t0;
         bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
+        // The chunk arrived and goes straight to the consumer (no await between): one event, no clock read. The
+        // consumer's time with it is not the server's silence: the idle wait starts again when it asks.
+        sig.feed('consumer_took');
         yield ok(chunk);
+        sig.feed('consumer_asked');
       } } catch (e) { yield err(wrapNet(e, sig.signal)); return; }
       // the exchange's signal ended the read: its reason is the error (a timeout names its limit)
       if (read.cut()) { yield err(wrapNet(sig.signal.reason, sig.signal)); return; }

@@ -187,3 +187,31 @@ export function scrubError(e: unknown, scrub: ((s: string) => string) | null = n
   };
   return walk(e);
 }
+
+// Remote-written text on its way into an error message or a span attribute. The sites that pass it through one of
+// these two are listed in SAFETY.md I43 and counted by test/remote-text.test.js: ERR lines, band 3, the HTTP error body
+// and content-type, refused protocol lines, v2End's section names, the too-large push reason and the
+// git.push.band2.tail attribute. Not every field does: I43 also lists the ones that still carry remote text as received
+// (hookOutput, git.push.remote.messages, git.push.ng.reason, fetch progress, the lines / rejected detail fields, an ng
+// reason quoted in a push message). A server chooses these bytes, and whoever prints the error to a terminal or a log
+// must not be driven by them. The text is cut to `max` UTF-16 units (after the scrub, where a site passes one), so the
+// result is bounded whatever the line's size; then every control (Cc: C0, DEL, C1), format
+// character (Cf: bidi overrides, zero-width and tag characters), line or paragraph separator and lone surrogate (a cut
+// pair, or ill-formed input) is written as \uXXXX (\u{XXXXX} above the BMP). Invalid UTF-8 has already decoded to U+FFFD, which
+// is printable and kept.
+//   remoteText   — running text (an ERR message, hook output, an error page): tab and newline stay, as in git's own
+//                  reports (usage.c vreportf masks every other control).
+//   remoteQuoted — one line shown in quotes: JSON's quoting (so `"`, `\`, tab and newline are escaped too), then the
+//                  characters JSON leaves raw (DEL, C1, format characters, U+2028/9).
+export const REMOTE_TEXT_MAX = 1024;
+const HEX = 16;
+const UNIT_DIGITS = 4;
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+// one match is one code point: a BMP character is \uXXXX (as JSON writes it), an astral one \u{XXXXX}
+const escaped = (c: string): string => { const hex = Number(c.codePointAt(0)).toString(HEX); return c.length === 1 ? `\\u${hex.padStart(UNIT_DIGITS, '0')}` : `\\u{${hex}}`; };
+// `scrub` (a transport's credential scrubber, or null) runs BEFORE the cut, on the whole text: a cut that falls inside
+// an echoed credential would leave a remainder too short for the scrubber to recognise afterwards. Where it is passed
+// the text is one pkt-line payload (at most 65516 bytes), so the scrub is bounded too.
+export const remoteText = (text: string, max: number = REMOTE_TEXT_MAX, scrub: ((s: string) => string) | null = null): string =>
+  (typeof scrub === 'function' ? scrub(text) : text).slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
+export const remoteQuoted = (text: string, max: number = REMOTE_TEXT_MAX): string => JSON.stringify(text.slice(0, max)).replaceAll(UNPRINTABLE, escaped);

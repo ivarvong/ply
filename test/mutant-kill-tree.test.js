@@ -535,15 +535,16 @@ test('editFile and pushTree: a non-Error from the first attempt is a rejection, 
   const tree = await settled(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'A\n' }, author: A, message: 'm', time: T0 }, e.opts)));
   assert.deepEqual(tree, { settled: 'rejected', reason: plain });
   assert.equal(calls, 1);
-  // a string thrown after the protocol (the caller's signer) is not wrapped, and is not the return value
+  // a string thrown after the protocol (the caller's signer) is not the return value: it is the caller's own code
+  // failing, the Err that names the signer and carries the string untouched (README "Your own code failing")
   const e2 = env(r);
   const before = r.pushes().length;
   const signer = { kind: 'ssh-ed25519', publicKeyLine: 'ssh-ed25519 AAAA', sign() { throw 'x'; } };
   const signed = await settled(unwrapAsync(pushTree('http://fake/r.git', { files: { ...FILES(), 'src/a.js': 'B\n' }, author: A, message: 'm', time: T0 }, { ...e2.opts, signer })));
-  assert.deepEqual(signed, { settled: 'rejected', reason: 'x' });
+  assert.deepEqual([signed.settled, signed.reason.code, signed.reason.what, signed.reason.cause], ['rejected', 'bad_request', 'signer', 'x']);
   assert.equal(r.pushes().length, before);
   const editSigned = await settled(unwrapAsync(editFile('http://fake/r.git', { path: 'README', find: 'hello', replace: 'HELLO', author: A, message: 'm', time: T0 }, { ...env(r).opts, signer: { ...signer, sign() { throw 'y'; } } })));
-  assert.deepEqual(editSigned, { settled: 'rejected', reason: 'y' });
+  assert.deepEqual([editSigned.settled, editSigned.reason.code, editSigned.reason.what, editSigned.reason.cause], ['rejected', 'bad_request', 'signer', 'y']);
 });
 
 test('pushTree: git.push_tree.diff belongs to the operation tracer, in the root span\'s trace', async () => {

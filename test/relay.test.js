@@ -6,7 +6,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { GitHttp, ZERO_OID } from '../src/client.js';
 import { unwrap, unwrapAsync } from './unwrap.js';
 import { resolvePack, makeDelta } from '../src/packresolve.js';
@@ -21,7 +21,7 @@ test('fetchPack({ resolve: true }) objects push as they are: ofs and ref deltas 
   const dst = makeBareRepo(root, 'relay-dst');
   const work = join(root, 'relay-w');
   mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   // many versions of one large-ish file: pack-objects deltas them (OFS_DELTA in a fresh pack)
   const line = i => `line ${i} ${'x'.repeat(40)}\n`;
   let body = Array.from({ length: 200 }, (_, i) => line(i)).join('');
