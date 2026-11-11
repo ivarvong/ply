@@ -7,8 +7,14 @@
 // distance recomputed for its new position, a REF_DELTA's base id unchanged (Cloudflare Artifacts packs are REF only, so
 // they pass through as they are). An OFS base must be written earlier in the new pack; one that is not (left out, or
 // later in the order) is refused by default, or written as a REF_DELTA to the base's id with `outsideBase: 'ref'` when
-// the index knows that id (a whole object, oids on). A REF base outside the selection stays a REF: such a pack is thin,
-// and the receiver supplies the base (receive-pack's index-pack --fix-thin) or refuses.
+// that id is known: the scan index knows a whole object's (oids on); `resolved` (resolvePackRange over the same pack)
+// knows every entry's, so with it a chain is cut anywhere, below a delta base too. A REF base outside the selection
+// stays a REF: such a pack is thin, and the receiver supplies the base (receive-pack's index-pack --fix-thin) or
+// refuses.
+//
+// One decision, shared: `entryWrite` and `baseId` say how an entry is written given where its base is, and the planner
+// (packplan.ts) plans with the same two functions, so a batch it plans is one this module builds from the same
+// `resolved`.
 //
 // `extras` are small objects ply encodes itself (a commit, a generated tree), deflated before anything is streamed and
 // written after the selected entries. Their base may be none or a REF; an OFS base inside extras is refused.
@@ -23,8 +29,10 @@ import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok } from './result.js';
 import { withDefaults } from './absent.js';
+import type { Input } from './absent.js';
 import type { RangeSource } from './rangesource.js';
 import type { ScannedPack } from './packscanindex.js';
+import type { ResolvedIndex } from './packrangeresolve.js';
 import type { PackInput } from './pack.js';
 import { encodeObjHeader, encodeOfsDistance, entryHead, inputBase, packHeader, zlibDeflate } from './pack.js';
 import { streamingSha1, fromHex } from './sha1.js';
@@ -35,22 +43,45 @@ import { OBJ_OFS_DELTA, OBJ_REF_DELTA, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } f
 /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above */
 
 export type OutsideBase = 'refuse' | 'ref';
-export type PackSubsetOpts = { readonly extras: readonly PackInput[]; readonly outsideBase: OutsideBase };
+export type PackSubsetOpts = {
+  readonly extras: readonly PackInput[];
+  readonly outsideBase: OutsideBase;
+  // every entry's id (resolvePackRange over this pack), or null: only a whole object's id is known (the scan index)
+  readonly resolved: ResolvedIndex | null;
+};
 export type PackSubset = { readonly stream: ReadableStream<Uint8Array>; readonly length: number; readonly count: number };
 // A fresh record per call: withDefaults fills it in place.
-const defaultOpts = (): PackSubsetOpts => ({ extras: [], outsideBase: 'refuse' });
+const defaultOpts = (): PackSubsetOpts => ({ extras: [], outsideBase: 'refuse', resolved: null });
 
 // A pack's object count is a 32-bit field.
 const MAX_COUNT = 0xff_ff_ff_ff;
-const KIND_WHOLE = 0;
-const KIND_OFS = 1;
-const KIND_REF = 2;
-const KIND_REF_FROM_OFS = 3;
+// How an entry is written: as stored (a whole object, or a REF_DELTA with its base id), as an OFS_DELTA to its base's
+// new position, as a REF_DELTA in place of the stored OFS_DELTA, or not at all.
+export const WRITE_WHOLE = 0;
+export const WRITE_OFS = 1;
+export const WRITE_REF = 2;
+export const WRITE_REF_FROM_OFS = 3;
+export const WRITE_REFUSED = 4;
+export type EntryWrite = typeof WRITE_WHOLE | typeof WRITE_OFS | typeof WRITE_REF | typeof WRITE_REF_FROM_OFS | typeof WRITE_REFUSED;
+const KIND_WHOLE = WRITE_WHOLE;
+const KIND_OFS = WRITE_OFS;
+const KIND_REF = WRITE_REF;
+const KIND_REF_FROM_OFS = WRITE_REF_FROM_OFS;
 const NOT_WRITTEN = -1;
+
+// The one rule for writing an entry whose stored type is `stored`: `baseWritten` says its OFS base is earlier in the
+// same new pack, `baseIdKnown` that `baseId` names that base. The planner and the builder both decide with this.
+export function entryWrite(stored: number, baseWritten: boolean, baseIdKnown: boolean, outsideBase: OutsideBase): EntryWrite {
+  if (stored === OBJ_REF_DELTA) return WRITE_REF;
+  if (stored !== OBJ_OFS_DELTA) return WRITE_WHOLE;
+  if (baseWritten) return WRITE_OFS;
+  return outsideBase === 'ref' && baseIdKnown ? WRITE_REF_FROM_OFS : WRITE_REFUSED;
+}
 
 type Plan = {
   readonly pack: ScannedPack;
   readonly selection: readonly number[];
+  readonly resolved: ResolvedIndex | null;
   readonly kind: Uint8Array;
   readonly basePos: Int32Array;
   readonly newOffset: Float64Array;
@@ -64,6 +95,13 @@ const refuse = (what: string, message: string): Result<never, PlyError> => fail(
 function wholeOid(pack: ScannedPack, i: number): string | null {
   const e = pack.entry(i);
   return e.tag === 'some' ? e.value.oid : null;
+}
+// The id of entry `b` as a REF_DELTA would name it: from `resolved` when given (any entry), else the scan index's (a
+// whole object, oids on); null when neither knows it.
+export function baseId(pack: ScannedPack, resolved: ResolvedIndex | null, b: number): string | null {
+  if (resolved === null) return wholeOid(pack, b);
+  const id = resolved.oid(b);
+  return id.tag === 'some' ? id.value : null;
 }
 // The REF base id entry `i` names.
 function refOid(pack: ScannedPack, i: number): string | null {
@@ -79,7 +117,7 @@ function headerOf(p: Plan, k: number): Uint8Array {
   switch (p.kind[k] as number) {
     case KIND_OFS: return concat([encodeObjHeader(OBJ_OFS_DELTA, size), encodeOfsDistance((p.newOffset[k] as number) - (p.newOffset[p.basePos[k] as number] as number))]);
     case KIND_REF: return concat([encodeObjHeader(OBJ_REF_DELTA, size), fromHex(refOid(p.pack, i) as string)]);
-    case KIND_REF_FROM_OFS: return concat([encodeObjHeader(OBJ_REF_DELTA, size), fromHex(wholeOid(p.pack, c.baseIndex[i] as number) as string)]);
+    case KIND_REF_FROM_OFS: return concat([encodeObjHeader(OBJ_REF_DELTA, size), fromHex(baseId(p.pack, p.resolved, c.baseIndex[i] as number) as string)]);
     default: return encodeObjHeader(c.storedType[i] as number, size);
   }
 }
@@ -97,7 +135,7 @@ async function plan(pack: ScannedPack, selection: readonly number[], opts: PackS
     if (selected[i] === 1) return refuse('pack subset selection', `entry ${i} is selected twice`);
     selected[i] = 1;
   }
-  const p: Plan = { pack, selection, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), extras: [], body: 0 };
+  const p: Plan = { pack, selection, resolved: opts.resolved, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), extras: [], body: 0 };
   let offset = PACK_HEADER_BYTES;
   for (let k = 0; k < n; k++) {
     const i = selection[k] as number;
@@ -105,14 +143,15 @@ async function plan(pack: ScannedPack, selection: readonly number[], opts: PackS
     if (stored === OBJ_OFS_DELTA) {
       const b = c.baseIndex[i] as number;
       const at = pos[b] as number;
-      if (at !== NOT_WRITTEN) {
+      const write = entryWrite(stored, at !== NOT_WRITTEN, baseId(pack, opts.resolved, b) !== null, opts.outsideBase);
+      if (write === WRITE_OFS) {
         p.kind[k] = KIND_OFS;
         p.basePos[k] = at;
-      } else if (opts.outsideBase === 'ref' && wholeOid(pack, b) !== null) {
+      } else if (write === WRITE_REF_FROM_OFS) {
         p.kind[k] = KIND_REF_FROM_OFS;
       } else {
         const where = selected[b] === 1 ? 'is written after it' : 'is not selected';
-        const hint = opts.outsideBase === 'ref' ? ' and its id is unknown (a delta, or oids off)' : '; outsideBase: \'ref\' writes it as a REF_DELTA when the base id is known';
+        const hint = opts.outsideBase === 'ref' ? ' and its id is unknown (a delta and no `resolved`, or oids off)' : '; outsideBase: \'ref\' writes it as a REF_DELTA when the base id is known';
         return refuse('pack subset base', `entry ${i} is an OFS_DELTA whose base, entry ${b}, ${where}${hint}`);
       }
     } else if (stored === OBJ_REF_DELTA) {
@@ -259,8 +298,9 @@ async function* pieces(source: RangeSource, p: Plan): AsyncGenerator<Uint8Array,
 // The selected entries of `pack`, read from `source`, as a new pack (see the top of this file). Refusals of the
 // selection, its bases or the extras are a Result before any byte is read; a range that fails or serves the wrong
 // length errors the stream before its trailer.
-export async function packSubset(source: RangeSource, pack: ScannedPack, selection: readonly number[], input: Partial<PackSubsetOpts> = {}): Promise<Result<PackSubset, PlyError>> {
+export async function packSubset(source: RangeSource, pack: ScannedPack, selection: readonly number[], input: Input<PackSubsetOpts> = {}): Promise<Result<PackSubset, PlyError>> {
   const opts = withDefaults(input, defaultOpts());
+  if (opts.resolved !== null && opts.resolved.count !== pack.count) return refuse('pack subset resolved', `the resolved index has ${opts.resolved.count} entries, the pack ${pack.count}`);
   if (pack.bytes > source.size) return refuse('pack subset source', `the source holds ${source.size} bytes; the indexed pack is ${pack.bytes}`);
   const planned = await plan(pack, selection, opts);
   if (!planned.ok) return planned;

@@ -128,7 +128,7 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
   if (!extras.ok) return extras;
   const { s, batch, objects } = extras.value;
   span.set({ 'git.transfer.step.kind': s.kind, 'git.transfer.step.prev': optionOid(s.prev), 'git.transfer.batch.entries': batch.entries.length, 'git.transfer.batch.planned_bytes': batch.packBytes, 'git.transfer.generated.objects': objects.length });
-  const subset = await packSubset(from.source, from.pack, batch.entries, { extras: objects.map(o => ({ type: o.type, data: o.data })), outsideBase: plan.pack.crossBatchRef ? 'ref' : 'refuse' });
+  const subset = await packSubset(from.source, from.pack, batch.entries, { extras: objects.map(o => ({ type: o.type, data: o.data })), outsideBase: plan.pack.crossBatchRef ? 'ref' : 'refuse', resolved: from.resolved });
   if (!subset.ok) return subset;
   span.set({ 'git.transfer.batch.bytes': subset.value.length, 'git.transfer.batch.objects': subset.value.count });
   const commands = commandsOf(plan, s);

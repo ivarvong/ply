@@ -11,8 +11,11 @@
 // Delta families stay together: a whole object and every delta resting on it, directly or through other deltas, go in
 // one batch, so every base a batch needs is in it. A family too big for one batch is refused unless `crossBatchRef`:
 // then it is split in chain order, and a delta whose base landed in an earlier batch is written as REF_DELTA to the
-// base's oid (an OFS_DELTA is rewritten; a REF_DELTA, which is all a Cloudflare Artifacts pack holds, already is). That
-// is a thin pack resting on objects the server already has; git's receive-pack runs index-pack --fix-thin and accepts
+// base's oid (an OFS_DELTA is rewritten; a REF_DELTA, which is all a Cloudflare Artifacts pack holds, already is). How
+// an entry is written given where its base is, is packSubset's own rule (`entryWrite`, `baseId`), called here: a batch
+// this plans is one packSubset builds when it is given the same `resolved` (a base that is itself a delta has an id
+// only there). An entry that rule cannot write fails the plan (bad_request), before anything is pushed. A cut is a
+// thin pack resting on objects the server already has; git's receive-pack runs index-pack --fix-thin and accepts
 // it, but whether a host does is the host's to say, so it is opt-in. A selected delta whose base is not selected, or a
 // thin pack's delta whose base is outside the pack, likewise needs `crossBatchRef` (the destination must hold the base).
 //
@@ -34,6 +37,7 @@ import type { ScannedPack } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import { NO_BASE, THIN_BASE } from './packrangeresolve.js';
 import { encodeOfsDistance } from './pack.js';
+import { entryWrite, baseId, WRITE_OFS, WRITE_REFUSED } from './packsubset.js';
 import { Sha1 } from './sha1.js';
 import { te } from './bytes.js';
 import { withDefaults, mapGet, at } from './absent.js';
@@ -131,6 +135,8 @@ type Ctx = {
   readonly batchOf: Int32Array;
   // bytes of an OFS distance counted for a delta written as OFS: the length the largest distance in a push needs
   readonly ofsMax: number;
+  // entries the builder's rule cannot write where the plan put them (none, unless `resolved` lacks a base's id)
+  readonly unbuildable: number[];
 };
 
 // The entry's base inside the selection, or -1 (a whole object, a thin base, or a base not selected).
@@ -139,21 +145,26 @@ function inBase(c: Ctx, i: number): number {
   return b >= 0 && c.chosen[b] === 1 ? b : -1;
 }
 // Bytes the entry takes in a batch whose number is `batch`: its header as it will be written, then its compressed bytes.
-function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; readonly rewrite: boolean } {
+function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; readonly rewrite: boolean; readonly refused: boolean } {
   const cols = c.pack.columns;
   const compressed = cols.compressed[i] as number;
   const header = cols.headerBytes[i] as number;
   const stored = cols.storedType[i] as number;
   const b = inBase(c, i);
   const isDelta = (c.resolved.columns.base[i] as number) !== NO_BASE;
-  if (!isDelta) return { bytes: header + compressed, rewrite: false };
+  if (!isDelta) return { bytes: header + compressed, rewrite: false, refused: false };
   const sameBatch = b >= 0 && (c.batchOf[b] as number) === batch;
   if (stored === OFS_DELTA) {
-    const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[cols.baseIndex[i] as number] as number));
-    return sameBatch ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false } : { bytes: typeSize + OID_BYTES + compressed, rewrite: true };
+    const storedBase = cols.baseIndex[i] as number;
+    const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[storedBase] as number));
+    // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know
+    const write = entryWrite(stored, sameBatch, baseId(c.pack, c.resolved, storedBase) !== null, c.cross ? 'ref' : 'refuse');
+    return write === WRITE_OFS
+      ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false, refused: false }
+      : { bytes: typeSize + OID_BYTES + compressed, rewrite: true, refused: write === WRITE_REFUSED };
   }
   // a REF_DELTA is written as it is stored, wherever its base is
-  return { bytes: header + compressed, rewrite: !sameBatch };
+  return { bytes: header + compressed, rewrite: !sameBatch, refused: false };
 }
 
 // Every planned entry checked against the per-object budget and the type it resolved to.
@@ -225,6 +236,7 @@ function place(c: Ctx, b: Open, batch: number, i: number): void {
   b.entries.push(i);
   b.bytes += w.bytes;
   if (w.rewrite) b.refRewrites += 1;
+  if (w.refused) c.unbuildable.push(i);
 }
 const done = (b: Open): PlannedBatch => ({ kind: b.kind, entries: b.entries, packBytes: b.bytes, objects: b.entries.length, refRewrites: b.refRewrites });
 
@@ -321,7 +333,7 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   if (!chosen.ok) return chosen;
   const c: Ctx = {
     pack, resolved, budget: opts.budget, cross: opts.crossBatchRef, chosen: chosen.value,
-    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes),
+    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes), unbuildable: [],
   };
   const bad = checkEntries(c);
   if (bad !== null) return err(bad);
@@ -335,6 +347,8 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   if (!blobs.ok) return blobs;
   const batches = planFinal(c, restFams, blobs.value);
   if (!batches.ok) return batches;
+  const stuck = at(c.unbuildable, 0);
+  if (stuck.tag === 'some') return fail('bad_request', `entry ${stuck.value} is an OFS_DELTA cut from its base, and the resolved index has no id for that base to write it as a REF_DELTA`);
   const entries = batches.value.reduce((s, b) => s + b.objects, 0);
   const body = { version: PLAN_VERSION, trailer: pack.trailer, budget: { ...opts.budget }, crossBatchRef: opts.crossBatchRef, select: opts.select === null ? null : [...opts.select], batches: batches.value, entries } as const;
   return ok({ ...body, hash: planHash(body) });
