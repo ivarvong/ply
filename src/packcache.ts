@@ -415,7 +415,8 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
       // delete makes sure nothing of a refused or given-up answer stays, and the reason is counted.
       if (fate.kind === 'refused') refused(stats, fate.error);
       else { stats.putFailed++; stats.putError = `the store fell ${fate.bytes} bytes behind the client (window ${CACHE_LAG_BYTES})`; }
-      await cache.delete(key).catch(() => null);
+      // a failed delete is ignored, whether it rejects or throws before it returns a promise
+      await Promise.resolve().then(() => cache.delete(key)).catch(() => null);
     };
     const put = store();
     if (waitUntil) waitUntil(put);

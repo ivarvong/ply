@@ -743,6 +743,32 @@ test('cachingFetch: a client that abandons the answer cancels the cache branch a
   assert.equal(deleted.length, 1, 'the key is deleted: a store that kept a partial entry does not keep it');
 });
 
+test('cachingFetch: a store whose delete fails after a refused answer, by throwing or by rejecting, never rejects the store promise', async () => {
+  const body = fetchBody({ wants: [headOf()], filter: 'tree:0', deepen: 1 });
+  const outcomes = {};
+  for (const kind of ['rejects', 'throws']) {
+    const meter = { produced: 0, cancelled: false };
+    // a wrong pack trailer: the answer is refused at its end, so the key is deleted
+    const origin = async () => new Response(syntheticAnswer(200_000, meter, { lie: true }), { status: 200, headers: RESULT });
+    let deletes = 0;
+    const store = {
+      match: async () => null,
+      put: async (k, res) => { for (const r = res.body.getReader(); ;) { const { done } = await r.read(); if (done) return; } },
+      delete: kind === 'throws' ? () => { deletes++; throw new Error('delete threw'); } : async () => { deletes++; throw new Error('delete rejected'); },
+    };
+    const pending = [];
+    const f = cachingFetch(origin, store, { waitUntil: p => { pending.push(p); } });
+    const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
+    await res.arrayBuffer();
+    outcomes[kind] = { settled: (await Promise.allSettled(pending)).map(x => x.status), deletes, verifyFailed: f.stats.verifyFailed, putOk: f.stats.putOk };
+  }
+  // From the contract, not from the code: the promise handed to waitUntil is fulfilled whichever way delete fails, the
+  // delete was attempted once, and the refusal is counted once.
+  const want = { settled: ['fulfilled'], deletes: 1, verifyFailed: 1, putOk: 0 };
+  assert.deepEqual(outcomes.rejects, want, 'a delete that rejects');
+  assert.deepEqual(outcomes.throws, want, 'a delete that throws synchronously ends the same way');
+});
+
 test('memoryCache: a fractional budget is floored, never replaced by the default; a value that is not a budget is the default', async () => {
   const fill = async c => {
     for (let i = 0; i < 12; i++) await c.put(`big${i}`, new Response(new Uint8Array(40_000)));
