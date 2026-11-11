@@ -12,6 +12,7 @@
   "test/deadline.test.js": 4,
   "test/delta-bound.test.js": 5,
   "test/describe-pack.test.js": 0,
+  "test/dist-types.test.js": 2,
   "test/dotnames.test.js": 46,
   "test/e2e-customer.test.js": 10,
   "test/edges.test.js": 14,
