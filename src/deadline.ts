@@ -181,12 +181,14 @@ const UPLOAD_PIECE = 65_536;
 // the last piece is handed over while a buffered tail is still going out. Measured with the real fetch on Node 24 over
 // loopback, 4 MiB to a server reading 64 KiB per 25 ms: 64 pulls in 8 bursts, the longest gap between pulls 473 ms
 // while the server never paused for more than 31 ms, and the last pull 1.7 s before the server's last read. So:
-//   - while pieces remain, a stall is idleTimeoutMs, and that limit must be longer than the link takes to drain one
-//     burst of the platform's buffers (not one 64 KiB piece);
+//   - while pieces remain, idleTimeoutMs fires when the platform takes no piece for that long, so that limit must be
+//     longer than the link takes to drain one burst of the platform's buffers (not one 64 KiB piece);
 //   - once the last piece is handed over the upload has ended for the clock, and firstByteTimeoutMs, which starts
 //     there, covers sending the buffered tail as well as the server's answer. A link too slow to drain the tail in
 //     that time fails as firstByteTimeoutMs: no response arrived in time, which is all ply can observe by then.
-// test/upload-progress-socket.test.js holds both on a real socket.
+// Neither measures upload progress below fetch. The bound on a stalled upload as a whole, whatever the platform has
+// buffered, is requestTimeoutMs (off by default) or the caller's signal.
+// test/upload-progress-socket.test.js holds all three on a real socket.
 export function watchedUpload(source: ReadableStream<Uint8Array>, clock: ExchangeClock): ReadableStream<Uint8Array> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let rest: Uint8Array | null = null;

@@ -637,8 +637,8 @@ function transportOf(settings: HttpSettings): HttpTransport {
     const target = `${base}/${service}`;
     const bytes = body instanceof Uint8Array ? body : null;
     const sig = clock.signal;
-    // A streamed body's pulls are the upload's progress (idle timer); its end starts the wait for the headers, unless
-    // they are already here.
+    // A streamed body's pulls by the platform are the clock's progress marks (what ply can see, not what reached the
+    // server); its end starts the wait for the headers, unless they are already here.
     if (bytes === null) clock.feed('upload_started');
     const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: watchedUpload(body.stream, clock), duplex: 'half' };
     const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig, bytes === null ? settings.streamRedirect : 'manual');

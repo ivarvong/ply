@@ -129,7 +129,7 @@ test('a long steady upload passes; the first-byte wait starts when the upload en
   assert.deepEqual([frames, seen.bytes], [2, 12 * 1024]);
 });
 
-test('a stalled upload is refused by the idle timeout', async () => {
+test('a request body whose source stops producing is refused as idleTimeoutMs: no more pieces reach the platform', async () => {
   const t = createTransport('https://h/r', { fetchImpl: reading(0), limits: withLimits(T) }).value;
   const t0 = Date.now();
   const e = await refusal(drain(t, { stream: uploading(12, 10, 2), length: 12 * 1024 }));
@@ -137,7 +137,7 @@ test('a stalled upload is refused by the idle timeout', async () => {
   assert.ok(Date.now() - t0 < 1500);
 });
 
-test('pushPack: a pack stream that stalls mid-upload ends at the idle timeout, as the ambiguous push it is', async () => {
+test('pushPack: a pack stream that stops producing partway ends as idleTimeoutMs, as the ambiguous push it is', async () => {
   const t = createTransport('https://h/r', { fetchImpl: reading(0), limits: withLimits({ ...T, maxPackBytes: 1 << 20 }) }).value;
   const t0 = Date.now();
   const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: 'a'.repeat(40), pack: uploading(64, 5, 4), length: 64 * 1024 });

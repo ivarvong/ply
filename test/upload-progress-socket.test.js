@@ -58,7 +58,7 @@ test('one 4 MiB chunk to a server that reads 64 KiB per 25 ms: the platform take
   } finally { srv.close(); }
 }, 60_000);
 
-test('a server that stops reading mid-upload is idleTimeoutMs: pieces remain and the platform takes no more', async () => {
+test('pieces remain and the platform takes no more (the server stopped reading): the limit that fires is idleTimeoutMs', async () => {
   // 64 MiB in 1 MiB chunks, more than undici's queue and the kernel's socket buffers hold, to a server that reads once
   // and never again. The platform stops pulling, so the source is never read to its end (pulls < 64) and the upload
   // has not ended: the limit is the idle one, whatever the first-byte limit is.
@@ -70,6 +70,24 @@ test('a server that stops reading mid-upload is idleTimeoutMs: pieces remain and
     const r = await push(t, source(64, MIB, pulls));
     assert.deepEqual(r, { frames: 0, code: 'timeout', what: 'idleTimeoutMs' });
     assert.ok(pulls.n < 64, `the source was read to its end (${pulls.n} chunks): the upload did not stall`);
+  } finally { srv.close(); }
+}, 60_000);
+
+test('with the idle and first-byte limits off, requestTimeoutMs ends an upload the server never reads, whatever the platform buffered', async () => {
+  // README Limits: requestTimeoutMs caps the whole exchange, body included. So it is the bound whether the platform
+  // still has pieces to take (64 MiB, more than its buffers hold: the source is not read to its end) or has taken
+  // them all (one 64 KiB piece, buffered whole and never read by the server).
+  const srv = await serve(req => { req.on('error', () => { /* cut */ }); });
+  const limits = withLimits({ firstByteTimeoutMs: 0, idleTimeoutMs: 0, requestTimeoutMs: 300 });
+  try {
+    const large = { pieces: [], pulls: { n: 0 } };
+    const r1 = await push(createTransport(srv.url, { fetchImpl: observed(large.pieces, () => 0), limits }).value, source(64, MIB, large.pulls));
+    assert.deepEqual(r1, { frames: 0, code: 'timeout', what: 'requestTimeoutMs' });
+    assert.ok(large.pulls.n < 64, `the source was read to its end (${large.pulls.n} chunks): the upload did not stall`);
+    const small = { pieces: [], pulls: { n: 0 } };
+    const r2 = await push(createTransport(srv.url, { fetchImpl: observed(small.pieces, () => 0), limits }).value, source(1, 65_536, small.pulls));
+    assert.deepEqual(r2, { frames: 0, code: 'timeout', what: 'requestTimeoutMs' });
+    assert.deepEqual(small.pieces.map(p => p.bytes), [65_536]);
   } finally { srv.close(); }
 }, 60_000);
 
