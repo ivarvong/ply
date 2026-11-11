@@ -97,6 +97,18 @@ test('the work ceiling follows the limits a caller gives: left out, it is 8 x th
   assert.equal(WORKER_LIMITS.maxResolveWork, 536_870_912);
 });
 
+test('maxResolveWork: null is the derived value, the same as leaving it out', async () => {
+  // by hand: 8 x 4 MiB = 33,554,432, whatever the record is spread from
+  const partial = { maxInflatedTotal: 4 * MIB, maxDeltaResult: MIB, maxObjectSize: MIB };
+  for (const record of [{ ...partial, maxResolveWork: null }, { ...WORKER_LIMITS, ...partial, maxResolveWork: null }, { ...DEFAULT_LIMITS, ...partial, maxResolveWork: null }]) {
+    const parsed = parseLimits(record);
+    assert.equal(parsed.ok, true, parsed.ok ? '' : parsed.error.message);
+    assert.equal(parsed.value.maxResolveWork, 33_554_432);
+  }
+  assert.equal(withLimits({ ...partial, maxResolveWork: null }).maxResolveWork, 33_554_432);
+  assertRefusedAt(await resolveBomb(bomb(40, 64 * 1024, MIB), { ...partial, maxResolveWork: null }), 33_554_432, MIB);
+});
+
 test('maxResolveWork is a limits key like any other: NaN, Infinity or negative is bad_request under either budget, and the refusal names limits.maxResolveWork', async () => {
   const pack = bomb(2, 1024, 1024);
   const idx = await scanPackIndex(streamOf(pack), {});

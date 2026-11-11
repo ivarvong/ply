@@ -247,9 +247,11 @@ export const WORKER_LIMITS: CheckedLimits = grant({
 // A caller's overrides on top of the defaults, as a plain record: it is checked where it enters (parseLimits).
 // maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits.
 const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS);
+// maxResolveWork: null is left out too (a spread of a preset, or a JSON record, has no other way to ask for the derived value)
+const derived = (maxResolveWork: unknown): boolean => maxResolveWork === null || isMissing(maxResolveWork);
 export const withLimits = (o: Partial<Limits> = {}): Limits => {
   const filled: Limits = { ...DEFAULT_LIMITS, ...o };
-  return Object.freeze(isMissing(o.maxResolveWork) ? { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) } : filled);
+  return Object.freeze(derived(o.maxResolveWork) ? { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) } : filled);
 };
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
@@ -269,7 +271,7 @@ export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, Er
   // A spread of DEFAULT_LIMITS: its keys (the brand is not enumerable), in order, each filled from the input where given.
   const given = withDefaults<Limits>(input, { ...DEFAULT_LIMITS });
   // the resolve work ceiling a caller leaves out follows the maxInflatedTotal of its own record, not the default's
-  const filled: Limits = isMissing(input.maxResolveWork) ? { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) } : given;
+  const filled: Limits = derived(input.maxResolveWork) ? { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) } : given;
   for (const [key, value] of Object.entries(filled)) {
     const checked = checkLimit(value, key);
     if (!checked.ok) return checked;
