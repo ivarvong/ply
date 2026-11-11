@@ -105,3 +105,28 @@ test('done is read once: what is not a boolean is refused before any request; fa
     assert.deepEqual([full.ok, full.ok && Boolean(full.value.parsed), fetches().at(-1).includes('0009done\n')], [true, true, true], 'done left out is sent, and answered with a pack');
   } finally { await p.close(); }
 });
+
+test('a fetch sent with done and answered with acknowledgments before its packfile is a protocol error, as it is for git', async () => {
+  // real git's answer (a real pack) with an acknowledgments section put in front of it
+  const DELIM = Buffer.from('0001');
+  const p = await lyingProxy(srv.url, () => null, (body, answer) => (body.includes('command=fetch') && body.includes('done\n') ? Buffer.concat([pkt('acknowledgments\n'), pkt('NAK\n'), DELIM, answer]) : answer));
+  try {
+    // the oracle: after a request with done, git reads the packfile section next and dies on any other
+    const g = await gitFetch(empty, `${p.url}/src.git`);
+    assert.equal(g.failed, true, 'git fails the fetch');
+    assert.match(g.stderr, /expected 'packfile', received 'acknowledgments'/);
+    const r = await client(`${p.url}/src.git`).fetchPack({ wants: [C] });
+    assert.deepEqual([r.ok, r.ok ? null : r.error.code], [false, 'protocol']);
+    assert.match(r.error.message, /expected packfile, received acknowledgments/);
+  } finally { await p.close(); }
+  // the same shape through the step machine: refused with done; without done it is git's `ready` then the pack
+  const te = new TextEncoder();
+  const data = l => ({ kind: 'data', payload: te.encode(l) });
+  const end = (frames, done) => { let st = v2Init(); for (const f of frames) { const s = v2Step(st, f); if (!s.ok) return s; st = s.value.state; } return v2End(st, done); };
+  const code = x => (x.ok ? 'ok' : x.error.code);
+  const acksThenPack = ready => [data('acknowledgments\n'), data(`ACK ${A}\n`), ...(ready ? [data('ready\n')] : []), { kind: 'delim' }, data('packfile\n'), { kind: 'flush' }];
+  assert.equal(code(end(acksThenPack(false), true)), 'protocol', 'done was sent: no acknowledgments section');
+  assert.equal(code(end(acksThenPack(true), true)), 'protocol', 'done was sent: not even with ready');
+  assert.equal(code(end(acksThenPack(true), false)), 'ok', 'no done: ready, then the pack');
+  assert.equal(code(end([data('shallow-info\n'), { kind: 'delim' }, data('packfile\n'), { kind: 'flush' }], true)), 'ok', 'done: shallow-info, then the pack');
+});

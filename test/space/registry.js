@@ -484,6 +484,8 @@ export const DECISIONS = [
   { match: "src/fetch.ts#v2End:protocol:v2: response ended without flush", space: 'fetch-protocol', axisTag: 'deepen' },
   { match: "src/fetch.ts#v2End:protocol:v2: no packfile section (sections: …)", space: 'hostile-server', axisTag: 'case' },
   { match: "src/fetch.ts#v2End:protocol:v2: the server said ready and sent no packfile section", space: 'lying-server', axisTag: 'case' },
+  { match: "src/fetch.ts#v2End:protocol:v2: expected packfile, received acknowledgments", space: 'lying-server', axisTag: 'case' },
+  { match: "src/fetch.ts#doneField:bad_request:invalid done: must be true, false or left out", space: 'lying-server', axisTag: 'case' },
   { match: "src/fetch.ts#v2Step:protocol:v2: unexpected acknowledgment line …", space: 'lying-server', axisTag: 'case' },
   { match: "src/fetch.ts#parseSideband:export", space: 'unit', axisTag: 'case' },
   { match: "src/push.ts#parseReceivePackTooLarge:export", space: 'unit', axisTag: 'case' },

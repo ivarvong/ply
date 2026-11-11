@@ -367,17 +367,19 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st.phase);
 }
-// The response is over: it ended with its flush, and it is the answer the request asked for. `done` is whether the
-// request carried `done`: then the only answer is a pack (git: "expected 'packfile', received 'acknowledgments'"), and
-// every caller says which request it sent, so an acknowledgments-only answer to a `done` fetch is never ok. Without
-// `done` a round may end on its acknowledgments, unless the server said `ready`: the packfile follows that in the same
-// response (git: "expected packfile to be sent after 'ready'").
+// The response is over: it ended with its flush, and it is the answer the request asked for. git is the judge of its
+// shape. `done` is whether the request carried `done` (the parsed request's, fetchRequest): after it git's fetch-pack
+// reads the packfile section next and dies on an acknowledgments section ("expected 'packfile', received
+// 'acknowledgments'"), so one is refused here whether or not a pack follows it, and an answer with no pack is never ok.
+// Without `done` a round may end on its acknowledgments, unless the server said `ready`: the packfile follows that in
+// the same response (git: "expected packfile to be sent after 'ready'").
 // A response with no section at all, not even its flush, carries reason 'empty_response': the answer git's upload-pack
 // gives when it dies on an argument (fetch.ts filterUnadvertised reads it).
 export function v2End(st: V2State, done: boolean): Result<V2State, ErrorOf<'protocol'>> {
   if (!st.done) return fail('protocol', 'v2: response ended without flush', st.sections.length === 0 ? { reason: 'empty_response' } : {});
-  if (st.phase === 'pack') return ok(st);
-  if (done || !st.sections.includes('acknowledgments')) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
+  const acks = st.sections.includes('acknowledgments');
+  if (st.phase === 'pack') return done && acks ? proto('v2: expected packfile, received acknowledgments') : ok(st);
+  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
   if (st.ready) return proto('v2: the server said ready and sent no packfile section');
   return ok(st);
 }
