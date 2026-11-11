@@ -35,7 +35,7 @@ export type ClockState = 'connecting' | 'uploading' | 'awaiting_first_byte' | 's
 // consumer_took: the chunk was handed to the consumer. consumer_asked: the consumer asked for the next. ended: over.
 export type ClockEvent = 'request_sent' | 'upload_started' | 'upload_bytes' | 'upload_ended' | 'headers' | 'body_chunk' | 'consumer_took' | 'consumer_asked' | 'ended';
 // The next state, and whether the event is network progress that restarts the wait (moves the mark).
-export type ClockStep = { readonly state: ClockState; readonly restart: boolean };
+type ClockStep = { readonly state: ClockState; readonly restart: boolean };
 export type ExchangeTimeouts = { readonly firstByteMs: number; readonly idleMs: number; readonly totalMs: number };
 export type ExchangeClock = {
   readonly signal: AbortSignal;
@@ -97,7 +97,7 @@ export function timeoutLimit(reason: unknown): TimeoutKey | null {
   return f.tag === 'some' && (f.value === 'firstByteTimeoutMs' || f.value === 'idleTimeoutMs' || f.value === 'requestTimeoutMs') ? f.value : null;
 }
 
-export type Due = { readonly at: number; readonly key: TimeoutKey; readonly ms: number };
+type Due = { readonly at: number; readonly key: TimeoutKey; readonly ms: number };
 const earlier = (a: Due | null, b: Due | null): Due | null => {
   if (a === null) return b;
   if (b === null) return a;
