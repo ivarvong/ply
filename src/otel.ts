@@ -372,6 +372,15 @@ export class Span {
   }
 }
 
+// fn(span) under a span that is ended for it, as a function of start() alone: how ply runs a body on a caller's
+// tracer. opts.tracer is duck-typed and operation()'s entry check guarantees start() and nothing else, so ply never
+// calls a caller's span(). The body's value passes through; what it throws is recorded, the span ended, and rethrown.
+export async function spanOn<T>(tracer: { readonly start: (name: string, options: StartOptions) => Span }, name: string, opts: StartOptions, fn: (s: Span) => T | PromiseLike<T>): Promise<T> {
+  const s = tracer.start(name, opts);
+  try { const r = await fn(s); s.end(); return r; }
+  catch (e) { s.error(e); s.end(); throw e; }
+}
+
 export class Tracer {
   public declare exporter: Exporter;
   public declare onEnd: SpanSink | null;
@@ -400,11 +409,8 @@ export class Tracer {
     return new Span(this, { name, ...withDefaults<StartConfig>(options, { parent: null, follows: null, kind: KIND.INTERNAL, attrs: {}, scrub: null }) });
   }
   // Run fn(span) with automatic end/status.
-  public async span<T>(name: string, opts: StartOptions, fn: (s: Span) => T | PromiseLike<T>): Promise<T> {
-    const s = this.start(name, opts);
-    try { const r = await fn(s); s.end(); return r; }
-    catch (e) { s.error(e); s.end(); throw e; }
-  }
+  // oxlint-disable-next-line typescript/promise-function-async -- spanOn's promise, returned as is
+  public span<T>(name: string, opts: StartOptions, fn: (s: Span) => T | PromiseLike<T>): Promise<T> { return spanOn(this, name, opts, fn); }
   public export(span: OtlpSpan): void {
     this.count++;
     const line: ExportLine = { resourceSpans: [{ resource: this.resource, scopeSpans: [{ scope: this.scope, spans: [span] }] }] };

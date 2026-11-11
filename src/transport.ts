@@ -29,7 +29,7 @@ import { err, ok } from './result.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
 import { parseLimits } from './limits.js';
 import type { Span, Tracer } from './otel.js';
-import { KIND } from './otel.js';
+import { KIND, spanOn } from './otel.js';
 import type { Input } from './absent.js';
 import { field, fillIn, fromNullable, mapGet, readKey } from './absent.js';
 import { timeoutLimit } from './deadline.js';
@@ -272,7 +272,7 @@ export async function coded<T>(code: Code, fn: () => Promise<Result<T, PlyError>
 // tracer records a raised error; a raised one still is, by the tracer, before coded() catches it.
 // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, passed through (an async wrapper adds bytes, not behaviour)
 export const spanned = <T>(t: Transport, name: string, opts: SpanOpts, fn: (span: Span) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> =>
-  t.tracer.span(name, opts, async (span: Span): Promise<Result<T, PlyError>> => {
+  spanOn(t.tracer, name, opts, async (span: Span): Promise<Result<T, PlyError>> => {
     const r = await fn(span);
     if (!r.ok) span.error(r.error);
     return r;

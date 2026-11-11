@@ -16,7 +16,7 @@ import { spliceDelta } from './pack.js';
 import { parseCommit, parseTree, objectHeader, TYPE } from './objects.js';
 import { streamingSha1 } from './sha1.js';
 import { te, bufferSource, concat, indexOfBytes, bytesOf } from './bytes.js';
-import { KIND, cpuNow, cpuSince } from './otel.js';
+import { KIND, cpuNow, cpuSince, spanOn } from './otel.js';
 import type { Attrs, Span, StartOptions, Tracer } from './otel.js';
 import { limitsOf, parseLimits } from './limits.js';
 import type { CheckedLimits, LimitsInput } from './limits.js';
@@ -332,7 +332,7 @@ const fetchCounters = (opts: EntryOptions): Attrs => {
 // the exception event), and returned. What the body throws (another module's refusal) still ends the span as an error.
 // oxlint-disable-next-line typescript/promise-function-async -- the span's promise, returned as is
 export function inSpan<T>(tracer: Tracer, name: string, opts: StartOptions, body: (span: Span) => Promise<Result<T, PlyError>>): Promise<Result<T, PlyError>> {
-  return tracer.span(name, opts, async span => {
+  return spanOn(tracer, name, opts, async span => {
     const r = await body(span);
     if (!r.ok) span.error(r.error);
     return r;

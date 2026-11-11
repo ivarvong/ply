@@ -6,7 +6,7 @@ import { test, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { commitChanges, editFile, pushTree, readFile, Tracer } from '../src/index.js';
+import { commitChanges, editFile, pushTree, readCommit, readFile, Tracer } from '../src/index.js';
 import { operation } from '../src/operation.js';
 import { tmpRoot, makeBareRepo, git, commitFiles, startGitServer } from './server.js';
 
@@ -100,6 +100,30 @@ for (const [label, make] of ducks) {
     }
   });
 }
+
+// The entry check and the wire layer agree (owner decision): the check guarantees start(), so start() is the only
+// method ply calls on opts.tracer. The tracer here has nothing else, and it is the tracer of the whole operation, wire
+// exchanges included (the test below runs its push under a different, full Tracer). Expected values are git's: the
+// commit readCommit reports is the ref's, and the edit landed with the bytes written here.
+test('readCommit and editFile work when opts.tracer has only start(): every span, wire spans included, goes through it', async () => {
+  const real = new Tracer();
+  const started = [];
+  const startOnly = () => ({ start: (name, o) => { started.push(name); return real.start(name, o); } });
+  let read;
+  try { read = await readCommit(url, { ref: 'main' }, { tracer: startOnly() }); } catch (e) { assert.fail(`readCommit rejected: ${String(e)}`); }
+  assert.equal(read.ok, true, read.ok ? '' : `readCommit: ${read.error.code}: ${read.error.message}`);
+  assert.equal(read.value.oid, head(), 'git: the commit read is the one the ref points at');
+  // the root (git.read_commit) and at least one wire exchange under it
+  assert.equal(started[0], 'git.read_commit');
+  assert.ok(started.length > 1, `the wire exchanges' spans start through the caller's start(): ${started.join(', ')}`);
+  const before = head();
+  let edited;
+  try { edited = await editFile(url, { ref: 'refs/heads/main', path: 'a.txt', find: 'hello', replace: 'start only', author, message: 'edit' }, { tracer: startOnly() }); } catch (e) { assert.fail(`editFile rejected: ${String(e)}`); }
+  assert.equal(edited.ok, true, edited.ok ? '' : `editFile: ${edited.error.code}: ${edited.error.message}`);
+  assert.notEqual(head(), before, 'git says the ref moved');
+  assert.equal(git(bare, ['rev-parse', 'refs/heads/main~1']).trim(), before);
+  assert.match(git(bare, ['show', 'refs/heads/main:a.txt']), /^start only/);
+});
 
 test('a throwing onFinish under a minimal duck-typed tracer: the landed push is ok, and the failure is reported as onFinish', async () => {
   const real = new Tracer();
