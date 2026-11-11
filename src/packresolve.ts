@@ -465,10 +465,11 @@ type DeltaEntry = Entry & { readonly tag: 'delta' };
 // lie between that base and it (the REF_DELTA is 1, an OFS_DELTA on it 2).
 type Wait = { readonly oid: Oid; readonly depth: number };
 const LANDED: Result<null, never> = ok(null);
+const NONE_FILED: readonly DeltaEntry[] = [];
 // The dependants filed under `key`, removed: each delta waits in one list and is taken from it once.
 function take<K>(waiting: Map<K, DeltaEntry[]>, key: K): readonly DeltaEntry[] {
   const list = mapGet(waiting, key);
-  if (list.tag === 'none') return [];
+  if (list.tag === 'none') return NONE_FILED;
   waiting.delete(key);
   return list.value;
 }
@@ -532,18 +533,28 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     settle(obj, r);
     return ok(r);
   }
+  // The deltas filed under `base` (one list of them), resolved on it and queued.
+  function wake(filed: readonly DeltaEntry[], base: ResolvedObject, landed: ResolvedObject[]): Result<null, PackError> {
+    for (const d of filed) {
+      // a second entry at an offset that has resolved (a hand-built input) is that object
+      if (memo.has(d.offset)) continue;
+      const r = patch(d, base);
+      if (!r.ok) return r;
+      landed.push(r.value);
+    }
+    return LANDED;
+  }
   // `first` resolved: the deltas filed under it resolve, then the ones filed under those, in the order they land.
   function land(first: ResolvedObject): Result<null, PackError> {
+    // nothing is filed in a pack whose bases all come first: no queue to run
+    if (onOffset.size === 0 && onOid.size === 0) return LANDED;
     const landed: ResolvedObject[] = [first];
     // the array grows as it is read: a queue
     for (const base of landed) {
-      for (const d of [...take(onOffset, base.offset), ...take(onOid, base.oid)]) {
-        // a second entry at an offset that has resolved (a hand-built input) is that object
-        if (memo.has(d.offset)) continue;
-        const r = patch(d, base);
-        if (!r.ok) return r;
-        landed.push(r.value);
-      }
+      const atOffset = wake(take(onOffset, base.offset), base, landed);
+      if (!atOffset.ok) return atOffset;
+      const atOid = wake(take(onOid, base.oid), base, landed);
+      if (!atOid.ok) return atOid;
     }
     return LANDED;
   }
@@ -588,8 +599,9 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     const l = land(r.value);
     if (!l.ok) return l;
   }
+  // every delta that has not resolved is filed: none filed, none left
+  if (onOffset.size === 0 && onOid.size === 0) return ok({ objects: resolved, stats, unresolved: [] });
   const left = deltas.filter(d => !memo.has(d.offset));
-  if (left.length === 0) return ok({ objects: resolved, stats, unresolved: [] });
   // What each remaining delta waits on, through its OFS bases, each walked once (the answer is kept per offset). A walk
   // that comes back to itself is a cycle of OFS bases (a hand-built input): a chain with no end is past any limit.
   const waits = new Map<number, Wait>();
