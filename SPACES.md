@@ -22,7 +22,7 @@ The procedure is enforced, not remembered:
 | linux | 0 | ENFORCE |
 | stale | 0 | ENFORCE |
 
-Decision points: **754** (666 fail sites, 20 produced codes, 3 untyped throws, 37 exported parse/decode/classify/decide functions). Covered by a merged space 654, by a pending PR 45, excluded 29, unregistered 26. Fail sites no cell reaches: 30 of 666. Of the registered points, 223 are claimed by an enumerated space, 9 only by a random one and 467 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
+Decision points: **758** (670 fail sites, 20 produced codes, 3 untyped throws, 37 exported parse/decode/classify/decide functions). Covered by a merged space 658, by a pending PR 45, excluded 29, unregistered 26. Fail sites no cell reaches: 30 of 670. Of the registered points, 223 are claimed by an enumerated space, 9 only by a random one and 471 only by a curated list: a curated or random claim says a case exists, not that the class is gone.
 
 git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, err-pkt 2, capability 46, request-arg 21, refname-rule 18, tree-mode 24). Covered by a merged space 233, by a pending PR 0, excluded 142, uncovered 2. Claimed by an enumerated space 221, random 2, curated 10.
 
@@ -59,6 +59,7 @@ git v2.50.0 checks: **377** (fsck-msg 71, error 38, die 111, reject 44, ng 2, er
 | `pkt-frame` | main | enumerated | length(64) × relation(7) × position(8) × writer(18) | 444 framing + 3,562 position + 18 writer | 444 / positions: from the reader model and the consumer rules of connect.c/sideband.c | git upload-pack --stateless-rpc with GIT_TRACE_PACKET (packet_read_with_status) on every framing cell, a port of it as the model for the rest; format_packet for the writer (#6, #14) | 21 | 15 | ci (`test/space/pkt-frame.test.js`) | — |
 | `fsck-oracle` | main | curated | case | cases | — | the fsck oracle itself must be able to fail: every git-as-oracle check audited | 0 | 0 | ci (`test/fsck-oracle.test.js`) | — |
 | `hostile-server` | main | curated | case | cases | — | safety invariants I1, I2, I4, I6 checked against git after every fault | 43 | 6 | ci (`test/adversarial.test.js`) | — |
+| `lying-server` | main | curated | case | cases | — | real git fetch against the same proxy that replaces one upload-pack answer (git must fail, so must ply), and fetch-pack.c process_ack / do_fetch_pack_v2 for the acknowledgment lines and sections git dies on | 4 | 0 | ci (`test/fetch-lying-server.test.js`) | — |
 | `commit-shapes` | main | curated | case | cases | — | git cat-file / log on every commit shape git writes; fsck --strict on header variants | 2 | 0 | ci (`test/compliance.test.js`, `test/git-differential.test.js`) | — |
 | `edges` | main | curated | case | cases | — | git state after each edit (ref, blob, fsck), concurrency convergence | 7 | 0 | ci (`test/edges.test.js`, `test/oracle.test.js`, `test/concurrency.test.js`) | — |
 | `host-reports` | main | curated | case | cases | — | receive-pack reports Cloudflare Artifacts writes (observed with cf-ray, #246, #266): each typed exactly, unpack refusals push_rejected, the 64 MiB body cap limit_exceeded with got/max in bytes, an empty 200 ambiguous and settled by read-back | 1 | 0 | ci (`test/push-unpack-host.test.js`) | — |

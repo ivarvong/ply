@@ -9,8 +9,8 @@ import type { CheckedLimits } from './limits.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
-import type { Attrs, Frame, Transport } from './transport.js';
-import { fail, scrubError } from './errors.js';
+import type { Attrs, Frame, Scrub, Transport } from './transport.js';
+import { fail, scrubError, remoteQuoted, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -55,6 +55,10 @@ const countField = (value: number, what: string): Result<number, BadRequest> => 
   if (!Number.isSafeInteger(value) || value < 0) return fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
   return ok(value);
 };
+// done is true, false or left out (the default, true). Anything else is refused: a null, 0 or '' from a JavaScript
+// caller used to leave `done` off the request while the answer was judged as the answer to a done request.
+const doneField = (value: unknown): Result<boolean, BadRequest> =>
+  typeof value === 'boolean' ? ok(value) : fail('bad_request', 'invalid done: must be true, false or left out', { what: 'done' });
 // deepen-since is a unix timestamp on the wire (a number from callers, or a digit string). Either way it is one token.
 const sinceField = (value: number | string, what: string): Result<number | WireField, BadRequest> =>
   typeof value === 'number' ? countField(value, what) : validateWire(value, what);
@@ -130,7 +134,9 @@ export type FetchRequest = {
   readonly done: boolean;
 };
 
-// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since.
+// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since,
+// done. The parsed `done` is the only one read afterwards: it decides the request's `done` line (fetchRequestBody) and
+// how the answer is judged (packStream, v2End).
 // An empty filter, a zero (or NaN) deepen and a falsy deepen-since are left out, as they always have been.
 // oxlint-disable-next-line complexity -- one check per fetch argument
 export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> {
@@ -150,7 +156,9 @@ export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> 
   let since: number | WireField = 0;
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- 0, '' and NaN mean no deepen-since, as they always have
   if (deepenSince) { const c = sinceField(deepenSince, 'deepen-since'); if (!c.ok) return c; since = c.value; }
-  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done });
+  const sentDone = doneField(done);
+  if (!sentDone.ok) return sentDone;
+  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done: sentDone.value });
 }
 
 // The command=fetch body of a parsed request.
@@ -249,8 +257,9 @@ export type Sidebanded<S> = { readonly state: S; readonly piece: SidebandPiece }
 export type SidebandError = ErrorOf<'protocol'> | ErrorOf<'limit_exceeded'> | ErrorOf<'remote_error'>;
 // One packfile-section frame, demultiplexed (git's demultiplex_sideband): band 1 is pack bytes and band 2 progress, each
 // held to maxPack before the frame is handed on; band 3 is the remote's error, its text the message. Peak is the frame.
+// scrub: the transport's credential scrubber (or null), applied to band 3's text before it is cut (errors.ts remoteText).
 // @decoder sidebandStep prefix=sideband
-export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number): Result<Sidebanded<S>, SidebandError> {
+export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number, scrub: Scrub | null = null): Result<Sidebanded<S>, SidebandError> {
   // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
   // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
   if (frame.kind !== 'data') return proto(`v2: ${frame.kind} inside the packfile section`);
@@ -271,7 +280,7 @@ export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, ma
   }
   if (band.band === SIDEBAND_ERROR) {
     const text = td.decode(band.body).trim();
-    return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+    return fail('remote_error', `remote: ${remoteText(text, REMOTE_TEXT_MAX, scrub)}`, notOurRefReason(text));
   }
   return proto(`v2: bad sideband ${band.band}`);
 }
@@ -293,6 +302,12 @@ function refuseNonCommit(expectType: number | null, type: number, oid: string): 
   return assertNever(found);
 }
 
+// characters of a refused acknowledgment line quoted in the error (remoteQuoted: cut first, then every control and format character escaped)
+const ACK_LINE_SHOWN = 60;
+// v2End's "no packfile section" names the answer's sections. A section header is a line the server wrote: each name
+// goes through remoteText cut to SECTION_SHOWN units, and at most SECTIONS_SHOWN of them are named.
+const SECTIONS_SHOWN = 8;
+const SECTION_SHOWN = 60;
 // limits: a checked record (parseLimits; DEFAULT_LIMITS when none is given): v2Step reads its caps on every frame.
 export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
@@ -300,9 +315,10 @@ export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Objec
   sectionLines: 0, otherLines: 0,
 });
 const stepped = (state: V2State, pack: Uint8Array | null = null): Result<V2Step, never> => ok({ state, pack });
+// scrub: the transport's credential scrubber (or null), applied to an ERR line's or band 3's text before it is cut.
 // @decoder v2Step prefix=v2
 // oxlint-disable-next-line complexity -- a step function is one transition table
-export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
+export function v2Step(st: V2State, frame: Frame, scrub: Scrub | null = null): Result<V2Step, PlyError> {
   // Every section line, including ones this client does not interpret, counts against the same cap. The state's limits
   // are checked (v2Init takes a CheckedLimits): a missing maxSectionLines used to make `n >= <missing>` false.
   const maxLines = st.limits.maxSectionLines;
@@ -315,7 +331,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   if (frame.kind === 'flush') return stepped({ ...st, done: true });
   switch (st.phase) {
     case 'pack': {
-      const sb = sidebandStep(st, frame, maxPack);
+      const sb = sidebandStep(st, frame, maxPack, scrub);
       if (!sb.ok) return sb;
       // Stryker disable next-line ConditionalExpression: a progress piece has no body field, and stepped's default parameter makes the missing value the same null
       return stepped(sb.value.state, sb.value.piece.kind === 'pack' ? sb.value.piece.body : null);
@@ -327,7 +343,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       const line = td.decode(frame.payload).replace(/\n$/, '');
       if (line.startsWith('ERR ')) {
         const text = line.slice('ERR '.length);
-        return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+        return fail('remote_error', `remote: ${remoteText(text, REMOTE_TEXT_MAX, scrub)}`, notOurRefReason(text));
       }
       if (st.section === null) {
         if (st.sections.length >= maxLines) return err(limitExceeded('section headers', st.sections.length + 1, maxLines));
@@ -346,6 +362,8 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       if (st.section === 'acknowledgments') {
         if (st.acks.length >= maxLines) return err(limitExceeded('acknowledgment lines', st.acks.length + 1, maxLines));
         if (line === 'ready') return stepped({ ...st, ready: true });
+        // git reads NAK, ACK <oid> and ready, and dies on anything else ("unexpected acknowledgment line")
+        if (line !== 'NAK' && !line.startsWith('ACK ')) return proto(`v2: unexpected acknowledgment line ${remoteQuoted(line, ACK_LINE_SHOWN)}`);
         return stepped({ ...st, acks: [...st.acks, line] });
       }
       if (st.otherLines >= maxLines) return err(limitExceeded('section lines', st.otherLines + 1, maxLines));
@@ -355,12 +373,20 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st.phase);
 }
-// The response is over: it ended with its flush, and it had a packfile section or (negotiation) acknowledgments.
+// The response is over: it ended with its flush, and it is the answer the request asked for. git is the judge of its
+// shape. `done` is whether the request carried `done` (the parsed request's, fetchRequest): after it git's fetch-pack
+// reads the packfile section next and dies on an acknowledgments section ("expected 'packfile', received
+// 'acknowledgments'"), so one is refused here whether or not a pack follows it, and an answer with no pack is never ok.
+// Without `done` a round may end on its acknowledgments, unless the server said `ready`: the packfile follows that in
+// the same response (git: "expected packfile to be sent after 'ready'").
 // A response with no section at all, not even its flush, carries reason 'empty_response': the answer git's upload-pack
 // gives when it dies on an argument (fetch.ts filterUnadvertised reads it).
-export function v2End(st: V2State): Result<V2State, ErrorOf<'protocol'>> {
+export function v2End(st: V2State, done: boolean): Result<V2State, ErrorOf<'protocol'>> {
   if (!st.done) return fail('protocol', 'v2: response ended without flush', st.sections.length === 0 ? { reason: 'empty_response' } : {});
-  if (st.phase !== 'pack' && !st.sections.includes('acknowledgments')) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
+  const acks = st.sections.includes('acknowledgments');
+  if (st.phase === 'pack') return done && acks ? proto('v2: expected packfile, received acknowledgments') : ok(st);
+  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.slice(0, SECTIONS_SHOWN).map(s => remoteText(s, SECTION_SHOWN)).join(',') || 'none'})`);
+  if (st.ready) return proto('v2: the server said ready and sent no packfile section');
   return ok(st);
 }
 export const v2Attrs = (st: V2State): Attrs => ({
@@ -382,26 +408,28 @@ export type PackFetch = AsyncGenerator<Uint8Array, V2State, unknown>;
 // The response read frame by frame: band-1 bytes yielded as they arrive, the v2 state or the first Err returned. A
 // caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too, and so is
 // whatever the transport's stream raised (it is re-raised, scrubbed).
+// The request is parsed once here: its `done` is the line that is sent and the one the answer is judged against (v2End).
 async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
-  const body = fetchBody(opts);
+  const req = fetchRequest(opts);
+  if (!req.ok) return req;
+  const body = fetchRequestBody(req.value);
   if (!body.ok) return body;
   // the exchange (no request yet: the frames are pulled below), then the limits it runs under
   const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) });
   let st = v2Init(t.limits);
   try { for await (const f of exchange) {
-    const r = v2Step(st, f);
+    const r = v2Step(st, f, t.scrub);
     if (!r.ok) { scrubError(r.error, t.scrub); return r; }
     st = r.value.state;
     if (r.value.pack) yield r.value.pack;
   } } catch (e) { throw scrubError(e, t.scrub); }
-  return ok(st);
+  return v2End(st, req.value.done);
 }
 // Stream band-1 pack bytes. Consumer drives it; the v2 state is the generator's return value. A stream: a failure is
 // raised through it (the iterator rejects with the PlyError).
 export async function* packStream(t: Transport, opts: FetchOpts, span: Span): PackFetch {
   span.set(fetchAttrs(opts));
-  const read = yield* v2Frames(t, opts, span);
-  const end = read.ok ? v2End(read.value) : read;
+  const end = yield* v2Frames(t, opts, span);
   if (!end.ok) throw end.error;
   span.set(v2Attrs(end.value));
   return end.value;
@@ -564,7 +592,7 @@ export async function filterUnadvertised(t: Transport, e: PlyError, refusal: (e:
     if (!framed.ok) return framed;
     const finished = pktFinish(framed.value.state);
     if (!finished.ok) return finished;
-    const lines = parseCapabilitiesV2(framed.value.frames);
+    const lines = parseCapabilitiesV2(framed.value.frames, t.scrub);
     if (!lines.ok) return lines;
     const features = capLookup(lines.value).features('fetch');
     const filter = features.includes('filter');

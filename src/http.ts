@@ -13,7 +13,7 @@ import type { CheckedLimits, LimitsInput } from './limits.js';
 import type { Span } from './otel.js';
 import { Tracer } from './otel.js';
 import type { Attrs, ExchangeClock, Frame, Hints, Quirks, RequestBody, Scrub, Transport } from './transport.js';
-import { fail, plyError } from './errors.js';
+import { fail, plyError, remoteQuoted, remoteText } from './errors.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import type { PktState } from './pktline.js';
 import { bufferSource, concat, td, te } from './bytes.js';
@@ -279,7 +279,7 @@ async function statusError(res: Response, service: string, scrub: Scrub | null, 
   const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal: clock.signal, progress: () => { clock.feed('body_chunk'); } });
   if (!read.ok) return read.error;
   const preview = td.decode(read.value);
-  const quoted = (scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE);
+  const quoted = remoteText(scrub ? scrub(preview) : preview, ERROR_QUOTE);
   const miss = res.status === 404 ? { miss: { kind: 'repository' as const } } : {};
   return plyError(httpCode(res.status), `HTTP ${res.status} ${service}: ${quoted}`, { status: res.status, ...miss } as Detail['http'] & Extra);
 }
@@ -626,7 +626,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     // Keep a prefix for the message (and for credential scrubbing). The rest of a huge error page is cancelled.
     if (!res.ok) return err(await statusError(res, service, scrub, clock));
     const ct = headerText(res, 'content-type');
-    if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${JSON.stringify(ct)} from ${service}`);
+    if (!ct.startsWith(`application/x-${service}-result`)) return fail('not_git', `unexpected content-type ${remoteQuoted(ct)} from ${service}`);
     const body = bodyOf(res);
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service}: HTTP ${res.status} response has no body`);

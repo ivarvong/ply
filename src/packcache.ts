@@ -114,7 +114,9 @@ export function verifyFetchAnswer(request: FetchRequest, answer: Uint8Array, giv
     st = r.value.state;
     if (r.value.pack) parts.push(r.value.pack);
   }
-  const end = v2End(st);
+  // judged by the request that produced it: after `done` an acknowledgments section is refused; without it git sends
+  // one (ACK, ready) before the pack, and a round that ends on its acknowledgments is no answer to store
+  const end = v2End(st, request.done);
   if (!end.ok) return end;
   if (st.phase !== 'pack') return fail('protocol', 'answer: no packfile section');
   const opts = packParseOpts(limits);
@@ -225,7 +227,9 @@ const PACK_TRAILER = 20;
 const isErrLine = (p: Uint8Array): boolean => p.length >= 4 && p[0] === 0x45 && p[1] === 0x52 && p[2] === 0x52 && p[3] === 0x20;
 // "PACK", then a big-endian version of 2 or 3
 const isPackHeader = (h: Uint8Array): boolean => h[0] === 0x50 && h[1] === 0x41 && h[2] === 0x43 && h[3] === 0x4b && h[4] === 0 && h[5] === 0 && h[6] === 0 && (h[7] === 2 || h[7] === 3);
-function answerGate(isFetch: boolean, limits: CheckedLimits): Gate {
+// `done` is the fetch request's own (false for a request that is no fetch): v2End judges an answer by the request that
+// produced it, as verifyFetchAnswer does.
+function answerGate(isFetch: boolean, done: boolean, limits: CheckedLimits): Gate {
   let ps = pktInit();
   let vs = v2Init(limits);
   let flushed = false;
@@ -275,7 +279,7 @@ function answerGate(isFetch: boolean, limits: CheckedLimits): Gate {
     const fin = pktFinish(ps);
     if (!fin.ok) return fin;
     if (!isFetch) return flushed ? ok(null) : fail('protocol', 'answer: ended without a flush');
-    const e = v2End(vs);
+    const e = v2End(vs, done);
     if (!e.ok) return e;
     if (vs.phase !== 'pack') return ok(null);
     if (headLen < PACK_HEADER || tailLen < PACK_TRAILER) return fail('pack_corrupt', 'answer: the pack ends before its trailer');
@@ -399,7 +403,7 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
     stored.set('content-type', ct);
     stored.set('cache-control', `public, max-age=${maxAge}, immutable`);
     const request = parseUploadPackRequest(body);
-    const split = splitVerified(res.body, answerGate(request.ok && request.value.command === 'fetch', checked.value), counters);
+    const split = splitVerified(res.body, answerGate(request.ok && request.value.command === 'fetch', request.ok && request.value.command === 'fetch' && request.value.done, checked.value), counters);
     // The put's fate is observable: a cache that silently refuses to store would otherwise look like a permanent miss rate.
     const store = async (): Promise<void> => {
       const failure = await cache.put(key, new Response(split.cache, { status: 200, headers: stored })).then((): Option<string> => none, (e: unknown): Option<string> => ({ tag: 'some', value: thrownText(e).slice(0, 200) }));

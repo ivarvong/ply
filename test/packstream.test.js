@@ -1019,10 +1019,14 @@ test('fetchWide and fetchPack: a scan refusal is held until the response is read
   const fp = await fetchPack(wire(pack, { chunk: 5 }).t, { wants: [hashObject('tree', tree)] });
   assert.equal(refusal(fp), 'ok');
   assert.deepEqual([fp.value.parsed.objects.length, fp.value.parsed.bytes, [...fp.value.objects.keys()]], [1, pack.length, [hashObject('tree', tree)]]);
-  // an acknowledgments-only answer has no pack to parse
+  // an acknowledgments-only answer to a negotiation round (no `done`) has no pack to parse. (This request used to be
+  // sent with the default `done` and expected ok: git dies on that answer, test/fetch-lying-server.test.js.)
   const acksOnly = cat([frame('acknowledgments\n'), frame('NAK\n'), FLUSH]);
-  const neg = await fetchPack(wire(pack, { response: acksOnly }).t, { wants: [hashObject('tree', tree)] });
+  const neg = await fetchPack(wire(pack, { response: acksOnly }).t, { wants: [hashObject('tree', tree)], done: false });
   assert.deepEqual([refusal(neg), neg.value.parsed, neg.value.nak], ['ok', null, true]);
+  const withDone = await fetchPack(wire(pack, { response: acksOnly }).t, { wants: [hashObject('tree', tree)] });
+  assert.equal(withDone.ok, false);
+  assert.equal(withDone.error.code, 'protocol');
 });
 
 test('a commit want read as it arrives: one object, a tag and its commit, a pack without the commit, a short answer', async () => {
