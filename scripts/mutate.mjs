@@ -29,21 +29,47 @@ const PARSER = /^(parse[A-Z]\w*|readObjHeader|readOfsDelta|readUint32BE|readVari
 // function, their step helpers included: the whole file is gated.
 // The large-repo stack reads stored and remote state (a spooled pack, a saved index, a plan read back, a host's report)
 // and bounds what it holds by configuration: the scan index, the range resolver, the subset cutter, the batch planner,
-// the pull codecs and the exchange deadline are gated whole, like the files above.
+// the pull codecs and the exchange deadline are gated whole, like the files above. So are the names a plan read back is
+// checked with (transfernames.ts), the resume loop that classifies each step's outcome (transfer.ts: landed, refused,
+// ambiguous, resend) and the loader that decides whether a saved index is used (transferload.ts).
 const BOUNDS_FILES = new Set([
   'src/bytes.js', 'src/format.js', 'src/bytes.ts', 'src/format.ts', 'src/inflatestream.ts', 'src/packstream.ts',
   'src/packscanindex.ts', 'src/packrangeresolve.ts', 'src/packsubset.ts', 'src/packplan.ts', 'src/pullstream.ts', 'src/deadline.ts',
+  'src/transfernames.ts', 'src/transfer.ts', 'src/transferload.ts',
 ]);
-// Files gated by owner rather than whole, where PARSER's names do not reach: the decode side of the saved index
-// (its encoder writes trusted state), the check of a transfer plan read back, and the classes of a host's push report
-// (unpack status, ng reasons, their tables: a wrong class turns a refusal into a retry, or a landed push into a failure).
-const STRICT_OWNERS = new Map([
-  ['src/packsaved.ts', /^(getF64s|getI32s|getBytes|readHeader|regionsOf|bad|checkEntry|checkIndex|checkResolved|statsOf|decodeSavedIndex)$/],
-  ['src/transferplan.ts', /^(edited|wellFormedStep|checkTransferPlan)$/],
-  ['src/push.ts', /^(GIT_UNPACK_ERROR_LIST|GIT_UNPACK_ERRORS|seenUnpack|isGitUnpackError|HOST_UNPACK_ALIASES|unpackReasonMatches|echoedFailure|TOO_LARGE|classifyReport|KNOWN_NG|knownNgClass|HOST_CAS|ngClass)$/],
+// Files gated by owner. The rule is fail-safe: every top-level owner of a file listed here is strict (the lines above
+// the first one too, as <module>) unless its name is exempt, so a new or renamed function is judged strictly until
+// someone writes down why it is not. Each entry says what is exempt and why a survivor there is left to the full run's
+// threshold. test/mutate-plan.test.js holds both lists by hand and fails when a file gains an owner that is in neither.
+const EXEMPT_OWNERS = new Map([
+  // The saved index. Exempt: its encoder (it writes this process's own, trusted state; decodeSavedIndex round-trips
+  // it in test/pack-saved.test.js) and the refusal's text for people (no decision reads it). Strict: everything the
+  // decoder is made of: the layout, the cursor, the type checks, the refusals, the constants it checks against, and
+  // the pack identity read from the source.
+  ['src/packsaved.ts', /^(putF64s|putI32s|putBytes|encodeSavedIndex|describeRefusal)$/],
+  // The transfer plan. Exempt: the planner, which builds a plan from the caller's own resolved index (its objects and
+  // steps are compared with real ones in test/transfer.test.js). Strict: the check of a plan read back and the
+  // canonical form and hash under it (TRANSFER_VERSION, optionJson, stepJson, canonical, transferPlanHash, edited,
+  // wellFormedStep, checkTransferPlan).
+  ['src/transferplan.ts', /^(OBJ_BLOB|OBJ_COMMIT|OBJ_TREE|MODE_BLOB|MODE_TREE|TRANSFER_REF_PREFIX|TRANSFER_IDENT|TRANSFER_GENERATED_OBJECTS|GEN_BYTES_PER_OBJECT|GEN_BYTES_FIXED|SIGNATURE_HEADERS|outOfRange|entryAt|batchTrees|commitObject|tempCommit|unsigned|rootCommit|reserved|treeEntries|tempFor|planSteps|planTransfer|transferKey)$/],
+  // push. Exempt: building the request from the caller's own options (commands, caps, bodies, the plan), the drivers
+  // that only move bytes between the transport and the decoders below, and span attributes. Strict: everything that
+  // reads the host's answer or turns it into an outcome: the sideband and report decoders and their caps, the unpack
+  // and ng classes and their tables, the too-large parse, the outcome decision and its Result, and the resolution of
+  // an ambiguous push (a wrong class turns a refusal into a retry, or a landed push into a failure).
+  ['src/push.ts', /^(SHORT_OID|isParsed|nonEmpty|pkts|pushBody|pushDefaults|requestCap|requestCaps|unchecked|checkBases|planPush|requestBody|readResponse|outcomeAttrs|objectTypeAttr|bodyOf|send|receivePack|push|isPackLength|planPackPush|sendSource|pushPackChecked)$/],
+  // The receive-pack advertisement and the capability check before a push (checkPushCaps, pushPack: a missing
+  // capability is `unsupported` before any byte is sent). Exempt: the problem's text for people and the length of the
+  // line preview inside it.
+  ['src/receivecaps.ts', /^(LINE_PREVIEW|problemText)$/],
 ]);
+// Left out, and why: src/packwrite.ts (streamPack and its helpers encode a pack from objects this process already
+// holds, the write side; test/packwrite.test.js compares its bytes with the buffered writer's) and src/rangesource.ts
+// (the storage interface and its in-memory adapter over the caller's own bytes; it decodes nothing). Neither decodes
+// or classifies stored or remote state; both stay under the full run's threshold.
+const MODULE = '<module>';
 // The one rule both the plan (gatedRanges) and the verdict (summarize) ask: is this owner of this file judged strictly?
-const isStrict = (file, fn) => BOUNDS_FILES.has(file) || PARSER.test(fn) || (STRICT_OWNERS.get(file)?.test(fn) ?? false);
+const isStrict = (file, fn) => BOUNDS_FILES.has(file) || PARSER.test(fn) || (EXEMPT_OWNERS.has(file) && !EXEMPT_OWNERS.get(file).test(fn));
 const SRC = /\.(?:js|ts)$/;
 // A test file that exits non-zero without reporting a failed test (a mutant that throws while its module loads, or one
 // that trips Stryker's hit limit, an infinite loop, there) is a RuntimeError to the tap runner. The test failed: the
@@ -63,7 +89,7 @@ function commentProblems() {
     });
   }
   const cfg = readFileSync('stryker.conf.json', 'utf8');
-  if (/!\s*src\/(objects|bytes|format|pack|packresolve|pktline|inflate|fetch|lsrefs|packsaved|packscanindex|packrangeresolve|packsubset|packplan|transferplan|pullstream|deadline|push)\.(?:js|ts)/.test(cfg)) {
+  if (/!\s*src\/(objects|bytes|format|pack|packresolve|pktline|inflate|fetch|lsrefs|packsaved|packscanindex|packrangeresolve|packsubset|packplan|transferplan|transfernames|transferload|transfer|receivecaps|pullstream|deadline|push)\.(?:js|ts)/.test(cfg)) {
     bad.push('stryker.conf.json excludes a parser or bounds file');
   }
   return bad;
@@ -83,7 +109,7 @@ function functions(file) {
 }
 
 function owner(fns, line) {
-  let name = '<module>';
+  let name = MODULE;
   for (const fn of fns) if (fn.line <= line) name = fn.name;
   return name;
 }
@@ -100,7 +126,9 @@ function gatedRanges(files) {
   for (const file of files) {
     const last = readFileSync(file, 'utf8').split('\n').length;
     if (BOUNDS_FILES.has(file)) { out.set(file, [[1, last]]); continue; }
-    const fns = functions(file);
+    // owner() gives the lines above the first declaration to <module>: a range of its own, strict in an owner-gated file.
+    const declared = functions(file);
+    const fns = declared[0]?.line === 1 ? declared : [{ name: MODULE, line: 1 }, ...declared];
     const rs = fns.flatMap((fn, k) => (isStrict(file, fn.name) ? [[fn.line, (fns[k + 1]?.line ?? last + 1) - 1]] : []));
     if (rs.length) out.set(file, rs);
   }
@@ -456,7 +484,7 @@ function summarize(report) {
       const fn = owner(fns, line);
       const strict = isStrict(file, fn);
       if (strict && (status === 'Survived' || status === 'NoCoverage')) {
-        violations.push(`${file}:${line} ${fn} ${m.mutatorName} ${status}${m.replacement ? ` → ${String(m.replacement).slice(0, 60)}` : ''}`);
+        violations.push({ file, line, column: m.location?.start?.column ?? 0, text: `${file}:${line} ${fn} ${m.mutatorName} ${status}${m.replacement ? ` → ${String(m.replacement).replace(/\s+/g, ' ').slice(0, 120)}` : ''}` });
       }
     }
     const det = (counts.Killed ?? 0) + (counts.Timeout ?? 0) + (counts.RuntimeError ?? 0);
@@ -466,9 +494,13 @@ function summarize(report) {
   }
   rows.sort((a, b) => a.file.localeCompare(b.file));
   const score = detected + survived === 0 ? 100 : (100 * detected) / (detected + survived);
-  return { rows, violations, score, detected, survived, ignored };
+  // One list in source order (file, line, column), whatever order the shard reports were merged in; one line each.
+  violations.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column);
+  return { rows, violations: violations.map(v => v.text), score, detected, survived, ignored };
 }
 
+// Every reason the run fails is printed before the one exit: a score below the break does not hide the list of fatal
+// survivors (it used to exit first), so one run names everything there is to kill.
 function verdict(report) {
   const { rows, violations, score, detected, survived, ignored } = summarize(report);
   const breakAt = JSON.parse(readFileSync('stryker.conf.json', 'utf8')).thresholds?.break;
@@ -477,15 +509,17 @@ function verdict(report) {
   const fullRun = process.env.GITHUB_EVENT_NAME !== 'pull_request' || process.env.MUTATE_FULL === '1';
   printRows(rows);
   console.log(`\nscore ${score.toFixed(2)}  (${detected} detected, ${survived} survived/uncovered, ${ignored} ignored)`);
+  let failed = false;
   if (fullRun && breakAt !== null && breakAt !== undefined && score + 1e-9 < breakAt) {
     console.error(`mutation score ${score.toFixed(2)} is below the break threshold ${breakAt}`);
-    process.exit(1);
+    failed = true;
   }
   if (violations.length) {
     console.error(`\n${violations.length} surviving mutant(s) in a parser or bounds check:`);
     console.error(violations.join('\n'));
-    process.exit(1);
+    failed = true;
   }
+  if (failed) process.exit(1);
 }
 
 function printRows(rows) {

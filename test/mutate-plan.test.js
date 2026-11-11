@@ -106,6 +106,21 @@ const STACK = [
   ['src/deadline.ts', 'exchangeClock', 'test/deadline.test.js'],
   ['src/push.ts', 'ngClass', 'test/push-unpack-host.test.js'],
   ['src/push.ts', 'unpackReasonMatches', 'test/push-unpack-host.test.js'],
+  // what those outer functions decide with (review of a8b920fc, required changes 2 and 4)
+  ['src/packsaved.ts', 'layoutOf', 'test/pack-saved.test.js'],
+  ['src/packsaved.ts', 'isWhole', 'test/pack-saved.test.js'],
+  ['src/packsaved.ts', 'malformed', 'test/pack-saved.test.js'],
+  ['src/transferplan.ts', 'transferPlanHash', 'test/transfer.test.js'],
+  ['src/transferplan.ts', 'canonical', 'test/transfer.test.js'],
+  ['src/transfernames.ts', 'isOid', 'test/transfer.test.js'],
+  ['src/transfernames.ts', 'targetRef', 'test/transfer.test.js'],
+  ['src/push.ts', 'rejectionCode', 'test/push-unpack-host.test.js'],
+  ['src/push.ts', 'decideOutcome', 'test/push-unpack-host.test.js'],
+  ['src/push.ts', 'reportStep', 'test/push-unpack-host.test.js'],
+  ['src/transfer.ts', 'refusedResend', 'test/transfer.test.js'],
+  ['src/transferload.ts', 'fromSaved', 'test/pack-saved.test.js'],
+  ['src/receivecaps.ts', 'checkPushCaps', 'test/push-commands.test.js'],
+  ['src/receivecaps.ts', 'pushPack', 'test/pack-plan.test.js'],
 ];
 const STACK_FILES = [...new Set(STACK.map(([file]) => file))];
 
@@ -182,3 +197,130 @@ test('a surviving or uncovered mutant in a large-repo stack decoder fails the ve
     rmSync(dir, { recursive: true, force: true });
   }
 }, 120_000);
+
+// The owner rule is fail-safe (review of a8b920fc, required change 3): in an owner-gated file every top-level owner is
+// strict unless scripts/mutate.mjs names it exempt. These are the two lists written out by hand, from reading each
+// file: `exempt` is what a survivor may live in (encoders of trusted state, request building from the caller's own
+// options, drivers, text and span attributes); `strict` is everything that decodes or classifies stored or remote
+// state. A new or renamed top-level declaration is in neither list and fails the test below until someone decides.
+const words = s => s.split(/\s+/).filter(Boolean);
+const OWNERS = {
+  'src/packsaved.ts': {
+    strict: words(`SAVED_INDEX_VERSION MAGIC HEADER CHECK FLAG_OIDS FLAG_REFS FLAG_RESOLVED FLAGS_KNOWN PACK_HEADER_BYTES
+      RESOLVED_BYTES STATS STATS_BYTES SAVED_INDEX_ENTRY_BYTES SAVED_INDEX_FIXED_BYTES refused malformed isWhole isStored
+      readAll packIdentity layoutOf cursorOf getF64s getI32s getBytes readHeader regionsOf bad checkEntry checkIndex
+      checkResolved statsOf decodeSavedIndex`),
+    exempt: words('putF64s putI32s putBytes encodeSavedIndex describeRefusal'),
+  },
+  'src/transferplan.ts': {
+    strict: words('TRANSFER_VERSION optionJson stepJson canonical transferPlanHash edited wellFormedStep checkTransferPlan'),
+    exempt: words(`OBJ_BLOB OBJ_COMMIT OBJ_TREE MODE_BLOB MODE_TREE TRANSFER_REF_PREFIX TRANSFER_IDENT
+      TRANSFER_GENERATED_OBJECTS GEN_BYTES_PER_OBJECT GEN_BYTES_FIXED SIGNATURE_HEADERS outOfRange entryAt batchTrees
+      commitObject tempCommit unsigned rootCommit reserved treeEntries tempFor planSteps planTransfer transferKey`),
+  },
+  'src/push.ts': {
+    strict: words(`BAND_TAIL BAND_ATTR REPORT_KEEP UNPACK OK_REF NG_REF parseCommand parseEach parseCommands parseSideband
+      broken streamInit streamStep streamFinish GIT_UNPACK_ERROR_LIST GIT_UNPACK_ERRORS seenUnpack isGitUnpackError
+      UNPACKER_ERROR PRINTABLE HOST_UNPACK_ALIASES unpackReasonMatches echoedFailure TOO_LARGE KIB MIB
+      parseReceivePackTooLarge malformed splitOnce reportInit reportStep reportFinish classifyReport KNOWN_NG knownNgClass
+      HOST_CAS ngClass refused rejectionCode decideOutcome outcomeResult bandLines REPORT_V2_OPTION_LINES reportLineCap
+      NOT_RUN codeOf refusedBeforeReceivePack serviceRefused unpackOf resolveAmbiguousByTip isEmptyBand3Ambiguous
+      finishPush decide`),
+    exempt: words(`SHORT_OID isParsed nonEmpty pkts pushBody pushDefaults requestCap requestCaps unchecked checkBases
+      planPush requestBody readResponse outcomeAttrs objectTypeAttr bodyOf send receivePack push isPackLength
+      planPackPush sendSource pushPackChecked`),
+  },
+  'src/receivecaps.ts': {
+    strict: words(`frameAt dataAt serviceHeaderEnd SHA1_HEX OID_HEX refLine shallowLine FORMAT objectFormat
+      parseReceiveAdvert receiveCaps noWants capsProblem checkPushCaps pushWithOptions pushPack`),
+    exempt: words('LINE_PREVIEW problemText'),
+  },
+};
+// Gated whole: every top-level owner is strict, whatever it is called.
+const WHOLE = ['src/transfernames.ts', 'src/transfer.ts', 'src/transferload.ts'];
+
+// Every top-level declaration of a file with its 1-based line, read from the file's own text with a wider pattern
+// than scripts/mutate.mjs's owner rule (generators, let, var, class, export default): one the script cannot see is
+// reported as `unseen`, since its mutants would be judged as the owner above it.
+function census(file) {
+  const seen = [], unseen = [];
+  readFileSync(join(ROOT, file), 'utf8').split('\n').forEach((l, i) => {
+    const m = /^(?:export )?(?:default )?(?:async )?(function\*?|const|let|var|class)\s+(\w+)/.exec(l);
+    if (m) (m[1] === 'function' || m[1] === 'const' ? seen : unseen).push({ name: m[2], line: i + 1 });
+    else if (/^export default\b/.test(l)) unseen.push({ name: 'default', line: i + 1 });
+  });
+  return { seen, unseen };
+}
+
+test('every top-level owner of an owner-gated file is listed strict or exempt, and the verdict agrees', () => {
+  const problems = [];
+  const want = [];
+  const mutants = {};
+  for (const file of [...Object.keys(OWNERS), ...WHOLE]) {
+    const { seen, unseen } = census(file);
+    for (const u of unseen) problems.push(`${file}:${u.line} ${u.name}: a top-level declaration the owner rule does not see`);
+    const lists = OWNERS[file] ?? { strict: seen.map(o => o.name), exempt: [] };
+    const listed = new Set([...lists.strict, ...lists.exempt]);
+    const names = new Set(seen.map(o => o.name));
+    for (const o of seen) if (!listed.has(o.name)) problems.push(`${file}:${o.line} ${o.name}: neither strict nor exempt (decide, and list it here)`);
+    for (const n of listed) if (!names.has(n)) problems.push(`${file} ${n}: listed, but no such top-level owner (renamed or removed)`);
+    for (const n of lists.strict) if (lists.exempt.includes(n)) problems.push(`${file} ${n}: listed both strict and exempt`);
+    if (lists.strict.length === 0) problems.push(`${file}: no strict owner`);
+    const strict = new Set(lists.strict);
+    mutants[file] = seen.map((o, k) => ({ id: String(k), mutatorName: 'ConditionalExpression', replacement: 'false', status: 'Survived', location: { start: { line: o.line, column: 1 }, end: { line: o.line, column: 2 } } }));
+    for (const o of seen) if (strict.has(o.name)) want.push(`${file}:${o.line} ${o.name}`);
+  }
+  assert.deepEqual(problems, []);
+
+  // one Survived mutant on every owner's declaration line, judged once as a pull request would be
+  const dir = mkdtempSync(join(tmpdir(), 'ply-mutate-owners-'));
+  try {
+    mkdirSync(join(dir, 'src'));
+    mkdirSync(join(dir, 'reports/mutation'), { recursive: true });
+    copyFileSync(join(ROOT, 'stryker.conf.json'), join(dir, 'stryker.conf.json'));
+    for (const file of Object.keys(mutants)) copyFileSync(join(ROOT, file), join(dir, file));
+    writeFileSync(join(dir, 'reports/mutation/mutation.json'), JSON.stringify({ files: Object.fromEntries(Object.entries(mutants).map(([f, ms]) => [f, { mutants: ms }])) }));
+    const env = { ...process.env, GITHUB_EVENT_NAME: 'pull_request' };
+    delete env.MUTATE_FULL;
+    const r = spawnSync(process.execPath, [SCRIPT, '--check'], { cwd: dir, env, encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    const fatal = r.stderr.split('\n').map(l => /^(src\/\S+:\d+ \S+) ConditionalExpression Survived/.exec(l)?.[1]).filter(Boolean);
+    assert.deepEqual(fatal.sort(), want.sort());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);
+
+// One run names everything there is to kill: a full run whose score is below the break still prints every fatal
+// survivor (file:line, owner, mutator, status, replacement) in one list in source order, and exits non-zero once.
+// Before, verdict() exited at the break message and the list was never printed. The report is written by hand: two
+// survivors in two gated files, given out of order, and nothing killed, so the score (0) is below any break.
+test('a full run below the break still lists every fatal survivor, in source order, and exits once', () => {
+  const dir = stackCheckout();
+  try {
+    mkdirSync(join(dir, 'reports/mutation'), { recursive: true });
+    const env = { ...process.env };
+    delete env.GITHUB_EVENT_NAME;
+    delete env.MUTATE_FULL;
+    const mutant = (line, mutatorName, replacement) => ({ id: `${line}`, mutatorName, replacement, status: 'Survived', location: { start: { line, column: 1 }, end: { line, column: 2 } } });
+    const entry = declaredAt('src/packsaved.ts', 'checkEntry'), layout = declaredAt('src/packsaved.ts', 'layoutOf');
+    const check = declaredAt('src/transferplan.ts', 'checkTransferPlan');
+    assert.ok(layout < entry);
+    writeFileSync(join(dir, 'reports/mutation/mutation.json'), JSON.stringify({ files: {
+      'src/transferplan.ts': { mutants: [mutant(check, 'EqualityOperator', 'a !== b')] },
+      'src/packsaved.ts': { mutants: [mutant(entry, 'ConditionalExpression', 'false'), mutant(layout, 'ArithmeticOperator', 'n - 1')] },
+    } }));
+    const r = spawnSync(process.execPath, [SCRIPT, '--check'], { cwd: dir, env, encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /mutation score 0\.00 is below the break threshold/);
+    const listed = r.stderr.split('\n').filter(l => l.startsWith('src/'));
+    assert.deepEqual(listed, [
+      `src/packsaved.ts:${layout} layoutOf ArithmeticOperator Survived → n - 1`,
+      `src/packsaved.ts:${entry} checkEntry ConditionalExpression Survived → false`,
+      `src/transferplan.ts:${check} checkTransferPlan EqualityOperator Survived → a !== b`,
+    ]);
+    assert.match(r.stderr, /\n3 surviving mutant\(s\) in a parser or bounds check:/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 60_000);

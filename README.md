@@ -658,7 +658,7 @@ npm run fuzz:protocol -- --n 500   # random wants/haves/deepen/filter/thin/negot
 npm run trace -- fuzz-out/trace.jsonl git.receive-pack "git.push.ok==false"
 ```
 
-An equivalent mutant stays only as `// Stryker disable next-line <Mutator>: <reason>` on that line. A blanket `Stryker disable all`, or dropping a parser file from the Stryker config, fails `npm run test:mutate`. See SAFETY.md.
+An equivalent mutant stays only as `// Stryker disable next-line <Mutator>: <reason>` on that line. A blanket `Stryker disable all`, or dropping a parser file from the Stryker config, fails `npm run test:mutate`. In an owner-gated file (`EXEMPT_OWNERS` in `scripts/mutate.mjs`: `packsaved.ts`, `transferplan.ts`, `push.ts`, `receivecaps.ts`) a new top-level function is judged strictly by default, and `test/mutate-plan.test.js` fails until it is listed there as strict or exempt. See SAFETY.md.
 
 ### The fuzzer
 
