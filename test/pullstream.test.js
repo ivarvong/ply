@@ -359,3 +359,68 @@ test('the adapters are exported from the package root', () => {
   assert.equal(index.pktFrames, pktFrames);
   assert.equal(index.inflateChunks, inflateChunks);
 });
+
+// ---- a source that refills one buffer for every chunk (README: "a source may refill one buffer for every chunk") ----
+// `bytes` in chunks of `size`, every chunk a view of the same buffer, overwritten with 0xa5 before each refill and after
+// the last: as an AsyncIterable and as a ReadableStream with highWaterMark 0 (nothing queued ahead of the reader).
+function reusedSources(bytes, size) {
+  const refill = state => {
+    state.buf.fill(0xa5);
+    if (state.at >= bytes.length) return null;
+    const n = Math.min(size, bytes.length - state.at);
+    state.buf.set(bytes.subarray(state.at, state.at + n));
+    state.at += n;
+    return state.buf.subarray(0, n);
+  };
+  const a = { buf: new Uint8Array(size), at: 0 };
+  const b = { buf: new Uint8Array(size), at: 0 };
+  return [
+    ['iterable', {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() { const c = refill(a); return c === null ? { done: true, value: undefined } : { done: false, value: c }; },
+          async return() { return { done: true, value: undefined }; },
+        };
+      },
+    }],
+    ['stream', new ReadableStream({ pull(c) { const chunk = refill(b); if (chunk === null) c.close(); else c.enqueue(chunk); } }, { highWaterMark: 0 })],
+  ];
+}
+
+test('pktFrames over a source that reuses one buffer: the frames laid down by hand, held until the end, at 1 byte and up', async () => {
+  // the wire by hand, not by pkt(): four hex digits of (payload + 4), then the payload; 0000 flush, 0001 delim
+  const hex4 = n => te.encode(n.toString(16).padStart(4, '0'));
+  const payloads = [
+    te.encode('version 2\n'), new Uint8Array(0), Uint8Array.of(0), null, blob(3000), 'delim', te.encode('0000'),
+    blob(65_516), null, te.encode('a'), blob(509), 'delim', te.encode('done\n'), null,
+  ];
+  const wire = concat(payloads.map(x => (x === null ? te.encode('0000') : x === 'delim' ? te.encode('0001') : concat([hex4(x.length + 4), x]))));
+  const want = payloads.map(x => (x === null ? { kind: 'flush' } : x === 'delim' ? { kind: 'delim' } : { kind: 'data', bytes: Buffer.from(x).toString('hex') }));
+  for (const size of [1, 2, 3, 4, 5, 13, 509, 4096, 65_536, 70_000]) {
+    for (const [name, source] of reusedSources(wire, size)) {
+      const frames = await collect(pktFrames(source));
+      // compared after the source is drained and its buffer overwritten: a frame that viewed a chunk would be 0xa5 now
+      assert.deepEqual(frames.map(f => (f.kind === 'data' ? { kind: 'data', bytes: Buffer.from(f.payload).toString('hex') } : { kind: f.kind })), want, `${size}-byte chunks, ${name}`);
+    }
+  }
+});
+
+test('inflateChunks over a source that reuses one buffer: the bytes node:zlib deflated, stored, fixed and dynamic blocks, at 1 byte and up', async () => {
+  let x = 99;
+  const noise = Uint8Array.from({ length: 9000 }, () => { x = (x * 1103515245 + 12345) >>> 0; return x >>> 24; });
+  const data = concat([blob(20_000), te.encode('tail '.repeat(2000)), noise]);
+  const variants = [
+    ['stored', zlib.deflateSync(data, { level: 0 }), {}],
+    ['dynamic', zlib.deflateSync(data, { level: 9 }), { bound: declaredBound(data.length) }],
+    ['fixed', zlib.deflateSync(data, { strategy: zlib.constants.Z_FIXED }), {}],
+    ['raw', zlib.deflateRawSync(data, { level: 1 }), { wrap: rawWrap(), bound: cappedBound() }],
+  ];
+  for (const [variant, member, opts] of variants) {
+    for (const size of [1, 2, 3, 5, 257, 4096, 65_536]) {
+      for (const [name, source] of reusedSources(new Uint8Array(member), size)) {
+        const out = await collect(inflateChunks(source, opts));
+        assert.equal(Buffer.from(concat(out)).equals(Buffer.from(data)), true, `${variant}, ${size}-byte chunks, ${name}: not the bytes that were deflated`);
+      }
+    }
+  }
+});
