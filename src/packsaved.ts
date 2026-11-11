@@ -17,7 +17,8 @@
 // Decoding refuses, as a SavedIndexRefusal: bytes that are not a saved index, another version, a length the header does
 // not give (truncated), a check that does not match (corrupt), an index of another pack (the caller's expected
 // trailer and length: a stale index is never used), and columns no scan plus resolve could produce (malformed: entries
-// not contiguous from the pack header to the trailer, a type or base out of range, resolved columns the index
+// not contiguous from the pack header to the trailer, a type or base out of range, a REF delta's base that is not the
+// whole object its REF id names (where the index carries ids), resolved columns the index
 // contradicts or whose bases do not form chains ending at a whole object or a thin base: see checkResolved).
 // loadTransferPack (transferload.ts) turns any refusal into a fresh scan and says why on its span.
 import type { PlyError } from './errors.js';
@@ -196,6 +197,19 @@ function regionsOf(n: number, flags: number): Regions {
 // Entry i's columns read from the buffer: where it ends, or the field no scan gives.
 type EntryCheck = { readonly tag: 'end'; readonly end: number; readonly ref: boolean } | { readonly tag: 'bad'; readonly field: string };
 const bad = (field: string): EntryCheck => ({ tag: 'bad', field });
+function sameId(v: DataView, a: number, b: number): boolean {
+  for (let k = 0; k < OID_BYTES; k++) if (v.getUint8(a + k) !== v.getUint8(b + k)) return false;
+  return true;
+}
+// A REF delta's scan base: none (-1: the scan found no whole object with the delta's REF id), or a whole object in the
+// pack, and where the index carries both ids the one whose id the delta names: the scan finds a REF base by id and no
+// other way. With the ids flag and no REF ids the columns are not compared here; checkIndex refuses those flags.
+const IDS_AND_REFS = FLAG_OIDS | FLAG_REFS;
+function refBaseOk(v: DataView, h: Header, at: Regions, i: number, base: number): boolean {
+  if (base === -1) return true;
+  if (base < -1 || base >= h.n || !isWhole(v.getUint8(at.storedType + base))) return false;
+  return (h.flags & IDS_AND_REFS) !== IDS_AND_REFS || sameId(v, at.oids + base * OID_BYTES, at.refs + i * OID_BYTES);
+}
 function checkEntry(v: DataView, h: Header, at: Regions, i: number, start: number): EntryCheck {
   const storedOf = (k: number): number => v.getUint8(at.storedType + k);
   const typeOf = (k: number): number => v.getUint8(at.type + k);
@@ -210,7 +224,7 @@ function checkEntry(v: DataView, h: Header, at: Regions, i: number, start: numbe
   if (!isStored(stored)) return bad('storedType');
   const end: EntryCheck = { tag: 'end', end: start + headerBytes + comp, ref: stored === OBJ_REF_DELTA };
   if (isWhole(stored)) return type === stored && base === -1 ? end : bad('type');
-  const baseOk = stored === OBJ_OFS_DELTA ? base >= 0 && base < i : base >= -1 && base < h.n && (base < 0 || isWhole(storedOf(base)));
+  const baseOk = stored === OBJ_OFS_DELTA ? base >= 0 && base < i : refBaseOk(v, h, at, i, base);
   if (!baseOk) return bad('baseIndex');
   return type === (base < 0 ? 0 : typeOf(base)) ? end : bad('type');
 }
@@ -242,10 +256,6 @@ function checkIndex(v: DataView, h: Header, at: Regions): Result<true, SavedInde
 // reaches but the pack lacks, or a tree pushed before its blobs, and the transfer fails definitely.
 type ResolvedAt = { readonly size: number; readonly base: number; readonly depth: number; readonly oid: number; readonly type: number; readonly stats: number };
 type ResolvedRow = { readonly i: number; readonly base: number; readonly depth: number; readonly size: number; readonly type: number; readonly stored: number };
-function sameId(v: DataView, a: number, b: number): boolean {
-  for (let k = 0; k < OID_BYTES; k++) if (v.getUint8(a + k) !== v.getUint8(b + k)) return false;
-  return true;
-}
 // A whole object's row: the field that is not the scan's, or null.
 function wholeBad(v: DataView, h: Header, at: Regions, r: ResolvedAt, e: ResolvedRow): string | null {
   if (e.base !== NO_BASE) return 'resolved.base';

@@ -187,7 +187,9 @@ test('malformed with a valid check: each field a scan could not produce is refus
     ['type of a whole object', b => { b[refAt.type + firstWhole] = b[refAt.type + firstWhole] === 3 ? 2 : 3; }, 'type', firstWhole],
     ['baseIndex of a whole object', b => { dv(b).setInt32(refAt.baseIndex + firstWhole * 4, 0, true); }, 'type', firstWhole],
     ['baseIndex of a REF delta past the end', b => { dv(b).setInt32(refAt.baseIndex + firstDelta * 4, n, true); }, 'baseIndex', firstDelta],
-    ['type of a REF delta', b => { b[refAt.type + firstDelta] = 0; dv(b).setInt32(refAt.baseIndex + firstDelta * 4, firstWhole, true); b[refAt.type + firstDelta] = b[refAt.type + firstWhole] === 3 ? 2 : 3; }, 'type', firstDelta],
+    // its baseIndex is left the scan's (review R2: one moved to a whole object with another id is refused as baseIndex
+    // before its type is read; the tampered table below has that case), so only the type disagrees with its base's
+    ['type of a REF delta', b => { b[refAt.type + firstDelta] = b[refAt.type + firstDelta] === 3 ? 2 : 3; }, 'type', firstDelta],
     ['resolved.type', b => { b[refAt.rType] = 7; }, 'resolved.type', 0],
     ['resolved.base self', b => { dv(b).setInt32(refAt.rBase + 4, 1, true); }, 'resolved.base', 1],
     ['resolved.base below thin', b => { dv(b).setInt32(refAt.rBase, -3, true); }, 'resolved.base', 0],
@@ -275,6 +277,21 @@ test('tampered resolved columns with a valid check: cycles, depth lies and bases
   // the scan found that base in the pack, so it is not a thin base
   assert.equal(from.pack.columns.baseIndex[onWhole], rc.base[onWhole]);
   assert.equal(refusal(from, b => { setBase(b, R, onWhole, -2); setDepth(b, R, onWhole, 1); }, 'thin base the scan found in the pack'), `resolved.base@${onWhole}`);
+  // #260 review R2. The scan's own base column (after the 64 B header and three f64 columns, an i32 per entry): a REF
+  // delta's baseIndex is the whole object whose id the delta names. The fixture says so itself (both ids are in the
+  // index), and git wrote both: the REF id is in the pack's bytes, the whole object's id is its SHA-1.
+  const hex = (col, i) => Buffer.from(col.subarray(i * 20, i * 20 + 20)).toString('hex');
+  assert.equal(hex(from.pack.columns.oids, from.pack.columns.baseIndex[onWhole]), hex(from.pack.columns.refs, onWhole));
+  assert.notEqual(hex(from.pack.columns.oids, otherBlob), hex(from.pack.columns.refs, onWhole));
+  const scanBaseAt = i => 64 + from.pack.count * 24 + i * 4;
+  assert.equal(dv(enc(from)).getInt32(scanBaseAt(onWhole), true), from.pack.columns.baseIndex[onWhole], 'the offset is the scan baseIndex column');
+  // moved to a whole blob with another id: type (blob) and range still agree, and the resolved base is left honest
+  assert.equal(refusal(from, b => { dv(b).setInt32(scanBaseAt(onWhole), otherBlob, true); }, 'scan REF base with another id'), `baseIndex@${onWhole}`);
+  // the same lie told in both columns, and told with no resolved columns saved
+  assert.equal(refusal(from, b => { dv(b).setInt32(scanBaseAt(onWhole), otherBlob, true); setBase(b, R, onWhole, otherBlob); }, 'scan and resolved REF base with another id'), `baseIndex@${onWhole}`);
+  const bare = must(encodeSavedIndex(from.pack, none));
+  dv(bare).setInt32(scanBaseAt(onWhole), otherBlob, true);
+  assert.deepEqual(decodeSavedIndex(rechecked(bare), idOf(from)).error, { tag: 'malformed', field: 'baseIndex', index: onWhole });
   // types, ids and sizes the scan knows: a delta's type is its base's, a whole object's are the scan's
   assert.equal(refusal(from, b => { b[R.type + onWhole] = 2; }, 'delta type'), `resolved.type@${onWhole}`);
   assert.equal(refusal(from, b => { b[R.type + blobs[0]] = 2; }, 'whole type'), `resolved.type@${blobs[0]}`);
