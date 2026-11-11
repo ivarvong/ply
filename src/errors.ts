@@ -200,5 +200,5 @@ const escaped = (c: string): string => { const hex = Number(c.codePointAt(0)).to
 // an echoed credential would leave a remainder too short for the scrubber to recognise afterwards. Where it is passed
 // the text is one pkt-line payload (at most 65516 bytes), so the scrub is bounded too.
 export const remoteText = (text: string, max: number = REMOTE_TEXT_MAX, scrub: ((s: string) => string) | null = null): string =>
-  (scrub === null ? text : scrub(text)).slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
+  (typeof scrub === 'function' ? scrub(text) : text).slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
 export const remoteQuoted = (text: string, max: number = REMOTE_TEXT_MAX): string => JSON.stringify(text.slice(0, max)).replaceAll(UNPRINTABLE, escaped);

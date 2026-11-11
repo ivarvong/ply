@@ -132,6 +132,15 @@ test('a credential across the 1024-unit cut: the step functions scrub first (cap
   }
 });
 
+test('a scrub argument that is not a function is ignored: the step returns its coded error and does not throw', () => {
+  for (const s of [null, undefined, 5, 'x', {}, true]) {
+    const r = v2Step(v2Init(), data('ERR denied\n'), s);
+    assert.deepEqual([r.ok, r.error.code, r.error.message], [false, 'remote_error', 'remote: denied']);
+    assert.equal(parseLsRefLine('ERR denied', s).error.message, 'remote: denied');
+    assert.equal(parseCapabilitiesV2([data('ERR denied\n')], s).error.message, 'remote: denied');
+  }
+});
+
 // The same through the exchanges, with ply's own scrubber (auth.token): a server written here answers ls-refs or fetch
 // with the token inside an ERR line or a band-3 message.
 test('a credential across the 1024-unit cut: listRefs (ERR) and readFile (fetch ERR, fetch band 3) carry none of it', async () => {
