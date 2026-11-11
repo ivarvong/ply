@@ -209,17 +209,22 @@ export function isMode(mode: unknown): mode is Mode {
 // A caller's value quoted in a refusal. The types say string, a JavaScript caller's value is whatever it is, and a
 // refusal must not throw: JSON.stringify throws on a BigInt and on a cycle, so only a string is quoted; a number, a
 // boolean, null and undefined are spelled, and anything else is named by its type.
+// An error never grows with a caller's text: at most QUOTE_UNITS UTF-16 units of a string are quoted (http.ts's
+// ERROR_QUOTE: 200), with the true length after it, and the `entry` field holds the same cut (cutName). A name over
+// TREE_MAX_NAME_BYTES is refused for its length, so without the cut that refusal alone is as large as the caller likes.
+const QUOTE_UNITS = 200;
+const cutName = (name: string): string => (typeof name === 'string' && name.length > QUOTE_UNITS ? name.slice(0, QUOTE_UNITS) : name);
 function quoted(value: unknown): string {
-  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'string') return value.length > QUOTE_UNITS ? `${JSON.stringify(value.slice(0, QUOTE_UNITS))}… (${value.length} UTF-16 units)` : JSON.stringify(value);
   return value === null || value === undefined || typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value;
 }
 // A caller's entry, parsed once: the mode is one of the five (`tree: entry "n": invalid mode`, what `mode`) and the oid
 // 40 lowercase hex (parseOid's refusal, what `oid`), each with the entry's name.
 export function treeEntryOf(e: TreeEntryInput): Result<EntryOf, BadRequest> {
   const { mode, name } = e;
-  if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: name });
+  if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: cutName(name) });
   const oid = parseOid(e.oid);
-  if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(name)}: ${oid.error.message}`, { what: 'oid', entry: name });
+  if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(name)}: ${oid.error.message}`, { what: 'oid', entry: cutName(name) });
   return ok({ mode, name, oid: oid.value });
 }
 
@@ -415,12 +420,12 @@ export function encodeEntries(entries: readonly EntryOf[]): Result<Uint8Array, B
     const encoded = encodeBytes(e.name, 'tree entry name');
     if (!encoded.ok) return encoded;
     const name = encoded.value;
-    if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(e.name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: e.name });
+    if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(e.name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: cutName(e.name) });
     const oid = parseOid(e.oid);
-    if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${oid.error.message}`, { what: 'oid', entry: e.name });
+    if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${oid.error.message}`, { what: 'oid', entry: cutName(e.name) });
     const why = entryRefusal(e, name);
-    if (why !== null) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${why}`, { what: 'tree entry', entry: e.name });
-    if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${quoted(e.name)}`, { what: 'tree entry', entry: e.name });
+    if (why !== null) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${why}`, { what: 'tree entry', entry: cutName(e.name) });
+    if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${quoted(e.name)}`, { what: 'tree entry', entry: cutName(e.name) });
     names.add(e.name);
     rows.push({ mode, name, oid: e.oid });
     size += mode.length + 1 + name.length + 1 + OID_BYTES;
