@@ -19,7 +19,7 @@ const rng = new Rng(2024);
 if (!(args.reuse && existsSync(bare))) {
   rmSync(DIR, { recursive: true, force: true }); mkdirSync(DIR, { recursive: true });
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
-  for (const [k, v] of [['uploadpack.allowFilter', 'true'], ['uploadpack.allowAnySHA1InWant', 'true'], ['http.receivepack', 'true'], ['receive.fsckObjects', 'true'], ['core.compression', '1'], ['pack.compression', '1'], ['gc.auto', '0']]) git(['config', k, v]);
+  for (const [k, v] of [['uploadpack.allowFilter', 'true'], ['uploadpack.allowAnySHA1InWant', 'true'], ['http.receivepack', 'true'], ['receive.fsckObjects', 'true'], ['core.compression', '1'], ['pack.compression', '1'], ['gc.auto', '0'], ['maintenance.auto', 'false'], ['receive.autoGc', 'false']]) git(['config', k, v]);
   const t0 = Date.now();
   // Layout: 40 dirs × 25 files of source-ish text (~45 MB), plus a few "assets" that churn every commit (that is where the
   // 10 GB of history comes from: each commit rewrites ~10 MB of incompressible binary).

@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as ply from '../src/index.js';
 import * as plyCheckoutNode from '../src/checkout-node.js';
-import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems, commitFiles } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems, commitFiles, initRepo } from './server.js';
 
 const ZERO = '0'.repeat(40);
 const README_PATH = new URL('../README.md', import.meta.url);
@@ -326,7 +326,7 @@ for (const kind of ['default', 'stock']) {
       bare = kind === 'default' ? defaultRepo(name) : stockRepo(name);
       url = `${srv.url}/${name}.git`;
       const work = join(root, `${name}-seed`);
-      git(root, ['init', '-q', '-b', 'main', work]);
+      initRepo(work);
       c1 = commitFiles(work, bare, { 'a.txt': 'one\n' }, 'one');
       c2 = commitFiles(work, bare, { 'a.txt': 'two\n' }, 'two');
       git(bare, ['tag', '-a', '-m', 'annotated', 'v-ann', c1]);

@@ -29,8 +29,6 @@ export function tempRefOf(prefix: string, key: string): Result<TempRef, PlyError
   if (!r.ok) return fail('bad_request', `transfer: tempPrefix: ${r.error.message}`, { what: 'tempPrefix', cause: r.error });
   return isUnder(r.value, prefix) ? ok(r.value) : fail('bad_request', 'transfer: tempPrefix must end in "/"', { what: 'tempPrefix' });
 }
-// A ref read back that git would push (a temp ref's prefix is the plan's, held by its hash).
-export const isPushRef = (v: unknown): boolean => validatePushRef(v, false).ok;
 export const isOid = (v: unknown): boolean => parseOid(v).ok;
 // An Option of an id, as JSON gives it back: {"tag":"none"} or {"tag":"some","value":<id>}.
 export function isOptionOid(o: unknown): boolean {

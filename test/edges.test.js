@@ -3,7 +3,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from './server.js';
 import { editFile } from '../src/edit.js';
 import { GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -15,7 +15,7 @@ let root, cleanup, srv, n = 0;
 before(async () => { ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root); });
 after(async () => { await srv.close(); cleanup(); });
 const A = { name: 'e', email: 'e@x' };
-const repo = () => { const name = `e${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']); return { name, bare, work, url: `${srv.url}/${name}.git` }; };
+const repo = () => { const name = `e${n++}`; const bare = makeBareRepo(root, name); const work = join(root, `w${name}`); mkdirSync(work); initRepo(work); return { name, bare, work, url: `${srv.url}/${name}.git` }; };
 const edit = (r, p, extra = {}, opts = {}) => unwrapAsync(editFile(r.url, { path: p, find: 'MARK', replace: 'OK', author: A, message: 'e', ...extra }, { tracer: new Tracer(), ...opts }));
 
 test('path depth 100 (limit 128): one tree fetch per level, push = commit + 100 tree deltas + blob delta', async () => {

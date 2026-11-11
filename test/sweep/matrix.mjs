@@ -207,6 +207,19 @@ function build() {
     });
   }
 
+  // ---- maxMergeWork. The 1024-byte file above merges (git merges it); its line merge needs some diff steps, so a
+  // budget of none is a merge_conflict, and each preset's budget is ample for three lines. ----
+  for (const [name, work, expect] of /** @type {const} */ ([
+    ['zero', 0, refused('merge_conflict')],
+    ['worker', WORKER_LIMITS.maxMergeWork, ok],
+    ['default', DEFAULT_LIMITS.maxMergeWork, ok],
+  ])) {
+    add({
+      id: `merge.work.${name}`, param: 'maxMergeWork', op: 'merge', repo: 'mblob-1024', from: 'refs/heads/feat', writes: true,
+      bytes: 1024, entries: 1, limits: { maxMergeWork: work }, expect,
+    });
+  }
+
   // ---- maxObjectSize via pushTree. Exactly the cap is allowed. ----
   const objCap = DEFAULT_LIMITS.maxObjectSize;
   for (const S of [0, 1, 1023, 1024, 1025]) {
@@ -316,14 +329,23 @@ function build() {
   add({ id: 'inflate.under', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, expectFrom: 'inflated-under' });
   add({ id: 'inflate.zero', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, limits: { maxInflatedTotal: 0 }, expect: refused('limit_exceeded', { what: 'pack inflated bytes' }) });
 
+  // ---- maxResolveWork: resolvePackRange of the chain git packed (d1-ofs: 80 revisions of a 2 KiB file, every delta one
+  // deep). The two cells differ in this key alone; maxInflatedTotal is 0 in both because the bound applied is never
+  // below it. A ceiling of 0 refuses the first delta read back (a delta inflates at least one byte); the default ceiling
+  // (2 GiB) is four orders of magnitude past everything this pack declares.
+  add({ id: 'resolve.work.default', param: 'maxResolveWork', op: 'resolveRange', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, limits: { maxInflatedTotal: 0, maxResolveWork: DEFAULT_LIMITS.maxResolveWork }, expect: ok });
+  add({ id: 'resolve.work.zero', param: 'maxResolveWork', op: 'resolveRange', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, limits: { maxInflatedTotal: 0, maxResolveWork: 0 }, expect: refused('limit_exceeded', { what: 'resolve work bytes' }) });
+
   pass2(add);
   // ---- Every key, parsed where it enters (#156 parseLimits). A value that bounds nothing is refused when the client
   // is made, before any request, whichever operation would read it: lsRefs reads only maxRefs and maxLsRefsBytes, and
   // every key's cell is still refused there (the lazy read refused only the key the operation reached). A key left out
   // is the default: every other cell passes only the keys it sets (cell.mjs passes the record as written).
+  // One null parses: maxResolveWork: null means derived (8 x the record's maxInflatedTotal), the same as leaving it out.
   for (const key of Object.keys(DEFAULT_LIMITS)) {
     for (const [name, value] of [['negative', -1], ['null', null]]) {
-      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect: refused('bad_request', { what: key }) });
+      const expect = key === 'maxResolveWork' && value === null ? ok : refused('bad_request', { what: key });
+      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect });
     }
   }
   add({ id: 'parse.none', param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: {}, expect: ok });
@@ -398,6 +420,15 @@ function pass2(add) {
     id: 'report.refs8.n8', param: 'maxReportLines', op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
     bytes: 8 * 64, entries: 8, limits: { maxRefs: 8, maxReportLines: 8 }, expect: ok,
   });
+  // ---- maxReportReasonBytes, maxReportProgressBytes. Neither can refuse a push: they bound what is kept of the answer
+  // (a reason's bytes, band 2's decoding), not whether the report is read. So the boundary is 0, and a push under it
+  // lands as it does at the default: git's refs after the push are the oracle.
+  for (const key of ['maxReportReasonBytes', 'maxReportProgressBytes']) {
+    add({
+      id: `report.${key}.zero`, param: key, op: 'pushRepo', repo: 'empty', local: 'branches-8', spec: { all: true }, writes: true,
+      bytes: 8 * 64, entries: 8, limits: { [key]: 0 }, expect: ok,
+    });
+  }
   // The default cap equals maxRefs, so the largest push maxRefs allows (10 000 commands) has 10 001 report lines.
   const refCap = DEFAULT_LIMITS.maxRefs;
   for (const n of [refCap - 1, refCap, refCap + 1]) {

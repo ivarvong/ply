@@ -8,7 +8,7 @@ import http from 'node:http';
 import { join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles, initRepo } from './server.js';
 import { readFile, listTree, readCommit, refCandidates, walkPath, fetchCommit, openBlob, readBlob, resolveCommit, resolveAbbrev } from '../src/read.js';
 import { lsRefs as lsRefsR } from '../src/lsrefs.js';
 import { createTransport as createTransportR } from '../src/http.js';
@@ -28,7 +28,7 @@ const lsTree = (bare, spec) => git(bare, ['ls-tree', '-z', spec]).split('\0').fi
 
 before(async () => {
   ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root);
-  const bare = makeBareRepo(root, 'r'); const work = join(root, 'wr'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'r'); const work = join(root, 'wr'); mkdirSync(work); initRepo(work);
   const big = Buffer.alloc(3 << 20); for (let i = 0; i < big.length; i += 7) big[i] = (i * 2654435761) >>> 24;
   commitFiles(work, bare, { 'README.md': '# v1\n', 'a/b/c.txt': 'nested\n', 'empty.txt': '', 'run.sh': { mode: '100755', data: '#!/bin/sh\necho hi\n' }, 'big.bin': big, 'dir with space/ünï.txt': 'unicode\n' }, 'one');
   git(work, ['tag', '-a', '-m', 'annotated', 'v1']); git(work, ['tag', 'light']); git(work, ['push', '-q', bare, 'refs/tags/v1', 'refs/tags/light']);
@@ -309,7 +309,7 @@ test('parseIdent is git split_ident_line: name trimmed, email to the first >, da
 });
 
 test('readCommit == git log -1 / git cat-file commit: root, merge (2 parents), signed, non-ASCII author, verbatim multi-line message, tags, oid', async () => {
-  const bare = makeBareRepo(root, 'rc'); const work = join(root, 'wrc'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const bare = makeBareRepo(root, 'rc'); const work = join(root, 'wrc'); mkdirSync(work); initRepo(work);
   const at = (author, committer, extra = {}) => ({ env: { ...process.env, GIT_AUTHOR_NAME: author[0], GIT_AUTHOR_EMAIL: author[1], GIT_AUTHOR_DATE: author[2], GIT_COMMITTER_NAME: committer[0], GIT_COMMITTER_EMAIL: committer[1], GIT_COMMITTER_DATE: committer[2], ...extra } });
   const commit = (args, who) => git(work, ['commit', '-q', ...args], who);
   writeFileSync(join(work, 'f.txt'), 'one\n'); git(work, ['add', '-A']);
@@ -386,7 +386,7 @@ test('abbreviated oids: unique among advertised tips agrees with git, and a ref 
   const bare = makeBareRepo(root, 'abbrev');
   const work = join(root, 'abbrev-work');
   mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   const empty = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
   const oids = [];
   const bucket = (n) => {

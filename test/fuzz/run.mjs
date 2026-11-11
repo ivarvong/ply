@@ -4,7 +4,7 @@
 // run editFile against git http-backend, check git's truth, bucketize the OTLP spans, steer.
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from '../server.js';
 import { Rng } from './prng.js';
 import { genCase, KNOBS } from './gen.js';
 import { editFile } from '../../src/edit.js';
@@ -119,7 +119,7 @@ async function runCase(ctx, seed, hints) {
   const bare = makeBareRepo(ctx.root, name);
   git(bare, ['config', 'core.compression', String(c.compression)]);
   git(bare, ['config', 'pack.compression', String(c.compression)]);
-  const work = join(ctx.root, `w${seed}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  const work = join(ctx.root, `w${seed}`); mkdirSync(work); initRepo(work);
   // Commits are built with `git fast-import`, never a checkout: case-only twins (`a/` beside `A`), valid in git, would
   // collide in a worktree on a case-insensitive filesystem (macOS) and crash the harness. Modes and symlinks go in as-is.
   const commit = (who, msg, files, fromExisting = false) => commits(work, [{ who, msg, files }], fromExisting);

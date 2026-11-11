@@ -6,11 +6,16 @@ import { ok, err } from './result.js';
 import { BYTE_VALUES, PKT_HEX_BASE } from './format.js';
 import { atOr, byteInRange } from './absent.js';
 
-export const te: TextEncoder = new TextEncoder();
+// The declarations name no DOM-lib global type: a Node consumer (lib ES2022 + @types/node) has `TextEncoder`,
+// `TextDecoder` and `CryptoKey` as values only, so their instance types are derived from the value, which the DOM lib,
+// @types/node and @cloudflare/workers-types all declare (test/dist-types.test.js compiles dist under each).
+type Utf8Encoder = InstanceType<typeof TextEncoder>;
+type Utf8Decoder = InstanceType<typeof TextDecoder>;
+export const te: Utf8Encoder = new TextEncoder();
 // git keeps every byte: a leading U+FEFF is part of a tree entry's name (`git ls-tree` prints it, `show HEAD:README`
 // does not find `<U+FEFF>README`), so no decoder here swallows it the way the default one does (#43). `td` is for text
 // git itself only prints (sideband progress, remote errors): an invalid sequence there becomes U+FFFD.
-export const td: TextDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+export const td: Utf8Decoder = new TextDecoder('utf-8', { ignoreBOM: true });
 const strict = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 // ---- git bytes as strings, losslessly (#43) ----
