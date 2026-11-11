@@ -30,7 +30,7 @@ import type { FetchRequest } from './uprequest.js';
 import type { Option, Result } from './result.js';
 import { te, concat } from './bytes.js';
 import { fail } from './errors.js';
-import { DEFAULT_LIMITS, limitExceeded, parseLimits } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES, limitExceeded, parseLimits } from './limits.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { v2Init, v2Step, v2End } from './fetch.js';
 import { parsePack, resolvePack, packParseOpts } from './packresolve.js';
@@ -289,14 +289,49 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
 }
 
 // Cache-API-shaped in-memory cache for tests and node. Bodies are buffered; `entries` is exposed so tests can poison one.
-export type MemoryCache = PackCache & { readonly entries: Map<string, { body: Uint8Array; headers: Record<string, string> }> };
-export function memoryCache(): MemoryCache {
+// Bounded: at most `maxBytes` of body bytes and header text and at most `maxEntries` entries, the least recently used
+// evicted first (a match or a put makes its key the most recent). An entry larger than the whole byte budget is not
+// stored, and its body is not read past the budget. A budget that is not a non-negative integer is the default.
+type MemoryEntry = { body: Uint8Array; headers: Record<string, string> };
+export type MemoryCache = PackCache & { readonly entries: Map<string, MemoryEntry> };
+export type MemoryCacheConfig = { readonly maxBytes: number; readonly maxEntries: number };
+export type MemoryCacheOptions = Input<MemoryCacheConfig>;
+const entryBytes = (e: MemoryEntry): number => Object.entries(e.headers).reduce((n, [k, v]) => n + k.length + v.length, e.body.length);
+const budgetOf = (given: number, fallback: number): number => (Number.isSafeInteger(given) && given >= 0 ? given : fallback);
+export function memoryCache(options: MemoryCacheOptions = {}): MemoryCache {
+  const given = withDefaults(options, { maxBytes: LIMIT_MEMORY_CACHE_BYTES, maxEntries: LIMIT_MEMORY_CACHE_ENTRIES });
+  const maxBytes = budgetOf(given.maxBytes, LIMIT_MEMORY_CACHE_BYTES);
+  const maxEntries = budgetOf(given.maxEntries, LIMIT_MEMORY_CACHE_ENTRIES);
   const entries: MemoryCache['entries'] = new Map();
+  // The Map's insertion order is the recency order: eviction takes from the front. The total is counted from the
+  // entries themselves on each put (at most maxEntries + 1 of them), so an entry written straight into `entries` counts.
+  const evict = (): void => {
+    let total = 0;
+    for (const e of entries.values()) total += entryBytes(e);
+    for (const [key, e] of entries) {
+      if (total <= maxBytes && entries.size <= maxEntries) return;
+      entries.delete(key);
+      total -= entryBytes(e);
+    }
+  };
   return {
     entries,
     // oxlint-disable-next-line require-await, typescript/require-await -- the Cache API's shape: every method returns a promise
-    async match(key) { return unwrapOrAbsent(mapOption(mapGet(entries, key), e => new Response(e.body.slice(), { status: 200, headers: e.headers }))); },
-    async put(key, res) { entries.set(key, { body: new Uint8Array(await res.arrayBuffer()), headers: Object.fromEntries(res.headers) }); },
+    async match(key) {
+      const hit = mapGet(entries, key);
+      if (hit.tag === 'some') { entries.delete(key); entries.set(key, hit.value); }
+      return unwrapOrAbsent(mapOption(hit, e => new Response(e.body.slice(), { status: 200, headers: e.headers })));
+    },
+    async put(key, res) {
+      // a put replaces: whatever was under the key is gone, whether or not the new entry fits
+      entries.delete(key);
+      const body = res.body === null ? ok(new Uint8Array(0)) : await readCapped(res.body, maxBytes);
+      if (!body.ok) return;
+      const entry: MemoryEntry = { body: body.value, headers: Object.fromEntries(res.headers) };
+      if (entryBytes(entry) > maxBytes) return;
+      entries.set(key, entry);
+      evict();
+    },
     // oxlint-disable-next-line require-await, typescript/require-await -- as above
     async delete(key) { return entries.delete(key); },
   };

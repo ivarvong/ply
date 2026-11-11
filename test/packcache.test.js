@@ -12,7 +12,7 @@ import { pkt, pktInit, pktStep, FLUSH, DELIM } from '../src/pktline.js';
 import { lsRefsBody as lsRefsBodyR } from '../src/lsrefs.js';
 import { parsePack, resolvePack } from '../src/packresolve.js';
 import { te, concat } from '../src/bytes.js';
-import { DEFAULT_LIMITS } from '../src/limits.js';
+import { DEFAULT_LIMITS, LIMIT_MEMORY_CACHE_BYTES, LIMIT_MEMORY_CACHE_ENTRIES } from '../src/limits.js';
 import { readFileSync } from 'node:fs';
 import { fetchBody as fetchBodyR, GitHttp } from '../src/client.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
@@ -541,4 +541,47 @@ test('cachingFetch: a stored entry is untrusted; an ERR, a cut answer, an empty 
     assert.deepEqual(objectSet(await rawCall(f, body)), [head]);
     assert.equal(delta(again, counts()).fetch, 0, `${name}: the repaired entry is served`);
   }
+});
+
+// The test's own accounting of what a memoryCache retains: every byte of every body it still holds, plus its header text.
+const retained = cache => [...cache.entries.values()].reduce((n, e) => n + e.body.length + Object.entries(e.headers).reduce((m, [k, v]) => m + k.length + v.length, 0), 0);
+test('memoryCache: a byte budget and an entry cap; the least recently used entry goes first', async () => {
+  // a Uint8Array body sets no content-type, so an entry is exactly its body bytes
+  const put = (c, k, n) => c.put(k, new Response(new Uint8Array(n)));
+  const c = memoryCache({ maxBytes: 100 });
+  await put(c, 'a', 40); await put(c, 'b', 40);
+  assert.deepEqual([...c.entries.keys()].sort(), ['a', 'b']); assert.equal(retained(c), 80);
+  await put(c, 'c', 40); // 120 > 100: a, the least recently used, goes; b + c = 80
+  assert.deepEqual([...c.entries.keys()].sort(), ['b', 'c']); assert.equal(retained(c), 80);
+  assert.equal((await c.match('b')).status, 200); // a read makes b the most recently used
+  await put(c, 'd', 40); // so c goes, not b
+  assert.deepEqual([...c.entries.keys()].sort(), ['b', 'd']); assert.equal(retained(c), 80);
+  await put(c, 'e', 101); // larger than the whole budget: not stored, and nothing is evicted for it
+  assert.deepEqual([...c.entries.keys()].sort(), ['b', 'd']); assert.ok(!(await c.match('e')));
+  await put(c, 'b', 100); // a put replaces: the old b (40) is gone, the new b (100) fills the budget, d goes
+  assert.deepEqual([...c.entries.keys()], ['b']); assert.equal(retained(c), 100);
+  // header text counts: 'x-a' + 97 characters is 100 bytes of headers, so a 1-byte body is over the budget of 100
+  await c.put('h', new Response(new Uint8Array(1), { headers: { 'x-a': 'v'.repeat(97) } }));
+  assert.ok(!c.entries.has('h'));
+  // the entry cap: four 1-byte entries under a cap of three
+  const few = memoryCache({ maxBytes: 100, maxEntries: 3 });
+  for (const k of ['p', 'q', 'r', 's']) await put(few, k, 1); // oxlint-disable-line no-await-in-loop -- in order
+  assert.deepEqual([...few.entries.keys()].sort(), ['q', 'r', 's']);
+  // a long run never retains more than the budget: 200 puts of 1000 bytes under 10,000 keep the last ten
+  const run = memoryCache({ maxBytes: 10_000 });
+  let peak = 0;
+  for (let i = 0; i < 200; i++) { await put(run, `k${i}`, 1000); peak = Math.max(peak, retained(run)); } // oxlint-disable-line no-await-in-loop -- in order
+  assert.equal(peak, 10_000);
+  assert.deepEqual([...run.entries.keys()].sort(), Array.from({ length: 10 }, (_, i) => `k${190 + i}`));
+  // a body over the budget is not read to its end: 1000 chunks of 1 KiB offered, the budget is 4 KiB
+  let pulled = 0;
+  const endless = new ReadableStream({ pull(ctl) { if (pulled++ < 1000) ctl.enqueue(new Uint8Array(1024)); else ctl.close(); } });
+  const tiny = memoryCache({ maxBytes: 4096 });
+  await tiny.put('big', new Response(endless));
+  assert.equal(tiny.entries.size, 0); assert.ok(pulled < 10, `read ${pulled} of 1000 chunks`);
+  // the named defaults, and a budget that is not a non-negative integer falls back to them (never unbounded)
+  assert.equal(LIMIT_MEMORY_CACHE_BYTES, 64 * 1024 * 1024); assert.equal(LIMIT_MEMORY_CACHE_ENTRIES, 1024);
+  const dflt = memoryCache({ maxBytes: Number.POSITIVE_INFINITY, maxEntries: Number.NaN });
+  for (let i = 0; i < 1030; i++) await put(dflt, `n${i}`, 1); // oxlint-disable-line no-await-in-loop -- in order
+  assert.equal(dflt.entries.size, 1024);
 });

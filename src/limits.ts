@@ -126,6 +126,13 @@ export const LIMIT_OBJECT_OVERHEAD: number = 3 * KIB;
  * 1032:1; real packs measure far below this (deltas inflate only their instructions).
  */
 export const LIMIT_WORK_RATIO = 32;
+/**
+ * What memoryCache() (packcache.ts) retains unless told otherwise: the body bytes and header text of all its entries.
+ * One object's worth: a process that keeps a cache beside its work holds at most one more LIMIT_OBJECT.
+ */
+export const LIMIT_MEMORY_CACHE_BYTES: number = LIMIT_OBJECT;
+/** Entries memoryCache() keeps unless told otherwise, however small: its eviction pass walks them on a put. */
+export const LIMIT_MEMORY_CACHE_ENTRIES = 1024;
 /* oxlint-enable no-magic-numbers */
 
 export type Limits = {
