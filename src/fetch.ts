@@ -304,6 +304,10 @@ function refuseNonCommit(expectType: number | null, type: number, oid: string): 
 
 // characters of a refused acknowledgment line quoted in the error (remoteQuoted: cut first, then every control and format character escaped)
 const ACK_LINE_SHOWN = 60;
+// v2End's "no packfile section" names the answer's sections. A section header is a line the server wrote: each name
+// goes through remoteText cut to SECTION_SHOWN units, and at most SECTIONS_SHOWN of them are named.
+const SECTIONS_SHOWN = 8;
+const SECTION_SHOWN = 60;
 // limits: a checked record (parseLimits; DEFAULT_LIMITS when none is given): v2Step reads its caps on every frame.
 export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
@@ -381,7 +385,7 @@ export function v2End(st: V2State, done: boolean): Result<V2State, ErrorOf<'prot
   if (!st.done) return fail('protocol', 'v2: response ended without flush', st.sections.length === 0 ? { reason: 'empty_response' } : {});
   const acks = st.sections.includes('acknowledgments');
   if (st.phase === 'pack') return done && acks ? proto('v2: expected packfile, received acknowledgments') : ok(st);
-  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
+  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.slice(0, SECTIONS_SHOWN).map(s => remoteText(s, SECTION_SHOWN)).join(',') || 'none'})`);
   if (st.ready) return proto('v2: the server said ready and sent no packfile section');
   return ok(st);
 }

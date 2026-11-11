@@ -77,6 +77,30 @@ test('fetch: an ERR line reaches remote_error escaped', () => {
   assert.equal(DRIVES.test(r.error.message), false);
 });
 
+// v2End names the sections of an answer that has no packfile section. A section header is a line the server chooses:
+// each name is shown cut to 60 units and escaped, and at most 8 names are shown. Expected values are written out by hand.
+test('fetch: the section names in "no packfile section" are escaped, cut to 60 units each, and at most 8 are shown', () => {
+  // ESC ] 0 ; owned BEL, ESC [ 2 J, C1 CSI (U+009B), RLO (U+202E)
+  const hostile = step(['\x1b]0;owned\x07\x1b[2J\u009b31m‮\n'], true);
+  assert.deepEqual([hostile.ok, hostile.error.code], [false, 'protocol']);
+  assert.equal(hostile.error.message, 'v2: no packfile section (sections: \\u001b]0;owned\\u0007\\u001b[2J\\u009b31m\\u202e)');
+  assert.equal(DRIVES.test(hostile.error.message), false);
+  // names git writes are shown as they were, and no section at all is still "none"
+  assert.equal(step(['acknowledgments\n', 'NAK\n'], true).error.message, 'v2: no packfile section (sections: acknowledgments)');
+  assert.equal(step(['shallow-info\n'], false).error.message, 'v2: no packfile section (sections: shallow-info)');
+  assert.equal(step([], true).error.message, 'v2: no packfile section (sections: none)');
+  // one header of 65000 units: 60 are shown. 61 units: the 61st is cut.
+  assert.equal(step([`${'a'.repeat(65000)}\n`], true).error.message, `v2: no packfile section (sections: ${'a'.repeat(60)})`);
+  assert.equal(step([`${'k'.repeat(60)}Z\n`], true).error.message, `v2: no packfile section (sections: ${'k'.repeat(60)})`);
+  // 12 sections (a delim frame between them starts the next header): the first 8 are shown. 8 names: all 8.
+  const many = n => { let st = v2Init(); for (let i = 0; i < n; i++) { st = v2Step(st, data(`s${i}\n`)).value.state; st = v2Step(st, { kind: 'delim' }).value.state; } return v2End(v2Step(st, { kind: 'flush' }).value.state, true); };
+  assert.equal(many(12).error.message, 'v2: no packfile section (sections: s0,s1,s2,s3,s4,s5,s6,s7)');
+  assert.equal(many(8).error.message, 'v2: no packfile section (sections: s0,s1,s2,s3,s4,s5,s6,s7)');
+  // the whole message is bounded whatever the server sends: 8 names of 60 escaped units (6 characters each) and 7 commas
+  const worst = (() => { let st = v2Init(); for (let i = 0; i < 12; i++) { st = v2Step(st, data(`${'\x1b'.repeat(65000)}\n`)).value.state; st = v2Step(st, { kind: 'delim' }).value.state; } return v2End(v2Step(st, { kind: 'flush' }).value.state, true); })();
+  assert.equal(worst.error.message.length, 'v2: no packfile section (sections: )'.length + 8 * 60 * 6 + 7);
+});
+
 // A credential the server echoes is scrubbed before the text is cut (SAFETY.md I43): a cut that falls inside the
 // credential must leave none of it. The token is 40 capital letters; the padding is dots and every other character of
 // the expected message is lower case, a digit, a bracket, a colon or a space, so "no character of the token is in the
@@ -145,7 +169,14 @@ test('a credential across the 1024-unit cut: listRefs (ERR) and readFile (fetch 
 // The inventory: every place in src/ that puts remote-written text into an error message or a span attribute, by file
 // and number of remoteText( / remoteQuoted( calls. A new site is added here in the same change; a site that quotes
 // remote text in one of the old shapes is caught by the patterns below.
-const SITES = { 'caps.ts': 2, 'fetch.ts': 3, 'http.ts': 2, 'lsrefs.ts': 4, 'negotiate.ts': 1, 'push.ts': 3, 'receivecaps.ts': 1 };
+const SITES = { 'caps.ts': 2, 'fetch.ts': 4, 'http.ts': 2, 'lsrefs.ts': 4, 'negotiate.ts': 1, 'push.ts': 3, 'receivecaps.ts': 1 };
+// a message that interpolates the section names a server sent (v2End) with no helper on the line
+const RAW_SECTIONS = line => /\$\{[^`]*\bsections\b/u.test(line) && !/remote(?:Text|Quoted)\(/u.test(line);
+test('inventory: the raw-shape patterns see a section list interpolated without the helper', () => {
+  // v2End's line as it was written before it was routed, and as it is written now
+  assert.equal(RAW_SECTIONS("  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);"), true);
+  assert.equal(RAW_SECTIONS("  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.slice(0, SECTIONS_SHOWN).map(s => remoteText(s, SECTION_SHOWN)).join(',') || 'none'})`);"), false);
+});
 test('inventory: remote text reaches an error only through remoteText / remoteQuoted', () => {
   const dir = new URL('../src/', import.meta.url);
   const found = {};
@@ -158,7 +189,7 @@ test('inventory: remote text reaches an error only through remoteText / remoteQu
       const calls = line.split(/remote(?:Text|Quoted)\(/u).length - 1;
       if (calls > 0) found[name] = (found[name] ?? 0) + calls;
       // the old shapes: `remote: ${…}` and a JSON-quoted remote line, without the helper
-      if (/`remote: \$\{(?!remoteText\()/u.test(line) || /JSON\.stringify\((?:(?:line|first|head|a)\.slice|first\)|ct\))/u.test(line)) raw.push(`${name}:${i + 1}`);
+      if (/`remote: \$\{(?!remoteText\()/u.test(line) || /JSON\.stringify\((?:(?:line|first|head|a)\.slice|first\)|ct\))/u.test(line) || RAW_SECTIONS(line)) raw.push(`${name}:${i + 1}`);
     });
   }
   assert.deepEqual(raw, []);

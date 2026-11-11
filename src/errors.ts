@@ -175,11 +175,14 @@ export function scrubError(e: unknown, scrub: ((s: string) => string) | null = n
   return walk(e);
 }
 
-// Remote-written text on its way into an error message, an error's `what`, or a span attribute: every ERR line, band-2
-// and band-3 text, HTTP error body, header value and refused protocol line passes through one of these two, and nowhere
-// else (test/remote-text.test.js lists the sites). A server chooses these bytes, and whoever prints the error to a
-// terminal or a log must not be driven by them (SAFETY.md, "Remote text"). The text is cut to `max` UTF-16 units first,
-// so the work and the result are bounded whatever the line's size; then every control (Cc: C0, DEL, C1), format
+// Remote-written text on its way into an error message or a span attribute. The sites that pass it through one of
+// these two are listed in SAFETY.md I43 and counted by test/remote-text.test.js: ERR lines, band 3, the HTTP error body
+// and content-type, refused protocol lines, v2End's section names, the too-large push reason and the
+// git.push.band2.tail attribute. Not every field does: I43 also lists the ones that still carry remote text as received
+// (hookOutput, git.push.remote.messages, git.push.ng.reason, fetch progress, the lines / rejected detail fields, an ng
+// reason quoted in a push message). A server chooses these bytes, and whoever prints the error to a terminal or a log
+// must not be driven by them. The text is cut to `max` UTF-16 units (after the scrub, where a site passes one), so the
+// result is bounded whatever the line's size; then every control (Cc: C0, DEL, C1), format
 // character (Cf: bidi overrides, zero-width and tag characters), line or paragraph separator and lone surrogate (a cut
 // pair, or ill-formed input) is written as \uXXXX (\u{XXXXX} above the BMP). Invalid UTF-8 has already decoded to U+FFFD, which
 // is printable and kept.
