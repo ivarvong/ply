@@ -290,6 +290,7 @@ export const DECISIONS = [
   { match: "src/packstream.ts#stepTrailer:pack_corrupt:pack: expected trailer at …, pack length …", space: 'pack-cut', axisTag: 'cut' },
   { match: "src/packstream.ts#stepTrailer:pack_corrupt:pack: trailer sha mismatch … != …", space: 'pack-cut', axisTag: 'corrupt' },
   { match: 'src/inflatestream.ts#*', space: 'pack-stream', axisTag: 'case' },
+  { match: "src/inflate.ts#inflate:bad_request:inflate: pos (…) is not a position in a buffer of … byte…", space: 'pack-stream', axisTag: 'case' },
   { match: 'src/packstream.ts#*', space: 'pack-stream', axisTag: 'case' },
   { match: 'src/packscanindex.ts#*', space: 'pack-scan-index', axisTag: 'case' },
   { match: 'src/pullstream.ts#*', space: 'pull-stream', axisTag: 'case' },

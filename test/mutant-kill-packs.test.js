@@ -470,10 +470,12 @@ test('inflate: a stream cut at each read of the block loop is refused with that 
     const cl = dynamicHeader(w, { hlit: 13, hdist: 0, clens: { 0: 1, 18: 1 } });
     refused('code length', w.code(cl[18]).bits(127, 7).code(cl[18]).bits(117, 7), 3, 0, END);
   }
-  // a code length symbol that matches no code: the code length code has one code ('0', symbol 0); fifteen 1 bits
+  // a code length symbol that matches no code: the code length code has no codes at all, the one incomplete
+  // code-length set zlib builds a table for (inftrees.c: "no symbols, but wait for decoding to report error"; a single
+  // code is `invalid code lengths set` at the header); fifteen 1 bits
   {
     const w = new DeflateBits();
-    dynamicHeader(w, { hlit: 0, hdist: 0, clens: { 0: 1 } });
+    dynamicHeader(w, { hlit: 0, hdist: 0, clens: {} });
     refused('code length, no code', w.bits(0x7fff, 15), 4, 0, NO_CODE);
   }
   // a repeat's extra bits: 249 zeros (138 + 111) of 258 entries, then an 18 whose 7 extra bits are not there
