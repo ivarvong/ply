@@ -8,6 +8,7 @@
   "test/cherrypick-rename.test.js": 22,
   "test/compliance.test.js": 26,
   "test/concurrency.test.js": 4,
+  "test/config-comment.test.js": 1,
   "test/custom-exchange.test.js": 2,
   "test/deadline.test.js": 4,
   "test/delta-bound.test.js": 5,
