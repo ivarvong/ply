@@ -250,12 +250,12 @@ export const WORKER_LIMITS: CheckedLimits = grant({
 // maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits.
 const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS);
 // maxResolveWork: null is left out too (a spread of a preset, or a JSON record, has no other way to ask for the derived value)
+const hasWork = (record: LimitsGiven): record is Limits => record.maxResolveWork !== null;
 export const withLimits = (o: Partial<LimitsGiven> = {}): Limits => {
   // null from an untyped caller is no overrides, as the missing value is: the frozen defaults, not a throw
   const given = getOrElse<Partial<LimitsGiven>>(fromNullish(o), {});
-  const asked = given.maxResolveWork;
   const filled = { ...DEFAULT_LIMITS, ...given };
-  return Object.freeze({ ...filled, maxResolveWork: asked === null || isMissing(asked) ? resolveWorkOf(filled.maxInflatedTotal) : asked });
+  return Object.freeze(hasWork(filled) && !isMissing(given.maxResolveWork) ? filled : { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) });
 };
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
@@ -275,8 +275,7 @@ export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, Er
   // A spread of DEFAULT_LIMITS: its keys (the brand is not enumerable), in order, each filled from the input where given.
   const given = withDefaults<LimitsGiven>(input, { ...DEFAULT_LIMITS });
   // the resolve work ceiling a caller leaves out (or gives as null) follows the maxInflatedTotal of its own record, not the default's
-  const asked = input.maxResolveWork;
-  const filled: Limits = { ...given, maxResolveWork: asked === null || isMissing(asked) ? resolveWorkOf(given.maxInflatedTotal) : asked };
+  const filled: Limits = hasWork(given) && !isMissing(input.maxResolveWork) ? given : { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) };
   for (const [key, value] of Object.entries(filled)) {
     const checked = checkLimit(value, key);
     if (!checked.ok) return checked;
