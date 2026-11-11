@@ -183,12 +183,28 @@ export async function gitUserinfoCred(cwd, url) {
   return { cred: null, config: [['http.extraHeader', `Authorization: Basic ${Buffer.concat([user, Buffer.from(':'), pass]).toString('base64')}`]] };
 }
 
+// Background maintenance off for a repository real git serves, receives into or commits in. A test reads the object
+// store right after git returns (git fsck, ls-tree, a copy of the directory), and a repack still running then renames
+// and unlinks packs under that read: CI's git 2.56 failed `git fsck` after a push with "packfile … index not opened"
+// and ".tmp-…-pack-….pack index not opened" (ci runs 43067401434, 43070027886; receive.unpackLimit=1 keeps each push
+// a pack). What each key stops (git-config(1); builtin/receive-pack.c and builtin/gc.c at v2.50.0 and v2.56.0):
+//   receive.autoGc=false    receive-pack does not start `git maintenance run --auto` after it updates refs (`if
+//                           (auto_gc)` around prepare_auto_maintenance; the default is true).
+//   maintenance.auto=false  no porcelain (commit, fetch, merge, rebase, am, receive-pack) starts `git maintenance run
+//                           --auto`: prepare_auto_maintenance returns before spawning, whatever the strategy's tasks.
+//   gc.auto=0               the gc task's own condition (need_to_gc: gc.auto <= 0 never runs), so a `git gc --auto` or
+//                           a `maintenance run --auto` started some other way does not repack through the gc task.
+// Environment config (GIT_CONFIG_COUNT) outranks all three; test/harness-maintenance.test.js observes them under it.
+export const NO_MAINTENANCE = [['gc.auto', '0'], ['maintenance.auto', 'false'], ['receive.autoGc', 'false']];
+export function noMaintenance(dir) { for (const [k, v] of NO_MAINTENANCE) git(dir, ['config', k, v]); }
+
 // A bare repo configured for v2 partial fetch of arbitrary objects + push. `stock: true` leaves upload-pack at git's
 // defaults: no uploadpack.allowFilter (so `fetch=` advertises no `filter`, and upload-pack dies on one) and no
 // allowAnySHA1InWant, as a `git init --bare` behind `git http-backend` serves it; push and fsck-on-receive stay on.
 export function makeBareRepo(root, name, { stock = false } = {}) {
   const dir = join(root, `${name}.git`);
   git(root, ['init', '--bare', '-q', '-b', 'main', dir]);
+  noMaintenance(dir);
   const upload = stock ? [] : [['uploadpack.allowFilter', 'true'], ['uploadpack.allowAnySHA1InWant', 'true'], ['protocol.version', '2']];
   for (const [k, v] of [...upload, ['http.receivepack', 'true'], ['receive.fsckObjects', 'true'], ['transfer.fsckObjects', 'true']]) git(dir, ['config', k, v]);
   return dir;
