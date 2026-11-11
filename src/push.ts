@@ -77,7 +77,8 @@ export type { Frame } from './transport.js';
 import type { Frame, RequestBody, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
-import { WHOLE } from './pack.js';
+import { WHOLE, inputBase, typeNameOf } from './pack.js';
+import { hashObject } from './objects.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
@@ -537,6 +538,47 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
   }
   return ok(null);
 }
+// Each object once: the one place every producer's list passes (commitChanges, pushTree, merge, rebase, editFile, a
+// caller's own). A pack that holds one object twice is refused by a strict receiver: git index-pack --strict says
+// "The same object <oid> appears twice in the pack", unpack-objects --strict "tried to add buffer twice!", and
+// receive-pack reports either as "unpacker error" (git 2.50). Two whole objects are one object when type and bytes
+// are equal, so only objects that share a type and a length with another are hashed (their producer hashed each once
+// already); a list with no such pair costs a map insert per object. The first of a pair is kept, in its place, and an
+// ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
+// A delta entry is kept as given: its object id is not known without applying it. Runs after checkBases.
+export function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
+  const buckets = new Map<string, { readonly first: number; byOid: Map<string, number> | null }>();
+  const out: PackObject[] = [];
+  const keptAt: number[] = [];
+  for (const [i, obj] of objects.entries()) {
+    const base = inputBase(obj);
+    const name = typeNameOf(obj.type);
+    if (base.tag !== 'none' || name === null || !(obj.data instanceof Uint8Array)) {
+      keptAt.push(out.length);
+      out.push(base.tag === 'ofs' && out.length !== i ? { ...obj, base: { tag: 'ofs', index: atOr(keptAt, base.index, base.index) } } : obj);
+      continue;
+    }
+    const key = `${obj.type}:${obj.data.length}`;
+    const bucket = mapGet(buckets, key);
+    if (bucket.tag === 'none') {
+      buckets.set(key, { first: out.length, byOid: null });
+      keptAt.push(out.length);
+      out.push(obj);
+      continue;
+    }
+    const held = bucket.value;
+    const firstObj = at(out, held.first);
+    const byOid = held.byOid === null ? new Map<string, number>(firstObj.tag === 'some' ? [[hashObject(name, firstObj.value.data), held.first]] : []) : held.byOid;
+    held.byOid = byOid;
+    const oid = hashObject(name, obj.data);
+    const seen = mapGet(byOid, oid);
+    if (seen.tag === 'some') { keptAt.push(seen.value); continue; }
+    byOid.set(oid, out.length);
+    keptAt.push(out.length);
+    out.push(obj);
+  }
+  return out.length === objects.length ? objects : out;
+}
 // limits: the transport's (checked), or a caller's record (any subset, a key left out is the default; null is the defaults).
 export function planPush(o: PushOptions, limits: LimitsInput | null): Result<PushPlan, PlyError> {
   const checkedLimits = parseLimits(limits);
@@ -562,7 +604,7 @@ export function planPush(o: PushOptions, limits: LimitsInput | null): Result<Pus
   const listed = nonEmpty(parsed.value);
   if (!listed.ok) return listed;
   const commands = listed.value;
-  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxPack: maxPackBytes, objects: cfg.objects, sideband: cfg.sideband });
+  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxPack: maxPackBytes, objects: oncePerObject(cfg.objects), sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {

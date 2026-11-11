@@ -109,7 +109,7 @@ export type BuiltEntry = {
   readonly type: number; readonly typeName: string | null; readonly size: number; readonly compressed: number;
   readonly baseOid: string | null; readonly bytes: number; readonly offset: number;
 };
-const typeNameOf = (type: number): string | null => {
+export const typeNameOf = (type: number): string | null => {
   const named = readKey(TYPE_NAME as Readonly<Record<number, string>>, type);
   return named.tag === 'some' ? named.value : null;
 };
