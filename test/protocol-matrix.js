@@ -49,7 +49,7 @@ function makeServer(mode) {
 
 export async function runMode(mode) {
   const S = makeServer(mode);
-  const stats = { cells: 0, modelExact: 0, oracleExact: 0, invocationExact: 0, degenerate: 0, crash: 0, remote: 0 };
+  const stats = { cells: 0, modelExact: 0, oracleExact: 0, invocationExact: 0, degenerate: 0, crash: 0 };
   const norm = t => { const lines = t.trim().split('\n'); const i = lines.indexOf('--not'); const uniq = a => [...new Set(a)].sort(); return JSON.stringify([uniq(lines.slice(0, i).filter(l => l.startsWith('--shallow'))), uniq(lines.slice(0, i).filter(l => !l.startsWith('--shallow'))), uniq(lines.slice(i + 1).filter(Boolean))]); };
   const seen = new Map();
   const { model, dag, bare } = S;
@@ -80,7 +80,10 @@ export async function runMode(mode) {
     let r;
     try { r = done ? await unwrapAsync(client.fetchPack(req, { external })) : await unwrapAsync(client.negotiate(req, { external })); }
     catch (e) {
-      if (e.code === 'remote_error') { stats.remote++; continue; }
+      // The server answers no request of this plan with ERR: it serves the cell or, for a degenerate deepen, dies
+      // without a flush (remoteRefused=0 in every recorded run of the matrix, and in a probe of all 14,256 requests).
+      // A remote_error is therefore ply sending what the server refuses, and it fails its cell like any other error.
+      // It was once counted and skipped in any cell, so a ply refused in every cell passed with nothing compared.
       if (e.code === 'protocol' && /without flush/.test(e.message) && degenerate) { stats.crash++; continue; }
       assert.fail(`${label}: ${e.code} ${e.message}`);
     }

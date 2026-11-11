@@ -50,11 +50,13 @@ test('exhaustive fetch matrix: wants × haves × deepen × filter × server', as
     w.once('exit', code => reject(new Error(`${mode} worker exited ${code} without a result`)));
   })));
   for (const r of runs) if (!r.ok) assert.fail(r.error);
-  const stats = { cells: 0, modelExact: 0, oracleExact: 0, invocationExact: 0, degenerate: 0, crash: 0, remote: 0 };
+  const stats = { cells: 0, modelExact: 0, oracleExact: 0, invocationExact: 0, degenerate: 0, crash: 0 };
   for (const r of runs) for (const k of Object.keys(stats)) stats[k] += r.stats[k];
   const seen = new Map(runs.flatMap(r => r.seen));
-  console.log(`  cells=${stats.cells} oracleExact=${stats.oracleExact} invocationExact=${stats.invocationExact} modelExact=${stats.modelExact} degenerate=${stats.degenerate} serverCrash=${stats.crash} remoteRefused=${stats.remote}`);
-  assert.equal(stats.oracleExact, stats.cells - stats.degenerate - stats.crash - stats.remote, 'every non-degenerate cell is pack-objects-exact');
+  console.log(`  cells=${stats.cells} oracleExact=${stats.oracleExact} invocationExact=${stats.invocationExact} modelExact=${stats.modelExact} degenerate=${stats.degenerate} serverCrash=${stats.crash}`);
+  // No cell is excused for a refusal: a remote_error fails its cell in the worker (the server refuses no request of the plan).
+  assert.equal(stats.cells, 3 * 4752, 'three server modes, every cell of the plan');
+  assert.equal(stats.oracleExact, stats.cells - stats.degenerate - stats.crash, 'every non-degenerate cell is pack-objects-exact');
   assert.ok(stats.crash + stats.degenerate < stats.cells * 0.25, 'degenerate deepen-since/not combos stay a minority (each one is only accepted when the degeneracy predicate holds)');
   // the three server modes must agree wherever bitmaps cannot be used (deepen present or unsupported filter)
   let disagree = 0, compared = 0;
