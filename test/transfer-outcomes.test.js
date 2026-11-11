@@ -108,7 +108,7 @@ test('a push applied whose response is dropped: the refs show it, the run goes o
   for (const nth of [1, p.steps.length - 1]) {
     const f = faulty({ push: i => (i === nth ? 'drop' : 'pass') });
     const { bare, t } = repo({ fetchImpl: f.fetchImpl });
-    const run = await runTransfer(t, from, p, src.commit, { settle: FAST });
+    const run = await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF });
     assert.equal(f.seen.dropped, 1);
     assert.equal(run.ok, true, run.ok ? '' : `${run.error.code}: ${run.error.message}`);
     // every step was sent exactly once (the dropped one landed: git shows the head), so pushes is the step count
@@ -124,7 +124,7 @@ test('maxSteps: a push that gets no answer and does not land is ambiguous, never
   const { bare, t } = repo({ fetchImpl: f.fetchImpl });
   for (const maxSteps of [1, 1, 2]) {
     const before = f.seen.lost;
-    const run = await runTransfer(t, from, p, src.commit, { maxSteps, settle: FAST });
+    const run = await runTransfer(t, from, p, src.commit, { maxSteps, settle: FAST, ref: REF });
     assert.equal(f.seen.lost - before, maxSteps, 'every push the run was allowed was sent and lost');
     assert.equal(run.ok, false, `a run whose only pushes have an unknown outcome reported ${JSON.stringify(run.ok ? run.value : null)}`);
     assert.equal(run.error.code, 'ambiguous');
@@ -132,11 +132,11 @@ test('maxSteps: a push that gets no answer and does not land is ambiguous, never
   }
   // a clean run that stops at maxSteps: paused, and the pause says its last push landed (git: the temp ref moved)
   const clean = repo();
-  const paused = must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 1, settle: FAST }));
+  const paused = must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 1, settle: FAST, ref: REF }));
   assert.deepEqual(paused, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'acknowledged', lastStep: 'landed' });
   assert.equal(refsOf(clean.bare), `${p.tempRef} ${p.steps[0].temp}`);
   // no push at all
-  assert.deepEqual(must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 0 })), { tag: 'paused', step: 1, pushes: 0, reason: 'max_steps', lastPush: 'none', lastStep: 'none' });
+  assert.deepEqual(must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 0, ref: REF })), { tag: 'paused', step: 1, pushes: 0, reason: 'max_steps', lastPush: 'none', lastStep: 'none' });
 });
 
 test('the final push applied, its response dropped, the read after it failing: ambiguous, never the read\'s error', async () => {
@@ -145,7 +145,7 @@ test('the final push applied, its response dropped, the read after it failing: a
   let failReads = false;
   const f = faulty({ push: i => { if (i !== final) return 'pass'; failReads = true; return 'drop'; }, read: () => (failReads ? 'fail' : 'pass') });
   const { bare, t } = repo({ fetchImpl: f.fetchImpl });
-  const run = await runTransfer(t, from, p, src.commit, { settle: FAST });
+  const run = await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF });
   assert.equal(f.seen.dropped, 1);
   assert.ok(f.seen.readsFailed >= 1);
   assertPublished(bare, p); // git: the branch is published
@@ -154,14 +154,14 @@ test('the final push applied, its response dropped, the read after it failing: a
   assert.equal(run.error.cause?.code, 'ambiguous', 'carries the push\'s own outcome');
   // a clean resume: done, nothing sent
   failReads = false;
-  assert.deepEqual(must(await runTransfer(t, from, p, src.commit)), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
+  assert.deepEqual(must(await runTransfer(t, from, p, src.commit, { ref: REF })), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
 });
 
 test('two runners on one plan at once, 20 times: both end done; the destination is the planned head', async () => {
   const p = plan();
   for (let rep = 0; rep < 20; rep++) {
     const { bare, url } = repo();
-    const runs = await Promise.all([0, 1].map(() => runTransfer(unwrap(createTransport(url)), from, p, src.commit)));
+    const runs = await Promise.all([0, 1].map(() => runTransfer(unwrap(createTransport(url)), from, p, src.commit, { ref: REF })));
     assertPublished(bare, p);
     for (const r of runs) {
       assert.equal(r.ok, true, `rep ${rep}: a runner reported ${r.ok ? '' : `${r.error.code}: ${r.error.message}`} though git shows the transfer complete`);
@@ -230,8 +230,8 @@ async function raceGated(p, opts) {
   chmodSync(join(bare, 'hooks', 'pre-receive'), 0o755);
   const g = gatedRunners(p.steps.length, opts);
   const [runA, runB] = await Promise.all([
-    runTransfer(unwrap(createTransport(url, { fetchImpl: g.a })), from, p, src.commit, { settle: FAST }).finally(g.release.a),
-    runTransfer(unwrap(createTransport(url, { fetchImpl: g.b })), from, p, src.commit, { settle: FAST }).finally(g.release.b),
+    runTransfer(unwrap(createTransport(url, { fetchImpl: g.a })), from, p, src.commit, { settle: FAST, ref: REF }).finally(g.release.a),
+    runTransfer(unwrap(createTransport(url, { fetchImpl: g.b })), from, p, src.commit, { settle: FAST, ref: REF }).finally(g.release.b),
   ]);
   return { bare, g, runA, runB };
 }
@@ -279,7 +279,7 @@ test('atomic off, the temp ref\'s delete refused by a hook while the create land
   mkdirSync(join(bare, 'hooks'), { recursive: true });
   writeFileSync(hook, '#!/bin/sh\ncase "$1" in refs/ply/*) [ "$3" = 0000000000000000000000000000000000000000 ] && exit 1 ;; esac\nexit 0\n');
   chmodSync(hook, 0o755);
-  const run = await runTransfer(t, from, p, src.commit, { settle: FAST });
+  const run = await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF });
   assertPublished(bare, p, { temp: true }); // git: the branch at the planned head, the temp ref still there
   assert.equal(run.ok, true, run.ok ? '' : `the branch is published; the run said ${run.error.code}: ${run.error.message}`);
   assert.deepEqual(run.value, { tag: 'done', head: p.head, pushes: p.steps.length, tempLeft: true });
@@ -325,10 +325,10 @@ test('a runner whose every push is overtaken by another transport landing that s
     const landed = [];
     const o = overtaken(async k => {
       // the other writer: step k through a clean transport, and git's own view of the ref it moved
-      landed.push(must(await transferStep(clean, from, p, k, src.commit)).step);
+      landed.push(must(await transferStep(clean, from, p, k, { commit: src.commit, ref: REF })).step);
       assert.equal(refsOf(bare), k < n - 1 ? `${p.tempRef} ${p.steps[k].temp}` : `${REF} ${p.head}`);
     }, around);
-    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { settle: FAST });
+    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { settle: FAST, ref: REF });
     assert.equal(run.ok, true, `${how}: git refused the runner's push of a step the other transport had landed (the refs show it); the runner said ${say(run)}`);
     // the other transport landed every step, in order, before the runner's push of it reached git
     assert.deepEqual(landed, Array.from({ length: n }, (_, k) => k), how);
@@ -350,8 +350,8 @@ test('a pause after this run\'s push was refused and another runner landed the s
   // compare-and-swap refusal). The two facts are the test's own: the report git sent the runner, and git's refs.
   const refused = repo();
   const clean = unwrap(createTransport(refused.url));
-  const o = overtaken(async k => { must(await transferStep(clean, from, p, k, src.commit)); });
-  const paused = must(await runTransfer(unwrap(createTransport(refused.url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { maxSteps: 1, settle: FAST }));
+  const o = overtaken(async k => { must(await transferStep(clean, from, p, k, { commit: src.commit, ref: REF })); });
+  const paused = must(await runTransfer(unwrap(createTransport(refused.url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { maxSteps: 1, settle: FAST, ref: REF }));
   assert.equal(o.seen.reports.length, 1);
   assert.match(o.seen.reports[0], NG, 'git refused this run\'s push');
   assert.equal(refsOf(refused.bare), `${p.tempRef} ${p.steps[0].temp}`, 'git shows step 0 landed');
@@ -359,7 +359,7 @@ test('a pause after this run\'s push was refused and another runner landed the s
   // unanswered: the push applied, its report dropped before the runner saw it; git shows the step landed
   const f = faulty({ push: () => 'drop' });
   const dropped = repo({ fetchImpl: f.fetchImpl });
-  const unanswered = must(await runTransfer(dropped.t, from, p, src.commit, { maxSteps: 1, settle: FAST }));
+  const unanswered = must(await runTransfer(dropped.t, from, p, src.commit, { maxSteps: 1, settle: FAST, ref: REF }));
   assert.equal(f.seen.dropped, 1);
   assert.equal(refsOf(dropped.bare), `${p.tempRef} ${p.steps[0].temp}`);
   assert.deepEqual(unanswered, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'unanswered', lastStep: 'landed' });
@@ -386,7 +386,7 @@ test('a real AbortSignal fired during the final push: ambiguous, never aborted; 
       return res;
     };
     const { bare, url } = repo();
-    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl, signal: controller.signal })), from, p, src.commit, { settle: FAST });
+    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl, signal: controller.signal })), from, p, src.commit, { settle: FAST, ref: REF });
     assert.equal(seen.fired, 1, when);
     assert.equal(controller.signal.aborted, true);
     // git decides what landed: the branch published, or the temp ref still at the last batch step
@@ -395,7 +395,7 @@ test('a real AbortSignal fired during the final push: ambiguous, never aborted; 
     assert.equal(run.ok, false, `${when}: the final push's outcome is not known to the runner; it said ${say(run)}`);
     assert.equal(run.error.code, 'ambiguous', `${when}: ${say(run)}`);
     // a resume without the signal: nothing to send when it had landed, the one final push when it had not
-    const resumed = must(await runTransfer(unwrap(createTransport(url)), from, p, src.commit, { settle: FAST }));
+    const resumed = must(await runTransfer(unwrap(createTransport(url)), from, p, src.commit, { settle: FAST, ref: REF }));
     assert.deepEqual(resumed, { tag: 'done', head: p.head, pushes: when === 'applied' ? 0 : 1, tempLeft: false }, when);
     assertPublished(bare, p);
   }
@@ -414,7 +414,7 @@ test('a sweep deleting the temp ref just before the final push: atomic off, publ
       swept.push(...must(await sweepTransfers(clean)));
       assert.equal(refsOf(bare), '', 'git: the sweep deleted the temp ref');
     });
-    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { settle: FAST });
+    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { settle: FAST, ref: REF });
     assert.deepEqual(swept, [p.tempRef]);
     assert.equal(o.seen.reports.length, n);
     assert.match(o.seen.reports[n - 1], NG, `atomic ${atomic}: git refused the delete of a ref that is gone`);
@@ -428,7 +428,7 @@ test('a sweep deleting the temp ref just before the final push: atomic off, publ
       assertPublished(bare, p);
       assert.equal(run.ok, true, `the branch is published; the run said ${say(run)}`);
       assert.deepEqual(run.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false });
-      assert.deepEqual(must(await runTransfer(clean, from, p, src.commit)), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
+      assert.deepEqual(must(await runTransfer(clean, from, p, src.commit, { ref: REF })), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
     }
   }
 });
@@ -468,14 +468,14 @@ test('a push refused here before any push request (the transport\'s maxPackBytes
   // the refs readable
   const a = counted();
   const fine = repo({ fetchImpl: a.fetchImpl, limits });
-  const r1 = await runTransfer(fine.t, from, p, src.commit, { settle: FAST });
+  const r1 = await runTransfer(fine.t, from, p, src.commit, { settle: FAST, ref: REF });
   assert.equal(codeOf(r1), 'limit_exceeded', say(r1));
   assert.deepEqual([a.seen.posts, a.seen.reads], [0, 1], 'no push request; the one status read before the step and no settle read');
   assert.equal(refsOf(fine.bare), '');
   // every read after the first failing: still the refusal, and no read was made to fail
   const b = counted({ read: nth => (nth >= 1 ? 'fail' : 'pass') });
   const unreadable = repo({ fetchImpl: b.fetchImpl, limits });
-  const r2 = await runTransfer(unreadable.t, from, p, src.commit, { settle: FAST });
+  const r2 = await runTransfer(unreadable.t, from, p, src.commit, { settle: FAST, ref: REF });
   assert.equal(codeOf(r2), 'limit_exceeded', say(r2));
   assert.deepEqual([b.seen.posts, b.seen.reads], [0, 1]);
   assert.equal(refsOf(unreadable.bare), '');
@@ -485,8 +485,8 @@ test('a push refused here before any push request (the transport\'s maxPackBytes
   const c = counted({ landed: async nth => { if (nth === 0) await other.land(); } });
   const raced = repo({ fetchImpl: c.fetchImpl, limits });
   const clean = unwrap(createTransport(raced.url, {}));
-  other.land = async () => { must(await transferStep(clean, from, p, 0, src.commit)); };
-  const r3 = await runTransfer(raced.t, from, p, src.commit, { maxSteps: 1, settle: FAST });
+  other.land = async () => { must(await transferStep(clean, from, p, 0, { commit: src.commit, ref: REF })); };
+  const r3 = await runTransfer(raced.t, from, p, src.commit, { maxSteps: 1, settle: FAST, ref: REF });
   assert.equal(refsOf(raced.bare), `${p.tempRef} ${p.steps[0].temp}`, 'git shows the other runner landed step 0');
   assert.equal(codeOf(r3), 'limit_exceeded', say(r3));
   assert.deepEqual([c.seen.posts, c.seen.reads], [0, 1]);
@@ -501,7 +501,7 @@ test('the final push\'s advertisement GET failing (a real AbortSignal; the host 
     const controller = new AbortController();
     const c = counted({ advert: () => { if (fault === 'abort') controller.abort(); return fault === 'down' ? 'down' : 'pass'; } });
     const { bare, t } = repo({ fetchImpl: c.fetchImpl, signal: controller.signal });
-    const r = await runTransfer(t, from, p, src.commit, { settle: FAST });
+    const r = await runTransfer(t, from, p, src.commit, { settle: FAST, ref: REF });
     assert.equal(codeOf(r), code, `${fault}: ${say(r)}`);
     assert.ok(c.seen.adverts >= 1, 'the fault was at the advertisement GET');
     assert.equal(c.seen.posts, n - 1, `${fault}: the batch steps' pushes only`);
