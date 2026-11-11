@@ -232,6 +232,31 @@ test('squash message: time is linear in the message (64x the newlines costs unde
   assert.ok(tb < 300 * ts, `64x the input cost ${(tb / ts).toFixed(0)}x the time (${ts.toFixed(4)} ms -> ${tb.toFixed(4)} ms)`);
 });
 
+test('limits: maxRebaseCommits governs a rebase above maxMergeDepth too: a chain of exactly the limit rebases as git does, one more is refused as the rebase chain', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const r = repo();
+  commitFiles(r.work, r.bare, { 'a.txt': 'a\n' }, 'base');
+  for (let i = 1; i <= 13; i++) commitOn(r, 'feat', i === 1 ? 'main' : 'feat', { [`f${i}.txt`]: `${i}\n` }, `feat ${i}`);
+  ok(sh(r.work, ['push', '-q', r.bare, 'HEAD~1:refs/heads/feat12'])); // the same branch without its last commit: 12 above the base
+  const tip13 = ok(sh(r.bare, ['rev-parse', 'feat']));
+  commitOn(r, 'main', 'main', { 'e.txt': 'e\n' }, 'main moved');
+  // git's answer: it rebases both; 12 and 13 are the counts of commits made above
+  const d = clone(r.bare);
+  ok(sh(d, ['checkout', '-q', 'feat'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); assert.equal(ok(sh(d, ['rev-list', '--count', 'origin/main..HEAD'])), '13');
+  ok(sh(d, ['checkout', '-q', 'feat12'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitLog = log(d, 'origin/main..HEAD'); rmSync(d, { recursive: true, force: true });
+  assert.equal(gitLog.length, 12);
+  const refused = (ref, limits, what, got, max) => assert.rejects(unwrapAsync(rebaseBranch(r.url, { ref, onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, ...limits } })), e => { assert.deepEqual({ code: e.code, what: e.what, got: e.got, max: e.max }, { code: 'limit_exceeded', what, got, max }); return true; });
+  // the rebase limit below, at and above the merge depth: each time it is the bound that fires, one commit over
+  await refused('refs/heads/feat', { maxMergeDepth: 64, maxRebaseCommits: 12 }, 'rebase chain', 13, 12);
+  await refused('refs/heads/feat', { maxMergeDepth: 12, maxRebaseCommits: 12 }, 'rebase chain', 13, 12);
+  await refused('refs/heads/feat', { maxMergeDepth: 4, maxRebaseCommits: 12 }, 'rebase chain', 13, 12);
+  assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), tip13, 'a refused rebase leaves the branch');
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat12', onto: 'refs/heads/main', committer }, { ...T(), limits: { ...DEFAULT_LIMITS, maxMergeDepth: 4, maxRebaseCommits: 12 } }));
+  assert.equal(res.outcome, 'rebase'); assert.equal(res.commits, 12);
+  assert.deepEqual(log(r.bare, 'main..feat12'), gitLog, 'tree, author and subject of every replayed commit == git rebase');
+  assert.deepEqual(fsckProblems(r.bare), []);
+});
+
 test('squash message equals the one git rebase -i (pick, squash, squash) writes, byte for byte', async () => {
   const r = repo();
   commitFiles(r.work, r.bare, { 'a.txt': 'a\n' }, 'base');

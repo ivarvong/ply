@@ -60,7 +60,10 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
  * and is the ceiling for a REF_DELTA fixpoint: one Map lookup per object per pass, not a scan of the pack.
  */
 export const LIMIT_PACK_OBJECTS = 100_000;
-/** ls-refs lines, and the rebase chain walked from them. */
+/**
+ * ls-refs lines, and the rebase chain walked from them. rebaseBranch searches for the merge base as deep as this
+ * chain bound needs (max(maxMergeDepth, maxRebaseCommits + 2)), so it, not LIMIT_MERGE_DEPTH, bounds a rebase.
+ */
 export const LIMIT_REFS = 10_000;
 export const LIMIT_REBASE_COMMITS: number = LIMIT_REFS;
 /** shallow, ack, and any other v2 section lines per fetch. */

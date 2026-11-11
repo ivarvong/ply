@@ -57,7 +57,7 @@ export function squashMessage(messages: ReadonlyArray<string | null>): string {
   for (const m of messages) {
     if (m === null) continue;
     let end = m.length;
-    while (end > 0 && m.charCodeAt(end - 1) === 10) end--;
+    while (end > 0 && m.codePointAt(end - 1) === 10) end--;
     if (end > 0) parts.push(m.slice(0, end));
   }
   return `${parts.join('\n\n')}\n`;
@@ -201,7 +201,11 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const target = targetAt.value;
     if (ontoOid.tag === 'some') { const c = await assertCommit(t, ontoOid.value, 'onto'); if (!c.ok) return c; }
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
-    const found = await mergeBaseOf(t, tip, target);
+    // maxRebaseCommits is the bound on a rebase's chain, so the base search must be able to see a chain that long:
+    // under maxMergeDepth alone the chain limit could never fire above it (the defaults: 1024 against 10 000) and a
+    // branch git rebases was refused whatever maxRebaseCommits said. The base of a chain of n commits is n + 1 commits
+    // from the tip; + 2 so a chain one over the limit is found and refused by its own name (linearChain).
+    const found = await mergeBaseOf(t, tip, target, { maxDepth: Math.max(limits.maxMergeDepth, limits.maxRebaseCommits + 2) });
     if (!found.ok) return found;
     const { bases, commits, verdict } = found.value;
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),
