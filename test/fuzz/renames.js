@@ -1,6 +1,6 @@
 // A seeded generator of three-way cases around renames: base / ours / theirs as { path: content }. ply does not detect
-// renames, so every shape here is one where git's rename detection may or may not change the merge; the callers
-// (test/merge-renames.test.js, test/fuzz/git-semantic.mjs) hold ply to `git merge-tree --write-tree`.
+// renames, so every shape here is one where git's rename detection may or may not change the merge; its caller
+// (test/merge-renames.test.js) holds ply to `git merge-tree --write-tree`.
 //
 // Operations, applied to a side or to both ("shared": the changed subtree is then the same tree on both sides):
 //   move       a file to another directory, same bytes
