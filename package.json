@@ -94,6 +94,7 @@
     "build": "tsc -p tsconfig.json",
     "prepare": "tsc -p tsconfig.json",
     "check:dist": "node scripts/dist-check.mjs",
+    "check:pack": "node scripts/pack-check.mjs",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.isolated.json && node scripts/ts-ratchet.mjs && node scripts/absence-ratchet.mjs && node scripts/throw-ratchet.mjs",
     "lint": "oxlint --type-aware --deny-warnings src && oxlint -c oxlint.loose.json src test scripts examples bench && node scripts/exhaustive.mjs",
     "test": "rm -rf .failsites && PLY_FAILSITES=.failsites NODE_OPTIONS=--import=$PWD/test/space/failsite-hook.mjs vitest run && PLY_FAILSITES=.failsites PLY_FAILSITES_GATE=1 vitest run test/space/failsites.test.js && npm run test:fuzz-pinned",

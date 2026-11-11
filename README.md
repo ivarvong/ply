@@ -17,6 +17,10 @@ npm install github:ivarvong/ply#<commit-sha>  # recommended: pin a commit for re
 
 It installs as `ply`, so imports read `from 'ply'` and `from 'ply/<subpath>'` (`ply/edit`, `ply/read`, `ply/tree`, `ply/checkout-node`, …). Types ship with it (`dist/*.d.ts`); JavaScript and TypeScript use the same calls.
 
+ply is ESM-only: there is no CommonJS build and no `require` export condition. The Node floor is 20 (`engines.node` is `>=20`; all 19 entry points import on 20.17.0). From a CommonJS file, `await import('ply')` works on every supported Node. `require('ply')` depends on the Node version: it throws `ERR_REQUIRE_ESM` on Node 20 (measured on 20.17.0 and 20.18.0) and on Node 22 before 22.12 (Node's documented boundary, not measured here), and it works on Node 22.12 and later (measured on 22.15.0, 24.16.0, 24.18.0 and 25.2.1). CI job `pack` packs the tarball, installs it with `--ignore-scripts` into an empty project, and checks every import and this `require()` behaviour under Node 20, 22 and 24 (`npm run check:pack`, `test/pack-install.test.js`).
+
+The git install above needs npm's lifecycle scripts: `dist/` is not in git, and npm builds it by running `prepare` (which installs ply's dev tools in a temporary clone). With `ignore-scripts=true` the same command exits 0 and installs a package with no `dist/`, so every import fails with `ERR_MODULE_NOT_FOUND` (measured with npm 11.16.0; pnpm, yarn and bun were not measured). The packed tarball contains `dist/` and installs with scripts off; CI uploads it as the workflow artifact `ply-tarball`.
+
 ## Beta
 
 ply is pre-1.0 (0.2.0). The API can change between commits without a deprecation period, and there are no tagged releases yet: pin a commit sha, read the commit log before moving the pin, and let your type checker or tests catch a changed signature. Span names and attributes are a stated contract (see [Telemetry contract](#telemetry-contract)).
