@@ -403,3 +403,37 @@ test('every REF delta filed under an id `external` gives is patched on that base
     assert.equal(r.value.objects.get(blobId(5)).chain, 1);
   }
 });
+
+test('a REF delta whose base the pack builds is patched on the pack\'s copy: `external` is not asked for that id even if it holds it, and the chain is the pack\'s own', () => {
+  // Hand-built (parsePack can produce the shape from wire bytes; git writes a base before its deltas):
+  //   REF@2 on X -> A,  REF@3 on B -> C,  OFS@4 on offset 2 -> B,   `external` holds X and B   (X = c8, A = c1, B = c2, C = c3).
+  // The README rule: `external` supplies a base that is not in the pack, and a REF_DELTA whose base the pack builds is
+  // patched on the pack's copy whenever that copy resolves before the id is asked for. Applied by hand: nothing resolves
+  // from the pack alone (@2 waits on X, @3 on B, @4 on @2), so the first waiting id in pack order, X, is asked for. @2 is
+  // patched on the given X (A: chain 1, external base 1). That lets @4 resolve on @2, which builds B inside the pack
+  // (chain 2). B is now in the pack before it was asked for, so @3 is patched on the pack's B: C is chain 2 + 1 = 3, and
+  // `external` is never asked for B though it holds it. So: asked [X], 3 objects, externalBases 1, maxChain 3, C at
+  // chain 3; and a limit of 2 deltas refuses the pack at C's third link (got 3, max 2), still having asked only X.
+  // (Main at ec337c5 asked X then B and patched C on the given B: chain 1, externalBases 2, ok at a limit of 2.)
+  // ofsAt(4, 2, 2) writes content(1).length as its source size and its base here is content(1): the delta applies.
+  const [X, A, B, C] = [8, 1, 2, 3];
+  const objects = [refAt(2, X, A), refAt(3, B, C), ofsAt(4, 2, B)];
+  const held = oid => (oid === blobId(X) ? blobBase(X) : oid === blobId(B) ? blobBase(B) : null);
+  const c = counting(held);
+  const r = resolvePack({ objects }, c.external);
+  assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+  assert.deepEqual(c.asked, [blobId(X)]);
+  assert.deepEqual([...r.value.objects.keys()].sort(), [blobId(A), blobId(B), blobId(C)].sort());
+  assert.equal(r.value.stats.externalBases, 1);
+  assert.equal(r.value.stats.maxChain, 3);
+  assert.equal(r.value.objects.get(blobId(A)).chain, 1);
+  assert.equal(r.value.objects.get(blobId(B)).chain, 2);
+  assert.equal(r.value.objects.get(blobId(C)).chain, 3);
+  const limited = counting(held);
+  let refused;
+  assert.doesNotThrow(() => { refused = resolvePack({ objects }, limited.external, withLimits({ maxDeltaChain: 2 })); });
+  assert.ok(!refused.ok);
+  assert.deepEqual(coded(refused), ['limit_exceeded', 'delta chain depth', 3, 2]);
+  assert.equal(refused.error.message, 'delta chain depth 3 exceeds limit 2');
+  assert.deepEqual(limited.asked, [blobId(X)]);
+});
