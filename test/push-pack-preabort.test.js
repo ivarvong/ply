@@ -11,6 +11,7 @@ import { createTransport } from '../src/http.js';
 import { ZERO_OID, push } from '../src/push.js';
 import { pushPack } from '../src/receivecaps.js';
 import { streamSource } from '../src/packwrite.js';
+import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
 test('pushPack under an already-aborted signal: a definite aborted, no request, the pack never read, locked or cancelled', async () => {
@@ -201,6 +202,62 @@ test('push with a pack sent as bytes: a signal already fired is the definite abo
     assert.equal(g.refs(), before, 'git for-each-ref is unchanged');
   } finally { g.close(); }
 });
+
+// The HTTP half of the same rule: an answer that arrives while the body is still unpulled. The server cannot have
+// read a command list nobody handed over, so the answer's own code is the outcome and the pack is still the caller's.
+// Expected codes are the status classes as HTTP defines them and README names them (401 auth, 404 not_found,
+// 429 rate_limited, 5xx upstream_5xx, an unfollowed redirect http, a 200 that is not a receive-pack result not_git),
+// written here by hand. The double answers without touching init.body; pulls and cancels are the test's own counters.
+const ANSWERS = [
+  ['401', () => new Response('no', { status: 401 }), 'auth'],
+  ['404', () => new Response('no', { status: 404 }), 'not_found'],
+  ['429', () => new Response('no', { status: 429 }), 'rate_limited'],
+  ['500', () => new Response('no', { status: 500 }), 'upstream_5xx'],
+  ['a 302 redirect', () => new Response('', { status: 302, headers: { location: 'http://127.0.0.1:1/elsewhere/git-receive-pack' } }), 'http'],
+  ['200 with content-type text/plain', () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } }), 'not_git'],
+];
+for (const [name, answer, code] of ANSWERS) {
+  test(`pushPack, the POST answered ${name} with the body never pulled: the definite ${code}, the pack never read, locked or cancelled`, async () => {
+    const g = await gitServer();
+    try {
+      const before = g.refs();
+      let posts = 0;
+      const fetchImpl = async (url, init) => { if (!isReceive(url)) return fetch(url, init); posts++; return answer(); };
+      const { seen, stream } = packOf();
+      const exporter = arrayExporter();
+      const t = unwrap(createTransport(g.url, { fetchImpl, tracer: new Tracer({ exporter }) }));
+      const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: g.commit, newOid: 'a'.repeat(40), pack: stream, length: 1024 });
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, code, r.error.message);
+      assert.deepEqual({ ...seen, locked: stream.locked, posts }, { pulls: 0, cancels: 0, locked: false, posts: 1 });
+      assert.equal(g.refs(), before, 'git for-each-ref is unchanged');
+      assert.equal((await stream.getReader().read()).value.length, 1024, 'the pack is still the caller\'s');
+      // the span says no more than the error it carries: no attribute outside the documented ones
+      const receive = exporter.lines.flatMap(flattenLine).filter(s => s.name === 'git.receive-pack');
+      assert.equal(receive.length, 1);
+      assert.equal('git.push.unsent' in receive[0].attrs, false);
+    } finally { g.close(); }
+  });
+
+  test(`pushPack, the POST answered ${name} after one body pull: ambiguous, with ${code} as the original`, async () => {
+    const g = await gitServer();
+    try {
+      let pulled = 0;
+      const fetchImpl = async (url, init) => {
+        if (!isReceive(url)) return fetch(url, init);
+        const first = await init.body.getReader().read();
+        pulled += first.value.length;
+        return answer();
+      };
+      const { stream } = packOf();
+      const t = unwrap(createTransport(g.url, { fetchImpl }));
+      const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: g.commit, newOid: 'a'.repeat(40), pack: stream, length: 1024 });
+      assert.ok(pulled > 0, 'the double read the first chunk');
+      assert.equal(r.ok, false);
+      assert.deepEqual({ code: r.error.code, original: r.error.original }, { code: 'ambiguous', original: code });
+    } finally { g.close(); }
+  });
+}
 
 // The body itself: `pulled` turns true at the first pull and not before; a source given back is unlocked and uncancelled;
 // a body given back and pulled after all errors without handing over the command list; after a pull giveBack does nothing.

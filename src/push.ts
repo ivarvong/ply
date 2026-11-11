@@ -877,11 +877,11 @@ async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promis
   const body = streamSource(p.pack, prefix.value, p.length, plan.maxPack);
   const r = await readResponse(t, plan, body, span, plan.sideband);
   // The exchange failed with no answer and the transport never pulled the body: the command list did not leave this
-  // process, so no ref can have moved. The failure is its own cause (network, aborted, timeout), not 'ambiguous', and
+  // process, so no ref can have moved. The failure is its own cause (network, aborted, timeout, or the code of an HTTP
+  // answer that came with the body still unpulled: auth, not_found, rate_limited, upstream_5xx, http, not_git), not 'ambiguous', and
   // the pack goes back to the caller unread, unlocked and uncancelled. 'ambiguous' starts at the first pull.
   if ('cause' in r && !r.answered && !body.pulled()) {
     body.giveBack();
-    span.set({ 'git.push.ok': false, 'git.push.unsent': true });
     return err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null));
   }
   // read before release: abandoning the rest of a pack the server already answered is not a failure of the pack
