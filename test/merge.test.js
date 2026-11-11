@@ -14,7 +14,7 @@ const rediff = oracleRediff();
 import { editFile } from '../src/edit.js';
 import { rebaseBranch } from '../src/rebase.js';
 import { mergeBranch, deleteRef, threeWay, bestBases, mergeMode, uniqueObjects, mergeBase } from '../src/merge.js';
-import { DEFAULT_LIMITS } from '../src/limits.js';
+import { DEFAULT_LIMITS, WORKER_LIMITS } from '../src/limits.js';
 import { attributesFor } from '../src/attributes.js';
 import { createTransport as createTransportR } from '../src/http.js';
 import { GitHttp } from '../src/client.js';
@@ -183,6 +183,27 @@ test('limits: a file over maxMergeBlobBytes is a conflict with that reason (git 
   await assert.rejects(unwrapAsync(mergeBase(t, a, c, { maxDepth: 9 })), e => e.code === 'limit_exceeded' && e.max === 9);
   const near = branchCommit(r2, 'n', root, { 'x': 'n\n' }, 'n'); const near2 = branchCommit(r2, 'n2', root, { 'x': 'n2\n' }, 'n2');
   assert.deepEqual(pick(await unwrapAsync(mergeBase(t, near, near2, { maxDepth: 3 }))), { base: root, depth: 3, verdict: 'found' }, 'cap 3 < the first window of 8: one search of 3 (was limit_exceeded with no fetch)');
+});
+
+test('limits: a file whose line merge needs more than maxMergeWork steps is a conflict, too large to merge (git merges it: the budget is ours); a maxMergeWork that bounds nothing is refused', async () => {
+  const r = repo();
+  const lines = Array.from({ length: 200 }, (_, i) => `line ${i}\n`);
+  const b = commitFiles(r.work, r.bare, { 'big.txt': lines.join('') }, 'base');
+  branchCommit(r, 'feat', b, { 'big.txt': [...lines.slice(0, -1), 'END\n'].join('') }, 'theirs');
+  const ours = branchCommit(r, 'main', b, { 'big.txt': ['TOP\n', ...lines.slice(1)].join('') }, 'ours');
+  const go = limits => unwrapAsync(mergeBranch(r.url, { ref: 'refs/heads/main', from: 'refs/heads/feat', author }, { tracer: new Tracer(), rediff, limits }));
+  // Any diff of 200 lines against 200 reads every line of both at least once: 400 steps for base→ours alone, so a
+  // budget of 100 is passed whatever is counted. The presets carry the key as a number (the brand's contract).
+  assert.ok(Number.isFinite(DEFAULT_LIMITS.maxMergeWork) && DEFAULT_LIMITS.maxMergeWork > 400, `DEFAULT_LIMITS.maxMergeWork ${DEFAULT_LIMITS.maxMergeWork}`);
+  assert.ok(Number.isFinite(WORKER_LIMITS.maxMergeWork) && WORKER_LIMITS.maxMergeWork > 400 && WORKER_LIMITS.maxMergeWork <= DEFAULT_LIMITS.maxMergeWork, `WORKER_LIMITS.maxMergeWork ${WORKER_LIMITS.maxMergeWork}`);
+  await assert.rejects(go({ ...DEFAULT_LIMITS, maxMergeWork: 100 }), e => e.code === 'merge_conflict' && e.reasons['big.txt'] === 'too large to merge');
+  assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), ours, 'nothing pushed');
+  for (const bad of [NaN, Infinity, -1, '100']) {
+    await assert.rejects(go({ maxMergeWork: bad }), e => e.code === 'bad_request' && e.what === 'maxMergeWork' && Object.is(e.got, bad), String(bad));
+    assert.equal(sh(r.bare, ['rev-parse', 'main']).stdout.trim(), ours, 'nothing pushed');
+  }
+  assert.equal((await go({ ...WORKER_LIMITS })).outcome, 'merge', 'within the Worker budget the same merge is clean');
+  assert.equal(sh(r.bare, ['cat-file', '-p', 'main:big.txt']).stdout, ['TOP\n', ...lines.slice(1, -1), 'END\n'].join(''));
 });
 
 test('merge bases decided by git: criss-cross refuses (git builds a virtual base we do not), the summed-distance trap now picks git\'s base', async () => {

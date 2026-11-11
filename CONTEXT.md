@@ -83,7 +83,10 @@ Key operation modules:
   `attributeDrivers`/`attributeTree`.
 - `linemerge.js` — port of git's xdiff as merge-ort drives it: histogram diff (+ hash-chain limit), classic Myers fallback
   (prepare-stage trim/cleanup, `xdl_split` heuristics), group compaction (+ git 2.54's shifted-group re-diff), build
-  script, `xdl_do_merge`, conflict refinement and simplification, fill (clean and `merge=union`).
+  script, `xdl_do_merge`, conflict refinement and simplification, fill (clean and `merge=union`). Its diff work is
+  counted (every inner-loop iteration of the histogram scan and the classic fallback, on the module's own counter)
+  against `limits.maxMergeWork`, absolute per merged file: past it the file is a conflict with reason `too large to
+  merge`, as one over `maxMergeBlobBytes` is, never a different merge.
 - `attributes.js` — `.gitattributes` as git reads them: parse, wildmatch, precedence, macros.
 - `rebase.js` — `rebaseBranch` (per-commit or squash), `cherryPick`, `revertCommit` on the same merge primitive.
 - `repo-node.ts` — `pushRepo(dir, url, { refspecs, all, tags, force, dryRun, thin }, opts)`: `git push` of a local
@@ -173,6 +176,7 @@ This session (2026-10-19 → 20):
 | After an acknowledged push, any read-back failure → `ambiguous` | the push may have landed; a transport code would invite a wrong retry (I25) |
 | Pack cache keyed by sha256(url, credential, body), wants-only | measured against GitHub: wants-only fetches are deterministic; the store side is verified while streaming (O(chunk) state: framing, no ERR, pack trailer SHA-1), a HIT is served unparsed and the client's parse is the check: poison → bust + one retry |
 | Merge = tree merge + ported line merge, never "close enough" | clean results must equal `git merge-tree` byte for byte; anything uncertain is a conflict (superset) |
+| Line merge work is budgeted: `maxMergeWork` steps per merged file (2^32 default, 2^26 in `WORKER_LIMITS`) | git's histogram diff is O(n²) on inputs well under the byte cap; over the budget is a conflict (`too large to merge`), the one place we conflict where git merges cleanly (I27). Default: what git merges in about 5 s here, pair swaps and bulk edits both (2^31 refused a 130,000-line bulk edit git merges in 4.1 s); Worker: about 1 s of counted work |
 | No rename detection; rename guards instead | porting merge-ort's rename detection is large; guards make every rename shape a conflict, never a wrong tree |
 | `rediff` option, default `myers` | git changed behaviour in 2.54; both are git; default follows current git, `skip`/`undecided` documented |
 | Merge base = git's best common ancestors, deepen until complete; criss-cross refused | the old "closest" rule produced wrong merges (shown); a single base cannot reproduce git's virtual base |
