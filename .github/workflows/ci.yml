@@ -100,6 +100,8 @@ jobs:
         env:
           RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: npm run typecheck
+      # lint ends with the regex gate (scripts/regex-gate.mjs): every regex in src/ has an inventory row and no refused
+      # shape. The rows' ratio test is test/regex-linear.test.js, which runs in the test shards.
       - run: npm run lint
       - name: dist is what consumers import
         run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"

@@ -70,6 +70,7 @@
   "test/read.test.js": 17,
   "test/rebase.test.js": 21,
   "test/redirect.test.js": 2,
+  "test/regex-linear.test.js": 4,
   "test/relay.test.js": 0,
   "test/resolve-memory.test.js": 8,
   "test/response-headers.test.js": 0,

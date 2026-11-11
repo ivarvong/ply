@@ -5,13 +5,17 @@
 //   1. every regex literal and every RegExp construction in src/ (found with the TypeScript compiler API) must have an
 //      entry in scripts/regex-inventory.mjs with the same file and the same pattern text; an entry whose pattern is no
 //      longer in that file fails too (a stale entry, or a known-bad marker left behind after its fix landed);
-//   2. each entry says what text the pattern is applied to (`input`: remote, caller or internal), why it is linear
-//      (`linear`), and for remote or caller text gives an adversarial input generator (`adversarial(n)`), which
-//      test/regex-linear.test.js runs as a ratio test (64 times the length must cost less than 300 times the time);
-//   3. shapes that backtrack are refused outright, whatever the inventory says: a quantifier inside a quantified group
-//      (nested), and two variable-length quantified atoms next to each other that can match the same character
-//      (adjacent). An entry marked `knownBad: '<branch that fixes it>'` is exempt from 3 and from the ratio test, and
-//      must still be in the source: when the fix lands the entry fails the gate until it is removed.
+//   2. each entry says what text the pattern is applied to (`input`: remote, stored, caller or internal), why it is
+//      linear (`linear`), and for remote, stored or caller text gives an adversarial input generator
+//      (`adversarial(n)`), which test/regex-linear.test.js runs at n, 2n and 4n as a ratio test (4 times the length
+//      must cost less than 9 times the time; never an absolute time). That test is the gate's first line;
+//   3. the second line: shapes that backtrack are refused outright, whatever the inventory says: a quantifier inside a
+//      quantified group (nested); two variable-length quantified atoms next to each other that can match the same
+//      character (adjacent); an unanchored unbounded run followed by something that can fail, such as /\/+$/ or
+//      /\n+$/ (every character of a long run starts the run again); and alternatives under a quantifier that can start
+//      with the same character, such as /(a|ab)*c/. An entry marked `knownBad: '<branch that fixes it>'` is exempt
+//      from 3, is listed on every run, must still be in the source (when the fix lands the entry fails the gate until
+//      it is removed), and the ratio test asserts that its generator does show a superlinear cost.
 //
 //   node scripts/regex-gate.mjs            check, exit 1 on any problem
 //   node scripts/regex-gate.mjs --list     print every pattern found with its inventory verdict
@@ -144,6 +148,18 @@ const charsIn = item => {
   return new Set();
 };
 const overlap = (a, b) => { for (const cp of a) if (b.has(cp)) return true; return false; };
+// What an alternative can start with: every atom up to and including the first one that must match.
+const firstChars = seq => {
+  const chars = new Set();
+  for (const item of seq) {
+    if (zeroWidth(item)) continue;
+    for (const cp of charsIn(item)) chars.add(cp);
+    if (item.min > 0) break;
+  }
+  return chars;
+};
+const isRun = item => !zeroWidth(item) && (unbounded(item) || (item.type === 'group' && hasUnbounded(item.body)));
+const canFail = item => zeroWidth(item) || item.min > 0;
 // The shapes refused: returns a list of reasons, empty when the pattern has none of them.
 export function shapeProblems(source, flags) {
   const problems = [];
@@ -152,6 +168,10 @@ export function shapeProblems(source, flags) {
       seq.forEach((item, at) => {
         if (item.type === 'group' || item.type === 'look') {
           if (item.type === 'group' && unbounded(item) && hasUnbounded(item.body)) problems.push(`nested quantifier: ${item.text} repeats a group that itself repeats`);
+          // (a|ab)*: after any prefix the engine may take either alternative, so a failure retries every split.
+          if (item.type === 'group' && unbounded(item) && item.body.some((alt, k) => item.body.slice(k + 1).some(later => overlap(firstChars(alt), firstChars(later))))) {
+            problems.push(`overlapping alternatives under a quantifier: two alternatives of ${item.text} can start with the same character`);
+          }
           check(item.body);
         }
         if (zeroWidth(item) || !variable(item)) return;
@@ -166,12 +186,29 @@ export function shapeProblems(source, flags) {
       });
     }
   };
-  check(parsePattern(source, flags));
+  const top = parsePattern(source, flags);
+  check(top);
+  // An unanchored unbounded run followed by something that can fail (/\/+$/ on '////…x'): the search starts the run
+  // again at each of its characters and each start walks to the end of the run before failing. It needs the pattern to
+  // be able to start inside the run: nothing before the run, or only atoms the run's own characters can match.
+  for (const seq of top) {
+    const first = seq.find(item => item.type !== 'look');
+    const caret = first !== undefined && first.type === 'assert' && first.text === '^';
+    seq.forEach((item, at) => {
+      if (!isRun(item)) return;
+      const chars = charsIn(item);
+      // ^ under the m flag also matches after every newline: it anchors only a run that cannot cross one.
+      if (flags.includes('y') || (caret && !(flags.includes('m') && chars.has(10)))) return;
+      const restarts = seq.slice(0, at).every(before => zeroWidth(before) || overlap(charsIn(before), chars));
+      const failing = seq.slice(at + 1).find(canFail);
+      if (restarts && failing !== undefined) problems.push(`unanchored run ${item.text} is followed by ${failing.text}, which can fail: every character of a long run starts the run again`);
+    });
+  }
   return problems;
 }
 
 // ---- the gate -----------------------------------------------------------------------------------------------------
-const INPUTS = ['remote', 'caller', 'internal'];
+const INPUTS = ['remote', 'stored', 'caller', 'internal'];
 export function gate(found, inventory) {
   const problems = [];
   const keyOf = x => `${x.file}\n${x.pattern}`;
@@ -193,6 +230,7 @@ export function gate(found, inventory) {
     if ((entry.count ?? 1) !== uses.length) problems.push(`${where}: used ${uses.length} time(s) (lines ${uses.map(u => u.line).join(', ')}), inventory says ${entry.count ?? 1}`);
     if (!INPUTS.includes(entry.input)) problems.push(`${where}: input must be one of ${INPUTS.join(', ')}`);
     if (typeof entry.linear !== 'string' || entry.linear.length < 12) problems.push(`${where}: say why it is linear`);
+    if (entry.knownBad !== undefined && (typeof entry.knownBad !== 'string' || entry.knownBad.length < 8)) problems.push(`${where}: knownBad names the branch that fixes it`);
     if (entry.input !== 'internal' && typeof entry.adversarial !== 'function') problems.push(`${where}: ${entry.input} text needs an adversarial(n) generator for the ratio test`);
     if (uses[0].kind === 'construction' && entry.input !== 'internal' && typeof entry.build !== 'function') problems.push(`${where}: a constructed RegExp on ${entry.input} text needs build() for the ratio test`);
     if (entry.knownBad !== undefined) continue;
@@ -240,5 +278,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   const problems = gate(found, INVENTORY);
   for (const p of problems) console.error(`regex-gate: ${p}`);
   if (problems.length > 0) { console.error(`regex-gate: ${problems.length} problem(s); see the header of scripts/regex-gate.mjs`); process.exit(1); }
-  console.log(`regex-gate: ${found.length} pattern(s) in src/, all inventoried, none of a refused shape (${INVENTORY.filter(e => e.knownBad !== undefined).length} known-bad)`);
+  const knownBad = INVENTORY.filter(e => e.knownBad !== undefined);
+  for (const e of knownBad) console.log(`regex-gate: KNOWN BAD ${e.file}: ${e.pattern} (fix: ${e.knownBad})`);
+  console.log(`regex-gate: ${found.length} pattern(s) in src/, all inventoried, none of a refused shape (${knownBad.length} known-bad, listed above)`);
 }
