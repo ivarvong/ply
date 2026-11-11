@@ -153,6 +153,43 @@ test('a call that does not name the ref is refused unsent: a stored plan never c
   assert.equal(refsOf(bare), `${VICTIM} ${victim}`, 'the destination is as git left it');
 });
 
+test('a `commit` that is not a Uint8Array is refused unsent by runTransfer and transferStep, naming `commit`: neither throws', async () => {
+  // a resuming caller reads the source commit's bytes back from its store next to the plan. The plan here is honest
+  // and the ref is named, so the only reason to refuse is the argument. Expected value, by the contract and not from
+  // the code: a Result API answers a wrong argument with a coded error (bad_request, what 'commit'), before any use
+  const honest = planned();
+  const { bare, victim, t } = destination();
+  const before = proxy.count();
+  const notBytes = {
+    null: null,
+    'not given': void 0,
+    'a string': 'junk',
+    'a number': 7,
+    'an object': {},
+    'an array of the bytes': [...commit],
+    'an ArrayBuffer of the bytes': commit.buffer.slice(commit.byteOffset, commit.byteOffset + commit.byteLength),
+  };
+  const wrong = [];
+  for (const [label, value] of Object.entries(notBytes)) {
+    const calls = {
+      runTransfer: () => runTransfer(t, from, honest, value, { ref: COPY }),
+      transferStep: () => transferStep(t, from, honest, 0, { commit: value, ref: COPY }),
+    };
+    for (const [name, call] of Object.entries(calls)) {
+      let got;
+      try {
+        got = JSON.stringify(answerOf(await call()));
+      } catch (e) {
+        got = `threw ${String(e)}`;
+      }
+      if (got !== '["bad_request","commit"]') wrong.push(`${name}(commit = ${label}): ${got}`);
+    }
+  }
+  assert.deepEqual(wrong, []);
+  assert.equal(proxy.count() - before, 0, 'no request was sent');
+  assert.equal(refsOf(bare), `${VICTIM} ${victim}`, 'the destination is as git left it');
+});
+
 test('on a finished destination a plan that does not pass is still refused, not answered done; a commit that does not give the planned head is refused unsent', async () => {
   const honest = planned();
   const { bare, victim, t } = destination();

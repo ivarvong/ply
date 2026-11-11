@@ -231,6 +231,8 @@ export async function runTransfer(dst: Transport, from: TransferPack, stored: Tr
   const cfg = withDefaults<RunConfig>(opts, { maxSteps: Number.POSITIVE_INFINITY, retries: 2, settle: SETTLE_DEFAULTS });
   const checked = checkTransferPlan(stored, opts);
   if (!checked.ok) return checked;
+  // the same refusal transferStep gives, before any use of the bytes
+  if (!(commit instanceof Uint8Array)) return fail('bad_request', 'transfer: `commit` is the source commit\'s bytes', { what: 'commit' });
   const plan = checked.value;
   const fits = planFitsPack(plan, from.pack, from.resolved);
   if (!fits.ok) return fits;
