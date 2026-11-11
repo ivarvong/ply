@@ -402,11 +402,14 @@ export type PackFetch = AsyncGenerator<Uint8Array, V2State, unknown>;
 // The response read frame by frame: band-1 bytes yielded as they arrive, the v2 state or the first Err returned. A
 // caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too, and so is
 // whatever the transport's stream raised (it is re-raised, scrubbed).
-async function* v2Frames(t: Transport, req: FetchRequest, bypassCache: boolean, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
-  const body = fetchRequestBody(req);
+// The request is parsed once here: its `done` is the line that is sent and the one the answer is judged against (v2End).
+async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
+  const req = fetchRequest(opts);
+  if (!req.ok) return req;
+  const body = fetchRequestBody(req.value);
   if (!body.ok) return body;
   // the exchange (no request yet: the frames are pulled below), then the limits it runs under
-  const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache });
+  const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) });
   let st = v2Init(t.limits);
   try { for await (const f of exchange) {
     const r = v2Step(st, f);
@@ -414,17 +417,13 @@ async function* v2Frames(t: Transport, req: FetchRequest, bypassCache: boolean, 
     st = r.value.state;
     if (r.value.pack) yield r.value.pack;
   } } catch (e) { throw scrubError(e, t.scrub); }
-  return ok(st);
+  return v2End(st, req.value.done);
 }
 // Stream band-1 pack bytes. Consumer drives it; the v2 state is the generator's return value. A stream: a failure is
 // raised through it (the iterator rejects with the PlyError).
 export async function* packStream(t: Transport, opts: FetchOpts, span: Span): PackFetch {
   span.set(fetchAttrs(opts));
-  // the request parsed once: its `done` is the line that is sent and the one the answer is judged against
-  const req = fetchRequest(opts);
-  if (!req.ok) throw req.error;
-  const read = yield* v2Frames(t, req.value, Boolean(opts.bypassCache), span);
-  const end = read.ok ? v2End(read.value, req.value.done) : read;
+  const end = yield* v2Frames(t, opts, span);
   if (!end.ok) throw end.error;
   span.set(v2Attrs(end.value));
   return end.value;
