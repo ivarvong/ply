@@ -25,29 +25,34 @@ const run = pos => {
 };
 
 test('a pos that is not a position in the buffer is bad_request: no throw, no read', () => {
+  // The third column is what the message calls the value, written out by hand: a number is named as JavaScript prints
+  // it, anything else by its type alone (a string's content never reaches the message, so the message is bounded
+  // whatever the caller passed). buf is 8 + member + empty bytes long; its length is spelled from the parts.
   const cells = [
-    ['negative', -1],
-    ['negative, the length of the trailing member (subarray reads it from the end)', -empty.length],
-    ['fractional', 1.5],
-    ['fractional, a hair past a valid position', junk.length + 0.5],
-    ['NaN', Number.NaN],
-    ['Infinity', Number.POSITIVE_INFINITY],
-    ['-Infinity', Number.NEGATIVE_INFINITY],
-    ['past the end by one', buf.length + 1],
-    ['past the end, not a safe integer', 2 ** 53],
-    ['a string that spells a valid position', String(junk.length)],
-    ['a string that spells zero', '0'],
-    ['an empty string', ''],
-    ['null', null],
-    ['a bigint', 8n],
-    ['an object with valueOf', { valueOf: () => junk.length }],
+    ['negative', -1, '-1'],
+    ['negative, the length of the trailing member (subarray reads it from the end)', -8, '-8'],
+    ['fractional', 1.5, '1.5'],
+    ['fractional, a hair past a valid position', 8.5, '8.5'],
+    ['NaN', Number.NaN, 'NaN'],
+    ['Infinity', Number.POSITIVE_INFINITY, 'Infinity'],
+    ['-Infinity', Number.NEGATIVE_INFINITY, '-Infinity'],
+    ['past the end by one', buf.length + 1, String(8 + member.length + empty.length + 1)],
+    ['past the end, not a safe integer', 2 ** 53, '9007199254740992'],
+    ['a string that spells a valid position', '8', 'string'],
+    ['a string that spells zero', '0', 'string'],
+    ['an empty string', '', 'string'],
+    ['a long string', 'x'.repeat(10_000), 'string'],
+    ['null', null, 'object'],
+    ['a bigint', 8n, 'bigint'],
+    ['an object with valueOf', { valueOf: () => junk.length }, 'object'],
   ];
-  for (const [name, pos] of cells) {
+  assert.equal(empty.length, 8, 'node:zlib\'s empty member is 8 bytes (2 header, 2 block, 4 adler), the -8 cell\'s premise');
+  for (const [name, pos, named] of cells) {
     const r = run(pos);
     assert.equal(r.threw, undefined, `${name}: threw ${r.threw}`);
     assert.equal(r.ok, false, `${name}: answered ok (${r.ok ? `${r.value.out.length} B, consumed ${r.value.consumed}` : ''})`);
     assert.equal(r.error.code, 'bad_request', `${name}: ${r.error.code}: ${r.error.message}`);
-    assert.ok(r.error.message.length < 200, `${name}: the message is bounded (${r.error.message.length})`);
+    assert.equal(r.error.message, `inflate: pos (${named}) is not a position in a buffer of ${8 + member.length + empty.length} bytes`, name);
   }
 });
 
