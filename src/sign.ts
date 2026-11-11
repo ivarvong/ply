@@ -34,7 +34,11 @@ export type Signer = {
   // namespace: 'git' when none is given (ssh-keygen -Y sign -n git)
   sign(message: Uint8Array, ...namespace: [] | [string]): Promise<string>;
 };
-export type SignerKey = { readonly privateKey: CryptoKey; readonly publicKeyRaw: Uint8Array };
+// WebCrypto's key, named through the value every supported lib declares (the type `CryptoKey` and `CryptoKeyPair` are
+// DOM-lib names a Node consumer with lib ES2022 + @types/node does not have; see src/bytes.ts).
+type WebCryptoKey = InstanceType<typeof CryptoKey>;
+type WebCryptoKeyPair = { privateKey: WebCryptoKey; publicKey: WebCryptoKey };
+export type SignerKey = { readonly privateKey: WebCryptoKey; readonly publicKeyRaw: Uint8Array };
 
 export function ed25519Signer({ privateKey, publicKeyRaw }: SignerKey): Signer {
   const pub = sshPublicKey(publicKeyRaw);
@@ -74,7 +78,7 @@ export async function signCommit(commitBytes: Uint8Array, signer: Signer, namesp
 }
 
 // Convenience for node/tests: a fresh Ed25519 key pair as a signer.
-export type GeneratedSigner = { readonly signer: Signer; readonly keyPair: CryptoKeyPair; readonly publicKeyRaw: Uint8Array };
+export type GeneratedSigner = { readonly signer: Signer; readonly keyPair: WebCryptoKeyPair; readonly publicKeyRaw: Uint8Array };
 export async function generateSigner(): Promise<GeneratedSigner> {
   const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
   const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));

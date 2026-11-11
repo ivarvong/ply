@@ -176,7 +176,7 @@ function peelRecordHeaders(init: RequestInit): { readonly init: RequestInit; rea
 // Anything with the Cache API's shape: `caches.default` on Workers, memoryCache() in tests.
 // match answers as the Cache API does: the response, or the platform's missing value on a miss.
 export type PackCache = {
-  readonly match: (key: string) => ReturnType<Cache['match']>;
+  readonly match: (key: string) => Promise<ReturnType<Map<string, Response>['get']>>; // Cache['match'], without naming the DOM-lib `Cache`
   readonly put: (key: string, res: Response) => Promise<unknown>;
   readonly delete: (key: string) => Promise<unknown>;
 };
