@@ -21,7 +21,7 @@
   "test/format-facts.test.js": 0,
   "test/fsck-oracle.test.js": 1,
   "test/fsck-space.test.js": 18,
-  "test/fuzz-pinned.test.js": 1,
+  "test/fuzz-pinned.test.js": 5,
   "test/git-bytes.test.js": 63,
   "test/git-differential.test.js": 2,
   "test/http-options.test.js": 1,

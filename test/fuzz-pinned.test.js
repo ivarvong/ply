@@ -8,7 +8,7 @@
 // which default to the clock.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, symlinkSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -152,3 +152,21 @@ test('a failing fuzzer stops the run and prints its seed and the exact command t
   assert.ok(report.includes(`seed=${seed}`) || report.includes(`case=${seed}`), report);
   assert.ok(report.includes(`replay: node ${failed}`), report);
 });
+
+// codec.mjs hung under load with node waiting inside execFileSync and its git oracle waiting on stdin (no ply code
+// involved: the same call hangs in a script that imports no ply). The oracle here is a stand-in `git` that
+// initialises a repository and then never answers. The fuzzer has to kill it, fail the case by name and exit 1; the
+// expected lines come from that rule, not from the fuzzer. Without the oracle timeout this run never ends and the
+// 40 s limit below kills it (status null).
+test('codec: a git oracle that never answers is killed and fails the case, it does not hang the fuzzer', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'ply-deaf-git-'));
+  try {
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\nfor a in "$@"; do [ "$a" = init ] && exit 0; done\nexec sleep 600\n');
+    chmodSync(join(bin, 'git'), 0o755);
+    const r = spawnSync(process.execPath, ['--import', './test/ts-resolve.mjs', 'test/fuzz/codec.mjs', '--n', '150', '--seed', '1', '--oracle-timeout-s', '1'],
+      { cwd: ROOT, encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    assert.equal(r.status, 1, `exit status; signal=${r.signal}; output: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /FAIL #\d+ delta-git: oracle did not answer: git hash-object -w --stdin had not exited after 1 s and was killed/);
+    assert.match(r.stdout, /150 cases in \d+s, [1-9]\d* failures/);
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+}, 60_000);
