@@ -154,16 +154,16 @@ test('an OFS pack cut below a delta base (crossBatchRef): the transfer finishes 
   const lastCut = Math.max(...cut.map(i => batchOf.get(i)));
   // one run to the end
   const whole = repo();
-  const run = must(await runTransfer(whole.t, from, plan, src.commit));
+  const run = must(await runTransfer(whole.t, from, plan, src.commit, { ref: REF }));
   assert.deepEqual(run, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
   assertCopied(whole.bare, plan);
   // paused before the last cut batch, then resumed: the temp ref is there in between, gone at the end
   const { bare, t } = repo();
-  const paused = must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut }));
+  const paused = must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut, ref: REF }));
   assert.equal(paused.tag, 'paused');
   assert.equal(paused.pushes, lastCut);
   assert.match(refsOf(bare), new RegExp(`^${plan.tempRef} [0-9a-f]{40}$`, 'u'));
-  const resumed = must(await runTransfer(t, from, plan, src.commit));
+  const resumed = must(await runTransfer(t, from, plan, src.commit, { ref: REF }));
   assert.equal(resumed.tag, 'done');
   assert.equal(resumed.pushes, plan.steps.length - lastCut);
   assert.equal(resumed.tempLeft, false);
@@ -210,32 +210,32 @@ test('a `resolved` whose oid() answers an id, then something else: one id asked 
   // runTransfer with exactly the answers needed: done without one lie told, and git holds exactly the tree
   const whole = repo();
   const enough = flipping(needed(everyStep));
-  const run = await runTransfer(whole.t, enough.from, plan, src.commit);
+  const run = await runTransfer(whole.t, enough.from, plan, src.commit, { ref: REF });
   assert.equal(run.ok, true, run.ok ? '' : `${run.error.code}: ${run.error.message}`);
   assert.deepEqual(run.value, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
   assert.equal(enough.state.lies, 0, 'an id was asked for more often than once per use');
   assertCopied(whole.bare, plan);
   // one honest answer too few for that base: the run ends with the builder's refusal (a Result); the ref is not created
   const short = repo();
-  const few = await runTransfer(short.t, flipping(needed(everyStep), lastBase).from, plan, src.commit);
+  const few = await runTransfer(short.t, flipping(needed(everyStep), lastBase).from, plan, src.commit, { ref: REF });
   assert.equal(few.ok, false);
   assert.equal(few.error.code, 'bad_request');
   assert.equal(few.error.what, 'pack subset base');
   assert.equal(git(short.bare, ['for-each-ref', REF]).trim(), '');
   // transferStep on the last cut batch: too few answers is the same refusal and nothing moves; enough, and it lands
   const { bare, t } = repo();
-  must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut }));
-  const step = must(await transferStatus(t, plan)).step;
+  must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut, ref: REF }));
+  const step = must(await transferStatus(t, plan, { ref: REF })).step;
   assert.equal(step, lastCut);
   const before = refsOf(bare);
-  const refused = await transferStep(t, flipping(needed([lastCut]), lastBase).from, plan, step, src.commit);
+  const refused = await transferStep(t, flipping(needed([lastCut]), lastBase).from, plan, step, { commit: src.commit, ref: REF });
   assert.equal(refused.ok, false);
   assert.equal(refused.error.code, 'bad_request');
   assert.equal(refused.error.what, 'pack subset base');
   assert.equal(refsOf(bare), before);
-  const landed = await transferStep(t, flipping(needed([lastCut])).from, plan, step, src.commit);
+  const landed = await transferStep(t, flipping(needed([lastCut])).from, plan, step, { commit: src.commit, ref: REF });
   assert.equal(landed.ok, true, landed.ok ? '' : `${landed.error.code}: ${landed.error.message}`);
-  assert.equal(must(await runTransfer(t, from, plan, src.commit)).tag, 'done');
+  assert.equal(must(await runTransfer(t, from, plan, src.commit, { ref: REF })).tag, 'done');
   assertCopied(bare, plan);
 });
 
@@ -536,24 +536,24 @@ test('an exception out of resolved.oid() is the cause of a coded refusal: planTr
   refused(planTransfer(from.pack, always.resolved, config), 'planTransfer, oid() throws for every entry');
   {
     const { bare, t } = repo();
-    assert.equal(must(await runTransfer(t, from, plan, src.commit, { maxSteps: cutBatch })).tag, 'paused');
+    assert.equal(must(await runTransfer(t, from, plan, src.commit, { maxSteps: cutBatch, ref: REF })).tag, 'paused');
     const before = refsOf(bare);
-    refused(await transferStep(t, onlyBase, plan, cutBatch, src.commit), 'transferStep, oid() throws only for the cut base');
+    refused(await transferStep(t, onlyBase, plan, cutBatch, { commit: src.commit, ref: REF }), 'transferStep, oid() throws only for the cut base');
     assert.equal(refsOf(bare), before, 'refs after transferStep, cut base');
-    refused(await transferStep(t, always, plan, cutBatch, src.commit), 'transferStep, oid() throws for every entry');
+    refused(await transferStep(t, always, plan, cutBatch, { commit: src.commit, ref: REF }), 'transferStep, oid() throws for every entry');
     assert.equal(refsOf(bare), before, 'refs after transferStep, every entry');
   }
   {
     const { bare, t } = repo();
-    refused(await runTransfer(t, always, plan, src.commit), 'runTransfer, oid() throws for every entry');
+    refused(await runTransfer(t, always, plan, src.commit, { ref: REF }), 'runTransfer, oid() throws for every entry');
     assert.equal(refsOf(bare), '', 'no ref was created');
   }
   {
     // the batch holding the cut base is the first to ask for its id: the refs are what an honest run paused there left
     const honest = repo();
-    assert.equal(must(await runTransfer(honest.t, from, plan, src.commit, { maxSteps: baseBatch })).tag, 'paused');
+    assert.equal(must(await runTransfer(honest.t, from, plan, src.commit, { maxSteps: baseBatch, ref: REF })).tag, 'paused');
     const { bare, t } = repo();
-    refused(await runTransfer(t, onlyBase, plan, src.commit), 'runTransfer, oid() throws only for the cut base');
+    refused(await runTransfer(t, onlyBase, plan, src.commit, { ref: REF }), 'runTransfer, oid() throws only for the cut base');
     assert.equal(refsOf(bare), refsOf(honest.bare), 'refs after runTransfer, cut base');
   }
 });
