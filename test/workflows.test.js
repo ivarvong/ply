@@ -39,6 +39,33 @@ test('notify-ply-web dispatches only after ci succeeded for that exact commit on
   assert.doesNotMatch(y, /github\.sha/u);
 });
 
+test('notify-ply-web sends the judged sha, once, from its one conditional job', () => {
+  const raw = read('.github/workflows/notify-ply-web.yml');
+  const y = code(raw);
+  // GitHub sets $GITHUB_SHA from the same context as github.sha: in a workflow_run run it is the default branch's
+  // tip, not the commit ci judged. Not even a comment may spell it: ply-web's README documented this file with it.
+  assert.doesNotMatch(raw, /GITHUB_SHA/u, 'GITHUB_SHA is the default branch tip in a workflow_run run');
+  // One job (the conditional one above) with one step: a second job or step would dispatch outside the condition.
+  const jobs = [...y.slice(y.indexOf('\njobs:\n')).matchAll(/^ {2}([A-Za-z0-9_-]+):/gmu)].map((m) => m[1]);
+  assert.deepEqual(jobs, ['dispatch']);
+  assert.equal((y.match(/^ {6}- /gmu) ?? []).length, 1, 'exactly one step');
+  // One request, to ply-web's repository_dispatch endpoint (REST: POST /repos/{owner}/{repo}/dispatches).
+  assert.equal((y.match(/dispatches/gu) ?? []).length, 1, 'exactly one dispatches call');
+  assert.equal((y.match(/\bgh api\b/gu) ?? []).length, 1);
+  assert.doesNotMatch(y, /\bcurl\b|\bwget\b/u);
+  assert.match(y, /gh api --method POST repos\/ivarvong\/ply-web\/dispatches --input - <<EOF\n/u);
+  // The body, as the REST API documents it: {event_type, client_payload}. The sha is the shell's COMMIT_SHA (the
+  // env line asserted above binds it to workflow_run.head_sha) and nothing else.
+  const body = /<<EOF\n\s*(.*)\n\s*EOF$/mu.exec(y)?.[1];
+  assert.deepEqual(JSON.parse(body ?? ''), { event_type: 'ply-main-updated', client_payload: { sha: '${COMMIT_SHA}' } });
+  // Nothing in the script can compute another sha: no command substitution, and the only shell variables read are
+  // the two the step's env declares. (`${{ ... }}` is a GitHub expression, removed before looking for shell ones.)
+  const shell = y.replace(/\$\{\{.*?\}\}/gu, '');
+  assert.doesNotMatch(shell, /\$\(|`/u, 'no command substitution');
+  const vars = new Set([...shell.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/gu)].map((m) => m[1]));
+  assert.deepEqual([...vars].sort(), ['COMMIT_SHA', 'PLY_WEB_DISPATCH_TOKEN']);
+});
+
 test('npm run check is the pre-push gate: typecheck, lint, the registry test, the dist check', () => {
   const { scripts } = JSON.parse(read('package.json'));
   assert.equal(typeof scripts.check, 'string', 'package.json has no check script');
