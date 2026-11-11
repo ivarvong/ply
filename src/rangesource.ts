@@ -7,9 +7,15 @@ import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok } from './result.js';
 
-// `signal` aborts when the reader no longer wants the range (its consumer cancelled): a source that can abandon a read in
-// flight does; one that ignores it (a read of two parameters is still a RangeSource) is never waited for by packSubset.
-export type RangeSource = { readonly size: number; read(offset: number, length: number, signal: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>> };
+// `signal` aborts when the reader no longer wants the range (its consumer cancelled, or the operation's own signal
+// aborted): a source that can abandon a read in flight does. It is optional in the type, spelled as two call signatures:
+// an implementer may ignore it (a read of two parameters is a RangeSource) and a direct caller may omit it, so a read
+// that takes it has to work without one. ply always passes one, and never waits for a source that ignores it.
+export type RangeRead = {
+  (offset: number, length: number): Promise<Result<ReadableStream<Uint8Array>, PlyError>>;
+  (offset: number, length: number, signal: AbortSignal): Promise<Result<ReadableStream<Uint8Array>, PlyError>>;
+};
+export type RangeSource = { readonly size: number; readonly read: RangeRead };
 
 // The signal that never aborts: the default `signal` of an operation whose caller gave none (resolvePackRange,
 // scanPackIndex, loadTransferPack, packIdentity). Only then is a source that never answers waited for.
