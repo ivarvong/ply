@@ -104,3 +104,39 @@ test('maxResolveWork is a limits key like any other: NaN, Infinity or negative i
     assert.equal(parseLimits({ maxResolveWork: bad }).ok, false);
   }
 });
+
+test('a forked family larger than the cache: a sibling that missed the cache costs one pass, not its whole chain again', async () => {
+  // A spine 50 deep; at each level a second delta on the same base (written first) with one leaf on it: 151 distinct
+  // objects of S bytes, depth 51, every one zeros but its last 4 bytes. The cache holds 16 of them.
+  const S = 64 * 1024; const D = 50;
+  const entries = [{ data: new Uint8Array(S) }];
+  const want = [oidOf(new Uint8Array(S))];
+  let tag = 1;
+  const edit = () => {
+    const t = tag++;
+    const obj = new Uint8Array(S); obj.set([t & 255, (t >> 8) & 255, 0x55, 0xaa], S - 4);
+    want.push(oidOf(obj));
+    return Uint8Array.from([...varint(S), ...varint(S), ...copyOp(0, S - 4), 4, t & 255, (t >> 8) & 255, 0x55, 0xaa]);
+  };
+  let spine = 0;
+  for (let k = 1; k <= D; k++) {
+    entries.push({ ofs: spine, delta: edit() }); const e = entries.length - 1;
+    entries.push({ ofs: spine, delta: edit() }); const s = entries.length - 1;
+    entries.push({ ofs: e, delta: edit() });
+    spine = s;
+  }
+  const pack = buildPack(entries);
+  const idx = await scanPackIndex(streamOf(pack), {});
+  assert.equal(idx.ok, true);
+  const inner = rangeFromBytes(pack);
+  let reads = 0;
+  const source = { size: inner.size, read: (o, l) => { reads += 1; return inner.read(o, l); } };
+  const r = await resolvePackRange(idx.value, source, { cacheBytes: 16 * S });
+  assert.equal(r.ok, true, r.ok ? '' : r.error.message);
+  // every oid, from node:crypto over the bytes the edits describe
+  for (let i = 0; i < want.length; i++) assert.equal(r.value.oid(i).value, want[i], `oid of entry ${i}`);
+  // by hand: 151 entries, 151 x S object bytes. Each object must be read and made once; twice that is the bound.
+  assert.equal(want.length, 151);
+  assert.ok(reads <= 2 * 151, `${reads} range reads for 151 entries`);
+  assert.ok(r.value.stats.work <= 2 * 151 * S, `${r.value.stats.work} work bytes for ${151 * S} bytes of objects`);
+});

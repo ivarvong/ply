@@ -11,7 +11,8 @@
 // chain. All the deltas resting on a base are applied while that base is held; of the results that something rests on,
 // the last is pinned (it is the next base, so a linear chain builds every object exactly once whatever its size) and
 // the others go to a small LRU (`cacheBytes`). A base in neither is rebuilt from its chain root on demand, each frame
-// holding nothing while its base is made.
+// holding nothing while its base is made, and every base made on the way is put in the LRU: a fork whose siblings
+// fell out of the cache walks the chain once per cache-full of siblings, not once per sibling.
 //
 // Memory: one base + one pinned result + one result + one delta's instructions + the LRU, at most
 // max(maxObjectSize, maxDeltaResult) + 3 x maxDeltaResult + cacheBytes, whatever the pack's size, depth or shape.
@@ -311,6 +312,9 @@ async function materialize(s: State, i: number): Promise<Result<Uint8Array, PlyE
   } else {
     const base = await materialize(s, b);
     if (!base.ok) return base;
+    // A base made again is kept (the LRU decides for how long): the siblings waiting behind this entry rest on the
+    // bases just below it, so each of them then costs one delta, not the chain from its root again.
+    cachePut(s.cache, b, base.value);
     made = await applyEntry(s, i, base.value, false);
   }
   if (!made.ok) return made;
