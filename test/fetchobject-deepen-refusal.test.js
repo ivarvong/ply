@@ -74,15 +74,17 @@ function counted(bytes) {
 }
 const raw = () => new Uint8Array(gitBuf(bare, ['cat-file', 'commit', tip]));
 
-// The advertisement with `shallow` taken off its fetch= line: a server that does not implement shallow fetches.
-const stripShallow = async u => {
+// The advertisement with features taken off its fetch= line: a server that does not implement them.
+const strip = async (u, drop) => {
   const res = await fetch(u, { headers: { 'git-protocol': 'version=2' } });
   const text = Buffer.from(await res.arrayBuffer()).toString('latin1');
   const m = /[0-9a-f]{4}fetch=([^\n]*)\n/.exec(text);
-  assert.ok(m && m[1].split(' ').includes('shallow'), 'git advertises shallow');
-  const line = `fetch=${m[1].split(' ').filter(f => f !== 'shallow').join(' ')}\n`;
+  for (const f of drop) assert.ok(m && m[1].split(' ').includes(f), `git advertises ${f}`);
+  const line = `fetch=${m[1].split(' ').filter(f => !drop.includes(f)).join(' ')}\n`;
   return new Response(Buffer.from(text.replace(m[0], `${(line.length + 4).toString(16).padStart(4, '0')}${line}`), 'latin1'), { status: res.status, headers: res.headers });
 };
+// oxlint-disable-next-line typescript/promise-function-async -- strip's promise, passed through
+const stripShallow = u => strip(u, ['shallow']);
 const pkt = s => { const b = Buffer.from(s, 'latin1'); return Buffer.concat([Buffer.from((b.length + 4).toString(16).padStart(4, '0'), 'latin1'), b]); };
 // How a request that carries `deepen` is refused. ERR: a pkt-line, HTTP 200 (git's own way to refuse an argument it
 // parses and rejects). A status: the body a non-git server gives (Artifacts refuses a filter it does not take with 400).
@@ -183,3 +185,37 @@ test('a server that lists shallow: the first error stands, and the advertisement
     }
   }
 });
+
+// The request without `deepen` is main's request, so main's handling of its answer is ply's (R3 on the tree:0 path).
+// Two servers without `shallow` that main reads through its filter fallbacks, each refusing the default depth first in
+// one of the three shapes. The expected values are main's outcome, derived from git's rules as above:
+//   (a) lists `filter`, takes only blob:none (tree:0: HTTP 400, Artifacts' text). Main: tree:0 -> 400, blob:none -> the
+//       commit, in a pack of N commits + N root trees.
+//   (b) lists neither `shallow` nor `filter` and dies on a `filter` line as git's upload-pack does (an empty body).
+//       Main: tree:0 -> empty, the advertisement, no filter -> the commit, in a pack of N commits + N trees + N blobs.
+const EMPTY = () => new Response(new Uint8Array(0), { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } });
+const refusingFirst = how => (how === 'empty' ? EMPTY() : REFUSALS[how]());
+const SERVERS = [
+  ['lists filter, takes only blob:none', ['shallow'], () => new Response('Unsupported Git fetch filter; only blob:none is supported.', { status: 400, headers: { 'content-type': 'text/plain; charset=utf-8' } }), body => filterOf(body) === 'tree:0',
+    ['POST 1 tree:0', 'GET null null', 'POST null tree:0', 'POST null blob:none'], 'blob:none', { commit: N, tree: N, blob: 0, tag: 0 }],
+  ['lists no filter, dies on one', ['shallow', 'filter'], EMPTY, body => filterOf(body) !== null,
+    ['POST 1 tree:0', 'GET null null', 'POST null null'], 'none', { commit: N, tree: N, blob: N, tag: 0 }],
+];
+for (const how of ['err', '400', 'empty']) {
+  for (const [name, drop, refuseFilter, refused, requests, learned, pack] of SERVERS) {
+    test(`no shallow, deepen refused (${how}), tree:0 path, server ${name}: main's answer by main's fallback`, async () => {
+      const { t, log } = recording(async ({ url: u, method, body }) => {
+        if (method === 'GET') return strip(u, drop);
+        if (/deepen /.test(body)) return refusingFirst(how);
+        return refused(body) ? refuseFilter() : null;
+      });
+      const got = await fetchObject(t, want(undefined));
+      assert.equal(got.ok, true, got.ok ? 'ok' : `${got.error.code}: ${got.error.message} after ${JSON.stringify(log.map(x => `${x.method} ${deepenOf(x.body)} ${filterOf(x.body)} -> ${x.status} ${x.bytes.length}B`))}`);
+      assert.equal(got.value.type, TYPE.COMMIT);
+      assert.deepEqual(got.value.data, raw());
+      assert.deepEqual(log.map(x => `${x.method} ${deepenOf(x.body)} ${filterOf(x.body)}`), requests);
+      assert.deepEqual(counted(log.at(-1).bytes), pack);
+      assert.equal(t.quirks.treeFilter, learned);
+    });
+  }
+}

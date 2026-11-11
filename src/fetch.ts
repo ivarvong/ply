@@ -1042,6 +1042,8 @@ export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig
     await filterUnadvertised(t, first.error, e => isEmptyResponse(e) || isArgumentRefusal(e));
     return depth() === sent ? first : run(depth());
   };
+  // a depth this call added: the caller gave none and one was sent
+  const added = (sent: number): boolean => asked === null && sent !== 0;
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
   if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, tree: none, harvested: true }));
@@ -1065,10 +1067,19 @@ export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig
     if (await filterUnadvertised(t, single.error)) return wide('', true);
     // an ERR line or HTTP 400 that answered a depth this call added: the advertisement is read for `shallow` (see `ask`;
     // not read above, where an unlisted `filter` would change the request main sends)
-    if (asked === null && sent !== 0 && !shallowLearned(t.quirks)) await filterUnadvertised(t, single.error, isArgumentRefusal);
-    // the advertisement was just read: `filter` is the server's, and a depth this call added that the server does not
-    // take is dropped (see `ask`)
-    return depth() === sent ? single : fetchSingle(t, { oid, filter, deepen: depth(), expectType });
+    const unlisted = added(sent) && !shallowLearned(t.quirks) && (await filterUnadvertised(t, single.error, isArgumentRefusal));
+    // the advertisement was just read: a depth this call added that the server does not take is dropped (see `ask`).
+    // The request without it is main's, and its answer is handled as main handles it: no `filter` listed is the
+    // unfiltered pack, a refused tree:0 is blob:none, an empty response is the advertisement's to explain.
+    if (depth() === sent) return single;
+    if (unlisted) return wide('', true);
+    const again = await fetchSingle(t, { oid, filter, deepen: depth(), expectType });
+    if (again.ok) return again;
+    if (narrow && isFilterRejection(again.error)) {
+      t.quirks.treeFilter = 'blob:none';
+      return wide('blob:none', true);
+    }
+    return (await filterUnadvertised(t, again.error)) ? wide('', true) : again;
   });
 }
 // One object by oid: a bad oid, a fetch failure, a verification failure are the Err.

@@ -764,6 +764,16 @@ tree:0 path reads the advertisement for `filter` (the no-filter fallback: `filte
 `fetchObject`). So an annotated tag wanted on the tree:0 path is `pack_corrupt` at depth 1 (the tag and the commit it
 peels to: two objects) as it was without a depth (the tag and the history).
 
+**Outside the space: the server's `filter` support.** Every server in the space takes the filter its path sends. What
+a server does with `filter` is main's decision, made after this one and by the same lines: the request asked again
+without `deepen` is main's request, and on the tree:0 path its answer is read as main reads it (no `filter` on the
+advertisement just read: the unfiltered pack; `tree:0` refused: `blob:none`; an empty response: the advertisement). It
+is not an axis here because it does not change which `deepen` is sent or whether the want is asked again, only which
+filter the re-ask carries; as an axis it would multiply the 3 tree:0 cells of each refusal by servers the filter
+fallback's own tests already enumerate. The product that does matter (deepen refused as `ERR`, 400 or empty × a server
+that lists `filter` and takes only `blob:none`, or lists none and dies on one; neither lists `shallow`) is 6 rows in
+test/fetchobject-deepen-refusal.test.js, each against git with main's outcome as the expected value.
+
 **Judgment calls.**
 
 1. *A stale `listed`.* A record taught that the server lists `shallow`, on a server that no longer does, refused with
