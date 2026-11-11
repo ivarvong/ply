@@ -545,7 +545,8 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
 // are equal, so only objects that share a type and a length with another are hashed (their producer hashed each once
 // already); a list with no such pair costs a map insert per object. The first of a pair is kept, in its place, and an
 // ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
-// A delta entry is kept as given: its object id is not known without applying it. Runs after checkBases.
+// A delta entry is kept as given: its object id is not known without applying it. Runs in send, on a list planPush
+// passed (checkBases), before the pack is measured.
 function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
   const buckets = new Map<string, { readonly first: number; byOid: Map<string, number> | null }>();
   const out: PackObject[] = [];
@@ -604,7 +605,7 @@ export function planPush(o: PushOptions, limits: LimitsInput | null): Result<Pus
   const listed = nonEmpty(parsed.value);
   if (!listed.ok) return listed;
   const commands = listed.value;
-  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxPack: maxPackBytes, objects: oncePerObject(cfg.objects), sideband: cfg.sideband });
+  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxPack: maxPackBytes, objects: cfg.objects, sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {
@@ -773,7 +774,9 @@ async function decide(base: FinishPush, r: Read, cut: PlyError | null): Promise<
 
 // The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
 async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
-  const packed = plan.needPack ? await measurePack(plan.objects) : null;
+  // each object once (oncePerObject), here and not in planPush: under the span, where an entry that cannot be read is
+  // the push's 'protocol' error as it is when the pack writer reads it
+  const packed = plan.needPack ? await measurePack(oncePerObject(plan.objects)) : null;
   const entries: readonly PackEntry[] = packed === null ? [] : packed.entries;
   const packBytes = packed === null ? 0 : packed.bytes;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });

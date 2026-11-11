@@ -76,6 +76,25 @@ for (const [config, cfg] of CONFIGS) {
 
 // package.json maps './push' to this module, so each of its exports is public API ('ply/push'). The guard is push()'s
 // own: main (ec337c5) exports no such name, and the owner's decision is that none is added.
+// push() returns a Result and never rejects. A JavaScript caller's list with an entry that is not an object is refused
+// on main (ec337c5) as Result err 'protocol' before any request, for each of these lists (measured: attack5.mjs of the
+// second review, run against main). The guard reads every entry, so it runs where main first read one.
+test('push: an objects list with a null or undefined entry is a protocol error, never a rejection', async () => {
+  const blob = byte => ({ type: TYPE.BLOB, data: Uint8Array.of(byte) });
+  let calls = 0;
+  const fetchImpl = async () => { calls++; throw new Error('the network must not be reached'); };
+  for (const objects of [[null, blob(1)], [blob(1), blob(2), null], [undefined, blob(1)]]) {
+    const c = GitHttp.create('http://127.0.0.1:9/x.git', { tracer: new Tracer(), fetchImpl });
+    assert.equal(c.ok, true);
+    // a rejection fails here: the await throws
+    const r = await c.value.push({ ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40), objects });
+    assert.equal(r.ok ? 'ok' : r.error.code, 'protocol');
+    // planning refuses nothing main did not: it returns a Result for the same list, and does not throw
+    assert.equal(pushEntry.planPush({ ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40), objects }, null).ok, true);
+  }
+  assert.equal(calls, 0);
+});
+
 test("the duplicate-object guard is not an export of 'ply/push'", () => {
   assert.deepEqual(Object.keys(pushEntry).filter(k => /once|dedup|duplicate/iu.test(k)), []);
 });
