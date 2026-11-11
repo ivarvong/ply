@@ -67,7 +67,11 @@ export function haltOn(signal: AbortSignal): Halt {
     },
     // oxlint-disable-next-line typescript/promise-function-async -- an async wrapper is a promise and two hops more per chunk read
     race<T>(p: Promise<T>, late: (v: T) => void): Promise<T | Halted> {
-      if (signal === UNCANCELLABLE) return p;
+      // `p` is typed a promise, but a source written in JavaScript may answer with the value itself, which the bare await
+      // this replaces took. Promise.resolve gives a platform promise back as it is (no promise, no hop added) and makes
+      // one of anything else, so what is returned is always a promise and `then` below is always there.
+      const answer = Promise.resolve(p);
+      if (signal === UNCANCELLABLE) return answer;
       // One promise per await, settled by whichever comes first: p (one reaction on it) or the abort listener, through
       // this await's waker (its resolve). No Promise.race and no second promise to lose: a chunk read costs one promise and one hop.
       return new Promise<T | Halted>((resolve, reject) => {
@@ -75,7 +79,7 @@ export function haltOn(signal: AbortSignal): Halt {
         // and what `late` throws goes nowhere. A rejection is handled here whenever it comes: before the halt the
         // race carries it, after it nothing does.
         // oxlint-disable-next-line promise/catch-or-return -- both outcomes are taken here; neither reaction can throw
-        p.then(v => {
+        answer.then(v => {
           const waited = wakers.delete(resolve);
           resolve(v);
           if (!waited) { try { late(v); } catch { drop(); } }

@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process';
 import { MEMORY_CELL_FLAGS } from './memcell.js';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomFillSync } from 'node:crypto';
+import { randomFillSync, createHash } from 'node:crypto';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { packSubset } from '../src/packsubset.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -756,6 +756,39 @@ test('haltOn: every await in flight is released at the abort, and a finished ope
   assert.deepEqual(late, ['a', 'b']);
   // after the abort nothing is waited for, not even a promise that never settles
   assert.equal(await halt.race(new Promise(() => {}), () => {}), rangesource.HALTED);
+});
+
+test('a source whose read answers with its Result itself, not a promise of it, is read as a promise of it would be', async () => {
+  // A JavaScript caller's source: read() returns { ok, value } synchronously. Every await on it was a bare await before
+  // the abort work, and a bare await takes a plain value. Expected values, none from the code under test: git's own
+  // pack bytes; the pack format's trailer (the SHA-1 of every byte before it, here node:crypto's) and the pack's
+  // length; and the object ids `git verify-pack -v` lists for the pack.
+  const idx = await scan(packs.ofs);
+  const all = [...Array(idx.count).keys()];
+  const source = { size: packs.ofs.length, read: (offset, length) => ({ ok: true, value: rangeStream(packs.ofs.subarray(offset, offset + length)) }) };
+  // bounded like every wait in this file: a drain or a call that never ends fails here, it does not hang
+  const built = unwrap(await packSubset(source, idx, all));
+  const drained = drain(built.stream);
+  assert.equal(await settledWithin(drained, 2000), 'settled', 'the drain ends');
+  assert.deepEqual(await drained, packs.ofs);
+  const trailer = createHash('sha1').update(packs.ofs.subarray(0, packs.ofs.length - 20)).digest('hex');
+  const byOid = indexByOid(packs.ofs, idx);
+  assert.equal(byOid.size, idx.count, 'git lists every entry of the pack');
+  for (const signal of [undefined, new AbortController().signal]) {
+    const identity = packIdentity(source, signal);
+    assert.equal(await settledWithin(identity, 2000), 'settled', 'packIdentity ends');
+    assert.deepEqual(unwrap(await identity), { trailer, bytes: packs.ofs.length });
+    const resolving = resolvePackRange(idx, source, signal === undefined ? {} : { signal });
+    assert.equal(await settledWithin(resolving, 2000), 'settled', 'resolvePackRange ends');
+    const resolved = unwrap(await resolving);
+    for (const [oid, i] of byOid) assert.equal(resolved.oid(i).value, oid);
+    // loadTransferPack opens the whole spool through the same read (no index on the destination: it scans)
+    const dst = unwrap(createTransport(`${srv.url}/none.git`));
+    const loading = loadTransferPack(dst, source, { tag: 'none' }, signal === undefined ? {} : { signal });
+    assert.equal(await settledWithin(loading, 2000), 'settled', 'loadTransferPack ends');
+    const loaded = unwrap(await loading);
+    for (const [oid, i] of byOid) assert.equal(loaded.from.resolved.oid(i).value, oid);
+  }
 });
 
 test('a chunk read is not a promise race: a whole pack served 256 bytes at a time is drained without one Promise.race', async () => {
