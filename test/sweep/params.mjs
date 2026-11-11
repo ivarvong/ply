@@ -8,6 +8,7 @@ import { DEFAULT_LIMITS } from '../../src/limits.js';
 /** @type {Param[]} */
 export const PARAMS = [
   { key: 'maxMergeBlobBytes', limit: DEFAULT_LIMITS.maxMergeBlobBytes, probe: 'mergeBranch of a file of that exact size', later: false },
+  { key: 'maxMergeWork', limit: DEFAULT_LIMITS.maxMergeWork, probe: 'mergeBranch of a three-line file both sides changed, with a budget of no steps and with each preset\'s', later: false },
   { key: 'maxObjectSize', limit: DEFAULT_LIMITS.maxObjectSize, probe: 'pushTree of one file', later: false },
   { key: 'maxHarvestBytes', limit: DEFAULT_LIMITS.maxHarvestBytes, probe: 'readLog on a server without filters, the cap around the commit and tree bytes git reports', later: false },
   { key: 'maxPackBytes', limit: DEFAULT_LIMITS.maxPackBytes, probe: 'readFile of an incompressible blob', later: false },

@@ -207,6 +207,19 @@ function build() {
     });
   }
 
+  // ---- maxMergeWork. The 1024-byte file above merges (git merges it); its line merge needs some diff steps, so a
+  // budget of none is a merge_conflict, and each preset's budget is ample for three lines. ----
+  for (const [name, work, expect] of /** @type {const} */ ([
+    ['zero', 0, refused('merge_conflict')],
+    ['worker', WORKER_LIMITS.maxMergeWork, ok],
+    ['default', DEFAULT_LIMITS.maxMergeWork, ok],
+  ])) {
+    add({
+      id: `merge.work.${name}`, param: 'maxMergeWork', op: 'merge', repo: 'mblob-1024', from: 'refs/heads/feat', writes: true,
+      bytes: 1024, entries: 1, limits: { maxMergeWork: work }, expect,
+    });
+  }
+
   // ---- maxObjectSize via pushTree. Exactly the cap is allowed. ----
   const objCap = DEFAULT_LIMITS.maxObjectSize;
   for (const S of [0, 1, 1023, 1024, 1025]) {
