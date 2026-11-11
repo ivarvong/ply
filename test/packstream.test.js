@@ -16,7 +16,7 @@ import { inflate, huffBuild, adler32, DEFLATE_TABLES, FIXED_LIT, FIXED_DIST } fr
 import { inflateRef } from './oracle/inflate-ref.js';
 import { parsePackRef } from './oracle/pack-ref.js';
 import {
-  inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs, huffFast,
+  inflateInit, inflateReset, inflateFeed, inflatePull, inflateEnd, inflateUnread, inflateTakeUnread, inflateConsumed, cappedBound, declaredBound, zlibWrap, rawWrap, streamInflateAttrs, huffFast,
 } from '../src/inflatestream.js';
 import { parsePackInit, parsePackFeed, parsePackClose, parsePackPull, parsePackEnd, packScanOpts, streamPackAttrs, workBudget, WORK_BUDGET, RETAIN_BUDGET } from '../src/packstream.js';
 import { sidebandStep, v2Init, fetchObject, spInit, spStep } from '../src/fetch.js';
@@ -1343,4 +1343,153 @@ test('the default budget is retain: a record with no budget, and packScanOpts wi
   assert.equal(refusal(drain([pack], { verify: true, limits, budget: undefined }).r), expected);
   assert.equal(refusal(drain([pack], { verify: true, limits, budget: null }).r), expected);
   assert.equal(refusal(drain([pack], packScanOpts(limits)).r), expected);
+});
+
+// ---- a chunk buffer the reader reuses: the scan reads a chunk until it answers `need`, and holds no view of it after ----
+// Every ArrayBufferView reachable from `root` that shares `ab`, by field path.
+function viewsOf(root, ab) {
+  const seen = new Set();
+  const hits = [];
+  const stack = [[root, 'st']];
+  while (stack.length > 0) {
+    const [v, name] = stack.pop();
+    if (v === null || typeof v !== 'object' || seen.has(v)) continue;
+    seen.add(v);
+    if (ArrayBuffer.isView(v)) { if (v.buffer === ab) hits.push(name); continue; }
+    for (const k of Object.keys(v)) stack.push([v[k], `${name}.${k}`]);
+  }
+  return hits;
+}
+// A hand-laid pack: each entry's offset, header length and content are known here, not read back from the scan. The
+// members are node:zlib's: a dynamic-block text, stored blocks (level 0) past one inflate chunk, noise, an OFS and a
+// REF delta (their headers carry the distance and the base oid a chunk can cut). The trailer is node:crypto's.
+function reuseFixture() {
+  const text = te.encode('line of text\n'.repeat(300));
+  let x = 12345;
+  const noise = Uint8Array.from({ length: INFLATE_CHUNK + 77 }, () => { x = (x * 1103515245 + 12345) >>> 0; return x >>> 24; });
+  const delta = makeDelta(text, te.encode('line of text\n'.repeat(299) + 'changed\n')).delta;
+  const z = (d, level) => new Uint8Array(zlib.deflateSync(d, { level }));
+  const entries = [
+    { type: TYPE.BLOB, head: encodeObjHeader(TYPE.BLOB, text.length), data: text, member: z(text, 6) },
+    { type: TYPE.BLOB, head: encodeObjHeader(TYPE.BLOB, noise.length), data: noise, member: z(noise, 0) },
+    { type: TYPE.BLOB, head: encodeObjHeader(TYPE.BLOB, noise.length), data: noise, member: z(noise, 9) },
+  ];
+  const ofsAt = PACK_HEADER_BYTES + entries.reduce((n, e) => n + e.head.length + e.member.length, 0);
+  entries.push({ type: TYPE.OFS_DELTA, head: concat([encodeObjHeader(TYPE.OFS_DELTA, delta.length), encodeOfsDistance(ofsAt - PACK_HEADER_BYTES)]), data: delta, member: z(delta, 6) });
+  entries.push({ type: TYPE.REF_DELTA, head: concat([encodeObjHeader(TYPE.REF_DELTA, delta.length), Uint8Array.from(Buffer.from(hashObject('blob', text), 'hex'))]), data: delta, member: z(delta, 1) });
+  let at = PACK_HEADER_BYTES;
+  const want = entries.map(e => {
+    const o = { offset: at, headerBytes: e.head.length, type: e.type, size: e.data.length, compressed: e.member.length, sha: crypto.createHash('sha1').update(e.data).digest('hex') };
+    at += e.head.length + e.member.length;
+    return o;
+  });
+  const body = concat([packHead(entries.length), ...entries.flatMap(e => [e.head, e.member])]);
+  const pack = concat([body, new Uint8Array(crypto.createHash('sha1').update(body).digest())]);
+  return { pack, want, trailer: crypto.createHash('sha1').update(body).digest('hex') };
+}
+// The pull API over one buffer of `size` bytes, overwritten with 0xa5 at every need (what a ring reader leaves).
+// `atNeed(st, buf)` runs when a pull has answered need, before the buffer is overwritten.
+function scanReused(pack, size, budget, atNeed) {
+  const st = must(parsePackInit({ limits: DEFAULT_LIMITS, verify: true, budget }));
+  const buf = new Uint8Array(size);
+  const got = [];
+  let cur = null;
+  let fed = 0;
+  let closed = false;
+  let trailer = null;
+  for (;;) {
+    const p = must(parsePackPull(st));
+    if (p.kind === 'end') return { got, trailer };
+    if (p.kind === 'need') {
+      atNeed(st, buf);
+      buf.fill(0xa5);
+      if (fed >= pack.length) { assert.equal(closed, false, 'need after close'); parsePackClose(st); closed = true; continue; }
+      const n = Math.min(size, pack.length - fed);
+      buf.set(pack.subarray(fed, fed + n));
+      fed += n;
+      parsePackFeed(st, buf.subarray(0, n));
+    } else if (p.kind === 'object') cur = { offset: p.offset, headerBytes: p.headerBytes, type: p.type, size: p.size, h: crypto.createHash('sha1') };
+    else if (p.kind === 'chunk') cur.h.update(p.bytes);
+    else if (p.kind === 'object-end') { const { h, ...rest } = cur; got.push({ ...rest, compressed: p.compressed, sha: h.digest('hex') }); }
+    else if (p.kind === 'trailer') trailer = p.trailer;
+  }
+}
+
+test('a reused chunk buffer: once a pull answers need, no field of the scan or its inflate record is a view of the chunk', () => {
+  const { pack, want, trailer } = reuseFixture();
+  for (const budget of [RETAIN_BUDGET, WORK_BUDGET]) {
+    for (const size of [1, 2, 3, 7, 19, 20, 21, 64, 509, 4096, 65536, pack.length]) {
+      let needs = 0;
+      const res = scanReused(pack, size, budget, (st, buf) => {
+        needs += 1;
+        assert.deepEqual(viewsOf(st, buf.buffer), [], `${budget.tag} ${size}-byte chunks, need ${needs}: the record still views the fed buffer`);
+      });
+      assert.deepEqual(res.got, want, `${budget.tag} ${size}-byte chunks`);
+      assert.equal(res.trailer, trailer, `${budget.tag} ${size}-byte chunks: trailer`);
+    }
+  }
+});
+
+test('a reused chunk buffer: the tail is copied only by the pull that answers need, and nothing is allocated when no tail is pending', () => {
+  const { pack, want } = reuseFixture();
+  // the whole pack in one chunk: every piece before the first need is read in place. After the header the carry is
+  // the fed buffer at byte 12; after an object ends it is the fed buffer at the next entry's offset (hand-laid above).
+  const st = must(parsePackInit({ limits: DEFAULT_LIMITS, verify: true }));
+  const pristine = must(parsePackInit({ limits: DEFAULT_LIMITS, verify: true }));
+  assert.deepEqual(must(parsePackPull(st)), { kind: 'need' });
+  assert.equal(st.carry, pristine.carry, 'nothing fed, nothing pending: the shared empty carry, no allocation');
+  parsePackFeed(st, pack);
+  assert.equal(must(parsePackPull(st)).kind, 'header');
+  assert.equal(st.carry.buffer, pack.buffer, 'a piece that is not need copies nothing');
+  assert.equal(st.carry.byteOffset + st.p, PACK_HEADER_BYTES);
+  let ended = 0;
+  for (let p = must(parsePackPull(st)); p.kind !== 'need'; p = must(parsePackPull(st))) {
+    if (p.kind !== 'object-end') continue;
+    ended += 1;
+    if (ended < want.length) {
+      assert.equal(st.carry.buffer, pack.buffer, `after object ${ended} the rest of the chunk is read in place`);
+      assert.equal(st.carry.byteOffset + st.p, want[ended].offset);
+    }
+    assert.deepEqual(viewsOf(st.inflate, pack.buffer), [], 'an ended member keeps no view of the chunk it ended in');
+  }
+  assert.equal(ended, want.length);
+  // a chunk that ends on an entry boundary leaves no tail: the need allocates nothing (the same empty carry)
+  const cut = must(parsePackInit({ limits: DEFAULT_LIMITS, verify: true }));
+  const fresh = must(inflateInit(streamOpts()));
+  parsePackFeed(cut, pack.subarray(0, want[1].offset));
+  for (let p = must(parsePackPull(cut)); p.kind !== 'need'; p = must(parsePackPull(cut))) { /* drain */ }
+  assert.equal(cut.carry, pristine.carry);
+  // inside a body, with the entry header read to its last byte: the inflate record's carry is the shared empty too
+  parsePackFeed(cut, pack.subarray(want[1].offset, want[1].offset + want[1].headerBytes));
+  assert.equal(must(parsePackPull(cut)).kind, 'object');
+  assert.deepEqual(must(parsePackPull(cut)), { kind: 'need' });
+  assert.equal(cut.carry, pristine.carry);
+  assert.equal(cut.inflate.carry, fresh.carry);
+  // a tail that is pending is the record's own copy of exactly the unread bytes: one byte of the two-byte zlib header
+  const one = Uint8Array.of(pack[want[1].offset + want[1].headerBytes], 0xee, 0xee);
+  parsePackFeed(cut, one.subarray(0, 1));
+  assert.deepEqual(must(parsePackPull(cut)), { kind: 'need' });
+  assert.notEqual(cut.inflate.carry.buffer, one.buffer);
+  assert.deepEqual([...cut.inflate.carry.subarray(cut.inflate.p)], [one[0]]);
+  assert.equal(cut.inflate.carry.buffer.byteLength, 1, 'the tail alone, not the chunk');
+});
+
+test('inflateTakeUnread hands over what follows the member: the record keeps no view, and its consumed count stands', () => {
+  const data = te.encode('taken '.repeat(50));
+  const member = new Uint8Array(zlib.deflateSync(data));
+  const after = Uint8Array.of(9, 8, 7, 6, 5);
+  const chunk = concat([member, after]);
+  const st = must(inflateInit(streamOpts()));
+  inflateFeed(st, chunk);
+  const out = [];
+  for (let p = must(inflatePull(st)); p.kind !== 'end'; p = must(inflatePull(st))) { assert.equal(p.kind, 'chunk'); out.push(Uint8Array.from(p.bytes)); }
+  assert.deepEqual(Buffer.from(concat(out)), Buffer.from(data));
+  const rest = inflateTakeUnread(st);
+  assert.deepEqual([...rest], [...after]);
+  assert.equal(rest.buffer, chunk.buffer, 'handed over, not copied');
+  assert.equal(rest.byteOffset, member.length);
+  assert.equal(inflateUnread(st).length, 0);
+  assert.deepEqual(viewsOf(st, chunk.buffer), []);
+  // node:zlib's member length: the count does not move when the bytes after it are taken
+  assert.equal(inflateConsumed(st), member.length);
 });
