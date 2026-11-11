@@ -156,10 +156,12 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
     const next = transition(from, event);
     state = next.state;
     if (next.restart) mark = now();
-    // The per-chunk path makes no timer call. A restart inside a state only moves the mark, and past the headers a
-    // deadline only moves later (marks only advance; held waits for less than streaming), so a pending timer is early
-    // enough: it re-arms for what is left when it fires.
-    if (timer !== null && (state === from || (pastHeaders(from) && pastHeaders(state)))) return;
+    // The per-chunk path makes no timer call: a pending timer that fires no later than the new deadline is left alone
+    // and re-arms for what is left when it fires. That covers a restart inside a state (marks only advance) and
+    // streaming to held (held waits for less). Held to streaming is the one move past the headers that can bring the
+    // deadline earlier than the pending timer: a timer that fired while the consumer held the chunk was set again for
+    // the total cap, which is later than the idle deadline that starts at the ask. Then, and only then, it is set again.
+    if (timer !== null && (state === from || (pastHeaders(from) && pastHeaders(state) && !(from === 'held' && t.idleMs > 0 && armedFor > mark + t.idleMs)))) return;
     arm();
   };
   arm();
