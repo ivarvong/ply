@@ -425,3 +425,27 @@ test('memory: a pack far larger than held memory holds about two chunks', async 
   assert.ok(out.samples >= 10, JSON.stringify(out));
   assert.ok(out.liveDelta < 3 * chunk, JSON.stringify(out));
 }, 180_000);
+
+// A transport that keeps the request body of a push that failed unsent, and pulls it afterwards. Expected values from
+// the README (pushPack): a `fetchImpl` that rejects without reading the body is that failure itself (a rejected
+// fetch() is a network error), the server received no command list, and the stream stays unread and unlocked: the
+// caller still owns it. So the late pull must hand over nothing (not the command list, no byte of the pack): the read
+// rejects, as ply's own fault-free refusal of a use outside the contract ('internal'), and the caller's stream is
+// still unpulled, uncancelled, unlocked and readable from its first byte; git shows no ref.
+test('a transport that rejects without reading the body and pulls it afterwards is handed nothing; the pack is still the caller\'s', async () => {
+  const { url, bare } = repo();
+  let kept = null;
+  const fetchImpl = routed(async init => { kept = init.body; throw new TypeError('fetch failed'); });
+  const { stream, state } = streamOf(source.pack);
+  const r = await pushPack(transport(url, { fetchImpl }), { ...create(), pack: stream, length: source.pack.length });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'network', r.error.message);
+  assert.deepEqual({ ...state, locked: stream.locked }, { pulls: 0, cancelled: 0, locked: false });
+  const late = await kept.getReader().read().then(chunk => ({ chunk }), error => ({ error }));
+  assert.equal('chunk' in late, false, 'the late pull was handed a chunk');
+  assert.equal(late.error.code, 'internal');
+  assert.deepEqual({ ...state, locked: stream.locked }, { pulls: 0, cancelled: 0, locked: false });
+  assert.equal(tipOf(bare), null);
+  const first = await stream.getReader().read();
+  assert.deepEqual([...first.value], [...source.pack.slice(0, 4096)]);
+});
