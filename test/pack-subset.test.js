@@ -288,6 +288,38 @@ test('an index changed after planning: the stream errors instead of sending a le
   await assert.rejects(drain(built.stream), e => e.code === 'internal' && /wrote \d+ bytes, planned \d+/.test(e.message));
 });
 
+test('the selection is copied at the call: changing the array afterwards changes nothing git can see', async () => {
+  const idx = await scan(packs.ofs);
+  const c = idx.columns;
+  const entries = [...idx.entries()];
+  // git's own ids for the source's entries
+  const oidOf = new Map([...indexByOid(packs.ofs, idx)].map(([oid, i]) => [i, oid]));
+  // D is an OFS_DELTA on the whole object A; X is another whole object
+  const d = entries.find(e => e.base.tag === 'ofs' && entries[c.baseIndex[e.index]].base.tag === 'none').index;
+  const a = c.baseIndex[d];
+  const x = entries.find(e => e.base.tag === 'none' && e.index !== a).index;
+  const want = [oidOf.get(a), oidOf.get(x), oidOf.get(d)];
+  const listed = bytes => verifyPack(bytes).toSorted((p, q) => p.offset - q.offset).map(r => r.oid);
+  // left alone
+  const plain = await drain(unwrap(await packSubset(rangeFromBytes(packs.ofs), idx, [a, x, d])).stream);
+  assert.deepEqual(listed(plain), want);
+  // the caller reuses its array before the stream is read (a batching loop's scratch array): A and X swapped, so D's
+  // planned distance would land on X
+  const sel = [a, x, d];
+  const built = unwrap(await packSubset(rangeFromBytes(packs.ofs), idx, sel));
+  sel[0] = x;
+  sel[1] = a;
+  const changed = await drain(built.stream);
+  // git index-pack accepts it (verifyPack runs it) and lists the objects the call named, in the order it named them
+  assert.deepEqual(listed(changed), want);
+  assert.equal(verifyPack(changed).find(r => r.oid === oidOf.get(d)).base, oidOf.get(a), 'D is still a delta on A');
+  assert.deepEqual(changed, plain);
+  // more entries than the pack has cannot all be distinct and in it: refused before anything is sized by the selection
+  const over = await packSubset(rangeFromBytes(packs.ofs), idx, new Array(idx.count + 1).fill(a));
+  assert.equal(over.ok, false);
+  assert.equal(over.error.code, 'bad_request');
+});
+
 test('rangeFromBytes refuses a range outside its bytes', async () => {
   const src = rangeFromBytes(new Uint8Array(8));
   for (const [o, l] of [[4, 5], [-1, 2], [9, 0], [0.5, 1]]) {

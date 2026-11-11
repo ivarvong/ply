@@ -3,7 +3,7 @@
 // several, or part of a received pack relayed, in memory bounded by a chunk whatever the pack's size.
 //
 // The selection is a list of the source's entry indices (from scanPackIndex, #236) in the order they are to be written,
-// which may differ from the source's. Each entry gets a rewritten header: the same type and size, an OFS_DELTA's
+// which may differ from the source's. It is copied at the call (4 bytes an entry): the array is the caller's to reuse. Each entry gets a rewritten header: the same type and size, an OFS_DELTA's
 // distance recomputed for its new position, a REF_DELTA's base id unchanged (Cloudflare Artifacts packs are REF only, so
 // they pass through as they are). An OFS base must be written earlier in the new pack; one that is not (left out, or
 // later in the order) is refused by default, or written as a REF_DELTA to the base's id with `outsideBase: 'ref'` when
@@ -15,7 +15,7 @@
 //
 // `length` is exact before the first byte, so the stream feeds pushPack (#234) with a known length. Consecutive source
 // entries are read with one range read; the SHA-1 trailer is computed while streaming. Held: per selected entry 8 bytes
-// (its new offset) + 4 (its OFS base's position) + 1 (its kind), per source entry 4 + 1 (position, selected mark), the
+// (its new offset) + 4 (its OFS base's position) + 4 (its index, the copy) + 1 (its kind), per source entry 4 + 1 (position, selected mark), the
 // extras' deflated bytes, and the chunk in flight. A source that serves fewer or more bytes than a range asks for
 // errors the stream (pack_corrupt) before the trailer, so the receiver never gets a whole pack from a short read.
 //
@@ -55,7 +55,9 @@ const NOT_WRITTEN = -1;
 
 type Plan = {
   readonly pack: ScannedPack;
-  readonly selection: readonly number[];
+  // the plan's own copy of the caller's selection, taken at the call: the offsets below are planned from these values,
+  // so the stream must write from the same ones whatever the caller does with its array afterwards
+  readonly selection: Uint32Array;
   readonly kind: Uint8Array;
   readonly basePos: Int32Array;
   readonly newOffset: Float64Array;
@@ -153,15 +155,20 @@ async function plan(pack: ScannedPack, selection: readonly number[], opts: PackS
   // where each source entry is written (position in the new pack), NOT_WRITTEN until it is
   const pos = new Int32Array(pack.count).fill(NOT_WRITTEN);
   const selected = new Uint8Array(pack.count);
-  for (const i of selection) {
+  // distinct entries of the pack are at most its count, so the copy is sized by the pack, never by the caller's array
+  if (n > pack.count) return refuse('pack subset selection', `${n} entries selected from a pack of ${pack.count}: one is selected twice or is not in the pack`);
+  const copy = new Uint32Array(n);
+  for (let k = 0; k < n; k++) {
+    const i = selection[k] as number;
     if (!Number.isInteger(i) || i < 0 || i >= pack.count) return refuse('pack subset selection', `entry ${String(i)} is not in the pack (0..${pack.count - 1})`);
     if (selected[i] === 1) return refuse('pack subset selection', `entry ${i} is selected twice`);
     selected[i] = 1;
+    copy[k] = i;
   }
-  const p: Plan = { pack, selection, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), extras: [], body: 0 };
+  const p: Plan = { pack, selection: copy, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), extras: [], body: 0 };
   let offset = PACK_HEADER_BYTES;
   for (let k = 0; k < n; k++) {
-    const i = selection[k] as number;
+    const i = copy[k] as number;
     const stored = c.storedType[i] as number;
     if (stored === OBJ_OFS_DELTA) {
       const b = c.baseIndex[i] as number;
