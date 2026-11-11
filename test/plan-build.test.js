@@ -285,3 +285,29 @@ test('an exception out of resolved.oid() is the cause of a coded refusal from pa
     assert.equal(plan.error.cause, marker, `planPackBatches, oid() throws ${label}: the cause`);
   }
 });
+
+test('an oid() that returns nothing is refused with a message that says so, not one that says it threw', async () => {
+  const c = src.idx.columns;
+  const type = src.resolved.columns.type;
+  const blobs = [...Array(src.idx.count).keys()].filter(i => type[i] === TYPE.BLOB);
+  const budget = { ...BIG, maxObjects: 2 };
+  const honest = unwrap(planPackBatches(src.idx, src.resolved, { budget, select: blobs, crossBatchRef: true }));
+  const batchOf = new Map(honest.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const cut = blobs.find(i => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== batchOf.get(i));
+  assert.ok(cut !== undefined);
+  // The expected words are the owner's decision, not the code's: nothing was thrown, so the refusal neither says
+  // 'threw' nor carries a cause (the TypeError ply itself would raise reading `.tag` of nothing is not the caller's).
+  for (const [label, oid] of Object.entries({ 'undefined': () => undefined, 'null': () => null })) {
+    const resolved = { ...src.resolved, oid };
+    const built = await packSubset(rangeFromBytes(src.bytes), src.idx, [cut], { outsideBase: 'ref', resolved });
+    const plan = planPackBatches(src.idx, resolved, { budget, select: blobs, crossBatchRef: true });
+    for (const [api, r] of [['packSubset', built], ['planPackBatches', plan]]) {
+      assert.equal(r.ok, false, `${api}, oid() returns ${label}`);
+      assert.equal(r.error.code, 'bad_request', `${api}, ${label}`);
+      assert.match(r.error.message, /oid\(\) returned nothing/u, `${api}, ${label}`);
+      assert.doesNotMatch(r.error.message, /threw/u, `${api}, ${label}`);
+      assert.equal('cause' in r.error && r.error.cause !== undefined, false, `${api}, ${label}: no cause, nothing was thrown`);
+    }
+    assert.equal(built.error.what, 'pack subset base', label);
+  }
+});

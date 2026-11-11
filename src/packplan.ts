@@ -36,7 +36,7 @@ import { limitExceeded } from './limits.js';
 import type { ScannedPack } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import { NO_BASE, THIN_BASE } from './packrangeresolve.js';
-import type { Threw } from './packsubset.js';
+import type { Threw, Nothing } from './packsubset.js';
 import { entryWrite, baseId, ofsDistanceBytes, WRITE_OFS, WRITE_REFUSED } from './packsubset.js';
 import { Sha1 } from './sha1.js';
 import { te } from './bytes.js';
@@ -137,8 +137,9 @@ type Ctx = {
   readonly ofsMax: number;
   // entries the builder's rule cannot write where the plan put them (none, unless `resolved` lacks a base's id)
   readonly unbuildable: number[];
-  // what the caller's `resolved.oid()` threw, the first time it did (at most one): the cause of the plan's refusal
-  readonly threw: Threw[];
+  // what the caller's `resolved.oid()` threw, the first time it did, or that it returned nothing (at most one): the
+  // plan's refusal, with what was thrown as its cause
+  readonly threw: Array<Threw | Nothing>;
 };
 
 // The entry's base inside the selection, or -1 (a whole object, a thin base, or a base not selected).
@@ -357,7 +358,11 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   const batches = blobs.ok ? planFinal(c, restFams, blobs.value) : blobs;
   // an exception out of the caller's `resolved.oid()` is the cause, ahead of any other refusal: never swallowed
   const threw = at(c.threw, 0);
-  if (threw.tag === 'some') return fail('bad_request', 'the resolved index\'s oid() threw when a cut base\'s id was asked for', { cause: threw.value.threw });
+  if (threw.tag === 'some') {
+    return 'threw' in threw.value
+      ? fail('bad_request', 'the resolved index\'s oid() threw when a cut base\'s id was asked for', { cause: threw.value.threw })
+      : fail('bad_request', 'the resolved index\'s oid() returned nothing when a cut base\'s id was asked for');
+  }
   if (!batches.ok) return batches;
   const stuck = at(c.unbuildable, 0);
   if (stuck.tag === 'some') return fail('bad_request', `entry ${stuck.value} is an OFS_DELTA cut from its base, and the resolved index has no id (40 lowercase hex) for that base to write it as a REF_DELTA`);
