@@ -60,8 +60,14 @@ const OVER_BUDGET = 'line diff step budget exceeded';
 export const stepsPerLineOf = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : LIMIT_MERGE_STEPS_PER_LINE);
 const stepBudget = (stepsPerLine: unknown, lines: number): Budget => ({ steps: 0, max: stepsPerLineOf(stepsPerLine) * (lines + LIMIT_MERGE_STEPS_FLOOR_LINES) });
 // The call's total, copied out to the caller's meter. The meter is never read; one that is not an object, or will not
-// take the write (frozen), is left alone: no option value makes mergeLines or diffScript throw.
-const report = (meter: unknown, budget: Budget): void => { if (typeof meter === 'object' && meter !== null) Reflect.set(meter, 'steps', budget.steps); };
+// take the write (frozen), is left alone (an array is an object and gets the property; a function is ignored). The
+// write runs the caller's code (a setter, a Proxy's set trap, a revoked Proxy), so what it throws is caught and
+// dropped: the result is the one the diff computed and no meter makes mergeLines or diffScript throw. Every return
+// path writes, a call that returns before any diff with 0.
+const report = (meter: unknown, steps: number): void => {
+  if (typeof meter !== 'object' || meter === null) return;
+  try { Reflect.set(meter, 'steps', steps); } catch { /* the caller's meter threw: its total is lost, the result is not */ }
+};
 // compact's invariant: the two sides' change groups move in step (equal counts of unchanged lines). Broken, it is a
 // programmer bug, so thrown, and typed (#80); the stack names the site.
 const broken = (): Error => plyError('internal', 'linemerge: groups out of step');
@@ -535,7 +541,7 @@ export function diffScript(base: Lines, side: Lines, options: Input<DiffConfig> 
   const { rediff, stepsPerLine, meter } = withDefaults<DiffConfig>(options, { rediff: 'myers', stepsPerLine: LIMIT_MERGE_STEPS_PER_LINE, meter: { steps: 0 } });
   const budget = stepBudget(stepsPerLine, base.n + side.n);
   const script = diffWith(base, side, rediff, budget);
-  report(meter, budget);
+  report(meter, budget.steps);
   return script;
 }
 
@@ -694,15 +700,15 @@ function mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget }: { reado
 // -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
 // driver, as in ll_xdl_merge.
 function mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine, meter }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff; readonly stepsPerLine: unknown; readonly meter: unknown }): MergeLinesResult {
-  if (Math.max(base.length, ours.length, theirs.length) > maxBytes) return { clean: false, reason: 'too large to merge' };
-  if ([base, ours, theirs].some(f => isBinary(f))) return { clean: false, reason: 'binary' };
+  if (Math.max(base.length, ours.length, theirs.length) > maxBytes) { report(meter, 0); return { clean: false, reason: 'too large to merge' }; }
+  if ([base, ours, theirs].some(f => isBinary(f))) { report(meter, 0); return { clean: false, reason: 'binary' }; }
   const cl = classifier();
   const B = records(base, cl);
   const O = records(ours, cl);
   const T = records(theirs, cl);
   const budget = stepBudget(stepsPerLine, B.n + O.n + T.n);
   const merged = mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget });
-  report(meter, budget);
+  report(meter, budget.steps);
   return merged;
 }
 // stepsPerLine x (lines of base + ours + theirs + LIMIT_MERGE_STEPS_FLOOR_LINES) is the merge's step budget: past it
@@ -713,7 +719,7 @@ export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Red
 export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, options: Input<MergeLinesConfig> = {}): MergeLinesResult {
   const { maxBytes, rediff, driver, stepsPerLine, meter } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text', stepsPerLine: LIMIT_MERGE_STEPS_PER_LINE, meter: { steps: 0 } });
   switch (driver) {
-    case 'binary': return { clean: false, reason: 'binary (merge attribute)' };
+    case 'binary': report(meter, 0); return { clean: false, reason: 'binary (merge attribute)' };
     case 'text':
     case 'union': return mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine, meter });
   }

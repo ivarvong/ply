@@ -226,3 +226,46 @@ test('work bound: a low-variety file (random a/b/c) costs under 3x when it doubl
   assert.deepEqual(held.d, { ok: false, error: { undecided: true, detail: 'line diff step budget exceeded' } });
   assert.ok(held.steps > 1_345_536 && held.steps <= 1_345_536 * 1.05, `${held.steps} steps`);
 });
+
+// ---- the meter write-out (re-review REQ 4 and REQ 5): it cannot throw, and every return path writes ----
+// Oracles: git for the result (the five-line merge is git's clean merge; the base -> ours script is one line for one
+// line, by hand), arithmetic for the totals (a call that returns before any diff has done 0 steps).
+const hostileMeters = () => {
+  const revoked = Proxy.revocable({}, {}); revoked.revoke();
+  return {
+    'a throwing setter': { set steps(_v) { throw new Error('boom-setter'); } },
+    'a Proxy whose set trap throws': new Proxy({}, { set() { throw new Error('boom-proxy'); } }),
+    'a revoked Proxy': revoked.proxy,
+  };
+};
+test('meter: one whose write throws (a setter, a Proxy set trap, a revoked Proxy) leaves the result unchanged, in mergeLines and diffScript', () => {
+  const [b, o, t] = five(), g = gitMerge(b, o, t), bin = enc('a\0b\n');
+  assert.equal(g.status, 'clean');
+  for (const [name, meter] of Object.entries(hostileMeters())) {
+    const m = mergeLines(b, o, t, { rediff, meter });
+    assert.equal(m.clean, true, name);
+    assert.deepEqual(m.data, g.data, name);
+    const cl = classifier();
+    assert.deepEqual(diffScript(records(b, cl), records(o, cl), { rediff, meter }), { ok: true, value: [{ i1: 0, i2: 0, chg1: 1, chg2: 1 }] }, name);
+    // the returns before any diff write the meter too
+    assert.deepEqual(mergeLines(bin, bin, bin, { rediff, meter }), { clean: false, reason: 'binary' }, name);
+    assert.deepEqual(mergeLines(b, o, t, { rediff, meter, maxBytes: 4 }), { clean: false, reason: 'too large to merge' }, name);
+    assert.deepEqual(mergeLines(b, o, t, { rediff, meter, driver: 'binary' }), { clean: false, reason: 'binary (merge attribute)' }, name);
+  }
+});
+test('meter: a call that returns before any diff (binary content, an input over maxBytes, driver binary) sets a reused meter to 0', () => {
+  const [b, o, t] = five(), bin = enc('a\0b\n'), meter = { steps: 0 };
+  assert.equal(mergeLines(b, o, t, { rediff, meter }).clean, true);
+  const first = meter.steps;
+  assert.ok(first > 0, `the five-line merge diffs: ${first} steps`);
+  const early = [
+    ['binary content', () => mergeLines(bin, bin, bin, { rediff, meter }), { clean: false, reason: 'binary' }],
+    ['an input over maxBytes', () => mergeLines(b, o, t, { rediff, meter, maxBytes: 4 }), { clean: false, reason: 'too large to merge' }],
+    ['driver binary', () => mergeLines(b, o, t, { rediff, meter, driver: 'binary' }), { clean: false, reason: 'binary (merge attribute)' }],
+  ];
+  for (const [name, call, expected] of early) {
+    meter.steps = first; // what the previous file's call left
+    assert.deepEqual(call(), expected, name);
+    assert.equal(meter.steps, 0, `${name}: no diff ran, so the call's total is 0, not the previous call's ${first}`);
+  }
+});
