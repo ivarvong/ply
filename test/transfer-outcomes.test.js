@@ -363,7 +363,8 @@ test('a pause after this run\'s push was refused and another runner landed the s
   assert.equal(f.seen.dropped, 1);
   assert.equal(refsOf(dropped.bare), `${p.tempRef} ${p.steps[0].temp}`);
   assert.deepEqual(unanswered, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'unanswered', lastStep: 'landed' });
-  // the package entry exports the runner; LastPush and LastStep are types beside TransferRun (checked by tsc below)
+  // the package entry exports the runner. This is a value check only: the LastPush and LastStep type exports and the
+  // paused shape are pinned by test/types/entry.typetest.ts (compiled by tsconfig.check.json in `npm run typecheck`)
   assert.equal(entry.runTransfer, runTransfer);
 });
 
