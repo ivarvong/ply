@@ -48,8 +48,10 @@ const operationDefaults = (): { -readonly [K in keyof OperationConfig]: Operatio
 });
 // The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
 const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
-// The service whose request is a push: once it is handed to a transport, a failure is no longer definite.
-const RECEIVE_PACK = 'git-receive-pack';
+// The service whose request only reads. The protocol has one other, the push service, and it is named only in the push
+// modules (a read-only bundle carries no push string: test/bundle.test.js). Once a request for any service but this
+// one is handed to a transport, a failure is no longer definite.
+const UPLOAD_PACK = 'git-upload-pack';
 // outcome(kind, result) or outcome(kind, result, attrs): the attributes stamped on the root beside the outcome; ok(result).
 export type Outcome = <R>(kind: string, result: R, ...extra: [] | [Attrs]) => Ok<R>;
 export type OperationBody<R> = (ctx: { readonly t: Transport; readonly root: Span; readonly outcome: Outcome; readonly limits: CheckedLimits }) => Promise<Result<R, PlyError>>;
@@ -93,7 +95,7 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
     const given = made.value;
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create returns any; a view of `given` (like withParent) whose frames() records the hand-over
     const t = Object.create(given, { frames: { enumerable: true, value: (service: string, sent: RequestBody, span: Span, hints: Hints): AsyncIterable<Frame> => {
-      if (service === RECEIVE_PACK) pushHandedOver = true;
+      if (service !== UPLOAD_PACK) pushHandedOver = true;
       return given.frames(service, sent, span, hints);
     } } }) as Transport;
     // The root and every span under it redact the credential; root.error(e) below scrubs the error the caller gets.
