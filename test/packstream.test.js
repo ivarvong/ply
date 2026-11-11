@@ -1134,10 +1134,12 @@ test('the collector and the resolver edge: a cap that bounds nothing, a hand-bui
   // given stats, their inflated count is what is held (a collector that dropped objects still counted them)
   assert.equal(refusal(resolvePack({ objects, stats: { inflated: base.length + delta.length + 1 } }, undefined, withLimits({ maxInflatedTotal: held + target.length }))), `limit_exceeded: delta result size ${target.length} exceeds limit ${target.length - 1}`);
   assert.equal(refusal(resolvePack({ objects, stats: { inflated: 0 } }, undefined, withLimits({ maxInflatedTotal: 2 * OV + target.length }))), 'ok');
-  // a chain listed child-first is walked by recursion: the depth bound stops it at the cap, not at the stack's end
+  // a chain listed child-first, every link a delta that fits its base (40 bytes to 40 bytes), so its length is the only
+  // thing to refuse: the chain bound stops it at the cap, not at the stack's end
   const chain = [];
   const n = 20000;
-  for (let i = n; i >= 1; i--) chain.push({ offset: 12 + i, type: TYPE.OFS_DELTA, data: delta, base: { tag: 'ofs', offset: 12 + i - 1 } });
+  const link = makeDelta(base, te.encode('B'.repeat(40))).delta;
+  for (let i = n; i >= 1; i--) chain.push({ offset: 12 + i, type: TYPE.OFS_DELTA, data: link, base: { tag: 'ofs', offset: 12 + i - 1 } });
   chain.push({ offset: 12, type: TYPE.BLOB, data: base });
   assert.equal(refusal(resolvePack({ objects: chain }, undefined, withLimits({ maxDeltaChain: 64 }))), 'limit_exceeded: delta chain depth 65 exceeds limit 64');
   const refChain = [];

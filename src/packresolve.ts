@@ -1,10 +1,10 @@
 // Pack parsing and delta resolution (buffered, general-purpose): parsePack walks a whole pack verifying the trailer,
-// applyDelta is git's patch_delta, resolvePack resolves OFS/REF chains to a fixpoint with external bases as a last
-// resort, describePack reports that layout the way `git verify-pack -v` prints it (a thin base is data, not an error),
+// applyDelta is git's patch_delta, resolvePack resolves OFS/REF chains by dependency (a delta resolves when its base
+// lands) with external bases as a last resort, describePack reports that layout the way `git verify-pack -v` prints it (a thin base is data, not an error),
 // makeDelta is a general delta generator. The edit pipeline needs none of this (fetch.js/fetchObject +
 // pack.js/spliceDelta); it is here for the general client and re-exported from pack.js for callers.
 import type { ErrorOf } from './errors.js';
-import { fail, plyError } from './errors.js';
+import { fail } from './errors.js';
 import type { Err, Result } from './result.js';
 import { ok, err, assertNever, flatMapOption, getOrElse } from './result.js';
 import { atOr, fromNullable, fromNullish, mapGet, readKey, type Input } from './absent.js';
@@ -396,7 +396,9 @@ export type BaseInput = { readonly tag: 'none' } | { readonly tag: 'ofs'; readon
 export type PackObjectInput = { readonly offset: number; readonly type: number; readonly data: Uint8Array } & Input<{ readonly base: BaseInput; readonly size: number; readonly compressed: number }>;
 // What resolvePack reads of a parsed pack: parsePack's result, or a hand-built one (stats optional).
 export type PackToResolve = { readonly objects: readonly PackObjectInput[] } & Input<{ readonly stats: Input<{ readonly inflated: number }> }>;
-export type ResolvedPack = { readonly objects: Map<string, ResolvedObject>; readonly stats: { maxChain: number; externalBases: number; baseLookups: number } };
+// stats: the longest chain resolved; REF_DELTAs resolved on a base the caller's lookup gave; REF_DELTA bases looked up by
+// id (one per REF_DELTA); entries the resolver visited (at most three per entry, whatever the pack's order).
+export type ResolvedPack = { readonly objects: Map<string, ResolvedObject>; readonly stats: { maxChain: number; externalBases: number; baseLookups: number; steps: number } };
 type Base = { readonly type: ResolvedObjType; readonly data: Uint8Array; readonly chain: number };
 // One object of the resolver's input, parsed (packEntry): a full object's type is a stored type, a delta's base tagged.
 type Entry =
@@ -443,21 +445,8 @@ function packEntry(o: PackObjectInput): Result<Entry, BadRequest> {
   return ok({ tag: 'full', offset: o.offset, type, data, size, compressed, base: b });
 }
 
-// One object's resolution: done, waiting on a REF_DELTA base that has not been resolved yet (in this phase), or refused.
-// `waiting` is the typed form of what used to be a pack_corrupt "ref delta base … not found" caught back by a regex on
-// its message (#76).
-type Step =
-  | { readonly tag: 'resolved'; readonly r: ResolvedObject }
-  | { readonly tag: 'waiting'; readonly oid: Oid }
-  | { readonly tag: 'failed'; readonly error: PackError };
-const failed = (error: PackError): Step => ({ tag: 'failed', error });
-// The fixpoint's phase: REF_DELTA bases from the pack only, until a pass makes no progress; then the caller's
-// `external` lookup too (a thin pack's bases); then, if a pass still makes no progress, the first waiting object's
-// missing base is the error.
-type Phase = 'in_pack' | 'external';
-
-// A REF_DELTA whose base is not in the pack, kept instead of refused. `oid` is that missing base (the root the fixpoint
-// was waiting on), in pack order of the objects that could not be resolved.
+// A REF_DELTA whose base is not in the pack, kept instead of refused. `oid` is that missing base (the root its chain
+// waits on), in pack order of the objects that could not be resolved.
 export type UnresolvedBase = { readonly offset: number; readonly oid: Oid };
 export type CollectedPack = ResolvedPack & { readonly unresolved: readonly UnresolvedBase[] };
 
@@ -473,9 +462,35 @@ function externalBase(oid: Oid, ext: ExternalBase): Result<Base, Corrupt> {
   return ok({ type, data: ext.data, chain: 0 });
 }
 
-// The fixpoint. `collectMissing` is describePack's path: a thin base is data, not an error. Without it a thin base the
-// lookup does not have is refused (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
-// oxlint-disable-next-line complexity -- the fixpoint's phases, one function so the memo and the budget are shared
+type DeltaEntry = Entry & { readonly tag: 'delta' };
+// What a delta that never resolved waits on: the REF_DELTA base id at the root of its OFS bases, and how many deltas
+// lie between that base and it (the REF_DELTA is 1, an OFS_DELTA on it 2).
+type Wait = { readonly oid: Oid; readonly depth: number };
+const LANDED: Result<null, never> = ok(null);
+// The dependants filed under `key`, removed: each delta waits in one list and is taken from it once.
+function take<K>(waiting: Map<K, DeltaEntry[]>, key: K): readonly DeltaEntry[] {
+  const list = mapGet(waiting, key);
+  if (list.tag === 'none') return [];
+  waiting.delete(key);
+  return list.value;
+}
+function file<K>(waiting: Map<K, DeltaEntry[]>, key: K, d: DeltaEntry): void {
+  const list = mapGet(waiting, key);
+  if (list.tag === 'some') list.value.push(d);
+  else waiting.set(key, [d]);
+}
+
+// The resolver: a dependency structure, not a rescan. Full objects resolve first, in pack order. Then every delta is
+// visited once, in pack order: its base has resolved (it is patched now) or it has not (the delta is filed under that
+// base: by offset for an OFS_DELTA, by id for a REF_DELTA). An object that resolves takes the deltas filed under its
+// offset and its id and resolves them, and theirs, from a queue (no recursion: a chain is as long as maxDeltaChain
+// allows, and the caller sets that). What is left waits on a base outside the pack: each such id is asked of `external`
+// once, and what it gives lands the same way. So an entry is visited at most three times whatever the pack's order
+// (stats.steps), and the bytes produced are the delta results, each charged to maxInflatedTotal before it exists: the
+// work is linear in entries plus bytes and bounded by the limits record.
+// `collectMissing` is describePack's path: a thin base is data, not an error. Without it a thin base the lookup does not
+// have is refused (`pack: ref delta base … not found`), which callers and the pack-cut space depend on.
+// oxlint-disable-next-line complexity -- the resolver's phases, one function so the maps and the budget are shared
 function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: CheckedLimits, collectMissing: boolean): Result<CollectedPack, PackError> {
   const { maxDeltaChain: maxChain, maxDeltaResult: maxDelta, maxInflatedTotal: inflatedCap } = limits;
   const entries: Entry[] = [];
@@ -485,56 +500,27 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     entries.push(e.value);
   }
   const byOffset = new Map(entries.map(o => [o.offset, o]));
-  // REF_DELTA lookup is this map, not a scan of the objects (that is O(n) per delta, O(passes·n²) on a pack of tiny
-  // ref-deltas). Resolved deltas join the same map.
-  const byOid = new Map<Oid, Entry>();
+  // Resolved objects by id (a REF_DELTA's base is this lookup, not a scan of the objects) and by offset.
   const resolved = new Map<string, ResolvedObject>();
   const memo = new Map<number, ResolvedObject>();
-  const stats = { maxChain: 0, externalBases: 0, baseLookups: 0 };
+  // Deltas whose base has not resolved, under the base they rest on.
+  const onOffset = new Map<number, DeltaEntry[]>();
+  const onOid = new Map<Oid, DeltaEntry[]>();
+  const stats = { maxChain: 0, externalBases: 0, baseLookups: 0, steps: 0 };
   // Bytes already held (inflated instructions and bases) plus each delta result, which is a new buffer, and
   // LIMIT_OBJECT_OVERHEAD per object, as parsePack charged it. That one charge covers the object's resolved form too
   // (measured: resolving adds 0.65 KiB per object, delta or not), so a delta result adds its bytes only.
   const given = flatMapOption(fromNullish(parsed.stats), s => fromNullish(s.inflated));
   let held = (given.tag === 'some' ? given.value : entries.reduce((n, o) => n + o.data.length, 0)) + entries.length * LIMIT_OBJECT_OVERHEAD;
-  let phase: Phase = 'in_pack';
-  // The base of a delta: the object at its offset (OFS_DELTA), or the object named by its id (REF_DELTA).
-  type BaseOrStep = { readonly tag: 'base'; readonly base: Base } | Step;
-  function findBase(base: ObjBase & { readonly tag: 'ofs' | 'ref' }, depth: number, resolveFn: (o: Entry, d: number) => Step): BaseOrStep {
-    switch (base.tag) {
-      case 'ofs': {
-        const b = mapGet(byOffset, base.offset);
-        if (b.tag === 'none') return failed(plyError('pack_corrupt', `pack: ofs delta base not at object boundary ${base.offset}`));
-        const s = resolveFn(b.value, depth + 1);
-        if (s.tag !== 'resolved') return s;
-        return { tag: 'base', base: s.r };
-      }
-      case 'ref': {
-        stats.baseLookups++;
-        const inPack = mapGet(byOid, base.oid);
-        if (inPack.tag === 'some') {
-          // byOid holds resolved objects only, so this is the memo's answer, whatever the depth
-          // Stryker disable next-line ArithmeticOperator: see above
-          const s = resolveFn(inPack.value, depth + 1);
-          // Stryker disable next-line ConditionalExpression,BlockStatement: an object in byOid has resolved (above)
-          if (s.tag !== 'resolved') return s;
-          return { tag: 'base', base: s.r };
-        }
-        if (phase !== 'external') return { tag: 'waiting', oid: base.oid };
-        const ext = external(base.oid);
-        if (!ext) return { tag: 'waiting', oid: base.oid };
-        const checked = externalBase(base.oid, ext);
-        if (!checked.ok) return failed(checked.error);
-        stats.externalBases++;
-        return { tag: 'base', base: checked.value };
-      }
-    }
-    // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
-    return assertNever(base);
+  function settle(obj: Entry, r: ResolvedObject): void {
+    if (r.chain > stats.maxChain) stats.maxChain = r.chain;
+    memo.set(obj.offset, r);
+    resolved.set(r.oid, r);
   }
   // A delta's resolved form: its base's bytes patched by its instructions.
-  function patch(obj: Entry & { readonly tag: 'delta' }, base: Base): Result<ResolvedObject, PackError> {
-    // Chain length, not recursion depth: a base resolved earlier comes back from memo, so depth alone let a chain
-    // emitted base-first grow without bound (#14). An external base is chain 0.
+  function patch(obj: DeltaEntry, base: Base): Result<ResolvedObject, PackError> {
+    stats.steps++;
+    // Chain length from the full (or external) base, whatever order the links arrived in (#14). An external base is 0.
     const chain = base.chain + 1;
     if (chain > maxChain) return err(limitError('delta chain depth', chain, maxChain));
     // The result buffer does not exist until the delta's header passes maxResult. Room is what the aggregate cap has left.
@@ -544,71 +530,131 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     if (!patched.ok) return patched;
     held += patched.value.out.length;
     const out = patched.value.out;
-    return ok({ type: base.type, data: out, chain, deltaOps: patched.value.ops, oid: hashObject(storedName(base.type), out), offset: obj.offset, size: obj.size, compressed: obj.compressed, packBase: obj.base });
+    const r: ResolvedObject = { type: base.type, data: out, chain, deltaOps: patched.value.ops, oid: hashObject(storedName(base.type), out), offset: obj.offset, size: obj.size, compressed: obj.compressed, packBase: obj.base };
+    settle(obj, r);
+    return ok(r);
   }
-  function resolveObj(obj: Entry, depth = 0): Step {
-    const hit = mapGet(memo, obj.offset);
-    if (hit.tag === 'some') return { tag: 'resolved', r: hit.value };
-    if (depth > maxChain) return failed(limitError('delta chain depth', depth, maxChain));
-    let r: ResolvedObject;
-    if (obj.tag === 'full') {
-      r = { type: obj.type, data: obj.data, chain: 0, oid: hashObject(storedName(obj.type), obj.data), offset: obj.offset, size: obj.size, compressed: obj.compressed, packBase: obj.base };
-    } else {
-      const b = findBase(obj.base, depth, resolveObj);
-      if (b.tag !== 'base') return b;
-      const built = patch(obj, b.base);
-      if (!built.ok) return failed(built.error);
-      r = built.value;
+  // `first` resolved: the deltas filed under it resolve, then the ones filed under those, in the order they land.
+  function land(first: ResolvedObject): Result<null, PackError> {
+    const landed: ResolvedObject[] = [first];
+    // the array grows as it is read: a queue
+    for (const base of landed) {
+      for (const d of [...take(onOffset, base.offset), ...take(onOid, base.oid)]) {
+        // a second entry at an offset that has resolved (a hand-built input) is that object
+        if (memo.has(d.offset)) continue;
+        const r = patch(d, base);
+        if (!r.ok) return r;
+        landed.push(r.value);
+      }
     }
-    if (r.chain > stats.maxChain) stats.maxChain = r.chain;
-    memo.set(obj.offset, r);
-    resolved.set(r.oid, r);
-    byOid.set(r.oid, obj);
-    return { tag: 'resolved', r };
+    return LANDED;
   }
-  // Full objects first: each is hashed once (resolveObj) and registered, so a REF_DELTA finds it by id.
+  // The base of a delta if it has resolved; if not, the delta is filed under it.
+  function findBase(d: DeltaEntry): Result<Base | null, PackError> {
+    const base = d.base;
+    switch (base.tag) {
+      case 'ofs': {
+        if (!byOffset.has(base.offset)) return corrupt(`pack: ofs delta base not at object boundary ${base.offset}`);
+        const b = mapGet(memo, base.offset);
+        if (b.tag === 'some') return ok(b.value);
+        file(onOffset, base.offset, d);
+        return ok(null);
+      }
+      case 'ref': {
+        stats.baseLookups++;
+        const b = mapGet(resolved, base.oid);
+        if (b.tag === 'some') return ok(b.value);
+        file(onOid, base.oid, d);
+        return ok(null);
+      }
+    }
+    // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
+    return assertNever(base);
+  }
+  // Full objects first: each is hashed once and registered, so a REF_DELTA finds it by id.
+  const deltas: DeltaEntry[] = [];
   for (const o of entries) {
-    if (o.tag === 'delta') continue;
-    const s = resolveObj(o);
-    // a full object resolves: it has no base to wait on or refuse
-    // Stryker disable next-line ConditionalExpression,BlockStatement: see above
-    if (s.tag === 'failed') return err(s.error);
+    if (o.tag === 'delta') { deltas.push(o); continue; }
+    stats.steps++;
+    if (memo.has(o.offset)) continue;
+    settle(o, { type: o.type, data: o.data, chain: 0, oid: hashObject(storedName(o.type), o.data), offset: o.offset, size: o.size, compressed: o.compressed, packBase: o.base });
   }
-  // Until nothing is pending: a pass either resolves something, or moves to the external phase once, or ends in an
-  // error. A REF chain emitted child-first resolves one link per pass, so the pass count is bounded by the chain check
-  // above (≤ 2 · maxDeltaChain + 2), not by a pass ceiling that used to return the tail unresolved without an error (#14).
-  // Stryker disable next-line MethodExpression,ConditionalExpression: a full object left in is resolved already, and comes back from the memo
-  let pending: Entry[] = entries.filter(o => o.tag === 'delta');
-  while (pending.length > 0) {
-    const next: Entry[] = [];
-    let missingOid = '';
-    let haveMissing = false;
-    const waited: UnresolvedBase[] = [];
-    for (const o of pending) {
-      const s = resolveObj(o);
-      switch (s.tag) {
-        case 'failed': return err(s.error);
-        case 'waiting':
-          next.push(o);
-          waited.push({ offset: o.offset, oid: s.oid });
-          if (!haveMissing) { missingOid = s.oid; haveMissing = true; }
-          continue;
-        case 'resolved': continue;
-      }
-      // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
-      return assertNever(s);
-    }
-    if (next.length === pending.length) {
-      // no progress even with external bases: the first waiting object's base is missing from the pack and the caller
-      if (phase === 'external') {
-        if (collectMissing) return ok({ objects: resolved, stats, unresolved: waited });
-        return corrupt(`pack: ref delta base ${missingOid} not found`);
-      }
-      phase = 'external'; // every in-pack base is known now; the rest are thin bases
-    }
-    pending = next;
+  // Every delta once, in pack order: resolved on a base that is there, or filed under the one that is not.
+  for (const d of deltas) {
+    if (memo.has(d.offset)) continue;
+    const base = findBase(d);
+    if (!base.ok) return base;
+    if (base.value === null) { stats.steps++; continue; }
+    const r = patch(d, base.value);
+    if (!r.ok) return r;
+    const l = land(r.value);
+    if (!l.ok) return l;
   }
-  return ok({ objects: resolved, stats, unresolved: [] });
+  const left = deltas.filter(d => !memo.has(d.offset));
+  if (left.length === 0) return ok({ objects: resolved, stats, unresolved: [] });
+  // What each remaining delta waits on, through its OFS bases, each walked once (the answer is kept per offset). A walk
+  // that comes back to itself is a cycle of OFS bases (a hand-built input): a chain with no end is past any limit.
+  const waits = new Map<number, Wait>();
+  function waitOf(start: DeltaEntry): Wait | null {
+    const path: DeltaEntry[] = [];
+    const onPath = new Set<number>();
+    let cur = start;
+    let found: Wait;
+    for (;;) {
+      const known = mapGet(waits, cur.offset);
+      if (known.tag === 'some') { found = known.value; break; }
+      stats.steps++;
+      if (cur.base.tag === 'ref') { found = { oid: cur.base.oid, depth: 1 }; waits.set(cur.offset, found); break; }
+      const b = mapGet(byOffset, cur.base.offset);
+      // an unresolved delta's OFS base is an unresolved delta: findBase saw the object, and it would have landed this one
+      if (onPath.has(cur.offset) || b.tag === 'none' || b.value.tag !== 'delta') return null;
+      onPath.add(cur.offset);
+      path.push(cur);
+      cur = b.value;
+    }
+    for (const d of path.toReversed()) {
+      found = { oid: found.oid, depth: found.depth + 1 };
+      waits.set(d.offset, found);
+    }
+    return found;
+  }
+  // A delta more than maxDeltaChain deltas above a base that has not resolved is refused before that base is asked for
+  // (one link fewer is refused by patch if the base turns up: an external base is chain 0).
+  for (const d of left) {
+    const w = waitOf(d);
+    if (w === null || w.depth > maxChain + 1) return err(limitError('delta chain depth', maxChain + 1, maxChain));
+  }
+  // The caller's bases, each id asked once, in pack order of the REF_DELTAs that wait on it. A base that lands may
+  // resolve an object another REF_DELTA waits on: that one is in the pack after all, and is not asked for.
+  const asked = new Set<Oid>();
+  for (const d of left) {
+    if (d.base.tag !== 'ref' || memo.has(d.offset) || asked.has(d.base.oid)) continue;
+    asked.add(d.base.oid);
+    const ext = external(d.base.oid);
+    if (!ext) continue;
+    const checked = externalBase(d.base.oid, ext);
+    if (!checked.ok) return checked;
+    for (const w of take(onOid, d.base.oid)) {
+      stats.externalBases++;
+      const r = patch(w, checked.value);
+      if (!r.ok) return r;
+      const l = land(r.value);
+      if (!l.ok) return l;
+    }
+  }
+  // Still unresolved: the base is in neither the pack nor the caller's hands.
+  const unresolved: UnresolvedBase[] = [];
+  let missing: Oid | null = null;
+  for (const d of left) {
+    const w = mapGet(waits, d.offset);
+    // every delta in `left` has a wait (the loop above)
+    // Stryker disable next-line ConditionalExpression: see above
+    if (memo.has(d.offset) || w.tag === 'none') continue;
+    unresolved.push({ offset: d.offset, oid: w.value.oid });
+    if (missing === null) missing = w.value.oid;
+  }
+  if (missing === null || collectMissing) return ok({ objects: resolved, stats, unresolved });
+  return corrupt(`pack: ref delta base ${missing} not found`);
 }
 
 // Stryker disable next-line ArrowFunction: null and a bare return both mean the base is not in the pack
@@ -671,22 +717,34 @@ function baseOf(obj: ParsedObject, memo: ReadonlyMap<number, ResolvedObject>): P
   // Stryker disable next-line ConditionalExpression,BlockStatement,CallExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(obj.base);
 }
-// Depth of an object the fixpoint could not hash. That only happens when a REF base is outside the pack, and a
-// resolved base would have resolved this object too, so the walk never lands on a memoised object. An external base
+// Depth of an object the resolver could not hash. That only happens when a REF base is outside the pack, and a
+// resolved base would have resolved this object too, so the walk never lands on a resolved object. An external base
 // is chain 0: a REF_DELTA on it is 1, and an OFS_DELTA on that object is one deeper. Same numbers verify-pack prints
-// once index-pack has appended the base.
-function chainDepth(obj: ParsedObject, byOffset: ReadonlyMap<number, ParsedObject>): number {
-  if (obj.base.tag !== 'ofs') return 1;
-  const base = mapGet(byOffset, obj.base.offset);
-  // Stryker disable next-line ConditionalExpression: an ofs offset that is not an object is pack_corrupt before layout
-  if (base.tag === 'none') return 0;
-  return chainDepth(base.value, byOffset) + 1;
+// once index-pack has appended the base. A loop over the OFS bases, each object's depth kept in `depths`: no recursion
+// (the chain is as long as maxDeltaChain allows) and no object walked twice.
+function chainDepth(obj: ParsedObject, byOffset: ReadonlyMap<number, ParsedObject>, depths: Map<number, number>): number {
+  const path: ParsedObject[] = [];
+  let cur = obj;
+  let depth: number;
+  for (;;) {
+    const known = mapGet(depths, cur.offset);
+    if (known.tag === 'some') { depth = known.value; break; }
+    if (cur.base.tag !== 'ofs') { depth = 1; depths.set(cur.offset, depth); break; }
+    const base = mapGet(byOffset, cur.base.offset);
+    // Stryker disable next-line ConditionalExpression: an ofs offset that is not an object is pack_corrupt before layout
+    if (base.tag === 'none') { depth = 0; break; }
+    path.push(cur);
+    cur = base.value;
+  }
+  for (const o of path.toReversed()) depths.set(o.offset, ++depth);
+  return depth;
 }
 function packLayout(parsed: ParsedPack, resolved: CollectedPack): PackLayout {
   const memo = new Map<number, ResolvedObject>();
   for (const r of resolved.objects.values()) memo.set(r.offset, r);
   const byOffset = new Map(parsed.objects.map(o => [o.offset, o]));
   const objects: PackLayoutObject[] = [];
+  const depths = new Map<number, number>();
   for (const obj of parsed.objects) {
     const found = mapGet(memo, obj.offset);
     const r = found.tag === 'some' ? found.value : null;
@@ -699,7 +757,7 @@ function packLayout(parsed: ParsedPack, resolved: CollectedPack): PackLayout {
       type: r ? r.type : null,
       oid: r ? r.oid : null,
       base: baseOf(obj, memo),
-      depth: r ? r.chain : chainDepth(obj, byOffset),
+      depth: r ? r.chain : chainDepth(obj, byOffset, depths),
     });
   }
   const missingBases: Oid[] = [];
