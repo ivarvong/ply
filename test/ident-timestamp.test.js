@@ -60,11 +60,17 @@ test('a huge timestamp costs no more conversion work than a benign object of the
 // CPU of a same-size benign object (the reviewer's exp6-cputime.mjs on 91f0e71: 64 ms against 0.3 ms at 4M digits).
 // The expected bound is git's rule, not ply's code: with no leading zero a 20th digit is already past 2^63 - 1, and
 // fsck_ident reports the overflow before it reads what follows the digits, so 20 digits of one timestamp decide it.
+// What it counts: the calls of RegExp.prototype.test whose subject is one character of the object (or the empty
+// string charAt gives past its end), which is how the ident parser classifies: one call a character. A call with a
+// longer subject is not a character of the object being classified and is not counted: under CI's PLY_FAILSITES the
+// gate c recorder (test/space/failsite-hook.mjs) reads a stack at every plyError, and vitest's source-mapped stack
+// tests each frame's path and each CallSite method name with a regex inside the parse call. That was 200 calls on the
+// refused object only (21 by the parser + 200 = the 221 of ci run 43074758530), none on the accepted one.
 function charsClassified(fn) {
   const real = RegExp.prototype.test;
   let tests = 0;
   // oxlint-disable-next-line no-extend-native -- a counter for the length of this call, restored in finally
-  RegExp.prototype.test = function test(s) { tests++; return real.call(this, s); };
+  RegExp.prototype.test = function test(s) { if (typeof s === 'string' && s.length <= 1) tests++; return real.call(this, s); };
   try { return { value: fn(), tests }; } finally { RegExp.prototype.test = real; }
 }
 
