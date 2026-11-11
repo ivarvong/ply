@@ -114,14 +114,13 @@ function decidePath(B: Entry, O: Entry, T: Entry): PathDecision {
 }
 
 // Pure: three-way merge of one directory's entries, as lists by decision: { entries (resolved, in no particular order),
-// recurse: [name], conflicts: [name], content: [name], deletedBoth, addedOurs, addedTheirs }. The deleted/added lists
-// feed the rename guards in mergeTrees.
+// recurse: [name], conflicts: [name], content: [name], addedOurs, addedTheirs }. The added lists feed the directory-rename
+// guard in mergeTrees (G2). What both sides deleted is not read off this walk: see deletedOnBoth.
 export type ThreeWay = {
   readonly entries: TreeEntry[];
   readonly recurse: string[];
   readonly conflicts: string[];
   readonly content: string[];
-  readonly deletedBoth: string[];
   readonly addedOurs: string[];
   readonly addedTheirs: string[];
 };
@@ -134,14 +133,12 @@ export function threeWay(base: readonly TreeEntry[], ours: readonly TreeEntry[],
   const recurse: string[] = [];
   const conflicts: string[] = [];
   const content: string[] = [];
-  const deletedBoth: string[] = [];
   const addedOurs: string[] = [];
   const addedTheirs: string[] = [];
   for (const name of names) {
     const B = mapGet(b, name);
     const O = mapGet(o, name);
     const T = mapGet(t, name);
-    if (B.tag === 'some' && O.tag === 'none' && T.tag === 'none') deletedBoth.push(name);
     if (B.tag === 'none' && O.tag === 'some') addedOurs.push(name);
     if (B.tag === 'none' && T.tag === 'some') addedTheirs.push(name);
     const d = decidePath(B, O, T);
@@ -155,7 +152,7 @@ export function threeWay(base: readonly TreeEntry[], ours: readonly TreeEntry[],
     // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
     assertNever(d);
   }
-  return { entries, recurse, conflicts, content, deletedBoth, addedOurs, addedTheirs };
+  return { entries, recurse, conflicts, content, addedOurs, addedTheirs };
 }
 
 // Pure: git's mode merge for a regular file both sides touched: equal → that; one side unchanged → the other's; null:
@@ -315,18 +312,20 @@ const cachedTree = async (t: Transport, cache: TreeCache, oid: string, onFetch: 
 const subtree = (e: Entry): Oid | null => (e.tag === 'some' && isTreeEntry(e.value) ? e.value.oid : null);
 // a tree by oid; null is the empty tree
 type ReadTree = (oid: Oid | null) => Promise<Result<readonly TreeEntry[], PlyError>>;
-// Effect: the paths `side` adds relative to `base` (both tree oids), recursing only into differing subtrees; a directory
-// new on `side` is one entry, 'dir/', standing for everything inside it.
-async function addedPaths(read: ReadTree, base: Oid | null, side: Oid | null, prefix = ''): Promise<Result<string[], PlyError>> {
+// Effect: what `side` adds relative to `base` (both tree oids), recursing only into differing subtrees; a directory new
+// on `side` is one entry, 'dir/', standing for everything inside it, so it carries the directory's tree id: two sides
+// added the same things there only if they added the same tree.
+type Added = { readonly path: string; readonly oid: Oid };
+async function addedPaths(read: ReadTree, base: Oid | null, side: Oid | null, prefix = ''): Promise<Result<Added[], PlyError>> {
   if (base === side) return ok([]);
   const [B, S] = await Promise.all([read(base), read(side)]);
   if (!B.ok) return B;
   if (!S.ok) return S;
-  const b = byName(B.value); const out: string[] = [];
+  const b = byName(B.value); const out: Added[] = [];
   for (const e of S.value) {
     const was = mapGet(b, e.name);
     // new, or a file where a directory was (or the reverse): added
-    if (was.tag === 'none' || isTreeEntry(e) !== isTreeEntry(was.value)) out.push(prefix + e.name + (isTreeEntry(e) ? '/' : ''));
+    if (was.tag === 'none' || isTreeEntry(e) !== isTreeEntry(was.value)) out.push({ path: prefix + e.name + (isTreeEntry(e) ? '/' : ''), oid: e.oid });
     else if (isTreeEntry(e) && was.value.oid !== e.oid) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- one subtree at a time, as before
       const inner = await addedPaths(read, was.value.oid, e.oid, `${prefix}${e.name}/`);
@@ -337,8 +336,36 @@ async function addedPaths(read: ReadTree, base: Oid | null, side: Oid | null, pr
   return ok(out);
 }
 
-// a path list as one comparable value (paths hold no NUL)
-const pathSet = (l: readonly string[]): string => [...l].toSorted().join('\0');
+// a list of additions as one comparable value: each path with what was put there (paths hold no NUL)
+const changeSet = (l: readonly Added[]): string => l.map(a => `${a.path}\0${a.oid}`).toSorted().join('\0');
+// a side still holds a base file as a file (a file replaced by a directory of its name is deleted there: the rename
+// detection ply stands in for counts anything but a tree as the file)
+const holdsFile = (e: Entry): boolean => e.tag === 'some' && !isTreeEntry(e.value);
+// Effect: the base paths neither side holds any more: every rename source both sides lost, which is what arms G1. It is
+// read off the three trees, not off the merge walk, because the walk does not visit every place a file can be lost on
+// both sides: a subtree that is the same tree on ours and theirs is taken whole, and a base file under a name where a
+// side now has a directory is merged as if the base were empty. Descends only where base differs from both sides (a
+// subtree one side left alone has no deletion on that side), through the tree cache the walk filled; a directory gone
+// from both sides (absent, or a file now) is one path. The cost beyond the walk is the subtrees ours and theirs agree
+// on and base does not: two tree reads per such directory.
+async function deletedOnBoth(read: ReadTree, { base, ours, theirs }: Trees, prefix: string, out: string[]): Promise<Result<true, PlyError>> {
+  if (base === null || base === ours || base === theirs) return ok(true);
+  const [B, O, T] = await Promise.all([read(base), read(ours), read(theirs)]);
+  if (!B.ok) return B;
+  if (!O.ok) return O;
+  if (!T.ok) return T;
+  const o = byName(O.value); const t = byName(T.value);
+  for (const e of B.value) {
+    const eo = mapGet(o, e.name); const et = mapGet(t, e.name);
+    if (!isTreeEntry(e)) { if (!holdsFile(eo) && !holdsFile(et)) out.push(prefix + e.name); continue; }
+    const so = subtree(eo); const st = subtree(et);
+    if (so === null && st === null) { out.push(prefix + e.name); continue; }
+    // oxlint-disable-next-line eslint/no-await-in-loop -- one subtree at a time, as addedPaths
+    const inner = await deletedOnBoth(read, { base: e.oid, ours: so, theirs: st }, `${prefix}${e.name}/`, out);
+    if (!inner.ok) return inner;
+  }
+  return ok(true);
+}
 export type DriverFor = (path: string) => Promise<Result<Driver, PlyError>>;
 // Why a path conflicts. The text is the reason a caller reads in merge_conflict's `reasons`.
 export type ContentReason =
@@ -405,7 +432,8 @@ const mergeTreesDefaults = (): MergeTreesConfig => ({ base: null, ours: null, th
 // Rename guards. merge-ort detects renames (and directory renames, as conflicts); we do not. Two shapes are where a
 // rename could make git conflict while a rename-blind merge is clean, so they are conflicts here (superset of git's):
 //   G1  a path deleted on both sides while either side adds a path   (rename/rename(1to2), rename/delete) — the deleted
-//       paths and the added ones are reported, since git names the conflict at the rename target
+//       paths and the added ones are reported, since git names the conflict at the rename target. "Deleted on both
+//       sides" is decided over the whole of the three trees (deletedOnBoth), wherever the walk went
 //   (G2's target is a path git computes from the directory rename; we report the added path and the reason.)
 //   G2  a directory one side removed entirely, the other side adds inside it   (directory rename + add)
 // A rename on one side with the other side untouched merges exactly as git does.
@@ -426,7 +454,6 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
   const th = byName(T);
   for (const name of r.conflicts) conflict(prefix + name, 'tree');
   if (r.conflicts.some(name => b.has(name) && !(o.has(name) && th.has(name)))) out.deletedOne = true; // modify/delete
-  for (const name of r.deletedBoth) out.deletedBoth.push(prefix + name);
   if (removed === 'ours') for (const name of r.addedTheirs) out.dirAdds.push(prefix + name);
   if (removed === 'theirs') for (const name of r.addedOurs) out.dirAdds.push(prefix + name);
   for (const name of r.content) {
@@ -462,6 +489,7 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
   if (!encoded.ok) return encoded;
   const data: Uint8Array = encoded.value;
   const oid: Oid = hashObject('tree', data);
+  if (top) { const lost = await deletedOnBoth(read, { base, ours, theirs }, prefix, out.deletedBoth); if (!lost.ok) return lost; }
   // deletedOne is set only beside a conflict
   if (top && (out.deletedBoth.length > 0 || out.deletedOne)) {
     // Every path either side added, across the whole tree — the walk above skips directories only one side changed, and a
@@ -472,16 +500,17 @@ async function mergeDir(t: Transport, cache: TreeCache, { base, ours, theirs, pr
     if (!addedTheirsR.ok) return addedTheirsR;
     const addedOurs = addedOursR.value;
     const addedTheirs = addedTheirsR.value;
-    const added = [...new Set([...addedOurs, ...addedTheirs])];
+    const added = [...new Set([...addedOurs, ...addedTheirs].map(a => a.path))];
     // G1 stands down when the rename is already applied (#103): the rename-blind merge is ours' tree (every change theirs
-    // made is in ours) and both sides added and deleted exactly the same paths, so git pairs the same renames on both
+    // made is in ours) and both sides added and deleted exactly the same things (a directory new on both sides is one
+    // name, and the same addition only as the same tree), so git pairs the same renames on both
     // sides and finds nothing to conflict (a cherry-pick of it is empty). An add or delete on ours alone could let git
     // pair a different source or target there (rename/rename, rename/delete), so the guard stays.
     const sameChanges = async (): Promise<Result<boolean, PlyError>> => {
-      if (pathSet(addedOurs) !== pathSet(addedTheirs)) return ok(false);
+      if (changeSet(addedOurs) !== changeSet(addedTheirs)) return ok(false);
       const removedOurs = await addedPaths(read, ours, base);
       if (!removedOurs.ok) return removedOurs;
-      return map(await addedPaths(read, theirs, base), removedTheirs => pathSet(removedOurs.value) === pathSet(removedTheirs));
+      return map(await addedPaths(read, theirs, base), removedTheirs => changeSet(removedOurs.value) === changeSet(removedTheirs));
     };
     const unchanged = out.conflicts.length === 0 && oid === ours ? await sameChanges() : ok(false);
     if (!unchanged.ok) return unchanged;
