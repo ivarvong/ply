@@ -414,7 +414,6 @@ export const DECISIONS = [
   { match: "src/objects.ts#verifyHeaders:pack_corrupt:unterminatedHeader", space: 'fsck-commit', axisTag: 'commitHeader' },
   { match: "src/push.ts#outcomeResult:<o.code>:<message>", space: 'push-outcome', axisTag: 'status' },
   { match: "src/push.ts#outcomeResult:cas_conflict:<message>", space: 'push-outcome', axisTag: 'status' },
-  { match: 'src/push.ts#refusedInPlace:push_rejected:<e.message>', space: 'sync-ref', axisTag: 'case' },
   { match: "src/push.ts#outcomeResult:limit_exceeded:push is too large: …", space: 'host-reports', axisTag: 'case' },
   { match: "src/push.ts#outcomeResult:ambiguous:push outcome unknown: ……", space: 'push-outcome', axisTag: 'delivery' },
   { match: "src/push.ts#readResponse:limit_exceeded:report bytes", space: 'mutant-kill', axisTag: 'case' },

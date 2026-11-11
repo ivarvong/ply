@@ -433,13 +433,6 @@ export type PushReport = Exclude<ReportShape, Malformed>;
 // band 2. A rejection's message names the first refused ref's reason (git's report order; an unpack failure's refs
 // are all "unpacker error", and there is at least one command).
 export type PushError = ErrorOf<RejectionCode | 'push_partial' | 'ambiguous'>;
-// A refusal classed as a lost compare-and-swap, once its caller has read the ref back and found it exactly where the
-// command's old id said (absent, for a create): the precondition held, so no race was lost. git <= 2.50 writes its
-// catch-all 'failed to update ref' for a D/F name conflict, a held lock and a non-commit under refs/heads/ as well
-// (git >= 2.51 names the first 'refname conflict', a refusal already). The same message, report and band 2 as
-// push_rejected: a fresh read finds the same ref and the same refusal, and nothing claims where the ref went.
-export const refusedInPlace = (e: PlyError): Result<never, PlyError> =>
-  fail('push_rejected', e.message, { what: 'ref', report: e.report, hookOutput: e.hookOutput });
 // remote: band 3's message when the stream broke on one, else null (a JS caller's missing value reads as null).
 export type OutcomeContext = { readonly report: PushReport | null; readonly hookOutput: string; readonly remote: string | null; readonly commands: readonly Command[] };
 // scrub: the transport's credential scrubber (or null), applied to band 3's text before it is cut (errors.ts remoteText).

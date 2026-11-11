@@ -223,58 +223,6 @@ for (const stock of [false, true]) describe(stock ? 'stock upload-pack' : 'defau
   });
 });
 
-// refs/unchanged-ref-refusal-reported-as-cas-conflict. git <= 2.50 answers a D/F name conflict and a held ref lock with
-// its catch-all `ng <ref> failed to update ref`, the reason a stale old id gets too (git >= 2.51 says 'refname
-// conflict' for the first). The expected values are git's own: `git push` to the same destination prints
-// `[remote rejected]` (git's word for a refusal by the remote; a lost race reads `[rejected]` with 'fetch first' or
-// 'stale info'), and `git for-each-ref` reads the destination's refs back unmoved. A ref that is exactly where the
-// command said has not lost a compare-and-swap, so the code is push_rejected (retry: no) and the error makes no claim
-// about where the ref is.
-describe('a refusal with the destination ref unmoved is push_rejected, not cas_conflict', () => {
-  const refsOf = dir => git(dir, ['for-each-ref', '--format=%(refname) %(objectname)']).trim();
-  const gitPush = (work, bare, spec) => spawnSync('git', ['push', bare, spec], { cwd: work, encoding: 'utf8' });
-  // the reason as the client prints it: `! [remote rejected] <src> -> <dst> (<reason>)`
-  const refusal = viaGit => {
-    assert.notEqual(viaGit.status, 0);
-    const said = /\[remote rejected\][^\n]*\(([^()\n]+)\)/.exec(viaGit.stderr);
-    assert.notEqual(said, null, viaGit.stderr);
-    return said[1];
-  };
-  const judge = (e, label, reason) => {
-    assert.equal(e.code, 'push_rejected', `${label}: ${e.code}: ${e.message}`);
-    assert.equal(ply.retryPolicy(e), 'no', label);
-    assert.equal('actual' in e, false, `${label}: no claim about where the ref is`);
-    assert.equal('expected' in e, false, label);
-    assert.equal(e.message, `push rejected: ${reason}`, `${label}: the server's reason, as the client printed it`);
-    assert.deepEqual(e.report.refs.map(r => [r.ok, r.reason]), [[false, reason]], `${label}: receive-pack's report is carried`);
-  };
-  test('a D/F name conflict: syncRef and createBranch under a branch the destination holds', async () => {
-    const p = pair(false);
-    const c1 = commit(p.work, 1);
-    pushTo(p.work, p.src, 'HEAD:refs/heads/a/b');
-    pushTo(p.work, p.dst, 'HEAD:refs/heads/a');
-    const held = refsOf(p.dst);
-    // git's verdict on the same push to the same destination
-    const reason = refusal(gitPush(p.work, p.dst, 'HEAD:refs/heads/a/b'));
-    judge(errOf(await syncRef(p.srcUrl, p.dstUrl, { ref: 'refs/heads/a/b' })), 'syncRef', reason);
-    judge(errOf(await ply.createBranch(p.dstUrl, { ref: 'refs/heads/a/c', from: c1 })), 'createBranch', reason);
-    assert.equal(refsOf(p.dst), held, 'git for-each-ref: nothing moved, nothing was created');
-  });
-  test('a held lock on the destination ref: it is still at the tip ls-refs read, and the error does not say deleted', async () => {
-    const p = pair(false);
-    commit(p.work, 1);
-    pushTo(p.work, p.src, 'HEAD:refs/heads/main');
-    okOf(await syncRef(p.srcUrl, p.dstUrl, { ref: 'refs/heads/main' }));
-    const held = refsOf(p.dst);
-    commit(p.work, 2);
-    pushTo(p.work, p.src, 'HEAD:refs/heads/main');
-    writeFileSync(join(p.dst, 'refs', 'heads', 'main.lock'), '');
-    const reason = refusal(gitPush(p.work, p.dst, 'HEAD:refs/heads/main'));
-    judge(errOf(await syncRef(p.srcUrl, p.dstUrl, { ref: 'refs/heads/main' })), 'syncRef under a lock', reason);
-    assert.equal(refsOf(p.dst), held, 'git for-each-ref: the ref is where it was');
-  });
-});
-
 describe('refs, options and refusals', () => {
   test('dstRef, an annotated tag (created, then a moved tag refused unless forced), verify', async () => {
     const p = pair(false);

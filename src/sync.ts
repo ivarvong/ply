@@ -47,7 +47,7 @@ import { ok, map, assertNever } from './result.js';
 import { field, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { fetchPack } from './fetchpack.js';
-import { push, refusedInPlace, ZERO_OID } from './push.js';
+import { push, ZERO_OID } from './push.js';
 import { operation, verifyRef } from './operation.js';
 import { createTransport, redactUrl } from './http.js';
 import { transportFrom, withParent } from './transport.js';
@@ -126,14 +126,13 @@ function forwarded(parsed: ParsedPack | null): PackInput[] {
 }
 
 // Effect: a push the destination refused as stale (it moved after ls-refs). receive-pack does not say where it went, so
-// re-read it: moved, cas_conflict naming the tip it has now (null: deleted); unchanged, the compare-and-swap held and
-// the refusal is the server's own (push_rejected: a D/F name conflict, a held lock, a tag object onto a branch).
-async function lostRace(d: Transport, dstRef: string, expected: string, refused: PlyError): Promise<Result<never, PlyError>> {
+// re-read it: moved, cas_conflict naming the tip it has now (null: deleted); unchanged, the push's own error stands.
+async function lostRace(d: Transport, dstRef: string, expected: string, pushed: Result<never, PlyError>): Promise<Result<never, PlyError>> {
   const now = await lsRefs(d, [dstRef]);
   if (!now.ok) return now;
   const tip = refOid(now.value.refs, dstRef);
   const actual = tip.tag === 'some' ? tip.value : null;
-  if (actual === (expected === ZERO_OID ? null : expected)) return refusedInPlace(refused);
+  if (actual === (expected === ZERO_OID ? null : expected)) return pushed;
   return fail('cas_conflict', `${dstRef} moved from ${expected} to ${actual === null ? 'absent' : actual} during the sync`, { what: 'ref', expected, actual });
 }
 
@@ -171,7 +170,7 @@ async function transfer({ dstRef, force, shared }: Parsed, { t, d, root, to, fro
   const pack = forwarded(fetched.value.parsed);
   const expected = from === null ? ZERO_OID : from;
   const pushed = await push(d, { ref: dstRef, oldOid: expected, newOid: to, objects: pack });
-  if (!pushed.ok) return pushed.error.code === 'cas_conflict' ? lostRace(d, dstRef, expected, pushed.error) : pushed;
+  if (!pushed.ok) return pushed.error.code === 'cas_conflict' ? lostRace(d, dstRef, expected, pushed) : pushed;
   if (shared.verify) { const seen = await verifyRef(d, root, 'git.sync_ref', dstRef, to); if (!seen.ok) return seen; }
   return ok({ outcome: from === null ? 'created' : 'updated', dstRef, from, to, forced: !fastForward, objects: pack.length, pushBytes: pushed.value.packBytes });
 }

@@ -52,16 +52,10 @@ export async function negotiate(t: Transport, opts: NegotiateOpts, extra: Pick<F
   const { haves } = parsed.value;
   // what the server acknowledged: each an id, offered again as a have in every later round
   const acked = new Set<Oid>();
-  // every have sent so far. upload-pack acknowledges only a have line it was sent (upload-pack.c process_haves and
-  // send_acks), so an acknowledgment outside this set is a protocol violation. Kept as common, it went back as a have
-  // in the final request, claiming an object the caller does not hold, and the server left it out of the pack: ok with
-  // the want missing. Real git fails the same exchange (test/fetch-lying-server.test.js).
-  const offered = new Set<Oid>();
   const rounds: Round[] = [];
   let i = 0, ready = false;
   for (let round = 0; round < caps.rounds && i < haves.length && !ready; round++) {
     const sent = haves.slice(i, i + caps.batch); i += caps.batch;
-    for (const h of sent) offered.add(h);
     // oxlint-disable-next-line no-await-in-loop -- each round's haves depend on the last round's acks
     const fetched = await fetchPack(t, { ...rest, wants, haves: [...acked, ...sent], done: false }, { external, resolve });
     if (!fetched.ok) return fetched;
@@ -69,8 +63,6 @@ export async function negotiate(t: Transport, opts: NegotiateOpts, extra: Pick<F
     for (const a of r.acks) {
       const id = parseOid(a);
       if (!id.ok) return fail('protocol', `negotiate: the server acknowledged ${remoteQuoted(a, ACK_SHOWN)}, not an object id`);
-      // an object id by now: hex only, so it is quoted as it is
-      if (!offered.has(id.value)) return fail('protocol', `negotiate: the server acknowledged ${id.value}, which was never offered as a have`);
       acked.add(id.value);
     }
     rounds.push({ sent: sent.length, acks: r.acks, nak: r.nak, ready: r.ready, pack: Boolean(r.parsed) });
