@@ -628,7 +628,8 @@ const PROGRESS_DROPPED: Frame = { kind: 'data', payload: Uint8Array.of(SIDEBAND_
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the
 // response end the read as `lost`; the stream otherwise ends as a report or broken. `reading` is the last reading state.
 // `answered`: a frame of receive-pack's answer was read before the failure (false: the exchange failed at its status line).
-type Read = { readonly done: Broken | StreamReport; readonly reading: Reading } | { readonly cause: unknown; readonly answered: boolean };
+// `shape`: the report as the read classified it, line by line (decide() does not classify it again).
+type Read = { readonly done: Broken | StreamReport; readonly shape: ReportShape | Broken; readonly reading: Reading } | { readonly cause: unknown; readonly answered: boolean };
 // An HTTP refusal of the receive-pack request itself (401/403: receive-pack disabled or not for this credential; 404: no
 // such repository), seen before any frame of its answer. git's http-backend decides that at the status line, before it
 // runs receive-pack (http.receivepack false is a 403), but the request body was sent, and a middlebox that forwarded
@@ -678,20 +679,25 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody,
       // Stryker disable next-line ConditionalExpression: a broken state has no lines, so reading on fails the read: ambiguous either way
       if (st.tag !== 'reading') break;
       reading = st;
-      if (st.lines.length > maxLines) { lost = { cause: limitExceeded('report lines', st.lines.length, maxLines) }; break; }
-      for (const whole of st.lines.splice(fed)) {
+      const { lines } = st;
+      if (lines.length > maxLines) { lost = { cause: limitExceeded('report lines', lines.length, maxLines) }; break; }
+      // each new line is classified once, where it lies: only a line over the cap is replaced, by its cut copy
+      for (; fed < lines.length; fed += 1) {
+        const whole = lines[fed];
+        // Stryker disable next-line ConditionalExpression: unreachable, fed < lines.length
+        if (whole === undefined) break;
         const line = cutReportLine(whole, reasonCap);
-        st.lines.push(line);
+        if (line !== whole) lines[fed] = line;
         report = reportStep(report, line);
       }
-      fed = st.lines.length;
       unreadable = report.tag === 'malformed';
       if (unreadable) break;
     }
   } catch (e) { lost = { cause: e }; }
   if (lost !== null) return { ...lost, answered };
-  // a report that cannot be git's is that report, as far as it was read: decide() classifies the same lines to the same verdict
-  return { done: unreadable ? { tag: 'report', lines: reading.lines } : streamFinish(st), reading };
+  // a report that cannot be git's is that report, as far as it was read
+  const done: Broken | StreamReport = unreadable ? { tag: 'report', lines: reading.lines } : streamFinish(st);
+  return { done, shape: done.tag === 'report' ? reportFinish(report) : done, reading };
 }
 
 // The span's view of the outcome, from the classified report (no second parser).
@@ -787,9 +793,8 @@ async function decide(base: FinishPush, r: Read, cut: PlyError | null): Promise<
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush returns a PlyError
     return finishPush(base, err(ambiguousAfterPush(r.cause) as PlyError));
   }
-  const { done, reading } = r;
+  const { done, shape, reading } = r;
   const band2 = reading.band2Carry.length > 0 ? (reading.band2 + td.decode(reading.band2Carry)).slice(-BAND_TAIL) : reading.band2;
-  const shape: ReportShape | Broken = done.tag === 'report' ? classifyReport(done.lines, plan.commands) : done;
   const outcome = decideOutcome(shape, { atomic: plan.checked !== null && plan.checked.atomic, pack: plan.needPack });
   const report = shape.tag === 'malformed' || shape.tag === 'broken' ? null : shape;
   span.set(outcomeAttrs(done, report, outcome, reading.band2Frames, band2));
