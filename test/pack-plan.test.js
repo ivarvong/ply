@@ -339,7 +339,9 @@ test('end to end: each batch pushed with pushPack to git http-backend (receive.f
 });
 
 // A synthetic index of `n` entries: blob families of a root and a chain of deltas, a tree per 50 blobs, one commit.
-function synthetic(count) {
+// `stored` is how the deltas are stored: REF_DELTA (a 23-byte header: 3 of type and size, a 20-byte id) or OFS_DELTA (4:
+// 2 of type and size for a 40-byte delta, and a 2-byte distance, since the entry before is 203..383 bytes away).
+function synthetic(count, stored = TYPE.REF_DELTA) {
   const offset = new Float64Array(count), headerBytes = new Uint8Array(count).fill(3), compressed = new Float64Array(count), size = new Float64Array(count);
   const storedType = new Uint8Array(count), type = new Uint8Array(count), baseIndex = new Int32Array(count).fill(-1);
   const rbase = new Int32Array(count).fill(-1), depth = new Int32Array(count), rsize = new Float64Array(count);
@@ -353,9 +355,10 @@ function synthetic(count) {
     compressed[i] = 200 + (i % 17) * 10;
     size[i] = delta ? 40 : 400;
     rsize[i] = 400;
-    storedType[i] = isCommit ? TYPE.COMMIT : isTree ? TYPE.TREE : delta ? TYPE.REF_DELTA : TYPE.BLOB;
+    storedType[i] = isCommit ? TYPE.COMMIT : isTree ? TYPE.TREE : delta ? stored : TYPE.BLOB;
     type[i] = isCommit ? TYPE.COMMIT : isTree ? TYPE.TREE : TYPE.BLOB;
-    if (delta) { rbase[i] = i - 1; depth[i] = depth[i - 1] + 1; headerBytes[i] = 23; }
+    if (delta) { rbase[i] = i - 1; depth[i] = depth[i - 1] + 1; headerBytes[i] = stored === TYPE.OFS_DELTA ? 4 : 23; }
+    if (delta && stored === TYPE.OFS_DELTA) baseIndex[i] = i - 1;
     at += headerBytes[i] + compressed[i];
   }
   const idx = { version: 2, count, trailer: createHash('sha1').update(String(count)).digest('hex'), bytes: at + 20, columns: { offset, headerBytes, compressed, size, storedType, type, baseIndex } };
@@ -363,19 +366,30 @@ function synthetic(count) {
   return { idx, res };
 }
 
-test('planning time and memory at 200,000 entries', () => {
+test('planning time and memory at 200,000 entries, REF_DELTA and OFS_DELTA packs', () => {
   const N = 200_000;
-  const { idx, res } = synthetic(N);
   const budget = { maxRequestBytes: 64 * 1024 * 1024 - 64 * 1024, maxObjects: 50_000, maxObjectBytes: 32 * 1024 * 1024, maxCompressedObjectBytes: 32 * 1024 * 1024, reserveBytes: 64 * 1024, reserveObjects: 300 };
-  globalThis.gc?.();
-  const before = process.memoryUsage().heapUsed;
-  const t0 = performance.now();
-  const plan = must(planPackBatches(idx, res, { budget, crossBatchRef: false }));
-  const ms = performance.now() - t0;
-  const after = process.memoryUsage().heapUsed;
-  assert.equal(plan.entries, N);
-  for (const b of plan.batches) assert.ok(b.objects + budget.reserveObjects <= budget.maxObjects && b.packBytes + budget.reserveBytes <= budget.maxRequestBytes);
-  const json = JSON.stringify(plan).length;
-  console.log(JSON.stringify({ entries: N, batches: plan.batches.length, ms: Math.round(ms), heapDeltaMB: +((after - before) / 1e6).toFixed(1), planJsonMB: +(json / 1e6).toFixed(2) }));
-  assert.ok(ms < 5_000, `${ms} ms`);
+  const kinds = [['ref', synthetic(N)], ['ofs', synthetic(N, TYPE.OFS_DELTA)]];
+  const times = { ref: [], ofs: [] };
+  const first = {};
+  // the two kinds alternate, so load on the machine falls on both; the figure reported is each kind's median
+  for (let round = 0; round < 5; round++) {
+    for (const [kind, { idx, res }] of kinds) {
+      globalThis.gc?.();
+      const before = process.memoryUsage().heapUsed;
+      const t0 = performance.now();
+      const plan = must(planPackBatches(idx, res, { budget, crossBatchRef: false }));
+      const ms = performance.now() - t0;
+      const after = process.memoryUsage().heapUsed;
+      assert.equal(plan.entries, N);
+      for (const b of plan.batches) assert.ok(b.objects + budget.reserveObjects <= budget.maxObjects && b.packBytes + budget.reserveBytes <= budget.maxRequestBytes);
+      // whole families: nothing is rewritten, whichever way the deltas are stored
+      assert.equal(plan.batches.reduce((sum, b) => sum + b.refRewrites, 0), 0);
+      assert.ok(ms < 5_000, `${kind}: ${ms} ms`);
+      times[kind].push(ms);
+      first[kind] ??= { batches: plan.batches.length, heapDeltaMB: +((after - before) / 1e6).toFixed(1), planJsonMB: +(JSON.stringify(plan).length / 1e6).toFixed(2) };
+    }
+  }
+  const median = a => Math.round(a.toSorted((x, y) => x - y)[Math.floor(a.length / 2)]);
+  for (const [kind] of kinds) console.log(JSON.stringify({ kind, entries: N, medianMs: median(times[kind]), runsMs: times[kind].map(Math.round), ...first[kind] }));
 });
