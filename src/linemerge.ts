@@ -12,7 +12,7 @@
 
 import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
-import { LIMIT_MERGE_BLOB } from './limits.js';
+import { LIMIT_MERGE_BLOB, LIMIT_MERGE_WORK } from './limits.js';
 import { ok, err, assertNever, getOrElse, isSome, none, some } from './result.js';
 import { plyError } from './errors.js';
 import { bytesToStr, popLast } from './attributes.js';
@@ -45,6 +45,31 @@ export type MergeLinesResult =
 export type Undecided = { readonly undecided: true; readonly detail: string };
 type Diffed<T> = Result<T, Undecided>;
 const DONE: Diffed<null> = ok(null);
+// The work bound. The histogram scan and the classic-Myers fallback add every inner-loop iteration (a line scanned, a
+// candidate tried, a diagonal advanced, a neighbour looked at) and compaction its slides to one counter per merge;
+// past `max` the diff stops and the merge is refused. `max` is absolute, per merged file (limits.ts:
+// Limits.maxMergeWork, LIMIT_MERGE_WORK), so the counted steps are bounded whatever the input's content. A step is
+// not one fixed amount of CPU: the two paths differ about 2x (measured at classicDiff).
+// The counter is the module's own, made per call and starting at zero: nothing a caller passes is read to decide a
+// refusal. A caller's meter is written once, when the call returns, with that call's total.
+export type Meter = { steps: number };
+export type Budget = { steps: number; readonly max: number };
+const unbounded = (): Budget => ({ steps: 0, max: Infinity });
+const spent = (budget: Budget): boolean => budget.steps > budget.max;
+const OVER_BUDGET = 'line diff step budget exceeded';
+// maxWork as a caller gave it: a non-negative finite number, or the default. A value that would bound nothing
+// (NaN, Infinity, a negative, a non-number) never switches the bound off and never refuses everything.
+export const maxWorkOf = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : LIMIT_MERGE_WORK);
+const stepBudget = (maxWork: unknown): Budget => ({ steps: 0, max: maxWorkOf(maxWork) });
+// The call's total, copied out to the caller's meter. The meter is never read; one that is not an object, or will not
+// take the write (frozen), is left alone (an array is an object and gets the property; a function is ignored). The
+// write runs the caller's code (a setter, a Proxy's set trap, a revoked Proxy), so what it throws is caught and
+// dropped: the result is the one the diff computed and no meter makes mergeLines or diffScript throw. Every return
+// path writes, a call that returns before any diff with 0.
+const report = (meter: unknown, steps: number): void => {
+  if (typeof meter !== 'object' || meter === null) return;
+  try { Reflect.set(meter, 'steps', steps); } catch { /* the caller's meter threw: its total is lost, the result is not */ }
+};
 // compact's invariant: the two sides' change groups move in step (equal counts of unchanged lines). Broken, it is a
 // programmer bug, so thrown, and typed (#80); the stack names the site.
 const broken = (): Error => plyError('internal', 'linemerge: groups out of step');
@@ -92,72 +117,86 @@ function applyRediff(rediff: string, myers: () => void): boolean {
 }
 
 // ---- xhistogram.c ----
-type Rec = { ptr: number; cnt: number };
-const NO_REC: Readonly<Rec> = { ptr: 0, cnt: 0 };
 type Lcs = { begin1: number; end1: number; begin2: number; end2: number };
 // find_lcs's outcomes: a common subsequence, none (every line differs), the classic-diff fallback (every common line
-// occurs > 64 times), or the hash-chain limit where git's merge fails.
-type Found = Lcs & { readonly tag: 'lcs' } | { readonly tag: 'none' } | { readonly tag: 'fallback' } | { readonly tag: 'chain-limit' };
+// occurs > 64 times), the hash-chain limit where git's merge fails, or the step budget spent.
+type Found = Lcs & { readonly tag: 'lcs' } | { readonly tag: 'none' } | { readonly tag: 'fallback' } | { readonly tag: 'chain-limit' } | { readonly tag: 'over-budget' };
+// find_lcs's tables, allocated once per diff and sized to it: per class id its first line in the region (`first`) and
+// its occurrence count there (`count`, 0 = absent); per line of file 1 the next line of the same class (`next`, 0 =
+// none). Each region resets only the `count` slots it touched, so a region costs its own length and allocates nothing
+// (xhistogram.c callocs three tables per region; a Map and an object per line here made the same scan ~50x dearer).
+type Index = { readonly first: Int32Array; readonly count: Int32Array; readonly next: Int32Array };
 /* oxlint-disable eslint/max-depth, eslint/complexity, eslint/max-params -- a line-for-line port of xhistogram.c's find_lcs / try_lcs */
-function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number): Found {
+// Typed-array reads below are in range (1-based lines within the region, ids below the class count); Number() only
+// types the read: this is the scan's hot path.
+function scanRegion(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number, ix: Index, budget: Budget): Found {
   const END1 = line1 + count1 - 1;
   const END2 = line2 + count2 - 1;
-  // Line numbers here are in range (1-based, within the region), so every read is defined. Number() only types an
-  // Int32Array read (an int32 is unchanged): this is the scan's hot path, where atOr's checks cost a third of a merge.
-  const recs = new Map<number, Rec>(); // id → { ptr, cnt }  (scanA: ptr = first occurrence, NEXT_PTR chains forward)
-  // oxlint-disable-next-line unicorn/no-new-array -- line_map, preallocated and filled top-down
-  const lineMap = new Array<Rec>(count1);
-  const next = new Int32Array(count1);
+  const { first, count, next } = ix;
+  // scanA: first = first occurrence, next chains forward
+  let distinct = 0;
   for (let ptr = END1; ptr >= line1; ptr--) {
     const id = Number(a[ptr - 1]);
-    const rec = recs.get(id);
-    if (rec) { next[ptr - line1] = rec.ptr; rec.ptr = ptr; rec.cnt = rec.cnt + 1; lineMap[ptr - line1] = rec; }
-    else { const r = { ptr, cnt: 1 }; recs.set(id, r); lineMap[ptr - line1] = r; }
+    const c = Number(count[id]);
+    if (c === 0) { distinct++; next[ptr] = 0; } else next[ptr] = Number(first[id]);
+    first[id] = ptr; count[id] = c + 1;
   }
   // scanA's other way out: a new distinct line landing in a hash bucket that already chains 64 distinct records makes
   // find_lcs fail (-1) and git's merge fail — never clean. Bucket = XDL_HASHLONG(class index, xdl_hashbits(count1)).
-  if (recs.size > MAX_CHAIN) {
+  if (distinct > MAX_CHAIN) {
     let bits = 0; for (let v = 1; v < count1 && bits < 32; v *= 2) bits++; bits = bits || 1;
     const mask = 2 ** bits - 1;
-    const load = new Map<number, number>();
-    for (const id of recs.keys()) { const h = (id + Math.floor(id / 2 ** bits)) & mask; const l = getOrElse(mapGet(load, h), 0) + 1; if (l > MAX_CHAIN) return { tag: 'chain-limit' }; load.set(h, l); }
+    const load = new Uint8Array(mask + 1); // a bucket's load stops at 65
+    for (let ptr = line1; ptr <= END1; ptr++) {
+      const id = Number(a[ptr - 1]);
+      if (Number(first[id]) !== ptr) continue; // once per distinct line
+      const h = (id + Math.floor(id / 2 ** bits)) & mask;
+      const l = Number(load[h]) + 1; if (l > MAX_CHAIN) return { tag: 'chain-limit' }; load[h] = l;
+    }
   }
-  const CNT = (ptr: number): number => atOr(lineMap, ptr - line1, NO_REC).cnt;
-  const NEXT = (ptr: number): number => Number(next[ptr - line1]);
+  const CNT = (ptr: number): number => Number(count[Number(a[ptr - 1])]);
   const lcs = { tag: 'lcs' as const, begin1: 0, end1: 0, begin2: 0, end2: 0 };
   let cnt = MAX_CHAIN + 1;
   let hasCommon = false;
   for (let bPtr = line2; bPtr <= END2;) {
     let bNext = bPtr + 1;
-    const rec = recs.get(Number(b[bPtr - 1]));
-    if (rec) {
-      if (rec.cnt > cnt) { hasCommon = true; }
-      else {
-        hasCommon = true;
-        let as = rec.ptr;
+    const recCnt = Number(count[Number(b[bPtr - 1])]);
+    if (recCnt > 0) {
+      hasCommon = true;
+      if (recCnt <= cnt) {
+        let as = Number(first[Number(b[bPtr - 1])]);
         for (;;) {
-          const np0 = NEXT(as);
+          const np0 = Number(next[as]);
           let bs = bPtr;
           let ae = as;
           let be = bs;
-          let rc = rec.cnt;
+          let rc = recCnt;
           while (line1 < as && line2 < bs && a[as - 2] === b[bs - 2]) { as--; bs--; if (rc > 1) rc = Math.min(rc, CNT(as)); }
           while (ae < END1 && be < END2 && a[ae] === b[be]) { ae++; be++; if (rc > 1) rc = Math.min(rc, CNT(ae)); }
+          budget.steps += ae - as + 1; // the candidate's extension
           if (bNext <= be) bNext = be + 1;
           if (lcs.end1 - lcs.begin1 < ae - as || rc < cnt) { lcs.begin1 = as; lcs.begin2 = bs; lcs.end1 = ae; lcs.end2 = be; cnt = rc; }
           let np = np0;
           if (np === 0) break;
           let stop = false;
-          while (np <= ae) { np = NEXT(np); if (np === 0) { stop = true; break; } }
+          while (np <= ae) { np = Number(next[np]); if (np === 0) { stop = true; break; } }
           if (stop) break;
           as = np;
         }
+        if (spent(budget)) return { tag: 'over-budget' };
       }
     }
     bPtr = bNext;
   }
   if (hasCommon && MAX_CHAIN < cnt) return { tag: 'fallback' };
   return lcs.begin1 === 0 && lcs.begin2 === 0 ? { tag: 'none' } : lcs;
+}
+function findLcs(a: Int32Array, b: Int32Array, line1: number, count1: number, line2: number, count2: number, ix: Index, budget: Budget): Found {
+  budget.steps += count1 + count2; // scanA over file 1's region, one lookup per line of file 2's
+  if (spent(budget)) return { tag: 'over-budget' };
+  const found = scanRegion(a, b, line1, count1, line2, count2, ix, budget);
+  for (let ptr = line1; ptr < line1 + count1; ptr++) ix.count[Number(a[ptr - 1])] = 0; // leave the tables clean for the next region
+  return found;
 }
 /* oxlint-enable eslint/max-depth, eslint/complexity, eslint/max-params */
 
@@ -179,7 +218,8 @@ const DISCARD = 0;
 const KEEP = 1;
 const INVESTIGATE = 2;
 
-function cleanMmatch(action: Uint8Array, i: number, len: number): boolean {
+// oxlint-disable-next-line eslint/max-params -- xdl_clean_mmatch's arguments and the diff's budget
+function cleanMmatch(action: Uint8Array, i: number, len: number, budget: Budget): boolean {
   let s = 0;
   let e = len - 1;
   if (i - s > SIMSCAN_WINDOW) s = i - SIMSCAN_WINDOW;
@@ -190,8 +230,10 @@ function cleanMmatch(action: Uint8Array, i: number, len: number): boolean {
   let rdis1 = 0;
   let rpdis1 = 1;
   for (r = 1; i - r >= s; r++) { const x = action[i - r]; if (x === DISCARD) rdis0++; else if (x === INVESTIGATE) rpdis0++; else break; }
+  budget.steps += r; // the neighbours looked at, up to SIMSCAN_WINDOW each way
   if (rdis0 === 0) return false;
   for (r = 1; i + r <= e; r++) { const x = action[i + r]; if (x === DISCARD) rdis1++; else if (x === INVESTIGATE) rpdis1++; else break; }
+  budget.steps += r;
   if (rdis1 === 0) return false;
   rdis1 += rdis0; rpdis1 += rpdis0;
   return rpdis1 * KPDIS_RUN < rpdis1 + rdis1;
@@ -200,7 +242,17 @@ function cleanMmatch(action: Uint8Array, i: number, len: number): boolean {
 type Split = { i1: number; i2: number; minLo: boolean; minHi: boolean };
 type Box = [off1: number, lim1: number, off2: number, lim2: number, needMin: boolean];
 /* oxlint-disable eslint/max-depth, eslint/complexity, eslint/max-params, eslint/no-param-reassign -- a line-for-line port of xdiffi.c's xdl_split / xdl_recs_cmp over C's argument list */
-export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1: number, line2: number, count2: number, CH1: Uint8Array, CH2: Uint8Array): void {
+// false: the step budget was spent before the diff finished, and nothing was marked.
+// Every loop below adds its iterations to the budget: the class counts, the trim, the cleanup and its neighbour scans,
+// each diagonal and snake of the search, the heuristics' passes over the diagonals, and the boxes' trims and marks.
+// What a counted step costs, measured at babb1b0 on a loaded 16-core machine (process.cpuUsage, median of 9 runs of
+// diffScript, rediff skip): 12.4-15.4 ns per step on this path (two unrelated random a/b/c files of 10,000 / 20,000 /
+// 40,000 lines: 5,370,282 / 10,811,747 / 34,481,049 steps in 79 / 135 / 532 ms) against 6.3-7.3 ns per step on the
+// histogram path (every adjacent pair of lines swapped, 2,000 / 4,000 lines: 3,005,997 / 9,240,577 steps in 22 /
+// 58 ms). So one budget buys about twice the CPU here that it buys on the histogram path.
+export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1: number, line2: number, count2: number, CH1: Uint8Array, CH2: Uint8Array, budget: Budget = unbounded()): boolean {
+  budget.steps += count1 + count2; // the class counts: one pass over each range
+  if (spent(budget)) return false;
   const a = A.subarray(line1 - 1, line1 - 1 + count1);
   const b = B.subarray(line2 - 1, line2 - 1 + count2);
   const n1 = a.length;
@@ -218,6 +270,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   for (; i < lim; i++) if (a[i] !== b[i]) break;
   const off = i; lim -= i;
   for (i = 0; i < lim; i++) if (a[n1 - 1 - i] !== b[n2 - 1 - i]) break;
+  budget.steps += off + i; // the lines trimmed
   const dend1 = n1 - i - 1;
   const dend2 = n2 - i - 1;
   // xdl_cleanup_records
@@ -225,21 +278,23 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
     const len = dend - off + 1;
     const mlim = Math.min(bogosqrt(n), MAX_EQLIMIT);
     const action = new Uint8Array(Math.max(len, 0));
+    budget.steps += 2 * Math.max(len, 0); // the two passes below
     for (let k = 0; k < len; k++) {
       const nm = getOrElse(mapGet(other, atOr(x, k + off, 0)), 0);
       const many = nm < mlim ? KEEP : INVESTIGATE;
       action[k] = nm === 0 ? DISCARD : many;
     }
     const ref: number[] = [];
-    for (let k = 0; k < len; k++) {
+    for (let k = 0; k < len && !spent(budget); k++) {
       let act = action[k];
-      if (act === INVESTIGATE) act = cleanMmatch(action, k, len) ? DISCARD : KEEP;
+      if (act === INVESTIGATE) act = cleanMmatch(action, k, len, budget) ? DISCARD : KEEP;
       if (act === KEEP) ref.push(k + off); else ch[k + off] = 1;
     }
     return Int32Array.from(ref);
   };
   const r1 = refs(a, n1, dend1, len2, ch1);
   const r2 = refs(b, n2, dend2, len1, ch2);
+  if (spent(budget)) return false;
   const h1 = Int32Array.from(r1, k => atOr(a, k, 0));
   const h2 = Int32Array.from(r2, k => atOr(b, k, 0));
   // xdl_do_diff (Myers part)
@@ -247,11 +302,15 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   const nreff2 = r2.length;
   const ndiags = nreff1 + nreff2 + 3;
   const kvd = new Float64Array(2 * ndiags + 2);
+  budget.steps += ndiags; // the kept lines copied, the k-vectors cleared
   const F = nreff2 + 1;
   const Bk = ndiags + nreff2 + 1;
   const mxcost = Math.max(bogosqrt(ndiags), MAX_COST_MIN);
-  const kf = (d: number): number => atOr(kvd, F + d, 0);
-  const kb = (d: number): number => atOr(kvd, Bk + d, 0);
+  // Reads of the k-vectors are in range, as in C: a split touches diagonals [dmin - 1, dmax + 1] and kvd holds
+  // 2 x ndiags + 2 slots around the two midpoints. Number() only types the read: this is the search's hot path
+  // (through atOr each diagonal cost ~100 ns, 13x a histogram step).
+  const kf = (d: number): number => Number(kvd[F + d]);
+  const kb = (d: number): number => Number(kvd[Bk + d]);
   const setF = (d: number, v: number): void => { kvd[F + d] = v; };
   const setB = (d: number, v: number): void => { kvd[Bk + d] = v; };
   const split = (off1: number, lim1: number, off2: number, lim2: number, needMin: boolean): Split => {
@@ -276,6 +335,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
         i1 = kf(d - 1) >= kf(d + 1) ? kf(d - 1) + 1 : kf(d + 1);
         prev1 = i1; i2 = i1 - d;
         for (; i1 < lim1 && i2 < lim2 && h1[i1] === h2[i2]; i1++, i2++);
+        budget.steps += i1 - prev1 + 1; // one diagonal and its snake
         if (i1 - prev1 > SNAKE_CNT) gotSnake = true;
         setF(d, i1);
         if (odd && bmin <= d && d <= bmax && kb(d) <= i1) return { i1, i2, minLo: true, minHi: true };
@@ -286,12 +346,16 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
         i1 = kb(d - 1) < kb(d + 1) ? kb(d - 1) : kb(d + 1) - 1;
         prev1 = i1; i2 = i1 - d;
         for (; i1 > off1 && i2 > off2 && h1[i1 - 1] === h2[i2 - 1]; i1--, i2--);
+        budget.steps += prev1 - i1 + 1;
         if (prev1 - i1 > SNAKE_CNT) gotSnake = true;
         setB(d, i1);
         if (!odd && fmin <= d && d <= fmax && i1 <= kf(d)) return { i1, i2, minLo: true, minHi: true };
       }
+      // budget spent: any split ends the search; the caller sees `spent` and drops the result
+      if (spent(budget)) return { i1: off1, i2: off2, minLo: false, minHi: false };
       if (needMin) continue;
       if (gotSnake && ec > HEUR_MIN_COST) {
+        budget.steps += (fmax - fmin) / 2 + (bmax - bmin) / 2 + 2; // the heuristic's pass over every diagonal, both ways
         // spl is Some exactly when best > 0
         let best = 0;
         let spl: Option<{ readonly i1: number; readonly i2: number }> = none;
@@ -299,6 +363,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
           const dd = d > fmid ? d - fmid : fmid - d; i1 = kf(d); i2 = i1 - d;
           const v = (i1 - off1) + (i2 - off2) - dd;
           if (v > K_HEUR * ec && v > best && off1 + SNAKE_CNT <= i1 && i1 < lim1 && off2 + SNAKE_CNT <= i2 && i2 < lim2) {
+            budget.steps += SNAKE_CNT;
             for (let k = 1; h1[i1 - k] === h2[i2 - k]; k++) if (k === SNAKE_CNT) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
@@ -308,12 +373,14 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
           const dd = d > bmid ? d - bmid : bmid - d; i1 = kb(d); i2 = i1 - d;
           const v = (lim1 - i1) + (lim2 - i2) - dd;
           if (v > K_HEUR * ec && v > best && off1 < i1 && i1 <= lim1 - SNAKE_CNT && off2 < i2 && i2 <= lim2 - SNAKE_CNT) {
+            budget.steps += SNAKE_CNT;
             for (let k = 0; h1[i1 + k] === h2[i2 + k]; k++) if (k === SNAKE_CNT - 1) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
         if (isSome(spl)) return { ...spl.value, minLo: false, minHi: true };
       }
       if (ec >= mxcost) {
+        budget.steps += (fmax - fmin) / 2 + (bmax - bmin) / 2 + 2; // the cutoff's pass over every diagonal, both ways
         let fbest = -1;
         let fbest1 = -1;
         let bbest = LINE_MAX;
@@ -338,33 +405,40 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   for (let top = popLast(stack); top.tag === 'some'; top = popLast(stack)) {
     const box = top.value;
     let [off1, lim1, off2, lim2] = box;
+    const span = lim1 - off1 + lim2 - off2;
     for (; off1 < lim1 && off2 < lim2 && h1[off1] === h2[off2]; off1++, off2++);
     for (; off1 < lim1 && off2 < lim2 && h1[lim1 - 1] === h2[lim2 - 1]; lim1--, lim2--);
+    budget.steps += 1 + span - (lim1 - off1 + lim2 - off2) + (off1 === lim1 || off2 === lim2 ? lim1 - off1 + lim2 - off2 : 0); // the box, the lines its trim passed, the lines it marks
     if (off1 === lim1) { for (; off2 < lim2; off2++) ch2[atOr(r2, off2, 0)] = 1; }
     else if (off2 === lim2) { for (; off1 < lim1; off1++) ch1[atOr(r1, off1, 0)] = 1; }
     else {
       const spl = split(off1, lim1, off2, lim2, box[4]);
+      if (spent(budget)) return false;
       stack.push([spl.i1, lim1, spl.i2, lim2, spl.minHi], [off1, spl.i1, off2, spl.i2, spl.minLo]);
     }
   }
   CH1.set(ch1, line1 - 1); CH2.set(ch2, line2 - 1);
+  return true;
 }
 /* oxlint-enable eslint/max-depth, eslint/complexity, eslint/max-params, eslint/no-param-reassign */
 
 // ---- xhistogram.c: histogram_diff ----
 // a, b: id arrays (0-based storage, 1-based line numbers as in C). Marks ch1 / ch2 (index = line - 1).
 type Region = [line1: number, count1: number, line2: number, count2: number];
-function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8Array): Diffed<null> {
+// oxlint-disable-next-line eslint/max-params -- the two files, their marks, the class count and the budget
+function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8Array, classes: number, budget: Budget): Diffed<null> {
+  const ix: Index = { first: new Int32Array(classes), count: new Int32Array(classes), next: new Int32Array(a.length + 1) };
   const stack: Region[] = [[1, a.length, 1, b.length]];
   for (let top = popLast(stack); top.tag === 'some'; top = popLast(stack)) {
     const [line1, count1, line2, count2] = top.value;
     if (count1 <= 0 && count2 <= 0) continue;
     if (!count1) { for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue; }
     if (!count2) { for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; continue; }
-    const found = findLcs(a, b, line1, count1, line2, count2);
+    const found = findLcs(a, b, line1, count1, line2, count2, ix, budget);
     switch (found.tag) {
       case 'chain-limit': return undecided('histogram hash chain limit (git fails this merge)');
-      case 'fallback': classicDiff(a, b, line1, count1, line2, count2, ch1, ch2); continue; // fall_back_to_classic_diff
+      case 'over-budget': return undecided(OVER_BUDGET);
+      case 'fallback': if (!classicDiff(a, b, line1, count1, line2, count2, ch1, ch2, budget)) return undecided(OVER_BUDGET); continue; // fall_back_to_classic_diff
       case 'none': for (let i = 0; i < count1; i++) ch1[line1 - 1 + i] = 1; for (let i = 0; i < count2; i++) ch2[line2 - 1 + i] = 1; continue;
       case 'lcs': stack.push([found.end1 + 1, line1 + count1 - 1 - found.end1, found.end2 + 1, line2 + count2 - 1 - found.end2], [line1, found.begin1 - line1, line2, found.begin2 - line2]); continue;
     }
@@ -378,7 +452,7 @@ function histogramDiff(a: Int32Array, b: Int32Array, ch1: Uint8Array, ch2: Uint8
 // ch: Uint8Array of n+2 with ch[0] and ch[n+1] as the -1 / n sentinels; C index i ↔ ch[i + 1].
 type Group = { start: number; end: number };
 /* oxlint-disable eslint/max-params, eslint/no-param-reassign, eslint/complexity, eslint/max-depth -- a line-for-line port of xdiffi.c's xdl_change_compact and its group helpers, which advance the group in place */
-export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32Array, chO: Uint8Array, nO: number, rediff: Rediff): Diffed<null> {
+export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32Array, chO: Uint8Array, nO: number, rediff: Rediff, budget: Budget = unbounded()): Diffed<null> {
   const C = (i: number): boolean => ch[i + 1] === 1;
   const CO = (i: number): boolean => chO[i + 1] === 1;
   const set = (i: number, v: number): void => { ch[i + 1] = v ? 1 : 0; };
@@ -387,8 +461,8 @@ export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32A
   const init = (G: Group, c: (i: number) => boolean): void => { G.start = G.end = 0; while (c(G.end)) G.end++; };
   const nextG = (G: Group, c: (i: number) => boolean, nn: number): boolean => { if (G.end === nn) return false; G.start = G.end + 1; for (G.end = G.start; c(G.end); G.end++); return true; };
   const prevG = (G: Group, c: (i: number) => boolean): boolean => { if (G.start === 0) return false; G.end = G.start - 1; for (G.start = G.end; c(G.start - 1); G.start--); return true; };
-  const slideDown = (): boolean => { if (g.end < n && ids[g.start] === ids[g.end]) { set(g.start++, 0); set(g.end++, 1); while (C(g.end)) g.end++; return true; } return false; };
-  const slideUp = (): boolean => { if (g.start > 0 && ids[g.start - 1] === ids[g.end - 1]) { set(--g.start, 1); set(--g.end, 0); while (C(g.start - 1)) g.start--; return true; } return false; };
+  const slideDown = (): boolean => { if (g.end < n && ids[g.start] === ids[g.end]) { budget.steps++; set(g.start++, 0); set(g.end++, 1); while (C(g.end)) g.end++; return true; } return false; };
+  const slideUp = (): boolean => { if (g.start > 0 && ids[g.start - 1] === ids[g.end - 1]) { budget.steps++; set(--g.start, 1); set(--g.end, 0); while (C(g.start - 1)) g.start--; return true; } return false; };
   init(g, C); init(go, CO);
   for (;;) {
     if (g.end !== g.start) {
@@ -414,7 +488,9 @@ export function compact(ids: Int32Array, ch: Uint8Array, n: number, idsO: Int32A
       }
       // histogram: a moved group facing a non-empty group on the other side is re-diffed with classic Myers in git.
       // A JS caller's unknown rediff reads as 'skip', as it always has (blobMerger refuses one before this).
-      if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end) && !applyRediff(rediff, () => { classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1)); })) return undecided('compaction needs the classic-diff fallback');
+      let within = true;
+      if (go.end !== go.start && (g.start !== orig.start || g.end !== orig.end) && !applyRediff(rediff, () => { within = classicDiff(ids, idsO, g.start + 1, g.end - g.start, go.start + 1, go.end - go.start, ch.subarray(1), chO.subarray(1), budget); })) return undecided('compaction needs the classic-diff fallback');
+      if (!within || spent(budget)) return undecided(OVER_BUDGET);
     }
     if (!nextG(g, C, n)) return DONE;
     if (!nextG(go, CO, nO)) throw broken();
@@ -445,7 +521,7 @@ function buildScript(ch1: Uint8Array, n1: number, ch2: Uint8Array, n2: number): 
 //   'myers' (default) — git ≥ 2.54 (verified against master, 2.56: every merge and every diff hunk agrees);
 //   'skip'  — git < 2.54 (verified against 2.43: every case agrees);
 //   'undecided' — conflict wherever the two differ: right against any version.
-function diffWith(base: Lines, side: Lines, rediff: Rediff): Diffed<Change[]> {
+function diffWith(base: Lines, side: Lines, rediff: Rediff, budget: Budget): Diffed<Change[]> {
   const n1 = base.n;
   const n2 = side.n;
   const h1 = new Uint8Array(n1);
@@ -458,15 +534,22 @@ function diffWith(base: Lines, side: Lines, rediff: Rediff): Diffed<Change[]> {
   const b = renum(side.ids);
   const ch1 = new Uint8Array(n1 + 2);
   const ch2 = new Uint8Array(n2 + 2);
-  const h = histogramDiff(a, b, h1, h2); if (!h.ok) return h;
+  const h = histogramDiff(a, b, h1, h2, local.size, budget); if (!h.ok) return h;
   ch1.set(h1, 1); ch2.set(h2, 1);
-  const c1 = compact(a, ch1, n1, b, ch2, n2, rediff); if (!c1.ok) return c1;
-  const c2 = compact(b, ch2, n2, a, ch1, n1, rediff); if (!c2.ok) return c2;
+  const c1 = compact(a, ch1, n1, b, ch2, n2, rediff, budget); if (!c1.ok) return c1;
+  const c2 = compact(b, ch2, n2, a, ch1, n1, rediff, budget); if (!c2.ok) return c2;
   return ok(buildScript(ch1, n1, ch2, n2));
 }
-export type DiffConfig = { readonly rediff: Rediff };
+// maxWork: the diff's step budget (limits.ts: LIMIT_MERGE_WORK); past it the diff is declined, detail
+// 'line diff step budget exceeded'. One that is not a non-negative finite number reads as the default. meter: an
+// object whose `steps` is set to this call's work when it returns (never read; anything else is ignored).
+export type DiffConfig = { readonly rediff: Rediff; readonly maxWork: number; readonly meter: Meter };
 export function diffScript(base: Lines, side: Lines, options: Input<DiffConfig> = {}): Diffed<Change[]> {
-  return diffWith(base, side, withDefaults<DiffConfig>(options, { rediff: 'myers' }).rediff);
+  const { rediff, maxWork, meter } = withDefaults<DiffConfig>(options, { rediff: 'myers', maxWork: LIMIT_MERGE_WORK, meter: { steps: 0 } });
+  const budget = stepBudget(maxWork);
+  const script = diffWith(base, side, rediff, budget);
+  report(meter, budget.steps);
+  return script;
 }
 
 // ---- xdl_do_merge + xdl_append_merge ----
@@ -520,12 +603,13 @@ function doMerge(base: Records, ours: Records, theirs: Records, s1: readonly Cha
 
 // ---- xdl_refine_conflicts: re-diff each conflict's two sides (a fresh environment over just those lines, histogram +
 // compaction both ways); identical sides resolve, otherwise the conflict becomes the script's hunks ----
-function refine(ours: Records, theirs: Records, c: readonly Hunk[], rediff: Rediff): Diffed<Hunk[]> {
+// oxlint-disable-next-line eslint/max-params -- the two sides, the hunks, the mode and the merge's budget
+function refine(ours: Records, theirs: Records, c: readonly Hunk[], rediff: Rediff, budget: Budget): Diffed<Hunk[]> {
   const out: Hunk[] = [];
   for (const m of c) {
     if (m.kind !== 'conflict' || m.chg1 === 0 || m.chg2 === 0) { out.push(m); continue; }
     const sub = (F: Records, i: number, n: number): Lines => ({ ids: F.ids.slice(i, i + n), n });
-    const script = diffWith(sub(ours, m.i1, m.chg1), sub(theirs, m.i2, m.chg2), rediff);
+    const script = diffWith(sub(ours, m.i1, m.chg1), sub(theirs, m.i2, m.chg2), rediff, budget);
     if (!script.ok) return script;
     if (script.value.length === 0) { out.push({ ...m, kind: 'identical' }); continue; }
     for (const x of script.value.toSorted((p, q) => p.i1 - q.i1)) out.push({ kind: 'conflict', i1: x.i1 + m.i1, chg1: x.chg1, i2: x.i2 + m.i2, chg2: x.chg2 });
@@ -599,24 +683,16 @@ function fill(base: Records, ours: Records, theirs: Records, c: readonly Hunk[],
   return out;
 }
 
-const declined = ({ detail }: Undecided): MergeLinesResult => ({ clean: false, reason: 'undecided', detail });
-// The merge. `maxBytes` bounds each input (git's MAX_XDIFF_SIZE is ~1 GiB; a Worker's is much smaller).
-// driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
-// -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
-// driver, as in ll_xdl_merge.
-function mergeText({ driver, base, ours, theirs, maxBytes, rediff }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff }): MergeLinesResult {
-  if (Math.max(base.length, ours.length, theirs.length) > maxBytes) return { clean: false, reason: 'too large to merge' };
-  if ([base, ours, theirs].some(f => isBinary(f))) return { clean: false, reason: 'binary' };
-  const cl = classifier();
-  const B = records(base, cl);
-  const O = records(ours, cl);
-  const T = records(theirs, cl);
-  const s1 = diffWith(B, O, rediff); if (!s1.ok) return declined(s1.error);
-  const s2 = diffWith(B, T, rediff); if (!s2.ok) return declined(s2.error);
+// A diff stopped by the step budget is the input being too large to merge; any other is undecided, with its detail.
+const declined = ({ detail }: Undecided): MergeLinesResult => (detail === OVER_BUDGET ? { clean: false, reason: 'too large to merge' } : { clean: false, reason: 'undecided', detail });
+// The three files' records under one budget: both sides against base, then the conflicts' refinement.
+function mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget }: { readonly driver: 'text' | 'union'; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly B: Records; readonly O: Records; readonly T: Records; readonly rediff: Rediff; readonly budget: Budget }): MergeLinesResult {
+  const s1 = diffWith(B, O, rediff, budget); if (!s1.ok) return declined(s1.error);
+  const s2 = diffWith(B, T, rediff, budget); if (!s2.ok) return declined(s2.error);
   const hunks = { ours: s1.value.length, theirs: s2.value.length };
   if (hunks.ours === 0) return { clean: true, data: theirs, hunks };
   if (hunks.theirs === 0) return { clean: true, data: ours, hunks };
-  const r = refine(O, T, doMerge(B, O, T, s1.value, s2.value), rediff); if (!r.ok) return declined(r.error);
+  const r = refine(O, T, doMerge(B, O, T, s1.value, s2.value), rediff, budget); if (!r.ok) return declined(r.error);
   const c = simplify(r.value);
   const conflicts = c.filter(m => m.kind === 'conflict').length;
   switch (driver) {
@@ -626,13 +702,33 @@ function mergeText({ driver, base, ours, theirs, maxBytes, rediff }: { readonly 
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(driver);
 }
-export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Rediff; readonly driver: Driver };
+// The merge. `maxBytes` bounds each input (git's MAX_XDIFF_SIZE is ~1 GiB; a Worker's is much smaller).
+// driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
+// -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
+// driver, as in ll_xdl_merge.
+function mergeText({ driver, base, ours, theirs, maxBytes, rediff, maxWork, meter }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff; readonly maxWork: unknown; readonly meter: unknown }): MergeLinesResult {
+  if (Math.max(base.length, ours.length, theirs.length) > maxBytes) { report(meter, 0); return { clean: false, reason: 'too large to merge' }; }
+  if ([base, ours, theirs].some(f => isBinary(f))) { report(meter, 0); return { clean: false, reason: 'binary' }; }
+  const cl = classifier();
+  const B = records(base, cl);
+  const O = records(ours, cl);
+  const T = records(theirs, cl);
+  const budget = stepBudget(maxWork);
+  const merged = mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget });
+  report(meter, budget.steps);
+  return merged;
+}
+// maxWork is the merge's step budget, absolute for this file (Limits.maxMergeWork; LIMIT_MERGE_WORK by default): past it
+// the answer is 'too large to merge', as for an input over maxBytes. A maxWork that is not a non-negative finite
+// number reads as the default. meter: an object whose `steps` is set to this call's work when it returns; it is never
+// read, so a reused or malformed one changes no result (anything that is not an object is ignored).
+export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Rediff; readonly driver: Driver; readonly maxWork: number; readonly meter: Meter };
 export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, options: Input<MergeLinesConfig> = {}): MergeLinesResult {
-  const { maxBytes, rediff, driver } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text' });
+  const { maxBytes, rediff, driver, maxWork, meter } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text', maxWork: LIMIT_MERGE_WORK, meter: { steps: 0 } });
   switch (driver) {
-    case 'binary': return { clean: false, reason: 'binary (merge attribute)' };
+    case 'binary': report(meter, 0); return { clean: false, reason: 'binary (merge attribute)' };
     case 'text':
-    case 'union': return mergeText({ driver, base, ours, theirs, maxBytes, rediff });
+    case 'union': return mergeText({ driver, base, ours, theirs, maxBytes, rediff, maxWork, meter });
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(driver);

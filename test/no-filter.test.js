@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { startProxy } from './proxy.js';
 import { editFile } from '../src/edit.js';
 import { commitChanges } from '../src/changes.js';
@@ -35,7 +35,7 @@ const noise = len => { const out = Buffer.alloc(len); for (let i = 0, b = Buffer
 
 before(async () => {
   ({ root, cleanup } = tmpRoot()); srv = await startGitServer(root);
-  work = join(root, 'work'); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+  work = join(root, 'work'); mkdirSync(work); initRepo(work);
   const put = files => { for (const [p, v] of Object.entries(files)) { mkdirSync(join(work, p, '..'), { recursive: true }); writeFileSync(join(work, p), v); } };
   const commit = (msg, i) => { git(work, ['add', '-A']); git(work, ['commit', '-q', '-m', msg], { env: { ...process.env, GIT_AUTHOR_DATE: `${T - 100 + i} +0000`, GIT_COMMITTER_DATE: `${T - 100 + i} +0000` } }); return git(work, ['rev-parse', 'HEAD']).trim(); };
   put({ 'README.md': '# readme\n', 'a/b/c.txt': 'deep MARK\n', 'x.txt': 'x1\nx2\nx3\n', 'y.txt': 'y1\n', 'd/z.txt': 'z\n', 'big.bin': noise(200_000), 'run.sh': '#!/bin/sh\necho hi\n' });
@@ -218,10 +218,31 @@ test('a server that advertises filter and answers a filtered fetch with an empty
     try {
       const tr = unwrap(createTransport(`${proxy2.url}/${filter.url.split('/').pop()}`, { tracer: t2.tracer }));
       const { fetchObject } = await import('../src/fetch.js');
-      const got = await fetchObject(tr, { oid: blob, filter: '' });
+      // (the request that carries no argument a server may refuse: a want named a blob is sent no `deepen`)
+      const { TYPE } = await import('../src/objects.js');
+      const got = await fetchObject(tr, { oid: blob, filter: '', expectType: TYPE.BLOB });
       assert.equal(got.ok, false);
       assert.equal(got.error.code, 'protocol');
       assert.equal(spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover').length, 0);
+      // the same for a caller's own depth: it is sent as given and its refusal is the caller's answer
+      const own = await fetchObject(tr, { oid: blob, filter: '', deepen: 0 });
+      assert.equal(own.ok, false);
+      assert.equal(own.error.code, 'protocol');
+      assert.equal(spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover').length, 0);
+      // A want of unknown type is sent `deepen 1` by default (fetchobject-deepen.test.js), an argument a server may not
+      // take: its empty answer reads the advertisement, once per quirks record. It lists `shallow`, so the answer is
+      // still the protocol error, and the next empty answer reads nothing.
+      const typeless = await fetchObject(tr, { oid: blob, filter: '' });
+      assert.equal(typeless.ok, false);
+      assert.equal(typeless.error.code, 'protocol');
+      assert.equal(typeless.error.reason, 'empty_response');
+      const probes2 = spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover');
+      assert.equal(probes2.length, 1);
+      assert.equal(probes2[0].attrs['git.server.shallow'], true);
+      const again = await fetchObject(tr, { oid: blob, filter: '' });
+      assert.equal(again.ok, false);
+      assert.equal(again.error.code, 'protocol');
+      assert.equal(spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover').length, 1);
     } finally { await proxy2.close(); }
   } finally { await proxy.close(); }
 });

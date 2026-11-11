@@ -10,7 +10,7 @@ import { mkdirSync, symlinkSync, writeFileSync, chmodSync, readdirSync, lstatSyn
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { git, tmpRoot, makeBareRepo, startGitServer, startAuthGate } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, startAuthGate, initRepo } from './server.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = 'tok-3x4mple';
@@ -97,7 +97,7 @@ test('examples: push-tree → checkout-tree round-trips byte-identical with mode
 test('examples: push-repo with only node on PATH: first push, incremental, up to date, non-fast-forward refused then forced, tags, dry run', async () => {
   const bare = makeBareRepo(root, 'repo', { stock: true }); const url = `${auth.url}/repo.git`;
   const local = join(root, 'local-repo');
-  git(root, ['init', '-q', '-b', 'main', local]);
+  initRepo(local);
   const commit = (i) => {
     writeFileSync(join(local, 'app.js'), Array.from({ length: 200 }, (_, k) => `export const v${k} = ${k === i ? 'changed' : k};\n`).join(''));
     writeFileSync(join(local, `note${i}.md`), `note ${i}\n`);

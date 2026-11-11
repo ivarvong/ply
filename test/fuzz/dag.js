@@ -2,11 +2,11 @@
 // then read the full object model back from git. The model is the oracle for expected pack contents.
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, gitBuf } from '../server.js';
+import { git, gitBuf, initRepo } from '../server.js';
 
 // files: a set of paths at varying depth; each commit edits some, adds some, deletes some.
 export function genDag(rng, work, { commits = 14, maxParents = 3, branches = 3 } = {}) {
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   const paths = ['a.txt', 'big.bin', 'd1/x.txt', 'd1/y.txt', 'd1/d2/z.txt', 'd1/d2/d3/w.txt', 'd1/d2/d3/d4/v.txt', 'e/f.txt'];
   const content = Object.fromEntries(paths.map(p => [p, Buffer.from(`${p}\n` + 'line\n'.repeat(rng.int(1, 40)))]));
   content['big.bin'] = Buffer.alloc(rng.int(2000, 9000), rng.int(0, 255));

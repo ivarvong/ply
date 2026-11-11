@@ -12,7 +12,7 @@ import { assertNever, getOrElse, ok } from './result.js';
 import { fromNullish } from './absent.js';
 import { checkRequiredV2, decideObjectFormat, fetchFeatureFlags } from './closed.js';
 import { pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
-import { asTransport, coded, clientSpan, advertise, spanned, learnFilter } from './transport.js';
+import { asTransport, coded, clientSpan, advertise, spanned, learnFilter, learnShallow } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 
 export { capLookup, parseCapabilitiesV2 } from './caps.js';
@@ -59,7 +59,7 @@ export async function discover(t: Transport): Promise<Result<DiscoverInfo, PlyEr
     const { frames, state } = stepped.value;
     const finished = pktFinish(state);
     if (!finished.ok) return finished;
-    const parsed = parseCapabilitiesV2(frames);
+    const parsed = parseCapabilitiesV2(frames, t.scrub);
     if (!parsed.ok) return parsed;
     const lines = parsed.value;
     const { has, value, features } = capLookup(lines);
@@ -76,6 +76,8 @@ export async function discover(t: Transport): Promise<Result<DiscoverInfo, PlyEr
     // hand answers it first. A host that stops (or starts) advertising `filter` is followed either way. A transport handed
     // in without a quirks record has no memory to keep it in (asTransport gives the view a fresh one).
     learnFilter(asTransport(t, t.limits), info.filter);
+    // and whether it takes `deepen`: a single-object fetch adds depth 1 only for a server that lists `shallow` (objectAt)
+    learnShallow(asTransport(t, t.limits), info.shallow);
     span.set({ ...pktAttrs(state), 'git.server.agent': info.agent, 'git.server.object_format': info.objectFormat, 'git.server.caps': [...caps.keys()], 'git.server.fetch': fetchFeatures, 'git.server.filter': info.filter, 'git.server.shallow': info.shallow, 'git.server.wait_for_done': info.waitForDone, 'git.server.ref_in_want': info.refInWant, 'git.server.ls_refs.unborn': info.lsRefsUnborn, 'git.server.server_option': info.serverOption, 'git.server.bundle_uri': info.bundleUri });
     return serverFits(info, has);
   }));

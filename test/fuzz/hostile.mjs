@@ -3,7 +3,7 @@
 //   node test/fuzz/hostile.mjs [--n 300] [--seed 1] [--case <seed>]
 import { join } from 'node:path';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from '../server.js';
+import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems, initRepo } from '../server.js';
 import { startProxy } from '../proxy.js';
 import { MUTATORS, MUTATOR_NAMES } from './mutate.js';
 import { Rng } from './prng.js';
@@ -35,7 +35,7 @@ try {
     const rng = new Rng(seeds[i]);
     const name = `h${i}`;
     const bare = makeBareRepo(root, name);
-    const work = join(root, `w${i}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+    const work = join(root, `w${i}`); mkdirSync(work); initRepo(work);
     commitFiles(work, bare, { [FILE]: ORIG, 'a/s.txt': 'x'.repeat(rng.int(0, 70000)), 'z.txt': 'z' }, 'one');
     const head = commitFiles(work, bare, { 'z.txt': 'z2' }, 'two');
     const [stage, k] = rng.pick(STAGES);

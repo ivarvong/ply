@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, tmpRoot } from './server.js';
+import { git, tmpRoot, initRepo } from './server.js';
 import { encodeTag, hashObject } from '../src/index.js';
 import { decodeBytes } from '../src/bytes.js';
 import { unwrap } from './unwrap.js';
@@ -22,7 +22,7 @@ const targets = {};
 before(() => {
   ({ root, cleanup } = tmpRoot());
   work = join(root, 'w'); mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   writeFileSync(join(work, 'f'), 'f\n');
   git(work, ['add', 'f']);
   git(work, ['-c', 'user.name=s', '-c', 'user.email=s@x', 'commit', '-q', '-m', 'c']);

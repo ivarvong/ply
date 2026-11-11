@@ -9,8 +9,8 @@ import type { CheckedLimits } from './limits.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
-import type { Attrs, Frame, Transport } from './transport.js';
-import { fail, scrubError } from './errors.js';
+import type { Attrs, Frame, Scrub, Transport } from './transport.js';
+import { fail, scrubError, remoteQuoted, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -31,7 +31,7 @@ import { DEFAULT_LIMITS, limitExceeded } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 import { parseOid, type Oid } from './oid.js';
-import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, probing, spanned } from './transport.js';
+import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, learnShallow, takesShallow, shallowLearned, probing, spanned } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
 
@@ -55,6 +55,10 @@ const countField = (value: number, what: string): Result<number, BadRequest> => 
   if (!Number.isSafeInteger(value) || value < 0) return fail('bad_request', `invalid ${what}: must be a non-negative safe integer`, { what });
   return ok(value);
 };
+// done is true, false or left out (the default, true). Anything else is refused: a null, 0 or '' from a JavaScript
+// caller used to leave `done` off the request while the answer was judged as the answer to a done request.
+const doneField = (value: unknown): Result<boolean, BadRequest> =>
+  typeof value === 'boolean' ? ok(value) : fail('bad_request', 'invalid done: must be true, false or left out', { what: 'done' });
 // deepen-since is a unix timestamp on the wire (a number from callers, or a digit string). Either way it is one token.
 const sinceField = (value: number | string, what: string): Result<number | WireField, BadRequest> =>
   typeof value === 'number' ? countField(value, what) : validateWire(value, what);
@@ -130,7 +134,9 @@ export type FetchRequest = {
   readonly done: boolean;
 };
 
-// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since.
+// The caller's options, checked in this order: wants, haves, shallows, deepen-nots, the filter, deepen, deepen-since,
+// done. The parsed `done` is the only one read afterwards: it decides the request's `done` line (fetchRequestBody) and
+// how the answer is judged (packStream, v2End).
 // An empty filter, a zero (or NaN) deepen and a falsy deepen-since are left out, as they always have been.
 // oxlint-disable-next-line complexity -- one check per fetch argument
 export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> {
@@ -150,7 +156,9 @@ export function fetchRequest(opts: FetchOpts): Result<FetchRequest, BadRequest> 
   let since: number | WireField = 0;
   // oxlint-disable-next-line typescript/strict-boolean-expressions -- 0, '' and NaN mean no deepen-since, as they always have
   if (deepenSince) { const c = sinceField(deepenSince, 'deepen-since'); if (!c.ok) return c; since = c.value; }
-  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done });
+  const sentDone = doneField(done);
+  if (!sentDone.ok) return sentDone;
+  return ok({ wants: w.value, haves: h.value, shallows: sh.value, deepenNot: dn.value, filter: f, deepen: d, deepenSince: since, deepenRelative, thinPack, ofsDelta, includeTag, noProgress, done: sentDone.value });
 }
 
 // The command=fetch body of a parsed request.
@@ -249,8 +257,9 @@ export type Sidebanded<S> = { readonly state: S; readonly piece: SidebandPiece }
 export type SidebandError = ErrorOf<'protocol'> | ErrorOf<'limit_exceeded'> | ErrorOf<'remote_error'>;
 // One packfile-section frame, demultiplexed (git's demultiplex_sideband): band 1 is pack bytes and band 2 progress, each
 // held to maxPack before the frame is handed on; band 3 is the remote's error, its text the message. Peak is the frame.
+// scrub: the transport's credential scrubber (or null), applied to band 3's text before it is cut (errors.ts remoteText).
 // @decoder sidebandStep prefix=sideband
-export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number): Result<Sidebanded<S>, SidebandError> {
+export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number, scrub: Scrub | null = null): Result<Sidebanded<S>, SidebandError> {
   // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
   // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
   if (frame.kind !== 'data') return proto(`v2: ${frame.kind} inside the packfile section`);
@@ -271,7 +280,7 @@ export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, ma
   }
   if (band.band === SIDEBAND_ERROR) {
     const text = td.decode(band.body).trim();
-    return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+    return fail('remote_error', `remote: ${remoteText(text, REMOTE_TEXT_MAX, scrub)}`, notOurRefReason(text));
   }
   return proto(`v2: bad sideband ${band.band}`);
 }
@@ -293,6 +302,12 @@ function refuseNonCommit(expectType: number | null, type: number, oid: string): 
   return assertNever(found);
 }
 
+// characters of a refused acknowledgment line quoted in the error (remoteQuoted: cut first, then every control and format character escaped)
+const ACK_LINE_SHOWN = 60;
+// v2End's "no packfile section" names the answer's sections. A section header is a line the server wrote: each name
+// goes through remoteText cut to SECTION_SHOWN units, and at most SECTIONS_SHOWN of them are named.
+const SECTIONS_SHOWN = 8;
+const SECTION_SHOWN = 60;
 // limits: a checked record (parseLimits; DEFAULT_LIMITS when none is given): v2Step reads its caps on every frame.
 export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
@@ -300,9 +315,10 @@ export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Objec
   sectionLines: 0, otherLines: 0,
 });
 const stepped = (state: V2State, pack: Uint8Array | null = null): Result<V2Step, never> => ok({ state, pack });
+// scrub: the transport's credential scrubber (or null), applied to an ERR line's or band 3's text before it is cut.
 // @decoder v2Step prefix=v2
 // oxlint-disable-next-line complexity -- a step function is one transition table
-export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
+export function v2Step(st: V2State, frame: Frame, scrub: Scrub | null = null): Result<V2Step, PlyError> {
   // Every section line, including ones this client does not interpret, counts against the same cap. The state's limits
   // are checked (v2Init takes a CheckedLimits): a missing maxSectionLines used to make `n >= <missing>` false.
   const maxLines = st.limits.maxSectionLines;
@@ -315,7 +331,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   if (frame.kind === 'flush') return stepped({ ...st, done: true });
   switch (st.phase) {
     case 'pack': {
-      const sb = sidebandStep(st, frame, maxPack);
+      const sb = sidebandStep(st, frame, maxPack, scrub);
       if (!sb.ok) return sb;
       // Stryker disable next-line ConditionalExpression: a progress piece has no body field, and stepped's default parameter makes the missing value the same null
       return stepped(sb.value.state, sb.value.piece.kind === 'pack' ? sb.value.piece.body : null);
@@ -327,7 +343,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       const line = td.decode(frame.payload).replace(/\n$/, '');
       if (line.startsWith('ERR ')) {
         const text = line.slice('ERR '.length);
-        return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+        return fail('remote_error', `remote: ${remoteText(text, REMOTE_TEXT_MAX, scrub)}`, notOurRefReason(text));
       }
       if (st.section === null) {
         if (st.sections.length >= maxLines) return err(limitExceeded('section headers', st.sections.length + 1, maxLines));
@@ -346,6 +362,8 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       if (st.section === 'acknowledgments') {
         if (st.acks.length >= maxLines) return err(limitExceeded('acknowledgment lines', st.acks.length + 1, maxLines));
         if (line === 'ready') return stepped({ ...st, ready: true });
+        // git reads NAK, ACK <oid> and ready, and dies on anything else ("unexpected acknowledgment line")
+        if (line !== 'NAK' && !line.startsWith('ACK ')) return proto(`v2: unexpected acknowledgment line ${remoteQuoted(line, ACK_LINE_SHOWN)}`);
         return stepped({ ...st, acks: [...st.acks, line] });
       }
       if (st.otherLines >= maxLines) return err(limitExceeded('section lines', st.otherLines + 1, maxLines));
@@ -355,12 +373,20 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st.phase);
 }
-// The response is over: it ended with its flush, and it had a packfile section or (negotiation) acknowledgments.
+// The response is over: it ended with its flush, and it is the answer the request asked for. git is the judge of its
+// shape. `done` is whether the request carried `done` (the parsed request's, fetchRequest): after it git's fetch-pack
+// reads the packfile section next and dies on an acknowledgments section ("expected 'packfile', received
+// 'acknowledgments'"), so one is refused here whether or not a pack follows it, and an answer with no pack is never ok.
+// Without `done` a round may end on its acknowledgments, unless the server said `ready`: the packfile follows that in
+// the same response (git: "expected packfile to be sent after 'ready'").
 // A response with no section at all, not even its flush, carries reason 'empty_response': the answer git's upload-pack
 // gives when it dies on an argument (fetch.ts filterUnadvertised reads it).
-export function v2End(st: V2State): Result<V2State, ErrorOf<'protocol'>> {
+export function v2End(st: V2State, done: boolean): Result<V2State, ErrorOf<'protocol'>> {
   if (!st.done) return fail('protocol', 'v2: response ended without flush', st.sections.length === 0 ? { reason: 'empty_response' } : {});
-  if (st.phase !== 'pack' && !st.sections.includes('acknowledgments')) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
+  const acks = st.sections.includes('acknowledgments');
+  if (st.phase === 'pack') return done && acks ? proto('v2: expected packfile, received acknowledgments') : ok(st);
+  if (done || !acks) return proto(`v2: no packfile section (sections: ${st.sections.slice(0, SECTIONS_SHOWN).map(s => remoteText(s, SECTION_SHOWN)).join(',') || 'none'})`);
+  if (st.ready) return proto('v2: the server said ready and sent no packfile section');
   return ok(st);
 }
 export const v2Attrs = (st: V2State): Attrs => ({
@@ -382,26 +408,28 @@ export type PackFetch = AsyncGenerator<Uint8Array, V2State, unknown>;
 // The response read frame by frame: band-1 bytes yielded as they arrive, the v2 state or the first Err returned. A
 // caller's own span (GitHttp.packStream) may not carry t.scrub: band-3/ERR text is redacted here too, and so is
 // whatever the transport's stream raised (it is re-raised, scrubbed).
+// The request is parsed once here: its `done` is the line that is sent and the one the answer is judged against (v2End).
 async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenerator<Uint8Array, Result<V2State, PlyError>, unknown> {
-  const body = fetchBody(opts);
+  const req = fetchRequest(opts);
+  if (!req.ok) return req;
+  const body = fetchRequestBody(req.value);
   if (!body.ok) return body;
   // the exchange (no request yet: the frames are pulled below), then the limits it runs under
   const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) });
   let st = v2Init(t.limits);
   try { for await (const f of exchange) {
-    const r = v2Step(st, f);
+    const r = v2Step(st, f, t.scrub);
     if (!r.ok) { scrubError(r.error, t.scrub); return r; }
     st = r.value.state;
     if (r.value.pack) yield r.value.pack;
   } } catch (e) { throw scrubError(e, t.scrub); }
-  return ok(st);
+  return v2End(st, req.value.done);
 }
 // Stream band-1 pack bytes. Consumer drives it; the v2 state is the generator's return value. A stream: a failure is
 // raised through it (the iterator rejects with the PlyError).
 export async function* packStream(t: Transport, opts: FetchOpts, span: Span): PackFetch {
   span.set(fetchAttrs(opts));
-  const read = yield* v2Frames(t, opts, span);
-  const end = read.ok ? v2End(read.value) : read;
+  const end = yield* v2Frames(t, opts, span);
   if (!end.ok) throw end.error;
   span.set(v2Attrs(end.value));
   return end.value;
@@ -548,27 +576,35 @@ export const isFilterRejection = (e: unknown): boolean => {
 // Spans: this one is `git.upload-pack discover` with git.server.fetch/filter; the fetch that follows carries
 // `git.fetch.filter.fallback: 'none'`.
 export const isEmptyResponse = (e: unknown): boolean => thrownCodeIs(e, 'protocol') && thrownReasonIs(e, 'empty_response');
-export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boolean> {
-  if (!isEmptyResponse(e)) return false;
+// The other ways a server refuses an argument it does not take: an ERR pkt-line (remote_error) or HTTP 400 (Artifacts'
+// answer to a filter it does not take). 401, 403, 404, 429 and 5xx are other codes and never match. objectAt reads the
+// advertisement on one of these only for a `deepen` it added itself, once per quirks record.
+const isArgumentRefusal = (e: PlyError): boolean => e.code === 'remote_error' || (e.code === 'http' && e.status === FILTER_REFUSAL_STATUS);
+// `refusal`: the answers that send this call to the advertisement. Every caller but objectAt's depth takes the default.
+export async function filterUnadvertised(t: Transport, e: PlyError, refusal: (e: PlyError) => boolean = isEmptyResponse): Promise<boolean> {
+  if (!refusal(e)) return false;
   const attrs = { 'git.command': 'discover', 'git.protocol.version': PROTOCOL_V2 };
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
-  const read = await coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, attrs), async (span: Span): Promise<Result<boolean, PlyError>> => {
+  const read = await coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, attrs), async (span: Span): Promise<Result<{ readonly filter: boolean; readonly shallow: boolean }, PlyError>> => {
     const buf = await advertise(t, 'git-upload-pack', span);
     if (!buf.ok) return buf;
     const framed = pktStep(pktInit(), buf.value);
     if (!framed.ok) return framed;
     const finished = pktFinish(framed.value.state);
     if (!finished.ok) return finished;
-    const lines = parseCapabilitiesV2(framed.value.frames);
+    const lines = parseCapabilitiesV2(framed.value.frames, t.scrub);
     if (!lines.ok) return lines;
     const features = capLookup(lines.value).features('fetch');
     const filter = features.includes('filter');
-    span.set({ ...pktAttrs(finished.value), 'git.server.fetch': features, 'git.server.filter': filter });
-    return ok(filter);
+    const shallow = features.includes('shallow');
+    span.set({ ...pktAttrs(finished.value), 'git.server.fetch': features, 'git.server.filter': filter, 'git.server.shallow': shallow });
+    return ok({ filter, shallow });
   }));
   if (!read.ok) return false;
-  learnFilter(t, read.value);
-  return !read.value;
+  learnFilter(t, read.value.filter);
+  // the same line says whether the server takes `deepen`: objectAt asks again without the depth it added
+  learnShallow(t, read.value.shallow);
+  return !read.value.filter;
 }
 
 // Check a wide (blob:none) pack's commits, trees and tags before any of it is returned or harvested (#18, #46).
@@ -641,9 +677,14 @@ async function onceMore<T>(once: (bust: boolean) => Promise<Result<T, PlyError>>
 }
 
 // One object wanted by oid. `expectType` (a TYPE id) is checked against what arrives; null takes any type.
-export type ObjectWantConfig = { readonly filter: string; readonly deepen: number; readonly expectType: number | null };
+// `deepen`: the depth sent with the want. Left out (or null) it is 1 for a want that may be a commit (expectType null,
+// commit or tag) on a server that takes `deepen`, so one object costs one object of pack whatever the history behind it:
+// with no depth a commit want is answered with every commit reachable from it. A number is sent as given: n for the
+// commit and n - 1 generations of ancestors, 0 for no `deepen` line (the whole history). A want the caller names a tree
+// or a blob gets none: no history is reachable from one.
+export type ObjectWantConfig = { readonly filter: string; readonly deepen: number | null; readonly expectType: number | null };
 export type ObjectWant = { readonly oid: string } & Input<ObjectWantConfig>;
-const objectWantDefaults = (): ObjectWantConfig => ({ filter: 'tree:0', deepen: 0, expectType: null });
+const objectWantDefaults = (): ObjectWantConfig => ({ filter: 'tree:0', deepen: null, expectType: null });
 // The entries of a fetched tree as its check (assertFetched) parsed them, and the entry cap they were parsed under: the
 // only limit parseTree reads (#208).
 export type CheckedTree = { readonly entries: TreeEntry[]; readonly maxTreeEntries: number };
@@ -1009,26 +1050,64 @@ export function objectId(oid: unknown): Result<Oid, BadRequest> {
 // fetchObject of a parsed id: ply's own callers, which hold an Oid, start here.
 // oxlint-disable-next-line typescript/promise-function-async -- probing's promise (or the harvest's answer), passed through
 export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig> = {}): Promise<Result<FetchedObject, PlyError>> {
-  const { filter, deepen, expectType } = withDefaults(options, objectWantDefaults());
+  const { filter, deepen: asked, expectType } = withDefaults(options, objectWantDefaults());
+  // The depth to send (ObjectWantConfig): the caller's, else 1 when the want may be a commit and the server is not known
+  // to lack `shallow`. Read at each send: the advertisement may be read between two of them.
+  const mayBeCommit = expectType !== TYPE.TREE && expectType !== TYPE.BLOB;
+  const depth = (): number => {
+    if (asked !== null) return asked;
+    return mayBeCommit && takesShallow(t.quirks) ? 1 : 0;
+  };
+  // run(depth). When it fails carrying a depth this call added, an empty response, an ERR line or HTTP 400 (the shapes a
+  // server refuses an argument in) sends ply to the advertisement (as for a refused filter: filterUnadvertised learns
+  // `shallow` from the same line), and a server that lists no `shallow` is asked once more with no `deepen`, as before
+  // the default: the answer is then the history, held to the pack limits. `shallow` listed: the first error stands.
+  const ask = async (run: (deepen: number) => Promise<Result<FetchedObject, PlyError>>): Promise<Result<FetchedObject, PlyError>> => {
+    const sent = depth();
+    const first = await run(sent);
+    // once per quirks record: an advertisement already read for it has said whether `shallow` is listed
+    if (first.ok || asked !== null || sent === 0 || shallowLearned(t.quirks)) return first;
+    await filterUnadvertised(t, first.error, e => isEmptyResponse(e) || isArgumentRefusal(e));
+    return depth() === sent ? first : run(depth());
+  };
+  // a depth this call added: the caller gave none and one was sent
+  const added = (sent: number): boolean => asked === null && sent !== 0;
   const narrow = filter === 'tree:0';
   const held = narrow ? mapGet(t.objects, oid) : none;
   if (held.tag === 'some' && (expectType === null || held.value.type === expectType)) return Promise.resolve(ok({ type: held.value.type, data: held.value.data, oid, size: held.value.data.length, bust: false, tree: none, harvested: true }));
-  // oxlint-disable-next-line typescript/promise-function-async -- fetchWide's promise, passed through
-  const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter });
-  if (filter === '') return fetchSingle(t, { oid, filter, deepen, expectType });
+  // oxlint-disable-next-line typescript/promise-function-async -- ask's promise, passed through
+  const wide = (sent: WideFilter, learned: boolean): Promise<Result<FetchedObject, PlyError>> => ask(deepen => fetchWide(t, { oid, deepen, expectType, learned, filter: sent, requested: filter }));
+  // oxlint-disable-next-line typescript/promise-function-async -- fetchSingle's promise, passed through
+  if (filter === '') return ask(deepen => fetchSingle(t, { oid, filter, deepen, expectType }));
   // one probe at a time per quirks record (transport.ts probing): the checks below read it after any wait
   return probing(t.quirks, narrow ? 'tree:0' : 'filter', async (): Promise<Result<FetchedObject, PlyError>> => {
     const harvested = narrow ? mapGet(t.objects, oid) : none;
     if (harvested.tag === 'some' && (expectType === null || harvested.value.type === expectType)) return ok({ type: harvested.value.type, data: harvested.value.data, oid, size: harvested.value.data.length, bust: false, tree: none, harvested: true });
     if (t.quirks.treeFilter === 'none') return wide('', false);
     if (narrow && t.quirks.treeFilter === 'blob:none') return wide('blob:none', false);
-    const single = await fetchSingle(t, { oid, filter, deepen, expectType });
+    const sent = depth();
+    const single = await fetchSingle(t, { oid, filter, deepen: sent, expectType });
     if (single.ok) return single;
     if (narrow && isFilterRejection(single.error)) {
       t.quirks.treeFilter = 'blob:none';
       return wide('blob:none', true);
     }
-    return (await filterUnadvertised(t, single.error)) ? wide('', true) : single;
+    if (await filterUnadvertised(t, single.error)) return wide('', true);
+    // an ERR line or HTTP 400 that answered a depth this call added: the advertisement is read for `shallow` (see `ask`;
+    // not read above, where an unlisted `filter` would change the request main sends)
+    const unlisted = added(sent) && !shallowLearned(t.quirks) && (await filterUnadvertised(t, single.error, isArgumentRefusal));
+    // the advertisement was just read: a depth this call added that the server does not take is dropped (see `ask`).
+    // The request without it is main's, and its answer is handled as main handles it: no `filter` listed is the
+    // unfiltered pack, a refused tree:0 is blob:none, an empty response is the advertisement's to explain.
+    if (depth() === sent) return single;
+    if (unlisted) return wide('', true);
+    const again = await fetchSingle(t, { oid, filter, deepen: depth(), expectType });
+    if (again.ok) return again;
+    if (narrow && isFilterRejection(again.error)) {
+      t.quirks.treeFilter = 'blob:none';
+      return wide('blob:none', true);
+    }
+    return (await filterUnadvertised(t, again.error)) ? wide('', true) : again;
   });
 }
 // One object by oid: a bad oid, a fetch failure, a verification failure are the Err.

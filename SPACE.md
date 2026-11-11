@@ -733,6 +733,134 @@ The space of ref names a caller can hand ply (test/space/refname.space.js, #73):
 
 Git v2.50.0 accepts 726 names as refs, 719 for a create and 725 for a delete. The create/delete gap is receive-pack's, not check-ref-format's: `refs/<one level>` (refs/stash is one) is a valid ref and can be deleted by a push but never created or updated, and `refs/@` is a valid ref no push can touch (`@` alone is refused as a whole refname). Before #73 ply validated a push's ref with `validateRef` alone and disagreed with receive-pack on 8 cells, all of them those two shapes; git refused them as `funny refname`.
 
+## Default depth
+
+**Decision.** `fetchObject` / `objectAt` asks for one object by id. Which `deepen` goes on the wire, and what happens
+when the server refuses it? (src/fetch.ts `objectAt`: `depth`, `ask`; src/transport.ts `learnShallow`. Space:
+test/space/default-depth.space.js, run by test/space/default-depth.test.js.)
+
+**Rules** (the owner's; `expected()` is written from these, not from the code):
+
+- **R1** One object costs one object's worth of pack. A want that is or may be a commit (`expectType` left out, COMMIT
+  or TAG) is sent with `deepen 1` when the server takes shallow requests. A want named a tree or a blob gets none.
+- **R2** A caller's explicit `deepen` is sent as given and always wins (`0`: no `deepen` line).
+- **R3** Without the capability ply behaves as on main, for every refusal shape. A default-depth request (the caller gave
+  no deepen, 1 was sent, `shallow` not yet known for the quirks record) refused with an empty response, an `ERR` line or
+  HTTP 400 reads the advertisement once per quirks record; if `fetch=` lists no `shallow` the want is asked again
+  without `deepen`, once; if it is listed the first error stands. Never when the caller gave `deepen`.
+- **R4** No extra round trip on a success path.
+
+**git's shape, from the source** (git v2.50.0). `upload-pack.c`: a commit want with no depth is answered with every
+commit reachable from it; `deepen <d>` cuts that at d generations (`shallow.c` `get_shallow_commits`, which peels a tag
+want with `deref_tag` and skips a want that is not a commit). `filter tree:0` drops trees and blobs but not ancestors,
+`blob:none` drops blobs. git's upload-pack always lists `shallow` on `fetch=` (`filter` only with
+`uploadpack.allowFilter`), so a server without `shallow` is not git: the space renders one by taking the word off git's
+own advertisement and refusing or dropping the `deepen` line in front of git's own upload-pack. An argument git does not
+take makes upload-pack die: over smart HTTP that is HTTP 200 with an empty body (the `empty` class).
+
+**Two things main already did** that the expected values use, and that predate this decision: an empty response on the
+tree:0 path reads the advertisement for `filter` (the no-filter fallback: `filterUnadvertised`), and the single fetch
+(tree:0, filter '') refuses a pack of more than one object for a want not typed COMMIT (`pack_corrupt`; README,
+`fetchObject`). So an annotated tag wanted on the tree:0 path is `pack_corrupt` at depth 1 (the tag and the commit it
+peels to: two objects) as it was without a depth (the tag and the history).
+
+**Outside the space: the server's `filter` support.** Every server in the space takes the filter its path sends. What
+a server does with `filter` is main's decision, made after this one and by the same lines: the request asked again
+without `deepen` is main's request, and on the tree:0 path its answer is read as main reads it (no `filter` on the
+advertisement just read: the unfiltered pack; `tree:0` refused: `blob:none`; an empty response: the advertisement). It
+is not an axis here because it does not change which `deepen` is sent or whether the want is asked again, only which
+filter the re-ask carries; as an axis it would multiply the 3 tree:0 cells of each refusal by servers the filter
+fallback's own tests already enumerate. The product that does matter (deepen refused as `ERR`, 400 or empty × a server
+that lists `filter` and takes only `blob:none`, or lists none and dies on one; neither lists `shallow`) is 6 rows in
+test/fetchobject-deepen-refusal.test.js, each against git with main's outcome as the expected value.
+
+**Judgment calls.**
+
+1. *A stale `listed`.* A record taught that the server lists `shallow`, on a server that no longer does, refused with
+   an `ERR` line or HTTP 400 (or with an empty response on a path that does not read the advertisement): the first
+   error stands (33 cells: 3 types × (4 + 4 + 3 paths)). R3's trigger needs `shallow` not yet known, and main would
+   have succeeded here; the record is corrected by the next advertisement read (`discover()`). On the tree:0 path an
+   empty response reads the advertisement anyway (main's filter fallback), and what it says about `shallow` is
+   believed: the want is asked again without `deepen` (3 cells).
+2. *A stale `unlisted`.* A record taught that the server lists no `shallow`, on a server that now does: no `deepen` is
+   sent and the answer is the history, held to the pack limits. That is main's request; R1 says "when the server takes
+   shallow requests" and the record says it does not. Corrected by the next advertisement read.
+3. *`deepen` ignored.* The server answers with the history as if the line were not there. One request, `ok` (or the
+   pack limits' refusal): ply learns it only from the pack, and R4 forbids a second request on a success path.
+4. *The caller's depth refused* (R2). The error stands in every shape, with no re-ask; on the tree:0 path an empty
+   response still costs main's advertisement read for `filter`.
+
+<!-- default-depth: generated by test/space/default-depth.test.js (DEFAULT_DEPTH_WRITE=1); do not edit by hand -->
+
+### Axes
+
+**asked** — the caller's deepen (3)
+
+- `none` — left out: the default depth applies (R1)
+- `0` — explicit 0: no `deepen` line, the whole history (R2)
+- `2` — explicit n: `deepen 2`, sent as given (R2)
+
+**expectType** — the type the caller names; the want is an object of that type (5)
+
+- `none` — untyped: may be a commit (the want is the tip commit)
+- `COMMIT` — a commit
+- `TAG` — may peel to a commit (the want is an annotated tag of the tip)
+- `TREE` — no history is reachable from a tree: no default depth
+- `BLOB` — nor from a blob
+
+**knowledge** — what the quirks record was taught about `shallow` before the call (by discover()) (3)
+
+- `unlearned` — no advertisement read for this record
+- `listed` — an advertisement that listed `shallow`
+- `unlisted` — an advertisement that did not
+
+**advertised** — whether the server's fetch= line lists `shallow` during the call (differs from a learned knowledge when the server changed: stored state is untrusted) (2)
+
+- `yes` — git, GitHub, GitLab, Codeberg, Artifacts
+- `no` — a server without shallow fetches
+
+**refusal** — what the server does with a request that carries `deepen` (5)
+
+- `none` — takes it: git
+- `empty` — HTTP 200 with an empty body: git upload-pack dying on an argument it does not take
+- `err` — an ERR pkt-line (remote_error)
+- `400` — HTTP 400: how Artifacts refuses an argument it does not take
+- `ignored` — drops the line and answers as if it were not there
+
+**path** — objectAt's request path (4)
+
+- `tree:0` — the single fetch, filter tree:0 (quirks.treeFilter tree:0)
+- `blob:none` — the wide fetch on a record that learned blob:none (Artifacts)
+- `unfiltered` — the wide fetch on a record that learned no filter (the server lists no `filter`)
+- `filter ''` — the single fetch with the caller's filter ''
+
+### Product
+
+3 × 5 × 3 × 2 × 5 × 4 = **1,800 cells** (asked × expectType × knowledge × advertised × refusal × path), none removed.
+
+| requests, in order → outcome | cells |
+|---|---:|
+| `POST - → ok` | 740 |
+| `POST - → pack_corrupt` | 220 |
+| `POST 2 → ok` | 180 |
+| `POST 2 → http` | 120 |
+| `POST 2 → remote_error` | 120 |
+| `POST 2 → protocol` | 90 |
+| `POST 1 → ok` | 68 |
+| `POST 2 → pack_corrupt` | 60 |
+| `POST 2, GET → protocol` | 30 |
+| `POST 1 → pack_corrupt` | 28 |
+| `POST 1, GET, POST - → ok` | 25 |
+| `POST 1 → http` | 24 |
+| `POST 1 → remote_error` | 24 |
+| `POST 1 → protocol` | 18 |
+| `POST 1, GET → protocol` | 15 |
+| `POST 1, GET, POST - → pack_corrupt` | 14 |
+| `POST 1, GET → http` | 12 |
+| `POST 1, GET → remote_error` | 12 |
+
+<!-- default-depth: end generated -->
+
 ## SSH
 
 SSH transport removed 2026-10-31; history on branch archive/ssh.

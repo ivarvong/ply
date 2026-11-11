@@ -100,9 +100,17 @@ jobs:
         env:
           RATCHET_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: npm run typecheck
+      # lint ends with the regex gate (scripts/regex-gate.mjs): every regex in src/ has an inventory row and no refused
+      # shape. The rows' ratio test is test/regex-linear.test.js, which runs in the test shards.
       - run: npm run lint
       - name: dist is what consumers import
         run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"
+      # the built d.ts compiled by a consumer of every subpath, skipLibCheck false: lib ES2022 + @types/node 20, 22 and
+      # 24, lib DOM, and @cloudflare/workers-types. The type packages are pinned devDependencies that npm ci installs; a
+      # missing one fails this step, none is skipped (scripts/dist-check.mjs; test/dist-types.test.js runs it in the
+      # suite too)
+      - name: dist types compile for Node-only, DOM and Workers consumers
+        run: npm run check:dist
       - name: below-hash fuzzer
         run: node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
       - name: git-semantic fuzzer
@@ -178,6 +186,46 @@ jobs:
       - run: npm ci
       - name: sweep (small cells)
         run: node --import ./test/ts-resolve.mjs test/sweep/run.mjs --ci
+
+  # What a consumer installs: the npm pack tarball, built from a fresh export of the tracked files, installed with
+  # --ignore-scripts into an empty project (one package, no registry), the root and every subpath imported, and
+  # require('ply') compared with README Install, under Node 22 and then the same tarball under Node 20 and 24
+  # (scripts/pack-check.mjs). On Node 22 it also runs the setup command examples/README.md documents in a fresh export
+  # and starts each example. The tarball is uploaded as the artifact `ply-tarball`.
+  # It runs on every pull request and every push to main, and it does not gate: it is not in `test`'s needs, because it
+  # has not yet been seen green on a GitHub runner. The repository owner adds it to `test`'s needs after seeing it green
+  # in the merge train's pull request.
+  pack:
+    name: pack + install
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: pack, install --ignore-scripts, import every subpath, examples from a fresh export (Node 22)
+        run: node scripts/pack-check.mjs --out pack-out
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: the same tarball under Node 20
+        run: node scripts/pack-check.mjs --tarball pack-out/ply-*.tgz
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: the same tarball under Node 24
+        run: node scripts/pack-check.mjs --tarball pack-out/ply-*.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ply-tarball
+          path: pack-out/ply-*.tgz
+          if-no-files-found: error
 
   # The gate. Its name stays `test` so anything waiting on that check still works. It runs even when a shard fails or
   # is cancelled (a skipped check would count as passing), and fails unless every shard and lint + fuzz succeeded.

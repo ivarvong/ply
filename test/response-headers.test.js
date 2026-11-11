@@ -5,7 +5,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, initRepo } from './server.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { createTransport as createTransportR } from '../src/http.js';
 import { discover as discoverR } from '../src/discover.js';
@@ -32,7 +32,7 @@ const seeded = () => {
   const bare = makeBareRepo(root, name);
   const work = join(root, `w${name}`);
   mkdirSync(work);
-  git(work, ['init', '-q', '-b', 'main']);
+  initRepo(work);
   writeFileSync(join(work, 'a.txt'), 'a\n');
   const g = ['-c', 'user.name=h', '-c', 'user.email=h@x', '-c', 'commit.gpgsign=false'];
   git(work, ['add', 'a.txt']);

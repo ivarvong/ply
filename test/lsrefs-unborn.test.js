@@ -11,7 +11,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles } from './server.js';
+import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, commitFiles, initRepo } from './server.js';
 import { createTransport as rawTransportR } from '../src/http.js';
 import { Tracer } from '../src/otel.js';
 import { lsRefs, discover as discoverR, GitHttp } from '../src/client.js';
@@ -46,7 +46,7 @@ before(async () => {
   for (const [state, make] of Object.entries(STATES)) {
     for (const cfg of CONFIGS) {
       const name = `${state}-${cfg}`;
-      const work = join(root, `w-${name}`); mkdirSync(work); git(work, ['init', '-q', '-b', 'main']);
+      const work = join(root, `w-${name}`); mkdirSync(work); initRepo(work);
       const bare = make(makeBareRepo(root, name), work);
       git(bare, ['config', 'lsrefs.unborn', cfg]);
       repos[name] = { state, cfg, bare, headOid: state === 'detached' ? git(bare, ['rev-parse', 'HEAD']).trim() : null };
