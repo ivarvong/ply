@@ -107,6 +107,28 @@ test.skipIf(process.getuid?.() === 0)('a pack the process cannot read is a coded
   } finally { chmodSync(path, 0o644); }
 });
 
+// The boundary cells of the bound, on a real pack (git gc). The oracle is statSync and git: a pack of exactly
+// maxPackBytes is read and the push lands (git rev-parse on the remote equals the local tip); with one byte less of
+// limit the refusal carries got = the file's size and max = size - 1.
+test('the maxPackBytes boundary: a pack of exactly the bound is read and pushes; one byte less of bound refuses with got = size, max = size - 1', async () => {
+  const dir = localRepo();
+  const url = remoteRepo();
+  const [real] = readdirSync(packDir(dir)).filter(f => f.endsWith('.pack'));
+  const size = statSync(join(packDir(dir), real)).size;
+
+  const under = await pushRepo(dir, url, { refspecs: ['main'] }, { limits: withLimits({ maxPackBytes: size - 1 }) });
+  assert.equal(under.ok, false);
+  assert.equal(under.error.code, 'limit_exceeded');
+  assert.equal(under.error.what, 'local pack bytes');
+  assert.equal(under.error.got, size);
+  assert.equal(under.error.max, size - 1);
+
+  const exact = await pushRepo(dir, url, { refspecs: ['main'] }, { limits: withLimits({ maxPackBytes: size }) });
+  assert.equal(exact.ok, true, exact.ok ? '' : `${exact.error.code}: ${exact.error.message}`);
+  const remoteDir = join(root, `${url.slice(srv.url.length + 1)}`);
+  assert.equal(git(remoteDir, ['rev-parse', 'refs/heads/main']).trim(), git(dir, ['rev-parse', 'main']).trim());
+});
+
 // node's fs binding takes a read's length as an int32 and aborts the process on more (node_file.cc, fs.Read:
 // `args[3]->IsInt32()`, SIGABRT), so a caller who raises maxPackBytes past 2 GiB for a pack of 2^31 bytes or more must
 // still get an answer. The expected values are hand-derived: the file is 2 GiB + 1 zeros (truncate), which is not a
