@@ -757,3 +757,30 @@ test('haltOn: every await in flight is released at the abort, and a finished ope
   // after the abort nothing is waited for, not even a promise that never settles
   assert.equal(await halt.race(new Promise(() => {}), () => {}), rangesource.HALTED);
 });
+
+test('a chunk read is not a promise race: a whole pack served 256 bytes at a time is drained without one Promise.race', async () => {
+  // Expected values, neither from the code under test: 0 is the owner's decision (no race per read), and the bytes are
+  // git's own pack. The count is the platform's Promise.race, wrapped for the length of the drain.
+  const idx = await scan(packs.ofs);
+  const all = [...Array(idx.count).keys()];
+  let chunks = 0;
+  const source = { size: packs.ofs.length, async read(offset, length) {
+    let at = offset;
+    return { ok: true, value: new ReadableStream({ pull(c) {
+      const n = Math.min(256, offset + length - at);
+      if (n === 0) { c.close(); return; }
+      chunks++;
+      c.enqueue(packs.ofs.subarray(at, at + n));
+      at += n;
+    } }, { highWaterMark: 0 }) };
+  } };
+  const built = unwrap(await packSubset(source, idx, all));
+  const platformRace = Promise.race;
+  let races = 0;
+  Promise.race = function race(list) { races++; return platformRace.call(this, list); };
+  let bytes;
+  try { bytes = await drain(built.stream); } finally { Promise.race = platformRace; }
+  assert.equal(chunks, Math.ceil(packs.ofs.length / 256), 'every chunk of the pack was read, 256 bytes at a time');
+  assert.equal(races, 0);
+  assert.deepEqual(bytes, packs.ofs);
+});

@@ -50,11 +50,11 @@ export const cancelLate = (opened: Result<ReadableStream<Uint8Array>, PlyError>)
 export const aborted = (what: string): PlyError => plyError('aborted', `${what}: aborted while waiting for the caller's storage`);
 export function haltOn(signal: AbortSignal): Halt {
   let range: Cancellable | null = null;
-  const wakers = new Set<() => void>();
+  const wakers = new Set<(halted: Halted) => void>();
   const onAbort = (): void => {
     if (range !== null) cancelRange(range, signal.reason);
     range = null;
-    for (const wake of wakers) wake();
+    for (const wake of wakers) wake(HALTED);
     wakers.clear();
   };
   if (signal !== UNCANCELLABLE && !signal.aborted) signal.addEventListener('abort', onAbort, { once: true });
@@ -65,26 +65,30 @@ export function haltOn(signal: AbortSignal): Halt {
       if (r !== null && signal.aborted) cancelRange(r, signal.reason);
       else range = r;
     },
-    async race<T>(p: Promise<T>, late: (v: T) => void): Promise<T | Halted> {
-      if (signal === UNCANCELLABLE) {
-        const own = await p;
-        return own;
-      }
-      let wake: () => void = drop;
-      const stopped = new Promise<Halted>(resolve => {
-        if (signal.aborted) { resolve(HALTED); return; }
-        wake = (): void => { resolve(HALTED); };
-        wakers.add(wake);
+    // oxlint-disable-next-line typescript/promise-function-async -- an async wrapper is a promise and two hops more per chunk read
+    race<T>(p: Promise<T>, late: (v: T) => void): Promise<T | Halted> {
+      if (signal === UNCANCELLABLE) return p;
+      // One promise per await, settled by whichever comes first: p (one reaction on it) or the abort listener, through
+      // this await's waker (its resolve). No Promise.race and no second promise to lose: a chunk read costs one promise and one hop.
+      return new Promise<T | Halted>((resolve, reject) => {
+        // still waited for (the waker is there to take): p's outcome is the race's. No longer: a value goes to `late`,
+        // and what `late` throws goes nowhere. A rejection is handled here whenever it comes: before the halt the
+        // race carries it, after it nothing does.
+        // oxlint-disable-next-line promise/catch-or-return -- both outcomes are taken here; neither reaction can throw
+        p.then(v => {
+          const waited = wakers.delete(resolve);
+          resolve(v);
+          if (!waited) { try { late(v); } catch { drop(); } }
+          return null;
+        }, (e: unknown) => {
+          wakers.delete(resolve);
+          // oxlint-disable-next-line typescript/prefer-promise-reject-errors -- p's own rejection, passed on as it came
+          reject(e);
+          return null;
+        });
+        if (signal.aborted) resolve(HALTED);
+        else wakers.add(resolve);
       });
-      // still waited for: p's outcome is the race's. No longer (the waker is gone): a value goes to `late`.
-      const settled = p.then(v => {
-        if (!wakers.delete(wake)) late(v);
-        return v;
-      });
-      // a rejection is handled here whenever it comes: before the halt the race carries it, after it nothing does
-      settled.catch(() => { wakers.delete(wake); });
-      const first = await Promise.race([settled, stopped]);
-      return first;
     },
     release() {
       signal.removeEventListener('abort', onAbort);
