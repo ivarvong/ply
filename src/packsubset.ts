@@ -249,11 +249,14 @@ function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, 
   return { take, skip, end };
 }
 
-// The platform's reader on a range, whatever getReader the stream's own class defines; null when the range is not a
-// platform ReadableStream (the brand check throws), which is then read through its own reader.
+// The platform's reader on a range whose getReader is the platform's own. null for any other range, which is then read
+// through its own reader: a class that defines its own getReader (a subclass that serves its bytes through it, with no
+// underlying source at all) and an object that is not a platform ReadableStream (the brand check throws).
 // oxlint-disable-next-line typescript/unbound-method -- only ever called with the range as its `this`, just below
 const getPlatformReader: (this: ReadableStream<Uint8Array>) => ReadableStreamDefaultReader<Uint8Array> = ReadableStream.prototype.getReader;
 function platformReader(range: ReadableStream<Uint8Array>): ReadableStreamDefaultReader<Uint8Array> | null {
+  // oxlint-disable-next-line typescript/unbound-method -- compared, never called
+  if (range.getReader !== getPlatformReader) return null;
   try { return getPlatformReader.call(range); } catch { return null; }
 }
 

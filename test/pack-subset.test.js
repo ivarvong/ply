@@ -791,6 +791,27 @@ test('a source whose read answers with its Result itself, not a promise of it, i
   }
 });
 
+test('a range that is a ReadableStream subclass serving its bytes through its own getReader() is read through that reader', async () => {
+  // The subclass has no underlying source: its bytes come only from the reader its own getReader() returns (the idiom
+  // test/push-pack.test.js uses for a caller-controlled reader). Expected values, none from the code under test: git's
+  // own pack bytes; one read, because the whole pack in order is one run; one getReader call, one per range.
+  const idx = await scan(packs.ofs);
+  const all = [...Array(idx.count).keys()];
+  const seen = { reads: 0, readers: 0 };
+  const source = { size: packs.ofs.length, read(offset, length) {
+    seen.reads++;
+    const inner = rangeStream(packs.ofs.subarray(offset, offset + length)).getReader();
+    class Served extends ReadableStream { getReader() { seen.readers++; return inner; } }
+    return Promise.resolve({ ok: true, value: new Served() });
+  } };
+  const built = unwrap(await packSubset(source, idx, all));
+  const drained = drain(built.stream);
+  // bounded: a range whose bytes are never read fails here, it does not hang
+  assert.equal(await settledWithin(drained, 2000), 'settled', 'the drain ends');
+  assert.deepEqual(await drained, packs.ofs);
+  assert.deepEqual(seen, { reads: 1, readers: 1 });
+});
+
 test('a chunk read is not a promise race: a whole pack served 256 bytes at a time is drained without one Promise.race', async () => {
   // Expected values, neither from the code under test: 0 is the owner's decision (no race per read), and the bytes are
   // git's own pack. The count is the platform's Promise.race, wrapped for the length of the drain.
