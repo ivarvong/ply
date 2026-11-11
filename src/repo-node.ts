@@ -38,15 +38,19 @@
 // the runtime has no buffer for is `limit_exceeded`, what: 'local pack buffer bytes'. A packfile the file system will not give (EACCES, EIO,
 // EISDIR, …) is `unsupported`, kind 'filesystem', what: 'local pack', with the path, the operation and the system's
 // code in the message and the thrown error as `cause`: pushRepo never rejects with a node:fs error for a packfile.
-// Not yet bounded before the read (maybeRead / maybeText read the file whole): a loose object file, packed-refs, a
-// loose ref file, config, commondir, a `.git` file and HEAD. maxObjectSize bounds a loose object's inflated bytes,
-// not its file, and a text file of 512 MiB or more makes pushRepo reject with node's ERR_STRING_TOO_LONG.
+// Every other file read whole is bounded the same way, from its size, before a byte of it is read (readBounded; one
+// exactly at the bound is read): a loose object file by zlibBound(limits.maxObjectSize + 32), the longest zlib stream
+// of an object within the limit (`limit_exceeded`, what: 'local loose object bytes'); packed-refs and config by
+// limits.maxLsRefsBytes, the bound a ref listing has on the wire (what: 'local packed-refs bytes', 'local config
+// bytes'); a loose ref file, HEAD, commondir and a `.git` file, each one line, by 65 520 bytes (LINE_FILE_MAX, the
+// pkt-line maximum: what: 'local ref file bytes', 'local HEAD bytes', 'local commondir bytes', 'local .git file
+// bytes'). A text the runtime has no string for under a raised bound is `limit_exceeded` (what: '… buffer bytes').
 //
 // Refused as `bad_request` with `what`: SHA-256 repositories (objectFormat), reftable (refStorage), partial clones
 // (partialClone), objects/info/alternates (alternates) and shallow repositories (shallow).
 /* oxlint-disable no-await-in-loop -- the walks read one object at a time from the local repository, under the bounds */
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
-import { open, readFile, readdir, readlink, lstat, stat } from 'node:fs/promises';
+import { open, readdir, readlink, lstat, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a tree path throughout this file
 import { join, resolve } from 'node:path';
@@ -58,7 +62,7 @@ import type { CheckedLimits } from './limits.js';
 import { inflate } from './inflate.js';
 import { parsePack, resolvePack } from './packresolve.js';
 import { hashObject, parseCommit, parseTag, TYPE, TYPE_ID } from './objects.js';
-import { ZERO_OID } from './format.js';
+import { PKT_MAX_SIZE, ZERO_OID, zlibBound } from './format.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import type { Command, Commands } from './push.js';
@@ -97,10 +101,9 @@ type Repo = {
 };
 
 const mapOrNone = <T>(v: T | null): Option<T> => (v === null ? { tag: 'none' } : { tag: 'some', value: v });
-// A file's bytes, or null when it cannot be read (absent, a directory): for the files a repository may lack.
-// oxlint-disable-next-line typescript/promise-function-async -- the read's own promise, its failure mapped to null
-const maybeRead = (path: string): Promise<Buffer | null> => readFile(path).then(b => b, () => null);
-const maybeText = async (path: string): Promise<string | null> => { const b = await maybeRead(path); return b === null ? null : b.toString('utf8'); };
+// The most a one-line file of the repository holds (a loose ref, HEAD, commondir, a `.git` file): the pkt-line
+// maximum (gitprotocol-common), past which a ref's name or value could not be sent either.
+const LINE_FILE_MAX = PKT_MAX_SIZE;
 // oxlint-disable-next-line typescript/promise-function-async -- lstat's own promise, mapped to a boolean
 const exists = (path: string): Promise<boolean> => lstat(path).then(() => true, () => false);
 
@@ -153,17 +156,39 @@ async function readBounded(path: string, max: number, what: string): Promise<Res
   }
 }
 
+// A file a repository may lack, held to `max` before a byte of it is read: its bytes, null when it cannot be opened or
+// read (absent, a directory), `limit_exceeded` when it is past the bound. Never rejects.
+async function maybeRead(path: string, max: number, what: string): Promise<Result<Uint8Array | null, PlyError>> {
+  const read = await readBounded(path, max, what);
+  return read.ok || read.error.code === 'limit_exceeded' ? read : ok(null);
+}
+
+// That file as text (UTF-8, as it was read before the bound). A text the runtime has no string for (node: 512 MiB)
+// under a raised bound is `limit_exceeded` as well, never a thrown ERR_STRING_TOO_LONG.
+async function maybeText(path: string, max: number, what: string): Promise<Result<string | null, PlyError>> {
+  const read = await maybeRead(path, max, what);
+  if (!read.ok) return read;
+  const b = read.value;
+  if (b === null) return ok(null);
+  try {
+    return ok(Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('utf8'));
+  } catch {
+    return fail('limit_exceeded', `${what}: no string of ${b.length} bytes could be made (the file is within the limit ${max}, the runtime cannot hold it as text)`, { what: `${what} buffer bytes`, got: b.length, max });
+  }
+}
+
 // The git directory of a work tree (`.git`, a directory or a `gitdir:` file) or a bare repository; null for neither.
-async function findGitDir(dir: string): Promise<string | null> {
+async function findGitDir(dir: string): Promise<Result<string | null, PlyError>> {
   const dot = join(dir, '.git');
   const st = await lstat(dot).then(s => s, () => null);
-  if (st !== null && st.isDirectory()) return dot;
+  if (st !== null && st.isDirectory()) return ok(dot);
   if (st !== null && st.isFile()) {
-    const text = await maybeText(dot);
-    const m = text === null ? null : /^gitdir: (.+)$/mu.exec(text);
-    return m === null ? null : resolve(dir, getOrElse(at(m, 1), ''));
+    const text = await maybeText(dot, LINE_FILE_MAX, 'local .git file');
+    if (!text.ok) return text;
+    const m = text.value === null ? null : /^gitdir: (.+)$/mu.exec(text.value);
+    return ok(m === null ? null : resolve(dir, getOrElse(at(m, 1), '')));
   }
-  return (await exists(join(dir, 'HEAD'))) && (await exists(join(dir, 'objects'))) && (await exists(join(dir, 'refs'))) ? dir : null;
+  return ok((await exists(join(dir, 'HEAD'))) && (await exists(join(dir, 'objects'))) && (await exists(join(dir, 'refs'))) ? dir : null);
 }
 
 // git config as `section.key` → value (the last one wins), enough to read the format extensions. Subsections are kept
@@ -186,16 +211,20 @@ export function readConfig(text: string): Map<string, string> {
 }
 
 // Why ply will not push from this repository, or null: the format extensions and layouts it does not read.
-async function unsupported(commonDir: string): Promise<{ readonly what: string; readonly why: string } | null> {
-  const config = readConfig(getOrElse<string>(mapOrNone(await maybeText(join(commonDir, 'config'))), ''));
+type Refusal = { readonly what: string; readonly why: string };
+const refuse = (what: string, why: string): Result<Refusal | null, PlyError> => ok({ what, why });
+async function unsupported(commonDir: string, limits: CheckedLimits): Promise<Result<Refusal | null, PlyError>> {
+  const text = await maybeText(join(commonDir, 'config'), limits.maxLsRefsBytes, 'local config');
+  if (!text.ok) return text;
+  const config = readConfig(getOrElse<string>(mapOrNone(text.value), ''));
   const format = getOrElse(mapGet(config, 'extensions.objectformat'), 'sha1').toLowerCase();
-  if (format !== 'sha1') return { what: 'objectFormat', why: `object format ${format} (ply reads SHA-1 repositories only)` };
+  if (format !== 'sha1') return refuse('objectFormat', `object format ${format} (ply reads SHA-1 repositories only)`);
   const refStorage = getOrElse(mapGet(config, 'extensions.refstorage'), 'files').toLowerCase();
-  if (refStorage !== 'files') return { what: 'refStorage', why: `ref storage ${refStorage} (ply reads loose and packed refs only)` };
-  if (config.has('extensions.partialclone')) return { what: 'partialClone', why: 'a partial clone (objects may be missing locally)' };
-  if (await exists(join(commonDir, 'objects', 'info', 'alternates'))) return { what: 'alternates', why: 'objects/info/alternates (objects stored in another repository)' };
-  if (await exists(join(commonDir, 'shallow'))) return { what: 'shallow', why: 'a shallow repository (history is cut off)' };
-  return null;
+  if (refStorage !== 'files') return refuse('refStorage', `ref storage ${refStorage} (ply reads loose and packed refs only)`);
+  if (config.has('extensions.partialclone')) return refuse('partialClone', 'a partial clone (objects may be missing locally)');
+  if (await exists(join(commonDir, 'objects', 'info', 'alternates'))) return refuse('alternates', 'objects/info/alternates (objects stored in another repository)');
+  if (await exists(join(commonDir, 'shallow'))) return refuse('shallow', 'a shallow repository (history is cut off)');
+  return ok(null);
 }
 
 // A ref's value to its id through at most five symbolic hops: the id, 'dangling' for a symbolic ref that ends nowhere
@@ -212,9 +241,12 @@ const followRef = (raw: ReadonlyMap<string, string>, value: string): string | nu
 
 // Every ref: packed-refs, then loose refs over them (a loose ref is newer). A symbolic ref is followed (refs/remotes/
 // origin/HEAD) and left out when it ends nowhere; a value that is neither an id nor `ref: <name>` is refused.
-async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<string, string>, PlyError>> {
+async function readRefs(commonDir: string, limits: CheckedLimits): Promise<Result<Map<string, string>, PlyError>> {
+  const { maxRefs } = limits;
   const raw = new Map<string, string>();
-  const packed = getOrElse<string>(mapOrNone(await maybeText(join(commonDir, 'packed-refs'))), '');
+  const packedText = await maybeText(join(commonDir, 'packed-refs'), limits.maxLsRefsBytes, 'local packed-refs');
+  if (!packedText.ok) return packedText;
+  const packed = getOrElse<string>(mapOrNone(packedText.value), '');
   for (const line of packed.split('\n')) {
     const m = /^([0-9a-f]{40}) (refs\/\S+)$/u.exec(line);
     if (m !== null) raw.set(getOrElse(at(m, 2), ''), getOrElse(at(m, 1), ''));
@@ -243,7 +275,12 @@ async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<
         // refs/files-backend.c files_read_raw_ref: a link whose target text is a ref name is a symbolic ref to that
         // name; any other link is read as the file it points at
         const text = link ? await readlink(path).then(t => t, () => '') : '';
-        raw.set(name, text.startsWith('refs/') && validateRef(text).ok ? `${SYMREF}${text}` : getOrElse<string>(mapOrNone(await maybeText(path)), '').trim());
+        if (text.startsWith('refs/') && validateRef(text).ok) raw.set(name, `${SYMREF}${text}`);
+        else {
+          const value = await maybeText(path, LINE_FILE_MAX, 'local ref file');
+          if (!value.ok) return value;
+          raw.set(name, getOrElse<string>(mapOrNone(value.value), '').trim());
+        }
       }
       if (raw.size > maxRefs) return ok(null);
     }
@@ -263,15 +300,21 @@ async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<
 }
 
 async function openRepo(dir: string, limits: CheckedLimits): Promise<Result<Repo, PlyError>> {
-  const gitDir = typeof dir === 'string' && dir !== '' ? await findGitDir(dir) : null;
+  const found = typeof dir === 'string' && dir !== '' ? await findGitDir(dir) : ok(null);
+  if (!found.ok) return found;
+  const gitDir = found.value;
   if (gitDir === null) return fail('bad_request', `${typeof dir === 'string' ? dir : '(not a string)'}: not a git repository (no .git, and not a bare repository)`, { what: 'dir' });
-  const common = await maybeText(join(gitDir, 'commondir'));
-  const commonDir = common === null ? gitDir : resolve(gitDir, common.trim());
-  const refused = await unsupported(commonDir);
-  if (refused !== null) return fail('bad_request', `${dir}: ${refused.why}`, { what: refused.what });
-  const refs = await readRefs(commonDir, limits.maxRefs);
+  const common = await maybeText(join(gitDir, 'commondir'), LINE_FILE_MAX, 'local commondir');
+  if (!common.ok) return common;
+  const commonDir = common.value === null ? gitDir : resolve(gitDir, common.value.trim());
+  const refused = await unsupported(commonDir, limits);
+  if (!refused.ok) return refused;
+  if (refused.value !== null) return fail('bad_request', `${dir}: ${refused.value.why}`, { what: refused.value.what });
+  const refs = await readRefs(commonDir, limits);
   if (!refs.ok) return refs;
-  const headText = getOrElse<string>(mapOrNone(await maybeText(join(gitDir, 'HEAD'))), '').trim();
+  const headFile = await maybeText(join(gitDir, 'HEAD'), LINE_FILE_MAX, 'local HEAD');
+  if (!headFile.ok) return headFile;
+  const headText = getOrElse<string>(mapOrNone(headFile.value), '').trim();
   const headRef = headText.startsWith(`${SYMREF}refs/heads/`) ? headText.slice(SYMREF.length).trim() : null;
   const head = OID.test(headText) ? headText : getOrElse<string | null>(mapGet(refs.value, getOrElse<string>(mapOrNone(headRef), '')), null);
   return ok({ dir, gitDir, commonDir, refs: refs.value, headRef, head });
@@ -323,7 +366,11 @@ async function openStore(repo: Repo, limits: CheckedLimits): Promise<Result<Stor
   const get = async (oid: string): Promise<Result<Obj | null, PlyError>> => {
     const hit = mapGet(held, oid);
     if (hit.tag === 'some') return ok(hit.value);
-    const buf = await maybeRead(join(objectsDir, oid.slice(0, HEX_DIR), oid.slice(HEX_DIR)));
+    // the file is a zlib stream of the header and the object: none of an object within maxObjectSize is longer than
+    // zlibBound of both, so a longer file is refused from its size instead of being read whole and then inflated
+    const file = await maybeRead(join(objectsDir, oid.slice(0, HEX_DIR), oid.slice(HEX_DIR)), zlibBound(maxObject + HEADER_ROOM), 'local loose object');
+    if (!file.ok) return file;
+    const buf = file.value;
     if (buf === null) return ok(null);
     const z = inflate(buf, 0, { maxOutput: maxObject + HEADER_ROOM });
     if (!z.ok) return z;
