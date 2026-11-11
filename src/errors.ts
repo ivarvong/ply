@@ -193,6 +193,9 @@ const UNIT_DIGITS = 4;
 const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
 // one match is one code point: a BMP character is \uXXXX (as JSON writes it), an astral one \u{XXXXX}
 const escaped = (c: string): string => { const hex = Number(c.codePointAt(0)).toString(HEX); return c.length === 1 ? `\\u${hex.padStart(UNIT_DIGITS, '0')}` : `\\u{${hex}}`; };
-export const remoteText = (text: string, max: number = REMOTE_TEXT_MAX): string =>
-  text.slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
+// `scrub` (a transport's credential scrubber, or null) runs BEFORE the cut, on the whole text: a cut that falls inside
+// an echoed credential would leave a remainder too short for the scrubber to recognise afterwards. Where it is passed
+// the text is one pkt-line payload (at most 65516 bytes), so the scrub is bounded too.
+export const remoteText = (text: string, max: number = REMOTE_TEXT_MAX, scrub: ((s: string) => string) | null = null): string =>
+  (scrub === null ? text : scrub(text)).slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
 export const remoteQuoted = (text: string, max: number = REMOTE_TEXT_MAX): string => JSON.stringify(text.slice(0, max)).replaceAll(UNPRINTABLE, escaped);

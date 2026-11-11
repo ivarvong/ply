@@ -1,7 +1,7 @@
 // v0 receive-pack: commands + thin pack in, report-status out. Planning the request, reading the response stream,
 // classifying the report and deciding the outcome are pure; `push` is the one effect. Any failure after the body is on
 // the wire is 'ambiguous' (the ref may have moved).
-import { fail, ambiguousAfterPush, remoteText } from './errors.js';
+import { fail, ambiguousAfterPush, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
 import type { Result } from './result.js';
@@ -74,7 +74,7 @@ export function parseCommands(raw: readonly RawCommand[]): Result<ParsedCommands
 }
 // A pkt-line frame as pktStep and the transports' frames() yield it.
 export type { Frame } from './transport.js';
-import type { Frame, RequestBody, Transport } from './transport.js';
+import type { Frame, RequestBody, Scrub, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
 import { WHOLE } from './pack.js';
@@ -442,7 +442,8 @@ export const refusedInPlace = (e: PlyError): Result<never, PlyError> =>
   fail('push_rejected', e.message, { what: 'ref', report: e.report, hookOutput: e.hookOutput });
 // remote: band 3's message when the stream broke on one, else null (a JS caller's missing value reads as null).
 export type OutcomeContext = { readonly report: PushReport | null; readonly hookOutput: string; readonly remote: string | null; readonly commands: readonly Command[] };
-export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands }: OutcomeContext): Result<PushReport | null, PushError> {
+// scrub: the transport's credential scrubber (or null), applied to band 3's text before it is cut (errors.ts remoteText).
+export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands }: OutcomeContext, scrub: Scrub | null = null): Result<PushReport | null, PushError> {
   const extra = { report, hookOutput };
   switch (o.tag) {
     case 'landed': return ok(report);
@@ -465,7 +466,7 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
     case 'partial': return fail('push_partial', `push partially applied: ${o.landed.join(', ')} updated; ${o.rejected.map(r => `${r.ref} (${r.reason})`).join(', ')} refused`, { ...extra, landed: o.landed, rejected: o.rejected });
     case 'ambiguous': {
       const said = fromNullish(remote);
-      return fail('ambiguous', `push outcome unknown: ${said.tag === 'none' ? '' : `remote: ${remoteText(said.value)}: `}${o.why}`, said.tag === 'none' ? extra : { ...extra, original: 'remote_error' });
+      return fail('ambiguous', `push outcome unknown: ${said.tag === 'none' ? '' : `remote: ${remoteText(said.value, REMOTE_TEXT_MAX, scrub)}: `}${o.why}`, said.tag === 'none' ? extra : { ...extra, original: 'remote_error' });
     }
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
@@ -732,7 +733,7 @@ async function decide(base: FinishPush, r: Read, cut: PlyError | null): Promise<
   const report = shape.tag === 'malformed' || shape.tag === 'broken' ? null : shape;
   span.set(outcomeAttrs(done, report, outcome, reading.band2Frames, band2));
   if (outcome.tag === 'ambiguous') span.set({ 'git.push.ambiguous': outcome.why });
-  const res = outcomeResult(outcome, { report, hookOutput: band2, remote: shape.tag === 'broken' ? shape.remote : null, commands: plan.commands });
+  const res = outcomeResult(outcome, { report, hookOutput: band2, remote: shape.tag === 'broken' ? shape.remote : null, commands: plan.commands }, t.scrub);
   return finishPush({ ...base, hookOutput: band2 }, res);
 }
 

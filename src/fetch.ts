@@ -9,8 +9,8 @@ import type { CheckedLimits } from './limits.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
-import type { Attrs, Frame, Transport } from './transport.js';
-import { fail, scrubError, remoteQuoted, remoteText } from './errors.js';
+import type { Attrs, Frame, Scrub, Transport } from './transport.js';
+import { fail, scrubError, remoteQuoted, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -257,8 +257,9 @@ export type Sidebanded<S> = { readonly state: S; readonly piece: SidebandPiece }
 export type SidebandError = ErrorOf<'protocol'> | ErrorOf<'limit_exceeded'> | ErrorOf<'remote_error'>;
 // One packfile-section frame, demultiplexed (git's demultiplex_sideband): band 1 is pack bytes and band 2 progress, each
 // held to maxPack before the frame is handed on; band 3 is the remote's error, its text the message. Peak is the frame.
+// scrub: the transport's credential scrubber (or null), applied to band 3's text before it is cut (errors.ts remoteText).
 // @decoder sidebandStep prefix=sideband
-export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number): Result<Sidebanded<S>, SidebandError> {
+export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, maxPack: number, scrub: Scrub | null = null): Result<Sidebanded<S>, SidebandError> {
   // A delim or response-end inside the packfile section ends git's sideband demultiplexer (demultiplex_sideband:
   // SIDEBAND_FLUSH), so git reads a pack cut there; neither is a frame upload-pack writes in it. Refused, not skipped.
   if (frame.kind !== 'data') return proto(`v2: ${frame.kind} inside the packfile section`);
@@ -279,7 +280,7 @@ export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, ma
   }
   if (band.band === SIDEBAND_ERROR) {
     const text = td.decode(band.body).trim();
-    return fail('remote_error', `remote: ${remoteText(text)}`, notOurRefReason(text));
+    return fail('remote_error', `remote: ${remoteText(text, REMOTE_TEXT_MAX, scrub)}`, notOurRefReason(text));
   }
   return proto(`v2: bad sideband ${band.band}`);
 }
@@ -310,9 +311,10 @@ export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Objec
   sectionLines: 0, otherLines: 0,
 });
 const stepped = (state: V2State, pack: Uint8Array | null = null): Result<V2Step, never> => ok({ state, pack });
+// scrub: the transport's credential scrubber (or null), applied to an ERR line's or band 3's text before it is cut.
 // @decoder v2Step prefix=v2
 // oxlint-disable-next-line complexity -- a step function is one transition table
-export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
+export function v2Step(st: V2State, frame: Frame, scrub: Scrub | null = null): Result<V2Step, PlyError> {
   // Every section line, including ones this client does not interpret, counts against the same cap. The state's limits
   // are checked (v2Init takes a CheckedLimits): a missing maxSectionLines used to make `n >= <missing>` false.
   const maxLines = st.limits.maxSectionLines;
@@ -325,7 +327,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   if (frame.kind === 'flush') return stepped({ ...st, done: true });
   switch (st.phase) {
     case 'pack': {
-      const sb = sidebandStep(st, frame, maxPack);
+      const sb = sidebandStep(st, frame, maxPack, scrub);
       if (!sb.ok) return sb;
       // Stryker disable next-line ConditionalExpression: a progress piece has no body field, and stepped's default parameter makes the missing value the same null
       return stepped(sb.value.state, sb.value.piece.kind === 'pack' ? sb.value.piece.body : null);
@@ -337,7 +339,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       const line = td.decode(frame.payload).replace(/\n$/, '');
       if (line.startsWith('ERR ')) {
         const text = line.slice('ERR '.length);
-        return fail('remote_error', `remote: ${remoteText(text)}`, notOurRefReason(text));
+        return fail('remote_error', `remote: ${remoteText(text, REMOTE_TEXT_MAX, scrub)}`, notOurRefReason(text));
       }
       if (st.section === null) {
         if (st.sections.length >= maxLines) return err(limitExceeded('section headers', st.sections.length + 1, maxLines));
@@ -412,7 +414,7 @@ async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenera
   const exchange = frames(t, 'git-upload-pack', body.value, span, { bypassCache: Boolean(opts.bypassCache) });
   let st = v2Init(t.limits);
   try { for await (const f of exchange) {
-    const r = v2Step(st, f);
+    const r = v2Step(st, f, t.scrub);
     if (!r.ok) { scrubError(r.error, t.scrub); return r; }
     st = r.value.state;
     if (r.value.pack) yield r.value.pack;
@@ -581,7 +583,7 @@ export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boo
     if (!framed.ok) return framed;
     const finished = pktFinish(framed.value.state);
     if (!finished.ok) return finished;
-    const lines = parseCapabilitiesV2(framed.value.frames);
+    const lines = parseCapabilitiesV2(framed.value.frames, t.scrub);
     if (!lines.ok) return lines;
     const features = capLookup(lines.value).features('fetch');
     const filter = features.includes('filter');

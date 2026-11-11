@@ -2,9 +2,9 @@
 // module so the fetch path can read one bit of it (does `fetch` take `filter`, fetch.ts) without discover's canary.
 // discover.ts re-exports both; the space of advertisements and ply's answer to each is test/space/advertisement.space.js.
 import type { ErrorOf, Extra } from './errors.js';
-import type { Frame } from './transport.js';
+import type { Frame, Scrub } from './transport.js';
 import type { Option, Result } from './result.js';
-import { fail, remoteQuoted, remoteText } from './errors.js';
+import { fail, remoteQuoted, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import { flatMapOption, getOrElse, mapOption, none, ok, some } from './result.js';
 import { at, atOr, fromNullable } from './absent.js';
 import { td } from './bytes.js';
@@ -30,8 +30,9 @@ const text = (f: DataFrame): string => td.decode(f.payload).replace(/\n$/, '');
 const dataAt = (frames: readonly Frame[], i: number): Option<DataFrame> => flatMapOption(at(frames, i), (f): Option<DataFrame> => (f.kind === 'data' ? some(f) : none));
 // The kind of the frame at `i`, or 'end of stream' past the last one.
 const kindAt = (frames: readonly Frame[], i: number): string => getOrElse(mapOption(at(frames, i), f => f.kind), 'end of stream');
+// scrub: the transport's credential scrubber (or null), applied to an ERR line's text before it is cut (errors.ts remoteText).
 // @decoder parseCapabilitiesV2 prefix=caps
-export function parseCapabilitiesV2(frames: readonly Frame[]): Result<string[], CapsV2Error> {
+export function parseCapabilitiesV2(frames: readonly Frame[], scrub: Scrub | null = null): Result<string[], CapsV2Error> {
   let i = 0;
   const preamble = dataAt(frames, 0);
   if (preamble.tag === 'some' && text(preamble.value).startsWith(SERVICE)) {
@@ -45,7 +46,7 @@ export function parseCapabilitiesV2(frames: readonly Frame[]): Result<string[], 
   }
   const head = dataAt(frames, i);
   const first = head.tag === 'some' ? text(head.value) : '';
-  if (first.startsWith(ERR)) return fail('remote_error', `remote: ${remoteText(first.slice(ERR.length))}`);
+  if (first.startsWith(ERR)) return fail('remote_error', `remote: ${remoteText(first.slice(ERR.length), REMOTE_TEXT_MAX, scrub)}`);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- an ad-hoc error field (errors.ts Extra); A3 moves it into Detail
   if (first !== VERSION_2) return fail('unsupported', `server did not answer protocol v2 (first line ${remoteQuoted(first)})`, { lines: [first] } as Extra);
   const lines: string[] = [];

@@ -59,7 +59,7 @@ export async function discover(t: Transport): Promise<Result<DiscoverInfo, PlyEr
     const { frames, state } = stepped.value;
     const finished = pktFinish(state);
     if (!finished.ok) return finished;
-    const parsed = parseCapabilitiesV2(frames);
+    const parsed = parseCapabilitiesV2(frames, t.scrub);
     if (!parsed.ok) return parsed;
     const lines = parsed.value;
     const { has, value, features } = capLookup(lines);
