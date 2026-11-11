@@ -548,8 +548,13 @@ export const isFilterRejection = (e: unknown): boolean => {
 // Spans: this one is `git.upload-pack discover` with git.server.fetch/filter; the fetch that follows carries
 // `git.fetch.filter.fallback: 'none'`.
 export const isEmptyResponse = (e: unknown): boolean => thrownCodeIs(e, 'protocol') && thrownReasonIs(e, 'empty_response');
-export async function filterUnadvertised(t: Transport, e: PlyError): Promise<boolean> {
-  if (!isEmptyResponse(e)) return false;
+// The other ways a server refuses an argument it does not take: an ERR pkt-line (remote_error) or HTTP 400 (Artifacts'
+// answer to a filter it does not take). 401, 403, 404, 429 and 5xx are other codes and never match. objectAt reads the
+// advertisement on one of these only for a `deepen` it added itself, once per quirks record.
+const isArgumentRefusal = (e: PlyError): boolean => e.code === 'remote_error' || (e.code === 'http' && e.status === FILTER_REFUSAL_STATUS);
+// `refusal`: the answers that send this call to the advertisement. Every caller but objectAt's depth takes the default.
+export async function filterUnadvertised(t: Transport, e: PlyError, refusal: (e: PlyError) => boolean = isEmptyResponse): Promise<boolean> {
+  if (!refusal(e)) return false;
   const attrs = { 'git.command': 'discover', 'git.protocol.version': PROTOCOL_V2 };
   // oxlint-disable-next-line typescript/promise-function-async -- the exchange's promise, passed through
   const read = await coded('protocol', () => spanned(t, 'git.upload-pack discover', clientSpan(t, attrs), async (span: Span): Promise<Result<{ readonly filter: boolean; readonly shallow: boolean }, PlyError>> => {
@@ -1025,15 +1030,16 @@ export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig
     if (asked !== null) return asked;
     return mayBeCommit && takesShallow(t.quirks) ? 1 : 0;
   };
-  // run(depth). When it fails carrying a depth this call added, an empty response sends ply to the advertisement (as for
-  // a refused filter: filterUnadvertised learns `shallow` from the same line), and a server that lists no `shallow` is
-  // asked once more with no `deepen`, as before the default: the answer is then the history, held to the pack limits.
+  // run(depth). When it fails carrying a depth this call added, an empty response, an ERR line or HTTP 400 (the shapes a
+  // server refuses an argument in) sends ply to the advertisement (as for a refused filter: filterUnadvertised learns
+  // `shallow` from the same line), and a server that lists no `shallow` is asked once more with no `deepen`, as before
+  // the default: the answer is then the history, held to the pack limits. `shallow` listed: the first error stands.
   const ask = async (run: (deepen: number) => Promise<Result<FetchedObject, PlyError>>): Promise<Result<FetchedObject, PlyError>> => {
     const sent = depth();
     const first = await run(sent);
     // once per quirks record: an advertisement already read for it has said whether `shallow` is listed
     if (first.ok || asked !== null || sent === 0 || shallowLearned(t.quirks)) return first;
-    await filterUnadvertised(t, first.error);
+    await filterUnadvertised(t, first.error, e => isEmptyResponse(e) || isArgumentRefusal(e));
     return depth() === sent ? first : run(depth());
   };
   const narrow = filter === 'tree:0';
@@ -1057,6 +1063,9 @@ export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig
       return wide('blob:none', true);
     }
     if (await filterUnadvertised(t, single.error)) return wide('', true);
+    // an ERR line or HTTP 400 that answered a depth this call added: the advertisement is read for `shallow` (see `ask`;
+    // not read above, where an unlisted `filter` would change the request main sends)
+    if (asked === null && sent !== 0 && !shallowLearned(t.quirks)) await filterUnadvertised(t, single.error, isArgumentRefusal);
     // the advertisement was just read: `filter` is the server's, and a depth this call added that the server does not
     // take is dropped (see `ask`)
     return depth() === sent ? single : fetchSingle(t, { oid, filter, deepen: depth(), expectType });
