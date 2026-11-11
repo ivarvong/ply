@@ -1368,3 +1368,17 @@ test('the default budget is retain: a record with no budget, and packScanOpts wi
   assert.equal(refusal(drain([pack], { verify: true, limits, budget: null }).r), expected);
   assert.equal(refusal(drain([pack], packScanOpts(limits)).r), expected);
 });
+
+// inflate()'s pos is a position in the buffer (test/inflate-pos.test.js holds every cell): the refusal is reached here
+// too, so the pack-stream space's runners cover it. The member is node:zlib's; -1 and a fraction name no byte of it.
+test('inflate: a pos that is not a position in the buffer is bad_request, never a read from the end or a throw', () => {
+  const z = zlib.deflateSync(te.encode('pos'));
+  for (const pos of [-1, 0.5, Number.NaN, z.length + 1]) {
+    const r = inflate(z, pos);
+    assert.equal(r.ok, false, `pos ${pos}`);
+    assert.equal(r.error.code, 'bad_request', `pos ${pos}`);
+  }
+  const at0 = inflate(z, 0);
+  assert.equal(at0.ok, true);
+  assert.deepEqual([...at0.value.out], [...te.encode('pos')]);
+});

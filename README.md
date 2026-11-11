@@ -266,6 +266,8 @@ if (!stale.ok) {
 
 ## More detail
 
+`inflate(buf, pos = 0, opts)` reads the zlib member at `buf[pos..]` and reports the bytes it `consumed`. `pos` is a position in `buf`: a non-negative safe integer no greater than `buf.length` (at the very end there are no bytes, so the member is cut: `pack_corrupt`). Any other value (negative, fractional, `NaN`, past the end, a string) is `bad_request` before a byte is read; it used to be passed to `subarray`, which reads a negative offset from the end of the buffer, and `NaN` threw.
+
 `parsePack` accepts optional `maxObjects` and `maxInflatedTotal`. Omitting them uses `DEFAULT_LIMITS` (`maxPackObjects` 100_000, `maxInflatedTotal` 256 MiB). A limits object that drops either key fails closed (`bad_request`) instead of leaving the cap off. `validateIdent({ name, email, time, tz })` is the only way to build an author, committer, or tagger: `time` is a non-negative safe integer, `tz` is a civil offset (`-1200`..`+1400`), and the result is branded so a spread cannot reach `ident()`. [ply-web](https://github.com/ivarvong/ply-web) also uses these entry-point exports: `validateIdent`, `validateRef`, `validatePath`, `concat`, `limitError`, `isFilterRejection`, `fromAny`, `packParseOpts`.
 
 ```js
