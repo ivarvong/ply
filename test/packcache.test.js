@@ -501,14 +501,20 @@ test('cachingFetch: an origin body that fails part way is not stored and does no
   assert.match(f.stats.verifyError, /the body failed while it was read: .*connection reset/);
   // a store that answers a match with a bodiless response: the cache layer does not look inside a HIT. It is handed on
   // as the store gave it, unparsed, and the caller's own reader is what refuses it (an empty body is not an answer).
-  const hollow = { match: async () => new Response(null, { status: 200, headers: RESULT }), put: async () => null, delete: async () => true };
+  const hollowDeleted = [];
+  const hollow = { match: async () => new Response(null, { status: 200, headers: RESULT }), put: async () => null, delete: async k => { hollowDeleted.push(k); return true; } };
   const g = cachingFetch(globalThis.fetch, hollow, { waitUntil });
   const before = counts();
   const res = await g(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body });
   assert.equal(res.headers.get('x-ply-pack-cache'), 'HIT'); assert.equal((await res.arrayBuffer()).byteLength, 0);
   assert.equal(delta(before, counts()).fetch, 0); assert.equal(g.stats.hit, 1); assert.equal(g.counters.parsed, 0);
-  const refusedByClient = await unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: g })).fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
-  assert.equal(refusedByClient.ok, false, 'never reported as a good answer');
+  // ply's client refuses the empty HIT, the key is deleted, and the origin is asked exactly once: the caller gets the
+  // origin's own answer (one commit for this want), never the empty body
+  const viaClient = await unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: g })).fetchPack({ wants: [head], filter: 'tree:0', deepen: 1 });
+  assert.equal(viaClient.ok, true, 'the empty body is never the answer: the refused HIT is retried past the cache');
+  assert.equal(viaClient.value.parsed.stats.count, 1, 'the origin\'s answer for this want is one commit');
+  assert.equal(delta(before, counts()).fetch, 1, 'the origin was asked exactly once');
+  assert.equal(hollowDeleted.length, 1, 'the refused key was deleted'); assert.equal(g.stats.bust, 1);
 });
 
 test('cachingFetch: a stored entry is untrusted; a tampered pack is served at most once, deleted, and refetched once (the client\'s parse is the check)', async () => {
@@ -552,6 +558,52 @@ test('cachingFetch: a stored entry is untrusted; a tampered pack is served at mo
     assert.deepEqual(objectSet(inner.entries.get(key).body), [head], `${name}: the entry now holds a verified answer`);
     // the only chunks the cache layer parsed are the refetched answer's, on their way to the store
     assert.ok(f.counters.parsed > parsedBefore, `${name}: the refetch went through the store-side verifier`);
+    served.length = 0; const again = counts();
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    assert.equal((await unwrapAsync(c.fetchPack(req))).parsed.stats.count, 1);
+    assert.equal(delta(again, counts()).fetch, 0, `${name}: the repaired entry is served`);
+    assert.equal(served.filter(b => Buffer.compare(b, poison) === 0).length, 0, `${name}: the poisoned bytes are never served again`);
+  }
+});
+
+test('cachingFetch: a stored entry tampered into an ERR, a cut, an empty body or a wrong pack trailer is served at most once, deleted, and refetched once', async () => {
+  const head = headOf();
+  const req = { wants: [head], filter: 'tree:0', deepen: 1 };
+  const inner = memoryCache(); const pending = [];
+  // the store, counted: what each match served and which keys were deleted
+  const served = []; const deleted = [];
+  const cache = {
+    entries: inner.entries,
+    match: async k => { const r = await inner.match(k); if (r) served.push(new Uint8Array(await r.clone().arrayBuffer())); return r; },
+    put: (k, r) => inner.put(k, r),
+    delete: async k => { deleted.push(k); return inner.delete(k); },
+  };
+  const f = cachingFetch(globalThis.fetch, cache, { waitUntil: p => { pending.push(p); } });
+  const settle = async () => { await Promise.all(pending.splice(0)); };
+  const c = unwrap(GitHttp.create(url, { tracer: new Tracer(), fetchImpl: f }));
+  await unwrapAsync(c.fetchPack(req)); await settle();
+  const [key] = [...inner.entries.keys()];
+  const good = inner.entries.get(key).body.slice();
+  // a pkt-line by hand (gitprotocol-common): four hex digits of the length, themselves included, then the payload
+  const line = text => Buffer.concat([Buffer.from((text.length + 4).toString(16).padStart(4, '0')), Buffer.from(text)]);
+  const err = Uint8Array.from(Buffer.concat([line('ERR upload-pack: not our ref\n'), Buffer.from('0000')]));
+  // the answer ends with the pack's 20-byte SHA-1 trailer and the 4-byte final flush: 10 from the end is inside the trailer
+  const trailer = good.slice(); trailer[trailer.length - 10] ^= 0xff;
+  const poisons = [['ERR packet', err], ['cut', good.slice(0, good.length - 40)], ['empty body', new Uint8Array(0)], ['wrong pack trailer', trailer]];
+  let busts = 0;
+  for (const [name, poison] of poisons) {
+    inner.entries.set(key, { body: poison.slice(), headers: { ...RESULT } });
+    served.length = 0; deleted.length = 0;
+    const before = counts();
+    // oxlint-disable-next-line no-await-in-loop -- one poison at a time
+    const got = await c.fetchPack(req); await settle();
+    assert.equal(got.ok, true, `${name}: the caller gets the origin's answer, not the stored failure`);
+    assert.equal(got.value.parsed.stats.count, 1, `${name}: the origin's answer for this want is one commit`);
+    assert.equal(served.filter(b => Buffer.compare(b, poison) === 0).length, 1, `${name}: the poisoned bytes were served exactly once`);
+    assert.deepEqual(deleted, [key], `${name}: the entry was deleted`);
+    assert.equal(delta(before, counts()).fetch, 1, `${name}: refetched from the origin exactly once`);
+    assert.equal(f.stats.bust, ++busts, `${name}: counted as a bust`);
+    assert.deepEqual(objectSet(inner.entries.get(key).body), [head], `${name}: the entry now holds a verified answer`);
     served.length = 0; const again = counts();
     // oxlint-disable-next-line no-await-in-loop -- as above
     assert.equal((await unwrapAsync(c.fetchPack(req))).parsed.stats.count, 1);
