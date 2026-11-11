@@ -10,7 +10,7 @@ import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './va
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
-import { atOr, type Input } from './absent.js';
+import { atOr, isMissing, type Input } from './absent.js';
 import type { ObjType, ObjectTypeName, PackKind } from './format.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
@@ -365,7 +365,6 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
 }
 
 type Sortable = { readonly mode: string; readonly name: string };
-const sortKey = (e: Sortable): string => (e.mode === MODE_TREE ? `${e.name}/` : e.name);
 // git's tree order on the names' bytes (a directory sorts as its name and a `/`). A name with no byte form is refused.
 // Each key is computed once, before the sort: an entry's name and mode are read once and encoded once, where encoding
 // both keys inside the comparator cost two encodes (and, for a directory, two string concatenations) per comparison,
@@ -376,7 +375,13 @@ type SortRow<T> = { readonly key: Uint8Array; readonly entry: T };
 export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], BadRequest> {
   const rows: Array<SortRow<T>> = [];
   for (const entry of entries) {
-    const key = encodeBytes(sortKey(entry), 'tree entry name');
+    // The entry's type is not checked at run time. An entry that is no object (null, or the missing value) has no name,
+    // and a name that is not a string (null, missing, a Symbol, an object whose toString throws) is never concatenated:
+    // the `/` is added to a string only, and anything else goes to encodeBytes as it is, which refuses it (`tree entry
+    // name must be a string`). So the refusal is the same at every list length, and nothing here can throw on a name.
+    const given: unknown = entry;
+    const name: unknown = given === null || isMissing(given) ? null : entry.name;
+    const key = encodeBytes(typeof name === 'string' && entry.mode === MODE_TREE ? `${name}/` : name, 'tree entry name');
     if (!key.ok) return key;
     rows.push({ key: key.value, entry });
   }

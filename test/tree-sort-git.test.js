@@ -95,3 +95,64 @@ test('treeSort refuses the first entry, in the caller\'s order, whose name has n
   assert.deepEqual(run([e('z'), e('y'), e('x'), e('w'), e('v'), e('u'), e('t'), e('s'), e('r'), e('q'), e('p'), e('\ud803', '40000'), e('\ud800')]), lone('D803'));
   assert.deepEqual(run([]), { ok: true });
 });
+
+test('treeSort refuses a name that is not a string, and an entry that is no object, as bad_request at 1, 2 and 3 entries: it never throws', () => {
+  // By hand, from the rule: a name that is not a string is refused as `tree entry name must be a string`, whatever the
+  // mode, the position and the list length. None of this is computed by the code under test.
+  const WANT = { ok: false, code: 'bad_request', message: 'tree entry name must be a string', what: 'tree entry name' };
+  const run = entries => {
+    try {
+      const r = treeSort(entries);
+      return r.ok ? { ok: true, names: r.value.map(e => e.name) } : { ok: false, code: r.error.code, message: r.error.message, what: r.error.what };
+    } catch (error) {
+      return { threw: String(error) };
+    }
+  };
+  const a = { mode: '100644', name: 'a' };
+  const b = { mode: '40000', name: 'b' };
+  let conversions = 0;
+  // the four kinds of name: the last two cannot be turned into a string at all
+  const kinds = {
+    null: () => null,
+    undefined: () => undefined,
+    'a Symbol': () => Symbol('s'),
+    'an object whose toString throws': () => ({ toString() { conversions += 1; throw new Error('boom'); } }),
+  };
+  let cases = 0;
+  for (const [kind, make] of Object.entries(kinds)) {
+    // a directory's key is its name and a `/` (where the name used to be concatenated), a file's key is its name
+    for (const mode of ['40000', '100644']) {
+      const bad = () => ({ mode, name: make() });
+      // every position of the bad entry, in a list of one, of two and of three
+      const lists = { 1: [[bad()]], 2: [[bad(), a], [a, bad()]], 3: [[bad(), a, b], [a, bad(), b], [a, b, bad()]] };
+      for (const [length, sameLength] of Object.entries(lists)) {
+        for (const [at, list] of sameLength.entries()) {
+          assert.equal(list.length, Number(length));
+          assert.deepEqual(run(list), WANT, `name ${kind}, mode ${mode}, ${length} entries, bad entry at ${at}`);
+          cases += 1;
+        }
+      }
+    }
+  }
+  // 4 kinds x 2 modes x (1 + 2 + 3) lists
+  assert.equal(cases, 48);
+  assert.equal(conversions, 0, 'a name that is not a string is never converted to one');
+  // an entry that is no object has no name: the same refusal, at the same three lengths
+  for (const none of [null, undefined]) {
+    assert.deepEqual(run([none]), WANT, `[${none}]`);
+    assert.deepEqual(run([none, a]), WANT, `[${none}, a]`);
+    assert.deepEqual(run([a, none]), WANT, `[a, ${none}]`);
+    assert.deepEqual(run([none, a, b]), WANT, `[${none}, a, b]`);
+    assert.deepEqual(run([a, none, b]), WANT, `[a, ${none}, b]`);
+    assert.deepEqual(run([a, b, none]), WANT, `[a, b, ${none}]`);
+  }
+  // the refusal is still the first entry in the caller's order: U+D800 is a lone surrogate, a string with no byte form
+  const lone = { mode: '100644', name: '\ud800' };
+  assert.deepEqual(run([lone, { mode: '40000', name: null }]), { ...WANT, message: 'tree entry name: lone surrogate U+D800 is no byte sequence' });
+  assert.deepEqual(run([{ mode: '40000', name: null }, lone]), WANT);
+  // and string names are sorted as before, at the same lengths. By hand: the directory b is `b/`; `a` (0x61) < `b` (0x62),
+  // and `b-` (0x2d after the b) < `b/` (0x2f)
+  assert.deepEqual(run([b]), { ok: true, names: ['b'] });
+  assert.deepEqual(run([b, a]), { ok: true, names: ['a', 'b'] });
+  assert.deepEqual(run([b, { mode: '100644', name: 'b-' }, a]), { ok: true, names: ['a', 'b-', 'b'] });
+});
