@@ -3,6 +3,8 @@
 //   - end to end (REF-only and OFS packs, several batches): the ref is the planned head, no temp ref is left,
 //     fsck --strict is clean, exactly the tree's objects and the one new commit are reachable, ls-tree -r is the
 //     source's, the commit has no parents and keeps the source's author, committer and message
+//   - an OFS pack whose delta chain a small budget cuts below a delta base (crossBatchRef): done in one run and after
+//     a pause and resume, no temp ref, the same checks
 //   - resume: paused after every single push and resumed, the same head; a push that dies mid-stream (the spool
 //     fails) leaves the refs where they were and the next run finishes; a step already landed, sent again, is refused
 //     and moves nothing
@@ -30,6 +32,7 @@ import { createTransport } from '../src/http.js';
 import { planTransfer, checkTransferPlan, rootCommit, batchTrees, TRANSFER_REF_PREFIX } from '../src/transferplan.js';
 import { transferStatus, transferStep, runTransfer, copyTree, sweepTransfers } from '../src/transfer.js';
 import { te } from '../src/bytes.js';
+import { TYPE } from '../src/objects.js';
 import { Tracer, arrayExporter, flattenLine } from '../src/otel.js';
 import { unwrap } from './unwrap.js';
 
@@ -133,6 +136,38 @@ test('end to end, REF-only and OFS packs: several pushes under the cap, fsck --s
     assert.ok(checkTransferPlan(JSON.parse(JSON.stringify(plan))).ok);
     assert.deepEqual(must(await transferStatus(t, plan)), { tag: 'done', head: plan.head, tempLeft: false });
   }
+});
+
+test('an OFS pack cut below a delta base (crossBatchRef): the transfer finishes and resumes; git holds exactly the tree', async () => {
+  const from = await spooled(src.packs.ofs);
+  const c = from.pack.columns;
+  // 258 generated objects and 3 of the pack's entries a push (the three trees need that): the chain0..4 family (a blob
+  // and deltas on deltas) cannot fit one push, so it is refused without crossBatchRef and cut in chain order with it
+  const budget = { ...BUDGET, maxObjects: 261 };
+  assert.equal(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit }).error.code, 'limit_exceeded');
+  const plan = must(planTransfer(from.pack, from.resolved, { budget, ref: REF, commit: src.commit, crossBatchRef: true }));
+  // the fixture, read from git's pack and the plan's batches: an OFS_DELTA whose base is itself an OFS_DELTA, pushed in
+  // an earlier batch. Its base id is not in the scan index (a delta's id is known only once it is applied).
+  const batchOf = new Map(plan.pack.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const cut = [...batchOf.keys()].filter(i => c.storedType[i] === TYPE.OFS_DELTA && c.storedType[c.baseIndex[i]] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) < batchOf.get(i));
+  assert.ok(cut.length >= 1, `OFS deltas cut from a delta base: ${cut.length}`);
+  const lastCut = Math.max(...cut.map(i => batchOf.get(i)));
+  // one run to the end
+  const whole = repo();
+  const run = must(await runTransfer(whole.t, from, plan, src.commit));
+  assert.deepEqual(run, { tag: 'done', head: plan.head, pushes: plan.steps.length, tempLeft: false });
+  assertCopied(whole.bare, plan);
+  // paused before the last cut batch, then resumed: the temp ref is there in between, gone at the end
+  const { bare, t } = repo();
+  const paused = must(await runTransfer(t, from, plan, src.commit, { maxSteps: lastCut }));
+  assert.equal(paused.tag, 'paused');
+  assert.equal(paused.pushes, lastCut);
+  assert.match(refsOf(bare), new RegExp(`^${plan.tempRef} [0-9a-f]{40}$`, 'u'));
+  const resumed = must(await runTransfer(t, from, plan, src.commit));
+  assert.equal(resumed.tag, 'done');
+  assert.equal(resumed.pushes, plan.steps.length - lastCut);
+  assert.equal(resumed.tempLeft, false);
+  assertCopied(bare, plan);
 });
 
 test('everything in one push: no temp ref; atomic off: one plain push', async () => {
