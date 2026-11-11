@@ -210,7 +210,8 @@ const DISCARD = 0;
 const KEEP = 1;
 const INVESTIGATE = 2;
 
-function cleanMmatch(action: Uint8Array, i: number, len: number): boolean {
+// oxlint-disable-next-line eslint/max-params -- xdl_clean_mmatch's arguments and the diff's budget
+function cleanMmatch(action: Uint8Array, i: number, len: number, budget: Budget): boolean {
   let s = 0;
   let e = len - 1;
   if (i - s > SIMSCAN_WINDOW) s = i - SIMSCAN_WINDOW;
@@ -221,8 +222,10 @@ function cleanMmatch(action: Uint8Array, i: number, len: number): boolean {
   let rdis1 = 0;
   let rpdis1 = 1;
   for (r = 1; i - r >= s; r++) { const x = action[i - r]; if (x === DISCARD) rdis0++; else if (x === INVESTIGATE) rpdis0++; else break; }
+  budget.steps += r; // the neighbours looked at, up to SIMSCAN_WINDOW each way
   if (rdis0 === 0) return false;
   for (r = 1; i + r <= e; r++) { const x = action[i + r]; if (x === DISCARD) rdis1++; else if (x === INVESTIGATE) rpdis1++; else break; }
+  budget.steps += r;
   if (rdis1 === 0) return false;
   rdis1 += rdis0; rpdis1 += rpdis0;
   return rpdis1 * KPDIS_RUN < rpdis1 + rdis1;
@@ -232,8 +235,10 @@ type Split = { i1: number; i2: number; minLo: boolean; minHi: boolean };
 type Box = [off1: number, lim1: number, off2: number, lim2: number, needMin: boolean];
 /* oxlint-disable eslint/max-depth, eslint/complexity, eslint/max-params, eslint/no-param-reassign -- a line-for-line port of xdiffi.c's xdl_split / xdl_recs_cmp over C's argument list */
 // false: the step budget was spent before the diff finished, and nothing was marked.
+// Every loop below adds its iterations to the budget: the class counts, the trim, the cleanup and its neighbour scans,
+// each diagonal and snake of the search, the heuristics' passes over the diagonals, and the boxes' trims and marks.
 export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1: number, line2: number, count2: number, CH1: Uint8Array, CH2: Uint8Array, budget: Budget = unbounded()): boolean {
-  budget.steps += count1 + count2; // trim, cleanup and the class counts each pass over both ranges
+  budget.steps += count1 + count2; // the class counts: one pass over each range
   if (spent(budget)) return false;
   const a = A.subarray(line1 - 1, line1 - 1 + count1);
   const b = B.subarray(line2 - 1, line2 - 1 + count2);
@@ -252,6 +257,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   for (; i < lim; i++) if (a[i] !== b[i]) break;
   const off = i; lim -= i;
   for (i = 0; i < lim; i++) if (a[n1 - 1 - i] !== b[n2 - 1 - i]) break;
+  budget.steps += off + i; // the lines trimmed
   const dend1 = n1 - i - 1;
   const dend2 = n2 - i - 1;
   // xdl_cleanup_records
@@ -259,21 +265,23 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
     const len = dend - off + 1;
     const mlim = Math.min(bogosqrt(n), MAX_EQLIMIT);
     const action = new Uint8Array(Math.max(len, 0));
+    budget.steps += 2 * Math.max(len, 0); // the two passes below
     for (let k = 0; k < len; k++) {
       const nm = getOrElse(mapGet(other, atOr(x, k + off, 0)), 0);
       const many = nm < mlim ? KEEP : INVESTIGATE;
       action[k] = nm === 0 ? DISCARD : many;
     }
     const ref: number[] = [];
-    for (let k = 0; k < len; k++) {
+    for (let k = 0; k < len && !spent(budget); k++) {
       let act = action[k];
-      if (act === INVESTIGATE) act = cleanMmatch(action, k, len) ? DISCARD : KEEP;
+      if (act === INVESTIGATE) act = cleanMmatch(action, k, len, budget) ? DISCARD : KEEP;
       if (act === KEEP) ref.push(k + off); else ch[k + off] = 1;
     }
     return Int32Array.from(ref);
   };
   const r1 = refs(a, n1, dend1, len2, ch1);
   const r2 = refs(b, n2, dend2, len1, ch2);
+  if (spent(budget)) return false;
   const h1 = Int32Array.from(r1, k => atOr(a, k, 0));
   const h2 = Int32Array.from(r2, k => atOr(b, k, 0));
   // xdl_do_diff (Myers part)
@@ -281,11 +289,15 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   const nreff2 = r2.length;
   const ndiags = nreff1 + nreff2 + 3;
   const kvd = new Float64Array(2 * ndiags + 2);
+  budget.steps += ndiags; // the kept lines copied, the k-vectors cleared
   const F = nreff2 + 1;
   const Bk = ndiags + nreff2 + 1;
   const mxcost = Math.max(bogosqrt(ndiags), MAX_COST_MIN);
-  const kf = (d: number): number => atOr(kvd, F + d, 0);
-  const kb = (d: number): number => atOr(kvd, Bk + d, 0);
+  // Reads of the k-vectors are in range, as in C: a split touches diagonals [dmin - 1, dmax + 1] and kvd holds
+  // 2 x ndiags + 2 slots around the two midpoints. Number() only types the read: this is the search's hot path
+  // (through atOr each diagonal cost ~100 ns, 13x a histogram step).
+  const kf = (d: number): number => Number(kvd[F + d]);
+  const kb = (d: number): number => Number(kvd[Bk + d]);
   const setF = (d: number, v: number): void => { kvd[F + d] = v; };
   const setB = (d: number, v: number): void => { kvd[Bk + d] = v; };
   const split = (off1: number, lim1: number, off2: number, lim2: number, needMin: boolean): Split => {
@@ -330,6 +342,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
       if (spent(budget)) return { i1: off1, i2: off2, minLo: false, minHi: false };
       if (needMin) continue;
       if (gotSnake && ec > HEUR_MIN_COST) {
+        budget.steps += (fmax - fmin) / 2 + (bmax - bmin) / 2 + 2; // the heuristic's pass over every diagonal, both ways
         // spl is Some exactly when best > 0
         let best = 0;
         let spl: Option<{ readonly i1: number; readonly i2: number }> = none;
@@ -337,6 +350,7 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
           const dd = d > fmid ? d - fmid : fmid - d; i1 = kf(d); i2 = i1 - d;
           const v = (i1 - off1) + (i2 - off2) - dd;
           if (v > K_HEUR * ec && v > best && off1 + SNAKE_CNT <= i1 && i1 < lim1 && off2 + SNAKE_CNT <= i2 && i2 < lim2) {
+            budget.steps += SNAKE_CNT;
             for (let k = 1; h1[i1 - k] === h2[i2 - k]; k++) if (k === SNAKE_CNT) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
@@ -346,12 +360,14 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
           const dd = d > bmid ? d - bmid : bmid - d; i1 = kb(d); i2 = i1 - d;
           const v = (lim1 - i1) + (lim2 - i2) - dd;
           if (v > K_HEUR * ec && v > best && off1 < i1 && i1 <= lim1 - SNAKE_CNT && off2 < i2 && i2 <= lim2 - SNAKE_CNT) {
+            budget.steps += SNAKE_CNT;
             for (let k = 0; h1[i1 + k] === h2[i2 + k]; k++) if (k === SNAKE_CNT - 1) { best = v; spl = some({ i1, i2 }); break; }
           }
         }
         if (isSome(spl)) return { ...spl.value, minLo: false, minHi: true };
       }
       if (ec >= mxcost) {
+        budget.steps += (fmax - fmin) / 2 + (bmax - bmin) / 2 + 2; // the cutoff's pass over every diagonal, both ways
         let fbest = -1;
         let fbest1 = -1;
         let bbest = LINE_MAX;
@@ -376,8 +392,10 @@ export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1:
   for (let top = popLast(stack); top.tag === 'some'; top = popLast(stack)) {
     const box = top.value;
     let [off1, lim1, off2, lim2] = box;
+    const span = lim1 - off1 + lim2 - off2;
     for (; off1 < lim1 && off2 < lim2 && h1[off1] === h2[off2]; off1++, off2++);
     for (; off1 < lim1 && off2 < lim2 && h1[lim1 - 1] === h2[lim2 - 1]; lim1--, lim2--);
+    budget.steps += 1 + span - (lim1 - off1 + lim2 - off2) + (off1 === lim1 || off2 === lim2 ? lim1 - off1 + lim2 - off2 : 0); // the box, the lines its trim passed, the lines it marks
     if (off1 === lim1) { for (; off2 < lim2; off2++) ch2[atOr(r2, off2, 0)] = 1; }
     else if (off2 === lim2) { for (; off1 < lim1; off1++) ch1[atOr(r1, off1, 0)] = 1; }
     else {

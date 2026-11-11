@@ -193,3 +193,36 @@ test('work bound: no meter and no stepsPerLine switches the bound off', () => {
   const [B6, O6, T6] = swapCase(6000);
   for (const stepsPerLine of [NaN, Infinity]) assert.deepEqual(mergeLines(B6, O6, T6, { rediff, stepsPerLine }), { clean: false, reason: 'too large to merge' }, String(stepsPerLine));
 });
+
+// ---- the classic-Myers fallback counts its real work (review R1) ----
+// Three distinct lines, each far more than 64 times: find_lcs has no anchor it may use and the region goes to classic
+// Myers (xdl_fall_back_diff), whose xdl_cleanup_records looks, for every line whose class is frequent in the other
+// file, at up to 100 neighbours each way (xdl_clean_mmatch, XDL_SIMSCAN_WINDOW). With no line discarded or kept
+// before it, line k of a file is compared with min(k, 100) earlier lines: 4950 + 100 x (n - 100) for an n-line file.
+// That is xdiff's arithmetic (git does the same work in C), not ply's output, and the count must hold at least it.
+const lowVariety = (n, seed) => { let s = seed; const rnd = () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s % 3; }; return Array.from({ length: n }, () => 'abc'[rnd()]); };
+const scanFloor = n => 2 * (4950 + 100 * (n - 100)); // both files
+const diffSteps = (base, side, options = {}) => { const cl = classifier(), meter = { steps: 0 }; const d = diffScript(records(enc(base.join('\n') + '\n'), cl), records(enc(side.join('\n') + '\n'), cl), { rediff, meter, ...options }); return { d, steps: meter.steps }; };
+const LOWVAR_10K_STEPS = 5_370_282; // measured: the two 10,000-line files below (main counted nothing; 23f01d1 counted the diagonals only)
+test('work bound: the classic-Myers fallback counts the cleanup scan, not only the diagonals', () => {
+  // a 3000-line a/b/c file with its first and last lines changed: nothing trims, every line is frequent in the other
+  // file (about 1000 times against a threshold of bogosqrt(3000) = 64), and the two-line edit itself is one long snake
+  const L = lowVariety(3000, 7), o = [...L];
+  o[0] = L[0] === 'a' ? 'b' : 'a'; o[2999] = L[2999] === 'a' ? 'b' : 'a';
+  const { d, steps } = diffSteps(L, o);
+  assert.equal(d.ok, true);
+  assert.ok(steps >= scanFloor(3000), `the neighbour scans alone are ${scanFloor(3000)} line visits: ${steps} steps counted`);
+});
+test('work bound: a low-variety file (random a/b/c) costs under 3x when it doubles, and is refused within the budget', () => {
+  // two unrelated random files: Myers under xdl_split's cost cutoff (mxcost = bogosqrt(diagonals), at least 256) is
+  // about n^1.5, so doubling the input is at most 2^1.5 = 2.83x the work, never the 4x of a quadratic diff
+  const at = n => diffSteps(lowVariety(n, 0x9e3779b9), lowVariety(n, 0x1234567)).steps;
+  const [s1, s2] = [at(10000), at(20000)];
+  assert.ok(s1 >= scanFloor(10000) - 2 * 100 * 100, `${s1} steps`); // up to 100 lines of each file may trim
+  assert.ok(s2 / s1 > 1.8 && s2 / s1 < 3, `doubling ratio ${s2 / s1}: ${s1} -> ${s2}`);
+  assert.equal(s1, LOWVAR_10K_STEPS, 'the fixed case\'s count (pinned: a change here is a change in what is counted)');
+  // the same files under 64 steps per line: (20000 + 1024) x 64 = 1,345,536, and the stop is within 5% of it
+  const held = diffSteps(lowVariety(10000, 0x9e3779b9), lowVariety(10000, 0x1234567), { stepsPerLine: 64 });
+  assert.deepEqual(held.d, { ok: false, error: { undecided: true, detail: 'line diff step budget exceeded' } });
+  assert.ok(held.steps > 1_345_536 && held.steps <= 1_345_536 * 1.05, `${held.steps} steps`);
+});
