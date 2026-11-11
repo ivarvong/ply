@@ -1,7 +1,7 @@
 // v0 receive-pack: commands + thin pack in, report-status out. Planning the request, reading the response stream,
 // classifying the report and deciding the outcome are pure; `push` is the one effect. Any failure after the body is on
 // the wire is 'ambiguous' (the ref may have moved).
-import { fail, ambiguousAfterPush } from './errors.js';
+import { fail, ambiguousAfterPush, remoteText } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
 import type { Result } from './result.js';
@@ -446,7 +446,7 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
         // rejectionCode only returns limit_exceeded when every ng reason parsed
         const got = sizes === null ? 0 : sizes.got;
         const max = sizes === null ? 0 : sizes.max;
-        return fail('limit_exceeded', `push is too large: ${reason}`, { ...extra, what: 'receive-pack request', got, max });
+        return fail('limit_exceeded', `push is too large: ${remoteText(reason)}`, { ...extra, what: 'receive-pack request', got, max });
       }
       const message = `push rejected: ${reason}`;
       if (o.code !== 'cas_conflict') return fail(o.code, message, extra);
@@ -458,7 +458,7 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
     case 'partial': return fail('push_partial', `push partially applied: ${o.landed.join(', ')} updated; ${o.rejected.map(r => `${r.ref} (${r.reason})`).join(', ')} refused`, { ...extra, landed: o.landed, rejected: o.rejected });
     case 'ambiguous': {
       const said = fromNullish(remote);
-      return fail('ambiguous', `push outcome unknown: ${said.tag === 'none' ? '' : `remote: ${said.value}: `}${o.why}`, said.tag === 'none' ? extra : { ...extra, original: 'remote_error' });
+      return fail('ambiguous', `push outcome unknown: ${said.tag === 'none' ? '' : `remote: ${remoteText(said.value)}: `}${o.why}`, said.tag === 'none' ? extra : { ...extra, original: 'remote_error' });
     }
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
@@ -635,7 +635,7 @@ const outcomeAttrs = (done: Broken | StreamReport, report: PushReport | null, ou
   return {
     'git.push.report.lines': done.tag === 'report' ? done.lines.slice(0, REPORT_KEEP).map(p => decodeBytes(p).replace(/\n$/u, '')) : [],
     'git.push.unpack': unpackOf(report), 'git.push.ok': outcome.tag === 'landed', 'git.push.outcome': outcome.tag,
-    'git.push.ng.reason': getOrElse(mapOption(fromNullish(refs.find(x => !x.ok)), x => x.reason), ''), 'git.push.band2.frames': band2Frames, 'git.push.band2.tail': band2.slice(-BAND_ATTR),
+    'git.push.ng.reason': getOrElse(mapOption(fromNullish(refs.find(x => !x.ok)), x => x.reason), ''), 'git.push.band2.frames': band2Frames, 'git.push.band2.tail': remoteText(band2.slice(-BAND_ATTR), BAND_ATTR),
     'git.push.remote.messages': bandLines(band2), 'git.push.refs.ok': refs.filter(x => x.ok).length, 'git.push.refs.ng': refs.filter(x => !x.ok).length,
   };
 };

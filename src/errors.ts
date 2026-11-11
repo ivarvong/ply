@@ -174,3 +174,25 @@ export function scrubError(e: unknown, scrub: ((s: string) => string) | null = n
   };
   return walk(e);
 }
+
+// Remote-written text on its way into an error message, an error's `what`, or a span attribute: every ERR line, band-2
+// and band-3 text, HTTP error body, header value and refused protocol line passes through one of these two, and nowhere
+// else (test/remote-text.test.js lists the sites). A server chooses these bytes, and whoever prints the error to a
+// terminal or a log must not be driven by them (SAFETY.md, "Remote text"). The text is cut to `max` UTF-16 units first,
+// so the work and the result are bounded whatever the line's size; then every control (Cc: C0, DEL, C1), format
+// character (Cf: bidi overrides, zero-width and tag characters), line or paragraph separator and lone surrogate (a cut
+// pair, or ill-formed input) is written as \uXXXX (\u{XXXXX} above the BMP). Invalid UTF-8 has already decoded to U+FFFD, which
+// is printable and kept.
+//   remoteText   — running text (an ERR message, hook output, an error page): tab and newline stay, as in git's own
+//                  reports (usage.c vreportf masks every other control).
+//   remoteQuoted — one line shown in quotes: JSON's quoting (so `"`, `\`, tab and newline are escaped too), then the
+//                  characters JSON leaves raw (DEL, C1, format characters, U+2028/9).
+export const REMOTE_TEXT_MAX = 1024;
+const HEX = 16;
+const UNIT_DIGITS = 4;
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+// one match is one code point: a BMP character is \uXXXX (as JSON writes it), an astral one \u{XXXXX}
+const escaped = (c: string): string => { const hex = Number(c.codePointAt(0)).toString(HEX); return c.length === 1 ? `\\u${hex.padStart(UNIT_DIGITS, '0')}` : `\\u{${hex}}`; };
+export const remoteText = (text: string, max: number = REMOTE_TEXT_MAX): string =>
+  text.slice(0, max).replaceAll(UNPRINTABLE, c => (c === '\n' || c === '\t' ? c : escaped(c)));
+export const remoteQuoted = (text: string, max: number = REMOTE_TEXT_MAX): string => JSON.stringify(text.slice(0, max)).replaceAll(UNPRINTABLE, escaped);

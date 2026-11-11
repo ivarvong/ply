@@ -4,7 +4,7 @@
 import type { ErrorOf, Extra } from './errors.js';
 import type { Frame } from './transport.js';
 import type { Option, Result } from './result.js';
-import { fail } from './errors.js';
+import { fail, remoteQuoted, remoteText } from './errors.js';
 import { flatMapOption, getOrElse, mapOption, none, ok, some } from './result.js';
 import { at, atOr, fromNullable } from './absent.js';
 import { td } from './bytes.js';
@@ -45,9 +45,9 @@ export function parseCapabilitiesV2(frames: readonly Frame[]): Result<string[], 
   }
   const head = dataAt(frames, i);
   const first = head.tag === 'some' ? text(head.value) : '';
-  if (first.startsWith(ERR)) return fail('remote_error', `remote: ${first.slice(ERR.length)}`);
+  if (first.startsWith(ERR)) return fail('remote_error', `remote: ${remoteText(first.slice(ERR.length))}`);
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- an ad-hoc error field (errors.ts Extra); A3 moves it into Detail
-  if (first !== VERSION_2) return fail('unsupported', `server did not answer protocol v2 (first line ${JSON.stringify(first)})`, { lines: [first] } as Extra);
+  if (first !== VERSION_2) return fail('unsupported', `server did not answer protocol v2 (first line ${remoteQuoted(first)})`, { lines: [first] } as Extra);
   const lines: string[] = [];
   for (i++; ; i++) {
     const line = dataAt(frames, i);

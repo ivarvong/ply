@@ -10,7 +10,7 @@ import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
 import type { Attrs, Frame, Transport } from './transport.js';
-import { fail, scrubError } from './errors.js';
+import { fail, scrubError, remoteQuoted, remoteText } from './errors.js';
 import { pkts, pktInit, pktStep, pktFinish, pktAttrs } from './pktline.js';
 import { td, concat, take, decodeChunk } from './bytes.js';
 import { Sha1, toHex } from './sha1.js';
@@ -279,7 +279,7 @@ export function sidebandStep<S extends SidebandCounters>(st: S, frame: Frame, ma
   }
   if (band.band === SIDEBAND_ERROR) {
     const text = td.decode(band.body).trim();
-    return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+    return fail('remote_error', `remote: ${remoteText(text)}`, notOurRefReason(text));
   }
   return proto(`v2: bad sideband ${band.band}`);
 }
@@ -301,7 +301,7 @@ function refuseNonCommit(expectType: number | null, type: number, oid: string): 
   return assertNever(found);
 }
 
-// characters of a refused acknowledgment line quoted in the error (JSON-quoted: control characters are escaped)
+// characters of a refused acknowledgment line quoted in the error (remoteQuoted: cut first, then every control and format character escaped)
 const ACK_LINE_SHOWN = 60;
 // limits: a checked record (parseLimits; DEFAULT_LIMITS when none is given): v2Step reads its caps on every frame.
 export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
@@ -337,7 +337,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       const line = td.decode(frame.payload).replace(/\n$/, '');
       if (line.startsWith('ERR ')) {
         const text = line.slice('ERR '.length);
-        return fail('remote_error', `remote: ${text}`, notOurRefReason(text));
+        return fail('remote_error', `remote: ${remoteText(text)}`, notOurRefReason(text));
       }
       if (st.section === null) {
         if (st.sections.length >= maxLines) return err(limitExceeded('section headers', st.sections.length + 1, maxLines));
@@ -357,7 +357,7 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
         if (st.acks.length >= maxLines) return err(limitExceeded('acknowledgment lines', st.acks.length + 1, maxLines));
         if (line === 'ready') return stepped({ ...st, ready: true });
         // git reads NAK, ACK <oid> and ready, and dies on anything else ("unexpected acknowledgment line")
-        if (line !== 'NAK' && !line.startsWith('ACK ')) return proto(`v2: unexpected acknowledgment line ${JSON.stringify(line.slice(0, ACK_LINE_SHOWN))}`);
+        if (line !== 'NAK' && !line.startsWith('ACK ')) return proto(`v2: unexpected acknowledgment line ${remoteQuoted(line, ACK_LINE_SHOWN)}`);
         return stepped({ ...st, acks: [...st.acks, line] });
       }
       if (st.otherLines >= maxLines) return err(limitExceeded('section lines', st.otherLines + 1, maxLines));

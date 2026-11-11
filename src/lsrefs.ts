@@ -6,7 +6,7 @@ import type { Span } from './otel.js';
 import type { Frame, Transport } from './transport.js';
 import type { Input } from './absent.js';
 import type { Option, Result } from './result.js';
-import { fail } from './errors.js';
+import { fail, remoteQuoted, remoteText } from './errors.js';
 import { pkts, pktInit, pktStep } from './pktline.js';
 import { decodeBytes } from './bytes.js';
 import { limitExceeded } from './limits.js';
@@ -81,15 +81,15 @@ const PEELED_KEY = `${PEELED}:`, SYMREF_KEY = `${SYMREF_TARGET}:`;
 // nothing for the attributes it skips (#209: a large listing paid a split array, and a key and a value per attribute).
 // @decoder parseLsRefLine prefix=ls-ref
 export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
-  if (line.startsWith(ERR)) return fail('remote_error', `remote: ${line.slice(ERR.length)}`);
+  if (line.startsWith(ERR)) return fail('remote_error', `remote: ${remoteText(line.slice(ERR.length))}`);
   const sp = line.indexOf(' ');
   // Stryker disable next-line EqualityOperator: a leading space still fails the oid check with this same malformed-line error
-  if (sp < 0) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  if (sp < 0) return proto(`ls-refs: malformed line ${remoteQuoted(line, LINE_PREVIEW)}`);
   const oid = line.slice(0, sp);
   if (oid === UNBORN) return ok(null);
   // 40 hex digits is a sha1 oid; 64 is a sha256 repository's, refused as such; anything else is malformed.
   const parsed = sha1Of(oid);
-  if (!parsed.ok) return OID_SHA256.test(oid) ? fail('unsupported', 'unsupported object-format: only sha1 repositories are supported') : proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+  if (!parsed.ok) return OID_SHA256.test(oid) ? fail('unsupported', 'unsupported object-format: only sha1 repositories are supported') : proto(`ls-refs: malformed line ${remoteQuoted(line, LINE_PREVIEW)}`);
   // git takes the second field as the name even when it is empty (`<oid> ` lists a ref named "")
   const nameEnd = fieldEnd(line, sp + 1);
   // Only `symref-target:` and `peeled:` are kept, as connect.c process_ref_v2 reads them and skips everything else, so a
@@ -103,7 +103,7 @@ export function parseLsRefLine(line: string): Result<LsRef | null, PlyError> {
     end = fieldEnd(line, from);
     if (line.startsWith(PEELED_KEY, from)) {
       const peeled = sha1Of(line.slice(from + PEELED_KEY.length, end));
-      if (!peeled.ok) return proto(`ls-refs: malformed line ${JSON.stringify(line.slice(0, LINE_PREVIEW))}`);
+      if (!peeled.ok) return proto(`ls-refs: malformed line ${remoteQuoted(line, LINE_PREVIEW)}`);
       rec[PEELED] = peeled.value;
     } else if (line.startsWith(SYMREF_KEY, from)) rec[SYMREF_TARGET] = line.slice(from + SYMREF_KEY.length, end);
   }

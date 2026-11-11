@@ -1,7 +1,7 @@
 // v0 receive-pack capability advertisement (GET info/refs). Only needed to check optional capabilities (atomic,
 // push-options) before relying on them; the v2 fetch path never needs it. Parsing the advertisement and checking a
 // push against it are pure; receiveCaps is the one effect.
-import { fail } from './errors.js';
+import { fail, remoteQuoted } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, assertNever, getOrElse, mapOption } from './result.js';
 import { decideObjectFormat } from './closed.js';
@@ -86,7 +86,7 @@ export function parseReceiveAdvert(frames: readonly Frame[]): Result<Set<string>
       // Stryker disable next-line StringLiteral,LogicalOperator: no object-format is a key OID_HEX lacks, which keeps sha1's width either way
       hex = getOrElse(mapGet(OID_HEX, getOrElse(objectFormat(caps), '')), hex);
     }
-    if (!refLine(hex).test(head) && !shallowLine(hex).test(head)) return fail('protocol', `receive-pack advertisement: unexpected line ${JSON.stringify(head.slice(0, LINE_PREVIEW))}`);
+    if (!refLine(hex).test(head) && !shallowLine(hex).test(head)) return fail('protocol', `receive-pack advertisement: unexpected line ${remoteQuoted(head, LINE_PREVIEW)}`);
   }
   return ok(caps);
 }
