@@ -9,7 +9,7 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { cpSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
-import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, tmpRoot, makeBareRepo, startGitServer, fsckProblems, noMaintenance } from './server.js';
 import { commitChanges } from '../src/changes.js';
 import { Tracer } from '../src/otel.js';
 
@@ -58,7 +58,7 @@ before(async () => {
   ({ root, cleanup } = tmpRoot());
   srv = await startGitServer(root);
   seed = join(root, 'seed');
-  git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', seed]);
+  git(root, ['-c', 'core.autocrlf=false', 'init', '-q', '-b', 'main', seed]); noMaintenance(seed);
   for (const [k, v] of [['user.name', 's'], ['user.email', 's@x'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false']]) git(seed, ['config', k, v]);
   for (const d of TWINS) {
     mkdirSync(join(seed, d, 'sub'), { recursive: true });
