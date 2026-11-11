@@ -15,7 +15,8 @@ import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomFillSync } from 'node:crypto';
+import { randomFillSync, createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { scanPackIndex, scannedPackOf } from '../src/packscanindex.js';
 import { resolvePackRange } from '../src/packrangeresolve.js';
@@ -365,6 +366,65 @@ test('loadTransferPack: scanned with none; saved used reading only the trailer; 
   assert.deepEqual(got.map(s => s.attrs['git.transfer.load.from']), ['scanned', 'saved', 'resolved', 'scanned', 'scanned', 'scanned', 'scanned', 'scanned', 'scanned']);
   assert.deepEqual(got.map(s => s.attrs['git.transfer.load.refused']), [undefined, undefined, undefined, undefined, 'other_pack', 'corrupt', 'truncated', 'not_saved_index', 'version']);
   for (const s of got) { assert.equal(s.attrs['git.pack.trailer'], scanned.from.pack.trailer === s.attrs['git.pack.trailer'] ? scanned.from.pack.trailer : other.from.pack.trailer); assert.equal(typeof s.attrs['git.transfer.load.saved_bytes'], 'number'); }
+});
+
+// #260 review R1. A hand-built pack of one chain 100 deep: 101 blobs, entry 0 whole, entry i a REF_DELTA on entry i-1
+// (the delta copies the first 40 bytes of its base and inserts the rest). Stock git is the judge that it is an honest
+// pack and of how deep it is (index-pack --strict accepts it; verify-pack -v prints each delta's depth). 64 is
+// DEFAULT_LIMITS.maxDeltaChain, so only a caller's raised limit resolves it. (git pack-objects --depth=200 over 120
+// versions of one file chained 43 deep at --window=20 and 5 at --window=2: its heuristics do not promise a depth.)
+test('loadTransferPack: a pack chained deeper than 64 is used from its saved index under the caller\'s raised maxDeltaChain (scanned -> saved -> saved)', async () => {
+  const DEPTH = 100;
+  const sha1 = b => createHash('sha1').update(b).digest();
+  const entryHeader = (type, size) => { const out = [(type << 4) | (size & 15)]; let rest = size >> 4; while (rest > 0) { out[out.length - 1] |= 0x80; out.push(rest & 0x7f); rest >>= 7; } return Buffer.from(out); };
+  const versions = Array.from({ length: DEPTH + 1 }, (_, i) => Buffer.from(`c ${'x'.repeat(40)} v${i}\n`));
+  const ids = versions.map(v => sha1(Buffer.concat([Buffer.from(`blob ${v.length}\0`), v])));
+  // base size, result size (both under 128: one byte each), copy 40 bytes from offset 0, insert the rest
+  const deltaOf = (base, target) => Buffer.concat([Buffer.from([base.length, target.length, 0x90, 40, target.length - 40]), target.subarray(40)]);
+  const head = Buffer.alloc(12);
+  head.write('PACK'); head.writeUInt32BE(2, 4); head.writeUInt32BE(DEPTH + 1, 8);
+  const parts = [head, entryHeader(3, versions[0].length), deflateSync(versions[0])];
+  for (let i = 1; i <= DEPTH; i++) { const d = deltaOf(versions[i - 1], versions[i]); parts.push(entryHeader(7, d.length), ids[i - 1], deflateSync(d)); }
+  const body = Buffer.concat(parts);
+  const bytes = new Uint8Array(Buffer.concat([body, sha1(body)]));
+  const dir = join(root, `deep${n++}`);
+  mkdirSync(dir);
+  git(dir, ['init', '-q', '-b', 'main']);
+  writeFileSync(join(dir, 'deep.pack'), bytes);
+  git(dir, ['index-pack', '--strict', 'deep.pack']);
+  const depths = git(dir, ['verify-pack', '-v', 'deep.idx']).split('\n').map(l => /^[0-9a-f]{40} \w+\s+\d+ \d+ \d+ (\d+) [0-9a-f]{40}$/u.exec(l)).filter(m => m !== null).map(m => Number(m[1]));
+  const deepest = Math.max(...depths);
+  assert.equal(deepest, DEPTH, 'git reads the chain as 100 deep');
+  const { t } = traced();
+  const limits = { maxDeltaChain: 200 };
+  const source = rangeFromBytes(bytes);
+  // the default limit refuses the pack itself: the raised one is what the caller needs to read it at all
+  assert.equal((await loadTransferPack(t, source, none)).error.code, 'limit_exceeded');
+  const first = must(await loadTransferPack(t, source, none, { resolve: { limits } }));
+  assert.equal(first.loaded.tag, 'scanned');
+  assert.equal(Math.max(...first.from.resolved.columns.depth), deepest);
+  const second = must(await loadTransferPack(t, source, some(first.saved), { resolve: { limits } }));
+  assert.deepEqual(second.loaded, { tag: 'saved' });
+  const third = must(await loadTransferPack(t, source, some(second.saved), { resolve: { limits } }));
+  assert.deepEqual(third.loaded, { tag: 'saved' });
+  assert.deepEqual([...third.saved], [...first.saved]);
+  assertSameResolved(first.from.resolved, third.from.resolved);
+  // the limit is the caller's, both ways: at the pack's deepest chain it loads, one below it the saved index is refused
+  // and the rescan's resolve refuses the pack, as it does with no saved index
+  assert.deepEqual(must(await loadTransferPack(t, source, some(first.saved), { resolve: { limits: { maxDeltaChain: deepest } } })).loaded, { tag: 'saved' });
+  assert.equal((await loadTransferPack(t, source, some(first.saved), { resolve: { limits: { maxDeltaChain: deepest - 1 } } })).error.code, 'limit_exceeded');
+  assert.equal((await loadTransferPack(t, source, some(first.saved))).error.code, 'limit_exceeded');
+  // limits that do not parse are refused where they enter, saved index or not
+  for (const saved of [none, some(first.saved)]) {
+    const bad = await loadTransferPack(t, source, saved, { resolve: { limits: { maxDeltaChain: -1 } } });
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error.code, 'bad_request');
+    assert.match(bad.error.message, /limits\.maxDeltaChain/u);
+  }
+  // a direct caller of decodeSavedIndex passes the same limit; without it the default 64 applies
+  const id = { trailer: first.from.pack.trailer, bytes: first.from.pack.bytes };
+  assert.ok(decodeSavedIndex(first.saved, id, 200).ok);
+  assert.equal(decodeSavedIndex(first.saved, id).error.field, 'resolved.depth');
 });
 
 test('loadTransferPack refusals: a spool too small for a pack, a spool whose read fails, a spool that is not a pack', async () => {

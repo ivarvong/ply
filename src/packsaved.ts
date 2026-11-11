@@ -291,7 +291,10 @@ function statsOf(v: DataView, at: number): ResolveStats {
 
 // Saved bytes → the index and, when saved, its resolved columns; refused unless they are an intact saved index of
 // exactly the pack `want` names (see the top of this file). `maxDeltaChain` is the chain limit the caller resolves
-// under (limits.maxDeltaChain): resolved columns with a deeper chain are refused, as a resolve would refuse the pack.
+// under, the limits.maxDeltaChain it gives resolvePackRange: resolved columns with a deeper chain are refused
+// (malformed, resolved.depth), as a resolve would refuse the pack. It is the caller's to pass: left out it is the
+// default (64), so an index saved from a pack resolved under a raised limit is refused unless the same limit is passed
+// here. loadTransferPack passes its opts.resolve.limits. A value that is not a number refuses every delta.
 export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain): Result<SavedIndex, SavedIndexRefusal> {
   const head = readHeader(bytes);
   if (!head.ok) return head;
