@@ -711,8 +711,11 @@ test('cachingFetch memory: a 64 MiB answer streams through the verifier into the
 test('cachingFetch: a client that abandons the answer cancels the cache branch and the origin; nothing is drained', async () => {
   const body = fetchBody({ wants: [headOf()], filter: 'tree:0', deepen: 1 });
   const meter = { produced: 0, cancelled: false };
-  // a hostile origin: a packfile section that never ends
-  const origin = async () => new Response(syntheticAnswer(0, meter, { endless: true }), { status: 200, headers: RESULT });
+  // a hostile origin, but a finite one: 32 MiB of packfile section, 64 times the allowance below. An origin that never
+  // ends would make an implementation that drains spin in microtasks for ever (a hung worker, not a red test); this
+  // one lets the drain finish, so the byte count below fails it.
+  const ORIGIN = 32 * 1024 * 1024;
+  const origin = async () => new Response(syntheticAnswer(ORIGIN, meter), { status: 200, headers: RESULT });
   let stored = 0; const deleted = [];
   const store = {
     match: async () => null,
@@ -725,10 +728,17 @@ test('cachingFetch: a client that abandons the answer cancels the cache branch a
   const reader = res.body.getReader();
   await reader.read(); await reader.read(); await reader.read();
   await reader.cancel(new Error('the client refused the answer'));
-  assert.deepEqual((await Promise.allSettled(pending)).map(x => x.status), ['fulfilled']);
-  assert.equal(meter.cancelled, true, 'the origin was cancelled');
-  // three reads by the client; the tee and the store may each be one frame ahead. Draining would have read 8 MiB (the cap).
+  // The store promise settles within a counted number of event-loop turns (no clock): at head it settles in the
+  // cancel's own microtasks; an implementation that neither cancels nor drains never settles it, and fails here.
+  let outcome = null;
+  void Promise.allSettled(pending).then(s => { outcome = s.map(x => x.status); });
+  // oxlint-disable-next-line no-await-in-loop -- counted turns
+  for (let turn = 0; turn < 1000 && outcome === null; turn++) await new Promise(r => { setImmediate(r); });
+  assert.deepEqual(outcome, ['fulfilled'], 'the store promise settled, fulfilled, within 1000 turns of the cancel');
+  // three reads by the client; the split and the store may each be a few frames ahead (8 frames allowed). Draining
+  // reads the origin to its end: 32 MiB and its framing.
   assert.ok(meter.produced <= 8 * 65520, `origin bytes pulled: ${meter.produced}`);
+  assert.equal(meter.cancelled, true, 'the origin was cancelled');
   assert.equal(f.stats.verifyFailed, 1); assert.match(f.stats.verifyError, /the client abandoned it/); assert.equal(f.stats.putOk, 0);
   assert.equal(deleted.length, 1, 'the key is deleted: a store that kept a partial entry does not keep it');
 });
