@@ -12,8 +12,10 @@
 // That is the default budget, for a caller that keeps what it reads. A caller that drops every object can ask for a work
 // budget (workBudget): nothing is retained, so what a pack can cost is CPU, and it is charged as CPU: the bytes actually
 // inflated, against maxInflatedTotal or `ratio` times the pack bytes consumed so far, whichever is larger. A scan's memory
-// is peakBound('pack-scan') under either budget (streambound.ts). The check runs at each chunk's end, so a refusal comes
-// at most one chunk past the budget, and a pack within a chunk of its ratio can pass or refuse depending on how it is fed.
+// is peakBound('pack-scan') under either budget (streambound.ts). The check runs at points the pack fixes: every
+// INFLATE_CHUNK inflated bytes of an object, and the object's end. So a refusal comes at most one chunk past the budget,
+// and the same pack passes or is refused, with the same numbers, however it is fed. For that an object's chunks are
+// INFLATE_CHUNK bytes each and then its last, under either budget: output pending when a feed runs out waits for the next.
 import type { ErrorOf } from './errors.js';
 import { fail, plyError } from './errors.js';
 import type { Err, Result } from './result.js';
@@ -436,7 +438,8 @@ function chargeWork(st: PackScan, inflated: number): boolean {
 }
 function stepBody(st: PackScan): Step {
   const stream = st.inflate;
-  const pulled = st.ended ? inflateEnd(stream) : inflatePull(stream);
+  // whole chunks: the pieces, and the points chargeWork checks at, do not depend on where a feed ended
+  const pulled = st.ended ? inflateEnd(stream) : inflatePull(stream, true);
   if (!pulled.ok) return refuse(st, pulled.error);
   const got = pulled.value;
   switch (got.kind) {

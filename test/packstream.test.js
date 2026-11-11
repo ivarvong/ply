@@ -1265,6 +1265,42 @@ test('work budget: the budget is the larger of maxInflatedTotal and ratio times 
   assert.equal(at(0, workBudget(1000)), 'ok');
 });
 
+// Owner decision (review of fix/review-scan-stream): the same pack gives the same outcome however it is chunked. The
+// budget's check points are the pack's: every INFLATE_CHUNK inflated bytes of an object, and the object's end.
+// Expected values are hand-derived from the pack: `consumed` is the pack header, the object header and the member
+// node:zlib wrote; the work is the bytes node:zlib was given.
+const chunkings = (bytes, rng) => [
+  [bytes], Array.from(bytes, b => Uint8Array.of(b)),
+  ...[2, 3, 7, 61, 4096].map(n => Array.from({ length: Math.ceil(bytes.length / n) }, (_, i) => bytes.subarray(i * n, i * n + n))),
+  ...Array.from({ length: 24 }, () => splitRandom(rng, bytes)),
+];
+const outcome = ({ inflated, objects, r }) => `${refusal(r)} | delivered ${inflated} | objects ${objects}`;
+test('work budget: one pack, any chunking, one outcome and one work count, just under and just over the budget', () => {
+  const rng = new Rng(2401);
+  // compressible first, then not: part way through the member the ratio so far is far above the member's own
+  const front = concat([new Uint8Array(12_000), rng.bytes(200)]);
+  const pack = packOf([front]);
+  const consumed = pack.length - 20;
+  const ratio = Math.ceil(front.length / consumed);
+  assert.ok(12_000 / 64 > ratio, 'the zeros alone are far over the ratio the whole member has');
+  // a bomb over several chunks: the first check point past a floor of INFLATE_CHUNK + 1 is 2 x INFLATE_CHUNK
+  const bomb = packOf([new Uint8Array(3 * INFLATE_CHUNK + 100)]);
+  const cases = [
+    [pack, 0, workBudget(ratio), `ok | delivered ${front.length} | objects 1`],
+    [pack, 0, workBudget(ratio - 1), `limit_exceeded: pack inflated work ${front.length} exceeds limit ${(ratio - 1) * consumed} | delivered 0 | objects 0`],
+    [pack, front.length, workBudget(0), `ok | delivered ${front.length} | objects 1`],
+    [pack, front.length - 1, workBudget(0), `limit_exceeded: pack inflated work ${front.length} exceeds limit ${front.length - 1} | delivered 0 | objects 0`],
+    [bomb, 3 * INFLATE_CHUNK + 100, workBudget(0), `ok | delivered ${3 * INFLATE_CHUNK + 100} | objects 1`],
+    [bomb, INFLATE_CHUNK + 1, workBudget(0), `limit_exceeded: pack inflated work ${2 * INFLATE_CHUNK} exceeds limit ${INFLATE_CHUNK + 1} | delivered ${INFLATE_CHUNK} | objects 0`],
+  ];
+  for (const [bytes, maxInflatedTotal, budget, want] of cases) {
+    for (const pieces of chunkings(bytes, rng)) {
+      const got = outcome(drain(pieces, packScanOpts(withLimits({ maxInflatedTotal }), true, budget)));
+      assert.equal(got, want, `${pieces.length} pieces, floor ${maxInflatedTotal}, ratio ${budget.ratio}`);
+    }
+  }
+});
+
 test('work budget: charges accumulate across objects, with no per-object overhead and no declared-size charge', () => {
   const a = new Uint8Array(1000).fill(1), b = new Uint8Array(2000).fill(2);
   const pack = packOf([a, b]);

@@ -671,7 +671,10 @@ function own(st: InflateStream): void {
 }
 // The next piece: a chunk when one is full (or the input ran out with output pending), the end, or a request for input.
 // A refusal (FAILED) is on the record: the loop goes round once more and returns it.
-export function inflatePull(st: InflateStream): Result<InflatePiece, InflateError> {
+// With `whole`, input that runs out while it is still open answers `need` and keeps the pending output: every chunk is
+// then INFLATE_CHUNK bytes or the member's last, so where the chunks fall is the member's own, not the feeding's (the
+// pack scan weighs its work budget at them, packstream.ts chargeWork). The pending output is the record's own buffer.
+export function inflatePull(st: InflateStream, whole = false): Result<InflatePiece, InflateError> {
   for (;;) {
     if (st.halt.tag === 'failed') return err(st.halt.error);
     const d = dispatch(st);
@@ -683,7 +686,7 @@ export function inflatePull(st: InflateStream): Result<InflatePiece, InflateErro
     }
     if (d === END) return ok({ kind: 'end', consumed: consumedOf(st), stats: { ...st.stats } });
     if (d === NEED) {
-      if (st.outLen > 0) return ok({ kind: 'chunk', bytes: takeChunk(st) });
+      if (st.outLen > 0 && (st.ended || !whole)) return ok({ kind: 'chunk', bytes: takeChunk(st) });
       if (!st.ended) {
         own(st);
         return ok(NEED_PIECE);
