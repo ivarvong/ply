@@ -16,9 +16,10 @@
 //
 // Decoding refuses, as a SavedIndexRefusal: bytes that are not a saved index, another version, a length the header does
 // not give (truncated), a check that does not match (corrupt), an index of another pack (the caller's expected
-// trailer and length: a stale index is never used), and columns no scan could produce (malformed: entries not
-// contiguous from the pack header to the trailer, a type or base out of range). loadTransferPack (below) turns any
-// refusal into a fresh scan and says why on its span.
+// trailer and length: a stale index is never used), and columns no scan plus resolve could produce (malformed: entries
+// not contiguous from the pack header to the trailer, a type or base out of range, resolved columns the index
+// contradicts or whose bases do not form chains ending at a whole object or a thin base: see checkResolved).
+// loadTransferPack (transferload.ts) turns any refusal into a fresh scan and says why on its span.
 import type { PlyError } from './errors.js';
 import { fail } from './errors.js';
 import type { Option, Result } from './result.js';
@@ -28,6 +29,7 @@ import type { ScannedPack, ScanColumns } from './packscanindex.js';
 import { scannedPackOf, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
 import type { ResolvedIndex, ResolvedColumns, ResolveStats } from './packrangeresolve.js';
 import { resolvedIndexOf, NO_BASE, THIN_BASE } from './packrangeresolve.js';
+import { DEFAULT_LIMITS } from './limits.js';
 import { Sha1, toHex, fromHex } from './sha1.js';
 import { OID_BYTES, OBJ_COMMIT, OBJ_TREE, OBJ_BLOB, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA, PACK_TRAILER_BYTES } from './format.js';
 
@@ -226,20 +228,53 @@ function checkIndex(v: DataView, h: Header, at: Regions): Result<true, SavedInde
   if (end !== h.bytes - PACK_TRAILER_BYTES) return malformed('offset', h.n);
   return anyRef === ((h.flags & FLAG_REFS) !== 0) ? ok(true) : malformed('flags');
 }
-// Resolved columns: a whole type each, a base in range (never itself), depth 0 exactly for a whole object.
-function checkResolved(v: DataView, n: number, from: number): Result<true, SavedIndexRefusal> {
-  const sizeAt = from;
+// Resolved columns, held to the index beside them (already checked) in one pass: what resolvePackRange gives for it.
+//   whole object  no base, depth 0, the scan's type and size, and the scan's id when the index has ids
+//   OFS_DELTA     the base is the scan's baseIndex
+//   REF_DELTA     the base is an entry whose resolved id is the delta's REF id, or THIN_BASE where the scan found no
+//                 whole object with that id in the pack
+//   any delta     depth = its base's depth + 1 (1 on a thin base), at most `maxChain`; the type of its base
+// The depth rule is what makes the base column a forest: along a chain depth falls by one per link, so a cycle of k
+// links would need depth = depth + k. Every chain therefore ends at a whole object or a thin base, within maxChain links.
+// Not checked, because only a resolve can: a delta's id and size, the type under a thin base, and that a THIN_BASE
+// delta's base is not some other delta in the pack. A lie there changes which objects a push names, not how much ply
+// does: the receiver indexes the pushed pack itself and refuses a base it does not have, an object the pushed commit
+// reaches but the pack lacks, or a tree pushed before its blobs, and the transfer fails definitely.
+function checkResolved(v: DataView, h: Header, at: Regions, maxChain: number): Result<true, SavedIndexRefusal> {
+  const n = h.n;
+  const sizeAt = at.resolved;
   const baseAt = sizeAt + n * 8;
   const depthAt = baseAt + n * 4;
-  const typeAt = depthAt + n * 4 + n * OID_BYTES;
+  const oidAt = depthAt + n * 4;
+  const typeAt = oidAt + n * OID_BYTES;
+  const hasOids = (h.flags & FLAG_OIDS) !== 0;
+  const sameId = (a: number, b: number): boolean => { for (let k = 0; k < OID_BYTES; k++) if (v.getUint8(a + k) !== v.getUint8(b + k)) return false; return true; };
   for (let i = 0; i < n; i++) {
     const base = v.getInt32(baseAt + i * 4, true);
     const depth = v.getInt32(depthAt + i * 4, true);
     const size = v.getFloat64(sizeAt + i * 8, true);
-    if (!isWhole(v.getUint8(typeAt + i))) return malformed('resolved.type', i);
+    const type = v.getUint8(typeAt + i);
+    const stored = v.getUint8(at.storedType + i);
+    if (!isWhole(type)) return malformed('resolved.type', i);
     if (base < THIN_BASE || base >= n || base === i) return malformed('resolved.base', i);
-    if (depth < 0 || (base === NO_BASE) !== (depth === 0)) return malformed('resolved.depth', i);
     if (!Number.isSafeInteger(size) || size < 0) return malformed('resolved.size', i);
+    if (isWhole(stored)) {
+      if (base !== NO_BASE) return malformed('resolved.base', i);
+      if (depth !== 0) return malformed('resolved.depth', i);
+      if (type !== stored) return malformed('resolved.type', i);
+      if (size !== v.getFloat64(at.size + i * 8, true)) return malformed('resolved.size', i);
+      if (hasOids && !sameId(oidAt + i * OID_BYTES, at.oids + i * OID_BYTES)) return malformed('resolved.oid', i);
+      continue;
+    }
+    const scanBase = v.getInt32(at.baseIndex + i * 4, true);
+    const baseOk = stored === OBJ_OFS_DELTA
+      ? base === scanBase
+      : base >= 0 ? sameId(oidAt + base * OID_BYTES, at.refs + i * OID_BYTES) : base === THIN_BASE && scanBase < 0;
+    if (!baseOk) return malformed('resolved.base', i);
+    const want = base === THIN_BASE ? 1 : v.getInt32(depthAt + base * 4, true) + 1;
+    // `!(<=)`: a limit that is not a number refuses every delta
+    if (depth !== want || !(depth <= maxChain)) return malformed('resolved.depth', i);
+    if (base >= 0 && type !== v.getUint8(typeAt + base)) return malformed('resolved.type', i);
   }
   const statsAt = typeAt + n;
   return STATS.every((_, k) => { const s = v.getFloat64(statsAt + k * 8, true); return Number.isFinite(s) && s >= 0; }) ? ok(true) : malformed('resolved.stats');
@@ -250,8 +285,9 @@ function statsOf(v: DataView, at: number): ResolveStats {
 }
 
 // Saved bytes → the index and, when saved, its resolved columns; refused unless they are an intact saved index of
-// exactly the pack `want` names (see the top of this file).
-export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity): Result<SavedIndex, SavedIndexRefusal> {
+// exactly the pack `want` names (see the top of this file). `maxDeltaChain` is the chain limit the caller resolves
+// under (limits.maxDeltaChain): resolved columns with a deeper chain are refused, as a resolve would refuse the pack.
+export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain): Result<SavedIndex, SavedIndexRefusal> {
   const head = readHeader(bytes);
   if (!head.ok) return head;
   const h = head.value;
@@ -264,7 +300,7 @@ export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity): Result<
   const checked = checkIndex(c.view, h, at);
   if (!checked.ok) return checked;
   if (hasResolved) {
-    const good = checkResolved(c.view, n, at.resolved);
+    const good = checkResolved(c.view, h, at, maxDeltaChain);
     if (!good.ok) return good;
   }
   c.at = HEADER;

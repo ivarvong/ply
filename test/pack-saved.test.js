@@ -228,6 +228,87 @@ test('malformed with a valid check: each field a scan could not produce is refus
   assert.deepEqual(decodeSavedIndex(rechecked(grown), idOf(ofs)).error, { tag: 'malformed', field: 'flags', index: -1 });
 });
 
+// Review finding saved-index-resolved-base-cycle: a saved index is stored state, so untrusted. Each tampered index below
+// has its trailing SHA-1 recomputed (the check is unkeyed), so only the structural checks can refuse it. The expected
+// refusal comes from the pack format, not from ply: a delta's object is its base's with one more delta applied (depth
+// = base depth + 1, same type), an OFS_DELTA names its base by position, a REF_DELTA by the base's id, a whole object
+// has no base, and the objects are git's own (pack-objects above).
+test('tampered resolved columns with a valid check: cycles, depth lies and bases the scan contradicts are malformed', async () => {
+  const from = await fresh(src.packs.ref);
+  const ofs = await fresh(src.packs.ofs);
+  const enc = f => must(encodeSavedIndex(f.pack, some(f.resolved)));
+  const dv = b => new DataView(b.buffer, b.byteOffset, b.byteLength);
+  // where the resolved columns start: 64 B header, 31 B per entry, 20 B of ids, 20 B of REF base ids in a REF pack
+  const rAt = (count, refs) => { const r = 64 + count * (31 + 20 + (refs ? 20 : 0)); return { size: r, base: r + count * 8, depth: r + count * 12, oid: r + count * 16, type: r + count * 36 }; };
+  const setBase = (b, at, i, v) => dv(b).setInt32(at.base + i * 4, v, true);
+  const setDepth = (b, at, i, v) => dv(b).setInt32(at.depth + i * 4, v, true);
+  const refusal = (f, edit, name) => {
+    const b = enc(f);
+    edit(b);
+    const r = decodeSavedIndex(rechecked(b), idOf(f));
+    assert.equal(r.ok, false, `${name}: accepted`);
+    assert.equal(r.error.tag, 'malformed', name);
+    return `${r.error.field}@${r.error.index}`;
+  };
+  const R = rAt(from.pack.count, true);
+  const rc = from.resolved.columns;
+  const all = [...Array(from.pack.count).keys()];
+  const deltas = all.filter(i => from.pack.columns.storedType[i] === 7);
+  const blobs = all.filter(i => from.pack.columns.storedType[i] === 3);
+  assert.ok(deltas.length >= 3 && blobs.length >= 3, 'the fixture has three REF deltas and three whole blobs');
+  const [d0, d1, d2] = deltas;
+  // the finding's bytes: two deltas resting on each other, depth 1 each
+  assert.match(refusal(from, b => { setBase(b, R, d0, d1); setBase(b, R, d1, d0); setDepth(b, R, d0, 1); setDepth(b, R, d1, 1); }, '2-cycle'), /^resolved\.(base|depth)@/u);
+  // a longer cycle whose depths agree on every link but the one that closes it
+  assert.match(refusal(from, b => { setBase(b, R, d0, d1); setBase(b, R, d1, d2); setBase(b, R, d2, d0); setDepth(b, R, d0, 3); setDepth(b, R, d1, 2); setDepth(b, R, d2, 1); }, '3-cycle'), /^resolved\.(base|depth)@/u);
+  assert.equal(refusal(from, b => { setBase(b, R, d0, d0); }, 'self base'), `resolved.base@${d0}`);
+  // depth lies with every base left honest: one more, one less, none, negative
+  for (const lie of [rc.depth[d0] + 1, rc.depth[d0] - 1, 0, -1]) assert.equal(refusal(from, b => { setDepth(b, R, d0, lie); }, `depth ${lie}`), `resolved.depth@${d0}`);
+  // a delta resolved to no base, and a whole object given one
+  assert.equal(refusal(from, b => { setBase(b, R, d0, -1); setDepth(b, R, d0, 0); }, 'delta without a base'), `resolved.base@${d0}`);
+  assert.equal(refusal(from, b => { setBase(b, R, blobs[0], blobs[1]); setDepth(b, R, blobs[0], 1); }, 'whole object with a base'), `resolved.base@${blobs[0]}`);
+  // a REF delta resting on a whole blob moved to another whole blob: depth 1 and type blob still agree, the base's id does not
+  const onWhole = deltas.find(i => from.pack.columns.storedType[rc.base[i]] === 3);
+  const otherBlob = blobs.find(i => i !== rc.base[onWhole]);
+  assert.equal(refusal(from, b => { setBase(b, R, onWhole, otherBlob); }, 'REF base with another id'), `resolved.base@${onWhole}`);
+  // the scan found that base in the pack, so it is not a thin base
+  assert.equal(from.pack.columns.baseIndex[onWhole], rc.base[onWhole]);
+  assert.equal(refusal(from, b => { setBase(b, R, onWhole, -2); setDepth(b, R, onWhole, 1); }, 'thin base the scan found in the pack'), `resolved.base@${onWhole}`);
+  // types, ids and sizes the scan knows: a delta's type is its base's, a whole object's are the scan's
+  assert.equal(refusal(from, b => { b[R.type + onWhole] = 2; }, 'delta type'), `resolved.type@${onWhole}`);
+  assert.equal(refusal(from, b => { b[R.type + blobs[0]] = 2; }, 'whole type'), `resolved.type@${blobs[0]}`);
+  assert.equal(refusal(from, b => { b[R.oid + blobs[0] * 20] ^= 1; }, 'whole id'), `resolved.oid@${blobs[0]}`);
+  assert.equal(refusal(from, b => { dv(b).setFloat64(R.size + blobs[0] * 8, rc.size[blobs[0]] + 1, true); }, 'whole size'), `resolved.size@${blobs[0]}`);
+  // OFS: the base is the scan's baseIndex and nothing else: a later entry, an earlier one, a cycle
+  const O = rAt(ofs.pack.count, false);
+  const oc = ofs.resolved.columns;
+  const ofsAll = [...Array(ofs.pack.count).keys()];
+  const od = ofsAll.filter(i => ofs.pack.columns.storedType[i] === 6);
+  assert.ok(od.length >= 2, 'the fixture has two OFS deltas');
+  const [o0, o1] = od;
+  const later = ofsAll.find(i => i > o0 && ofs.pack.columns.storedType[i] === 3 && i !== oc.base[o0]);
+  const earlier = ofsAll.find(i => i < o0 && ofs.pack.columns.storedType[i] === 3 && i !== oc.base[o0]);
+  assert.equal(ofs.pack.columns.baseIndex[o0], oc.base[o0]);
+  assert.ok(later !== undefined, 'a whole blob after the first OFS delta');
+  for (const to of [later, earlier]) {
+    if (to === undefined) continue;
+    assert.equal(refusal(ofs, b => { setBase(b, O, o0, to); setDepth(b, O, o0, 1); }, `OFS base ${to}`), `resolved.base@${o0}`);
+  }
+  assert.match(refusal(ofs, b => { setBase(b, O, o0, o1); setBase(b, O, o1, o0); setDepth(b, O, o0, 1); setDepth(b, O, o1, 1); }, 'OFS 2-cycle'), /^resolved\.base@/u);
+  // depth is held to the chain limit the caller resolves under: the honest index passes at its deepest chain, not below
+  const deepest = Math.max(...rc.depth);
+  assert.ok(deepest >= 1);
+  assert.ok(decodeSavedIndex(enc(from), idOf(from), deepest).ok);
+  assert.deepEqual(decodeSavedIndex(enc(from), idOf(from), deepest - 1).error, { tag: 'malformed', field: 'resolved.depth', index: all.find(i => rc.depth[i] === deepest) });
+  // the tampered index is rescanned by loadTransferPack, never used
+  const cyc = enc(from);
+  setBase(cyc, R, d0, d1); setBase(cyc, R, d1, d0); setDepth(cyc, R, d0, 1); setDepth(cyc, R, d1, 1);
+  const loaded = must(await loadTransferPack(traced().t, from.source, some(rechecked(cyc))));
+  assert.equal(loaded.loaded.tag, 'scanned');
+  assert.equal(loaded.loaded.refused.value.tag, 'malformed');
+  assertSameResolved(from.resolved, loaded.from.resolved);
+});
+
 test('encode refusals: an index short of its count, resolved columns of another length, no trailer', async () => {
   const from = await fresh(src.packs.ref);
   const short = scannedPackOf({ version: 2, count: from.pack.count + 1, trailer: from.pack.trailer, bytes: from.pack.bytes, heldBytes: 0 }, from.pack.columns);
