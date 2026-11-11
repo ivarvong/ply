@@ -17,7 +17,6 @@ import { fromHex } from '../../src/sha1.js';
 import { hashObject, parseCommit, parseTag, parseTree, encodeCommit, encodeTag, ident } from '../../src/objects.js';
 import { validateIdent } from '../../src/validate.js';
 import { Rng } from './prng.js';
-import { OID_BYTES } from '../../src/format.js';
 import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] && !arr[i + 1].startsWith('--') ? arr[i + 1] : true] : []).filter(x => x.length));

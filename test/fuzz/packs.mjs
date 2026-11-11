@@ -79,7 +79,8 @@ try {
       for (const oid of appended) if (!asked.has(oid)) { problems.push(`git appended base ${oid}, ply never asked for it`); break; }
       for (const oid of asked.keys()) if (!appended.has(oid)) { problems.push(`ply asked for base ${oid}, git did not need it`); break; }
       if (!opts.thin && appended.size) problems.push('git appended a base to a non-thin pack');
-      opts.thin ? thinJudged++ : fullJudged++; basesJudged += appended.size;
+      if (opts.thin) thinJudged++; else fullJudged++;
+      basesJudged += appended.size;
     } catch (e) { problems.push(`ERROR ${e.code ?? ''} ${e.message.slice(0, 120)}`); }
     const buckets = [`window.${opts.window}`, `depth.${opts.depth}`, `comp.${opts.compression}`, `ofs.${opts.ofs}`, `thin.${opts.thin}`, `sparse.${opts.sparse}`, `reuseDelta.${opts.reuseDelta}`, `reuseObject.${opts.reuseObject}`, `bigFile.${opts.bigFile}`, `objects.${parsed ? 2 ** Math.floor(Math.log2(parsed.stats.count)) : 'err'}`, `chain.${r ? Math.min(r.stats.maxChain, 9) : 'err'}`, `stored.${parsed?.stats.inflate.stored > 0}`, `ref_delta.${parsed?.stats.refDelta > 0}`, `ofs_delta.${parsed?.stats.ofsDelta > 0}`];
     for (const b of buckets) cov.set(b, (cov.get(b) ?? 0) + 1);
