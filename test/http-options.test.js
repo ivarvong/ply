@@ -584,3 +584,50 @@ test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the optio
     for (const fine of [0, 1, 2 ** 31 - 1]) assert.equal(createTransport('https://h/r', { limits: { [key]: fine } }).ok, true, `${key}=${fine}`);
   }
 });
+
+// The scheme rule (src/http.ts parseHttpOptions), in the suite the mutation gate runs. ply speaks git smart HTTP only
+// (SAFETY.md), so the rule itself gives every expectation: http: and https: pass, in any letter case (WHATWG URL
+// lowercases the scheme); anything else is a definite bad_request about the url, before any I/O. The message is the
+// fixed text README documents, and the allowUrl rows are the train head's verdicts (607691d1) recorded by the probe in
+// scratch (fix9/http-scheme-mutants-kill/probe-before.txt), not read back from the code under test here.
+import { listRefs } from '../src/index.js';
+const SCHEME_MESSAGE = 'invalid url: only http: and https: remotes are supported';
+const NOT_HTTP = ['file:///etc/passwd', 'data:text/plain,hi', 'blob:nodedata:abc', 'ssh://git@127.0.0.1/repo.git', 'git://127.0.0.1/repo.git', 'ext::sh -c "touch /tmp/pwned"'];
+
+test('a base URL that is not http(s) is bad_request, what: url, with the fixed message, and the fetch implementation is never called', async () => {
+  for (const url of NOT_HTTP) {
+    const c = counting();
+    for (const r of [createTransport(url, { fetchImpl: c.fetchImpl }), parseHttpOptions(url, { fetchImpl: c.fetchImpl }), await listRefs(url, {}, { fetchImpl: c.fetchImpl })]) {
+      assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.message], [false, 'bad_request', 'url', SCHEME_MESSAGE], url);
+    }
+    assert.equal(c.n, 0, url);
+  }
+});
+
+test('http: and https: bases pass the scheme rule, in any letter case, and are the URL requested', () => {
+  for (const [url, href] of [['http://127.0.0.1/r.git', 'http://127.0.0.1/r.git'], ['HTTP://127.0.0.1/r.git', 'http://127.0.0.1/r.git'], ['https://127.0.0.1/r.git', 'https://127.0.0.1/r.git'], ['HtTpS://127.0.0.1/r.git', 'https://127.0.0.1/r.git']]) {
+    const settings = parseHttpOptions(url, {});
+    assert.equal(settings.ok, true, url);
+    assert.equal(settings.value.url.href, href, url);
+    assert.equal(createTransport(url, {}).ok, true, url);
+  }
+});
+
+test('an allowUrl that maps an http(s) base to another scheme is refused as allowUrl\'s fault before any fetch; one that maps a caller\'s scheme to https passes', () => {
+  for (const target of NOT_HTTP) {
+    for (const base of ['https://127.0.0.1/r.git', 'http://127.0.0.1/r.git']) {
+      const c = counting();
+      const allowUrl = () => ({ ok: true, value: new URL(target) });
+      // no transport exists after the refusal, so nothing can fetch (the one-call entry points take no allowUrl)
+      for (const r of [createTransport(base, { fetchImpl: c.fetchImpl, allowUrl }), parseHttpOptions(base, { fetchImpl: c.fetchImpl, allowUrl })]) {
+        assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.message], [false, 'bad_request', 'allowUrl', 'allowUrl must return an http(s) URL'], `${base} -> ${target}`);
+      }
+      assert.equal(c.n, 0, target);
+    }
+  }
+  for (const url of [...NOT_HTTP, 'repo://alias/team/r.git']) {
+    const settings = parseHttpOptions(url, { allowUrl: () => ({ ok: true, value: new URL('https://real.example/team/r.git') }) });
+    assert.equal(settings.ok, true, url);
+    assert.equal(settings.value.url.href, 'https://real.example/team/r.git', url);
+  }
+});
