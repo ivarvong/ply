@@ -198,8 +198,9 @@ function regionsOf(n: number, flags: number): Regions {
 // Entry i's columns read from the buffer: where it ends, or the field no scan gives.
 type EntryCheck = { readonly tag: 'end'; readonly end: number; readonly ref: boolean } | { readonly tag: 'bad'; readonly field: string };
 const bad = (field: string): EntryCheck => ({ tag: 'bad', field });
+// Two 20-byte ids in the buffer, compared as five 32-bit words (the same bytes; a quarter of the reads).
 function sameId(v: DataView, a: number, b: number): boolean {
-  for (let k = 0; k < OID_BYTES; k++) if (v.getUint8(a + k) !== v.getUint8(b + k)) return false;
+  for (let k = 0; k < OID_BYTES; k += 4) if (v.getUint32(a + k) !== v.getUint32(b + k)) return false;
   return true;
 }
 // A REF delta's scan base: none (-1: the scan found no whole object with the delta's REF id), or a whole object in the

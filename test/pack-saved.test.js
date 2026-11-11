@@ -320,6 +320,8 @@ test('tampered resolved columns with a valid check: cycles, depth lies and bases
   assert.equal(refusal(from, b => { b[R.type + onWhole] = 2; }, 'delta type'), `resolved.type@${onWhole}`);
   assert.equal(refusal(from, b => { b[R.type + blobs[0]] = 2; }, 'whole type'), `resolved.type@${blobs[0]}`);
   assert.equal(refusal(from, b => { b[R.oid + blobs[0] * 20] ^= 1; }, 'whole id'), `resolved.oid@${blobs[0]}`);
+  // ids are compared whole: one that differs in any single byte (each of the 20) is another id
+  for (let k = 0; k < 20; k++) assert.equal(refusal(from, b => { b[R.oid + blobs[0] * 20 + k] ^= 0x80; }, `whole id byte ${k}`), `resolved.oid@${blobs[0]}`);
   assert.equal(refusal(from, b => { dv(b).setFloat64(R.size + blobs[0] * 8, rc.size[blobs[0]] + 1, true); }, 'whole size'), `resolved.size@${blobs[0]}`);
   // OFS: the base is the scan's baseIndex and nothing else: a later entry, an earlier one, a cycle
   const O = rAt(ofs.pack.count, false);
