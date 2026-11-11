@@ -250,6 +250,10 @@ test('parseReceivePackTooLarge: the observed Artifacts text parses to the same b
     `${HEAD}MiB`, `${HEAD} MiB`, `${HEAD}5 MiB`, `${HEAD}286.3 MiB`, `${HEAD}286.3 MiB, limit is 64.0 MiB, limit is 64.0 MiB`,
     // 10 integer digits, 7 decimals (9 and 6 are the most a figure has, below)
     `${HEAD}1000000000 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is 1000000000 MiB`, `${HEAD}1.0000001 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is 64.0000000 MiB`,
+    // 10 integer digits with decimals, on either side: the 9-digit bound holds for a figure with a '.' as for one without.
+    // It is the bound that keeps the byte count exact: 9999999999.5 MiB is 10,485,759,999,475,712 bytes, over 2^53
+    // (9,007,199,254,740,992), and 1234567890.5 has the same 10 digits.
+    `${HEAD}1234567890.5 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is 1234567890.5 MiB`, `${HEAD}9999999999.5 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is 9999999999.5 MiB`,
     // a figure is digits only, on both sides
     `${HEAD}286.3 MiB, limit is .5 MiB`, `${HEAD}286.3 MiB, limit is 64. MiB`, `${HEAD}286.3 MiB, limit is -64 MiB`, `${HEAD}286.3 MiB, limit is 6 4 MiB`, `${HEAD}286.3 MiB, limit is 64.0a MiB`, `${HEAD}a286.3 MiB, limit is 64.0 MiB`,
     `${HEAD}0 MiB, limit is 64.0 MiB`, `${HEAD}0.0000004 MiB, limit is 64.0 MiB`,
