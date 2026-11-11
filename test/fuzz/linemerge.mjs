@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './prng.js';
 import { mergeLines } from '../../src/linemerge.js';
-import { LIMIT_MERGE_STEPS_FLOOR_LINES, LIMIT_MERGE_STEPS_PER_LINE } from '../../src/limits.js';
+import { LIMIT_MERGE_WORK } from '../../src/limits.js';
 
 import { oracleRediff } from '../gitversion.js';
 const REDIFF = process.argv.includes('--rediff') ? process.argv[process.argv.indexOf('--rediff') + 1] : oracleRediff(); // default: whatever the oracle git does
@@ -96,8 +96,7 @@ for (let i = 0; i < N; i++) {
     v = 'conservative'; const k = m.detail ? `${m.reason}: ${m.detail}` : m.reason; why[k] = (why[k] ?? 0) + 1;
     // A refusal where git merges cleanly passes only under a documented rule: --rediff undecided (the compaction
     // re-diff), or the step budget (limits.ts), proven spent by the meter against the limit's own arithmetic.
-    const nl = b => b.reduce((c, x) => c + (x === 10 ? 1 : 0), 0) + (b.length && b.at(-1) !== 10 ? 1 : 0);
-    const budget = LIMIT_MERGE_STEPS_PER_LINE * (nl(B) + nl(O) + nl(T) + LIMIT_MERGE_STEPS_FLOOR_LINES);
+    const budget = LIMIT_MERGE_WORK;
     const ruled = (REDIFF === 'undecided' && k === 'undecided: compaction needs the classic-diff fallback') || (m.reason === 'too large to merge' && meter.steps > budget);
     if (!ruled) { refused.push(i); if (refused.length <= 3) console.log(`REFUSED case ${i}: git merges cleanly, ours ${k} after ${meter.steps} steps (budget ${budget})`); }
   }

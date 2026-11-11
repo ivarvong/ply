@@ -21,18 +21,20 @@ const MIB = KIB * KIB;
  */
 export const LIMIT_MERGE_BLOB: number = 8 * MIB;
 /**
- * The line merge's work budget: primitive diff steps per input line, summed over base + ours + theirs and counted
- * across everything one merge runs (both histogram diffs, the classic-diff fallbacks, group compaction, conflict
- * refinement). git's histogram diff rescans the rest of the region on every split (xhistogram.c find_lcs), so a file
- * whose splits peel a line or two at a time costs O(n²) however short its hash chains are; the byte cap does not
- * bound that. With the budget the counted steps are at most linear in the input: a merge that would pass it is
- * refused as `too large to merge`, never guessed. A step is ~6-7 ns of CPU on the histogram path and ~12-15 ns on the
- * classic fallback (measured: linemerge.ts, classicDiff), so the CPU bound is the fallback's rate times the budget.
- * 1024 lets a merge with ~500 scattered hunks rescan the whole file for each.
+ * The line merge's work budget: primitive diff steps for one merged file, counted across everything that merge runs
+ * (both histogram diffs, the classic-diff fallbacks, group compaction, conflict refinement). git's histogram diff
+ * rescans the rest of the region on every split (xhistogram.c find_lcs), so a file whose splits peel a line or two at
+ * a time costs O(n²) however short its hash chains are; the byte cap does not bound that. The budget does, whatever
+ * the content: a merge that would pass it is refused as `too large to merge`, never guessed.
+ * A step is ~6-7 ns of CPU on the histogram path and ~12-15 ns on the classic fallback (measured: linemerge.ts,
+ * classicDiff), so the CPU bound is the fallback's rate times the budget.
+ * PROVISIONAL (the sizing step replaces both numbers, from measurements with the fallback metered): the default is
+ * 2^30, at least twice the 361,702,266 steps the 70,000-line / 3,500-hunk bulk edit counts at babb1b0 (git merges it
+ * cleanly; test/linemerge.test.js pins it); the Worker preset is 2^27, about 0.8 s of the pair-swap scan at the
+ * 6 ns per step measured at f184a93.
  */
-export const LIMIT_MERGE_STEPS_PER_LINE = 1024;
-/** Lines added to the count before multiplying, so a small file's budget (~1M steps) never binds on ordinary input. */
-export const LIMIT_MERGE_STEPS_FLOOR_LINES = 1024;
+export const LIMIT_MERGE_WORK: number = 2 ** 30;
+export const LIMIT_MERGE_WORK_WORKER: number = 2 ** 27;
 /**
  * Inflated size of any single non-streamed object (trees, commits, tags, metadata blobs).
  * gitformat-pack does not cap this; 64 MiB is one object a Worker-sized heap can still inflate and hash.
@@ -143,6 +145,7 @@ export const LIMIT_WORK_RATIO = 32;
 
 export type Limits = {
   readonly maxMergeBlobBytes: number;
+  readonly maxMergeWork: number;
   readonly maxObjectSize: number;
   readonly maxHarvestBytes: number;
   readonly maxPackBytes: number;
@@ -187,6 +190,7 @@ const isChecked = (value: LimitsInput): value is CheckedLimits => Object.hasOwn(
 
 export const DEFAULT_LIMITS: CheckedLimits = grant({
   maxMergeBlobBytes: LIMIT_MERGE_BLOB,
+  maxMergeWork: LIMIT_MERGE_WORK,
   maxObjectSize: LIMIT_OBJECT,
   maxHarvestBytes: LIMIT_HARVEST,
   maxPackBytes: LIMIT_PACK_WIRE,
@@ -215,7 +219,8 @@ export const DEFAULT_LIMITS: CheckedLimits = grant({
  * peaks near twice its size (the inflate output and the buffer the caller holds), so the object and delta caps are
  * 16 MiB and the inflated total, which also pays LIMIT_OBJECT_OVERHEAD per object, is 64 MiB: half the isolate, about
  * 21 000 tiny objects. The wire caps (pack, push, ls-refs) are two objects, as in the defaults. maxHarvestBytes is half an
- * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), and maxTreeEntries 32 768
+ * object, maxMergeBlobBytes 2 MiB (the line merger holds each side more than twice), maxMergeWork 2^27 steps per merged
+ * file (LIMIT_MERGE_WORK_WORKER: CPU, not memory), and maxTreeEntries 32 768
  * (a listed entry keeps ~150 B of heap, so the 200 000 default is ~30 MiB of the isolate's 128: #140). Every other cap
  * is the default. The limit sweep runs these at --max-old-space-size=128 (test/sweep/matrix.mjs, `worker.*` cells):
  * each refuses or succeeds, none runs out of memory.
@@ -231,6 +236,7 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxDeltaResult: 16 * MIB,
   maxHarvestBytes: 8 * MIB,
   maxMergeBlobBytes: 2 * MIB,
+  maxMergeWork: LIMIT_MERGE_WORK_WORKER,
   maxTreeEntries: 32_768,
 });
 /* oxlint-enable no-magic-numbers */

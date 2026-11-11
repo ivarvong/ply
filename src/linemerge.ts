@@ -12,7 +12,7 @@
 
 import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
-import { LIMIT_MERGE_BLOB, LIMIT_MERGE_STEPS_FLOOR_LINES, LIMIT_MERGE_STEPS_PER_LINE } from './limits.js';
+import { LIMIT_MERGE_BLOB, LIMIT_MERGE_WORK } from './limits.js';
 import { ok, err, assertNever, getOrElse, isSome, none, some } from './result.js';
 import { plyError } from './errors.js';
 import { bytesToStr, popLast } from './attributes.js';
@@ -47,8 +47,8 @@ type Diffed<T> = Result<T, Undecided>;
 const DONE: Diffed<null> = ok(null);
 // The work bound. The histogram scan and the classic-Myers fallback add every inner-loop iteration (a line scanned, a
 // candidate tried, a diagonal advanced, a neighbour looked at) and compaction its slides to one counter per merge;
-// past `max` the diff stops and the merge is refused. `max` is a multiple of the input's line count (limits.ts:
-// LIMIT_MERGE_STEPS_PER_LINE), so the counted steps are at most linear in the input whatever its content. A step is
+// past `max` the diff stops and the merge is refused. `max` is absolute, per merged file (limits.ts:
+// Limits.maxMergeWork, LIMIT_MERGE_WORK), so the counted steps are bounded whatever the input's content. A step is
 // not one fixed amount of CPU: the two paths differ about 2x (measured at classicDiff).
 // The counter is the module's own, made per call and starting at zero: nothing a caller passes is read to decide a
 // refusal. A caller's meter is written once, when the call returns, with that call's total.
@@ -57,10 +57,10 @@ export type Budget = { steps: number; readonly max: number };
 const unbounded = (): Budget => ({ steps: 0, max: Infinity });
 const spent = (budget: Budget): boolean => budget.steps > budget.max;
 const OVER_BUDGET = 'line diff step budget exceeded';
-// stepsPerLine as a caller gave it: a non-negative finite number, or the default. A value that would bound nothing
+// maxWork as a caller gave it: a non-negative finite number, or the default. A value that would bound nothing
 // (NaN, Infinity, a negative, a non-number) never switches the bound off and never refuses everything.
-export const stepsPerLineOf = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : LIMIT_MERGE_STEPS_PER_LINE);
-const stepBudget = (stepsPerLine: unknown, lines: number): Budget => ({ steps: 0, max: stepsPerLineOf(stepsPerLine) * (lines + LIMIT_MERGE_STEPS_FLOOR_LINES) });
+export const maxWorkOf = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : LIMIT_MERGE_WORK);
+const stepBudget = (maxWork: unknown): Budget => ({ steps: 0, max: maxWorkOf(maxWork) });
 // The call's total, copied out to the caller's meter. The meter is never read; one that is not an object, or will not
 // take the write (frozen), is left alone (an array is an object and gets the property; a function is ignored). The
 // write runs the caller's code (a setter, a Proxy's set trap, a revoked Proxy), so what it throws is caught and
@@ -540,13 +540,13 @@ function diffWith(base: Lines, side: Lines, rediff: Rediff, budget: Budget): Dif
   const c2 = compact(b, ch2, n2, a, ch1, n1, rediff, budget); if (!c2.ok) return c2;
   return ok(buildScript(ch1, n1, ch2, n2));
 }
-// stepsPerLine: the work budget per line of base + side (limits.ts); past it the diff is declined, detail
+// maxWork: the diff's step budget (limits.ts: LIMIT_MERGE_WORK); past it the diff is declined, detail
 // 'line diff step budget exceeded'. One that is not a non-negative finite number reads as the default. meter: an
 // object whose `steps` is set to this call's work when it returns (never read; anything else is ignored).
-export type DiffConfig = { readonly rediff: Rediff; readonly stepsPerLine: number; readonly meter: Meter };
+export type DiffConfig = { readonly rediff: Rediff; readonly maxWork: number; readonly meter: Meter };
 export function diffScript(base: Lines, side: Lines, options: Input<DiffConfig> = {}): Diffed<Change[]> {
-  const { rediff, stepsPerLine, meter } = withDefaults<DiffConfig>(options, { rediff: 'myers', stepsPerLine: LIMIT_MERGE_STEPS_PER_LINE, meter: { steps: 0 } });
-  const budget = stepBudget(stepsPerLine, base.n + side.n);
+  const { rediff, maxWork, meter } = withDefaults<DiffConfig>(options, { rediff: 'myers', maxWork: LIMIT_MERGE_WORK, meter: { steps: 0 } });
+  const budget = stepBudget(maxWork);
   const script = diffWith(base, side, rediff, budget);
   report(meter, budget.steps);
   return script;
@@ -706,29 +706,29 @@ function mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget }: { reado
 // driver: 'text' (git's default) | 'union' (merge=union: conflicts resolve to ours then theirs) | 'binary' (merge=binary,
 // -merge: any two-sided change is a conflict). Binary content (a NUL in the first 8000 bytes) is a conflict whatever the
 // driver, as in ll_xdl_merge.
-function mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine, meter }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff; readonly stepsPerLine: unknown; readonly meter: unknown }): MergeLinesResult {
+function mergeText({ driver, base, ours, theirs, maxBytes, rediff, maxWork, meter }: { readonly driver: 'text' | 'union'; readonly base: Uint8Array; readonly ours: Uint8Array; readonly theirs: Uint8Array; readonly maxBytes: number; readonly rediff: Rediff; readonly maxWork: unknown; readonly meter: unknown }): MergeLinesResult {
   if (Math.max(base.length, ours.length, theirs.length) > maxBytes) { report(meter, 0); return { clean: false, reason: 'too large to merge' }; }
   if ([base, ours, theirs].some(f => isBinary(f))) { report(meter, 0); return { clean: false, reason: 'binary' }; }
   const cl = classifier();
   const B = records(base, cl);
   const O = records(ours, cl);
   const T = records(theirs, cl);
-  const budget = stepBudget(stepsPerLine, B.n + O.n + T.n);
+  const budget = stepBudget(maxWork);
   const merged = mergeRecords({ driver, ours, theirs, B, O, T, rediff, budget });
   report(meter, budget.steps);
   return merged;
 }
-// stepsPerLine x (lines of base + ours + theirs + LIMIT_MERGE_STEPS_FLOOR_LINES) is the merge's step budget: past it
-// the answer is 'too large to merge', as for an input over maxBytes. A stepsPerLine that is not a non-negative finite
+// maxWork is the merge's step budget, absolute for this file (Limits.maxMergeWork; LIMIT_MERGE_WORK by default): past it
+// the answer is 'too large to merge', as for an input over maxBytes. A maxWork that is not a non-negative finite
 // number reads as the default. meter: an object whose `steps` is set to this call's work when it returns; it is never
 // read, so a reused or malformed one changes no result (anything that is not an object is ignored).
-export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Rediff; readonly driver: Driver; readonly stepsPerLine: number; readonly meter: Meter };
+export type MergeLinesConfig = { readonly maxBytes: number; readonly rediff: Rediff; readonly driver: Driver; readonly maxWork: number; readonly meter: Meter };
 export function mergeLines(base: Uint8Array, ours: Uint8Array, theirs: Uint8Array, options: Input<MergeLinesConfig> = {}): MergeLinesResult {
-  const { maxBytes, rediff, driver, stepsPerLine, meter } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text', stepsPerLine: LIMIT_MERGE_STEPS_PER_LINE, meter: { steps: 0 } });
+  const { maxBytes, rediff, driver, maxWork, meter } = withDefaults<MergeLinesConfig>(options, { maxBytes: LIMIT_MERGE_BLOB, rediff: 'myers', driver: 'text', maxWork: LIMIT_MERGE_WORK, meter: { steps: 0 } });
   switch (driver) {
     case 'binary': report(meter, 0); return { clean: false, reason: 'binary (merge attribute)' };
     case 'text':
-    case 'union': return mergeText({ driver, base, ours, theirs, maxBytes, rediff, stepsPerLine, meter });
+    case 'union': return mergeText({ driver, base, ours, theirs, maxBytes, rediff, maxWork, meter });
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(driver);

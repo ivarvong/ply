@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './prng.js';
 import { records, classifier, diffScript } from '../../src/linemerge.js';
-import { LIMIT_MERGE_STEPS_FLOOR_LINES, LIMIT_MERGE_STEPS_PER_LINE } from '../../src/limits.js';
+import { LIMIT_MERGE_WORK } from '../../src/limits.js';
 let refused = 0;
 
 import { oracleRediff } from '../gitversion.js';
@@ -46,7 +46,7 @@ for (let c = 0; c < N; c++) {
   if (!sc.ok) {
     // A refusal passes only under a documented rule: --rediff undecided (the compaction re-diff), or the step budget
     // (limits.ts), proven spent by the meter against the limit's own arithmetic. Anything else fails the run.
-    const budget = LIMIT_MERGE_STEPS_PER_LINE * (ra.n + rb.n + LIMIT_MERGE_STEPS_FLOOR_LINES);
+    const budget = LIMIT_MERGE_WORK;
     const ruled = (REDIFF === 'undecided' && sc.error.detail === 'compaction needs the classic-diff fallback') || (sc.error.detail === 'line diff step budget exceeded' && meter.steps > budget);
     counts.undecided++;
     if (!ruled) { refused++; if (refused <= 3) console.log(`REFUSED case ${c}: ${sc.error.detail} after ${meter.steps} steps (budget ${budget})`); }

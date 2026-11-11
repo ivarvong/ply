@@ -7,7 +7,8 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mergeLines, isBinary, records, classifier, diffScript, compact, stepsPerLineOf } from '../src/linemerge.js';
+import { mergeLines, isBinary, records, classifier, diffScript, compact, maxWorkOf } from '../src/linemerge.js';
+import { DEFAULT_LIMITS, WORKER_LIMITS } from '../src/limits.js';
 import { retryPolicy, isPlyCode } from '../src/errors.js';
 import { oracleRediff } from './gitversion.js';
 const rediff = oracleRediff();
@@ -124,28 +125,35 @@ const swapCase = n => {
   for (let i = 0; i + 1 < n; i += 2) [o[i], o[i + 1]] = [o[i + 1], o[i]];
   return [L, o, [...L, 'tail']].map(l => enc(l.join('\n') + '\n'));
 };
-const FLOOR_LINES = 1024; // LIMIT_MERGE_STEPS_FLOOR_LINES
-const budgetOf = (n, perLine) => perLine * (n + n + n + 1 + FLOOR_LINES); // lines of base + ours + theirs, plus the floor
+// The absolute budgets (maxWork) these tests pass: a number of steps per line of base + ours + theirs, plus 1024 lines.
+// That was the budget's own rule before Limits.maxMergeWork; here it is only how each test sizes a budget for its input.
+const FLOOR_LINES = 1024;
+const budgetOf = (n, perLine) => perLine * (n + n + n + 1 + FLOOR_LINES);
 test('work bound: pair swaps past the step budget are refused as too large, within the budget', () => {
-  // n = 2000 needs ≥ 2000²/4 = 1,000,000 steps; 64 steps per line allow 64 × (6001 + 1024) = 449,600.
+  // n = 2000 needs ≥ 2000²/4 = 1,000,000 steps; the budget is 64 × (6001 + 1024) = 449,600.
   const [B, O, T] = swapCase(2000), meter = { steps: 0 };
-  assert.deepEqual(mergeLines(B, O, T, { rediff, stepsPerLine: 64, meter }), { clean: false, reason: 'too large to merge' });
+  assert.deepEqual(mergeLines(B, O, T, { rediff, maxWork: budgetOf(2000, 64), meter }), { clean: false, reason: 'too large to merge' });
   assert.ok(meter.steps > budgetOf(2000, 64), `stopped by the budget: ${meter.steps} steps`);
   assert.ok(meter.steps <= budgetOf(2000, 64) * 1.05, `overshoot is one region's scan at most: ${meter.steps} steps`);
 });
-test('work bound: unbudgeted steps quadruple when the input doubles, budgeted steps only double', () => {
-  const steps = (n, stepsPerLine) => { const [B, O, T] = swapCase(n), meter = { steps: 0 }; mergeLines(B, O, T, { rediff, stepsPerLine, meter }); return meter.steps; };
+test('work bound: unbudgeted steps quadruple when the input doubles, budgeted steps stop at the budget whatever the input', () => {
+  const steps = (n, maxWork) => { const [B, O, T] = swapCase(n), meter = { steps: 0 }; mergeLines(B, O, T, { rediff, maxWork, meter }); return meter.steps; };
   const free = [steps(1000, Number.MAX_SAFE_INTEGER), steps(2000, Number.MAX_SAFE_INTEGER)];
   assert.ok(free[0] >= 1000 ** 2 / 4 && free[1] >= 2000 ** 2 / 4, `the algorithm's own cost is ≥ n²/4: ${free}`);
   assert.ok(free[1] / free[0] > 3.5, `quadratic without the budget: ${free}`);
-  const held = [steps(2000, 64), steps(4000, 64)];
-  assert.ok(held[1] / held[0] < 2.2, `linear under the budget: ${held}`); // (12001 + 1024) / (6001 + 1024) = 1.85
+  // one absolute budget (449,600) for both sizes: each stops past it by one region's scan at most (≤ 2n lines, under 2%)
+  const held = [steps(2000, budgetOf(2000, 64)), steps(4000, budgetOf(2000, 64))];
+  for (const h of held) assert.ok(h > budgetOf(2000, 64) && h <= budgetOf(2000, 64) * 1.05, `stopped at the budget: ${held}`);
 });
-test('work bound: the 20,000-line pair-swap file (120 KiB, 155 s before) is refused at the default budget', () => {
-  // needs ≥ 20000²/4 = 100,000,000 steps; the default 1024 per line allows 1024 × (60001 + 1024) = 62,489,600.
-  const [B, O, T] = swapCase(20000), meter = { steps: 0 };
-  assert.deepEqual(mergeLines(B, O, T, { rediff, meter }), { clean: false, reason: 'too large to merge' });
-  assert.ok(meter.steps > 62_489_600 && meter.steps <= 62_489_600 * 1.05, `${meter.steps} steps`);
+// The smallest pair-swap file whose base→ours scan alone (≥ n²/4 steps, above) passes a budget: n > 2 × sqrt(budget).
+const swapLinesPast = budget => 2 * Math.ceil(Math.sqrt(budget)) + 2;
+test('work bound: a pair-swap file whose scan needs more than WORKER_LIMITS.maxMergeWork is refused at that budget', () => {
+  const max = WORKER_LIMITS.maxMergeWork, n = swapLinesPast(max);
+  assert.ok(n ** 2 / 4 > max);
+  const [B, O, T] = swapCase(n), meter = { steps: 0 };
+  assert.ok(Math.max(B.length, O.length, T.length) <= WORKER_LIMITS.maxMergeBlobBytes, 'under the Worker blob cap: only the work budget refuses it');
+  assert.deepEqual(mergeLines(B, O, T, { rediff, maxBytes: WORKER_LIMITS.maxMergeBlobBytes, maxWork: max, meter }), { clean: false, reason: 'too large to merge' });
+  assert.ok(meter.steps > max && meter.steps <= max * 1.05, `${meter.steps} steps`);
 });
 test('work bound: the same shape under the budget is git\'s merge, byte for byte', () => {
   // pairs swapped in the first half only, so theirs' appended line is far from ours' hunks: git merges it cleanly
@@ -175,23 +183,27 @@ test('work bound: a caller\'s meter never decides a merge: reused, pre-loaded or
   // one meter over two files: the first is refused (2000 swapped pairs need >= 1,000,000 steps, 449,600 allowed), the
   // second is git's clean merge, and the meter then holds the second call's own total
   const meter = { steps: 0 }, [B, O, T] = swapCase(2000);
-  assert.deepEqual(mergeLines(B, O, T, { rediff, stepsPerLine: 64, meter }), { clean: false, reason: 'too large to merge' });
+  assert.deepEqual(mergeLines(B, O, T, { rediff, maxWork: budgetOf(2000, 64), meter }), { clean: false, reason: 'too large to merge' });
   assert.ok(meter.steps > budgetOf(2000, 64));
-  assert.equal(mergeLines(b, o, t, { rediff, stepsPerLine: 64, meter }).clean, true);
+  assert.equal(mergeLines(b, o, t, { rediff, maxWork: budgetOf(2000, 64), meter }).clean, true);
   assert.ok(meter.steps > 0 && meter.steps < 1000, `${meter.steps} steps`);
 });
-test('work bound: no meter and no stepsPerLine switches the bound off', () => {
+test('work bound: no meter and no maxWork switches the bound off', () => {
   const [B, O, T] = swapCase(2000); // >= 1,000,000 steps against 449,600
-  for (const meter of [{}, { steps: NaN }, { steps: -1e12 }, null, 7]) assert.deepEqual(mergeLines(B, O, T, { rediff, stepsPerLine: 64, meter }), { clean: false, reason: 'too large to merge' }, `meter ${JSON.stringify(meter)}`);
-  // a stepsPerLine that is not a non-negative finite number is the default (1024): neither no bound nor a zero budget
-  for (const bad of [NaN, Infinity, -1, null, '64', {}]) assert.equal(stepsPerLineOf(bad), 1024, String(bad));
-  assert.equal(stepsPerLineOf(0), 0); assert.equal(stepsPerLineOf(64), 64);
+  for (const meter of [{}, { steps: NaN }, { steps: -1e12 }, null, 7]) assert.deepEqual(mergeLines(B, O, T, { rediff, maxWork: budgetOf(2000, 64), meter }), { clean: false, reason: 'too large to merge' }, `meter ${JSON.stringify(meter)}`);
+  // a maxWork that is not a non-negative finite number is the default (DEFAULT_LIMITS.maxMergeWork): neither no bound nor a zero budget
+  for (const bad of [NaN, Infinity, -1, null, '64', {}]) assert.equal(maxWorkOf(bad), DEFAULT_LIMITS.maxMergeWork, String(bad));
+  assert.equal(maxWorkOf(0), 0); assert.equal(maxWorkOf(64), 64);
   const [b, o, t] = five();
-  for (const stepsPerLine of [NaN, -1, null, '64']) assert.equal(mergeLines(b, o, t, { rediff, stepsPerLine }).clean, true, String(stepsPerLine));
-  // 6000 swapped pairs need >= 6000^2/4 = 9,000,000 steps for the scan alone and the default allows
-  // 1024 x (18001 + 1024) = 19,481,600; the reviewer measured 27,036,000 steps of work with the bound off (NaN)
-  const [B6, O6, T6] = swapCase(6000);
-  for (const stepsPerLine of [NaN, Infinity]) assert.deepEqual(mergeLines(B6, O6, T6, { rediff, stepsPerLine }), { clean: false, reason: 'too large to merge' }, String(stepsPerLine));
+  for (const maxWork of [NaN, -1, null, '64']) assert.equal(mergeLines(b, o, t, { rediff, maxWork }).clean, true, String(maxWork));
+  // end to end at the default: a pair-swap file whose scan alone needs more than DEFAULT_LIMITS.maxMergeWork steps is
+  // refused, within 5% of it, when maxWork is a value that would bound nothing
+  const max = DEFAULT_LIMITS.maxMergeWork, [B6, O6, T6] = swapCase(swapLinesPast(max));
+  for (const maxWork of [NaN, Infinity]) {
+    const meter = { steps: 0 };
+    assert.deepEqual(mergeLines(B6, O6, T6, { rediff, maxWork, meter }), { clean: false, reason: 'too large to merge' }, String(maxWork));
+    assert.ok(meter.steps > max && meter.steps <= max * 1.05, `${maxWork}: ${meter.steps} steps`);
+  }
 });
 
 // ---- the classic-Myers fallback counts its real work (review R1) ----
@@ -221,8 +233,8 @@ test('work bound: a low-variety file (random a/b/c) costs under 3x when it doubl
   assert.ok(s1 >= scanFloor(10000) - 2 * 100 * 100, `${s1} steps`); // up to 100 lines of each file may trim
   assert.ok(s2 / s1 > 1.8 && s2 / s1 < 3, `doubling ratio ${s2 / s1}: ${s1} -> ${s2}`);
   assert.equal(s1, LOWVAR_10K_STEPS, 'the fixed case\'s count (pinned: a change here is a change in what is counted)');
-  // the same files under 64 steps per line: (20000 + 1024) x 64 = 1,345,536, and the stop is within 5% of it
-  const held = diffSteps(lowVariety(10000, 0x9e3779b9), lowVariety(10000, 0x1234567), { stepsPerLine: 64 });
+  // the same files under a budget of (20000 + 1024) x 64 = 1,345,536 steps: the stop is within 5% of it
+  const held = diffSteps(lowVariety(10000, 0x9e3779b9), lowVariety(10000, 0x1234567), { maxWork: 1_345_536 });
   assert.deepEqual(held.d, { ok: false, error: { undecided: true, detail: 'line diff step budget exceeded' } });
   assert.ok(held.steps > 1_345_536 && held.steps <= 1_345_536 * 1.05, `${held.steps} steps`);
 });
