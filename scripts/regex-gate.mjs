@@ -4,7 +4,10 @@
 //
 //   1. every regex literal and every RegExp construction in src/ (found with the TypeScript compiler API) must have an
 //      entry in scripts/regex-inventory.mjs with the same file and the same pattern text; an entry whose pattern is no
-//      longer in that file fails too (a stale entry, or a known-bad marker left behind after its fix landed);
+//      longer in that file fails too (a stale entry, or a known-bad marker left behind after its fix landed). A regex
+//      built any other way cannot have a row and fails where it stands: RegExp used as a value other than the callee
+//      of RegExp(...) / new RegExp(...), and String#match, matchAll or search given anything but a regex literal or a
+//      construction written at the call (see regexesIn; the Cache API's cache.match is the one named allowance);
 //   2. each entry says what text the pattern is applied to (`input`: remote, stored, caller or internal), why it is
 //      linear (`linear`), and for remote, stored or caller text gives an adversarial input generator
 //      (`adversarial(n)`), which test/regex-linear.test.js runs at n, 2n and 4n as a ratio test (4 times the length
@@ -33,19 +36,62 @@ const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
   return path.endsWith('.ts') ? [path] : [];
 });
 
+// String methods that compile a string argument into a RegExp: s.match('(a+)+$') builds the pattern at the call.
+const STRING_REGEX_METHODS = new Set(['match', 'matchAll', 'search']);
+// Calls with one of those names that are not String methods. Each is allowed by its file and its receiver, and nowhere
+// else: the same call in another file, or on another receiver in that file, is refused.
+export const NOT_STRING_METHODS = [
+  { file: 'src/packcache.ts', receiver: 'cache', method: 'match', why: 'the Cache API: cache.match(key) looks a stored Response up by its URL key and compiles nothing' },
+];
+
 // Every regex in one parsed source file: literals (`/x/u`), and `RegExp(...)` / `new RegExp(...)` (pattern text = the
-// whole expression as written, since its arguments may be computed).
+// whole expression as written, since its arguments may be computed). Every other way to build one cannot be given a
+// row, so it is found too and reported as kind 'refused' (gate() fails on each):
+//   - RegExp referenced as a value anywhere but as the callee of those two forms: `new globalThis.RegExp(...)`,
+//     `new (RegExp)(...)`, `globalThis['RegExp']`, `const R = RegExp`, `Reflect.construct(RegExp, ...)`,
+//     `class X extends RegExp`. A type position (`: RegExp`, `typeof RegExp`, `implements`) is not a value;
+//   - String#match, matchAll and search called with anything but a regex literal or a RegExp construction written at
+//     the call (each of which needs its own row): the engine compiles any other argument as a pattern.
 export function regexesIn(file, sf) {
   const found = [];
   const lineOf = node => sf.getLineAndCharacterOfPosition(node.end).line + 1;
-  const visit = node => {
-    if (isRegularExpressionLiteral(node)) found.push({ file, line: lineOf(node), pattern: node.text, kind: 'literal' });
-    else if ((node.kind === SyntaxKind.NewExpression || node.kind === SyntaxKind.CallExpression) && node.expression.kind === SyntaxKind.Identifier && node.expression.text === 'RegExp') {
-      found.push({ file, line: lineOf(node), pattern: sf.text.slice(node.pos, node.end).trim(), kind: 'construction' });
-    }
-    node.forEachChild(visit);
+  const textOf = node => sf.text.slice(node.pos, node.end).trim();
+  const refuse = (node, why) => found.push({ file, line: lineOf(node), pattern: textOf(node), kind: 'refused', why });
+  const isConstruction = node => (node.kind === SyntaxKind.NewExpression || node.kind === SyntaxKind.CallExpression) && node.expression.kind === SyntaxKind.Identifier && node.expression.text === 'RegExp';
+  const sameNode = (a, b) => a.kind === b.kind && a.pos === b.pos && a.end === b.end;
+  // The member a node reads: x.name, x?.name, x['name'], x[`name`] (undefined for anything else, a computed key included).
+  const memberName = node => {
+    if (node.kind === SyntaxKind.PropertyAccessExpression) return node.name.text;
+    if (node.kind !== SyntaxKind.ElementAccessExpression) return undefined;
+    const key = node.argumentExpression;
+    return key.kind === SyntaxKind.StringLiteral || key.kind === SyntaxKind.NoSubstitutionTemplateLiteral ? key.text : undefined;
   };
-  visit(sf);
+  const unwrapped = node => (node.kind === SyntaxKind.ParenthesizedExpression || node.kind === SyntaxKind.NonNullExpression ? unwrapped(node.expression) : node);
+  // A type position: a type node, or a heritage clause that names a type (`implements`, an interface's `extends`).
+  const typePosition = (node, parent) => (node.kind >= SyntaxKind.FirstTypeNode && node.kind <= SyntaxKind.LastTypeNode)
+    || (node.kind === SyntaxKind.HeritageClause && (node.token === SyntaxKind.ImplementsKeyword || parent.kind === SyntaxKind.InterfaceDeclaration));
+  const visit = (node, parent, inType) => {
+    if (isRegularExpressionLiteral(node)) found.push({ file, line: lineOf(node), pattern: node.text, kind: 'literal' });
+    else if (isConstruction(node)) found.push({ file, line: lineOf(node), pattern: textOf(node), kind: 'construction' });
+    else if (node.kind === SyntaxKind.Identifier && node.text === 'RegExp') {
+      if (!inType && !(isConstruction(parent) && sameNode(parent.expression, node))) refuse(parent, 'RegExp is used as a value here, not as the callee of RegExp(...) or new RegExp(...): the gate cannot inventory what is built from it, write the construction directly');
+    } else if (node.kind === SyntaxKind.ElementAccessExpression && memberName(node) === 'RegExp') {
+      refuse(node, "['RegExp'] reads the constructor as a value: the gate cannot inventory what is built from it, write RegExp(...) or new RegExp(...) directly");
+    } else if (node.kind === SyntaxKind.CallExpression) {
+      const callee = unwrapped(node.expression);
+      const method = memberName(callee);
+      if (method !== undefined && STRING_REGEX_METHODS.has(method)) {
+        const receiver = callee.expression.kind === SyntaxKind.Identifier ? callee.expression.text : undefined;
+        const allowed = NOT_STRING_METHODS.some(a => a.file === file && a.receiver === receiver && a.method === method);
+        const arg = node.arguments[0];
+        if (!allowed && (arg === undefined || !(isRegularExpressionLiteral(arg) || isConstruction(arg)))) {
+          refuse(node, `String#${method} compiles its argument as a pattern: pass a regex literal or a RegExp construction written at the call (with its own row), or use RegExp#exec on an inventoried pattern`);
+        }
+      }
+    }
+    node.forEachChild(child => visit(child, node, inType || typePosition(child, node)));
+  };
+  visit(sf, sf, false);
   return found;
 }
 
@@ -222,7 +268,10 @@ export function gate(found, inventory) {
   const problems = [];
   const keyOf = x => `${x.file}\n${x.pattern}`;
   const counts = new Map();
-  for (const f of found) counts.set(keyOf(f), [...(counts.get(keyOf(f)) ?? []), f]);
+  for (const f of found) {
+    if (f.kind === 'refused') problems.push(`${f.file}:${f.line}: ${f.pattern}: ${f.why}`);
+    else counts.set(keyOf(f), [...(counts.get(keyOf(f)) ?? []), f]);
+  }
   const seen = new Set();
   for (const entry of inventory) {
     const key = keyOf(entry);
@@ -280,7 +329,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   if (process.argv.includes('--list')) {
     for (const f of found) {
       const entry = INVENTORY.find(e => e.file === f.file && e.pattern === f.pattern);
-      const verdict = entry === undefined ? 'NOT INVENTORIED' : entry.knownBad === undefined ? `${entry.input}: ${entry.linear}` : `KNOWN BAD (fix: ${entry.knownBad})`;
+      const verdict = f.kind === 'refused' ? `REFUSED: ${f.why}` : entry === undefined ? 'NOT INVENTORIED' : entry.knownBad === undefined ? `${entry.input}: ${entry.linear}` : `KNOWN BAD (fix: ${entry.knownBad})`;
       console.log(`${f.file}:${f.line}\t${f.pattern}\t${verdict}`);
     }
   }

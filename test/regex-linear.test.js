@@ -9,6 +9,11 @@
 //
 // A row marked knownBad is asserted the other way round: its generator must show the superlinear cost, so the marker is
 // evidence and not an excuse. When its fix lands the pattern changes, the gate refuses the stale row, and it is rewritten.
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, cpSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
 import { gate, shapeProblems } from '../scripts/regex-gate.mjs';
 import { INVENTORY } from '../scripts/regex-inventory.mjs';
@@ -113,4 +118,66 @@ test('the gate fails on a pattern with no row, a row with no pattern, and a know
   expect(gate(found, [{ ...entry, adversarial: undefined }])[0]).toContain('needs an adversarial(n) generator');
   const slash = { file: 'src/x.ts', line: 9, pattern: String.raw`/\/+$/`, kind: 'literal' };
   expect(gate([slash], [{ ...entry, pattern: slash.pattern }])[0]).toContain('unanchored run');
+});
+
+// The gate's discovery. A pattern the gate does not find gets no row, no generator, no ratio test and no shape check,
+// so every way src/ can build a RegExp other than a literal, RegExp(...) or new RegExp(...) is refused. Each form is
+// planted alone in a scratch copy of this tree's src/ and the gate is run on it the way npm run lint runs it: a child
+// process, judged by its exit code (0 clean, 1 on any problem) and by a message naming the planted file and line. The
+// lines are counted by hand from the planted text below; every pattern is the textbook exponential (x+)+$.
+const PLANT = 'src/zz-planted.ts';
+const PLANTED = [
+  // (a) a construction whose callee is not the bare identifier RegExp
+  ['new globalThis.RegExp(...)', "export const r = new globalThis.RegExp('(c+)+$', 'u');\n", 1],
+  ['globalThis.RegExp(...)', "export const r = globalThis.RegExp('(c+)+$', 'u');\n", 1],
+  ['new (RegExp)(...)', "export const r = new (RegExp)('(i+)+$', 'u');\n", 1],
+  ["new globalThis['RegExp'](...)", "export const r = new globalThis['RegExp']('(j+)+$', 'u');\n", 1],
+  // (b) RegExp as a value that is not the callee of a construction
+  ['an alias of RegExp', "const R = RegExp;\nexport const r = new R('(d+)+$', 'u');\n", 1],
+  ['Reflect.construct(RegExp, ...)', "export const r: RegExp = Reflect.construct(RegExp, ['(g+)+$', 'u']);\n", 1],
+  ['class extends RegExp', "export class R extends RegExp {}\nexport const r = new R('(h+)+$', 'u');\n", 1],
+  // (c) String#match, matchAll and search compile an argument that is not a RegExp
+  ['match of a string', "export const f = (s: string): RegExpMatchArray | null =>\n  s.match('(e+)+$');\n", 2],
+  ['matchAll of a string', "export const f = (s: string): unknown => s.matchAll('(e+)+$');\n", 1],
+  ['search of a string', "export const f = (s: string): number => s.search('(f+)+$');\n", 1],
+  ['match of a variable', "const p = '(k+)+$';\n\nexport const f = (s: string): unknown => s.match(p);\n", 3],
+  // the Cache API allowance is src/packcache.ts and the receiver `cache`: the same text in another file is refused
+  ['cache.match(key) outside src/packcache.ts', "export const f = (cache: string, key: string): unknown => cache.match(key);\n", 1],
+];
+
+test('the gate exits 1 on every way to build a RegExp it cannot inventory, naming the file and line', { timeout: 240_000 }, () => {
+  const repo = fileURLToPath(new URL('..', import.meta.url));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ply-regex-gate-')));
+  const run = () => spawnSync(process.execPath, [join(repo, 'scripts/regex-gate.mjs'), '--root', root], { cwd: repo, encoding: 'utf8' });
+  try {
+    cpSync(join(repo, 'src'), join(root, 'src'), { recursive: true });
+    for (const name of ['tsconfig.json', 'tsconfig.check.json']) cpSync(join(repo, name), join(root, name));
+    const clean = run();
+    expect(clean.status, `unplanted tree: ${clean.stderr}`).toBe(0);
+    for (const [name, text, line] of PLANTED) {
+      writeFileSync(join(root, PLANT), text);
+      const planted = run();
+      expect(planted.status, `${name}: ${planted.stdout}${planted.stderr}`).toBe(1);
+      expect(planted.stderr, name).toContain(`regex-gate: ${PLANT}:${line}: `);
+      rmSync(join(root, PLANT));
+    }
+    // The allowance is not the file alone: another receiver in src/packcache.ts is refused, at the line appended.
+    const cacheFile = join(root, 'src/packcache.ts');
+    const before = readFileSync(cacheFile, 'utf8');
+    const appendedLine = before.split('\n').length; // the file ends with a newline: the appended text is the next line
+    appendFileSync(cacheFile, "export const zz = (s: string): unknown => s.match('(a+)+$');\n");
+    const other = run();
+    expect(other.status, other.stdout + other.stderr).toBe(1);
+    expect(other.stderr).toContain(`regex-gate: src/packcache.ts:${appendedLine}: `);
+    writeFileSync(cacheFile, before);
+    // Control: a regex literal argument is not refused as a string pattern. It is found as a literal, and the only
+    // problem is the missing row.
+    writeFileSync(join(root, PLANT), 'export const f = (s: string): unknown => s.match(/^zz$/u);\n');
+    const literal = run();
+    expect(literal.status).toBe(1);
+    expect(literal.stderr.split('\n').filter(l => l.includes(PLANT))).toEqual([`regex-gate: ${PLANT}:1: /^zz$/u: not in scripts/regex-inventory.mjs`]);
+    rmSync(join(root, PLANT));
+    const again = run();
+    expect(again.status, `tree restored: ${again.stderr}`).toBe(0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
