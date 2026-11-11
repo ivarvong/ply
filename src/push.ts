@@ -80,7 +80,7 @@ import type { PackInput, BuiltEntry } from './pack.js';
 import { WHOLE } from './pack.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
-import { at, atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
+import { at, atOr, field, fromNullish, isMissing, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 
@@ -637,7 +637,7 @@ function classifyNew(c: Classifying, lines: Uint8Array[], from: number, max: num
   for (let i = from; i < lines.length; i += 1) {
     const whole = lines[i];
     // Stryker disable next-line ConditionalExpression: unreachable, i < lines.length
-    if (whole === undefined) break;
+    if (isMissing(whole)) break;
     const line = cutReportLine(whole, max);
     if (i === 0) {
       const text = decodeBytes(whole);
