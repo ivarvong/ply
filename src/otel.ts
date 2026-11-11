@@ -398,7 +398,7 @@ export type ArrayExporter = Exporter & { readonly lines: ExportLine[] };
 export const arrayExporter = (arr: ExportLine[] = []): ArrayExporter => Object.assign((line: ExportLine) => { arr.push(line); }, { lines: arr });
 // the console exporter's default sink is the console; bundle budget: the JS's arrow, byte for byte
 // oxlint-disable-next-line no-console, typescript/no-confusing-void-expression -- see above
-export const consoleExporter = (log: (s: string) => void = console.log): Exporter => line => log(JSON.stringify(line));
+export const consoleExporter = (log: (s: string) => void = console.log): Exporter => request => log(JSON.stringify(request));
 // ---- reading side (pure): flatten a JSONL line back to {name, attrs, events, ...} ----
 export type FlatValue = string | number | boolean | readonly FlatValue[];
 export type FlatAttrs = Record<string, FlatValue>;
