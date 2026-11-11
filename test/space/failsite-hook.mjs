@@ -8,8 +8,15 @@
 // (`badTree(why)`, `take(..., code)`) would hide the decision that called it. A stack names every call site on the way,
 // so the wrapper's caller is recorded as the site it is.
 //
-// Records: <dir>/<pid>-<thread>-<runner>.json = { runner, platform, frames: { "src/x.ts:L:C": n } }, one count per src/
-// frame of every recorded stack, rewritten whenever the thread reaches a frame it had not reached (a vitest fork or a
+// Reached is not judged: a test that triggers an error and asserts nothing reaches the site too. So the recorder also
+// notes which errors were looked at: the error plyError returns gets its `code` and `message` served through accessors
+// (same values, same enumerability), and the first read made by code outside src/ (a test, a helper, node's assert)
+// marks every src/ frame of that error's stack as observed. ply reading its own error (a classifier, a wrapper's
+// message) does not count. An error whose frames are all observed already is left as plyError built it, so a space
+// that makes the same error a million times pays for the first one only.
+//
+// Records: <dir>/<pid>-<thread>-<runner>.json = { runner, platform, frames: { "src/x.ts:L:C": n }, observed: [frame] },
+// one count per src/ frame of every recorded stack, rewritten whenever the thread reaches a frame it had not reached (a vitest fork or a
 // worker thread may be stopped without an exit event) and at exit. The runner is the test file: the vitest setup file
 // (test/space/failsite-setup.js) names it and exports it as PLY_FAILSITE_RUNNER to the workers and children it starts;
 // a plain node process is its own script. test/space/holes.js maps frames to inventory sites.
@@ -27,6 +34,10 @@ if (DIR && !globalThis[KEY]) {
   mkdirSync(out, { recursive: true });
   const SRC = `${join(ROOT, 'src')}/`;
   const byRunner = new Map(); // runner -> Map(frame -> n)
+  const observedBy = new Map(); // runner -> Set(frame): frames of an error whose code or message was read outside src/
+  const FRAME = /\(?((?:file:\/\/)?\/[^\s()]+):(\d+):(\d+)\)?$/;
+  const fileOf = m => (m[1].startsWith('file://') ? fileURLToPath(m[1]) : m[1]);
+  let pending = null; // the stack recorded at the head of the plyError call that is running: { r, keys }
   let named = null;
   const runner = () => named ?? process.env.PLY_FAILSITE_RUNNER ?? (process.argv[1] ? relative(ROOT, process.argv[1]) : '(eval)');
   const thread = isMainThread ? 'm' : `w${threadId}`;
@@ -34,7 +45,7 @@ if (DIR && !globalThis[KEY]) {
   // a worker terminated) leaves its previous record or none, never a truncated one the gate cannot parse
   const save = r => {
     const file = join(out, `${process.pid}-${thread}-${r.replace(/[^\w.-]+/g, '_')}.json`);
-    writeFileSync(`${file}.tmp`, JSON.stringify({ runner: r, platform: process.platform, frames: Object.fromEntries(byRunner.get(r) ?? []) }));
+    writeFileSync(`${file}.tmp`, JSON.stringify({ runner: r, platform: process.platform, frames: Object.fromEntries(byRunner.get(r) ?? []), observed: [...(observedBy.get(r) ?? [])] }));
     renameSync(`${file}.tmp`, file);
   };
   const recorder = holder => {
@@ -50,9 +61,9 @@ if (DIR && !globalThis[KEY]) {
     let fresh = false;
     // node prints file:// URLs; vitest's source-mapped stacks print paths
     for (const line of o.stack.split('\n').slice(1)) {
-      const m = /\(?((?:file:\/\/)?\/[^\s()]+):(\d+):(\d+)\)?$/.exec(line);
+      const m = FRAME.exec(line);
       if (!m) continue;
-      const file = m[1].startsWith('file://') ? fileURLToPath(m[1]) : m[1];
+      const file = fileOf(m);
       if (!file.startsWith(SRC)) continue;
       const key = `${relative(ROOT, file)}:${m[2]}:${m[3]}`;
       if (seen.has(key)) continue;
@@ -60,7 +71,41 @@ if (DIR && !globalThis[KEY]) {
       if (!frames.has(key)) fresh = true;
       frames.set(key, (frames.get(key) ?? 0) + 1);
     }
+    pending = { r, keys: [...seen] };
     if (fresh) save(r);
+  };
+  // the error that plyError call built. Its code and message are read through accessors until code outside src/ reads
+  // one of them; the reader is the frame that called the accessor (one frame, captured only while still unobserved)
+  recorder.made = e => {
+    const p = pending;
+    pending = null;
+    if (!p || !p.keys.length) return e;
+    if (!observedBy.has(p.r)) observedBy.set(p.r, new Set());
+    const observed = observedBy.get(p.r);
+    if (p.keys.every(k => observed.has(k))) return e;
+    let open = true;
+    const read = getter => {
+      if (!open) return;
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 1;
+      const o = {};
+      Error.captureStackTrace(o, getter);
+      Error.stackTraceLimit = limit;
+      const m = FRAME.exec(o.stack.split('\n')[1] ?? '');
+      if (m && fileOf(m).startsWith(SRC)) return;
+      open = false;
+      let fresh = false;
+      for (const k of p.keys) if (!observed.has(k)) { observed.add(k); fresh = true; }
+      if (fresh) save(p.r);
+    };
+    for (const key of ['code', 'message']) {
+      const d = Object.getOwnPropertyDescriptor(e, key);
+      if (!d || !d.configurable || !('value' in d)) continue;
+      let value = d.value;
+      const get = () => { read(get); return value; };
+      Object.defineProperty(e, key, { enumerable: d.enumerable, configurable: true, get, set: v => { value = v; } });
+    }
+    return e;
   };
   // the vitest setup file names the test file this process (or thread) is running; written at once, even with no
   // frames: the record also says which runner ran on which platform (the Linux gate)

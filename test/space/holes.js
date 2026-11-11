@@ -78,6 +78,9 @@ export function readRecords(dir) {
   const frames = new Map();
   const runners = new Set();
   const platforms = new Map(); // runner -> Set(platform)
+  // frame -> Set(runner) for the errors a test read; null when no record carries the field (records of an older
+  // recorder): then `observed` is not judged, which is not the same as nothing observed
+  let observed = null;
   if (!dir || !existsSync(dir)) return null;
   for (const f of readdirSync(dir).filter(x => x.endsWith('.json'))) {
     const rec = JSON.parse(readFileSync(join(dir, f), 'utf8'));
@@ -85,8 +88,12 @@ export function readRecords(dir) {
     if (!platforms.has(rec.runner)) platforms.set(rec.runner, new Set());
     platforms.get(rec.runner).add(rec.platform ?? 'unknown');
     for (const k of Object.keys(rec.frames)) { if (!frames.has(k)) frames.set(k, new Set()); frames.get(k).add(rec.runner); }
+    if (Array.isArray(rec.observed)) {
+      observed ??= new Map();
+      for (const k of rec.observed) { if (!observed.has(k)) observed.set(k, new Set()); observed.get(k).add(rec.runner); }
+    }
   }
-  return { frames, runners, platforms };
+  return { frames, runners, platforms, observed };
 }
 export const frameOf = p => `${p.file}:${p.callLine}:${p.col}`;
 
@@ -98,7 +105,7 @@ export function compute({ records = null, spaces = SPACES, decisions = DECISIONS
   const man = manifest();
   const dec = resolve(points.map(p => p.id), decisions);
   const git = resolve(man.entries.map(e => e.id), GIT);
-  const holes = { decisions: [], git: [], failsites: null, claims: null, linux: null, stale: [] };
+  const holes = { decisions: [], git: [], failsites: null, claims: null, observed: null, linux: null, stale: [] };
   for (const p of points) if (!dec.by.has(p.id)) holes.decisions.push(p.id);
   for (const e of man.entries) if (!git.by.has(e.id)) holes.git.push(e.id);
   for (const r of dec.unused) holes.stale.push(`DECISIONS ${r.match}`);
@@ -111,6 +118,10 @@ export function compute({ records = null, spaces = SPACES, decisions = DECISIONS
     // a site the registry excludes (with its reason) is not a hole for gate c either
     const excluded = p => { const r = dec.by.get(p.id); return !!r && 'excluded' in r; };
     holes.failsites = sites.filter(p => !reachedBy.get(p.id).size && !sampled.has(p.id) && !excluded(p)).map(p => p.id);
+    // reached is not judged: a site whose error no test read (code or message, see failsite-hook.mjs) would pass
+    // gate c with a wrong code, message or outcome. Reported by failsites.test.js; not in CATEGORIES (no ratchet
+    // baseline yet: that needs one recorded run of the whole suite)
+    if (records.observed) holes.observed = sites.filter(p => reachedBy.get(p.id).size && !records.observed.get(frameOf(p))?.size && !sampled.has(p.id) && !excluded(p)).map(p => p.id);
     holes.claims = [];
     for (const p of sites) {
       const r = dec.by.get(p.id);

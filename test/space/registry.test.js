@@ -2,9 +2,11 @@
 // ratchet; `npm run spaces --` prints the same report.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { compute, judge, registryProblems, ROOT, ratchet, frameOf } from './holes.js';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { compute, judge, registryProblems, readRecords, ROOT, ratchet, frameOf } from './holes.js';
 import { SPACES, DECISIONS, SAMPLED } from './registry.js';
 import { renderMd } from '../../scripts/spaces.mjs';
 
@@ -41,6 +43,46 @@ test('a pending space whose runners are all in the tree is a registry problem (i
     ["space synthetic: pending (#1) but every runner is in the tree; it is merged: status: 'main'"]);
   // a runner that is not in the tree yet: still pending, no problem
   assert.deepEqual(registryProblems([{ ...base, name: 'synthetic', status: 'pending', pending: '#1', runners: ['test/not-written-yet.test.js'] }]), []);
+});
+
+test('observed: a fail site a runner reached while no test read the error is a hole, not a covered site', () => {
+  // Expected values are stated here, not derived from compute(): one real site, reached by one runner. With no
+  // observation data the records are not judged (null); with it, the site is a hole until some runner's record says a
+  // test read that error; a site nobody reached is a failsites hole and not an observed one.
+  const sampled = new Set(SAMPLED.map(s => s.id));
+  const site = all.sites.find(p => !sampled.has(p.id) && !('excluded' in (all.dec.by.get(p.id) ?? {})));
+  const runner = 'test/no-assert.test.js';
+  const base = { frames: new Map([[frameOf(site), new Set([runner])]]), runners: new Set([runner]), platforms: new Map() };
+  assert.equal(compute({ records: base }).holes.observed, null, 'records without observation data are not judged');
+  assert.deepEqual(compute({ records: { ...base, observed: new Map() } }).holes.observed, [site.id], 'reached, the error never read');
+  assert.deepEqual(compute({ records: { ...base, observed: new Map([[frameOf(site), new Set([runner])]]) } }).holes.observed, [], 'reached and read');
+  assert.deepEqual(compute({ records: { frames: new Map(), runners: new Set([runner]), platforms: new Map(), observed: new Map() } }).holes.observed, [], 'not reached: a failsites hole only');
+});
+
+test('observed: the recorder marks a site only when code outside src/ read the error\'s code or message', () => {
+  // Four node processes under the recorder, each building one error with errors.ts `fail` from a script outside src/.
+  // By hand: the stack at plyError holds exactly one src/ frame (fail's call), so each record has one frame. It is
+  // observed only where the script itself reads .code or .message; a script that drops the result, or lets only
+  // src/errors.ts read the code (isPlyError), observed nothing.
+  const dir = mkdtempSync(join(tmpdir(), 'ply-observed-'));
+  const run = (name, body) => {
+    const out = join(dir, name);
+    const script = `import { fail, isPlyError } from './src/errors.ts';\nconst r = fail('bad_request', 'seeded');\n${body}`;
+    const r = spawnSync(process.execPath, ['--import', './test/ts-resolve.mjs', '--import', './test/space/failsite-hook.mjs', '--input-type=module', '-e', script], { cwd: ROOT, env: { ...process.env, PLY_FAILSITES: out, NODE_OPTIONS: '' }, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+    const rec = readRecords(out);
+    assert.equal(rec.frames.size, 1, `${name}: one src frame`);
+    assert.match([...rec.frames.keys()][0], /^src\/errors\.ts:\d+:\d+$/, name);
+    return { frames: [...rec.frames.keys()], observed: [...(rec.observed?.keys() ?? ['(no observation data)'])] };
+  };
+  try {
+    assert.deepEqual(run('reach-only', 'void r;').observed, [], 'reached, result dropped');
+    assert.deepEqual(run('src-read', 'if (!isPlyError(r.error)) process.exit(3);').observed, [], 'only src/ read the code');
+    const code = run('code-read', "if (r.error.code !== 'bad_request') process.exit(3);");
+    assert.deepEqual(code.observed, code.frames, 'the script read .code');
+    const message = run('message-read', "if (r.error.message !== 'seeded') process.exit(3);");
+    assert.deepEqual(message.observed, message.frames, 'the script read .message');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('claims: a site claimed by a space whose runner ran without reaching it is a hole, pending or merged', () => {
