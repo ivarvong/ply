@@ -351,6 +351,8 @@ Repeat pushes are thin: ply reads the parent's trees only where the new tree dif
 
 `pushDir` / `filesFromDir(dir, { filter, limits })` read a directory as git's index would: the owner's execute bit makes `100755`, a symlink is `120000` with its target (never followed), empty directories vanish, `.git` is skipped, anything else (FIFO, socket) is `bad_request`. `filter(path, { directory, symlink })` → `false` leaves a path out; `.gitignore` is not read, and there is no `ply push` CLI. Gitlinks come only from `files` (`{ mode: '160000', oid }`): a nested checkout is walked as a plain directory. A tree oid from `filesFromDir` equals `git add -A && git write-tree` on the same directory (tested).
 
+**Each object once.** `push` (`client.push`, and every command that pushes through it: `editFile`, `commitChanges`, `pushTree`, merge, rebase) sends a whole object that `objects` holds more than once a single time: the first copy, in its place, and an `ofs` base that named a repeat names the kept copy. A pack with one object twice is refused by a strict receiver (`git index-pack --strict`: "The same object … appears twice in the pack"). So `PushResult.entries`, the span's `git.push.pack.objects` (and its `git.push.pack.*` sizes) and the `git.push.object` events count the objects sent, which can be fewer than `objects.length`. Delta entries are sent as given; `planPush` returns the list as given; `pushPack` sends your pack untouched.
+
 ## Push a pack you already have (`pushPack`)
 
 A mirror relay, a bundle import or a pack cut from another pack does not need its objects in memory. `pushPack` sends a complete pack from a `ReadableStream`, with `push`'s command checks, capability checks and report handling:

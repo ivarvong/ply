@@ -50,11 +50,16 @@ for (const [config, cfg] of CONFIGS) {
     // every object twice, the repeats as separate copies of the bytes (not the same array) and out of order
     const copy = o => ({ type: o.type, data: o.data.slice() });
     const objects = [commit, rootTree, sub, copy(sub), blob, other, copy(blob), copy(rootTree), copy(commit), copy(other)];
-    const c = GitHttp.create(`${srv.url}/${f.name}.git`, { tracer: new Tracer() });
+    const spans = [];
+    const c = GitHttp.create(`${srv.url}/${f.name}.git`, { tracer: new Tracer({ onEnd: s => spans.push(s) }) });
     assert.equal(c.ok, true);
     const r = await c.value.push({ ref: 'refs/heads/main', oldOid: f.head, newOid: f.next, objects });
     assert.equal(r.ok ? 'ok' : `${r.error.code}: ${r.error.message}`, 'ok');
     assert.equal(r.value.entries.length, 5); // five distinct objects, by the fixture
+    // what README says is counted: the objects sent (5), not the list's length (10)
+    const rp = spans.find(s => s.name === 'git.receive-pack');
+    assert.equal(rp.attrs['git.push.pack.objects'], 5);
+    assert.equal(rp.events.filter(e => e.name === 'git.push.object').length, 5);
     assert.equal(git(f.bare, ['rev-parse', 'refs/heads/main']).trim(), f.next);
     assert.deepEqual(fsckProblems(f.bare), []);
   });
