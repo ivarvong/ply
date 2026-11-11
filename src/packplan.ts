@@ -348,7 +348,7 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   const batches = planFinal(c, restFams, blobs.value);
   if (!batches.ok) return batches;
   const stuck = at(c.unbuildable, 0);
-  if (stuck.tag === 'some') return fail('bad_request', `entry ${stuck.value} is an OFS_DELTA cut from its base, and the resolved index has no id for that base to write it as a REF_DELTA`);
+  if (stuck.tag === 'some') return fail('bad_request', `entry ${stuck.value} is an OFS_DELTA cut from its base, and the resolved index has no id (40 lowercase hex) for that base to write it as a REF_DELTA`);
   const entries = batches.value.reduce((s, b) => s + b.objects, 0);
   const body = { version: PLAN_VERSION, trailer: pack.trailer, budget: { ...opts.budget }, crossBatchRef: opts.crossBatchRef, select: opts.select === null ? null : [...opts.select], batches: batches.value, entries } as const;
   return ok({ ...body, hash: planHash(body) });

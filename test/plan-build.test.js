@@ -173,3 +173,53 @@ test('an id is asked of `resolved` only for a base outside the batch: none when 
   assert.ok(cut.batches.some(b => b.refRewrites > 0));
   assert.ok(asked > 0, 'a cut base is looked up');
 });
+
+test('a resolved index whose oid() is missing, throws, or answers anything but 40 lowercase hex is refused before a byte is read', async () => {
+  const c = src.idx.columns;
+  const type = src.resolved.columns.type;
+  const all = [...Array(src.idx.count).keys()];
+  const blobs = all.filter(i => type[i] === TYPE.BLOB);
+  // an OFS_DELTA on an OFS_DELTA: selected alone, its base is outside the pack and can only be named by `resolved`
+  const cut = blobs.find(i => c.storedType[i] === TYPE.OFS_DELTA && c.storedType[c.baseIndex[i]] === TYPE.OFS_DELTA);
+  assert.ok(cut !== undefined);
+  // the base's id as git names it (verify-pack -v lists "<oid> <type> <size> <size-in-pack> <offset> ..."), not ply
+  const dir = join(work, '.git', 'objects', 'pack');
+  const listed = git(work, ['verify-pack', '-v', join(dir, readdirSync(dir).find(f => f.endsWith('.idx')))]).split('\n').map(l => l.split(/\s+/u));
+  const real = listed.find(f => Number(f[4]) === c.offset[c.baseIndex[cut]])[0];
+  assert.match(real, /^[0-9a-f]{40}$/u);
+  let reads = 0;
+  const bytes = rangeFromBytes(src.bytes);
+  const source = { size: bytes.size, read: (o, l) => { reads++; return bytes.read(o, l); } };
+  const some = value => () => ({ tag: 'some', value });
+  const bad = {
+    'no oid()': undefined,
+    'oid is not a function': real,
+    'oid() throws': () => { throw new Error('boom'); },
+    'oid() answers nothing': () => undefined,
+    'not hex': some('z'.repeat(40)),
+    '39 hex': some(real.slice(1)),
+    '41 hex': some(`${real}0`),
+    'uppercase hex': some('ABCDEF0123'.repeat(4)),
+    'hex with a newline': some(`${real.slice(1)}\n`),
+    'a number': some(7),
+    'bytes': some(new Uint8Array(20)),
+  };
+  for (const [label, oid] of Object.entries(bad)) {
+    const resolved = { ...src.resolved, oid };
+    const plan = planPackBatches(src.idx, resolved, { budget: { ...BIG, maxObjects: 2 }, select: blobs, crossBatchRef: true });
+    assert.equal(plan.ok, false, `${label}: planned`);
+    assert.equal(plan.error.code, 'bad_request', label);
+    const built = await packSubset(source, src.idx, [cut], { outsideBase: 'ref', resolved });
+    assert.equal(built.ok, false, `${label}: built`);
+    assert.equal(built.error.code, 'bad_request', label);
+    assert.equal(built.error.what, 'pack subset base', label);
+  }
+  assert.equal(reads, 0, 'nothing was read for a refused selection');
+  // the control: the same cut with git's own id is planned, built, and a pack strict git accepts on top of the source
+  const built = unwrap(await packSubset(source, src.idx, [cut], { outsideBase: 'ref', resolved: { ...src.resolved, oid: some(real) } }));
+  const out = await drain(built.stream);
+  assert.equal(out.length, built.length);
+  const dst = makeBareRepo(root, `v${n++}`);
+  gitBuf(dst, ['index-pack', '--stdin'], Buffer.from(src.bytes));
+  gitBuf(dst, ['index-pack', '--strict', '--fix-thin', '--stdin'], out);
+});

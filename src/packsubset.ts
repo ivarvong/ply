@@ -105,12 +105,27 @@ function wholeOid(pack: ScannedPack, i: number): string | null {
   const e = pack.entry(i);
   return e.tag === 'some' ? e.value.oid : null;
 }
+// An object id as a REF_DELTA header carries it: 40 lowercase hex, what parseOid (oid.ts) accepts. Spelled here because
+// this file is at its import budget.
+const OID_TEXT = /^[0-9a-f]{40}$/u;
+// The id `resolved` gives entry `b`, checked here, where it is used. A resolved index is the caller's object (made by
+// hand, or read back from storage): an `oid` that is missing, throws, or answers anything but 40 lowercase hex names no
+// base, so the entry is refused (by the planner and the builder alike) and nothing but an object id is ever written
+// into a REF_DELTA header. Asked only for a base outside the batch, so the check costs nothing elsewhere.
+function resolvedId(resolved: ResolvedIndex, b: number): string | null {
+  try {
+    const id = resolved.oid(b);
+    if (id.tag !== 'some') return null;
+    const value: unknown = id.value;
+    return typeof value === 'string' && OID_TEXT.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 // The id of entry `b` as a REF_DELTA would name it: from `resolved` when given (any entry), else the scan index's (a
 // whole object, oids on); null when neither knows it.
 export function baseId(pack: ScannedPack, resolved: ResolvedIndex | null, b: number): string | null {
-  if (resolved === null) return wholeOid(pack, b);
-  const id = resolved.oid(b);
-  return id.tag === 'some' ? id.value : null;
+  return resolved === null ? wholeOid(pack, b) : resolvedId(resolved, b);
 }
 // The REF base id entry `i` names.
 function refOid(pack: ScannedPack, i: number): string | null {
@@ -192,7 +207,7 @@ async function plan(pack: ScannedPack, asked: readonly number[], opts: PackSubse
         p.kind[k] = KIND_REF_FROM_OFS;
       } else {
         const where = selected[b] === 1 ? 'is written after it' : 'is not selected';
-        const hint = opts.outsideBase === 'ref' ? ' and its id is unknown (a delta and no `resolved`, or oids off)' : '; outsideBase: \'ref\' writes it as a REF_DELTA when the base id is known';
+        const hint = opts.outsideBase === 'ref' ? ' and its id is unknown (a delta and no `resolved`, a `resolved` with no valid id for it, or oids off)' : '; outsideBase: \'ref\' writes it as a REF_DELTA when the base id is known';
         return refuse('pack subset base', `entry ${i} is an OFS_DELTA whose base, entry ${b}, ${where}${hint}`);
       }
     } else if (stored === OBJ_REF_DELTA) {
