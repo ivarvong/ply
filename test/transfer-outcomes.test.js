@@ -11,6 +11,10 @@
 //     landed through a second clean transport. Git itself then refuses the runner's push because the ref moved (a lost
 //     compare-and-swap, no hook), or a pre-receive hook installed for that one request declines it: done either way
 //   - atomic off, the temp ref's delete refused by an update hook while the create lands: done with tempLeft
+//   - a real AbortSignal fired during the final push (after git applied it, and before the request was forwarded):
+//     `ambiguous`, never `aborted`; git shows which of the two happened and a resume ends done
+//   - a sweep deleting the temp ref just before the final push: atomic off, the branch is published and the run is
+//     done; atomic on, git refuses the whole push, nothing is published and the run reports a definite refusal
 // Each expectation is the fault the wrapper injected and what git shows in the bare repository, not ply's output.
 import { test, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
@@ -23,7 +27,7 @@ import { resolvePackRange } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
 import { createTransport } from '../src/http.js';
 import { planTransfer } from '../src/transferplan.js';
-import { runTransfer, transferStep } from '../src/transfer.js';
+import { runTransfer, transferStep, sweepTransfers } from '../src/transfer.js';
 import * as entry from '../src/index.js';
 import { unwrap } from './unwrap.js';
 
@@ -361,4 +365,69 @@ test('a pause after this run\'s push was refused and another runner landed the s
   assert.deepEqual(unanswered, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'unanswered', lastStep: 'landed' });
   // the package entry exports the runner; LastPush and LastStep are types beside TransferRun (checked by tsc below)
   assert.equal(entry.runTransfer, runTransfer);
+});
+
+test('a real AbortSignal fired during the final push: ambiguous, never aborted; git decides what landed', async () => {
+  const p = plan();
+  const n = p.steps.length;
+  // 'applied': the signal fires once git has written its whole report for the final push (it landed);
+  // 'unsent': it fires before the final push is forwarded (git never saw it). The runner cannot tell them apart.
+  for (const when of ['applied', 'unsent']) {
+    const controller = new AbortController();
+    const seen = { pushes: 0, fired: 0 };
+    const fetchImpl = async (input, init) => {
+      if (!isPush(input, init) || seen.pushes++ !== n - 1) return fetch(input, init);
+      if (when === 'unsent') { seen.fired++; controller.abort(); return fetch(input, init); }
+      const res = await fetch(input, init);
+      await res.clone().arrayBuffer();
+      seen.fired++;
+      controller.abort();
+      return res;
+    };
+    const { bare, url } = repo();
+    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl, signal: controller.signal })), from, p, src.commit, { settle: FAST });
+    assert.equal(seen.fired, 1, when);
+    assert.equal(controller.signal.aborted, true);
+    // git decides what landed: the branch published, or the temp ref still at the last batch step
+    if (when === 'applied') assertPublished(bare, p);
+    else assert.equal(refsOf(bare), `${p.tempRef} ${p.steps[n - 2].temp}`);
+    assert.equal(run.ok, false, `${when}: the final push's outcome is not known to the runner; it said ${say(run)}`);
+    assert.equal(run.error.code, 'ambiguous', `${when}: ${say(run)}`);
+    // a resume without the signal: nothing to send when it had landed, the one final push when it had not
+    const resumed = must(await runTransfer(unwrap(createTransport(url)), from, p, src.commit, { settle: FAST }));
+    assert.deepEqual(resumed, { tag: 'done', head: p.head, pushes: when === 'applied' ? 0 : 1, tempLeft: false }, when);
+    assertPublished(bare, p);
+  }
+});
+
+test('a sweep deleting the temp ref just before the final push: atomic off, published and done; atomic on, nothing published and a definite refusal', async () => {
+  for (const atomic of [false, true]) {
+    const p = plan({ atomic });
+    const n = p.steps.length;
+    const { bare, url } = repo();
+    const clean = unwrap(createTransport(url));
+    const swept = [];
+    const o = overtaken(async k => {
+      if (k !== n - 1) return;
+      assert.equal(refsOf(bare), `${p.tempRef} ${p.steps[n - 2].temp}`);
+      swept.push(...must(await sweepTransfers(clean)));
+      assert.equal(refsOf(bare), '', 'git: the sweep deleted the temp ref');
+    });
+    const run = await runTransfer(unwrap(createTransport(url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { settle: FAST });
+    assert.deepEqual(swept, [p.tempRef]);
+    assert.equal(o.seen.reports.length, n);
+    assert.match(o.seen.reports[n - 1], NG, `atomic ${atomic}: git refused the delete of a ref that is gone`);
+    if (atomic) {
+      // one transaction: the create is refused with the delete, so git shows nothing and the run must not say done
+      assert.equal(refsOf(bare), '', 'git: an atomic push refused publishes nothing');
+      assert.equal(run.ok, false, `nothing is published; the run said ${say(run)}`);
+      assert.notEqual(run.error.code, 'ambiguous', 'git answered the push: a definite refusal');
+    } else {
+      // two updates: the create lands, the delete is refused; git shows the branch and no temp ref
+      assertPublished(bare, p);
+      assert.equal(run.ok, true, `the branch is published; the run said ${say(run)}`);
+      assert.deepEqual(run.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false });
+      assert.deepEqual(must(await runTransfer(clean, from, p, src.commit)), { tag: 'done', head: p.head, pushes: 0, tempLeft: false });
+    }
+  }
 });
