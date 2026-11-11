@@ -1,13 +1,15 @@
 // encodeTree is the one way ply writes a tree, and it must not write one `git fsck --strict` refuses.
-// Every expectation here is git's: `git hash-object -t tree --stdin` runs fsck (strict) on the object, `git mktree`
-// builds git's own tree from the same entries, and `git ls-tree` reads back what was written.
+// Every expectation here is git's: `git fsck --strict` over a fresh repository holding one hand-built tree object
+// (written with `git hash-object --literally`, which checks nothing) is the verdict on each cell, `git mktree` builds
+// git's own tree from the same entries, and `git ls-tree` reads back what was written. Where git has no say (a mode
+// or an oid that is not a string) the expected refusal is derived by hand and said in a comment.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeTree, treeSort } from '../src/objects.js';
+import { encodeTree, encodeEntries, treeSort } from '../src/objects.js';
 
 const BLOB = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391'; // git's empty blob
 const TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'; // git's empty tree
@@ -75,6 +77,69 @@ test('encodeTree refuses exactly the single entries git fsck refuses, and writes
     assert.ok(refused >= 25, `git refused only ${refused} cells: the oracle is not judging`);
     assert.deepEqual(wrong, []);
   }
+});
+
+// Modes, at the encoder itself (encodeEntries: what pushTree, commitChanges, merge and memtree call with a typed entry).
+// The type says Mode; a JavaScript caller's value is whatever it is. Git decides each string cell: the entry's bytes are
+// written by hand with that mode (UTF-8) and `git fsck --strict` accepts or refuses the tree. No cell holds a space or a
+// NUL: those bytes would move the mode/name boundary and git would be judging a different entry.
+const MODE_CELLS = [
+  ['100644', BLOB], ['100755', BLOB], ['120000', BLOB], ['40000', TREE], ['160000', BLOB],
+  // fsck zeroPaddedFilemode, badFilemode (100664 is an error under --strict), and modes decode_tree_entry cannot read
+  ['0100644', BLOB], ['040000', TREE], ['100664', BLOB], ['100000', BLOB], ['644', BLOB], ['0', BLOB], ['', BLOB], ['abc', BLOB], ['100648', BLOB],
+  // not ASCII: fullwidth digits (3 bytes each in UTF-8, 1 UTF-16 unit), one fullwidth digit among ASCII, an astral digit
+  ['１００６４４', BLOB], ['10064４', BLOB], ['𝟏00644', BLOB], ['é', BLOB],
+];
+// Git's verdict on a mode has three values, and ply encodes only the first: `clean` (fsck --strict accepts and says
+// nothing: the five modes git writes), `notice` (fsck --strict accepts and reports badFilemode, an INFO id that
+// --strict does not raise: 100664, 100000, 644; git never writes these, canon_mode rewrites them), `refused`.
+test('encodeEntries checks the mode itself: it encodes exactly the modes git fsck --strict passes without a badFilemode notice, with git\'s bytes, and never throws', () => {
+  const wrong = [];
+  const seen = { clean: [], notice: [], refused: [] };
+  for (const [mode, oid] of MODE_CELLS) {
+    const raw = Buffer.concat([Buffer.from(`${mode} a`, 'utf8'), Buffer.from([0]), Buffer.from(oid, 'hex')]);
+    const want = fsckAccepts(raw);
+    const verdict = want.code !== 0 ? 'refused' : /badFilemode/.test(`${want.out}${want.err}`) ? 'notice' : 'clean';
+    seen[verdict].push(mode);
+    const label = `mode ${JSON.stringify(mode)}`;
+    let got;
+    try { got = encodeEntries([{ mode, name: 'a', oid }]); } catch (x) { wrong.push(`${label}: encodeEntries throws ${x}`); continue; }
+    if (got.ok !== (verdict === 'clean')) { wrong.push(`${label}: git ${verdict} (${`${want.err}${want.out}`.trim().split('\n')[0]}), ply ${got.ok ? `encodes ${JSON.stringify(Buffer.from(got.value).toString('latin1').slice(0, 12))}` : `refuses (${got.error.message})`}`); continue; }
+    if (got.ok) assert.deepEqual([...got.value], [...raw], label);
+    else assert.deepEqual([got.error.code, got.error.what, got.error.entry], ['bad_request', 'mode', 'a'], label);
+  }
+  // the oracle is judging: git passes its own five modes clean, and only those
+  assert.deepEqual(seen.clean, ['100644', '100755', '120000', '40000', '160000']);
+  assert.deepEqual(seen.notice, ['100664', '100000', '644']);
+  assert.equal(seen.refused.length, MODE_CELLS.length - 8);
+  assert.deepEqual(wrong, []);
+});
+
+test('encodeEntries checks every field itself: a mode or an oid that is not what the type says is bad_request, never a throw or a written tree', () => {
+  // By hand: a tree entry's mode is one of five ASCII strings and its id is 20 bytes, written from 40 lowercase hex
+  // digits. Nothing else has an encoding, so each of these has exactly one honest outcome: bad_request naming the field.
+  const cyclic = {}; cyclic.self = cyclic;
+  const cells = [
+    ['mode', { mode: 100644, name: 'a', oid: BLOB }], ['mode', { mode: undefined, name: 'a', oid: BLOB }], ['mode', { mode: null, name: 'a', oid: BLOB }],
+    ['mode', { mode: {}, name: 'a', oid: BLOB }], ['mode', { mode: 10n, name: 'a', oid: BLOB }], ['mode', { mode: cyclic, name: 'a', oid: BLOB }], ['mode', { mode: ['100644'], name: 'a', oid: BLOB }],
+    ['oid', { mode: '100644', name: 'a', oid: 'abc' }], ['oid', { mode: '100644', name: 'a', oid: BLOB.toUpperCase() }], ['oid', { mode: '100644', name: 'a', oid: `${BLOB}0` }],
+    ['oid', { mode: '100644', name: 'a', oid: BLOB.slice(1) }], ['oid', { mode: '100644', name: 'a', oid: `${BLOB.slice(0, 39)}g` }], ['oid', { mode: '100644', name: 'a', oid: 5 }],
+    ['oid', { mode: '100644', name: 'a', oid: undefined }], ['oid', { mode: '100644', name: 'a', oid: '１'.repeat(40) }],
+    // a name that is not a string, with a bad mode beside it: quoting the name must not throw either (a BigInt, a cycle)
+    ['mode', { mode: '644', name: 5n, oid: BLOB }], ['mode', { mode: '644', name: cyclic, oid: BLOB }],
+  ];
+  const wrong = [];
+  for (const [what, entry] of cells) {
+    for (const [fn, encode] of [['encodeEntries', encodeEntries], ['encodeTree', encodeTree]]) {
+      const label = `${fn} ${what} mode:${typeof entry.mode} name:${typeof entry.name} oid:${typeof entry.oid === 'string' ? entry.oid.length : typeof entry.oid}`;
+      let got;
+      try { got = encode([entry]); } catch (x) { wrong.push(`${label}: throws ${x}`); continue; }
+      if (got.ok) { wrong.push(`${label}: encodes ${got.value.length} bytes`); continue; }
+      // a name that is not a string is refused for the name by the encoder and for the mode by treeEntryOf: either names a field
+      if (got.error.code !== 'bad_request' || (got.error.what !== what && got.error.what !== 'tree entry name')) wrong.push(`${label}: ${got.error.code} what=${got.error.what}`);
+    }
+  }
+  assert.deepEqual(wrong, []);
 });
 
 test('encodeTree of one entry never writes a tree git reads as other entries (a NUL in the name)', () => {

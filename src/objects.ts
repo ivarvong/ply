@@ -206,13 +206,20 @@ export function isMode(mode: unknown): mode is Mode {
       return false;
   }
 }
+// A caller's value quoted in a refusal. The types say string, a JavaScript caller's value is whatever it is, and a
+// refusal must not throw: JSON.stringify throws on a BigInt and on a cycle, so only a string is quoted; a number, a
+// boolean, null and undefined are spelled, and anything else is named by its type.
+function quoted(value: unknown): string {
+  if (typeof value === 'string') return JSON.stringify(value);
+  return value === null || value === undefined || typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value;
+}
 // A caller's entry, parsed once: the mode is one of the five (`tree: entry "n": invalid mode`, what `mode`) and the oid
 // 40 lowercase hex (parseOid's refusal, what `oid`), each with the entry's name.
 export function treeEntryOf(e: TreeEntryInput): Result<EntryOf, BadRequest> {
   const { mode, name } = e;
-  if (!isMode(mode)) return fail('bad_request', `tree: entry ${JSON.stringify(name)}: invalid mode ${JSON.stringify(mode)}`, { what: 'mode', entry: name });
+  if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: name });
   const oid = parseOid(e.oid);
-  if (!oid.ok) return fail('bad_request', `tree: entry ${JSON.stringify(name)}: ${oid.error.message}`, { what: 'oid', entry: name });
+  if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(name)}: ${oid.error.message}`, { what: 'oid', entry: name });
   return ok({ mode, name, oid: oid.value });
 }
 
@@ -374,8 +381,11 @@ export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], 
 // each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and `readme`)
 // are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
 // treeNotSorted cannot happen: the entries are sorted here, in fsck verify_ordered's order (cmpTreeKeys), on name bytes
-// encoded once per entry. The mode is one of the five git writes (Mode: treeEntryOf refuses the rest), so
-// zeroPaddedFilemode and badFilemode cannot happen either.
+// encoded once per entry. zeroPaddedFilemode and badFilemode cannot happen either: the encoder checks every field
+// itself, whatever the entry's type says. The name must be a string with a byte form, the mode one of the five git
+// writes (isMode) and the id 40 lowercase hex (parseOid); anything else is bad_request (what `tree entry name`, `mode`,
+// `oid`), never a throw and never a written byte. A mode that is not one of the five has no fixed width (a fullwidth
+// digit is one UTF-16 unit and three bytes), so it is refused before the output is sized.
 const NULL_OID = '0'.repeat(OID_HEX_CHARS);
 type TreeRow = { readonly mode: Mode; readonly name: Uint8Array; readonly oid: Oid };
 // Why fsck refuses one entry (parseTree's words for it), or null: the entry and its name's bytes
@@ -405,9 +415,12 @@ export function encodeEntries(entries: readonly EntryOf[]): Result<Uint8Array, B
     const encoded = encodeBytes(e.name, 'tree entry name');
     if (!encoded.ok) return encoded;
     const name = encoded.value;
+    if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(e.name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: e.name });
+    const oid = parseOid(e.oid);
+    if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${oid.error.message}`, { what: 'oid', entry: e.name });
     const why = entryRefusal(e, name);
-    if (why !== null) return fail('bad_request', `tree: entry ${JSON.stringify(e.name)}: ${why}`, { what: 'tree entry', entry: e.name });
-    if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
+    if (why !== null) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${why}`, { what: 'tree entry', entry: e.name });
+    if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${quoted(e.name)}`, { what: 'tree entry', entry: e.name });
     names.add(e.name);
     rows.push({ mode, name, oid: e.oid });
     size += mode.length + 1 + name.length + 1 + OID_BYTES;
