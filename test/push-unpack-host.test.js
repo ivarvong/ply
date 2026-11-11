@@ -238,11 +238,32 @@ test('parseReceivePackTooLarge: the observed Artifacts text parses to the same b
     `${HEAD}286.3 MiB, limit is 0 MiB`, `${HEAD}286.3 MiB, limit is 0.0 MiB`,
     // more digits than any byte count ply can hold exactly: 10^10 MiB is over 2^53 bytes
     `${HEAD}10000000000 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is ${'9'.repeat(400)} MiB`,
-    // the right shape after a megabyte of padding is still not examined
+    // 300 leading zeros: more than the 9 integer digits a figure may have
     `${HEAD}${'0'.repeat(300)}286.3 MiB, limit is 64.0 MiB`,
+    // the second figure's unit is checked too: the last four characters are ' MiB' and nothing else
+    `${HEAD}286.3 MiB, limit is 64.0 GiB`, `${HEAD}286.3 MiB, limit is 64.0 KiB`, `${HEAD}286.3 MiB, limit is 64.0 mib`, `${HEAD}286.3 MiB, limit is 64.0XXXX`,
+    `${HEAD}286.3 MiB, limit is 64.0MiB `, `${HEAD}286.3 MiB, limit is 64.0 MiB, limit is 64.0 GiB`,
+    // the first 54 characters are the head and nothing else: the same length with one word, one letter or the code changed
+    TOO_LARGE.replace('push is', 'pull is'), TOO_LARGE.replace('artifacts_git', 'Artifacts_git'), TOO_LARGE.replace('too_large:', 'too_small:'),
+    `${'x'.repeat(HEAD.length)}286.3 MiB, limit is 64.0 MiB`, `${HEAD.slice(1)} 286.3 MiB, limit is 64.0 MiB`,
+    // the head and the tail alone, sharing their space or not; no middle; the middle twice
+    `${HEAD}MiB`, `${HEAD} MiB`, `${HEAD}5 MiB`, `${HEAD}286.3 MiB`, `${HEAD}286.3 MiB, limit is 64.0 MiB, limit is 64.0 MiB`,
+    // 10 integer digits, 7 decimals (9 and 6 are the most a figure has, below)
+    `${HEAD}1000000000 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is 1000000000 MiB`, `${HEAD}1.0000001 MiB, limit is 64.0 MiB`, `${HEAD}286.3 MiB, limit is 64.0000000 MiB`,
+    // a figure is digits only, on both sides
+    `${HEAD}286.3 MiB, limit is .5 MiB`, `${HEAD}286.3 MiB, limit is 64. MiB`, `${HEAD}286.3 MiB, limit is -64 MiB`, `${HEAD}286.3 MiB, limit is 6 4 MiB`, `${HEAD}286.3 MiB, limit is 64.0a MiB`, `${HEAD}a286.3 MiB, limit is 64.0 MiB`,
+    `${HEAD}0 MiB, limit is 64.0 MiB`, `${HEAD}0.0000004 MiB, limit is 64.0 MiB`,
   ];
+  // the near misses are near: each of the two-figure ones differs from a parsing reason in the part named above
+  assert.equal(TOO_LARGE.replace('push is', 'pull is').length, TOO_LARGE.length);
+  assert.equal(HEAD.length, 54);
   for (const reason of no) assert.equal(parseReceivePackTooLarge(reason), null, JSON.stringify(reason.slice(0, 120)));
   // every figure that parses is a safe, positive byte count
   const top = parseReceivePackTooLarge(`${HEAD}999999999.999999 MiB, limit is 999999999.999999 MiB`);
   assert.ok(top !== null && Number.isSafeInteger(top.got) && top.got === top.max && top.got > 0, JSON.stringify(top));
+  // By hand: 999,999,999.999999 MiB = 10^9 * 2^20 - 2^20 / 10^6 = 1,048,576,000,000,000 - 1.048576, rounded
+  // 1,048,575,999,999,999; the smallest figure, 0.000001 MiB = 1.048576 bytes, rounds to 1; 9 leading digits with
+  // zeros: 000000001 MiB = 1,048,576.
+  assert.deepEqual(top, { got: 1048575999999999, max: 1048575999999999 });
+  assert.deepEqual(parseReceivePackTooLarge(`${HEAD}000000001 MiB, limit is 0.000001 MiB`), { got: 1048576, max: 1 });
 });

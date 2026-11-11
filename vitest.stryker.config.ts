@@ -25,6 +25,7 @@ const MUTATION_FILES = [
   'test/packstream.test.js',
   'test/packwrite.test.js',
   'test/push-commands.test.js',
+  'test/push-unpack-host.test.js',
   'test/http-options.test.js',
   'test/describe-pack.test.js',
   'test/packindex.test.js',
