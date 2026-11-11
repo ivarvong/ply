@@ -9,10 +9,11 @@
 // so the wrapper's caller is recorded as the site it is.
 //
 // Reached is not judged: a test that triggers an error and asserts nothing reaches the site too. So the recorder also
-// notes which errors were looked at: the error plyError returns gets its `code` and `message` served through accessors
-// (same values, same enumerability), and the first read made by code outside src/ (a test, a helper, node's assert)
-// marks every src/ frame of that error's stack as observed. ply reading its own error (a classifier, a wrapper's
-// message) does not count. An error whose frames are all observed already is left as plyError built it, so a space
+// notes which errors were looked at: the error plyError returns gets its `code` served through an accessor (same
+// value, same enumerability), and the first read made by code outside src/ (a test, a helper, node's assert) marks
+// every src/ frame of that error's stack as observed. ply reading its own error (a classifier) does not count. Only
+// `code`: `message` stays the data property it is, because a structured clone (postMessage from a worker) copies an
+// Error's message only from a data property; `code` is not cloned either way. An error whose frames are all observed already is left as plyError built it, so a space
 // that makes the same error a million times pays for the first one only.
 //
 // Records: <dir>/<pid>-<thread>-<runner>.json = { runner, platform, frames: { "src/x.ts:L:C": n }, observed: [frame] },
@@ -74,8 +75,8 @@ if (DIR && !globalThis[KEY]) {
     pending = { r, keys: [...seen] };
     if (fresh) save(r);
   };
-  // the error that plyError call built. Its code and message are read through accessors until code outside src/ reads
-  // one of them; the reader is the frame that called the accessor (one frame, captured only while still unobserved)
+  // the error that plyError call built. Its code is read through an accessor until code outside src/ reads it; the
+  // reader is the frame that called the accessor (one frame, captured only while still unobserved)
   recorder.made = e => {
     const p = pending;
     pending = null;
@@ -98,7 +99,7 @@ if (DIR && !globalThis[KEY]) {
       for (const k of p.keys) if (!observed.has(k)) { observed.add(k); fresh = true; }
       if (fresh) save(p.r);
     };
-    for (const key of ['code', 'message']) {
+    for (const key of ['code']) {
       const d = Object.getOwnPropertyDescriptor(e, key);
       if (!d || !d.configurable || !('value' in d)) continue;
       let value = d.value;

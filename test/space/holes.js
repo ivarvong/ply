@@ -118,7 +118,7 @@ export function compute({ records = null, spaces = SPACES, decisions = DECISIONS
     // a site the registry excludes (with its reason) is not a hole for gate c either
     const excluded = p => { const r = dec.by.get(p.id); return !!r && 'excluded' in r; };
     holes.failsites = sites.filter(p => !reachedBy.get(p.id).size && !sampled.has(p.id) && !excluded(p)).map(p => p.id);
-    // reached is not judged: a site whose error no test read (code or message, see failsite-hook.mjs) would pass
+    // reached is not judged: a site whose error code no test read (see failsite-hook.mjs) would pass
     // gate c with a wrong code, message or outcome. Reported by failsites.test.js; not in CATEGORIES (no ratchet
     // baseline yet: that needs one recorded run of the whole suite)
     if (records.observed) holes.observed = sites.filter(p => reachedBy.get(p.id).size && !records.observed.get(frameOf(p))?.size && !sampled.has(p.id) && !excluded(p)).map(p => p.id);

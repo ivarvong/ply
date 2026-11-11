@@ -59,11 +59,11 @@ test('observed: a fail site a runner reached while no test read the error is a h
   assert.deepEqual(compute({ records: { frames: new Map(), runners: new Set([runner]), platforms: new Map(), observed: new Map() } }).holes.observed, [], 'not reached: a failsites hole only');
 });
 
-test('observed: the recorder marks a site only when code outside src/ read the error\'s code or message', () => {
+test('observed: the recorder marks a site only when code outside src/ read the error\'s code', () => {
   // Four node processes under the recorder, each building one error with errors.ts `fail` from a script outside src/.
   // By hand: the stack at plyError holds exactly one src/ frame (fail's call), so each record has one frame. It is
-  // observed only where the script itself reads .code or .message; a script that drops the result, or lets only
-  // src/errors.ts read the code (isPlyError), observed nothing.
+  // observed only where the script itself reads .code; a script that drops the result, lets only src/errors.ts read
+  // the code (isPlyError), or reads only .message (left a data property: a structured clone keeps it) observed nothing.
   const dir = mkdtempSync(join(tmpdir(), 'ply-observed-'));
   const run = (name, body) => {
     const out = join(dir, name);
@@ -81,7 +81,7 @@ test('observed: the recorder marks a site only when code outside src/ read the e
     const code = run('code-read', "if (r.error.code !== 'bad_request') process.exit(3);");
     assert.deepEqual(code.observed, code.frames, 'the script read .code');
     const message = run('message-read', "if (r.error.message !== 'seeded') process.exit(3);");
-    assert.deepEqual(message.observed, message.frames, 'the script read .message');
+    assert.deepEqual(message.observed, [], 'the script read only .message');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
