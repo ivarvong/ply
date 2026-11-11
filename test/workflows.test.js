@@ -46,3 +46,22 @@ test('npm run check is the pre-push gate: typecheck, lint, the registry test, th
   // Documented where a contributor looks for it.
   assert.match(read('CONTEXT.md'), /^npm run check\b/mu);
 });
+
+test('nightly: every job checks out the one sha the seed job resolved, never a moving main', () => {
+  const y = code(read('.github/workflows/nightly.yml'));
+  // Counted by hand in nightly.yml: fuzz, test-shard, test, pack-cut-full and sweep check the repository out.
+  const checkouts = y.match(/^ {6}- uses: actions\/checkout@/gmu) ?? [];
+  assert.equal(checkouts.length, 5);
+  const refs = [...y.matchAll(/^ {10}ref: (.*)$/gmu)].map((m) => m[1]);
+  assert.deepEqual(refs, Array.from({ length: 5 }, () => '${{ needs.seed.outputs.sha }}'));
+  // `needs.seed.outputs.sha` is empty in a job that does not need seed, and an empty ref checks out the default.
+  const jobs = y.slice(y.indexOf('\njobs:\n')).split(/^ {2}(?=[a-z-]+:$)/mu).slice(1);
+  for (const job of jobs) {
+    if (!job.includes('actions/checkout@')) continue;
+    assert.match(job, /^ {4}needs: (?:seed|\[seed(?:, [a-z-]+)*\])$/mu, `job ${job.split(':')[0]} checks out but does not need seed`);
+  }
+  // The sha is resolved once, validated as a commit id, and published as the seed job's output.
+  assert.match(y, /^ {6}sha: \$\{\{ steps\.seed\.outputs\.sha \}\}$/mu);
+  assert.match(y, /git ls-remote "https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\.git" refs\/heads\/main/u);
+  assert.match(y, /\[\[ "\$sha" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
+});
