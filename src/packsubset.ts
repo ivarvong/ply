@@ -311,6 +311,9 @@ async function* pieces(source: RangeSource, p: Plan, halt: Halt): AsyncGenerator
 export async function packSubset(source: RangeSource, pack: ScannedPack, selection: readonly number[], input: Partial<PackSubsetOpts> = {}): Promise<Result<PackSubset, PlyError>> {
   const opts = withDefaults(input, defaultOpts());
   if (pack.bytes > source.size) return refuse('pack subset source', `the source holds ${source.size} bytes; the indexed pack is ${pack.bytes}`);
+  // a JavaScript caller's value, checked as unknown: null, a number or an array-like is refused before it is counted
+  const extras: unknown = opts.extras;
+  if (!Array.isArray(extras)) return refuse('pack subset extras', 'extras is not an array');
   const planned = await plan(pack, selection, opts);
   if (!planned.ok) return planned;
   const p = planned.value;

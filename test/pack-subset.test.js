@@ -358,6 +358,27 @@ test('an extra a pack cannot hold is refused before the source sees a read', asy
   }
 });
 
+test('extras that is not an array is refused (bad_request), never thrown', async () => {
+  const idx = await scan(packs.ofs);
+  // The expected outcome is the contract's: packSubset returns a Result, so a caller's wrong value is a coded refusal
+  // (bad_request, what: 'pack subset extras'), not a TypeError out of the promise, and nothing is read for it.
+  const invalid = [['null', null], ['a number', 7], ['a string', 'ab'], ['a plain object', {}], ['an array-like', { length: 1, 0: { type: TYPE.BLOB, data: te.encode('x') } }], ['bytes', new Uint8Array(2)]];
+  for (const [name, extras] of invalid) {
+    const src = countingSource(packs.ofs);
+    const settled = await packSubset(src, idx, [0], { extras }).then(r => ({ r }), thrown => ({ thrown }));
+    assert.equal(settled.thrown, undefined, `${name}: rejected with ${String(settled.thrown)}`);
+    assert.equal(settled.r.ok, false, name);
+    assert.equal(settled.r.error.code, 'bad_request', name);
+    assert.equal(settled.r.error.what, 'pack subset extras', name);
+    assert.equal(src.state.reads, 0, `${name}: no read`);
+  }
+  // left out, or passed as the missing value, is no extras: the pack is the selection alone
+  for (const opts of [{}, { extras: undefined }]) {
+    const built = unwrap(await packSubset(rangeFromBytes(packs.ofs), idx, [0], opts));
+    assert.equal(built.count, 1);
+  }
+});
+
 test('rangeFromBytes refuses a range outside its bytes', async () => {
   const src = rangeFromBytes(new Uint8Array(8));
   for (const [o, l] of [[4, 5], [-1, 2], [9, 0], [0.5, 1]]) {
