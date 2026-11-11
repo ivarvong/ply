@@ -244,6 +244,41 @@ test('inflate pull == inflate() on every hand-built member the buffered tests re
   putHole(1, 1); putHole(0, 1);
   for (let i = 0; i < 15; i++) putHole(1, 1);
   assert.equal(refusal(same(packBits(hole), { raw: true, maxOutput: 32 })), 'pack_corrupt: inflate: invalid huffman code');
+  // The literal/length and the distance set of a dynamic block, each not a Huffman code (gate c: random bits after a
+  // block header never get here, their code-length set is refused first). RFC 1951 §3.2.2 builds the codes from the
+  // lengths, and a set of lengths is a code only if Σ 2^-length = 1: above 1 (over-subscribed) the codes do not fit;
+  // below 1 (incomplete) some bit strings are no code, which §3.2.7 allows for one case, a single code of one bit
+  // ("with one unused code"). So three codes of one bit (3/2) and two codes of two bits (1/2, more than one code) are
+  // both invalid, in either set.
+  // The header: final, dynamic, HLIT and HDIST as given, HCLEN 14: 18 code-length lengths in the RFC's order (16, 17,
+  // 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1), symbol 0 (4th) at one bit, 2 (16th) and 1 (18th) at two:
+  // 1/2 + 1/4 + 1/4 = 1, a complete set, and by §3.2.2 the codes are 0 → `0`, 1 → `10`, 2 → `11`. Then one of those
+  // codes for each literal/length and distance length (a code's first bit is sent first), then `tail`.
+  const sets = (lit, dist, tail = []) => {
+    const bits = []; const put = (v, n) => { for (let i = 0; i < n; i++) bits.push((v >> i) & 1); };
+    put(1, 1); put(2, 2); put(lit.length - 257, 5); put(dist.length - 1, 5); put(14, 4);
+    for (const n of [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2]) put(n, 3);
+    for (const l of [...lit, ...dist]) bits.push(...[[0], [1, 0], [1, 1]][l]);
+    return packBits([...bits, ...tail]);
+  };
+  // 257 literal/length lengths (HLIT 0), zero but for the symbols named
+  const lits = named => Array.from({ length: 257 }, (_, s) => named[s] ?? 0);
+  // node:zlib is the expected value: it refuses the bytes, naming the set; then the pull and inflate(), every chunking
+  const refusedSet = (buf, set) => {
+    assert.throws(() => zlib.inflateRawSync(buf), e => e.code === 'Z_DATA_ERROR' && e.message === set, `node:zlib: ${set}`);
+    assert.equal(refusal(same(buf, { raw: true })), `pack_corrupt: inflate: ${set}`);
+  };
+  // the builder with two valid sets: literal 0 and end-of-block at one bit each (complete), one distance code of one
+  // bit (the case §3.2.7 allows); the tail is literal 0 (`0`) then end-of-block (`1`). zlib and ply read one zero byte.
+  assert.deepEqual([...zlib.inflateRawSync(sets(lits({ 0: 1, 256: 1 }), [1], [0, 1]))], [0]);
+  assert.deepEqual([...same(sets(lits({ 0: 1, 256: 1 }), [1], [0, 1]), { raw: true }).value.out], [0]);
+  // literal/length: literals 0 and 1 and end-of-block at one bit each (3/2), then 0 and end-of-block at two bits (1/2);
+  // no distance code (one length of zero, §3.2.7)
+  refusedSet(sets(lits({ 0: 1, 1: 1, 256: 1 }), [0]), 'invalid literal/lengths set');
+  refusedSet(sets(lits({ 0: 2, 256: 2 }), [0]), 'invalid literal/lengths set');
+  // distance, under the complete literal/length set: three codes of one bit (3/2), then two codes of two bits (1/2)
+  refusedSet(sets(lits({ 0: 1, 256: 1 }), [1, 1, 1]), 'invalid distances set');
+  refusedSet(sets(lits({ 0: 1, 256: 1 }), [2, 2]), 'invalid distances set');
   // a dynamic block node:zlib writes for varied text, two dynamic blocks in a row (the code lengths start over)
   let varied = '';
   for (let i = 0; i < 40000; i++) varied += `word${(i * 7919) % 1500} `;
