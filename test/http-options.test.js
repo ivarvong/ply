@@ -551,3 +551,14 @@ test('the POST span: status, content type, a time to first byte from the request
   assert.equal(plain.attrs['http.response.headers.from_cache'], undefined, 'no recorded names: no recorded-header attributes at all');
   assert.equal(recorded.attrs['http.response.headers.from_cache'], true);
 });
+
+test('a timeout a timer cannot hold (above 2^31-1 ms) is refused where the options enter; 0 (off) and 2^31-1 pass', () => {
+  // setTimeout's delay is a signed 32-bit count of ms: 2147483647 is the largest it holds (HTML timers; Node warns)
+  for (const key of ['firstByteTimeoutMs', 'idleTimeoutMs', 'requestTimeoutMs']) {
+    for (const bad of [2 ** 31, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
+      const r = createTransport('https://h/r', { limits: { [key]: bad } });
+      assert.deepEqual([r.ok, r.error?.code, r.error?.what, r.error?.got], [false, 'bad_request', key, bad], `${key}=${bad}`);
+    }
+    for (const fine of [0, 1, 2 ** 31 - 1]) assert.equal(createTransport('https://h/r', { limits: { [key]: fine } }).ok, true, `${key}=${fine}`);
+  }
+});

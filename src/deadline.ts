@@ -1,31 +1,69 @@
 // The clock of one HTTP exchange (#255): a stall is refused, a long healthy stream is not.
 //
 //   firstByteTimeoutMs  from the request (or from the end of a streamed upload) to the response headers
-//   idleTimeoutMs       the longest gap with no progress: upload chunks pulled, response body chunks read
+//   idleTimeoutMs       the longest wait on the network with no bytes moved: upload bytes out, response body bytes in
 //   requestTimeoutMs    the whole exchange, opt-in (0, the default, is no total cap)
 //
 // 0 turns a timer off. git has no total timeout either (http.lowSpeedLimit is off by default); a caller who needs a
 // wall-clock bound passes requestTimeoutMs or its own signal.
 //
-// One timer, re-armed only when the phase changes. Progress only moves a mark; the timer, when it fires, re-arms for what
-// is left if progress came since. The timer is the strong owner of the AbortController: AbortSignal.any holds its
-// sources weakly and an AbortSignal.timeout is held only by its own weak timer, so after a GC it never fires and a
-// stalled body hangs forever (Node 20/22; found by the calibration harness). A controller owned by a live timer cannot
-// be collected. Date.now in a Worker advances only across I/O; every mark is taken after the I/O that made it.
+// The clock is a pure state machine (`transition`, `deadlineOf`); `exchangeClock` only feeds it events and arms what it
+// says. Two rules it cannot break: a state never moves backwards (headers seen means the first byte is satisfied for
+// good, whatever the upload does after), and time is charged only while ply waits on the network: while the consumer
+// holds a chunk, or has not asked for the next one (`held`), neither the first-byte nor the idle limit runs.
+//
+// One timer. An event moves the mark; the timer is set again only when none is pending or the new deadline is earlier
+// than the pending one, and when it fires it re-arms for what is left. The timer is the strong owner of the
+// AbortController: AbortSignal.any holds its sources weakly and an AbortSignal.timeout is held only by its own weak
+// timer, so after a GC it never fires and a stalled body hangs forever (Node 20/22; found by the calibration harness).
+// A controller owned by a live timer cannot be collected. Date.now in a Worker advances only across I/O; every mark is
+// taken after the I/O that made it.
 import { field } from './absent.js';
+import { MAX_TIMER_MS } from './limits.js';
 
 export type TimeoutKey = 'firstByteTimeoutMs' | 'idleTimeoutMs' | 'requestTimeoutMs';
-// upload: a streamed request body is being sent; first_byte: waiting for the response headers; body: reading the body.
-export type ClockPhase = 'upload' | 'first_byte' | 'body';
+// connecting: the request is out (a byte body), no headers yet. uploading: a streamed body is going out.
+// awaiting_first_byte: the upload ended, no headers yet. streaming: headers seen, ply is waiting on the network.
+// held: headers seen, the consumer holds a chunk or has not asked for the next. done: ended, nothing fires.
+export type ClockState = 'connecting' | 'uploading' | 'awaiting_first_byte' | 'streaming' | 'held' | 'done';
+// request_sent: the request went out again (the stale-memo retry). upload_started / upload_bytes / upload_ended: the
+// streamed request body. headers: the response headers arrived. body_chunk: a body chunk arrived from the network.
+// consumer_took: the chunk was handed to the consumer. consumer_asked: the consumer asked for the next. ended: over.
+export type ClockEvent = 'request_sent' | 'upload_started' | 'upload_bytes' | 'upload_ended' | 'headers' | 'body_chunk' | 'consumer_took' | 'consumer_asked' | 'ended';
+// The next state, and whether the event is network progress that restarts the wait (moves the mark).
+export type ClockStep = { readonly state: ClockState; readonly restart: boolean };
 export type ExchangeTimeouts = { readonly firstByteMs: number; readonly idleMs: number; readonly totalMs: number };
 export type ExchangeClock = {
   readonly signal: AbortSignal;
-  // a chunk moved (an upload pull, a response body chunk). Ignored while waiting for headers.
-  readonly progress: () => void;
-  readonly phase: (next: ClockPhase) => void;
-  // the exchange ended: no timer fires after it
+  readonly feed: (event: ClockEvent) => void;
+  // the exchange ended: no timer fires after it (feed('ended'))
   readonly cancel: () => void;
 };
+
+const stay = (state: ClockState): ClockStep => ({ state, restart: false });
+const go = (state: ClockState): ClockStep => ({ state, restart: true });
+// The whole machine. An event a state has no use for leaves it as it is: nothing moves a state backwards.
+export function transition(state: ClockState, event: ClockEvent): ClockStep {
+  if (state === 'done' || event === 'ended') return stay('done');
+  if (state === 'connecting') {
+    if (event === 'request_sent') return go('connecting');
+    if (event === 'upload_started') return go('uploading');
+    return event === 'headers' ? go('streaming') : stay(state);
+  }
+  if (state === 'uploading') {
+    if (event === 'upload_bytes') return go('uploading');
+    if (event === 'upload_ended') return go('awaiting_first_byte');
+    return event === 'headers' ? go('streaming') : stay(state);
+  }
+  if (state === 'awaiting_first_byte') return event === 'headers' ? go('streaming') : stay(state);
+  if (state === 'streaming') {
+    // bytes moved either way; an upload that ends here ends nothing the clock waits for
+    if (event === 'upload_bytes' || event === 'body_chunk') return go('streaming');
+    return event === 'consumer_took' ? stay('held') : stay(state);
+  }
+  // held: only the consumer's ask puts ply back on the network, and the wait starts then
+  return event === 'consumer_asked' ? go('streaming') : stay(state);
+}
 
 // Node's timer has unref (the DOM lib types it as a number); a Worker's has none.
 const unref = (timer: unknown): void => {
@@ -48,69 +86,91 @@ export function timeoutLimit(reason: unknown): TimeoutKey | null {
   return f.tag === 'some' && (f.value === 'firstByteTimeoutMs' || f.value === 'idleTimeoutMs' || f.value === 'requestTimeoutMs') ? f.value : null;
 }
 
-type Due = { readonly at: number; readonly key: TimeoutKey; readonly ms: number };
+export type Due = { readonly at: number; readonly key: TimeoutKey; readonly ms: number };
 const earlier = (a: Due | null, b: Due | null): Due | null => {
   if (a === null) return b;
   if (b === null) return a;
   return a.at <= b.at ? a : b;
 };
+// The deadline to arm in `state`, whose wait began at `mark`, in an exchange that began at `start`; null is none.
+export function deadlineOf(state: ClockState, mark: number, start: number, t: ExchangeTimeouts): Due | null {
+  if (state === 'done') return null;
+  const total: Due | null = t.totalMs > 0 ? { at: start + t.totalMs, key: 'requestTimeoutMs', ms: t.totalMs } : null;
+  if (state === 'held') return total;
+  const waiting = state === 'connecting' || state === 'awaiting_first_byte';
+  const ms = waiting ? t.firstByteMs : t.idleMs;
+  const step: Due | null = ms > 0 ? { at: mark + ms, key: waiting ? 'firstByteTimeoutMs' : 'idleTimeoutMs', ms } : null;
+  return earlier(total, step);
+}
 
 // `onFire` runs once, before the abort, with the limit that fired (the span records it). `now` is the clock (tests).
 export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, onFire: (key: TimeoutKey, ms: number) => void, now: () => number = Date.now): ExchangeClock {
   const ac = new AbortController();
   const start = now();
-  let phase: ClockPhase = 'first_byte';
+  let state: ClockState = 'connecting';
   let mark = start;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let done = false;
-  const due = (): Due | null => {
-    const total: Due | null = t.totalMs > 0 ? { at: start + t.totalMs, key: 'requestTimeoutMs', ms: t.totalMs } : null;
-    const waiting = phase === 'first_byte';
-    const ms = waiting ? t.firstByteMs : t.idleMs;
-    const step: Due | null = ms > 0 ? { at: mark + ms, key: waiting ? 'firstByteTimeoutMs' : 'idleTimeoutMs', ms } : null;
-    return earlier(total, step);
-  };
+  // when the pending timer fires
+  let armedFor = 0;
+  const due = (): Due | null => deadlineOf(state, mark, start, t);
   const clear = (): void => { if (timer !== null) clearTimeout(timer); timer = null; };
+  // A pending timer that fires no later than the deadline is left alone: fire() re-arms for what is left.
   const arm = (): void => {
-    clear();
     const d = due();
-    if (done || d === null) return;
+    if (d === null) { clear(); return; }
+    if (timer !== null && armedFor <= d.at) return;
+    clear();
+    const at = now();
+    const delay = Math.min(MAX_TIMER_MS, Math.max(0, d.at - at));
+    armedFor = at + delay;
     // oxlint-disable-next-line no-use-before-define -- fire re-arms: the two refer to each other
-    timer = setTimeout(fire, Math.max(0, d.at - now()));
+    timer = setTimeout(fire, delay);
     unref(timer);
   };
   function fire(): void {
     timer = null;
     const d = due();
-    if (done || d === null) return;
+    if (d === null) return;
     if (now() < d.at) { arm(); return; }
-    done = true;
+    state = 'done';
     onFire(d.key, d.ms);
     ac.abort(timeoutReason(d.key, d.ms));
   }
-  arm();
-  return {
-    signal: outer ? AbortSignal.any([ac.signal, outer]) : ac.signal,
-    progress: () => { if (phase !== 'first_byte') mark = now(); },
-    phase: (next: ClockPhase) => { phase = next; mark = now(); arm(); },
-    cancel: () => { done = true; clear(); },
+  const feed = (event: ClockEvent): void => {
+    const next = transition(state, event);
+    const moved = next.state !== state;
+    state = next.state;
+    if (next.restart) mark = now();
+    // a restart inside a state only moves the mark (the pending timer re-arms when it fires)
+    if (moved || timer === null) arm();
   };
+  arm();
+  return { signal: outer ? AbortSignal.any([ac.signal, outer]) : ac.signal, feed, cancel: () => { feed('ended'); } };
 }
 
-// A streamed request body whose pulls are the upload's progress. It reads the source only when the platform pulls it
-// (no buffer of its own: highWaterMark 0), and the source is locked only from the first pull, so a request that never
-// reads it leaves it as it was. Its end starts the wait for the response headers.
+// The most bytes handed to the platform at once: a pull is then evidence that about this much moved.
+const UPLOAD_PIECE = 65_536;
+// A streamed request body whose pulls are the upload's progress, counted in bytes: a source chunk goes to the platform
+// in views of at most UPLOAD_PIECE (no copy), so one large chunk on a slow link is many marks, not one. It reads the
+// source only when the platform pulls it (no buffer of its own: highWaterMark 0), and the source is locked only from
+// the first pull, so a request that never reads it leaves it as it was. Its end is the upload's end.
 export function watchedUpload(source: ReadableStream<Uint8Array>, clock: ExchangeClock): ReadableStream<Uint8Array> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let rest: Uint8Array | null = null;
   return new ReadableStream<Uint8Array>({
     async pull(c: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
-      if (reader === null) reader = source.getReader();
-      const r = await reader.read();
-      if (r.done) { clock.phase('first_byte'); c.close(); return; }
-      clock.progress();
-      c.enqueue(r.value);
+      let chunk = rest;
+      if (chunk === null) {
+        if (reader === null) reader = source.getReader();
+        const r = await reader.read();
+        if (r.done) { clock.feed('upload_ended'); c.close(); return; }
+        chunk = r.value;
+      }
+      rest = chunk.length > UPLOAD_PIECE ? chunk.subarray(UPLOAD_PIECE) : null;
+      clock.feed('upload_bytes');
+      c.enqueue(rest === null ? chunk : chunk.subarray(0, UPLOAD_PIECE));
     },
-    cancel: async (reason: unknown): Promise<void> => { await (reader === null ? source.cancel(reason) : reader.cancel(reason)); },
+    cancel: async (reason: unknown): Promise<void> => { rest = null; await (reader === null ? source.cancel(reason) : reader.cancel(reason)); },
   }, { highWaterMark: 0 });
 }
 

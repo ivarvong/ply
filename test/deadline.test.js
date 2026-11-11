@@ -4,7 +4,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createTransport } from '../src/http.js';
 import { withLimits, DEFAULT_LIMITS } from '../src/limits.js';
-import { exchangeClock, watchedUpload, timeoutLimit } from '../src/deadline.js';
+import { exchangeClock, watchedUpload, timeoutLimit, transition, deadlineOf } from '../src/deadline.js';
 import { pushPack } from '../src/receivecaps.js';
 import { ZERO_OID } from '../src/push.js';
 
@@ -143,8 +143,8 @@ test('pushPack: a pack stream that stalls mid-upload ends at the idle timeout, a
   const r = await pushPack(t, { ref: 'refs/heads/main', oldOid: ZERO_OID, newOid: 'a'.repeat(40), pack: uploading(64, 5, 4), length: 64 * 1024 });
   assert.equal(r.ok, false);
   assert.ok(Date.now() - t0 < 1500, `${Date.now() - t0} ms`);
-  const chain = [r.error, r.error.original, r.error.cause].filter(Boolean);
-  assert.ok(chain.some(e => e.code === 'timeout' || e === 'timeout') || /idleTimeoutMs/.test(r.error.message), JSON.stringify({ code: r.error.code, original: r.error.original, message: r.error.message }));
+  // the pack was partly sent: the server may have applied it, so the outcome is ambiguous, never the retryable `timeout`
+  assert.deepEqual([r.error.code, r.error.original, r.error.cause?.code, r.error.cause?.what], ['ambiguous', 'timeout', 'timeout', 'idleTimeoutMs']);
 });
 
 test('the caller signal aborts as aborted, not timeout', async () => {
@@ -167,7 +167,7 @@ test('0 turns a timer off: a stalled body with idle 0 runs until the opt-in tota
 test('exchangeClock: progress while waiting for headers does not extend the first-byte wait; cancel fires nothing', async () => {
   let fired = null;
   const c = exchangeClock({ firstByteMs: 80, idleMs: 1000, totalMs: 0 }, null, k => { fired = k; });
-  const iv = setInterval(() => c.progress(), 10);
+  const iv = setInterval(() => c.feed('upload_bytes'), 10);
   await sleep(200);
   clearInterval(iv);
   assert.equal(fired, 'firstByteTimeoutMs');
@@ -183,8 +183,8 @@ test('exchangeClock: progress while waiting for headers does not extend the firs
 test('exchangeClock: idle progress re-arms; the body phase fires only after a real gap', async () => {
   let fired = null;
   const c = exchangeClock({ firstByteMs: 50, idleMs: 60, totalMs: 0 }, null, k => { fired = k; });
-  c.phase('body');
-  for (let i = 0; i < 8; i++) { await sleep(30); c.progress(); }
+  c.feed('headers');
+  for (let i = 0; i < 8; i++) { await sleep(30); c.feed('body_chunk'); }
   assert.equal(fired, null);
   await sleep(150);
   assert.equal(fired, 'idleTimeoutMs');
@@ -205,4 +205,51 @@ test('watchedUpload: no buffer of its own, the source locked only from the first
   const untouched = new ReadableStream({ cancel(r) { cancelled = `untouched:${r}`; } });
   await watchedUpload(untouched, c).cancel('x');
   assert.equal(cancelled, 'untouched:x');
+});
+
+// The machine, every state and event pair. Written by hand from the rules, not from the code:
+//   - nothing moves a state backwards; an event a state has no use for leaves it as it is
+//   - headers seen (from any state before them) is `streaming`: the first byte is satisfied for good
+//   - `restart` (the wait starts again) only on network progress: the request sent again, upload bytes while uploading
+//     or streaming, the upload's end before the headers, the headers, a body chunk, the consumer asking for more
+//   - consumer_took parks the clock (`held`); only consumer_asked resumes it; `ended` and `done` are final
+const STATES = ['connecting', 'uploading', 'awaiting_first_byte', 'streaming', 'held', 'done'];
+const EVENTS = ['request_sent', 'upload_started', 'upload_bytes', 'upload_ended', 'headers', 'body_chunk', 'consumer_took', 'consumer_asked', 'ended'];
+// next state per event, in EVENTS order; a trailing `!` is a restart
+const TABLE = {
+  connecting: ['connecting!', 'uploading!', 'connecting', 'connecting', 'streaming!', 'connecting', 'connecting', 'connecting', 'done'],
+  uploading: ['uploading', 'uploading', 'uploading!', 'awaiting_first_byte!', 'streaming!', 'uploading', 'uploading', 'uploading', 'done'],
+  awaiting_first_byte: ['awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'streaming!', 'awaiting_first_byte', 'awaiting_first_byte', 'awaiting_first_byte', 'done'],
+  streaming: ['streaming', 'streaming', 'streaming!', 'streaming', 'streaming', 'streaming!', 'held', 'streaming', 'done'],
+  held: ['held', 'held', 'held', 'held', 'held', 'held', 'held', 'streaming!', 'done'],
+  done: ['done', 'done', 'done', 'done', 'done', 'done', 'done', 'done', 'done'],
+};
+test('transition: every state and event pair', () => {
+  assert.deepEqual(Object.keys(TABLE), STATES);
+  for (const state of STATES) {
+    assert.equal(TABLE[state].length, EVENTS.length);
+    EVENTS.forEach((event, i) => {
+      const want = TABLE[state][i];
+      assert.deepEqual(transition(state, event), { state: want.replace('!', ''), restart: want.endsWith('!') }, `${state} + ${event}`);
+    });
+  }
+});
+
+test('transition: no event moves a state backwards', () => {
+  // the order of an exchange; `streaming` and `held` alternate, so they share a rank
+  const rank = { connecting: 0, uploading: 1, awaiting_first_byte: 2, streaming: 3, held: 3, done: 4 };
+  for (const state of STATES) for (const event of EVENTS) assert.ok(rank[transition(state, event).state] >= rank[state], `${state} + ${event}`);
+});
+
+test('deadlineOf: first byte before the headers, idle while on the network, nothing while held, the total throughout', () => {
+  const t = { firstByteMs: 100, idleMs: 20, totalMs: 0 };
+  // mark 1000, start 400: the step deadline is mark + its limit
+  const at = state => { const d = deadlineOf(state, 1000, 400, t); return d === null ? null : [d.key, d.at, d.ms]; };
+  assert.deepEqual(STATES.map(at), [['firstByteTimeoutMs', 1100, 100], ['idleTimeoutMs', 1020, 20], ['firstByteTimeoutMs', 1100, 100], ['idleTimeoutMs', 1020, 20], null, null]);
+  // an opt-in total of 650 from start 400 is 1050: earlier than the first-byte wait, later than the idle one, and the
+  // only limit while the consumer holds a chunk
+  const capped = state => { const d = deadlineOf(state, 1000, 400, { ...t, totalMs: 650 }); return d === null ? null : [d.key, d.at]; };
+  assert.deepEqual(STATES.map(capped), [['requestTimeoutMs', 1050], ['idleTimeoutMs', 1020], ['requestTimeoutMs', 1050], ['idleTimeoutMs', 1020], ['requestTimeoutMs', 1050], null]);
+  // 0 turns a limit off
+  assert.equal(deadlineOf('streaming', 1000, 400, { firstByteMs: 100, idleMs: 0, totalMs: 0 }), null);
 });
