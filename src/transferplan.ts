@@ -33,7 +33,7 @@ import type { ResolvedIndex } from './packrangeresolve.js';
 import type { Oid } from './sha1.js';
 import type { RangeSource } from './rangesource.js';
 import type { Refname, TempRef } from './transfernames.js';
-import { sha1Hex, targetRef, tempRefOf, isOid, isOptionOid, isPushRef, isList } from './transfernames.js';
+import { sha1Hex, targetRef, tempRefOf, isOid, isOptionOid, isList } from './transfernames.js';
 
 const OBJ_BLOB = TYPE.BLOB;
 const OBJ_COMMIT = TYPE.COMMIT;
@@ -245,6 +245,11 @@ export function planTransfer(pack: ScannedPack, resolved: ResolvedIndex, input: 
 // The key a plan's temp commits and temp ref are named by.
 export const transferKey = (plan: TransferPlan): string => sha1Hex(JSON.stringify([plan.pack.hash, plan.head, plan.ref]));
 
+// What the caller of this call holds a plan read back to: the prefix its temp ref was planned under (default
+// refs/ply/transfer/) and, when named, the one ref this transfer may create (null: the plan's own).
+export type PlanExpectConfig = { readonly tempPrefix: string; readonly ref: string | null };
+export type PlanExpect = Input<PlanExpectConfig>;
+
 const edited = (): Result<never, PlyError> => fail('bad_request', 'transfer: the plan does not match its hash', { what: 'plan' });
 // A step read back: one of the two variants, its ids well formed, its prev an Option of one.
 function wellFormedStep(s: TransferStepPlan): boolean {
@@ -253,14 +258,34 @@ function wellFormedStep(s: TransferStepPlan): boolean {
   return s.kind === 'final' && !Reflect.has(s, 'temp');
 }
 
-// A plan as read back (JSON, a store): its ids, refs and steps well formed, and its hash matching, so a step never
-// pushes from an edited or stale plan. The last step is the only final one.
-export function checkTransferPlan(plan: TransferPlan): Result<TransferPlan, PlyError> {
-  if (typeof plan !== 'object' || plan === null || plan.version !== TRANSFER_VERSION) return edited();
-  if (!isOid(plan.source) || !isOid(plan.tree) || !isOid(plan.head) || !isList(plan.steps)) return edited();
-  if (!targetRef(plan.ref).ok || !isPushRef(plan.tempRef)) return edited();
+// The fields the check and the key read: ids, refs, the pack plan's hash, the steps (the last the only final one).
+function wellFormedPlan(plan: TransferPlan): boolean {
+  if (typeof plan !== 'object' || plan === null || plan.version !== TRANSFER_VERSION) return false;
+  if (!isOid(plan.source) || !isOid(plan.tree) || !isOid(plan.head) || !isList(plan.steps)) return false;
+  if (!targetRef(plan.ref).ok || typeof plan.tempRef !== 'string') return false;
+  if (typeof plan.pack !== 'object' || plan.pack === null || typeof plan.pack.hash !== 'string') return false;
   const last = at(plan.steps, plan.steps.length - 1);
-  if (last.tag !== 'some' || last.value.kind !== 'final' || !plan.steps.every((s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === plan.steps.length - 1))) return edited();
+  return last.tag === 'some' && last.value.kind === 'final' && plan.steps.every((s, i) => wellFormedStep(s) && (s.kind === 'final') === (i === plan.steps.length - 1));
+}
+
+// A plan as read back (JSON, a store) is untrusted input. The check, which transferStatus, transferStep and
+// runTransfer all make before they act or answer:
+//   - its ids, refs and steps are well formed, the last step the only final one;
+//   - its temp ref is not a free field: it must be the name tempRefOf derives from the plan's key under the caller's
+//     prefix, and never the target ref. So the only refs a plan can make a push create, move or delete are
+//     refs/ply/transfer/<key> (or the caller's prefix) and the target ref, which the caller can name on the call;
+//   - its hash matches. The hash is unkeyed (transferPlanHash is public): it is integrity against corruption and
+//     stale or partial writes, NOT authentication against whoever can write the plan store. What bounds a hostile
+//     plan is the temp ref rule above, the named target ref, and the destination's own checks (every update is a
+//     compare-and-swap; the server checks connectivity).
+export function checkTransferPlan(plan: TransferPlan, expect: PlanExpect = {}): Result<TransferPlan, PlyError> {
+  const want = withDefaults<PlanExpectConfig>(expect, { tempPrefix: TRANSFER_REF_PREFIX, ref: null });
+  if (!wellFormedPlan(plan)) return edited();
   const { hash, ...body } = plan;
-  return transferPlanHash(body) === hash ? ok(plan) : edited();
+  // corruption first (an honest plan, damaged), then what holds whoever wrote the hash
+  if (transferPlanHash(body) !== hash) return edited();
+  const named = tempRefOf(want.tempPrefix, transferKey(plan));
+  if (!named.ok || plan.tempRef !== named.value || plan.tempRef === plan.ref) return fail('bad_request', 'transfer: the plan\'s temp ref is not the one its key names', { what: 'tempRef' });
+  if (want.ref !== null && plan.ref !== want.ref) return fail('bad_request', `transfer: the plan is for ${plan.ref}, not the ref this call names`, { what: 'ref' });
+  return ok(plan);
 }
