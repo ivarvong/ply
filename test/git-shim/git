@@ -1,0 +1,19 @@
+#!/bin/sh
+# The test suite's git: real git with background maintenance off, for every git process a test starts.
+#
+# vitest.config.ts puts this directory first on PATH before any fork starts. PATH is the one thing every test hands
+# to git: several files build git's environment from scratch (GIT_* scrubbed, GIT_CONFIG_GLOBAL=/dev/null) or set
+# their own GIT_CONFIG_COUNT, so neither a shared GIT_CONFIG_COUNT nor a global config file reaches them. `-c` does:
+# it travels to git's own children in GIT_CONFIG_PARAMETERS and outranks repository, global and GIT_CONFIG_COUNT
+# config. What the three keys stop, and why a test must not read a store under a repack: test/server.js NO_MAINTENANCE.
+# Not reached: the far side of a local-path transport (git clears GIT_CONFIG_PARAMETERS for it); a repository git
+# receives into that way is made with makeBareRepo / initRepo, which set the keys in its config.
+#
+# PLY_TEST_AUTO_MAINTENANCE=1 turns this off: test/harness-maintenance.test.js observes the repository's own
+# settings and git's default with it.
+d=${0%/*}
+p=:$PATH:
+while case $p in *":$d:"*) true ;; *) false ;; esac; do p=${p%%":$d:"*}:${p#*":$d:"}; done
+p=${p#:}; PATH=${p%:}; export PATH
+[ -n "$PLY_TEST_AUTO_MAINTENANCE" ] && exec git "$@"
+exec git -c gc.auto=0 -c maintenance.auto=false -c receive.autoGc=false "$@"

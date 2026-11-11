@@ -26,6 +26,9 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitAsync, tmpRoot, makeBareRepo, startGitServer, NO_MAINTENANCE, initRepo } from './server.js';
 
+// PLY_TEST_AUTO_MAINTENANCE=1: test/git-shim/git (below) stands aside for the server's git processes, so the first two
+// tests observe the repository's own settings and nothing else.
+const SHIM_OFF = { PLY_TEST_AUTO_MAINTENANCE: '1' };
 const FORCED = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'gc.auto', GIT_CONFIG_VALUE_0: '1', GIT_CONFIG_KEY_1: 'gc.autoPackLimit', GIT_CONFIG_VALUE_1: '1' };
 const MAINTENANCE = new Set(['maintenance', 'gc', 'repack']);
 
@@ -36,7 +39,7 @@ after(() => cleanup());
 // Two pushes into `bare` through a server whose git processes trace to one file. Returns the trace's events.
 async function pushTwice(bare, name) {
   const trace = join(root, `trace-${name}.jsonl`);
-  const srv = await startGitServer(root, { ...FORCED, GIT_TRACE2_EVENT: trace });
+  const srv = await startGitServer(root, { ...FORCED, ...SHIM_OFF, GIT_TRACE2_EVENT: trace });
   try {
     const work = join(root, `work${n++}`); mkdirSync(work);
     initRepo(work);
@@ -75,7 +78,7 @@ test('harness control: the same repository with the three keys unset does start 
   // One push is enough: receive-pack starts the child whatever the pack count. The two-pack check of pushTwice is
   // not asked here, because this repository may be repacked in the background (the defect itself).
   const trace = join(root, 'trace-loud.jsonl');
-  const srv = await startGitServer(root, { ...FORCED, GIT_TRACE2_EVENT: trace });
+  const srv = await startGitServer(root, { ...FORCED, ...SHIM_OFF, GIT_TRACE2_EVENT: trace });
   try {
     const work = join(root, `work${n++}`); mkdirSync(work);
     initRepo(work);
@@ -89,4 +92,33 @@ test('harness control: the same repository with the three keys unset does start 
   assert.ok(ranReceivePack(events), 'receive-pack is in the trace');
   const seen = children(events);
   assert.ok(seen.some(c => /\b(maintenance|gc)\b/.test(c)), `receive-pack started maintenance without the three keys; saw ${JSON.stringify(seen)}`);
+});
+
+// ---- every git process the suite starts (test/git-shim/git, first on PATH from vitest.config.ts) ----
+// The files that make their own repositories hand git an environment of their own: GIT_* scrubbed and
+// GIT_CONFIG_GLOBAL=/dev/null (test/space/refname.test.js, push-oid.test.js), or their own GIT_CONFIG_COUNT
+// (test/stamps.test.js, merge.test.js, rebase.test.js). This is that environment, with the gc task forced willing the
+// same way, in a repository made by a bare `git init` that nothing configured: `git commit` starts
+// `git maintenance run --auto` there by git's default (builtin/commit.c: run_auto_maintenance), which the control
+// (the same steps with the shim told to stand aside) must show.
+function commitTraced(name, extraEnv = {}) {
+  const dir = join(root, name), trace = join(root, `trace-${name}.jsonl`);
+  const env = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...FORCED, PLY_TEST_AUTO_MAINTENANCE: '', GIT_TRACE2_EVENT: trace, ...extraEnv };
+  mkdirSync(dir);
+  git(dir, ['init', '-q', '-b', 'main'], { env });
+  writeFileSync(join(dir, 'f.txt'), '1\n');
+  git(dir, ['add', 'f.txt'], { env });
+  git(dir, ['-c', 'user.name=t', '-c', 'user.email=t@x', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'c1'], { env });
+  const events = readFileSync(trace, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+  assert.ok(events.some(e => e.event === 'cmd_name' && e.name === 'commit'), 'commit is in the trace');
+  return children(events);
+}
+
+test('harness: git commit in an unconfigured repository, under a scrubbed environment with its own GIT_CONFIG_COUNT, starts no maintenance child', () => {
+  assert.deepEqual(commitTraced('bare-init'), []);
+});
+
+test('harness control: the same commit with PLY_TEST_AUTO_MAINTENANCE=1 does start maintenance', () => {
+  const seen = commitTraced('bare-init-loud', { PLY_TEST_AUTO_MAINTENANCE: '1' });
+  assert.ok(seen.some(c => /\b(maintenance|gc)\b/.test(c)), `git commit started maintenance by default; saw ${JSON.stringify(seen)}`);
 });
