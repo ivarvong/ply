@@ -543,21 +543,31 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
 // "The same object <oid> appears twice in the pack", unpack-objects --strict "tried to add buffer twice!", and
 // receive-pack reports either as "unpacker error" (git 2.50). Two whole objects are one object when type and bytes
 // are equal, so only objects that share a type, a length and a fingerprint (below) with another are hashed, each at
-// most once, and two are one object when their ids are equal; a list with no such pair costs a fingerprint and a map
-// insert per object and no SHA-1. The first of a pair is kept, in its place, and an
+// most once, and two are one object when their ids are equal; a list with no such pair costs a fingerprint (at most
+// 256 bytes read) and a map insert per object and no SHA-1. The first of a pair is kept, in its place, and an
 // ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
 // A delta entry is kept as given: its object id is not known without applying it. Runs in send, on a list planPush
 // passed (checkBases), before the pack is measured.
-// FNV-1a (32 bits) over at most 2 * FINGERPRINT_SAMPLES bytes of an object, evenly spaced: every byte of an object
-// shorter than that. Equal bytes give equal fingerprints; it decides only which objects are hashed, never which are equal.
-const FINGERPRINT_SAMPLES = 64;
+// FNV-1a (32 bits) over at most FINGERPRINT_RUNS runs of FINGERPRINT_RUN bytes, evenly spaced from the first run to
+// the last: every byte of an object no longer than that. Runs, not single bytes at a stride: data with a period (a
+// record layout, a generator's low byte) is the same at every stride and differs inside a run. Equal bytes give equal
+// fingerprints; it decides only which objects are hashed, never which are equal.
+const FINGERPRINT_RUNS = 32;
+const FINGERPRINT_RUN = 8;
 const FNV_OFFSET = 0x81_1c_9d_c5;
 const FNV_PRIME = 0x01_00_01_93;
 const fingerprint = (data: Uint8Array): number => {
-  const step = Math.max(1, Math.floor(data.length / FINGERPRINT_SAMPLES));
+  const whole = data.length <= FINGERPRINT_RUNS * FINGERPRINT_RUN;
+  const runs = whole ? 1 : FINGERPRINT_RUNS;
+  const run = whole ? data.length : FINGERPRINT_RUN;
+  // the last run ends at the object's end
+  const spread = (data.length - run) / Math.max(1, runs - 1);
   let h = FNV_OFFSET;
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- i < data.length: the read is in range (`as`, not the `!` src/ forbids)
-  for (let i = 0; i < data.length; i += step) h = Math.imul(h ^ (data[i] as number), FNV_PRIME);
+  for (let r = 0; r < runs; r++) {
+    const start = Math.floor(r * spread);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- start + run <= data.length: the read is in range (`as`, not the `!` src/ forbids)
+    for (let i = start; i < start + run; i++) h = Math.imul(h ^ (data[i] as number), FNV_PRIME);
+  }
   return h >>> 0;
 };
 function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {

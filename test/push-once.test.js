@@ -132,6 +132,30 @@ test('push: a list with no repeated object hashes no object, though every blob h
   assert.deepEqual(fsckProblems(bare), []);
 });
 
+// The same count on the second review's own shape (bench-planpush.mjs): blobs of one length filled from a 32-bit LCG,
+// four bytes a step. An LCG's low byte repeats every 256 steps, so bytes read at a regular stride are the same in
+// every blob although no two blobs are equal: a guard that told objects apart by such bytes hashed all of them.
+// Nothing is sent (the fetch throws after the pack is measured), so the outcome is 'ambiguous'; no object is hashed.
+test('push: equal-length blobs that agree at every regular stride are still not hashed', async () => {
+  let seed = 12345;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed; };
+  const blob = len => { const d = new Uint8Array(len); for (let i = 0; i < len; i += 4) { const r = rnd(); d[i] = r; d[i + 1] = r >>> 8; d[i + 2] = r >>> 16; d[i + 3] = r >>> 24; } return d; };
+  const objects = Array.from({ length: 8 }, () => ({ type: TYPE.BLOB, data: blob(1 << 16) }));
+  // the premise, checked: every blob has the same byte at each multiple of 1024, and no two blobs are equal
+  for (const o of objects) for (let i = 0; i < o.data.length; i += 1024) assert.equal(o.data[i], objects[0].data[0]);
+  assert.equal(new Set(objects.map(o => Buffer.from(o.data).toString('latin1'))).size, 8);
+  const c = GitHttp.create('http://127.0.0.1:9/x.git', { tracer: new Tracer(), fetchImpl: async () => { throw new Error('not sent'); } });
+  assert.equal(c.ok, true);
+  const spy = vi.spyOn(Sha1.prototype, 'update');
+  let hashed;
+  try {
+    const r = await c.value.push({ ref: 'refs/heads/x', oldOid: '0'.repeat(40), newOid: 'a'.repeat(40), objects });
+    hashed = spy.mock.calls.map(([b]) => Buffer.from(b.subarray(0, 32)).toString('latin1')).filter(s => /^(?:blob|tree|commit|tag) \d+\0$/u.test(s));
+    assert.equal(r.ok ? 'ok' : r.error.code, 'ambiguous');
+  } finally { spy.mockRestore(); }
+  assert.deepEqual(hashed, []);
+});
+
 test("the duplicate-object guard is not an export of 'ply/push'", () => {
   assert.deepEqual(Object.keys(pushEntry).filter(k => /once|dedup|duplicate/iu.test(k)), []);
 });
