@@ -23,8 +23,8 @@ import type { PlyError } from './errors.js';
 import { fail } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, isSome, assertNever } from './result.js';
-import type { RangeSource } from './rangesource.js';
-import { UNCANCELLABLE } from './rangesource.js';
+import type { RangeSource, Halt, Halted } from './rangesource.js';
+import { UNCANCELLABLE, HALTED, haltOn, drop, cancelRange, cancelLate, aborted } from './rangesource.js';
 import type { ScannedPack, ScanColumns } from './packscanindex.js';
 import { scannedPackOf, SCAN_INDEX_ENTRY_BYTES } from './packscanindex.js';
 import type { ResolvedIndex, ResolvedColumns, ResolveStats } from './packrangeresolve.js';
@@ -64,23 +64,44 @@ const malformed = (field: string, index = -1): Result<never, SavedIndexRefusal> 
 const isWhole = (t: number): boolean => t === OBJ_COMMIT || t === OBJ_TREE || t === OBJ_BLOB || t === OBJ_TAG;
 const isStored = (t: number): boolean => isWhole(t) || t === OBJ_OFS_DELTA || t === OBJ_REF_DELTA;
 
-async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+// At most `max` bytes are waited for: a range that serves more is cancelled there, and what was read (more than `max`)
+// is the caller's refusal to make. Each read is raced against the halt (rangesource.ts).
+async function readAll(stream: ReadableStream<Uint8Array>, max: number, halt: Halt): Promise<Uint8Array | Halted> {
   const parts: Uint8Array[] = [];
   let n = 0;
-  for await (const p of stream) { parts.push(p); n += p.length; }
+  const reader = stream.getReader();
+  halt.reading(reader);
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- one stream, read in order
+    const r = await halt.race(reader.read(), drop);
+    if (r === HALTED) return HALTED;
+    if (r.done) break;
+    parts.push(r.value);
+    n += r.value.length;
+    if (n > max) { cancelRange(reader, null); break; }
+  }
+  halt.reading(null);
   const out = new Uint8Array(n);
   let at = 0;
   for (const p of parts) { out.set(p, at); at += p.length; }
   return out;
 }
-// The spool's identity: its length and its last 20 bytes, read through the source.
-export async function packIdentity(source: RangeSource): Promise<Result<PackIdentity, PlyError>> {
+// The spool's identity: its length and its last 20 bytes, read through the source. `signal` aborts the read: the call
+// settles `aborted` at once even when the source never answers.
+export async function packIdentity(source: RangeSource, signal: AbortSignal = UNCANCELLABLE): Promise<Result<PackIdentity, PlyError>> {
   if (!Number.isSafeInteger(source.size) || source.size < 32) return fail('bad_request', `saved index: a spool of ${source.size} bytes holds no pack`, { what: 'spool' });
-  const got = await source.read(source.size - PACK_TRAILER_BYTES, PACK_TRAILER_BYTES, UNCANCELLABLE);
-  if (!got.ok) return got;
-  const tail = await readAll(got.value);
-  if (tail.length !== PACK_TRAILER_BYTES) return fail('bad_request', `saved index: the spool's last ${PACK_TRAILER_BYTES} bytes read back as ${tail.length}`, { what: 'spool' });
-  return ok({ trailer: toHex(tail), bytes: source.size });
+  const halt = haltOn(signal);
+  try {
+    const got = await halt.race(source.read(source.size - PACK_TRAILER_BYTES, PACK_TRAILER_BYTES, halt.signal), cancelLate);
+    if (got === HALTED) return err(aborted('pack identity'));
+    if (!got.ok) return got;
+    const tail = await readAll(got.value, PACK_TRAILER_BYTES, halt);
+    if (tail === HALTED) return err(aborted('pack identity'));
+    if (tail.length !== PACK_TRAILER_BYTES) return fail('bad_request', `saved index: the spool's last ${PACK_TRAILER_BYTES} bytes read back as ${tail.length}`, { what: 'spool' });
+    return ok({ trailer: toHex(tail), bytes: source.size });
+  } finally {
+    halt.release();
+  }
 }
 
 // A refusal in words, for a span or a log line.

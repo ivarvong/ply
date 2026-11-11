@@ -32,8 +32,8 @@ import { DEFAULT_LIMITS, LIMIT_WORK_RATIO, limitExceeded, parseLimits } from './
 import type { Oid } from './sha1.js';
 import { fromHex, toOid } from './sha1.js';
 import type { ScannedPack, ScannedType, ScanIndexOpts } from './packscanindex.js';
-import type { RangeSource } from './rangesource.js';
-import { UNCANCELLABLE } from './rangesource.js';
+import type { RangeSource, Halt } from './rangesource.js';
+import { UNCANCELLABLE, HALTED, haltOn, drop, cancelLate, aborted } from './rangesource.js';
 import { inflateInit, inflateFeed, inflatePull, inflateEnd, declaredBound, zlibWrap } from './inflatestream.js';
 import { applyDelta } from './packresolve.js';
 import { TYPE, TYPE_NAME, hashObject } from './objects.js';
@@ -56,9 +56,12 @@ export type ResolveRangeOpts = {
   // bytes of resolved bases kept for the deltas resting on them; a base not kept is rebuilt from its chain when needed
   readonly cacheBytes: number;
   readonly bases: ThinBaseLookup | null;
+  // aborts the resolve: every await on `source` and on `bases` is raced against it, so the call settles `aborted` at once
+  // even when the storage never answers (the range in flight is cancelled, a late answer dropped). Default: never aborts.
+  readonly signal: AbortSignal;
 };
 export const RESOLVE_CACHE_BYTES: number = 16 * 1024 * 1024;
-const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null });
+const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null, signal: UNCANCELLABLE });
 
 // oid 20 + type 1 + base 4 + depth 4 + size 8 + byOid 4
 export const RESOLVED_ENTRY_BYTES = 41;
@@ -132,6 +135,7 @@ type State = {
   readonly pack: ScannedPack;
   readonly source: RangeSource;
   readonly bases: ThinBaseLookup | null;
+  readonly halt: Halt;
   readonly n: number;
   readonly maxObject: number;
   readonly maxDelta: number;
@@ -163,7 +167,9 @@ function charge(s: State, bytes: number): PlyError | null {
   return s.work > s.workMax ? limitExceeded('resolve work bytes', s.work, s.workMax) : null;
 }
 
+const stopped = (): PlyError => aborted('pack resolve');
 // The zlib member of entry i, inflated to its declared size, read back through the source.
+// Every await on the source goes through s.halt.race (rangesource.ts): an aborted resolve does not wait for it.
 async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyError>> {
   const cols = s.pack.columns;
   const at = (cols.offset[i] as number) + (cols.headerBytes[i] as number);
@@ -174,10 +180,12 @@ async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyEr
   const opened = inflateInit({ bound: declaredBound(size, isWhole(cols.storedType[i] as number) ? s.maxObject : s.maxDelta), wrap: zlibWrap(true) });
   if (!opened.ok) return opened;
   const st = opened.value;
-  const got = await s.source.read(at, length, UNCANCELLABLE);
+  const got = await s.halt.race(s.source.read(at, length, s.halt.signal), cancelLate);
+  if (got === HALTED) return err(stopped());
   if (!got.ok) return got;
   s.stats.reads += 1;
   const reader = got.value.getReader();
+  s.halt.reading(reader);
   const out = new Uint8Array(size);
   let o = 0;
   let fed = 0;
@@ -198,7 +206,8 @@ async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyEr
         return ok(out);
       }
       // oxlint-disable-next-line no-await-in-loop -- one member, read in order
-      const r = await reader.read();
+      const r = await s.halt.race(reader.read(), drop);
+      if (r === HALTED) return err(stopped());
       if (r.done) {
         ended = true;
         continue;
@@ -209,7 +218,12 @@ async function readMember(s: State, i: number): Promise<Result<Uint8Array, PlyEr
       inflateFeed(st, r.value);
     }
   } finally {
-    await reader.cancel().catch(() => null);
+    // an aborted resolve has already asked the source to stop (the halt), and does not wait for it; otherwise it is
+    // asked here, and waited for only until an abort
+    if (!s.halt.halted()) {
+      s.halt.reading(null);
+      await s.halt.race(reader.cancel().catch(drop), drop);
+    }
   }
 }
 
@@ -228,7 +242,10 @@ function checkAgain(s: State, i: number, data: Uint8Array): PlyError | null {
 type Thin = { readonly tag: 'absent' } | { readonly tag: 'found'; readonly type: ScannedType; readonly data: Uint8Array };
 // The caller's object for `want`: absent, or checked (a stored type, and its bytes hash to `want`).
 async function thinData(s: State, want: Oid): Promise<Result<Thin, PlyError>> {
-  const asked = fromNullish(s.bases === null ? null : await s.bases(want));
+  // the caller's lookup is its storage too
+  const looked = s.bases === null ? null : await s.halt.race(Promise.resolve(s.bases(want)), drop);
+  if (looked === HALTED) return err(stopped());
+  const asked = fromNullish(looked);
   if (asked.tag === 'none') return ok({ tag: 'absent' });
   const got = asked.value;
   if (!isWhole(got.type)) return fail('pack_corrupt', `pack: ref delta base ${want} has type ${got.type}`);
@@ -343,7 +360,7 @@ async function drain(s: State, stack: number[]): Promise<PlyError | null> {
 }
 
 // OFS children by base index (counting sort), REF deltas sorted by base id, whole oids the scan computed.
-function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, caps: { readonly maxObject: number; readonly maxDelta: number; readonly maxChain: number; readonly workMax: number }): State {
+function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, caps: { readonly maxObject: number; readonly maxDelta: number; readonly maxChain: number; readonly workMax: number }, halt: Halt): State {
   const cols = pack.columns;
   const n = cols.offset.length;
   const ofsStart = new Int32Array(n + 1);
@@ -392,7 +409,7 @@ function setup(pack: ScannedPack, source: RangeSource, opts: ResolveRangeOpts, c
     refEntry[k] = refAt[from] as number;
   }
   return {
-    pack, source, bases: opts.bases, n, ...caps, work: 0, oid, known,
+    pack, source, bases: opts.bases, halt, n, ...caps, work: 0, oid, known,
     type: new Uint8Array(n), base: new Int32Array(n).fill(NO_BASE), depth: new Int32Array(n), size: Float64Array.from(pack.columns.size), ofsStart, ofsKids,
     refEntry, refOid, thinOf: new Int32Array(n).fill(-1), thinOids: new Uint8Array(0), thinCount: 0,
     cache: { map: new Map(), bytes: 0, cap: opts.cacheBytes },
@@ -526,9 +543,14 @@ export async function resolvePackRange(pack: ScannedPack, source: RangeSource, i
   const budget = opts.budget;
   const l = limits.value;
   const workMax = budget.tag === 'work' ? Math.max(l.maxInflatedTotal, budget.ratio * pack.bytes) : l.maxInflatedTotal;
-  const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, workMax });
-  const roots = await fromRoots(s);
-  if (roots !== null) return err(roots);
-  const thin = await fromThin(s);
-  return thin === null ? ok(finish(s)) : err(thin);
+  const halt = haltOn(opts.signal);
+  try {
+    const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, workMax }, halt);
+    const roots = await fromRoots(s);
+    if (roots !== null) return err(roots);
+    const thin = await fromThin(s);
+    return thin === null ? ok(finish(s)) : err(thin);
+  } finally {
+    halt.release();
+  }
 }

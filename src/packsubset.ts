@@ -21,7 +21,7 @@
 // errors the stream (pack_corrupt) before the trailer, so the receiver never gets a whole pack from a short read.
 //
 // The source is the caller's storage and may never answer. Cancelling the stream settles at once all the same: no await
-// on the source (opening a range, reading it, cancelling it) is made without `Halt.race`, the range in flight is
+// on the source (opening a range, reading it, cancelling it) is made without `Halt.race` (rangesource.ts), the range in flight is
 // cancelled and the source's abort signal fired without waiting for either, and whatever a read answers later is
 // dropped (a range that opens late is cancelled).
 import type { PlyError } from './errors.js';
@@ -29,7 +29,8 @@ import { fail, plyError } from './errors.js';
 import type { Result } from './result.js';
 import { ok } from './result.js';
 import { withDefaults } from './absent.js';
-import type { RangeSource } from './rangesource.js';
+import type { RangeSource, Halt } from './rangesource.js';
+import { HALTED, haltOn, drop, cancelRange, cancelLate } from './rangesource.js';
 import type { ScannedPack } from './packscanindex.js';
 import type { PackInput } from './pack.js';
 import { encodeObjHeader, encodeOfsDistance, entryHead, inputBase, packHeader, zlibDeflate } from './pack.js';
@@ -67,61 +68,7 @@ type Plan = {
   readonly body: number;
 };
 
-// What cancelling the stream stops. One read of the source is in flight at a time (the stream is pulled in order), so
-// one slot holds what wakes it: not Promise.race against a promise that lives as long as the stream, which would keep a
-// reaction per chunk read.
-const HALTED: unique symbol = Symbol('halted');
-type Halted = typeof HALTED;
-type Halt = {
-  // given to every source.read: a source that can abandon a read does
-  readonly signal: AbortSignal;
-  readonly halted: () => boolean;
-  // p's outcome, or HALTED as soon as the stream is cancelled, whether or not p ever settles; a value that arrives
-  // after that goes to `late`, a rejection nowhere
-  readonly race: <T>(p: Promise<T>, late: (v: T) => void) => Promise<T | Halted>;
-  // the range being read (null: none), cancelled when the stream is
-  readonly reading: (range: ReadableStreamDefaultReader<Uint8Array> | null) => void;
-  readonly halt: (reason: unknown) => void;
-};
-const drop = (): void => { /* the stream is cancelled or already refused: the outcome is decided without this */ };
-// Asks a range to stop, without waiting for the source to say it has.
-const cancelRange = (range: { readonly cancel: (reason: unknown) => Promise<void> }, reason: unknown): void => { range.cancel(reason).catch(drop); };
 const cancelled = (): PlyError => plyError('aborted', 'pack subset: the stream was cancelled');
-function halter(): Halt {
-  const abort = new AbortController();
-  let done = false;
-  let wake: (() => void) | null = null;
-  let range: ReadableStreamDefaultReader<Uint8Array> | null = null;
-  return {
-    signal: abort.signal,
-    halted: () => done,
-    reading(r) { range = r; },
-    async race<T>(p: Promise<T>, late: (v: T) => void): Promise<T | Halted> {
-      // a fresh promise per read, held only by `wake` until the read settles or the stream is cancelled
-      const stopped = new Promise<Halted>(resolve => {
-        if (done) resolve(HALTED);
-        else wake = (): void => { resolve(HALTED); };
-      });
-      const settled = p.then(v => {
-        if (done) late(v);
-        else wake = null;
-        return v;
-      });
-      // a rejection after the halt is handled here (the race has attached to it) and goes nowhere
-      const first = await Promise.race([settled, stopped]);
-      return first;
-    },
-    halt(reason) {
-      if (done) return;
-      done = true;
-      abort.abort(reason);
-      if (range !== null) cancelRange(range, reason);
-      range = null;
-      if (wake !== null) wake();
-      wake = null;
-    },
-  };
-}
 
 const refuse = (what: string, message: string): Result<never, PlyError> => fail('bad_request', `pack subset: ${message}`, { what });
 
@@ -334,7 +281,7 @@ async function* pieces(source: RangeSource, p: Plan, halt: Halt): AsyncGenerator
     const start = c.offset[first] as number;
     const length = (c.offset[last] as number) + (c.headerBytes[last] as number) + (c.compressed[last] as number) - start;
     // oxlint-disable-next-line no-await-in-loop -- one run after another, in pack order
-    const opened = await halt.race(source.read(start, length, halt.signal), late => { if (late.ok) cancelRange(late.value, null); });
+    const opened = await halt.race(source.read(start, length, halt.signal), cancelLate);
     if (opened === HALTED) return cancelled();
     if (!opened.ok) return opened.error;
     const reader = opened.value.getReader();
@@ -365,7 +312,9 @@ export async function packSubset(source: RangeSource, pack: ScannedPack, selecti
   if (!planned.ok) return planned;
   const p = planned.value;
   const length = p.body + PACK_TRAILER_BYTES;
-  const halt = halter();
+  // the stream's own signal: aborted by its consumer's cancel, given to every source.read
+  const abort = new AbortController();
+  const halt = haltOn(abort.signal);
   const it = pieces(source, p, halt);
   const sha = streamingSha1();
   let sent = 0;
@@ -391,7 +340,7 @@ export async function packSubset(source: RangeSource, pack: ScannedPack, selecti
     // Settles at once, whatever the source does: the read in flight is released (Halt), and the generator unwinds
     // behind it, or from the yield it is parked at, without being waited for.
     cancel(reason: unknown): void {
-      halt.halt(reason);
+      abort.abort(reason);
       it.return(null).catch(drop);
     },
   }, { highWaterMark: 0 });

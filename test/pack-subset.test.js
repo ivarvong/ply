@@ -19,6 +19,10 @@ import { randomFillSync } from 'node:crypto';
 import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { packSubset } from '../src/packsubset.js';
 import { rangeFromBytes } from '../src/rangesource.js';
+import * as rangesource from '../src/rangesource.js';
+import { resolvePackRange } from '../src/packrangeresolve.js';
+import { loadTransferPack } from '../src/transferload.js';
+import { packIdentity } from '../src/packsaved.js';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { hashObject, TYPE } from '../src/objects.js';
 import { te } from '../src/bytes.js';
@@ -526,3 +530,170 @@ test('memory: a subset of a source far larger than what is held', async () => {
   // held: one 64 KiB range chunk in flight plus small headers, not the pack (allowance for the drain's own chunk)
   assert.ok(child.liveDelta < 1 << 20, `live ${child.liveDelta} B`);
 }, 120_000);
+
+// ---- every operation that reads the caller's storage, not only packSubset's stream: an abort settles it ----
+// The source is scripted, never slept on: read number `at` (0-based) stops answering, earlier reads are served from the
+// bytes. 'never' leaves read() itself pending for ever; 'stall' opens a range whose first chunk never comes. `parked`
+// resolves when the source is in that state, and the counters say what the operation told it afterwards.
+function stallAt(bytes, at, how) {
+  const real = rangeFromBytes(bytes);
+  const state = { reads: 0, cancelled: 0, aborted: 0 };
+  let reached;
+  const parked = new Promise(r => { reached = r; });
+  return {
+    state, parked, size: bytes.length,
+    read(offset, length, signal) {
+      const i = state.reads++;
+      if (i < at) return real.read(offset, length, signal);
+      signal.addEventListener('abort', () => { state.aborted++; });
+      if (how === 'never') { reached(); return new Promise(() => {}); }
+      return Promise.resolve({ ok: true, value: new ReadableStream({
+        pull() { reached(); return new Promise(() => {}); },
+        cancel() { state.cancelled++; },
+      }, { highWaterMark: 0 }) });
+    },
+  };
+}
+
+// The expected outcome is the contract's, not ply's output: an operation its caller aborts ends with the error code
+// `aborted` (errors.ts: retry 'no'), and it ends when the signal fires, not when the storage answers (it never does
+// here). `stalledRead` is the read each operation is parked at, counted from the operation's own description:
+//   packIdentity      read 0 is the trailer
+//   resolvePackRange  read 0 is the first entry read back
+//   loadTransferPack  read 0 the trailer (packIdentity), read 1 the whole spool (opened here, read by the scan),
+//                     read 2 the first entry read back by the resolve
+const ABORTABLE = [
+  ['packIdentity', 0, (source, signal) => packIdentity(source, signal)],
+  ['resolvePackRange', 0, (source, signal, idx) => resolvePackRange(idx, source, { signal })],
+  ['loadTransferPack: the trailer', 0, (source, signal, idx, dst) => loadTransferPack(dst, source, { tag: 'none' }, { signal })],
+  ['loadTransferPack: the scan', 1, (source, signal, idx, dst) => loadTransferPack(dst, source, { tag: 'none' }, { signal })],
+  ['loadTransferPack: the resolve', 2, (source, signal, idx, dst) => loadTransferPack(dst, source, { tag: 'none' }, { signal })],
+];
+for (const [name, stalledRead, run] of ABORTABLE) {
+  for (const how of ['never', 'stall']) {
+    test(`${name}: an abort settles it 'aborted' while the storage never answers (${how})`, async () => {
+      const idx = await scan(packs.ofs);
+      const dst = unwrap(createTransport(`${srv.url}/none.git`));
+      const source = stallAt(packs.ofs, stalledRead, how);
+      const ac = new AbortController();
+      const op = run(source, ac.signal, idx, dst);
+      await source.parked;
+      assert.equal(source.state.reads, stalledRead + 1, 'parked at the read the case names');
+      assert.equal(await settledWithin(op, 20), 'pending', 'it is waiting for the storage');
+      ac.abort(new Error('stop'));
+      assert.equal(await settledWithin(op), 'settled', 'the abort settles it');
+      const r = await op;
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, 'aborted');
+      assert.equal(source.state.aborted, 1, 'the source is told through the signal of the read in flight');
+      if (how === 'stall') assert.equal(source.state.cancelled, 1, 'the range in flight is cancelled');
+      assert.equal(source.state.reads, stalledRead + 1, 'and nothing more is read');
+    });
+  }
+}
+
+test('scanPackIndex: an abort settles it while its stream, or its iterator, never yields; the source is asked to stop', async () => {
+  // a ReadableStream that serves 100 bytes and then nothing
+  const src = stallingSource(packs.ofs, { open: 'stall', serve: 100 });
+  const stream = (await src.read(0, packs.ofs.length, new AbortController().signal)).value;
+  const a = new AbortController();
+  const scanA = scanPackIndex(stream, { signal: a.signal });
+  await src.parked;
+  assert.equal(await settledWithin(scanA, 20), 'pending');
+  a.abort(new Error('stop'));
+  assert.equal(await settledWithin(scanA), 'settled', 'a stalled stream');
+  const ra = await scanA;
+  assert.equal(ra.ok, false);
+  assert.equal(ra.error.code, 'aborted');
+  assert.equal(src.state.cancelled, 1, 'the stream is cancelled');
+  // an async iterable whose next() never resolves
+  const seen = { next: 0, returned: 0 };
+  let reached;
+  const parked = new Promise(r => { reached = r; });
+  const iterable = { [Symbol.asyncIterator]: () => ({
+    next() { seen.next++; reached(); return new Promise(() => {}); },
+    return() { seen.returned++; return new Promise(() => {}); },
+  }) };
+  const b = new AbortController();
+  const scanB = scanPackIndex(iterable, { signal: b.signal });
+  await parked;
+  b.abort(new Error('stop'));
+  assert.equal(await settledWithin(scanB), 'settled', 'a stalled iterator whose return() never settles either');
+  const rb = await scanB;
+  assert.equal(rb.ok, false);
+  assert.equal(rb.error.code, 'aborted');
+  assert.deepEqual(seen, { next: 1, returned: 1 });
+  // a signal that aborted before the call: nothing is waited for at all
+  const c = new AbortController();
+  c.abort(new Error('before'));
+  const scanC = scanPackIndex({ [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) }, { signal: c.signal });
+  assert.equal(await settledWithin(scanC), 'settled', 'a signal aborted before the call');
+  const rc = await scanC;
+  assert.equal(rc.ok, false);
+  assert.equal(rc.error.code, 'aborted');
+});
+
+test('what the storage answers after the abort is dropped: a late range is cancelled, a late rejection is not unhandled', async () => {
+  const idx = await scan(packs.ofs);
+  const unhandled = [];
+  const note = e => { unhandled.push(e); };
+  process.on('unhandledRejection', note);
+  try {
+    for (const late of ['opens', 'rejects']) {
+      const state = { reads: 0, cancelled: 0 };
+      let answer, refuse, reached;
+      const parked = new Promise(r => { reached = r; });
+      const source = { size: packs.ofs.length, read() {
+        state.reads++;
+        reached();
+        return new Promise((resolve, reject) => { answer = resolve; refuse = reject; });
+      } };
+      const ac = new AbortController();
+      const op = resolvePackRange(idx, source, { signal: ac.signal });
+      await parked;
+      ac.abort(new Error('stop'));
+      assert.equal(await settledWithin(op), 'settled', late);
+      assert.equal((await op).error.code, 'aborted', late);
+      // only now does the storage answer
+      if (late === 'opens') answer({ ok: true, value: new ReadableStream({ cancel() { state.cancelled++; } }) });
+      else refuse(new Error('the storage failed, late'));
+      for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r));
+      assert.equal(state.cancelled, late === 'opens' ? 1 : 0, `${late}: a range that opened late is cancelled, not left open`);
+      assert.equal(state.reads, 1, late);
+    }
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', note);
+  }
+});
+
+test('haltOn: every await in flight is released at the abort, and a finished operation leaves nothing on the signal', async () => {
+  const ac = new AbortController();
+  // count the listeners on the caller's signal with the platform's own add/remove
+  const listeners = new Set();
+  const add = ac.signal.addEventListener.bind(ac.signal);
+  const remove = ac.signal.removeEventListener.bind(ac.signal);
+  ac.signal.addEventListener = (type, fn, o) => { listeners.add(fn); add(type, fn, o); };
+  ac.signal.removeEventListener = (type, fn, o) => { listeners.delete(fn); remove(type, fn, o); };
+  const done = rangesource.haltOn(ac.signal);
+  assert.equal(listeners.size, 1);
+  // not halted: the race is the promise's own outcome, a value or a rejection
+  assert.equal(await done.race(Promise.resolve(7), () => {}), 7);
+  await assert.rejects(done.race(Promise.reject(new Error('mine')), () => {}), /mine/);
+  done.release();
+  assert.equal(listeners.size, 0, 'release() takes the listener off a signal that outlives the operation');
+  // two awaits in flight at once: both are released, and each late value goes to its own `late`
+  const halt = rangesource.haltOn(ac.signal);
+  const late = [];
+  let first, second;
+  const one = halt.race(new Promise(r => { first = r; }), v => { late.push(v); });
+  const two = halt.race(new Promise(r => { second = r; }), v => { late.push(v); });
+  ac.abort(new Error('stop'));
+  assert.deepEqual(await Promise.all([one, two]), [rangesource.HALTED, rangesource.HALTED]);
+  first('a');
+  second('b');
+  for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  assert.deepEqual(late, ['a', 'b']);
+  // after the abort nothing is waited for, not even a promise that never settles
+  assert.equal(await halt.race(new Promise(() => {}), () => {}), rangesource.HALTED);
+});
