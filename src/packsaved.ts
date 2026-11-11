@@ -240,43 +240,48 @@ function checkIndex(v: DataView, h: Header, at: Regions): Result<true, SavedInde
 // delta's base is not some other delta in the pack. A lie there changes which objects a push names, not how much ply
 // does: the receiver indexes the pushed pack itself and refuses a base it does not have, an object the pushed commit
 // reaches but the pack lacks, or a tree pushed before its blobs, and the transfer fails definitely.
+type ResolvedAt = { readonly size: number; readonly base: number; readonly depth: number; readonly oid: number; readonly type: number; readonly stats: number };
+type ResolvedRow = { readonly i: number; readonly base: number; readonly depth: number; readonly size: number; readonly type: number; readonly stored: number };
+function sameId(v: DataView, a: number, b: number): boolean {
+  for (let k = 0; k < OID_BYTES; k++) if (v.getUint8(a + k) !== v.getUint8(b + k)) return false;
+  return true;
+}
+// A whole object's row: the field that is not the scan's, or null.
+function wholeBad(v: DataView, h: Header, at: Regions, r: ResolvedAt, e: ResolvedRow): string | null {
+  if (e.base !== NO_BASE) return 'resolved.base';
+  if (e.depth !== 0) return 'resolved.depth';
+  if (e.type !== e.stored) return 'resolved.type';
+  if (e.size !== v.getFloat64(at.size + e.i * 8, true)) return 'resolved.size';
+  const ids = (h.flags & FLAG_OIDS) !== 0;
+  return ids && !sameId(v, r.oid + e.i * OID_BYTES, at.oids + e.i * OID_BYTES) ? 'resolved.oid' : null;
+}
+function deltaBaseOk(v: DataView, at: Regions, r: ResolvedAt, e: ResolvedRow): boolean {
+  const scanBase = v.getInt32(at.baseIndex + e.i * 4, true);
+  if (e.stored === OBJ_OFS_DELTA) return e.base === scanBase;
+  if (e.base >= 0) return sameId(v, r.oid + e.base * OID_BYTES, at.refs + e.i * OID_BYTES);
+  return e.base === THIN_BASE && scanBase < 0;
+}
+// A delta's row: the field its base (or the scan) contradicts, or null.
+function deltaBad(v: DataView, at: Regions, r: ResolvedAt, e: ResolvedRow, maxChain: number): string | null {
+  if (!deltaBaseOk(v, at, r, e)) return 'resolved.base';
+  const want = e.base === THIN_BASE ? 1 : v.getInt32(r.depth + e.base * 4, true) + 1;
+  // a limit that is not a number is within nothing: every delta is refused
+  const within = e.depth <= maxChain;
+  if (e.depth !== want || !within) return 'resolved.depth';
+  return e.base >= 0 && e.type !== v.getUint8(r.type + e.base) ? 'resolved.type' : null;
+}
 function checkResolved(v: DataView, h: Header, at: Regions, maxChain: number): Result<true, SavedIndexRefusal> {
   const n = h.n;
-  const sizeAt = at.resolved;
-  const baseAt = sizeAt + n * 8;
-  const depthAt = baseAt + n * 4;
-  const oidAt = depthAt + n * 4;
-  const typeAt = oidAt + n * OID_BYTES;
-  const hasOids = (h.flags & FLAG_OIDS) !== 0;
-  const sameId = (a: number, b: number): boolean => { for (let k = 0; k < OID_BYTES; k++) if (v.getUint8(a + k) !== v.getUint8(b + k)) return false; return true; };
+  const r: ResolvedAt = { size: at.resolved, base: at.resolved + n * 8, depth: at.resolved + n * 12, oid: at.resolved + n * 16, type: at.resolved + n * (16 + OID_BYTES), stats: at.resolved + n * RESOLVED_BYTES };
   for (let i = 0; i < n; i++) {
-    const base = v.getInt32(baseAt + i * 4, true);
-    const depth = v.getInt32(depthAt + i * 4, true);
-    const size = v.getFloat64(sizeAt + i * 8, true);
-    const type = v.getUint8(typeAt + i);
-    const stored = v.getUint8(at.storedType + i);
-    if (!isWhole(type)) return malformed('resolved.type', i);
-    if (base < THIN_BASE || base >= n || base === i) return malformed('resolved.base', i);
-    if (!Number.isSafeInteger(size) || size < 0) return malformed('resolved.size', i);
-    if (isWhole(stored)) {
-      if (base !== NO_BASE) return malformed('resolved.base', i);
-      if (depth !== 0) return malformed('resolved.depth', i);
-      if (type !== stored) return malformed('resolved.type', i);
-      if (size !== v.getFloat64(at.size + i * 8, true)) return malformed('resolved.size', i);
-      if (hasOids && !sameId(oidAt + i * OID_BYTES, at.oids + i * OID_BYTES)) return malformed('resolved.oid', i);
-      continue;
-    }
-    const scanBase = v.getInt32(at.baseIndex + i * 4, true);
-    const baseOk = stored === OBJ_OFS_DELTA
-      ? base === scanBase
-      : base >= 0 ? sameId(oidAt + base * OID_BYTES, at.refs + i * OID_BYTES) : base === THIN_BASE && scanBase < 0;
-    if (!baseOk) return malformed('resolved.base', i);
-    const want = base === THIN_BASE ? 1 : v.getInt32(depthAt + base * 4, true) + 1;
-    // `!(<=)`: a limit that is not a number refuses every delta
-    if (depth !== want || !(depth <= maxChain)) return malformed('resolved.depth', i);
-    if (base >= 0 && type !== v.getUint8(typeAt + base)) return malformed('resolved.type', i);
+    const e: ResolvedRow = { i, base: v.getInt32(r.base + i * 4, true), depth: v.getInt32(r.depth + i * 4, true), size: v.getFloat64(r.size + i * 8, true), type: v.getUint8(r.type + i), stored: v.getUint8(at.storedType + i) };
+    if (!isWhole(e.type)) return malformed('resolved.type', i);
+    if (e.base < THIN_BASE || e.base >= n || e.base === i) return malformed('resolved.base', i);
+    if (!Number.isSafeInteger(e.size) || e.size < 0) return malformed('resolved.size', i);
+    const field = isWhole(e.stored) ? wholeBad(v, h, at, r, e) : deltaBad(v, at, r, e, maxChain);
+    if (field !== null) return malformed(field, i);
   }
-  const statsAt = typeAt + n;
+  const statsAt = r.stats;
   return STATS.every((_, k) => { const s = v.getFloat64(statsAt + k * 8, true); return Number.isFinite(s) && s >= 0; }) ? ok(true) : malformed('resolved.stats');
 }
 function statsOf(v: DataView, at: number): ResolveStats {
