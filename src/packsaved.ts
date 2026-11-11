@@ -277,7 +277,7 @@ function deltaBaseOk(v: DataView, at: Regions, r: ResolvedAt, e: ResolvedRow): b
 function deltaBad(v: DataView, at: Regions, r: ResolvedAt, e: ResolvedRow, maxChain: number): string | null {
   if (!deltaBaseOk(v, at, r, e)) return 'resolved.base';
   const want = e.base === THIN_BASE ? 1 : v.getInt32(r.depth + e.base * 4, true) + 1;
-  // a limit that is not a number is within nothing: every delta is refused
+  // the limit as the caller passed it (see decodeSavedIndex): NaN is within nothing, every delta is refused
   const within = e.depth <= maxChain;
   if (e.depth !== want || !within) return 'resolved.depth';
   return e.base >= 0 && e.type !== v.getUint8(r.type + e.base) ? 'resolved.type' : null;
@@ -306,7 +306,9 @@ function statsOf(v: DataView, at: number): ResolveStats {
 // under, the limits.maxDeltaChain it gives resolvePackRange: resolved columns with a deeper chain are refused
 // (malformed, resolved.depth), as a resolve would refuse the pack. It is the caller's to pass: left out it is the
 // default (64), so an index saved from a pack resolved under a raised limit is refused unless the same limit is passed
-// here. loadTransferPack passes its opts.resolve.limits. A value that is not a number refuses every delta.
+// here. loadTransferPack passes its opts.resolve.limits, parsed. The value is not parsed here: it is the right side of
+// one comparison (depth <= maxDeltaChain), so one JavaScript reads as a number there ('200', 200n, [200], true) acts as
+// that number, and one the comparison is false for (NaN, an object) refuses every delta.
 export function decodeSavedIndex(bytes: Uint8Array, want: PackIdentity, maxDeltaChain: number = DEFAULT_LIMITS.maxDeltaChain): Result<SavedIndex, SavedIndexRefusal> {
   const head = readHeader(bytes);
   if (!head.ok) return head;
