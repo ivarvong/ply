@@ -46,7 +46,7 @@
 // (partialClone), objects/info/alternates (alternates) and shallow repositories (shallow).
 /* oxlint-disable no-await-in-loop -- the walks read one object at a time from the local repository, under the bounds */
 /* oxlint-disable import/max-dependencies -- an entry composes the protocol from one import per module */
-import { open, readFile, readdir, lstat } from 'node:fs/promises';
+import { open, readFile, readdir, readlink, lstat, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a tree path throughout this file
 import { join, resolve } from 'node:path';
@@ -219,7 +219,7 @@ async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<
     const m = /^([0-9a-f]{40}) (refs\/\S+)$/u.exec(line);
     if (m !== null) raw.set(getOrElse(at(m, 2), ''), getOrElse(at(m, 1), ''));
   }
-  const walk = async (rel: string): Promise<null> => {
+  const walk = async (rel: string): Promise<Result<null, PlyError>> => {
     const entries = await readdir(join(commonDir, rel), { withFileTypes: true }).then(e => e, () => []);
     for (const e of entries.toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
       // git looks at no entry, file or directory, whose name starts with '.' or ends in '.lock' (refs/files-backend.c
@@ -227,13 +227,30 @@ async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<
       // file (Finder's .DS_Store, an editor's backup) is not a ref, whatever it holds
       if (e.name.startsWith('.') || e.name.endsWith('.lock')) continue;
       const name = `${rel}/${e.name}`;
-      if (e.isDirectory()) await walk(name);
-      else if (e.isFile() && validateRef(name).ok) raw.set(name, getOrElse<string>(mapOrNone(await maybeText(join(commonDir, name))), '').trim());
-      if (raw.size > maxRefs) return null;
+      const path = join(commonDir, name);
+      // a symbolic link is what it points at, as git's get_dtype(follow) reads an entry; one that points nowhere, or
+      // at neither a file nor a directory, is not a ref
+      const link = e.isSymbolicLink();
+      const target = link ? await stat(path).then(s => s, () => null) : e;
+      if (target === null) continue;
+      if (target.isDirectory()) {
+        // git walks into a linked directory; a link can loop, and nothing but the path length bounds that walk, so
+        // ply refuses it by name rather than leave its refs out of the push unsaid
+        if (link) return fail('bad_request', `${name}: a symbolic link to a directory under refs/ is not read`, { what: 'ref', path: name });
+        const sub = await walk(name);
+        if (!sub.ok) return sub;
+      } else if (target.isFile() && validateRef(name).ok) {
+        // refs/files-backend.c files_read_raw_ref: a link whose target text is a ref name is a symbolic ref to that
+        // name; any other link is read as the file it points at
+        const text = link ? await readlink(path).then(t => t, () => '') : '';
+        raw.set(name, text.startsWith('refs/') && validateRef(text).ok ? `${SYMREF}${text}` : getOrElse<string>(mapOrNone(await maybeText(path)), '').trim());
+      }
+      if (raw.size > maxRefs) return ok(null);
     }
-    return null;
+    return ok(null);
   };
-  await walk('refs');
+  const walked = await walk('refs');
+  if (!walked.ok) return walked;
   if (raw.size > maxRefs) return err(limitExceeded('local refs', raw.size, maxRefs));
   const refs = new Map<string, string>();
   for (const [name, value] of raw) {

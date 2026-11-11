@@ -558,3 +558,31 @@ test('pushRepo vs git: a short source is ambiguous as git counts it (remote.c co
   assert.equal(p.error.code, 'bad_request');
   assert.match(p.error.message, /matches more than one ref \(refs\/tags\/dup, refs\/heads\/dup\)/);
 });
+
+test('pushRepo vs git: a loose ref that is a symbolic link is the file it points at; a link that points nowhere is not a ref', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  const outside = join(root, `outside-ref${n++}`);
+  writeFileSync(outside, `${rev(local, 'main')}\n`);
+  symlinkSync(outside, join(local, '.git', 'refs', 'heads', 'linked'));
+  symlinkSync(join(root, 'nowhere'), join(local, '.git', 'refs', 'heads', 'dangling'));
+  // a link whose target text is a ref name and that resolves on disk nowhere (the legacy symlink form of a symbolic ref)
+  symlinkSync('refs/heads/topic', join(local, '.git', 'refs', 'heads', 'alias'));
+  assert.deepEqual(await sameAsGit(local, url, ['linked'], { refspecs: ['linked'] }), [{ ref: 'refs/heads/linked', newOid: rev(local, 'main'), kind: 'create' }]);
+  const all = await sameAsGit(local, url, ['--all'], { all: true });
+  assert.ok(all.some(u => u.ref === 'refs/heads/linked'), 'git push --all sends the linked branch');
+  // a link whose target text is a ref name and that does resolve on disk (to refs/x/refs/heads/topic, at the second
+  // commit): git reads it as a symbolic ref to refs/heads/topic (the first commit), never as the file it points at
+  writeFileSync(join(local, 'f'), 'two\n');
+  git(local, [...ID, 'commit', '-q', '-a', '-m', 'two']);
+  git(local, ['update-ref', 'refs/x/refs/heads/topic', 'main']);
+  symlinkSync('refs/heads/topic', join(local, '.git', 'refs', 'x', 'alias2'));
+  assert.notEqual(rev(local, 'topic'), rev(local, 'main'));
+  assert.deepEqual(await sameAsGit(local, url, ['refs/x/alias2:refs/heads/via-link'], { refspecs: ['refs/x/alias2:refs/heads/via-link'] }), [{ ref: 'refs/heads/via-link', newOid: rev(local, 'topic'), kind: 'create' }]);
+  // the one stated difference: git walks into a linked directory (the push below succeeds for git); ply refuses it by name
+  symlinkSync(join(local, '.git', 'refs', 'tags'), join(local, '.git', 'refs', 'heads', 'dirlink'));
+  assert.equal((await gitDryRun(local, url, ['main'])).status, 0);
+  const refused = await plyDryRun(local, url, { refspecs: ['main'] });
+  assert.equal(refused.ok, false);
+  assert.deepEqual([refused.error.code, refused.error.what, refused.error.path], ['bad_request', 'ref', 'refs/heads/dirlink']);
+});
