@@ -31,7 +31,7 @@ import { DEFAULT_LIMITS, limitExceeded } from './limits.js';
 import { validateWire } from './validate.js';
 import type { WireField } from './validate.js';
 import { parseOid, type Oid } from './oid.js';
-import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, learnShallow, takesShallow, probing, spanned } from './transport.js';
+import { frames, advertise, coded, clientSpan, proto, harvestBytes, learnFilter, learnShallow, takesShallow, shallowLearned, probing, spanned } from './transport.js';
 import { capLookup, parseCapabilitiesV2 } from './caps.js';
 import { thrownCodeIs, thrownReasonIs, thrownCode, thrownMessage } from './boundary.js';
 
@@ -1031,7 +1031,8 @@ export function objectAt(t: Transport, oid: Oid, options: Input<ObjectWantConfig
   const ask = async (run: (deepen: number) => Promise<Result<FetchedObject, PlyError>>): Promise<Result<FetchedObject, PlyError>> => {
     const sent = depth();
     const first = await run(sent);
-    if (first.ok || asked !== null || sent === 0) return first;
+    // once per quirks record: an advertisement already read for it has said whether `shallow` is listed
+    if (first.ok || asked !== null || sent === 0 || shallowLearned(t.quirks)) return first;
     await filterUnadvertised(t, first.error);
     return depth() === sent ? first : run(depth());
   };

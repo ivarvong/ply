@@ -65,12 +65,12 @@ export const freshQuirks = (): Quirks => ({ treeFilter: 'tree:0', blobWants: 'ma
 // fetch= line (discover, or the read after a refused request: fetch.ts filterUnadvertised). Kept beside the record, not
 // in it, so the public Quirks shape (callers build and persist it as JSON) is unchanged. A record not yet taught is
 // taken to take it (git's upload-pack always lists `shallow`); a server that does not costs one refused request and one
-// advertisement read per record (fetch.ts objectAt).
-const shallowless = new WeakSet<Quirks>();
-export function learnShallow(t: Transport, advertised: boolean): void {
-  if (advertised) shallowless.delete(t.quirks); else shallowless.add(t.quirks);
-}
-export const takesShallow = (q: Quirks): boolean => !shallowless.has(q);
+// advertisement read per record (fetch.ts objectAt). Once a record is taught either way (shallowLearned), an empty
+// response is not a reason to read the advertisement for it again.
+const shallowKnown = new WeakMap<Quirks, boolean>();
+export function learnShallow(t: Transport, advertised: boolean): void { shallowKnown.set(t.quirks, advertised); }
+export const takesShallow = (q: Quirks): boolean => shallowKnown.get(q) !== false;
+export const shallowLearned = (q: Quirks): boolean => shallowKnown.has(q);
 // What an upload-pack advertisement says about `filter`, kept: absent is 'none'; present undoes an earlier 'none' (the
 // host turned it on) and leaves a learned blob:none alone (Artifacts advertises `filter` and refuses tree:0).
 export function learnFilter(t: Transport, advertised: boolean): void {

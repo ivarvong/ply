@@ -218,10 +218,31 @@ test('a server that advertises filter and answers a filtered fetch with an empty
     try {
       const tr = unwrap(createTransport(`${proxy2.url}/${filter.url.split('/').pop()}`, { tracer: t2.tracer }));
       const { fetchObject } = await import('../src/fetch.js');
-      const got = await fetchObject(tr, { oid: blob, filter: '' });
+      // (the request that carries no argument a server may refuse: a want named a blob is sent no `deepen`)
+      const { TYPE } = await import('../src/objects.js');
+      const got = await fetchObject(tr, { oid: blob, filter: '', expectType: TYPE.BLOB });
       assert.equal(got.ok, false);
       assert.equal(got.error.code, 'protocol');
       assert.equal(spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover').length, 0);
+      // the same for a caller's own depth: it is sent as given and its refusal is the caller's answer
+      const own = await fetchObject(tr, { oid: blob, filter: '', deepen: 0 });
+      assert.equal(own.ok, false);
+      assert.equal(own.error.code, 'protocol');
+      assert.equal(spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover').length, 0);
+      // A want of unknown type is sent `deepen 1` by default (fetchobject-deepen.test.js), an argument a server may not
+      // take: its empty answer reads the advertisement, once per quirks record. It lists `shallow`, so the answer is
+      // still the protocol error, and the next empty answer reads nothing.
+      const typeless = await fetchObject(tr, { oid: blob, filter: '' });
+      assert.equal(typeless.ok, false);
+      assert.equal(typeless.error.code, 'protocol');
+      assert.equal(typeless.error.reason, 'empty_response');
+      const probes2 = spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover');
+      assert.equal(probes2.length, 1);
+      assert.equal(probes2[0].attrs['git.server.shallow'], true);
+      const again = await fetchObject(tr, { oid: blob, filter: '' });
+      assert.equal(again.ok, false);
+      assert.equal(again.error.code, 'protocol');
+      assert.equal(spansOf(t2.ex).filter(s => s.name === 'git.upload-pack discover').length, 1);
     } finally { await proxy2.close(); }
   } finally { await proxy.close(); }
 });
