@@ -421,6 +421,64 @@ test('verifyFetchAnswer judges an answer by the request that produced it: git\'s
   assert.equal(noPack.ok, false); assert.equal(noPack.error.code, 'protocol'); assert.match(noPack.error.message, /no packfile section/);
 });
 
+// The streaming store gate judges an answer by the request that produced it, as verifyFetchAnswer does (above). The
+// answer in both tests is real git upload-pack's reply to a request without `done` for a have it holds; its lead is
+// asserted byte for byte from gitprotocol-v2 (acknowledgments, ACK, ready, delim, packfile), written out by hand.
+const ackAnswer = async () => {
+  const head = headOf(), have = git(bare, ['rev-parse', 'main~1']).trim();
+  const body = fetchBody({ wants: [head], haves: [have], done: false });
+  const answer = await post(`${srv.url}/pc.git`, body);
+  const lead = `0014acknowledgments\n0031ACK ${have}\n000aready\n0001000dpackfile\n`;
+  assert.equal(new TextDecoder('latin1').decode(answer.subarray(0, lead.length)), lead, 'git answers ACK and ready, then the pack');
+  return { head, have, body, answer };
+};
+
+test('cachingFetch: a streamed answer with an acknowledgments section to a request that sent done is not stored; the caller still gets every byte', async () => {
+  otherWriter({ 'gate-done.txt': 'one\n' }, 'gate: done request');
+  const { head, answer } = await ackAnswer();
+  // a pure fetch (wants, done): after `done` git's fetch-pack reads the packfile section next and dies on
+  // "expected 'packfile', received 'acknowledgments'", so these bytes are no answer to this request
+  const body = fetchBody({ wants: [head] });
+  assert.equal(unwrap(parseUploadPackRequest(body)).done, true);
+  const pending = [];
+  let origin = 0;
+  const lying = async () => { origin++; return new Response(answer.slice(), { status: 200, headers: { 'content-type': 'application/x-git-upload-pack-result' } }); };
+  const cache = memoryCache();
+  const f = cachingFetch(lying, cache, { verifyBeforeStore: true, waitUntil: p => { pending.push(p); } });
+  const call = async () => { const res = await f(`${url}/git-upload-pack`, { method: 'POST', headers: UPLOAD, body }); const got = new Uint8Array(await res.arrayBuffer()); await Promise.all(pending.splice(0)); return { got }; };
+  const first = await call();
+  assert.deepEqual(first.got, answer, 'the bytes still flow to the caller, unchanged');
+  assert.equal(cache.entries.size, 0, 'nothing stored');
+  assert.equal(f.stats.miss, 1); assert.equal(f.stats.verifyFailed, 1); assert.equal(f.stats.verifyOk, 0); assert.equal(f.stats.putOk, 0);
+  assert.match(f.stats.verifyError, /expected packfile, received acknowledgments/);
+  // so the next call asks the origin again: no hit
+  const second = await call();
+  assert.deepEqual(second.got, answer);
+  assert.equal(origin, 2); assert.equal(f.stats.hit, 0); assert.equal(f.stats.miss, 2); assert.equal(cache.entries.size, 0);
+});
+
+test('cachingFetch: git\'s streamed answer to a request without done (acknowledgments, ready, packfile) is stored, and the second call is a hit', async () => {
+  otherWriter({ 'gate-not-done.txt': 'one\n' }, 'gate: non-done request');
+  const { body, answer } = await ackAnswer();
+  assert.equal(unwrap(parseUploadPackRequest(body)).done, false);
+  // a negotiation round is not a pure fetch: only a caller's own shouldCache admits it
+  assert.equal(exchangeKind('POST', `${url}/git-upload-pack`, body), null);
+  const pending = [];
+  const cache = memoryCache();
+  const f = cachingFetch(globalThis.fetch, cache, { shouldCache: () => true, waitUntil: p => { pending.push(p); } });
+  const call = async () => { const got = await rawCall(f, body); await Promise.all(pending.splice(0)); return got; };
+  const before = counts();
+  const first = await call();
+  // git may pack the same objects into different bytes on another call: the object set is the oracle, not the bytes
+  assert.deepEqual(objectSet(first), objectSet(answer));
+  assert.equal(f.stats.miss, 1); assert.equal(f.stats.verifyFailed, 0, f.stats.verifyError); assert.equal(f.stats.verifyOk, 1); assert.equal(f.stats.putOk, 1);
+  assert.equal(cache.entries.size, 1, 'stored');
+  const hit = await call();
+  assert.equal(f.stats.hit, 1); assert.equal(f.stats.miss, 1);
+  assert.deepEqual(hit, first, 'the hit replays the stored answer byte for byte');
+  assert.equal(delta(before, counts()).fetch, 1, 'the origin saw one fetch for the two calls');
+});
+
 test('cachingFetch verifyBeforeStore: a blob fetch is cached; a tampered answer is never stored; a hit is byte-identical to the stored answer', async () => {
   const body = fetchBody({ wants: [blobOid()] });
   const pending = [];
