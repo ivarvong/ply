@@ -112,8 +112,10 @@ export async function measurePack(objects: readonly PackInput[], keep: number = 
 // Pass 2: `prefix` (the commands, and push options) and then the pack, as a stream read at the reader's pace. `failure`
 // is null until this pass refuses to finish the pack (a length or SHA-1 that is not pass 1's) or the deflate fails; the
 // stream is then errored before the trailer, whatever the runtime does with an errored request body (undici aborts the
-// request; workerd ends it as if complete, measured), so the server never gets a whole pack.
-export type StreamedPack = { readonly stream: ReadableStream<Uint8Array>; readonly length: number; readonly failure: () => ErrorOf<'internal'> | null };
+// request; workerd ends it as if complete, measured), so the server never gets a whole pack. `pulled` is whether the
+// transport ever asked the body for a byte: until it has, nothing of this push left the process (the first pull hands
+// over the command list).
+export type StreamedPack = { readonly stream: ReadableStream<Uint8Array>; readonly length: number; readonly failure: () => ErrorOf<'internal'> | null; readonly pulled: () => boolean };
 export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
   const it = pieces(m.objects);
   let failed: ErrorOf<'internal'> | null = null;
@@ -144,7 +146,7 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
     // Stryker disable next-line ObjectLiteral,ArrayDeclaration: equivalent, see above
     async cancel(): Promise<void> { await it.return({ entries: [], body: 0, digest: new Uint8Array(0) }); },
   }, { highWaterMark: 0 });
-  return { stream, length: prefix.length + m.bytes, failure: () => failed };
+  return { stream, length: prefix.length + m.bytes, failure: () => failed, pulled: () => started };
 }
 
 // A pack the caller already has, as the request body after `prefix` (commands, and push options): read at the reader's

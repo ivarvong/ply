@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTransport } from '../src/http.js';
-import { ZERO_OID } from '../src/push.js';
+import { ZERO_OID, push } from '../src/push.js';
 import { pushPack } from '../src/receivecaps.js';
 import { streamSource } from '../src/packwrite.js';
 import { unwrap } from './unwrap.js';
@@ -127,6 +127,80 @@ for (const [name, how, code] of FAILURES) {
     } finally { g.close(); }
   });
 }
+
+// push() with objects (the same rule, for the entry that writes the pack itself). 40 blobs of 60,000 random bytes do not
+// deflate, so the pack is 2.4 MB and its request body is a stream; the double sees that for itself (init.body is a
+// ReadableStream). Expected codes are the fetch contract's, as above; "no ref moved" is git's for-each-ref.
+const blobs = () => Array.from({ length: 40 }, () => ({ type: 3, data: crypto.getRandomValues(new Uint8Array(60000)) }));
+for (const [name, how, code] of FAILURES) {
+  test(`push with a streamed pack, ${name}: before the first body pull it is the definite ${code}, and git shows no ref moved`, async () => {
+    const g = await gitServer();
+    try {
+      const before = g.refs();
+      const ac = new AbortController();
+      if (how.preAbort) ac.abort();
+      const seen = { posts: 0, streamed: 0 };
+      const fetchImpl = async (url, init) => {
+        if (!isReceive(url)) return fetch(url, init);
+        seen.posts++;
+        if (init.body instanceof ReadableStream) seen.streamed++;
+        if (how.reject !== null) throw how.reject();
+        return fetch(url, init);
+      };
+      const t = unwrap(createTransport(g.url, { signal: ac.signal, fetchImpl }));
+      const r = await push(t, { ref: 'refs/heads/main', oldOid: g.commit, newOid: 'a'.repeat(40), objects: blobs() });
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, code, r.error.message);
+      // a signal that had fired: no request is made; a rejected fetch: one POST with a stream body, not retried
+      assert.deepEqual(seen, how.preAbort ? { posts: 0, streamed: 0 } : { posts: 1, streamed: 1 });
+      assert.equal(g.refs(), before, 'git for-each-ref is unchanged');
+    } finally { g.close(); }
+  });
+
+  test(`push with a streamed pack, ${name}: after one body pull the same failure is ambiguous`, async () => {
+    const g = await gitServer();
+    try {
+      const ac = new AbortController();
+      let pulled = 0;
+      const fetchImpl = async (url, init) => {
+        if (!isReceive(url)) return fetch(url, init);
+        const first = await init.body.getReader().read();
+        pulled += first.value.length;
+        if (how.reject === null) { ac.abort(); throw ac.signal.reason; }
+        throw how.reject();
+      };
+      const t = unwrap(createTransport(g.url, { signal: ac.signal, fetchImpl }));
+      const r = await push(t, { ref: 'refs/heads/main', oldOid: g.commit, newOid: 'a'.repeat(40), objects: blobs() });
+      assert.ok(pulled > 0, 'the double read the first chunk');
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, 'ambiguous', r.error.message);
+      assert.equal(r.error.original, code);
+    } finally { g.close(); }
+  });
+}
+
+// A pack small enough to go as bytes: a signal that had fired before the request is still the definite 'aborted' with
+// no request made. A fetch that rejects is not: bytes handed to fetch() cannot be seen leaving or not, so that stays
+// 'ambiguous' (the near miss of the streamed rows above).
+test('push with a pack sent as bytes: a signal already fired is the definite aborted with no request; a rejected fetch stays ambiguous', async () => {
+  const g = await gitServer();
+  try {
+    const before = g.refs();
+    const small = () => ({ ref: 'refs/heads/main', oldOid: g.commit, newOid: 'a'.repeat(40), objects: [{ type: 3, data: new TextEncoder().encode('hi\n') }] });
+    const ac = new AbortController();
+    ac.abort();
+    let posts = 0;
+    const counting = async (url, init) => { if (isReceive(url)) posts++; return fetch(url, init); };
+    const fired = await push(unwrap(createTransport(g.url, { signal: ac.signal, fetchImpl: counting })), small());
+    assert.deepEqual({ ok: fired.ok, code: fired.error.code, posts }, { ok: false, code: 'aborted', posts: 0 });
+
+    const kinds = [];
+    const rejecting = async (url, init) => { if (!isReceive(url)) return fetch(url, init); kinds.push(init.body instanceof ReadableStream ? 'stream' : 'bytes'); throw refused(); };
+    const lost = await push(unwrap(createTransport(g.url, { fetchImpl: rejecting })), small());
+    assert.deepEqual({ ok: lost.ok, code: lost.error.code, original: lost.error.original, kinds }, { ok: false, code: 'ambiguous', original: 'network', kinds: ['bytes'] });
+    assert.equal(g.refs(), before, 'git for-each-ref is unchanged');
+  } finally { g.close(); }
+});
 
 // The body itself: `pulled` turns true at the first pull and not before; a source given back is unlocked and uncancelled;
 // a body given back and pulled after all errors without handing over the command list; after a pull giveBack does nothing.

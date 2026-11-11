@@ -806,10 +806,19 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   // exception is the server refusing the service itself (refusedBeforeReceivePack, confirmed by its advertisement).
   const body = bodyOf(plan, packed);
   if (!body.ok) return body;
+  // The caller's signal had fired before the request: none is made, so this is the definite 'aborted' (or 'timeout',
+  // by the signal's reason), not 'ambiguous'.
+  const signal = getOrElse<unknown>(field(t, 'signal'), null);
+  if (signal instanceof AbortSignal && signal.aborted) return err(wrapNet(signal.reason, signal));
   const r = await readResponse(t, plan, body.value.body, span, plan.sideband);
+  // The exchange failed with no answer and the transport never pulled the streamed body: the command list did not
+  // leave this process, so no ref can have moved, and the failure is its own cause, not 'ambiguous'. A body handed
+  // over as bytes cannot be seen leaving or not, so it stays under the rule above.
+  const { streamed } = body.value;
+  if ('cause' in r && !r.answered && streamed !== null && !streamed.pulled()) return err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null));
   // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
   // it was not sent the pack that was measured
-  const cut = body.value.streamed === null ? null : body.value.streamed.failure();
+  const cut = streamed === null ? null : streamed.failure();
   return decide({ t, span, plan, packBytes, entries, hookOutput: '' }, r, cut);
 }
 
