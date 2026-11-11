@@ -11,7 +11,7 @@
 //      must cost less than 9 times the time; never an absolute time). That test is the gate's first line;
 //   3. the second line: shapes that backtrack are refused outright, whatever the inventory says: a quantifier inside a
 //      quantified group (nested); two variable-length quantified atoms next to each other that can match the same
-//      character (adjacent); an unanchored unbounded run followed by something that can fail, such as /\/+$/ or
+//      character (adjacent, also across capture groups: /(\d+)(\d*)/); an unanchored unbounded run followed by something that can fail, such as /\/+$/ or
 //      /\n+$/ (every character of a long run starts the run again); and alternatives under a quantifier that can start
 //      with the same character, such as /(a|ab)*c/. An entry marked `knownBad: '<branch that fixes it>'` is exempt
 //      from 3, is listed on every run, must still be in the source (when the fix lands the entry fails the gate until
@@ -158,6 +158,12 @@ const firstChars = seq => {
   }
   return chars;
 };
+// What an atom can start with: for a group, what its alternatives can start with (a group that must open with a
+// character the run before it cannot match is a delimiter, not a second run).
+const startChars = item => (item.type === 'group' ? new Set(item.body.flatMap(alt => [...firstChars(alt)])) : charsIn(item));
+// A group matched exactly once with one alternative is transparent: in /x(\d+)(\d*)y/ the two runs sit next to each
+// other although each is inside its own capture group.
+const flat = seq => seq.flatMap(item => (item.type === 'group' && item.min === 1 && item.max === 1 && item.body.length === 1 ? flat(item.body[0]) : [item]));
 const isRun = item => !zeroWidth(item) && (unbounded(item) || (item.type === 'group' && hasUnbounded(item.body)));
 const canFail = item => zeroWidth(item) || item.min > 0;
 // The shapes refused: returns a list of reasons, empty when the pattern has none of them.
@@ -165,7 +171,7 @@ export function shapeProblems(source, flags) {
   const problems = [];
   const check = alts => {
     for (const seq of alts) {
-      seq.forEach((item, at) => {
+      seq.forEach(item => {
         if (item.type === 'group' || item.type === 'look') {
           if (item.type === 'group' && unbounded(item) && hasUnbounded(item.body)) problems.push(`nested quantifier: ${item.text} repeats a group that itself repeats`);
           // (a|ab)*: after any prefix the engine may take either alternative, so a failure retries every split.
@@ -174,11 +180,14 @@ export function shapeProblems(source, flags) {
           }
           check(item.body);
         }
+      });
+      const line = flat(seq);
+      line.forEach((item, at) => {
         if (zeroWidth(item) || !variable(item)) return;
-        for (let next = at + 1; next < seq.length; next += 1) {
-          const other = seq[next];
+        for (let next = at + 1; next < line.length; next += 1) {
+          const other = line[next];
           if (zeroWidth(other)) continue;
-          if (variable(other) && (unbounded(item) || unbounded(other)) && overlap(charsIn(item), charsIn(other))) {
+          if (variable(other) && (unbounded(item) || unbounded(other)) && overlap(charsIn(item), startChars(other))) {
             problems.push(`adjacent quantified atoms ${item.text} and ${other.text} can match the same character`);
           }
           if (other.min > 0) break; // a required atom ends the run the first one could trade characters with
@@ -204,7 +213,7 @@ export function shapeProblems(source, flags) {
       if (restarts && failing !== undefined) problems.push(`unanchored run ${item.text} is followed by ${failing.text}, which can fail: every character of a long run starts the run again`);
     });
   }
-  return problems;
+  return [...new Set(problems)]; // a transparent group's atoms are seen from outside and from inside it
 }
 
 // ---- the gate -----------------------------------------------------------------------------------------------------

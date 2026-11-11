@@ -10,6 +10,7 @@
 // A row marked knownBad is asserted the other way round: its generator must show the superlinear cost, so the marker is
 // evidence and not an excuse. When its fix lands the pattern changes, the gate refuses the stale row, and it is rewritten.
 import { expect, test } from 'vitest';
+import { gate, shapeProblems } from '../scripts/regex-gate.mjs';
 import { INVENTORY } from '../scripts/regex-inventory.mjs';
 
 const BOUND = 9; // t(4n) / t(n): linear is about 4 (or less: a fixed-length match is constant), quadratic about 16
@@ -80,3 +81,36 @@ for (const entry of rows) {
     });
   }
 }
+
+// ---- the gate itself ------------------------------------------------------------------------------------------------
+// The second line (shape rules). The refused list is not derived from the rules: the first seven are the patterns an
+// independent reviewer timed at 16 times the input length (linear is about 16): /\/+$/ 477x, /\n+$/u 228x,
+// /[#;].*$/u 438x, /filter .* not (supported|allowed)/ 408x, /(a|a)*$/ 401x, /(a|ab)*c/ 329x, and /(a+)+$/, the
+// textbook exponential one. The eighth is quadratic by hand: on 'x' + n digits + 'z', (\d+) takes all n digits, y
+// fails, and for each of the n lengths (\d+) can give back, (\d*) tries every length of the rest: n(n+1)/2 steps.
+const REFUSED = [
+  [String.raw`\/+$`, ''], [String.raw`\n+$`, 'u'], [String.raw`[#;].*$`, 'u'], ['filter .* not (supported|allowed)', ''],
+  ['(a|a)*$', ''], ['(a|ab)*c', ''], ['(a+)+$', ''], [String.raw`x(\d+)(\d*)y`, ''],
+];
+// Linear by construction: one anchored start and one class run; a fixed count; no run at all; three runs whose
+// classes are pairwise disjoint (name, space, quoted text), so no character can be matched by two of them.
+const CLEAN = [['^[a-z]+$', ''], ['^[0-9a-f]{40}$', ''], [String.raw`\n$`, ''], [String.raw`^\[([^\]\s"]+)(\s+"([^"]*)")?\]$`, 'u']];
+
+test('the shape rules refuse the patterns measured superlinear and pass the linear controls', () => {
+  for (const [source, flags] of REFUSED) expect(shapeProblems(source, flags).length, `/${source}/${flags}`).toBeGreaterThan(0);
+  for (const [source, flags] of CLEAN) expect(shapeProblems(source, flags), `/${source}/${flags}`).toEqual([]);
+});
+
+test('the gate fails on a pattern with no row, a row with no pattern, and a known-bad marker left behind', () => {
+  const found = [{ file: 'src/x.ts', line: 7, pattern: '/^[a-z]+$/u', kind: 'literal' }];
+  const entry = { file: 'src/x.ts', pattern: '/^[a-z]+$/u', input: 'caller', linear: 'anchored at ^, one class run', adversarial: n => 'a'.repeat(n) };
+  expect(gate(found, [entry])).toEqual([]);
+  expect(gate(found, [])).toEqual(['src/x.ts:7: /^[a-z]+$/u: not in scripts/regex-inventory.mjs']);
+  expect(gate([], [entry])).toHaveLength(1);
+  expect(gate([], [entry])[0]).toContain('matches no pattern in the source');
+  expect(gate([], [{ ...entry, knownBad: 'fix/some-branch' }])[0]).toContain('its fix landed (fix/some-branch)');
+  // A row cannot claim remote text without a generator, and a refused shape is refused whatever the row says.
+  expect(gate(found, [{ ...entry, adversarial: undefined }])[0]).toContain('needs an adversarial(n) generator');
+  const slash = { file: 'src/x.ts', line: 9, pattern: String.raw`/\/+$/`, kind: 'literal' };
+  expect(gate([slash], [{ ...entry, pattern: slash.pattern }])[0]).toContain('unanchored run');
+});
