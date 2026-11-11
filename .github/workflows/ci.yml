@@ -103,8 +103,10 @@ jobs:
       - run: npm run lint
       - name: dist is what consumers import
         run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"
-      # the built d.ts compiled by a consumer of every subpath, skipLibCheck false: lib ES2022 + @types/node, lib DOM, and
-      # @cloudflare/workers-types when present (scripts/dist-check.mjs; test/dist-types.test.js runs it in the suite too)
+      # the built d.ts compiled by a consumer of every subpath, skipLibCheck false: lib ES2022 + @types/node 20, 22 and
+      # 24, lib DOM, and @cloudflare/workers-types. The type packages are pinned devDependencies that npm ci installs; a
+      # missing one fails this step, none is skipped (scripts/dist-check.mjs; test/dist-types.test.js runs it in the
+      # suite too)
       - name: dist types compile for Node-only, DOM and Workers consumers
         run: npm run check:dist
       - name: below-hash fuzzer
