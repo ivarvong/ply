@@ -472,15 +472,17 @@ test('the reason a cancelled range receives: the consumer\'s own, an AbortError 
     const source = {
       size: packs.ofs.length,
       read(offset, length, signal) {
-        signal.addEventListener('abort', () => { seen.aborts.push(signal.reason); });
+        // a read given no signal records no abort, so the assertions below fail rather than this source throwing
+        signal?.addEventListener('abort', () => { seen.aborts.push(signal.reason); });
         return Promise.resolve({ ok: true, value: new ReadableStream({ pull() { reached(); return new Promise(() => {}); }, cancel(why) { seen.cancels.push(why); } }, { highWaterMark: 0 }) });
       },
     };
     const reader = unwrap(await packSubset(source, idx, [...Array(idx.count).keys()])).stream.getReader();
     const drained = readAll(reader);
-    await parked;
-    await reader.cancel(given);
-    await drained;
+    // no wait here is bare: a cancel that waits for the range (which never answers) fails the test, it does not hang it
+    assert.equal(await settledWithin(parked), 'settled', 'the range is open and has stalled');
+    assert.equal(await settledWithin(reader.cancel(given)), 'settled', `cancel(${String(given)}) with a stalled range`);
+    assert.equal(await settledWithin(drained), 'settled', 'the read that was pending');
     assert.equal(seen.cancels.length, 1, String(given));
     assert.ok(expected(seen.cancels[0]), `the range's cancel reason for ${String(given)}: ${String(seen.cancels[0])}`);
     assert.deepEqual(seen.aborts, seen.cancels, 'read\'s signal aborts with the same reason');
@@ -580,7 +582,8 @@ function stallAt(bytes, at, how) {
     read(offset, length, signal) {
       const i = state.reads++;
       if (i < at) return real.read(offset, length, signal);
-      signal.addEventListener('abort', () => { state.aborted++; });
+      // an operation that passes no signal still parks here: its test then fails at 'the abort settles it'
+      signal?.addEventListener('abort', () => { state.aborted++; });
       if (how === 'never') { reached(); return new Promise(() => {}); }
       return Promise.resolve({ ok: true, value: new ReadableStream({
         pull() { reached(); return new Promise(() => {}); },
@@ -612,7 +615,8 @@ for (const [name, stalledRead, run] of ABORTABLE) {
       const source = stallAt(packs.ofs, stalledRead, how);
       const ac = new AbortController();
       const op = run(source, ac.signal, idx, dst);
-      await source.parked;
+      // bounded like every wait below: an operation that never reaches the read fails here, it does not hang
+      assert.equal(await settledWithin(source.parked), 'settled', 'the operation reached the read the case names');
       assert.equal(source.state.reads, stalledRead + 1, 'parked at the read the case names');
       assert.equal(await settledWithin(op, 20), 'pending', 'it is waiting for the storage');
       ac.abort(new Error('stop'));
