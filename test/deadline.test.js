@@ -253,3 +253,41 @@ test('deadlineOf: first byte before the headers, idle while on the network, noth
   // 0 turns a limit off
   assert.equal(deadlineOf('streaming', 1000, 400, { firstByteMs: 100, idleMs: 0, totalMs: 0 }), null);
 });
+
+// The hot loop (#255 review, R2). One timer is left pending: past the headers a deadline only moves later, so the
+// pending timer is early enough and re-arms for what is left when it fires. The expected count is the rule's: zero
+// timer calls per chunk (main ec337c5 made none either), whatever the limits.
+const countingTimers = async run => {
+  const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout;
+  const calls = { set: 0, clear: 0 };
+  globalThis.setTimeout = (...a) => { calls.set++; return realSet(...a); };
+  globalThis.clearTimeout = (...a) => { calls.clear++; return realClear(...a); };
+  try { await run(calls); } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
+};
+test('a consumer that keeps up costs no setTimeout and no clearTimeout per body chunk', async () => {
+  await countingTimers(calls => {
+    for (const totalMs of [0, 120_000]) {
+      const c = exchangeClock({ firstByteMs: 60_000, idleMs: 60_000, totalMs }, null, () => {});
+      c.feed('headers');
+      calls.set = 0; calls.clear = 0;
+      for (let i = 0; i < 1000; i++) { c.feed('body_chunk'); c.feed('consumer_took'); c.feed('consumer_asked'); }
+      assert.deepEqual([totalMs, calls.set, calls.clear], [totalMs, 0, 0]);
+      c.cancel();
+    }
+  });
+});
+test('frames() makes the same number of timer calls for 10 body chunks as for 1000', async () => {
+  const fetchOf = n => () => { let i = 0; return Promise.resolve(new Response(new ReadableStream({ pull(c) { if (i++ === n) { c.enqueue(te.encode('0000')); c.close(); return; } c.enqueue(te.encode('0008abcd')); } }, { highWaterMark: 0 }), { status: 200, headers: RESULT })); };
+  const timerCalls = async n => {
+    const seen = { set: 0, clear: 0, frames: 0 };
+    await countingTimers(async calls => {
+      const t = createTransport('https://h/r', { fetchImpl: fetchOf(n) }).value;
+      for await (const _ of t.frames('git-upload-pack', new Uint8Array(4), spanOf(), { bypassCache: false })) seen.frames++;
+      seen.set = calls.set; seen.clear = calls.clear;
+    });
+    return seen;
+  };
+  const few = await timerCalls(10), many = await timerCalls(1000);
+  assert.deepEqual([few.frames, many.frames], [11, 1001]);
+  assert.deepEqual([many.set, many.clear], [few.set, few.clear]);
+});

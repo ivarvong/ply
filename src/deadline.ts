@@ -14,7 +14,10 @@
 // holds a chunk, or has not asked for the next one (`held`), neither the first-byte nor the idle limit runs.
 //
 // One timer. An event moves the mark; the timer is set again only when none is pending or the new deadline is earlier
-// than the pending one, and when it fires it re-arms for what is left. The timer is the strong owner of the
+// than the pending one, and when it fires it re-arms for what is left: a body chunk costs no setTimeout and no
+// clearTimeout (test/deadline.test.js counts them). While the consumer holds a chunk and there is no total cap, a timer
+// that fires is not set again until the consumer asks for more: nothing is charged to the consumer, and a consumer
+// that never asks is bounded by the caller's signal or requestTimeoutMs. The timer is the strong owner of the
 // AbortController: AbortSignal.any holds its sources weakly and an AbortSignal.timeout is held only by its own weak
 // timer, so after a GC it never fires and a stalled body hangs forever (Node 20/22; found by the calibration harness).
 // A controller owned by a live timer cannot be collected. Date.now in a Worker advances only across I/O; every mark is
@@ -41,8 +44,15 @@ export type ExchangeClock = {
   readonly cancel: () => void;
 };
 
-const stay = (state: ClockState): ClockStep => ({ state, restart: false });
-const go = (state: ClockState): ClockStep => ({ state, restart: true });
+// Every step there is, made once: the machine runs per body chunk and allocates nothing.
+const steps = (restart: boolean): Readonly<Record<ClockState, ClockStep>> => ({
+  connecting: { state: 'connecting', restart }, uploading: { state: 'uploading', restart }, awaiting_first_byte: { state: 'awaiting_first_byte', restart },
+  streaming: { state: 'streaming', restart }, held: { state: 'held', restart }, done: { state: 'done', restart },
+});
+const STAY = steps(false);
+const GO = steps(true);
+const stay = (state: ClockState): ClockStep => STAY[state];
+const go = (state: ClockState): ClockStep => GO[state];
 // The whole machine. An event a state has no use for leaves it as it is: nothing moves a state backwards.
 export function transition(state: ClockState, event: ClockEvent): ClockStep {
   if (state === 'done' || event === 'ended') return stay('done');
@@ -104,6 +114,8 @@ export function deadlineOf(state: ClockState, mark: number, start: number, t: Ex
   return earlier(total, step);
 }
 
+const pastHeaders = (state: ClockState): boolean => state === 'streaming' || state === 'held';
+
 // `onFire` runs once, before the abort, with the limit that fired (the span records it). `now` is the clock (tests).
 export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, onFire: (key: TimeoutKey, ms: number) => void, now: () => number = Date.now): ExchangeClock {
   const ac = new AbortController();
@@ -115,10 +127,12 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
   let armedFor = 0;
   const due = (): Due | null => deadlineOf(state, mark, start, t);
   const clear = (): void => { if (timer !== null) clearTimeout(timer); timer = null; };
-  // A pending timer that fires no later than the deadline is left alone: fire() re-arms for what is left.
+  // A pending timer that fires no later than the deadline is left alone: fire() re-arms for what is left. So is one
+  // pending when there is nothing to wait for (held, no total cap): it finds that out when it fires and is not set again.
   const arm = (): void => {
+    if (state === 'done') { clear(); return; }
     const d = due();
-    if (d === null) { clear(); return; }
+    if (d === null) return;
     if (timer !== null && armedFor <= d.at) return;
     clear();
     const at = now();
@@ -138,12 +152,15 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
     ac.abort(timeoutReason(d.key, d.ms));
   }
   const feed = (event: ClockEvent): void => {
-    const next = transition(state, event);
-    const moved = next.state !== state;
+    const from = state;
+    const next = transition(from, event);
     state = next.state;
     if (next.restart) mark = now();
-    // a restart inside a state only moves the mark (the pending timer re-arms when it fires)
-    if (moved || timer === null) arm();
+    // The per-chunk path makes no timer call. A restart inside a state only moves the mark, and past the headers a
+    // deadline only moves later (marks only advance; held waits for less than streaming), so a pending timer is early
+    // enough: it re-arms for what is left when it fires.
+    if (timer !== null && (state === from || (pastHeaders(from) && pastHeaders(state)))) return;
+    arm();
   };
   arm();
   return { signal: outer ? AbortSignal.any([ac.signal, outer]) : ac.signal, feed, cancel: () => { feed('ended'); } };

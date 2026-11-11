@@ -691,10 +691,10 @@ function transportOf(settings: HttpSettings): HttpTransport {
       // The body read: a platform failure mid-stream is the network error it is.
       const read = readAbortable(stream.value, sig.signal);
       try { for await (const chunk of read.chunks) {
-        sig.feed('body_chunk');
         if (chunks === 0) first = Date.now() - t0;
         bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
-        // the consumer's time with the chunk is not the server's silence: the idle wait starts again when it asks
+        // The chunk arrived and goes straight to the consumer (no await between): one event, no clock read. The
+        // consumer's time with it is not the server's silence: the idle wait starts again when it asks.
         sig.feed('consumer_took');
         yield ok(chunk);
         sig.feed('consumer_asked');
