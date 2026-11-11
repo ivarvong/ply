@@ -190,15 +190,18 @@ type Cut = {
   readonly skip: (want: number) => Promise<PlyError | null>;
   readonly end: () => Promise<PlyError | null>;
 };
-function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, length: number, halt: Halt): Cut {
+// `bare`: the reader is the platform's own (platformReader), so a chunk read is awaited as it is, with no promise and no
+// hop added per chunk: the halt's abort listener cancels the reader, which settles a read in flight (done), and the
+// check after the await sees the halt. Any other reader may never answer its cancel, so its reads go through halt.race.
+function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, length: number, halt: Halt, bare: boolean): Cut {
   let chunk: Uint8Array = new Uint8Array(0);
   let at = 0;
   let got = 0;
   const long = (): PlyError => plyError('pack_corrupt', `pack subset: the range at ${start} served more than its ${length} bytes`);
   // the next chunk of the range, or why there is none
   async function refill(): Promise<PlyError | null> {
-    const r = await halt.race(reader.read(), drop);
-    if (r === HALTED) return cancelled();
+    const r = bare ? await reader.read() : await halt.race(reader.read(), drop);
+    if (r === HALTED || halt.halted()) return cancelled();
     if (r.done) return plyError('pack_corrupt', `pack subset: the range at ${start} ended after ${got} of ${length} bytes`);
     if (got + r.value.length > length) return long();
     chunk = r.value;
@@ -239,11 +242,19 @@ function cutter(reader: ReadableStreamDefaultReader<Uint8Array>, start: number, 
   }
   async function end(): Promise<PlyError | null> {
     if (at < chunk.length) return long();
-    const r = await halt.race(reader.read(), drop);
-    if (r === HALTED) return cancelled();
+    const r = bare ? await reader.read() : await halt.race(reader.read(), drop);
+    if (r === HALTED || halt.halted()) return cancelled();
     return r.done ? null : long();
   }
   return { take, skip, end };
+}
+
+// The platform's reader on a range, whatever getReader the stream's own class defines; null when the range is not a
+// platform ReadableStream (the brand check throws), which is then read through its own reader.
+// oxlint-disable-next-line typescript/unbound-method -- only ever called with the range as its `this`, just below
+const getPlatformReader: (this: ReadableStream<Uint8Array>) => ReadableStreamDefaultReader<Uint8Array> = ReadableStream.prototype.getReader;
+function platformReader(range: ReadableStream<Uint8Array>): ReadableStreamDefaultReader<Uint8Array> | null {
+  try { return getPlatformReader.call(range); } catch { return null; }
 }
 
 // Runs of entries consecutive in the source, written consecutively: one range read each.
@@ -287,11 +298,12 @@ async function* pieces(source: RangeSource, p: Plan, halt: Halt): AsyncGenerator
     const opened = await halt.race(source.read(start, length, halt.signal), cancelLate);
     if (opened === HALTED) return cancelled();
     if (!opened.ok) return opened.error;
-    const reader = opened.value.getReader();
+    const own = platformReader(opened.value);
+    const reader = own === null ? opened.value.getReader() : own;
     halt.reading(reader);
     let outcome: PlyError | null | 'open' = 'open';
     try {
-      outcome = yield* run(p, cutter(reader, start, length, halt), r.from, r.to);
+      outcome = yield* run(p, cutter(reader, start, length, halt, own !== null), r.from, r.to);
     } finally {
       halt.reading(null);
       // a range not read to its end (a refusal, the consumer cancelling) is cancelled, not left open; the source is
