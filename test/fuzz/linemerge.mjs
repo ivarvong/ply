@@ -5,6 +5,8 @@
 //   agree-conflict  both conflict
 //   conservative    git clean, we conflict (allowed: superset of git's conflicts) — split by our reason
 //   WRONG           we clean and git conflicts, or both clean with different bytes — must be zero
+// A conservative case fails the run too (exit 1) unless a documented rule covers it: --rediff undecided, or the step
+// budget shown spent by the merge's own meter. Otherwise a merge that refuses everything would pass.
 //   node test/fuzz/linemerge.mjs [--n 2000] [--seed 1] [--big|--runs] [--rediff skip]
 //   --rediff skip: model git without the compaction re-diff (2.43, the oracle here) — then conservative must be 0 too
 import { spawnSync } from 'node:child_process';
@@ -13,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Rng } from './prng.js';
 import { mergeLines } from '../../src/linemerge.js';
+import { LIMIT_MERGE_STEPS_FLOOR_LINES, LIMIT_MERGE_STEPS_PER_LINE } from '../../src/limits.js';
 
 import { oracleRediff } from '../gitversion.js';
 const REDIFF = process.argv.includes('--rediff') ? process.argv[process.argv.indexOf('--rediff') + 1] : oracleRediff(); // default: whatever the oracle git does
@@ -67,7 +70,7 @@ function edit(rng, base, other) {
 const bytes = lines => new TextEncoder().encode(lines.join(''));
 const eq = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-const counts = { 'agree-clean': 0, 'agree-conflict': 0, conservative: 0, WRONG: 0 }; const why = {}; const wrong = [];
+const counts = { 'agree-clean': 0, 'agree-conflict': 0, conservative: 0, WRONG: 0 }; const why = {}; const wrong = []; const refused = [];
 const rng0 = new Rng(SEED);
 for (let i = 0; i < N; i++) {
   const seed = rng0.u32(); if (ONLY >= 0 && i !== ONLY) continue;
@@ -84,11 +87,20 @@ for (let i = 0; i < N; i++) {
   const cat = gitClean ? git(['cat-file', 'blob', `${g.out.toString().split('\n')[0]}:f.txt`]) : null;
   if (cat && cat.status !== 0) { console.log(`case ${i}: git cat-file failed: ${cat.err}`); process.exit(1); }
   const gitBytes = cat ? cat.out : null;
-  const m = mergeLines(B, O, T, { rediff: REDIFF, driver: DRIVER });
+  const meter = { steps: 0 };
+  const m = mergeLines(B, O, T, { rediff: REDIFF, driver: DRIVER, meter });
   let v;
   if (m.clean && gitClean) v = eq(m.data, new Uint8Array(gitBytes)) ? 'agree-clean' : 'WRONG';
   else if (!m.clean && !gitClean) v = 'agree-conflict';
-  else if (!m.clean && gitClean) { v = 'conservative'; const k = m.detail ? `${m.reason}: ${m.detail}` : m.reason; why[k] = (why[k] ?? 0) + 1; }
+  else if (!m.clean && gitClean) {
+    v = 'conservative'; const k = m.detail ? `${m.reason}: ${m.detail}` : m.reason; why[k] = (why[k] ?? 0) + 1;
+    // A refusal where git merges cleanly passes only under a documented rule: --rediff undecided (the compaction
+    // re-diff), or the step budget (limits.ts), proven spent by the meter against the limit's own arithmetic.
+    const nl = b => b.reduce((c, x) => c + (x === 10 ? 1 : 0), 0) + (b.length && b.at(-1) !== 10 ? 1 : 0);
+    const budget = LIMIT_MERGE_STEPS_PER_LINE * (nl(B) + nl(O) + nl(T) + LIMIT_MERGE_STEPS_FLOOR_LINES);
+    const ruled = (REDIFF === 'undecided' && k === 'undecided: compaction needs the classic-diff fallback') || (m.reason === 'too large to merge' && meter.steps > budget);
+    if (!ruled) { refused.push(i); if (refused.length <= 3) console.log(`REFUSED case ${i}: git merges cleanly, ours ${k} after ${meter.steps} steps (budget ${budget})`); }
+  }
   else v = 'WRONG';
   counts[v]++;
   if (v === 'WRONG') { wrong.push(i); if (wrong.length <= 3) console.log(`WRONG case ${i}: ours ${m.clean ? 'clean' : m.reason}, git ${gitClean ? 'clean' : 'conflict'}\n  base=${JSON.stringify(baseL.join(''))}\n  ours=${JSON.stringify(oursL.join(''))}\n  theirs=${JSON.stringify(theirsL.join(''))}\n  gitout=${gitBytes ? JSON.stringify(gitBytes.toString()) : '-'}\n  ourout=${m.clean ? JSON.stringify(new TextDecoder().decode(m.data)) : '-'}`); }
@@ -97,3 +109,5 @@ rmSync(dir, { recursive: true, force: true });
 const total = Object.values(counts).reduce((a, b) => a + b, 0);
 console.log(`${total} non-trivial cases (seed ${SEED}, rediff ${REDIFF}, driver ${DRIVER}): ${JSON.stringify(counts)}  conservative by reason: ${JSON.stringify(why)}`);
 if (wrong.length) { console.log(`WRONG cases: ${wrong.slice(0, 20).join(',')} — repro: --seed ${SEED} --case <i>`); process.exit(1); }
+// a refusal is not a pass: a merge that always conflicts would otherwise agree with nothing and fail nothing
+if (refused.length) { console.log(`REFUSED cases (git clean, ours conflict, no documented rule): ${refused.slice(0, 20).join(',')} — repro: --seed ${SEED} --case <i>`); process.exit(1); }
