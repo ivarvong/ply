@@ -93,51 +93,28 @@ test('a pull request that only moves code past a parser still mutates every line
 // host report classes) decodes stored and remote state. Until this test its mutants could only end NoCoverage or
 // Survived without failing anything: none of its tests were in the mutation suite (vitest.stryker.config.ts) and none of
 // its owners were judged strictly (review finding tests-gates/mutation-gate-blind-to-new-stack). The expectations are
-// the owner's list, written out here by hand: [file, an owner that decodes or bounds untrusted input, its test file].
+// the owner's list, written out here by hand: [file, a test file of its that the mutation suite must run]. No strict
+// owner is pinned by name: the owners come from each file as it is now (strictOwners, below), so a branch that renames
+// or removes one (fix/review-transfer-outcomes drops refusedResend from transfer.ts) passes with no edit here, and the
+// name it brings is held to the same plan and verdict.
 const STACK = [
-  ['src/packsaved.ts', 'checkEntry', 'test/pack-saved.test.js'],
-  ['src/packsaved.ts', 'decodeSavedIndex', 'test/pack-saved.test.js'],
-  ['src/packscanindex.ts', 'scanPackIndex', 'test/scan-pack-index.test.js'],
-  ['src/packrangeresolve.ts', 'readMember', 'test/pack-range-resolve.test.js'],
-  ['src/packsubset.ts', 'headerOf', 'test/pack-subset.test.js'],
-  ['src/packplan.ts', 'checkBudget', 'test/pack-plan.test.js'],
-  ['src/transferplan.ts', 'checkTransferPlan', 'test/transfer.test.js'],
-  ['src/pullstream.ts', 'scanPack', 'test/pullstream.test.js'],
-  ['src/deadline.ts', 'exchangeClock', 'test/deadline.test.js'],
-  ['src/push.ts', 'ngClass', 'test/push-unpack-host.test.js'],
-  ['src/push.ts', 'unpackReasonMatches', 'test/push-unpack-host.test.js'],
-  // what those outer functions decide with (review of a8b920fc, required changes 2 and 4)
-  ['src/packsaved.ts', 'layoutOf', 'test/pack-saved.test.js'],
-  ['src/packsaved.ts', 'isWhole', 'test/pack-saved.test.js'],
-  ['src/packsaved.ts', 'malformed', 'test/pack-saved.test.js'],
-  ['src/transferplan.ts', 'transferPlanHash', 'test/transfer.test.js'],
-  ['src/transferplan.ts', 'canonical', 'test/transfer.test.js'],
-  ['src/transfernames.ts', 'isOid', 'test/transfer.test.js'],
-  ['src/transfernames.ts', 'targetRef', 'test/transfer.test.js'],
-  ['src/push.ts', 'rejectionCode', 'test/push-unpack-host.test.js'],
-  ['src/push.ts', 'decideOutcome', 'test/push-unpack-host.test.js'],
-  ['src/push.ts', 'reportStep', 'test/push-unpack-host.test.js'],
-  ['src/transfer.ts', 'refusedResend', 'test/transfer.test.js'],
-  ['src/transferload.ts', 'fromSaved', 'test/pack-saved.test.js'],
-  ['src/receivecaps.ts', 'checkPushCaps', 'test/push-commands.test.js'],
-  ['src/receivecaps.ts', 'pushPack', 'test/pack-plan.test.js'],
-  // the push drivers that hold a bound or an outcome input (review of 3aca484b, required change 1): readResponse
-  // enforces both report caps on what the host sends (report bytes against maxPack, report lines against the line cap)
-  // and sets `answered`, which chooses refused or ambiguous; send and sendSource refuse a pack over maxPack before a
-  // byte is sent and carry the body's own failure (`cut`) into the decision, where it becomes ambiguous.
-  ['src/push.ts', 'readResponse', 'test/push-unpack-host.test.js'],
-  ['src/push.ts', 'send', 'test/push-unpack-host.test.js'],
-  ['src/push.ts', 'sendSource', 'test/pack-plan.test.js'],
+  ['src/packsaved.ts', 'test/pack-saved.test.js'],
+  ['src/packscanindex.ts', 'test/scan-pack-index.test.js'],
+  ['src/packrangeresolve.ts', 'test/pack-range-resolve.test.js'],
+  ['src/packsubset.ts', 'test/pack-subset.test.js'],
+  ['src/packplan.ts', 'test/pack-plan.test.js'],
+  ['src/transferplan.ts', 'test/transfer.test.js'],
+  ['src/pullstream.ts', 'test/pullstream.test.js'],
+  ['src/deadline.ts', 'test/deadline.test.js'],
+  ['src/push.ts', 'test/push-unpack-host.test.js'],
+  ['src/push.ts', 'test/pack-plan.test.js'],
+  ['src/transfernames.ts', 'test/transfer.test.js'],
+  ['src/transfer.ts', 'test/transfer.test.js'],
+  ['src/transferload.ts', 'test/pack-saved.test.js'],
+  ['src/receivecaps.ts', 'test/push-commands.test.js'],
+  ['src/receivecaps.ts', 'test/pack-plan.test.js'],
 ];
 const STACK_FILES = [...new Set(STACK.map(([file]) => file))];
-
-// 1-based line of a top-level declaration, found in the file's own text (not by scripts/mutate.mjs)
-function declaredAt(file, name) {
-  const text = readFileSync(join(ROOT, file), 'utf8').split('\n');
-  const at = text.findIndex(l => new RegExp(`^(?:export )?(?:async )?(?:function|const) ${name}\\b`).test(l));
-  assert.ok(at >= 0, `${file}: no top-level ${name}`);
-  return at + 1;
-}
 
 function stackCheckout() {
   const dir = mkdtempSync(join(tmpdir(), 'ply-mutate-stack-'));
@@ -154,7 +131,7 @@ function stackCheckout() {
 
 test('the mutation suite runs the large-repo stack\'s tests', () => {
   const suite = readFileSync(join(ROOT, 'vitest.stryker.config.ts'), 'utf8');
-  const missing = [...new Set(STACK.map(([, , t]) => t))].filter(t => !suite.includes(`'${t}'`));
+  const missing = [...new Set(STACK.map(([, t]) => t))].filter(t => !suite.includes(`'${t}'`));
   assert.deepEqual(missing, []);
 });
 
@@ -168,10 +145,15 @@ test('a pull request that changes nothing still mutates the large-repo stack\'s 
     assert.equal(r.status, 0, r.stderr);
     const plan = JSON.parse(r.stdout);
     assert.equal(plan.full, false);
-    const ungated = STACK.filter(([file, name]) => {
-      const at = declaredAt(file, name);
-      return !unitRanges(plan, file).some(([a, b]) => a <= at && b >= at);
-    }).map(([file, name]) => `${file} ${name}`);
+    const owners = strictOwners();
+    assert.deepEqual(STACK_FILES.filter(file => !owners.some(o => o.file === file)), []);
+    // A const that is one number literal on one line holds no mutant (no Stryker mutator rewrites a number), so
+    // between exempt owners the plan has nothing to run for it (TRANSFER_VERSION = 1). Every other strict owner's
+    // declaration line lies in a planned range.
+    const NUMBER = /^(?:export )?const \w+(?:: number)? = -?[\d._]+;$/;
+    const source = Object.fromEntries(STACK_FILES.map(file => [file, readFileSync(join(ROOT, file), 'utf8').split('\n')]));
+    const ungated = owners.filter(({ file, line }) => !NUMBER.test(source[file][line - 1]) && !unitRanges(plan, file).some(([a, b]) => a <= line && b >= line))
+      .map(({ file, line, name }) => `${file}:${line} ${name}`);
     assert.deepEqual(ungated, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -185,18 +167,24 @@ test('a surviving or uncovered mutant in a large-repo stack decoder fails the ve
     // a pull request's verdict: the parser/bounds rule alone, without the full-library break threshold
     const env = { ...process.env, GITHUB_EVENT_NAME: 'pull_request' };
     delete env.MUTATE_FULL;
-    const judge = (file, line, status) => {
-      const mutant = { id: '1', mutatorName: 'EqualityOperator', replacement: 'x', status, location: { start: { line, column: 1 }, end: { line, column: 2 } } };
-      writeFileSync(join(dir, 'reports/mutation/mutation.json'), JSON.stringify({ files: { [file]: { mutants: [mutant] } } }));
+    // one report per status, a mutant on every strict owner's declaration line: four verdicts
+    const owners = strictOwners();
+    const judge = status => {
+      const files = {};
+      owners.forEach(({ file, line }, k) => {
+        (files[file] ??= { mutants: [] }).mutants.push({ id: String(k), mutatorName: 'EqualityOperator', replacement: 'x', status, location: { start: { line, column: 1 }, end: { line, column: 2 } } });
+      });
+      writeFileSync(join(dir, 'reports/mutation/mutation.json'), JSON.stringify({ files }));
       return spawnSync(process.execPath, [SCRIPT, '--check'], { cwd: dir, env, encoding: 'utf8' });
     };
     const wrong = [];
-    for (const [file, name] of STACK) {
-      const at = declaredAt(file, name);
-      for (const [status, want] of [['Survived', 1], ['NoCoverage', 1], ['Killed', 0], ['Timeout', 0]]) {
-        const r = judge(file, at, status);
-        if (r.status !== want) wrong.push(`${file}:${at} ${name} ${status}: exit ${r.status}, want ${want}`);
-        else if (want === 1 && !r.stderr.includes(`${file}:${at} ${name} EqualityOperator ${status}`)) wrong.push(`${file}:${at} ${name} ${status}: not named in ${r.stderr}`);
+    for (const [status, want] of [['Survived', 1], ['NoCoverage', 1], ['Killed', 0], ['Timeout', 0]]) {
+      const r = judge(status);
+      if (r.status !== want) wrong.push(`${status}: exit ${r.status}, want ${want}`);
+      if (want !== 1) continue;
+      const named = new Set(r.stderr.split('\n'));
+      for (const { file, line, name } of owners) {
+        if (!named.has(`${file}:${line} ${name} EqualityOperator ${status} → x`)) wrong.push(`${file}:${line} ${name} ${status}: not named`);
       }
     }
     assert.deepEqual(wrong, []);
@@ -257,6 +245,16 @@ function censusOf(text) {
   return { seen, unseen };
 }
 const census = file => censusOf(readFileSync(join(ROOT, file), 'utf8'));
+
+// The owners the gate has to judge strictly, { file, name, line }, read from the stack's files as they are now. In a
+// censused file: every top-level owner that is not pinned exempt above. In the six files gated whole that the census
+// does not cover: every top-level declaration the file has, whatever it is called.
+function strictOwners() {
+  return STACK_FILES.flatMap(file => {
+    const exempt = new Set((EXEMPT[file] ?? []).flatMap(([, names]) => words(names)));
+    return census(file).seen.filter(o => !exempt.has(o.name)).map(o => ({ file, ...o }));
+  });
+}
 
 // The forms are TypeScript's own top-level declarations and statements, written out by hand; the first five are the
 // ones the review appended after an exempt owner, of which the census before reported only the last.
@@ -334,21 +332,23 @@ test('a full run below the break still lists every fatal survivor, in source ord
     delete env.GITHUB_EVENT_NAME;
     delete env.MUTATE_FULL;
     const mutant = (line, mutatorName, replacement) => ({ id: `${line}`, mutatorName, replacement, status: 'Survived', location: { start: { line, column: 1 }, end: { line, column: 2 } } });
-    const entry = declaredAt('src/packsaved.ts', 'checkEntry'), layout = declaredAt('src/packsaved.ts', 'layoutOf');
-    const check = declaredAt('src/transferplan.ts', 'checkTransferPlan');
-    assert.ok(layout < entry);
+    // declaration lines found in the files, not pinned names: the first and the last strict owner of packsaved.ts
+    // and the first of transferplan.ts
+    const of = file => strictOwners().filter(o => o.file === file);
+    const saved = of('src/packsaved.ts'), early = saved[0], late = saved[saved.length - 1], check = of('src/transferplan.ts')[0];
+    assert.ok(early && late && check && early.line < late.line);
     writeFileSync(join(dir, 'reports/mutation/mutation.json'), JSON.stringify({ files: {
-      'src/transferplan.ts': { mutants: [mutant(check, 'EqualityOperator', 'a !== b')] },
-      'src/packsaved.ts': { mutants: [mutant(entry, 'ConditionalExpression', 'false'), mutant(layout, 'ArithmeticOperator', 'n - 1')] },
+      'src/transferplan.ts': { mutants: [mutant(check.line, 'EqualityOperator', 'a !== b')] },
+      'src/packsaved.ts': { mutants: [mutant(late.line, 'ConditionalExpression', 'false'), mutant(early.line, 'ArithmeticOperator', 'n - 1')] },
     } }));
     const r = spawnSync(process.execPath, [SCRIPT, '--check'], { cwd: dir, env, encoding: 'utf8' });
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /mutation score 0\.00 is below the break threshold/);
     const listed = r.stderr.split('\n').filter(l => l.startsWith('src/'));
     assert.deepEqual(listed, [
-      `src/packsaved.ts:${layout} layoutOf ArithmeticOperator Survived → n - 1`,
-      `src/packsaved.ts:${entry} checkEntry ConditionalExpression Survived → false`,
-      `src/transferplan.ts:${check} checkTransferPlan EqualityOperator Survived → a !== b`,
+      `src/packsaved.ts:${early.line} ${early.name} ArithmeticOperator Survived → n - 1`,
+      `src/packsaved.ts:${late.line} ${late.name} ConditionalExpression Survived → false`,
+      `src/transferplan.ts:${check.line} ${check.name} EqualityOperator Survived → a !== b`,
     ]);
     assert.match(r.stderr, /\n3 surviving mutant\(s\) in a parser or bounds check:/);
   } finally {
