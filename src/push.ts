@@ -622,6 +622,37 @@ export const cutReportLine = (line: Uint8Array, max: number): Uint8Array => {
   if (start === 0 || reason.length <= max || !text.endsWith('\n') || !PRINTABLE.test(reason)) return line;
   return concat([line.subarray(0, line.length - 1 - reason.length + max), line.subarray(line.length - 1)]);
 };
+// The reason of an "ng <ref> <reason>" line as it came, before any cut (reportStep's split: a ref holds no space).
+const wholeReason = (line: Uint8Array): string => {
+  const text = decodeBytes(line);
+  return text.slice(text.indexOf(' ', NG_REF.length) + 1, text.length - 1);
+};
+// The report as the read classifies it: reportStep's state, the unpack status whole (at most one pkt-line, held for this
+// read only), whether it was cut, and whether a line beside a cut is not that status repeated.
+type Classifying = { report: ReportState; status: string; statusCut: boolean; cutNoEcho: boolean };
+// Classifies lines[from..] once, where they lie: only a line over the cap is replaced, by its cut copy. The echo
+// (echoedFailure) is read from the whole lines, before the cut: where the unpack status or a ref's reason is cut,
+// anything but the status repeated whole is no unpack failure, however the kept parts compare.
+function classifyNew(c: Classifying, lines: Uint8Array[], from: number, max: number): void {
+  for (let i = from; i < lines.length; i += 1) {
+    const whole = lines[i];
+    // Stryker disable next-line ConditionalExpression: unreachable, i < lines.length
+    if (whole === undefined) break;
+    const line = cutReportLine(whole, max);
+    if (i === 0) {
+      const text = decodeBytes(whole);
+      c.status = text.slice(UNPACK.length, text.length - 1);
+      c.statusCut = line !== whole;
+    } else if ((c.statusCut || line !== whole) && wholeReason(whole) !== c.status) c.cutNoEcho = true;
+    if (line !== whole) lines[i] = line;
+    c.report = reportStep(c.report, line);
+  }
+}
+// An unpack failure read only because a cut made two different lines agree is none: whole, that report is not git's.
+const classified = (c: Classifying): ReportShape => {
+  const shape = reportFinish(c.report);
+  return c.cutNoEcho && shape.tag === 'unpackFailed' ? malformed('no git unpack line first') : shape;
+};
 // A band-2 frame past limits.maxReportProgressBytes, as the stream reads it: its place in the answer, none of its text.
 const PROGRESS_DROPPED: Frame = { kind: 'data', payload: Uint8Array.of(SIDEBAND_PROGRESS) };
 
@@ -659,7 +690,7 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody,
   // ends the read only when the report itself cannot be read inside it (report bytes, report lines).
   const reasonCap = reportReasonCap(plan);
   let progressBytes = 0;
-  let report = reportInit(plan.commands);
+  const report: Classifying = { report: reportInit(plan.commands), status: '', statusCut: false, cutNoEcho: false };
   let unreadable = false;
   let fed = 0;
   try {
@@ -681,23 +712,16 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody,
       reading = st;
       const { lines } = st;
       if (lines.length > maxLines) { lost = { cause: limitExceeded('report lines', lines.length, maxLines) }; break; }
-      // each new line is classified once, where it lies: only a line over the cap is replaced, by its cut copy
-      for (; fed < lines.length; fed += 1) {
-        const whole = lines[fed];
-        // Stryker disable next-line ConditionalExpression: unreachable, fed < lines.length
-        if (whole === undefined) break;
-        const line = cutReportLine(whole, reasonCap);
-        if (line !== whole) lines[fed] = line;
-        report = reportStep(report, line);
-      }
-      unreadable = report.tag === 'malformed';
+      classifyNew(report, lines, fed, reasonCap);
+      fed = lines.length;
+      unreadable = report.report.tag === 'malformed';
       if (unreadable) break;
     }
   } catch (e) { lost = { cause: e }; }
   if (lost !== null) return { ...lost, answered };
   // a report that cannot be git's is that report, as far as it was read
   const done: Broken | StreamReport = unreadable ? { tag: 'report', lines: reading.lines } : streamFinish(st);
-  return { done, shape: done.tag === 'report' ? reportFinish(report) : done, reading };
+  return { done, shape: done.tag === 'report' ? classified(report) : done, reading };
 }
 
 // The span's view of the outcome, from the classified report (no second parser).

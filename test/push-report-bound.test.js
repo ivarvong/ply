@@ -4,6 +4,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createTransport } from '../src/http.js';
 import { push, ZERO_OID } from '../src/push.js';
+import { WORKER_LIMITS } from '../src/limits.js';
 import { unwrap } from './unwrap.js';
 
 const te = new TextEncoder();
@@ -127,6 +128,33 @@ test('a cut never reads a report that is malformed whole: the bytes dropped are 
     const r = await pushOne(t);
     assert.equal(r.ok, false);
     assert.equal(r.error.code, 'ambiguous', r.error.message.slice(0, 120));
+  }
+});
+
+test('an over-long unpack status and ng reason that are not an exact echo whole stay ambiguous: the echo is read before the cut', async () => {
+  // SAFETY.md I36: a host's unpack failure is definite only when every ref's reason is the unpack status, byte for byte.
+  // The expected value is the grammar's, by hand: in each pair below the status and the reason are different strings,
+  // so whole they are no echo and the outcome is unknown, wherever the limit cuts them (4,096 bytes by default, 1,024
+  // under WORKER_LIMITS). `shared` is exactly the bytes a cut keeps, so each pair is equal once cut.
+  for (const [limits, cap] of [[{}, 4096], [WORKER_LIMITS, 1024]]) {
+    const shared = 'e'.repeat(cap);
+    for (const [status, reason] of [
+      [`${shared}${'A'.repeat(900)}`, `${shared}${'B'.repeat(900)}`], // both over the limit, different past it
+      [`${shared}${'e'.repeat(904)}`, shared], // the reason is the first bytes of the status, and under the limit
+      [shared, `${shared}B`], // the status is the first bytes of the reason, and under the limit
+    ]) {
+      const { t } = host(function* () { yield answerOf(`unpack ${status}\n`, `ng ${REF} ${reason}\n`); }, limits);
+      const r = await pushOne(t);
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, 'ambiguous', `cap ${cap}, status ${status.length} bytes, reason ${reason.length} bytes: ${r.error.message.slice(0, 80)}`);
+    }
+    // the control: the same over-long status echoed exactly is the host's unpack failure, cut where the limit says
+    const why = `${shared}${'A'.repeat(900)}`;
+    const { t } = host(function* () { yield answerOf(`unpack ${why}\n`, `ng ${REF} ${why}\n`); }, limits);
+    const r = await pushOne(t);
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, 'push_rejected', r.error.message.slice(0, 80));
+    assert.deepEqual(r.error.report, { tag: 'unpackFailed', status: shared, refs: [{ ref: REF, ok: false, reason: shared }] });
   }
 });
 
