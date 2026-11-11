@@ -1,7 +1,8 @@
 // The clock of one HTTP exchange (#255): a stall is refused, a long healthy stream is not.
 //
 //   firstByteTimeoutMs  from the request (or from the end of a streamed upload) to the response headers
-//   idleTimeoutMs       the longest wait on the network with no bytes moved: upload bytes out, response body bytes in
+//   idleTimeoutMs       the longest wait on the network with no progress: no upload piece taken by the platform, no
+//                       response body chunk in
 //   requestTimeoutMs    the whole exchange, opt-in (0, the default, is no total cap)
 //
 // 0 turns a timer off. git has no total timeout either (http.lowSpeedLimit is off by default); a caller who needs a
@@ -148,12 +149,25 @@ export function exchangeClock(t: ExchangeTimeouts, outer: AbortSignal | null, on
   return { signal: outer ? AbortSignal.any([ac.signal, outer]) : ac.signal, feed, cancel: () => { feed('ended'); } };
 }
 
-// The most bytes handed to the platform at once: a pull is then evidence that about this much moved.
+// The most bytes handed to the platform at once.
 const UPLOAD_PIECE = 65_536;
-// A streamed request body whose pulls are the upload's progress, counted in bytes: a source chunk goes to the platform
-// in views of at most UPLOAD_PIECE (no copy), so one large chunk on a slow link is many marks, not one. It reads the
-// source only when the platform pulls it (no buffer of its own: highWaterMark 0), and the source is locked only from
-// the first pull, so a request that never reads it leaves it as it was. Its end is the upload's end.
+// A streamed request body whose pulls by the platform are the upload's progress marks. A source chunk goes to the
+// platform in views of at most UPLOAD_PIECE (no copy), so one large chunk is many marks, not one. It reads the source
+// only when the platform pulls it (no buffer of its own: highWaterMark 0), and the source is locked only from the first
+// pull, so a request that never reads it leaves it as it was. Its end is the upload's end.
+//
+// What a mark proves, and what it does not. A pull says the platform took another piece into its own buffers, not that
+// the piece reached the server: ply cannot see below fetch. The platform pulls when its buffers have room (on Node,
+// undici's socket queue and the kernel's send buffer), so on a slow link the marks come in bursts a buffer apart, and
+// the last piece is handed over while a buffered tail is still going out. Measured with the real fetch on Node 24 over
+// loopback, 4 MiB to a server reading 64 KiB per 25 ms: 64 pulls in 8 bursts, the longest gap between pulls 473 ms
+// while the server never paused for more than 31 ms, and the last pull 1.7 s before the server's last read. So:
+//   - while pieces remain, a stall is idleTimeoutMs, and that limit must be longer than the link takes to drain one
+//     burst of the platform's buffers (not one 64 KiB piece);
+//   - once the last piece is handed over the upload has ended for the clock, and firstByteTimeoutMs, which starts
+//     there, covers sending the buffered tail as well as the server's answer. A link too slow to drain the tail in
+//     that time fails as firstByteTimeoutMs: no response arrived in time, which is all ply can observe by then.
+// test/upload-progress-socket.test.js holds both on a real socket.
 export function watchedUpload(source: ReadableStream<Uint8Array>, clock: ExchangeClock): ReadableStream<Uint8Array> {
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let rest: Uint8Array | null = null;

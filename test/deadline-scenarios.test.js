@@ -1,6 +1,6 @@
 // The exchange clock through the transport, on a fake clock (vitest's timers: setTimeout and Date.now; no real sleeps).
 // Every expectation is worked out by hand from the rules: time is charged only while ply waits on the network; headers
-// seen means the first byte is satisfied for good; upload progress is bytes moved.
+// seen means the first byte is satisfied for good; upload progress is a piece (at most 64 KiB) taken by the fetch.
 import { test, vi, beforeEach, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { createTransport } from '../src/http.js';
@@ -96,7 +96,9 @@ test('a server that never answers is cut at the first-byte timeout', async () =>
   assert.deepEqual([r.frames, r.error?.code, r.error?.what], [0, 'timeout', 'firstByteTimeoutMs']);
 });
 
-test('one 4 MiB upload chunk on a slow, steady link is progress in bytes, not one mark per chunk', async () => {
+test('one 4 MiB upload chunk is handed to the fetch in 64 KiB pieces, each a progress mark (a wire with no buffer)', async () => {
+  // A double that takes a piece only when the link has drained the last: it proves the split, not what undici and the
+  // kernel buffer on a real socket (test/upload-progress-socket.test.js).
   // The link drains 64 KiB every 25 ms and never stops: 4 MiB takes 64 * 25 = 1600 ms, over five idle timeouts, with
   // no gap in byte movement longer than 25 ms. It must be sent whole and answered.
   const seen = { bytes: 0 };

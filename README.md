@@ -595,8 +595,8 @@ The byte budgets count what an object costs, not only its bytes: each object par
 
 Time is bounded per exchange by three timers (#255), all fields of `limits`; 0 turns one off:
 
-- `firstByteTimeoutMs` (60 s): from the request to the response headers. For a streamed request body (`pushPack`, a `StreamBody`), it starts when the upload ends.
-- `idleTimeoutMs` (60 s): the longest gap with no progress, either no upload chunk pulled or no response chunk read. A server that keeps sending (upload-pack sends keepalives while it counts objects) is never cut.
+- `firstByteTimeoutMs` (60 s): from the request to the response headers. For a streamed request body (`pushPack`, a `StreamBody`), it starts when the upload ends, which for ply is when the platform has taken the last piece. The platform and the kernel may still be sending what they buffered (about 2 MiB on Node over loopback, measured), so on a slow link this limit also has to cover that tail: a link that cannot drain it in time fails as `firstByteTimeoutMs`.
+- `idleTimeoutMs` (60 s): the longest wait on the network with no progress, either no upload piece taken by the platform or no response chunk arriving. A streamed upload is handed to the platform in pieces of at most 64 KiB, so one large chunk is many progress marks; a mark means the platform took a piece, not that it reached the server, and marks arrive in bursts as the platform's and the kernel's buffers drain (with Node's fetch over loopback at 2.5 MiB/s: gaps up to about 0.5 s). A server that stops reading while pieces remain fails as `idleTimeoutMs`. A server that keeps sending (upload-pack sends keepalives while it counts objects) is never cut.
 - `requestTimeoutMs` (0, off): an opt-in cap on the whole exchange, body included. Before #255 this was the only timer, at 60 s, so a large streamed fetch died at 60 s however steadily bytes arrived. A caller who passes it keeps that behaviour.
 
 **With the defaults there is no total cap: an exchange that keeps making progress runs as long as it takes, unless the caller sets `requestTimeoutMs` or passes a `signal`.** Stalls are still bounded by the two timers above.
