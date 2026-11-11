@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync, symlinkSync, chmodSync, rmSync, appendFileSyn
 import { execFileSync } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { readBody } from './body.js';
-import { git, gitBuf, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
 import { pushRepo, readConfig } from '../src/repo-node.js';
 import { encodeDelta, planDeltas } from '../src/delta.js';
 import { applyDelta, buildPack, encodeOfsDistance, parsePack, resolvePack, readOfsDelta } from '../src/pack.js';
@@ -480,4 +480,55 @@ test('readConfig: sections, subsections, case, comments, a bare key', () => {
   assert.equal(c.get('extensions.objectformat'), 'sha256');
   assert.equal(c.get('remote.origin.url'), 'x');
   assert.equal(c.get('x.flag'), 'true');
+});
+
+// ---- git is the judge of how a local repository is read: the same push, from the same directory, by git 2.50 ----
+// git's verdict: its exit status, its stderr, and the commands `git push --dry-run --porcelain` reports, in the shape
+// of pushRepo's dry run. Each new oid is git's own reading of the source ref it printed (rev-parse), so nothing
+// expected here comes from ply. Only creates are compared (the remote is empty): porcelain's `*` flag.
+const byRef = (a, b) => (a.ref < b.ref ? -1 : 1);
+const gitDryRun = async (dir, url, args) => {
+  const r = await gitAsync(dir, ['push', '--dry-run', '--porcelain', url, ...args]);
+  const rows = r.stdout.split('\n').filter(l => l.includes('\t')).map(l => l.split('\t'));
+  const updates = rows.map(([flag, pair]) => { const [src, dst] = pair.split(':'); return { ref: dst, newOid: rev(dir, src), kind: flag === '*' ? 'create' : flag }; });
+  return { status: r.status, stderr: r.stderr, updates: updates.sort(byRef) };
+};
+const plyDryRun = async (dir, url, spec) => {
+  const r = await pushRepo(dir, url, { ...spec, dryRun: true });
+  return r.ok ? { ok: true, updates: r.value.updates.map(u => ({ ref: u.ref, newOid: u.newOid, kind: u.kind })).sort(byRef) } : { ok: false, error: r.error };
+};
+// both sides on one push: git performs it, and pushRepo's commands are git's
+const sameAsGit = async (dir, url, args, spec) => {
+  const g = await gitDryRun(dir, url, args);
+  assert.equal(g.status, 0, `git push ${args.join(' ')}: ${g.stderr}`);
+  const p = await plyDryRun(dir, url, spec);
+  assert.ok(p.ok, p.ok || `pushRepo ${JSON.stringify(spec)}: ${p.error.code}: ${p.error.message}`);
+  assert.deepEqual(p.updates, g.updates, `git push ${args.join(' ')}`);
+  return g.updates;
+};
+// a work tree with one commit: main, topic and a lightweight tag v1, all loose
+const smallLocal = () => {
+  const dir = join(root, `small${n++}`);
+  git(root, ['init', '-q', '-b', 'main', dir]);
+  writeFileSync(join(dir, 'f'), 'one\n');
+  git(dir, ['add', '-A']);
+  git(dir, [...ID, 'commit', '-q', '-m', 'one']);
+  git(dir, ['branch', 'topic']);
+  git(dir, ['tag', 'v1']);
+  return dir;
+};
+
+test('pushRepo vs git: a file under refs/ that is not a ref (Finder\'s .DS_Store, a dot directory, a name check-ref-format refuses) is ignored', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  const refsDir = join(local, '.git', 'refs');
+  writeFileSync(join(refsDir, 'heads', '.DS_Store'), '\x00\x00\x00\x01Bud1');
+  writeFileSync(join(refsDir, '.DS_Store'), '\x00\x00\x00\x01Bud1');
+  mkdirSync(join(refsDir, 'heads', '.hidden'));
+  writeFileSync(join(refsDir, 'heads', '.hidden', 'x'), 'junk\n');
+  writeFileSync(join(refsDir, 'tags', 'bad~name'), 'junk\n');
+  const head = rev(local, 'main');
+  assert.deepEqual(await sameAsGit(local, url, ['main'], { refspecs: ['main'] }), [{ ref: 'refs/heads/main', newOid: head, kind: 'create' }]);
+  assert.deepEqual((await sameAsGit(local, url, ['--all'], { all: true })).map(u => u.ref), ['refs/heads/main', 'refs/heads/topic']);
+  assert.deepEqual((await sameAsGit(local, url, ['--tags'], { tags: true })).map(u => u.ref), ['refs/tags/v1']);
 });

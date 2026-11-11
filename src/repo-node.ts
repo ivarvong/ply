@@ -65,7 +65,7 @@ import type { Command, Commands } from './push.js';
 import { operation } from './operation.js';
 import type { OperationOpts } from './operation.js';
 import type { ReadOptions } from './read.js';
-import { validatePushRef } from './validate.js';
+import { validatePushRef, validateRef } from './validate.js';
 import { planDeltas } from './delta.js';
 import type { DeltaCandidate, DeltaPlan, ThinBase } from './delta.js';
 import { children, missing, popped, reachable } from './packwalk.js';
@@ -222,9 +222,13 @@ async function readRefs(commonDir: string, maxRefs: number): Promise<Result<Map<
   const walk = async (rel: string): Promise<null> => {
     const entries = await readdir(join(commonDir, rel), { withFileTypes: true }).then(e => e, () => []);
     for (const e of entries.toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
+      // git looks at no entry, file or directory, whose name starts with '.' or ends in '.lock' (refs/files-backend.c
+      // loose_fill_ref_dir), and its ref iteration leaves out a file whose full name check-ref-format refuses: such a
+      // file (Finder's .DS_Store, an editor's backup) is not a ref, whatever it holds
+      if (e.name.startsWith('.') || e.name.endsWith('.lock')) continue;
       const name = `${rel}/${e.name}`;
       if (e.isDirectory()) await walk(name);
-      else if (e.isFile() && !e.name.endsWith('.lock')) raw.set(name, getOrElse<string>(mapOrNone(await maybeText(join(commonDir, name))), '').trim());
+      else if (e.isFile() && validateRef(name).ok) raw.set(name, getOrElse<string>(mapOrNone(await maybeText(join(commonDir, name))), '').trim());
       if (raw.size > maxRefs) return null;
     }
     return null;
