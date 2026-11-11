@@ -24,6 +24,7 @@ import { rangeFromBytes } from '../src/rangesource.js';
 import { createTransport } from '../src/http.js';
 import { planTransfer } from '../src/transferplan.js';
 import { runTransfer, transferStep } from '../src/transfer.js';
+import * as entry from '../src/index.js';
 import { unwrap } from './unwrap.js';
 
 const must = r => { if (r.ok) return r.value; throw Object.assign(new Error(r.error.message), { code: r.error.code }); };
@@ -128,10 +129,10 @@ test('maxSteps: a push that gets no answer and does not land is ambiguous, never
   // a clean run that stops at maxSteps: paused, and the pause says its last push landed (git: the temp ref moved)
   const clean = repo();
   const paused = must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 1, settle: FAST }));
-  assert.deepEqual(paused, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', last: 'landed' });
+  assert.deepEqual(paused, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'acknowledged', lastStep: 'landed' });
   assert.equal(refsOf(clean.bare), `${p.tempRef} ${p.steps[0].temp}`);
   // no push at all
-  assert.deepEqual(must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 0 })), { tag: 'paused', step: 1, pushes: 0, reason: 'max_steps', last: 'none' });
+  assert.deepEqual(must(await runTransfer(clean.t, from, p, src.commit, { maxSteps: 0 })), { tag: 'paused', step: 1, pushes: 0, reason: 'max_steps', lastPush: 'none', lastStep: 'none' });
 });
 
 test('the final push applied, its response dropped, the read after it failing: ambiguous, never the read\'s error', async () => {
@@ -337,4 +338,27 @@ test('a runner whose every push is overtaken by another transport landing that s
     assertPublished(bare, p);
     assert.deepEqual(run.value, { tag: 'done', head: p.head, pushes: n, tempLeft: false }, how);
   }
+});
+
+test('a pause after this run\'s push was refused and another runner landed the step says both: lastPush refused, lastStep landed', async () => {
+  const p = plan();
+  // refused: step 0 is landed through a clean transport before the runner's push of it reaches git (no hook: git's own
+  // compare-and-swap refusal). The two facts are the test's own: the report git sent the runner, and git's refs.
+  const refused = repo();
+  const clean = unwrap(createTransport(refused.url));
+  const o = overtaken(async k => { must(await transferStep(clean, from, p, k, src.commit)); });
+  const paused = must(await runTransfer(unwrap(createTransport(refused.url, { fetchImpl: o.fetchImpl })), from, p, src.commit, { maxSteps: 1, settle: FAST }));
+  assert.equal(o.seen.reports.length, 1);
+  assert.match(o.seen.reports[0], NG, 'git refused this run\'s push');
+  assert.equal(refsOf(refused.bare), `${p.tempRef} ${p.steps[0].temp}`, 'git shows step 0 landed');
+  assert.deepEqual(paused, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'refused', lastStep: 'landed' });
+  // unanswered: the push applied, its report dropped before the runner saw it; git shows the step landed
+  const f = faulty({ push: () => 'drop' });
+  const dropped = repo({ fetchImpl: f.fetchImpl });
+  const unanswered = must(await runTransfer(dropped.t, from, p, src.commit, { maxSteps: 1, settle: FAST }));
+  assert.equal(f.seen.dropped, 1);
+  assert.equal(refsOf(dropped.bare), `${p.tempRef} ${p.steps[0].temp}`);
+  assert.deepEqual(unanswered, { tag: 'paused', step: 1, pushes: 1, reason: 'max_steps', lastPush: 'unanswered', lastStep: 'landed' });
+  // the package entry exports the runner; LastPush and LastStep are types beside TransferRun (checked by tsc below)
+  assert.equal(entry.runTransfer, runTransfer);
 });

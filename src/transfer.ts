@@ -44,13 +44,19 @@ export type TransferNext = { readonly tag: 'step'; readonly step: number } | { r
 // done: the ref is at the planned head; tempLeft: a temp ref is still on the destination (a non-atomic last push that
 // did not delete it, or a host that kept it), for sweepTransfers. paused: `step` is next; 'max_steps' when this run used
 // its pushes, 'settling' when the last push was acknowledged but the refs had not shown it after `settle.reads` reads.
-// `last` is what this run's last push came to: 'none' it made no push; 'landed' the refs show its step ('max_steps'
-// pauses only there); 'acknowledged' the server reported ok and the refs do not show it yet ('settling'). A push whose
-// outcome is unknown is never a pause: the run ends `ambiguous` (the push's own error is its `cause`).
-export type LastPush = 'none' | 'landed' | 'acknowledged';
+// A pause states two facts about the last push this run made, in two fields, because they can differ:
+// `lastPush` is what the server answered THIS run's push: 'none' the run made no push; 'acknowledged' its report said
+// ok; 'refused' the server refused it; 'unanswered' no report reached this run.
+// `lastStep` is what the refs then showed of the step that push carried, whoever landed it: 'none' the run made no
+// push; 'landed' the refs show the step (by this push or by another runner's: `lastPush: 'refused'` beside
+// `lastStep: 'landed'` is another runner having landed it first); 'not_shown' they did not after `settle.reads` reads.
+// 'max_steps' pauses only after a step shown landed (or no push); 'settling' is 'acknowledged' and 'not_shown'. A step
+// whose outcome is unknown is never a pause: the run ends `ambiguous` (the push's own error is its `cause`).
+export type LastPush = 'none' | 'acknowledged' | 'refused' | 'unanswered';
+export type LastStep = 'none' | 'landed' | 'not_shown';
 export type TransferRun =
   | { readonly tag: 'done'; readonly head: Oid; readonly pushes: number; readonly tempLeft: boolean }
-  | { readonly tag: 'paused'; readonly step: number; readonly pushes: number; readonly reason: 'max_steps' | 'settling'; readonly last: LastPush };
+  | { readonly tag: 'paused'; readonly step: number; readonly pushes: number; readonly reason: 'max_steps' | 'settling'; readonly lastPush: LastPush; readonly lastStep: LastStep };
 // After a push, reads of the refs (at most `reads`, `delayMs` apart) until they show it.
 export type SettleConfig = { readonly reads: number; readonly delayMs: number };
 // maxSteps: pushes this run may make (default no limit); retries: sends of one step that may stay unsettled (default 2)
@@ -195,7 +201,7 @@ async function settle(dst: Transport, plan: TransferPlan, step: number, cfg: Set
   return settled.ok ? settled.value : { tag: 'unread', error: settled.error };
 }
 
-type Loop = { readonly pushes: number; readonly tries: number };
+type Loop = { readonly pushes: number; readonly tries: number; readonly lastPush: LastPush; readonly lastStep: LastStep };
 type Run = { readonly dst: Transport; readonly span: Span; readonly from: TransferPack; readonly plan: TransferPlan; readonly commit: Uint8Array; readonly cfg: RunConfig };
 type Turn = { readonly step: number; readonly pushes: number; readonly tries: number };
 // The step's outcome is unknown: its push's is, and the refs do not show it (or could not be read).
@@ -203,7 +209,7 @@ const unknown = (step: number, why: string, cause: PlyError): Result<TransferRun
   fail('ambiguous', `transfer: step ${step} ${why}`, { what: 'step', cause, original: cause.code });
 // What the run does after a push and the refs read back: end with `result`, or go on from `next` (`tries`: sends of
 // that step so far whose outcome is unknown).
-type After = { readonly tag: 'end'; readonly result: Result<TransferRun, PlyError> } | { readonly tag: 'go'; readonly next: TransferNext; readonly tries: number };
+type After = { readonly tag: 'end'; readonly result: Result<TransferRun, PlyError> } | { readonly tag: 'go'; readonly next: TransferNext; readonly tries: number; readonly lastStep: LastStep };
 const end = (result: Result<TransferRun, PlyError>): After => ({ tag: 'end', result });
 
 // A push the server acknowledged, then the refs: shown, the run goes on; not shown yet, a later run reads them again
@@ -211,8 +217,8 @@ const end = (result: Result<TransferRun, PlyError>): After => ({ tag: 'end', res
 // ok: the ref created, the temp ref deleted); unread after a batch, the read's failure (the transfer is not done).
 function acknowledged(plan: TransferPlan, settled: Settled, { step, pushes }: Turn): After {
   switch (settled.tag) {
-    case 'moved': return { tag: 'go', next: settled.next, tries: 0 };
-    case 'still': return end(ok({ tag: 'paused', step, pushes, reason: 'settling', last: 'acknowledged' }));
+    case 'moved': return { tag: 'go', next: settled.next, tries: 0, lastStep: 'landed' };
+    case 'still': return end(ok({ tag: 'paused', step, pushes, reason: 'settling', lastPush: 'acknowledged', lastStep: 'not_shown' }));
     case 'unread': return end(step === plan.steps.length - 1 ? ok({ tag: 'done', head: plan.head, pushes, tempLeft: false }) : { ok: false, error: settled.error });
     case 'conflict': return end({ ok: false, error: settled.error });
   }
@@ -225,26 +231,31 @@ function acknowledged(plan: TransferPlan, settled: Settled, { step, pushes }: Tu
 function unclean(cfg: RunConfig, error: PlyError, settled: Settled, { step, pushes, tries }: Turn): After {
   const refused = error.code !== 'ambiguous';
   switch (settled.tag) {
-    case 'moved': return { tag: 'go', next: settled.next, tries: 0 };
+    case 'moved': return { tag: 'go', next: settled.next, tries: 0, lastStep: 'landed' };
     case 'unread': return end(unknown(step, `was pushed (${error.code}) and the refs could not be read: whether it landed is not known`, error));
     case 'conflict': return end({ ok: false, error: refused ? error : settled.error });
     case 'still': {
       if (refused) return end({ ok: false, error });
       if (tries > cfg.retries) return end(unknown(step, `did not land after ${tries} tries`, error));
       if (pushes >= cfg.maxSteps) return end(unknown(step, `did not land: its push's outcome is not known and the refs do not show it (${tries} sent, maxSteps reached)`, error));
-      return { tag: 'go', next: { tag: 'step', step }, tries };
+      return { tag: 'go', next: { tag: 'step', step }, tries, lastStep: 'not_shown' };
     }
   }
   return assertNever(settled);
 }
 
+// What the server answered a push this run made (`ambiguous` is ply's class for a push with no report).
+function answered(pushed: Pushed): LastPush {
+  if (pushed.ok) return 'acknowledged';
+  return pushed.error.code === 'ambiguous' ? 'unanswered' : 'refused';
+}
 // One turn of the loop, then the next by recursion (each push waits on the status the last one left). `next` is where
 // the destination stands; a pause here follows a landed push or none (an unknown one never reaches it).
 async function turn(run: Run, next: TransferNext, st: Loop): Promise<Result<TransferRun, PlyError>> {
   const { dst, span, from, plan, commit, cfg } = run;
   if (next.tag === 'done') return ok({ tag: 'done', head: next.head, pushes: st.pushes, tempLeft: next.tempLeft });
   const { step } = next;
-  if (st.pushes >= cfg.maxSteps) return ok({ tag: 'paused', step, pushes: st.pushes, reason: 'max_steps', last: st.pushes === 0 ? 'none' : 'landed' });
+  if (st.pushes >= cfg.maxSteps) return ok({ tag: 'paused', step, pushes: st.pushes, reason: 'max_steps', lastPush: st.lastPush, lastStep: st.lastStep });
   const sent = await stepSpan(dst, { from, plan, step, commit });
   // refused here, before any request: nothing to read
   if (!sent.ok) return sent;
@@ -253,7 +264,7 @@ async function turn(run: Run, next: TransferNext, st: Loop): Promise<Result<Tran
   const settled = await settle(dst, plan, step, cfg.settle);
   const { pushed } = sent.value;
   const after = pushed.ok ? acknowledged(plan, settled, { step, pushes, tries: 0 }) : unclean(cfg, pushed.error, settled, { step, pushes, tries: st.tries + 1 });
-  return after.tag === 'end' ? after.result : turn(run, after.next, { pushes, tries: after.tries });
+  return after.tag === 'end' ? after.result : turn(run, after.next, { pushes, tries: after.tries, lastPush: answered(pushed), lastStep: after.lastStep });
 }
 
 // The loop (see the top of this file). The destination is the only commit point, so after every push the refs are read
@@ -263,7 +274,7 @@ export async function runTransfer(dst: Transport, from: TransferPack, plan: Tran
   const run = await spanned(dst, 'git.transfer.run', internal(dst, { ...planAttrs(plan), 'git.transfer.ref': plan.ref, 'git.transfer.head': plan.head }), async (span: Span): Promise<Result<TransferRun, PlyError>> => {
     const t = withParent(dst, span);
     const first = await transferStatus(t, plan);
-    const r = first.ok ? await turn({ dst: t, span, from, plan, commit, cfg }, first.value, { pushes: 0, tries: 0 }) : first;
+    const r = first.ok ? await turn({ dst: t, span, from, plan, commit, cfg }, first.value, { pushes: 0, tries: 0, lastPush: 'none', lastStep: 'none' }) : first;
     if (r.ok) span.set({ 'git.transfer.outcome': r.value.tag === 'done' ? 'done' : `paused_${r.value.reason}`, 'git.transfer.pushes': r.value.pushes, 'git.transfer.temp_left': r.value.tag === 'done' && r.value.tempLeft });
     else span.set({ 'git.transfer.outcome': r.error.code });
     return r;
