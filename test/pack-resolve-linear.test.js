@@ -252,3 +252,30 @@ test('a cycle of OFS bases (hand-built) is the coded chain-depth error from reso
     assert.deepEqual(c.asked, [], name);
   }
 });
+
+test('two entries hand-built at one offset are one object: the second thin REF delta at a resolved offset is not patched or counted', () => {
+  // An offset names one object, so the first entry at it is that object (the rule the resolver states for every other
+  // phase, and main at ec337c5's result for this input: 1 object, externalBases 1). By hand: one external base used once.
+  const c = counting(oid => (oid === blobId(9) ? blobBase(9) : null));
+  const r = resolvePack({ objects: [refAt(2, 9, 1), refAt(2, 9, 2)] }, c.external);
+  assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+  assert.deepEqual([...r.value.objects.keys()], [blobId(1)]);
+  assert.equal(r.value.stats.externalBases, 1);
+  assert.equal(r.value.stats.maxChain, 1);
+  assert.deepEqual(c.asked, [blobId(9)]);
+  // the same rule where the base is in the pack: a second whole object, a second delta already resolved, a second
+  // delta that waited (filed under a base that lands later)
+  const twoFull = resolvePack({ objects: [{ offset: 1, type: BLOB, data: content(0) }, { offset: 1, type: BLOB, data: content(1) }] });
+  assert.ok(twoFull.ok);
+  assert.deepEqual([...twoFull.value.objects.keys()], [blobId(0)]);
+  const twoDeltas = resolvePack({ objects: [{ offset: 1, type: BLOB, data: content(0) }, ofsAt(2, 1, 1), { ...ofsAt(2, 1, 1), data: replaceDelta(content(0).length, content(2)) }] });
+  assert.ok(twoDeltas.ok);
+  assert.deepEqual([...twoDeltas.value.objects.keys()], [blobId(0), blobId(1)]);
+  const twoWaiting = resolvePack({ objects: [refAt(2, 0, 1), refAt(2, 0, 2), { offset: 1, type: BLOB, data: content(0) }] });
+  assert.ok(twoWaiting.ok);
+  assert.deepEqual([...twoWaiting.value.objects.keys()], [blobId(0), blobId(1)]);
+  // two deltas at offset 3 filed under the delta at offset 2, which resolves after them: the first is the object
+  const twoFiled = resolvePack({ objects: [ofsAt(3, 2, 2), { ...ofsAt(3, 2, 2), data: replaceDelta(content(1).length, content(3)) }, refAt(2, 0, 1), { offset: 1, type: BLOB, data: content(0) }] });
+  assert.ok(twoFiled.ok);
+  assert.deepEqual([...twoFiled.value.objects.keys()], [blobId(0), blobId(1), blobId(2)]);
+});

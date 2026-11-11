@@ -645,6 +645,8 @@ function fixpoint(parsed: PackToResolve, external: ExternalLookup, limits: Check
     const checked = externalBase(d.base.oid, ext);
     if (!checked.ok) return checked;
     for (const w of take(onOid, d.base.oid)) {
+      // as in wake: a second entry at an offset that has resolved (a hand-built input) is that object
+      if (memo.has(w.offset)) continue;
       stats.externalBases++;
       const r = patch(w, checked.value);
       if (!r.ok) return r;
