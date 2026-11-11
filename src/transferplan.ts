@@ -273,7 +273,12 @@ function everyOf<T>(list: readonly T[], pass: (v: T, i: number) => boolean): boo
   }
   return true;
 }
-const isCounts = (v: readonly number[]): boolean => isList(v) && everyOf(v, n => isCount(n));
+// The plan's long lists (the selection, a batch's entries): the same walk, with no call per element but isCount.
+function isCounts(v: readonly number[]): boolean {
+  if (!isList(v)) return false;
+  for (const n of v) if (!isCount(n)) return false;
+  return true;
+}
 function wellFormedBatch(b: PlannedBatch): boolean {
   if (typeof b !== 'object' || b === null || (b.kind !== 'blobs' && b.kind !== 'final')) return false;
   return isCount(b.packBytes) && isCount(b.objects) && isCount(b.refRewrites) && isCounts(b.entries);
