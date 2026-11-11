@@ -50,3 +50,71 @@ test('throw ratchet: a missing baseline fails and is not written; only --write c
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+const ABSENCE = fileURLToPath(new URL('../scripts/absence-ratchet.mjs', import.meta.url));
+const ZERO = { boundary: 'src/absent.ts', undefined: 0, optional: 0, chain: 0, coalesce: 0 };
+// A tree whose baseline says: no absence syntax outside the boundary.
+function absenceTree(files) {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-absence-'));
+  mkdirSync(join(dir, 'src'));
+  mkdirSync(join(dir, 'scripts'));
+  writeFileSync(join(dir, 'src/absent.ts'), 'export const absent = undefined;\n');
+  writeFileSync(join(dir, 'scripts/absence-baseline.json'), `${JSON.stringify(ZERO, null, 2)}\n`);
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  return dir;
+}
+const absence = dir => spawnSync(process.execPath, [ABSENCE], { cwd: dir, encoding: 'utf8' });
+
+test('absence ratchet: a regex group, a string, a template and a comment are not absence syntax', () => {
+  // Hand count: this file has no optional member, no optional chain, no coalescing operator and no missing value.
+  // Every `?:`, `?.`, `??` and `undefined` below is inside a regex literal, a string, template text or a comment
+  // (the regex is the one the textual count failed at 018d58b: src/push.ts:257).
+  const dir = absenceTree({ 'src/a.ts': [
+    '// undefined is only named here: a?.b, c ?? d, e?: f',
+    '/* and here: undefined ?. ?? ?: */',
+    'export const R = /^push is ([0-9]+(?:\\.[0-9]+)?) MiB, limit is ([0-9]+(?:\\.[0-9]+)?) MiB$/u;',
+    "export const S = 'x?.y ?? z?: undefined';",
+    'export const T = `t?.u ?? v?: undefined ${1} ?? undefined`;',
+    'export const C = R.test(S) ? 1 : 2;',
+    '',
+  ].join('\n') });
+  try {
+    const r = absence(dir);
+    assert.equal(r.status, 0, `a file with no absence syntax must pass a zero baseline: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /undefined 0, optional 0, chain 0, coalesce 0/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('absence ratchet: spacing does not hide syntax; each kind is counted once per node', () => {
+  // Hand count, one line each:
+  //   optional 4: `a? : number`, `m?(): void`, the parameter `p?: number`, the mapped `[K in keyof T]?: T[K]`
+  //               (`-?` on the next line removes optionality: not counted; `c ? 1 : 2` is a conditional: not counted)
+  //   undefined 3: `void 0`, the type keyword in `number | undefined`, the identifier in `= undefined`
+  //   chain 3: `o?.a`, `o?.["a"]`, `f?.()`
+  //   coalesce 2: `??`, `??=`
+  const dir = absenceTree({ 'src/b.ts': [
+    'export type O = { a? : number; m?(): void };',
+    'export type P<T> = { [K in keyof T]?: T[K] };',
+    'export type Q<T> = { [K in keyof T]-?: T[K] };',
+    'export function g(o: O | null, f: (() => number) | null, p?: number): number {',
+    '  let x: number | undefined = undefined;',
+    '  const v = void 0;',
+    '  x ??= 1;',
+    '  const c = v ? 1 : 2;',
+    '  return (o?.a ?? 0) + Number(o?.["a"]) + Number(f?.()) + Number(p) + x + c;',
+    '}',
+    '',
+  ].join('\n') });
+  try {
+    const r = absence(dir);
+    assert.equal(r.status, 1, `absence syntax over a zero baseline must fail: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /undefined rose 0 -> 3;/u);
+    assert.match(r.stderr, /optional rose 0 -> 4;/u);
+    assert.match(r.stderr, /chain rose 0 -> 3;/u);
+    assert.match(r.stderr, /coalesce rose 0 -> 2;/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
