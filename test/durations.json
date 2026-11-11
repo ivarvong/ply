@@ -41,6 +41,7 @@
   "test/option.test.js": 0,
   "test/oracle.test.js": 3,
   "test/otel-ended.test.js": 0,
+  "test/pack-install.test.js": 2,
   "test/pack-plan.test.js": 2,
   "test/pack-range-resolve.test.js": 4,
   "test/pack-saved.test.js": 2,
