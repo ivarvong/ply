@@ -151,3 +151,24 @@ Object.entries(hostile).forEach(([name, make], i) => {
     });
   });
 });
+
+// The same for the directory itself: filesFromDir's Err describes `dir`, and a `dir` that is not a string may have no
+// string form either. node:fs refuses it with a TypeError of its own, and README's row for node:fs failures applies:
+// bad_request, what: 'dir', node's error as the cause.
+for (const [name, make] of [['a Symbol', () => Symbol('d')], ...Object.entries(hostile).filter(([n]) => n !== 'an object whose message getter throws')]) {
+  test(`filesFromDir and pushDir with ${name} as dir: bad_request naming 'dir', never a throw`, async () => {
+    const before = head();
+    for (const run of [d => filesFromDir(d), d => pushDir(url, { dir: d, ref: 'refs/heads/main', author, message: 'm' }, {})]) {
+      const d = make();
+      assert.throws(() => `${d}`, 'the language: this value has no string form');
+      let r;
+      try { r = await run(d); } catch (e) { assert.fail(`the Result API threw/rejected: ${e instanceof Error ? e.message : 'a value with no string form'}`); }
+      assert.equal(r.ok, false);
+      assert.equal(r.error.code, 'bad_request');
+      assert.equal(r.error.what, 'dir');
+      // node's ERR_INVALID_ARG_TYPE, or for the revoked Proxy the engine's own refusal to read it: a TypeError either way
+      assert.ok(r.error.cause instanceof TypeError, "the cause is node's refusal of the argument, not something ply made");
+    }
+    assert.equal(head(), before, 'git says the ref did not move');
+  });
+}

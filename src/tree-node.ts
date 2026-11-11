@@ -81,7 +81,8 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
   };
   let walked: Result<null, DirError>;
   try { walked = await walk(''); } catch (e) {
-    return fail('bad_request', `${dir}: the directory could not be read: ${describeThrown(e)}`, { what: 'dir', cause: e });
+    // `dir` is the caller's value: one that is not a string (node:fs refused it) may have no string form to print
+    return fail('bad_request', `${typeof dir === 'string' ? dir : 'dir'}: the directory could not be read: ${describeThrown(e)}`, { what: 'dir', cause: e });
   }
   return walked.ok ? ok(out) : walked;
 }
