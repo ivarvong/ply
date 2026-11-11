@@ -43,8 +43,12 @@ export type Halt = {
   readonly release: () => void;
 };
 export const drop = (): void => { /* the operation is halted or already refused: its outcome is decided without this */ };
-// Asks a range to stop, without waiting for the source to say it has.
-export const cancelRange = (range: Cancellable, reason: unknown): void => { range.cancel(reason).catch(drop); };
+// Asks a range to stop, without waiting for the source to say it has. The range is the caller's: a cancel() that throws
+// where it stands, or answers with something that is not a promise, is its own failure to cancel and changes nothing
+// (thrown from here it would leave the abort listener below, past every caller, with its wakers not woken).
+export const cancelRange = (range: Cancellable, reason: unknown): void => {
+  try { Promise.resolve(range.cancel(reason)).catch(drop); } catch { drop(); }
+};
 // A range that opened after the operation stopped waiting for it: cancelled, not left open.
 export const cancelLate = (opened: Result<ReadableStream<Uint8Array>, PlyError>): void => { if (opened.ok) cancelRange(opened.value, null); };
 export const aborted = (what: string): PlyError => plyError('aborted', `${what}: aborted while waiting for the caller's storage`);

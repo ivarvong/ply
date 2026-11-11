@@ -845,6 +845,117 @@ test('a range that is a ReadableStream subclass serving its bytes through its ow
   assert.deepEqual(seen, { reads: 1, readers: 1 });
 });
 
+// ---- a range reader that breaks the streams contract when asked to cancel ----
+// The two ways a hand-written reader does: cancel() answers with no promise, or throws where it stands. The range is
+// the caller's, and its failure to cancel is its own: ply asks it to stop and waits for nothing, so neither may reach
+// anyone as an error or hold an operation past its abort.
+const BROKEN_CANCEL = [
+  ['returns undefined', () => undefined],
+  ['throws where it stands', () => { throw new Error('sync cancel'); }],
+];
+// What node reports thrown out of every caller's reach while `run` runs. An error thrown inside an AbortSignal listener
+// (where an abort asks the range in flight to cancel) is caught by no one: node raises it as an uncaughtException on a
+// later tick, which ends a process that has no handler for it. The turns after `run` let that tick come.
+const uncaughtDuring = async run => {
+  const seen = [];
+  const onUncaught = e => { seen.push(String(e)); };
+  process.on('uncaughtException', onUncaught);
+  try {
+    await run();
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  } finally {
+    process.off('uncaughtException', onUncaught);
+  }
+  return seen;
+};
+for (const [name, broken] of BROKEN_CANCEL) {
+  test(`cancelRange asks a range to stop and does not throw when its cancel() ${name}`, () => {
+    // Expected values are the test's own: the one reason it gave, seen once by the range's cancel()
+    const reason = new Error('stop');
+    const reasons = [];
+    assert.doesNotThrow(() => rangesource.cancelRange({ cancel(why) { reasons.push(why); return broken(why); } }, reason));
+    assert.deepEqual(reasons, [reason]);
+  });
+
+  test(`packSubset over a range read through its own reader, whose cancel() ${name}: the consumer's cancel settles and nothing is thrown`, async () => {
+    // The range is a ReadableStream subclass that defines getReader, so it is read through the reader that returns.
+    // Expected values, none from the code under test: the streams contract for the consumer (cancel() fulfils with
+    // undefined), node's own uncaughtException event (none raised), and the test's counter (the range was asked to stop).
+    const idx = await scan(packs.ofs);
+    const seen = { cancels: 0 };
+    const source = { size: packs.ofs.length, read(offset, length) {
+      let at = offset;
+      const reader = {
+        // 256 bytes a read, so the consumer's cancel lands with the range open and most of it unread
+        read() {
+          const n = Math.min(256, offset + length - at);
+          if (n === 0) return Promise.resolve({ done: true, value: undefined });
+          at += n;
+          return Promise.resolve({ done: false, value: packs.ofs.subarray(at - n, at) });
+        },
+        cancel(why) { seen.cancels++; return broken(why); },
+        releaseLock() {},
+      };
+      class Served extends ReadableStream { getReader() { return reader; } }
+      return Promise.resolve({ ok: true, value: new Served() });
+    } };
+    let cancelled = 'not reached';
+    const uncaught = await uncaughtDuring(async () => {
+      const consumer = unwrap(await packSubset(source, idx, [...Array(idx.count).keys()])).stream.getReader();
+      for (let got = 0; got < 2000;) {
+        const chunk = consumer.read();
+        // bounded like every wait in this file: a read or a cancel that never ends fails here, it does not hang
+        assert.equal(await settledWithin(chunk), 'settled', 'a chunk of the new pack');
+        const r = await chunk;
+        assert.equal(r.done, false, 'the pack is longer than what is read before the cancel');
+        got += r.value.length;
+      }
+      const cancelling = consumer.cancel(new Error('consumer left'));
+      assert.equal(await settledWithin(cancelling), 'settled', 'cancel()');
+      cancelled = await cancelling.then(v => ({ fulfilled: v }), e => ({ rejected: String(e) }));
+    });
+    assert.deepEqual({ cancelled, uncaught }, { cancelled: { fulfilled: undefined }, uncaught: [] });
+    assert.ok(seen.cancels >= 1, 'the open range was asked to stop');
+  });
+
+  // The expected outcome is the contract's, as for ABORTABLE above: `aborted` when the signal fires, though the read in
+  // flight never answers. The counters are the test's own: one read issued, and its range asked once to stop.
+  const SIGNALLED = [
+    ['packIdentity', (source, signal) => packIdentity(source, signal)],
+    ['resolvePackRange', (source, signal, idx) => resolvePackRange(idx, source, { signal })],
+  ];
+  for (const [op, run] of SIGNALLED) {
+    test(`${op}: an abort settles it 'aborted' with a read in flight on a range whose cancel() ${name}`, async () => {
+      const idx = await scan(packs.ofs);
+      const seen = { reads: 0, cancels: 0 };
+      let reached;
+      const parked = new Promise(r => { reached = r; });
+      const source = { size: packs.ofs.length, read() {
+        seen.reads++;
+        const reader = {
+          read() { reached(); return new Promise(() => {}); },
+          cancel(why) { seen.cancels++; return broken(why); },
+          releaseLock() {},
+        };
+        class Stalled extends ReadableStream { getReader() { return reader; } }
+        return Promise.resolve({ ok: true, value: new Stalled() });
+      } };
+      const ac = new AbortController();
+      let outcome = 'not reached';
+      const uncaught = await uncaughtDuring(async () => {
+        const running = run(source, ac.signal, idx);
+        assert.equal(await settledWithin(parked), 'settled', 'the operation is reading the range');
+        assert.equal(await settledWithin(running, 20), 'pending', 'it is waiting for the storage');
+        ac.abort(new Error('stop'));
+        assert.equal(await settledWithin(running), 'settled', 'the abort settles it');
+        const r = await running;
+        outcome = r.ok ? 'ok' : r.error.code;
+      });
+      assert.deepEqual({ outcome, uncaught, ...seen }, { outcome: 'aborted', uncaught: [], reads: 1, cancels: 1 });
+    });
+  }
+}
+
 test('a chunk read is not a promise race: a whole pack served 256 bytes at a time is drained without one Promise.race', async () => {
   // Expected values, neither from the code under test: 0 is the owner's decision (no race per read), and the bytes are
   // git's own pack. The count is the platform's Promise.race, wrapped for the length of the drain.
