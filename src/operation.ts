@@ -46,6 +46,8 @@ export type OperationOpts = Input<OperationConfig & { readonly tracer: Tracer }>
 const operationDefaults = (): { -readonly [K in keyof OperationConfig]: OperationConfig[K] } => ({
   auth: null, parent: null, fetchImpl: null, limits: DEFAULT_LIMITS, signal: null, quirks: null, transport: null, attrs: {}, link: null, onFinish: null,
 });
+// The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
+const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
 // The service whose request is a push: once it is handed to a transport, a failure is no longer definite.
 const RECEIVE_PACK = 'git-receive-pack';
 // outcome(kind, result) or outcome(kind, result, attrs): the attributes stamped on the root beside the outcome; ok(result).
@@ -106,9 +108,6 @@ export async function operation<R>(op: string, url: string | URL, opts: Operatio
   }
   return r.ok ? r : failed(r.error);
 }
-
-// The code an `ambiguous` replaced, when the thrown value had one (no key at all when it had none).
-const originalCode = (e: unknown): Pick<Extra, 'original'> => { const c = thrownCode(e); return c.tag === 'some' ? { original: c.value } : {}; };
 
 // After an acknowledged push: read `ref` back and require `expected`. A transport error here, or any other value, is
 // 'ambiguous' — the push may have landed. Records `<prefix>.verify.ref` on `root` (empty when the ref is absent).

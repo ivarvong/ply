@@ -434,6 +434,10 @@ export const DECISIONS = [
   { match: 'src/push.ts#classifyReport:export', space: 'push-outcome', axisTag: 'status' },
   { match: 'src/push.ts#decideOutcome:*', space: 'push-outcome', axisTag: 'event' },
   { match: 'src/otel.ts#constructor:untyped:a span has a parent or follows one, not both', excluded: 'a caller programming error (a TypeError by design, never an outcome); test/span-contract.test.js holds it' },
+  // a caller-supplied callback that throws: the failure is the caller's own code, not an input ply decides on
+  { match: 'src/errors.ts#callbackFailed:bad_request:caller-supplied … threw: …', excluded: "a caller's callback threw (signer, filter, any callback at operation()'s edge), not a decision on an input; test/callback-throw.test.js holds the code, `what`, `cause` and the unchanged ref (git)" },
+  { match: 'src/sign.ts#signCommit:bad_request:signer', excluded: "a caller's signer threw or rejected, not a decision on an input; test/callback-throw.test.js holds it (two rows, ref unchanged in git)" },
+  { match: 'src/sign.ts#signCommit:bad_request:caller-supplied signer returned a signature that is not …', excluded: "a caller's signer broke its type (a non-string signature), a caller programming error; no test holds this branch yet" },
   // generated, reviewed
   { match: "src/checkout-node.ts#collision:*", space: 'checkout-tree', axisTag: 'case' },
   { match: "src/checkout-node.ts#emptyDir:*", space: 'checkout-tree', axisTag: 'case' },
