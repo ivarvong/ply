@@ -11,7 +11,8 @@
 // and the receiver supplies the base (receive-pack's index-pack --fix-thin) or refuses.
 //
 // `extras` are small objects ply encodes itself (a commit, a generated tree), deflated before anything is streamed and
-// written after the selected entries. Their base may be none or a REF; an OFS base inside extras is refused.
+// written after the selected entries. Their base may be none or a REF; an OFS base inside extras is refused, as is any
+// extra a pack cannot hold (a type that is not commit, tree, blob or tag; a REF base that is not a 40-hex id).
 //
 // `length` is exact before the first byte, so the stream feeds pushPack (#234) with a known length. Consecutive source
 // entries are read with one range read; the SHA-1 trailer is computed while streaming. Held: per selected entry 8 bytes
@@ -34,7 +35,8 @@ import type { PackInput } from './pack.js';
 import { encodeObjHeader, encodeOfsDistance, entryHead, inputBase, packHeader, zlibDeflate } from './pack.js';
 import { streamingSha1, fromHex } from './sha1.js';
 import { concat } from './bytes.js';
-import { OBJ_OFS_DELTA, OBJ_REF_DELTA, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from './format.js';
+import { OBJ_COMMIT, OBJ_TAG, OBJ_OFS_DELTA, OBJ_REF_DELTA, PACK_HEADER_BYTES, PACK_TRAILER_BYTES } from './format.js';
+import { parseOid } from './oid.js';
 
 // In-range indexed reads of columns this module sized or the index sized; noUncheckedIndexedAccess cannot see that.
 /* oxlint-disable typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- in-range indexed reads, see above */
@@ -147,11 +149,36 @@ function headerOf(p: Plan, k: number): Uint8Array {
   }
 }
 
+// Extra j as a pack can hold it: bytes, and either a whole object of one of the four types (commit 1 .. tag 4; 0, 5 and
+// the delta types are not whole objects) or a REF_DELTA to a 40-hex id, whose own type is the delta's and is not read.
+// The values are a JavaScript caller's, so they are checked as unknown: buildPack's encoder checks none of this
+// (pack.ts), and an extra it would write wrong is a pack of the declared length that no git can parse.
+function checkExtra(j: number, o: PackInput): Result<null, PlyError> {
+  const data: unknown = o.data;
+  if (!(data instanceof Uint8Array)) return refuse('pack subset extras', `extra ${j} has data that is not a Uint8Array`);
+  const base = inputBase(o);
+  const tag: unknown = base.tag;
+  if (tag === 'ofs') return refuse('pack subset extras', `extra ${j} has an OFS base; give a REF base or none`);
+  if (tag === 'ref') {
+    const oid: unknown = base.tag === 'ref' ? base.oid : null;
+    return parseOid(oid).ok ? ok(null) : refuse('pack subset extras', `extra ${j} has a REF base that is not a 40-hex object id`);
+  }
+  if (tag !== 'none') return refuse('pack subset extras', `extra ${j} has a base that is neither none nor a REF`);
+  const type: unknown = o.type;
+  if (typeof type !== 'number' || !Number.isInteger(type) || type < OBJ_COMMIT || type > OBJ_TAG) return refuse('pack subset extras', `extra ${j} has type ${String(type)}; a whole object is a commit (1), tree (2), blob (3) or tag (4)`);
+  return ok(null);
+}
+
 async function plan(pack: ScannedPack, selection: readonly number[], opts: PackSubsetOpts): Promise<Result<Plan, PlyError>> {
   const c = pack.columns;
   const n = selection.length;
   const total = n + opts.extras.length;
   if (total > MAX_COUNT) return refuse('pack subset count', `${total} objects is more than a pack can count`);
+  // every extra is checked before any is deflated, and before the selection is walked
+  for (const [j, o] of opts.extras.entries()) {
+    const checked = checkExtra(j, o);
+    if (!checked.ok) return checked;
+  }
   // where each source entry is written (position in the new pack), NOT_WRITTEN until it is
   const pos = new Int32Array(pack.count).fill(NOT_WRITTEN);
   const selected = new Uint8Array(pack.count);
@@ -194,8 +221,7 @@ async function plan(pack: ScannedPack, selection: readonly number[], opts: PackS
     offset += headerOf(p, k).length + (c.compressed[i] as number);
   }
   const extras: Array<{ head: Uint8Array; z: Uint8Array }> = [];
-  for (const [j, o] of opts.extras.entries()) {
-    if (inputBase(o).tag === 'ofs') return refuse('pack subset extras', `extra ${j} has an OFS base; give a REF base or none`);
+  for (const o of opts.extras) {
     // the extras are small and few; in order, as the pack is
     // oxlint-disable-next-line no-await-in-loop -- see above
     const z = await zlibDeflate(o.data);

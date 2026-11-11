@@ -320,6 +320,36 @@ test('the selection is copied at the call: changing the array afterwards changes
   assert.equal(over.error.code, 'bad_request');
 });
 
+test('an extra a pack cannot hold is refused before the source sees a read', async () => {
+  const idx = await scan(packs.ofs);
+  const data = te.encode('an extra\n');
+  // gitformat-pack: an undeltified entry's type is 1 (commit), 2 (tree), 3 (blob) or 4 (tag); 0 is invalid and 5
+  // reserved; 6 and 7 are deltas, which need a base; a REF_DELTA's base is a 20-byte object name, 40 hex digits.
+  // (The reviewer's run had git index-pack reject the pack built from each of these.)
+  const invalid = [
+    ['type 9', { type: 9, data }],
+    ['type 0', { type: 0, data }],
+    ['type 5', { type: 5, data }],
+    ['type 7 (REF_DELTA) with no base', { type: 7, data }],
+    ['type 6 (OFS_DELTA) with no base', { type: 6, data }],
+    ['a fractional type', { type: 1.5, data }],
+    ['a REF base that is not hex', { type: TYPE.BLOB, data, base: { tag: 'ref', oid: 'zz' } }],
+    ['a REF base of 39 hex digits', { type: TYPE.BLOB, data, base: { tag: 'ref', oid: 'a'.repeat(39) } }],
+    ['a base of no known tag', { type: TYPE.BLOB, data, base: { tag: 'offset', index: 0 } }],
+    ['data that is not bytes', { type: TYPE.BLOB, data: 'an extra\n' }],
+  ];
+  for (const [name, extra] of invalid) {
+    const src = countingSource(packs.ofs);
+    // a valid extra first: the refusal names the one at fault
+    const r = await packSubset(src, idx, [0], { extras: [{ type: TYPE.BLOB, data }, extra] });
+    assert.equal(r.ok, false, name);
+    assert.equal(r.error.code, 'bad_request', name);
+    assert.equal(r.error.what, 'pack subset extras', name);
+    assert.match(r.error.message, /extra 1 /, name);
+    assert.equal(src.state.reads, 0, `${name}: no read`);
+  }
+});
+
 test('rangeFromBytes refuses a range outside its bytes', async () => {
   const src = rangeFromBytes(new Uint8Array(8));
   for (const [o, l] of [[4, 5], [-1, 2], [9, 0], [0.5, 1]]) {
