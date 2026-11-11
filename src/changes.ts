@@ -512,12 +512,16 @@ const lostRace = (e: PlyError): boolean => isPlyError(e) && e.code === 'cas_conf
 const lostAt = (listed: Result<LsRefsResult, PlyError>, ref: string, expected: string, cause: unknown): Err<PlyError> =>
   (listed.ok ? lost(ref, expected, tipOf(listed.value.refs, ref), cause) : listed);
 
+// What one attempt answers on either path: the commit, or `retry` (an unpinned commit on a ref that existed lost its
+// push to another writer: the call reads the target again and redoes it once).
+type MemOutcome = { readonly retry: false; readonly done: CommitChangesResult; readonly objects: number } | { readonly retry: true };
 type StreamJob = {
   readonly plan: Plan;
   readonly target: Tip;
   readonly parent: Parent & { readonly oid: string };
   readonly edit: Extract<Norm, { readonly kind: 'edit' }>;
   readonly opts: StreamOpts;
+  readonly attempt: number;
 };
 function parseEditInputs(targetRef: string, editPath: string, limits: CheckedLimits): Result<{ readonly ref: Refname; readonly path: Path }, BadRequest> {
   const branded = parseRefname(targetRef);
@@ -526,9 +530,11 @@ function parseEditInputs(targetRef: string, editPath: string, limits: CheckedLim
   return map(parsePath(editPath, limits), p => ({ ref: branded.value, path: p.path }));
 }
 // The single edit of an existing file, streamed by editFile. Its Err is read here: a lost race (or a rebase refusal on a
-// new ref) is this commit's cas_conflict; any other Err is the commit's as it is.
-async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob): Promise<Result<CommitChangesResult, PlyError>> {
-  const { plan, target, parent, edit, opts } = job;
+// new ref) is this commit's cas_conflict; any other Err is the commit's as it is. editFile never redoes a lost push
+// itself (`retry: false`): the redo is this commit's, from its own fresh read of the target, as on the in-memory path
+// (writeMem), so both paths answer one race the same way and every push asserts what the commit read.
+async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob): Promise<Result<MemOutcome, PlyError>> {
+  const { plan, target, parent, edit, opts, attempt } = job;
   const creating = parent.creating;
   const strict = opts.pinned && !creating && parent.baseOid === null;
   root.set({ 'git.commit.stream': true });
@@ -542,23 +548,24 @@ async function streamEdit(url: string, t: Transport, root: Span, job: StreamJob)
     ref, base: getOrElse(fromNullish(parent.baseOid), getOrElse(fromNullish(parent.baseRef), target.ref)), path, find: edit.find, replace: edit.replace,
     author: person(plan.author), committer: person(plan.committer), message: plan.message, time: plan.author.time,
   }, expecting({
-    ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: !creating && !opts.pinned,
+    ...opts.rest, transport: t, parent: root, head: parent.oid, strictHead: strict, retry: false,
     verify: opts.verify, allowLfsPointer: opts.allowLfs, ...(opts.signer === null ? {} : { signer: opts.signer }),
   }, creating));
   if (!result.ok) {
     const e = result.error;
     const rebase = creating && e.code === 'bad_request' && whatIs(e, 'rebase');
     if (e.code !== 'cas_conflict' && !rebase) return result;
+    if (lostRace(e) && attempt === 0 && !opts.pinned && !creating) return ok({ retry: true });
     if (e.code === 'cas_conflict' && !creating && actualKnown(e)) return result;
     return lostAt(await lsRefs(t, [target.ref]), target.ref, creating ? ZERO_OID : parent.oid, e);
   }
   const edited = result.value;
   if (edited.noop) {
     if (creating) return nothing();
-    return ok(resultOf(target.ref, parent, { tree: edited.oldTree, oid: edited.oldCommit, pushBytes: 0, outcome: 'noop' }));
+    return ok({ retry: false, objects: 0, done: resultOf(target.ref, parent, { tree: edited.oldTree, oid: edited.oldCommit, pushBytes: 0, outcome: 'noop' }) });
   }
-  // editFile may have retried against a tip that moved. That commit's parent is the tip it won on.
-  return ok(resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' }));
+  // editFile corrects a stale head hint before it pushes. That commit's parent is the tip it won on.
+  return ok({ retry: false, objects: 0, done: resultOf(target.ref, { ...parent, oid: edited.oldCommit }, { tree: edited.newTree, oid: edited.newCommit, pushBytes: edited.pushBytes, outcome: 'commit' }) });
 }
 
 function treeDecision(parent: Parent, tree: string): 'noop' | 'empty' | 'commit' {
@@ -580,7 +587,6 @@ type MemJob = {
   readonly pinned: boolean;
   readonly attempt: number;
 };
-type MemOutcome = { readonly retry: false; readonly done: CommitChangesResult; readonly objects: number } | { readonly retry: true };
 function oldOidOf(parent: Parent): string {
   if (parent.creating || parent.oid === null) return ZERO_OID;
   return parent.oid;
@@ -625,13 +631,13 @@ async function writeMem(job: MemJob): Promise<Result<MemOutcome, PlyError>> {
   if (verify) { const seen = await verifyRef(t, root, 'git.commit', target.ref, oid); if (!seen.ok) return seen; }
   return ok({ retry: false, objects: objects.length, done: resultOf(target.ref, parent, { tree: applied.value.tree, oid, pushBytes: pushed.value.packBytes, outcome: 'commit' }) });
 }
-type StreamTry = { readonly plan: Plan; readonly target: Tip; readonly parent: Parent; readonly opts: StreamOpts };
+type StreamTry = { readonly plan: Plan; readonly target: Tip; readonly parent: Parent; readonly opts: StreamOpts; readonly attempt: number };
 // One edit of a file that exists on a parent that exists: streamed (Some). Anything else is the in-memory tree (None).
-async function streamIfEdit(url: string, t: Transport, root: Span, job: StreamTry): Promise<Result<Option<CommitChangesResult>, PlyError>> {
-  const { plan, target, parent, opts } = job;
+async function streamIfEdit(url: string, t: Transport, root: Span, job: StreamTry): Promise<Result<Option<MemOutcome>, PlyError>> {
+  const { plan, target, parent, opts, attempt } = job;
   const only = at(plan.changes, 0);
   if (plan.changes.length !== 1 || only.tag === 'none' || only.value.kind !== 'edit' || parent.oid === null) return ok(none);
-  const edited = await streamEdit(url, t, root, { plan, target, parent: { ...parent, oid: parent.oid }, edit: only.value, opts });
+  const edited = await streamEdit(url, t, root, { plan, target, parent: { ...parent, oid: parent.oid }, edit: only.value, opts, attempt });
   return edited.ok ? ok(some(edited.value)) : edited;
 }
 
@@ -665,9 +671,12 @@ export async function commitChanges(url: string, spec: CommitChangesSpec, option
       const parent = await resolveParent(t, tip, plan.base);
       if (!parent.ok) return parent;
       root.set({ 'git.commit.creating': parent.value.creating, 'git.commit.parent': parent.value.oid === null ? '' : parent.value.oid });
-      const streamed = await streamIfEdit(url, t, root, { plan, target: tip, parent: parent.value, opts });
+      const streamed = await streamIfEdit(url, t, root, { plan, target: tip, parent: parent.value, opts, attempt });
       if (!streamed.ok) return streamed;
-      if (streamed.value.tag === 'some') return finish(streamed.value.value, 0);
+      if (streamed.value.tag === 'some') {
+        if (streamed.value.value.retry) return run(1);
+        return finish(streamed.value.value.done, 0);
+      }
       const wrote = await writeMem({ t, root, plan, target: tip, parent: parent.value, limits, verify, signer, allowLfs: allowLfsPointer, pinned, attempt });
       if (!wrote.ok) return wrote;
       if (wrote.value.retry) return run(1);
