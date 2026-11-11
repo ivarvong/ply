@@ -8,7 +8,7 @@
 // which default to the clock.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, symlinkSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, symlinkSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -168,5 +168,66 @@ test('codec: a git oracle that never answers is killed and fails the case, it do
     assert.equal(r.status, 1, `exit status; signal=${r.signal}; output: ${r.stdout}${r.stderr}`);
     assert.match(r.stdout, /FAIL #\d+ delta-git: oracle did not answer: git hash-object -w --stdin had not exited after 1 s and was killed/);
     assert.match(r.stdout, /150 cases in \d+s, [1-9]\d* failures/);
+    // Every FAIL line names the seed and the command that replays it. codec draws one stream from --seed, so case
+    // #i is the (i+1)th case of that stream: `--n <i+1> --seed <seed>` (the rule scripts/nightly-fuzz.mjs applies).
+    const failLines = r.stdout.split('\n').filter(l => l.startsWith('FAIL'));
+    assert.ok(failLines.length > 0);
+    for (const l of failLines) {
+      const i = Number(/^FAIL #(\d+) /.exec(l)[1]);
+      assert.ok(l.includes(' seed=1 ') && l.endsWith(`replay: node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs --n ${i + 1} --seed 1`), l);
+    }
   } finally { rmSync(bin, { recursive: true, force: true }); }
 }, 60_000);
+
+// Owner decision (1) covers a fuzzer run directly, not only through the runner: `npm run fuzz:codec` passes no
+// --seed, so the seed comes from the clock and a failure can be replayed only if the run named it. Which fuzzers
+// fall back to the clock is read from their sources (the seven at ec337c5). Each is run with no --seed and a small
+// --n, and the first line it prints has to name a seed. Nothing here depends on which seed the clock gave or on
+// whether the run found a failure.
+const direct = (name, args, env = process.env) => spawnSync(process.execPath, ['--import', './test/ts-resolve.mjs', `test/fuzz/${name}.mjs`, ...args],
+  { cwd: ROOT, encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', env });
+const firstLine = out => out.split('\n').find(l => l.trim() !== '') ?? '';
+
+test('every clock-seeded fuzzer, run directly with no --seed, names its seed on its first line', () => {
+  const clock = readdirSync(`${ROOT}test/fuzz`).filter(f => f.endsWith('.mjs') && /args\.seed \?\?[^\n]*Date\.now\(\)/.test(readFileSync(`${ROOT}test/fuzz/${f}`, 'utf8'))).map(f => f.slice(0, -4)).sort();
+  assert.deepEqual(clock, ['codec', 'hostile', 'liar', 'packgen', 'packs', 'protocol', 'run']);
+  for (const name of clock) {
+    const r = direct(name, ['--n', name === 'codec' ? '200' : '2']);
+    assert.match(firstLine(r.stdout), /\bseed[= ]\d+/, `${name} with no --seed: first line names no seed (signal=${r.signal}): ${r.stdout.slice(0, 300)}${r.stderr.slice(0, 300)}`);
+  }
+}, 900_000);
+
+test('codec: the seed it prints is the seed it ran, a replay with it draws the same cases', () => {
+  const a = direct('codec', ['--n', '200']);
+  const seed = /^codec: seed (\d+), n 200\b/.exec(firstLine(a.stdout))?.[1];
+  assert.ok(seed, `first line: ${firstLine(a.stdout)}`);
+  // The table after the summary counts every generator and codec choice the run drew: a different seed gives a
+  // different table, the same seed the same one. Only the elapsed seconds are cut.
+  const table = out => out.slice(out.indexOf(' cases in ')).replace(/ cases in \d+s/, '');
+  const b = direct('codec', ['--n', '200', '--seed', seed]);
+  assert.equal(b.status, a.status);
+  assert.equal(table(b.stdout), table(a.stdout));
+  assert.notEqual(table(direct('codec', ['--n', '200', '--seed', String(Number(seed) + 1)]).stdout), table(a.stdout));
+}, 120_000);
+
+// below-hash defaults its seed to the constant 1 (its usage line). It still says so on start, and a failure names
+// the seed and its replay. The failure is made by the oracle, not by ply: a stand-in `git` whose fsck rejects every
+// object, so each object ply accepts is a DIVERGE. The replay expected for a case is its usage line's: a fixed case
+// by name, a random case `kind#<seed>` by that seed, with the run's --n and --seed (they decide which cases exist).
+test('below-hash: prints its seed on start, and a failure names the seed and the command that replays it', () => {
+  const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const bin = mkdtempSync(join(tmpdir(), 'ply-no-fsck-'));
+  try {
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do [ "$a" = fsck ] && { echo "error: stand-in fsck rejects every object"; exit 1; }; done\nexec "${realGit}" "$@"\n`);
+    chmodSync(join(bin, 'git'), 0o755);
+    const r = direct('below-hash', ['--n', '2'], { ...process.env, PATH: `${bin}:${process.env.PATH}` });
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(firstLine(r.stdout), /^below-hash: seed 1, n 2\b/);
+    const failed = r.stdout.split('\n').filter(l => /^(FAIL|DIVERGE|STRICT-NORMAL)\s/.test(l));
+    assert.ok(failed.some(l => /^DIVERGE\s+valid\s/.test(l)), r.stdout);
+    for (const l of failed) {
+      const name = /^\S+\s+(\S+?):?\s/.exec(l)[1], id = /#(\d+)$/.exec(name)?.[1] ?? name;
+      assert.ok(l.includes(' seed=1 ') && l.endsWith(`replay: node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 2 --seed 1 --case ${id}`), l);
+    }
+  } finally { rmSync(bin, { recursive: true, force: true }); }
+}, 300_000);

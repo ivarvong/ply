@@ -18,6 +18,11 @@ import { unwrap } from '../unwrap.js';
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, arr) => a.startsWith('--') ? [a.slice(2), arr[i + 1] ?? true] : []).filter(x => x.length));
 const N = parseInt(args.n ?? '200000', 10), SEED = parseInt(args.seed ?? String(Date.now() % 1e9), 10);
+// The seed is printed on start and in every FAIL line, with the command that replays it: with no --seed it comes
+// from the clock, and a failure nobody can replay is lost. One stream is drawn from the seed, so case #i is the
+// (i+1)th case of `--n <i+1> --seed <seed>`.
+const REPLAY = 'node --import ./test/ts-resolve.mjs test/fuzz/codec.mjs';
+console.log(`codec: seed ${SEED}, n ${N}  replay: ${REPLAY} --n ${N} --seed ${SEED}`);
 const rng = new Rng(SEED);
 const fails = [], counts = {};
 const tick = k => counts[k] = (counts[k] ?? 0) + 1;
@@ -112,7 +117,7 @@ for (let i = 0; i < N; i++) {
     }
   } catch (e) {
     fails.push({ i, which, seed: SEED, msg: e.message });
-    console.log(`FAIL #${i} ${which}: ${e.message}`);
+    console.log(`FAIL #${i} ${which}: ${e.message}  seed=${SEED}  replay: ${REPLAY} --n ${i + 1} --seed ${SEED}`);
     if (fails.length > 20) break;
   }
   if (i % 20000 === 0 && i) process.stdout.write(`  ${i}/${N} ${((Date.now() - t0) / 1000) | 0}s\n`);
