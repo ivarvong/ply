@@ -179,8 +179,10 @@ export type LimitKey = keyof Limits;
 // is a plain record again and is parsed afresh. Internal code takes CheckedLimits and reads its keys directly.
 const CHECKED_LIMITS: unique symbol = Symbol('checkedLimits');
 export type CheckedLimits = Limits & { readonly [CHECKED_LIMITS]: true };
-// What a caller passes: any subset of the keys (a missing key is the default), or none.
-export type LimitsInput = Input<Limits>;
+// What a caller passes: any subset of the keys (a missing key is the default), or none. maxResolveWork may also be
+// null: derived from the record's own maxInflatedTotal, the same as leaving it out (no other key takes null).
+type LimitsGiven = Omit<Limits, 'maxResolveWork'> & { readonly maxResolveWork: number | null };
+export type LimitsInput = Input<LimitsGiven>;
 
 // The brand on a record whose every value is a finite non-negative number (each caller's check, or arithmetic on checked
 // values). Frozen: the record is shared by every read past the edge.
@@ -248,12 +250,12 @@ export const WORKER_LIMITS: CheckedLimits = grant({
 // maxResolveWork left out follows the record's own maxInflatedTotal (resolveWorkOf), as in parseLimits.
 const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_SAFE_INTEGER, maxInflatedTotal * LIMIT_RESOLVE_TOTALS);
 // maxResolveWork: null is left out too (a spread of a preset, or a JSON record, has no other way to ask for the derived value)
-const derived = (maxResolveWork: unknown): boolean => maxResolveWork === null || isMissing(maxResolveWork);
-export const withLimits = (o: Partial<Limits> = {}): Limits => {
+export const withLimits = (o: Partial<LimitsGiven> = {}): Limits => {
   // null from an untyped caller is no overrides, as the missing value is: the frozen defaults, not a throw
-  const given = getOrElse<Partial<Limits>>(fromNullish(o), {});
-  const filled: Limits = { ...DEFAULT_LIMITS, ...given };
-  return Object.freeze(derived(given.maxResolveWork) ? { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) } : filled);
+  const given = getOrElse<Partial<LimitsGiven>>(fromNullish(o), {});
+  const asked = given.maxResolveWork;
+  const filled = { ...DEFAULT_LIMITS, ...given };
+  return Object.freeze({ ...filled, maxResolveWork: asked === null || isMissing(asked) ? resolveWorkOf(filled.maxInflatedTotal) : asked });
 };
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
@@ -271,9 +273,10 @@ export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, Er
   if (input === null) return ok(DEFAULT_LIMITS);
   if (isChecked(input)) return ok(input);
   // A spread of DEFAULT_LIMITS: its keys (the brand is not enumerable), in order, each filled from the input where given.
-  const given = withDefaults<Limits>(input, { ...DEFAULT_LIMITS });
-  // the resolve work ceiling a caller leaves out follows the maxInflatedTotal of its own record, not the default's
-  const filled: Limits = derived(input.maxResolveWork) ? { ...given, maxResolveWork: resolveWorkOf(given.maxInflatedTotal) } : given;
+  const given = withDefaults<LimitsGiven>(input, { ...DEFAULT_LIMITS });
+  // the resolve work ceiling a caller leaves out (or gives as null) follows the maxInflatedTotal of its own record, not the default's
+  const asked = input.maxResolveWork;
+  const filled: Limits = { ...given, maxResolveWork: asked === null || isMissing(asked) ? resolveWorkOf(given.maxInflatedTotal) : asked };
   for (const [key, value] of Object.entries(filled)) {
     const checked = checkLimit(value, key);
     if (!checked.ok) return checked;
