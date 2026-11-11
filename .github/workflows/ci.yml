@@ -108,7 +108,7 @@ jobs:
         run: node scripts/ratchet-guard.mjs
       - run: npm run lint
       - name: dist is what consumers import
-        run: npm run build && node -e "import('ply').then(m => { if (!m.Tracer || !m.RETRY) process.exit(1); })"
+        run: node scripts/dist-check.mjs
       - name: below-hash fuzzer
         run: node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --n 20 --seed 1 && node --import ./test/ts-resolve.mjs test/fuzz/below-hash.mjs --seed 20261030 --n 100 --case 1730047880
       - name: git-semantic fuzzer

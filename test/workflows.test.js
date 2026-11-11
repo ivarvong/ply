@@ -10,7 +10,11 @@
 // No YAML parser (no dependencies): the assertions are on the exact lines a reviewer would read.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, cpSync, symlinkSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 // Every test/**/*.test.js on disk: the directory itself, not the planner's view of it.
@@ -70,11 +74,11 @@ test('npm run check is the pre-push gate: typecheck, lint, the registry test, th
   const { scripts } = JSON.parse(read('package.json'));
   assert.equal(typeof scripts.check, 'string', 'package.json has no check script');
   const steps = scripts.check.split(' && ');
-  assert.deepEqual(steps.slice(0, 4), ['npm run typecheck', 'npm run lint', 'vitest run test/space/registry.test.js', 'npm run build']);
+  // No step writes into the tree: the dist check builds into a temporary directory (the test below runs it).
+  assert.deepEqual(steps, ['npm run typecheck', 'npm run lint', 'vitest run test/space/registry.test.js', 'node scripts/dist-check.mjs']);
   // The dist check is the one CI runs, word for word, so the two cannot drift.
-  const ciDist = /^ {8}run: npm run build && (node -e .*)$/mu.exec(read('.github/workflows/ci.yml'))?.[1];
-  assert.equal(steps[4], ciDist);
-  assert.equal(steps.length, 5);
+  const ciDist = /^ {6}- name: dist is what consumers import\n {8}run: (.*)$/mu.exec(read('.github/workflows/ci.yml'))?.[1];
+  assert.equal(steps[3], ciDist);
   // Documented where a contributor looks for it.
   assert.match(read('CONTEXT.md'), /^npm run check\b/mu);
 });
@@ -105,4 +109,41 @@ test('every test file has a weight in test/durations.json, so the shard planner 
   const known = JSON.parse(read('test/durations.json'));
   assert.deepEqual(testFiles('test').filter((f) => !(f in known)), [], 'add each file with its local seconds, rounded up');
   for (const [file, seconds] of Object.entries(known)) assert.ok(Number.isInteger(seconds) && seconds >= 0, `${file}: ${seconds}`);
+});
+
+// `npm run check` is the contributor's pre-push gate; it must judge the tree's source without rewriting the tree's
+// dist/. Run in a copy of the tree whose dist/ is known by construction, so the expectations are the copy's own
+// bytes and the two facts stated below, not anything the check prints.
+test('npm run check builds what it checks outside the tree: dist/ is not rewritten, and a stale dist/ is not what is judged', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const steps = JSON.parse(read('package.json')).scripts.check.split(' && ');
+  assert.deepEqual(steps.slice(0, 3), ['npm run typecheck', 'npm run lint', 'vitest run test/space/registry.test.js']);
+  const distStep = steps.slice(3).join(' && ');
+  assert.notEqual(distStep, '', 'check still has a dist step');
+  const dir = mkdtempSync(join(tmpdir(), 'ply-check-'));
+  try {
+    for (const p of ['src', 'scripts', 'package.json', 'tsconfig.json']) cpSync(join(root, p), join(dir, p), { recursive: true });
+    symlinkSync(join(root, 'node_modules'), join(dir, 'node_modules'));
+    mkdirSync(join(dir, 'dist'));
+    const stale = join(dir, 'dist/index.js');
+    const env = { ...process.env, NODE_OPTIONS: '', PATH: `${join(dir, 'node_modules/.bin')}:${process.env.PATH}` };
+    const run = () => spawnSync('sh', ['-c', distStep], { cwd: dir, env, encoding: 'utf8' });
+
+    // A stale dist/ that exports nothing, a good src: the step passes on what src builds to, and dist/ is as it was.
+    writeFileSync(stale, 'export {};\n');
+    const good = run();
+    assert.equal(good.status, 0, `${good.stdout}${good.stderr}`);
+    assert.deepEqual(readdirSync(join(dir, 'dist')), ['index.js']);
+    assert.equal(readFileSync(stale, 'utf8'), 'export {};\n');
+
+    // A stale dist/ that has both exports, a src whose index exports nothing: the step fails, and dist/ is as it was.
+    writeFileSync(stale, 'export const Tracer = 1;\nexport const RETRY = 1;\n');
+    writeFileSync(join(dir, 'src/index.ts'), 'export {};\n');
+    const bad = run();
+    assert.notEqual(bad.status, 0, 'the step judged the stale dist/, not the source');
+    assert.deepEqual(readdirSync(join(dir, 'dist')), ['index.js']);
+    assert.equal(readFileSync(stale, 'utf8'), 'export const Tracer = 1;\nexport const RETRY = 1;\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

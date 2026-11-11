@@ -204,7 +204,8 @@ pinned) for the Workers suite (skipped if absent).
 
 Before every push, run the fast gate. It is what CI's `lint + fuzz` job and the registry test reject first:
 types and the ratchets, lint, the space registry (gate a, SPACES.md freshness), and the built `dist` importing
-the way consumers import it. It needs no network. There are no git hooks: running it is the contributor's step,
+the way consumers import it (`scripts/dist-check.mjs` builds into a temporary directory and imports `ply` from
+there; your `dist/` is not rewritten, `npm run build` is what writes it). It needs no network. There are no git hooks: running it is the contributor's step,
 and `notify-ply-web` tells ply-web about a commit only after `ci` passed for that commit on main.
 
 ```sh
