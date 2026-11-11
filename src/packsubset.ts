@@ -110,23 +110,26 @@ function wholeOid(pack: ScannedPack, i: number): string | null {
 // An object id as a REF_DELTA header carries it: 40 lowercase hex, what parseOid (oid.ts) accepts. Spelled here because
 // this file is at its import budget.
 const OID_TEXT = /^[0-9a-f]{40}$/u;
+// What a caller's `resolved.oid()` threw: carried to the refusal as its cause, never swallowed and never let out.
+export type Threw = { readonly threw: unknown };
 // The id `resolved` gives entry `b`, checked here, where it is used. A resolved index is the caller's object (made by
-// hand, or read back from storage): an `oid` that is missing, throws, or answers anything but 40 lowercase hex names no
-// base, so the entry is refused (by the planner and the builder alike) and nothing but an object id is ever written
-// into a REF_DELTA header. Asked only for a base outside the batch, so the check costs nothing elsewhere.
-function resolvedId(resolved: ResolvedIndex, b: number): string | null {
+// hand, or read back from storage): an `oid` that is missing or answers anything but 40 lowercase hex names no base
+// (null), and one that throws is reported with what it threw. Either way the entry is refused (by the planner and the
+// builder alike) and nothing but an object id is ever written into a REF_DELTA header. Asked only for a base outside
+// the batch, so the check costs nothing elsewhere.
+function resolvedId(resolved: ResolvedIndex, b: number): string | Threw | null {
   try {
     const id = resolved.oid(b);
     if (id.tag !== 'some') return null;
     const value: unknown = id.value;
     return typeof value === 'string' && OID_TEXT.test(value) ? value : null;
-  } catch {
-    return null;
+  } catch (threw) {
+    return { threw };
   }
 }
 // The id of entry `b` as a REF_DELTA would name it: from `resolved` when given (any entry), else the scan index's (a
-// whole object, oids on); null when neither knows it.
-export function baseId(pack: ScannedPack, resolved: ResolvedIndex | null, b: number): string | null {
+// whole object, oids on); null when neither knows it, and what `resolved.oid()` threw when it did.
+export function baseId(pack: ScannedPack, resolved: ResolvedIndex | null, b: number): string | Threw | null {
   return resolved === null ? wholeOid(pack, b) : resolvedId(resolved, b);
 }
 // The REF base id entry `i` names.
@@ -203,6 +206,7 @@ async function plan(pack: ScannedPack, asked: readonly number[], opts: PackSubse
       // the id is asked for only when it would be written (the base is not earlier in this pack), and once: the
       // answer checked here is the one the header carries, so a `resolved` that answers otherwise later changes nothing
       const id = at === NOT_WRITTEN ? baseId(pack, opts.resolved, b) : null;
+      if (id !== null && typeof id !== 'string') return fail('bad_request', `pack subset: the resolved index's oid() threw for entry ${b}, the base of entry ${i}`, { what: 'pack subset base', cause: id.threw });
       const write = entryWrite(stored, at !== NOT_WRITTEN, id !== null, opts.outsideBase);
       if (write === WRITE_OFS) {
         p.kind[k] = KIND_OFS;

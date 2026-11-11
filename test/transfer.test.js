@@ -508,3 +508,52 @@ test('done reports a temp ref left behind; the spans: run > status, step, settle
   const [sweep] = named('git.transfer.sweep').length ? named('git.transfer.sweep') : ex.lines.flatMap(flattenLine).filter(s => s.name === 'git.transfer.sweep');
   assert.equal(sweep.attrs['git.transfer.sweep.deleted'], 1);
 });
+
+test('an exception out of resolved.oid() is the cause of a coded refusal: planTransfer, transferStep and runTransfer never reject, and the refs stay as they were', async () => {
+  const from = await spooled(src.packs.ofs);
+  const c = from.pack.columns;
+  const config = { budget: { ...BUDGET, maxObjects: 261 }, ref: REF, commit: src.commit, crossBatchRef: true };
+  const plan = must(planTransfer(from.pack, from.resolved, config));
+  // the first batch holding an OFS_DELTA whose stored base is in another batch: packSubset must ask for that base's id
+  const batchOf = new Map(plan.pack.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const isRewrite = (i, k) => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== k;
+  const cutBatch = plan.pack.batches.findIndex((b, k) => b.entries.some(i => isRewrite(i, k)));
+  assert.ok(cutBatch > 0, 'the fixture cuts a chain after the first batch');
+  const cutBase = c.baseIndex[plan.pack.batches[cutBatch].entries.find(i => isRewrite(i, cutBatch))];
+  const baseBatch = batchOf.get(cutBase);
+  assert.ok(baseBatch < cutBatch);
+  // the expected cause is the test's own object: the refusal must carry this very Error, not a copy or its message
+  const marker = new Error('caller boom');
+  // every entry: reached building the temp tree. Only the cut base: at step `cutBatch`, reached only inside packSubset
+  const always = { ...from, resolved: { ...from.resolved, oid: () => { throw marker; } } };
+  const onlyBase = { ...from, resolved: { ...from.resolved, oid: i => { if (i === cutBase) throw marker; return from.resolved.oid(i); } } };
+  // a rejection (the exception escaping) fails the test at the await; a swallowed one has no cause
+  const refused = (r, label) => {
+    assert.equal(r.ok, false, label);
+    assert.equal(r.error.code, 'bad_request', label);
+    assert.equal(r.error.cause, marker, `${label}: the cause`);
+  };
+  refused(planTransfer(from.pack, always.resolved, config), 'planTransfer, oid() throws for every entry');
+  {
+    const { bare, t } = repo();
+    assert.equal(must(await runTransfer(t, from, plan, src.commit, { maxSteps: cutBatch })).tag, 'paused');
+    const before = refsOf(bare);
+    refused(await transferStep(t, onlyBase, plan, cutBatch, src.commit), 'transferStep, oid() throws only for the cut base');
+    assert.equal(refsOf(bare), before, 'refs after transferStep, cut base');
+    refused(await transferStep(t, always, plan, cutBatch, src.commit), 'transferStep, oid() throws for every entry');
+    assert.equal(refsOf(bare), before, 'refs after transferStep, every entry');
+  }
+  {
+    const { bare, t } = repo();
+    refused(await runTransfer(t, always, plan, src.commit), 'runTransfer, oid() throws for every entry');
+    assert.equal(refsOf(bare), '', 'no ref was created');
+  }
+  {
+    // the batch holding the cut base is the first to ask for its id: the refs are what an honest run paused there left
+    const honest = repo();
+    assert.equal(must(await runTransfer(honest.t, from, plan, src.commit, { maxSteps: baseBatch })).tag, 'paused');
+    const { bare, t } = repo();
+    refused(await runTransfer(t, onlyBase, plan, src.commit), 'runTransfer, oid() throws only for the cut base');
+    assert.equal(refsOf(bare), refsOf(honest.bare), 'refs after runTransfer, cut base');
+  }
+});

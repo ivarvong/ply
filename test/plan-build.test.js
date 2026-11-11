@@ -254,3 +254,34 @@ test('an id is asked of `resolved` once per rewritten entry, and the answer that
     gitBuf(dst, ['index-pack', '--strict', '--fix-thin', '--stdin'], out);
   }
 });
+
+test('an exception out of resolved.oid() is the cause of a coded refusal from packSubset and planPackBatches, never swallowed', async () => {
+  const c = src.idx.columns;
+  const type = src.resolved.columns.type;
+  const blobs = [...Array(src.idx.count).keys()].filter(i => type[i] === TYPE.BLOB);
+  const budget = { ...BIG, maxObjects: 2 };
+  // an honest plan says which entry is cut from its base (an OFS_DELTA whose stored base is in another batch)
+  const honest = unwrap(planPackBatches(src.idx, src.resolved, { budget, select: blobs, crossBatchRef: true }));
+  const batchOf = new Map(honest.batches.flatMap((b, k) => b.entries.map(i => [i, k])));
+  const cut = blobs.find(i => c.storedType[i] === TYPE.OFS_DELTA && batchOf.get(c.baseIndex[i]) !== batchOf.get(i));
+  assert.ok(cut !== undefined);
+  const cutBase = c.baseIndex[cut];
+  // the expected cause is the test's own object: the refusal must carry this very Error, not a copy or its message
+  const marker = new Error('caller boom');
+  const throwers = {
+    'for every entry': () => { throw marker; },
+    'only for the cut base': i => { if (i === cutBase) throw marker; return src.resolved.oid(i); },
+  };
+  for (const [label, oid] of Object.entries(throwers)) {
+    const resolved = { ...src.resolved, oid };
+    const built = await packSubset(rangeFromBytes(src.bytes), src.idx, [cut], { outsideBase: 'ref', resolved });
+    assert.equal(built.ok, false, `packSubset, oid() throws ${label}`);
+    assert.equal(built.error.code, 'bad_request', label);
+    assert.equal(built.error.what, 'pack subset base', label);
+    assert.equal(built.error.cause, marker, `packSubset, oid() throws ${label}: the cause`);
+    const plan = planPackBatches(src.idx, resolved, { budget, select: blobs, crossBatchRef: true });
+    assert.equal(plan.ok, false, `planPackBatches, oid() throws ${label}`);
+    assert.equal(plan.error.code, 'bad_request', label);
+    assert.equal(plan.error.cause, marker, `planPackBatches, oid() throws ${label}: the cause`);
+  }
+});

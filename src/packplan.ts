@@ -36,6 +36,7 @@ import { limitExceeded } from './limits.js';
 import type { ScannedPack } from './packscanindex.js';
 import type { ResolvedIndex } from './packrangeresolve.js';
 import { NO_BASE, THIN_BASE } from './packrangeresolve.js';
+import type { Threw } from './packsubset.js';
 import { entryWrite, baseId, ofsDistanceBytes, WRITE_OFS, WRITE_REFUSED } from './packsubset.js';
 import { Sha1 } from './sha1.js';
 import { te } from './bytes.js';
@@ -136,6 +137,8 @@ type Ctx = {
   readonly ofsMax: number;
   // entries the builder's rule cannot write where the plan put them (none, unless `resolved` lacks a base's id)
   readonly unbuildable: number[];
+  // what the caller's `resolved.oid()` threw, the first time it did (at most one): the cause of the plan's refusal
+  readonly threw: Threw[];
 };
 
 // The entry's base inside the selection, or -1 (a whole object, a thin base, or a base not selected).
@@ -158,7 +161,9 @@ function wireBytes(c: Ctx, i: number, batch: number): { readonly bytes: number; 
     const typeSize = header - ofsLen((cols.offset[i] as number) - (cols.offset[storedBase] as number));
     // the builder's own rule: OFS beside its base, else a REF_DELTA to the base's id, which `resolved` must know. The
     // id is asked for only when it would be written (the base is outside this batch): this runs per entry per try
-    const write = entryWrite(stored, sameBatch, sameBatch || baseId(c.pack, c.resolved, storedBase) !== null, c.cross ? 'ref' : 'refuse');
+    const id = sameBatch ? null : baseId(c.pack, c.resolved, storedBase);
+    if (id !== null && typeof id !== 'string' && c.threw.length === 0) c.threw.push(id);
+    const write = entryWrite(stored, sameBatch, sameBatch || typeof id === 'string', c.cross ? 'ref' : 'refuse');
     return write === WRITE_OFS
       ? { bytes: typeSize + c.ofsMax + compressed, rewrite: false, refused: false }
       : { bytes: typeSize + OID_BYTES + compressed, rewrite: true, refused: write === WRITE_REFUSED };
@@ -333,7 +338,7 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
   if (!chosen.ok) return chosen;
   const c: Ctx = {
     pack, resolved, budget: opts.budget, cross: opts.crossBatchRef, chosen: chosen.value,
-    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes), unbuildable: [],
+    batchOf: new Int32Array(pack.count).fill(-1), ofsMax: ofsLen(opts.budget.maxRequestBytes), unbuildable: [], threw: [],
   };
   const bad = checkEntries(c);
   if (bad !== null) return err(bad);
@@ -344,8 +349,10 @@ export function planPackBatches(pack: ScannedPack, resolved: ResolvedIndex, inpu
     else restFams.push(list);
   }
   const blobs = planBlobs(c, blobFams);
-  if (!blobs.ok) return blobs;
-  const batches = planFinal(c, restFams, blobs.value);
+  const batches = blobs.ok ? planFinal(c, restFams, blobs.value) : blobs;
+  // an exception out of the caller's `resolved.oid()` is the cause, ahead of any other refusal: never swallowed
+  const threw = at(c.threw, 0);
+  if (threw.tag === 'some') return fail('bad_request', 'the resolved index\'s oid() threw when a cut base\'s id was asked for', { cause: threw.value.threw });
   if (!batches.ok) return batches;
   const stuck = at(c.unbuildable, 0);
   if (stuck.tag === 'some') return fail('bad_request', `entry ${stuck.value} is an OFS_DELTA cut from its base, and the resolved index has no id (40 lowercase hex) for that base to write it as a REF_DELTA`);
