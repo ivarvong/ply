@@ -120,8 +120,63 @@ test('cherry-pick of a delete onto a branch that moved the file: git cherry-pick
   assert.equal(p.error.code, 'merge_conflict');
 });
 
-// The generated run. RENAME_SEED / RENAME_CASES pick the run; the default is small enough for the suite, and
-// test/fuzz/git-semantic.mjs runs the same generator in the pinned fuzz run.
+// Tree reads, counted at the transport: every upload-pack request ply sends is recorded with the ids it wants, and git
+// says which of those are trees. The expected numbers are counted by hand from the shape (each tree named below); a
+// tree wanted twice is a tree fetched twice.
+async function wanted(base, ours, theirs) {
+  const wants = [];
+  const fetch = async (input, init) => {
+    const body = init?.body;
+    const text = typeof body === 'string' ? body : body instanceof Uint8Array ? Buffer.from(body).toString('latin1') : body instanceof ArrayBuffer || ArrayBuffer.isView(body) ? Buffer.from(body.buffer ?? body).toString('latin1') : '';
+    for (const m of text.matchAll(/want ([0-9a-f]{40})/g)) wants.push(m[1]);
+    return globalThis.fetch(input, init);
+  };
+  const cb = commit(tree(base), [], 'base'); const co = commit(tree(ours), [cb], 'ours'); const ct = commit(tree(theirs), [cb], 'theirs');
+  const id = seq++;
+  must(bare, ['update-ref', `refs/heads/o${id}`, co]); must(bare, ['update-ref', `refs/heads/t${id}`, ct]);
+  const gm = sh(bare, ['-c', `attr.tree=${EMPTY_TREE}`, 'merge-tree', '--write-tree', '--name-only', co, ct]);
+  const r = await mergeBranch(url, { ref: `refs/heads/o${id}`, from: `refs/heads/t${id}`, author }, { ...opts(), fetchImpl: fetch });
+  const trees = wants.filter(oid => must(bare, ['cat-file', '-t', oid]) === 'tree');
+  return { r, git: { clean: gm.status === 0, tree: gm.stdout.split('\n')[0].trim() }, trees };
+}
+const wide = (n, tag) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`pkg${i}/f`, `${tag} ${i}\n`]));
+const once = (name, trees) => assert.equal(new Set(trees).size, trees.length, `${name}: a tree was fetched twice (${trees.length} fetches of ${new Set(trees).size} trees)`);
+
+test('tree reads: 40 directories both sides changed identically, ordinary edits and nothing added or removed, read the three roots and nothing else', async () => {
+  // the roots of base, ours and theirs: 3. Every pkgN is the same tree on ours and theirs, so the merge takes it unread,
+  // and no path was added or removed, so there is no rename to guard: main read these 3 trees
+  const { r, git, trees } = await wanted({ ...K, ...wide(40, 'v1'), a: 'a\n', b: 'b\n' }, { ...K, ...wide(40, 'v2'), a: 'a2\n', b: 'b\n' }, { ...K, ...wide(40, 'v2'), a: 'a\n', b: 'b2\n' });
+  assert.ok(r.ok && git.clean, 'clean on both'); assert.equal(r.value.tree, git.tree);
+  once('40 dirs', trees);
+  assert.equal(trees.length, 3);
+});
+
+test('tree reads: a both-sides delete inside a shared subtree beside an added file (C1) reads each tree once', async () => {
+  // 3 roots + base's x + the one x ours and theirs share = 5 distinct trees; the shared x is one tree, read once
+  const { r, git, trees } = await wanted({ ...K, 'x/f': C, 'x/h': 'h\n' }, { ...K, 'x/h': 'h\n', w: C }, { ...K, 'x/h': 'h\n' });
+  assert.equal(git.clean, false); assert.equal(r.ok, false); assert.equal(r.error.code, 'merge_conflict');
+  once('C1', trees);
+  assert.equal(trees.length, 5);
+});
+
+test('tree reads: 40 shared directories and a file added on each side read base and the shared copy of each, once', async () => {
+  // an added file could be a rename target, so the shared directories are entered: 3 roots + 40 x (base's, the shared one)
+  const { r, git, trees } = await wanted({ ...K, ...wide(40, 'v1') }, { ...K, ...wide(40, 'v2'), mine: 'o\n' }, { ...K, ...wide(40, 'v2'), yours: 't\n' });
+  assert.ok(r.ok && git.clean, 'clean on both'); assert.equal(r.value.tree, git.tree);
+  once('40 dirs + adds', trees);
+  assert.equal(trees.length, 83);
+});
+
+test('a directory both sides replaced with different files (git: add/add) is listed once, with the walk\'s reason', async () => {
+  const got = await both({ ...K, 'x/f': C }, { ...K, x: 'A\n' }, { ...K, x: 'B\n' });
+  assert.equal(got.git.clean, false); assert.match(got.git.info, /CONFLICT \(add\/add\)/);
+  assert.equal(got.r.ok, false);
+  assert.deepEqual(got.r.error.conflicts, ['x']);
+  assert.equal(got.r.error.reasons.x, 'tree');
+});
+
+// The generated run. RENAME_SEED / RENAME_CASES pick the run; the default is small enough for the suite. This test is
+// the only run of the generator: it is not part of the pinned fuzz run (npm run test:fuzz-pinned).
 test('property: generated rename shapes — ply ok ⇒ git clean with the same tree; git conflict ⇒ ply conflict', async () => {
   const seed = Number(process.env.RENAME_SEED ?? 7); const cases = Number(process.env.RENAME_CASES ?? 120);
   const tally = { equal: 0, 'both-conflict': 0, superset: 0 };
