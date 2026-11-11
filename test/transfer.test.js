@@ -351,7 +351,7 @@ test('ls-refs that lags a push: settled by reading again, not by sending again; 
   let lagNext = 4;
   const lag = lagging(t, () => lagNext);
   const paused = must(await runTransfer(lag.t, from, plan, src.commit, { settle: { reads: 2, delayMs: 0 } }));
-  assert.deepEqual(paused, { tag: 'paused', step: 0, pushes: 1, reason: 'settling' });
+  assert.deepEqual(paused, { tag: 'paused', step: 0, pushes: 1, reason: 'settling', lastPush: 'acknowledged', lastStep: 'not_shown' });
   assert.equal(git(bare, ['rev-parse', plan.tempRef]).trim(), plan.steps[0].temp, 'the push landed');
   // the next run's first read still lags: it sends step 0 again, the server refuses it (stale), the refs settled show
   // step 0 landed, and the run goes on to the end
