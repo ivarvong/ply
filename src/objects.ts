@@ -1,11 +1,11 @@
 // Git object encoding/decoding. All pure. Every function that can refuse returns a Result.
 import { fail } from './errors.js';
 import type { Err, Ok, Option, Result } from './result.js';
-import { ok, err, map, none, some, assertNever } from './result.js';
+import { ok, err, none, some, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toOid, fromHex } from './sha1.js';
 import { parseOid, type Oid } from './oid.js';
-import { te, concat, shortRead, decodeBytes, encodeBytes } from './bytes.js';
+import { te, shortRead, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, parseLimits } from './limits.js';
@@ -362,25 +362,71 @@ export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], 
   return refused.ok ? ok(sorted) : refused;
 }
 
-// git fsck `duplicateEntries`: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort
-// next to each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and
-// `readme`) are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
-// Each entry's line is encoded (in the caller's order) before the sort: a name that is no byte sequence is refused there,
-// and the sort's own encoding of the same name cannot fail.
-// encodeTree of parsed entries: ply's own trees (merge, memtree, buildTree) start here.
+// The one tree encoder: every tree ply writes (encodeTree, pushTree, commitChanges, merge, memtree, buildTree) is built
+// here, and none of them can write a tree `git fsck --strict` refuses. Each entry is held to fsck.c fsck_tree's rules,
+// the ones parseTree reads by, before a byte is written: an empty name (git: `empty filename in tree entry`, badTree),
+// a NUL (it would end the name field early: the rest of the name would be read as an object id and further entries)
+// or a `/` in a name (fullPathname), `.` (hasDot), `..` (hasDotdot), any spelling of `.git` git checks (hasDotgit: case
+// folded, NTFS short and stream forms, HFS ignorable code points, after a backslash), a name over TREE_MAX_NAME_BYTES
+// (largePathname), the null id (nullSha1), `.gitmodules` as a symlink (gitmodulesSymlink) or as a tree or gitlink
+// (gitmodulesBlob, gitmodulesMissing), and `.gitattributes` as a tree or gitlink (gitattributesBlob).
+// duplicateEntries: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort next to
+// each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and `readme`)
+// are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
+// treeNotSorted cannot happen: the entries are sorted here, in fsck verify_ordered's order (cmpTreeKeys), on name bytes
+// encoded once per entry. The mode is one of the five git writes (Mode: treeEntryOf refuses the rest), so
+// zeroPaddedFilemode and badFilemode cannot happen either.
+const NULL_OID = '0'.repeat(OID_HEX_CHARS);
+type TreeRow = { readonly mode: Mode; readonly name: Uint8Array; readonly oid: Oid };
+// Why fsck refuses one entry (parseTree's words for it), or null: the entry and its name's bytes
+// oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, as in parseTree
+function entryRefusal(e: EntryOf, name: Uint8Array): string | null {
+  const { mode } = e;
+  if (name.length === 0) return 'empty name';
+  if (name.includes(TREE_NUL)) return 'NUL in name';
+  if (name.includes(TREE_SORT_SLASH)) return 'full pathname';
+  if (e.name === '.' || e.name === '..' || isDotGitName(name)) return 'bad name';
+  if (name.length > TREE_MAX_NAME_BYTES) return 'large pathname';
+  if (e.oid === NULL_OID) return 'null sha1';
+  const notBlob = mode === MODE_TREE || mode === MODE_COMMIT;
+  if (isDotFileName(name, 'gitmodules')) {
+    if (mode === MODE_LINK) return '.gitmodules is a symbolic link';
+    if (notBlob) return '.gitmodules is not a blob';
+  }
+  if (notBlob && isDotFileName(name, 'gitattributes')) return '.gitattributes is not a blob';
+  return null;
+}
 export function encodeEntries(entries: readonly EntryOf[]): Result<Uint8Array, BadRequest> {
   const names = new Set<string>();
+  const rows: TreeRow[] = [];
+  let size = 0;
   for (const e of entries) {
+    const { mode } = e;
+    const encoded = encodeBytes(e.name, 'tree entry name');
+    if (!encoded.ok) return encoded;
+    const name = encoded.value;
+    const why = entryRefusal(e, name);
+    if (why !== null) return fail('bad_request', `tree: entry ${JSON.stringify(e.name)}: ${why}`, { what: 'tree entry', entry: e.name });
     if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
     names.add(e.name);
+    rows.push({ mode, name, oid: e.oid });
+    size += mode.length + 1 + name.length + 1 + OID_BYTES;
   }
-  const lines: Array<EntryOf & { readonly line: Uint8Array }> = [];
-  for (const e of entries) {
-    const line = encodeBytes(`${e.mode} ${e.name}\0`, 'tree entry name');
-    if (!line.ok) return line;
-    lines.push({ mode: e.mode, name: e.name, oid: e.oid, line: line.value });
+  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own array
+  rows.sort((a, b) => cmpTreeKeys(a.name, a.mode === MODE_TREE, b.name, b.mode === MODE_TREE));
+  const out = new Uint8Array(size);
+  let p = 0;
+  for (const row of rows) {
+    // the mode is ASCII digits: one byte each
+    p += te.encodeInto(row.mode, out.subarray(p)).written;
+    out[p] = TREE_MODE_SEP;
+    out.set(row.name, p + 1);
+    p += row.name.length + 1;
+    out[p] = TREE_NUL;
+    out.set(fromHex(row.oid), p + 1);
+    p += OID_BYTES + 1;
   }
-  return map(treeSort(lines), sorted => concat(sorted.flatMap(e => [e.line, fromHex(e.oid)])));
+  return ok(out);
 }
 
 // A caller's entries, each parsed once (treeEntryOf, in the caller's order), then encoded.
