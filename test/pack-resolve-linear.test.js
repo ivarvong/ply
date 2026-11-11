@@ -279,3 +279,26 @@ test('two entries hand-built at one offset are one object: the second thin REF d
   assert.ok(twoFiled.ok);
   assert.deepEqual([...twoFiled.value.objects.keys()], [blobId(0), blobId(1), blobId(2)]);
 });
+
+test('`external` is asked once per distinct missing base id, in pack order, however many deltas wait on it', () => {
+  // By hand: 3 deltas wait on content(7), 2 on content(8), 1 on content(9): three ids, so three calls, in the order
+  // their first REF_DELTA appears in the pack, whether the lookup has the base or not.
+  const objects = [refAt(1, 7, 1), refAt(2, 8, 2), refAt(3, 7, 3), refAt(4, 9, 4), refAt(5, 7, 5), refAt(6, 8, 6)];
+  const order = [blobId(7), blobId(8), blobId(9)];
+  const have = counting(oid => (order.includes(oid) ? blobBase(order.indexOf(oid) + 7) : null));
+  const r = resolvePack({ objects }, have.external);
+  assert.ok(r.ok, JSON.stringify(r.ok ? null : r.error));
+  assert.equal(r.value.objects.size, 6);
+  assert.equal(r.value.stats.externalBases, 6);
+  assert.deepEqual(have.asked, order);
+  const none = counting(() => null);
+  const refused = resolvePack({ objects }, none.external);
+  assert.ok(!refused.ok);
+  assert.equal(refused.error.message, `pack: ref delta base ${blobId(7)} not found`);
+  assert.deepEqual(none.asked, order);
+  // one id has it, the others do not: still one call each
+  const some = counting(oid => (oid === blobId(8) ? blobBase(8) : null));
+  const partly = resolvePack({ objects }, some.external);
+  assert.ok(!partly.ok);
+  assert.deepEqual(some.asked, order);
+});
