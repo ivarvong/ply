@@ -77,7 +77,8 @@ export type { Frame } from './transport.js';
 import type { Frame, RequestBody, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
-import { WHOLE } from './pack.js';
+import { WHOLE, inputBase, typeNameOf } from './pack.js';
+import { hashObject } from './objects.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
 import { at, atOr, field, fromNullish, isMissing, mapGet, withDefaults } from './absent.js';
@@ -559,6 +560,71 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
   }
   return ok(null);
 }
+// Each object once: the one place every producer's list passes (commitChanges, pushTree, merge, rebase, editFile, a
+// caller's own). A pack that holds one object twice is refused by a strict receiver: git index-pack --strict says
+// "The same object <oid> appears twice in the pack", unpack-objects --strict "tried to add buffer twice!", and
+// receive-pack reports either as "unpacker error" (git 2.50). Two whole objects are one object when type and bytes
+// are equal, so only objects that share a type, a length and a fingerprint (below) with another are hashed, each at
+// most once, and two are one object when their ids are equal; a list with no such pair costs a fingerprint (at most
+// 256 bytes read) and a map insert per object and no SHA-1. The first of a pair is kept, in its place, and an
+// ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
+// A delta entry is kept as given: its object id is not known without applying it. Runs in send, on a list planPush
+// passed (checkBases), before the pack is measured.
+// FNV-1a (32 bits) over at most FINGERPRINT_RUNS runs of FINGERPRINT_RUN bytes, evenly spaced from the first run to
+// the last: every byte of an object no longer than that. Runs, not single bytes at a stride: data with a period (a
+// record layout, a generator's low byte) is the same at every stride and differs inside a run. Equal bytes give equal
+// fingerprints; it decides only which objects are hashed, never which are equal.
+const FINGERPRINT_RUNS = 32;
+const FINGERPRINT_RUN = 8;
+const FNV_OFFSET = 0x81_1c_9d_c5;
+const FNV_PRIME = 0x01_00_01_93;
+const fingerprint = (data: Uint8Array): number => {
+  const whole = data.length <= FINGERPRINT_RUNS * FINGERPRINT_RUN;
+  const runs = whole ? 1 : FINGERPRINT_RUNS;
+  const run = whole ? data.length : FINGERPRINT_RUN;
+  // the last run ends at the object's end
+  const spread = (data.length - run) / Math.max(1, runs - 1);
+  let h = FNV_OFFSET;
+  for (let r = 0; r < runs; r++) {
+    const start = Math.floor(r * spread);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- start + run <= data.length: the read is in range (`as`, not the `!` src/ forbids)
+    for (let i = start; i < start + run; i++) h = Math.imul(h ^ (data[i] as number), FNV_PRIME);
+  }
+  return h >>> 0;
+};
+function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
+  const buckets = new Map<string, { readonly first: number; byOid: Map<string, number> | null }>();
+  const out: PackObject[] = [];
+  const keptAt: number[] = [];
+  for (const [i, obj] of objects.entries()) {
+    const base = inputBase(obj);
+    const name = typeNameOf(obj.type);
+    if (base.tag !== 'none' || name === null || !(obj.data instanceof Uint8Array)) {
+      keptAt.push(out.length);
+      out.push(base.tag === 'ofs' && out.length !== i ? { ...obj, base: { tag: 'ofs', index: atOr(keptAt, base.index, base.index) } } : obj);
+      continue;
+    }
+    const key = `${obj.type}:${obj.data.length}:${fingerprint(obj.data)}`;
+    const bucket = mapGet(buckets, key);
+    if (bucket.tag === 'none') {
+      buckets.set(key, { first: out.length, byOid: null });
+      keptAt.push(out.length);
+      out.push(obj);
+      continue;
+    }
+    const held = bucket.value;
+    const firstObj = at(out, held.first);
+    const byOid = held.byOid === null ? new Map<string, number>(firstObj.tag === 'some' ? [[hashObject(name, firstObj.value.data), held.first]] : []) : held.byOid;
+    held.byOid = byOid;
+    const oid = hashObject(name, obj.data);
+    const seen = mapGet(byOid, oid);
+    if (seen.tag === 'some') { keptAt.push(seen.value); continue; }
+    byOid.set(oid, out.length);
+    keptAt.push(out.length);
+    out.push(obj);
+  }
+  return out.length === objects.length ? objects : out;
+}
 // limits: the transport's (checked), or a caller's record (any subset, a key left out is the default; null is the defaults).
 export function planPush(o: PushOptions, limits: LimitsInput | null): Result<PushPlan, PlyError> {
   const checkedLimits = parseLimits(limits);
@@ -831,7 +897,9 @@ async function decide(base: FinishPush, r: Read, cut: PlyError | null): Promise<
 
 // The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
 async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
-  const packed = plan.needPack ? await measurePack(plan.objects) : null;
+  // each object once (oncePerObject), here and not in planPush: under the span, where an entry that cannot be read is
+  // the push's 'protocol' error as it is when the pack writer reads it
+  const packed = plan.needPack ? await measurePack(oncePerObject(plan.objects)) : null;
   const entries: readonly PackEntry[] = packed === null ? [] : packed.entries;
   const packBytes = packed === null ? 0 : packed.bytes;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });

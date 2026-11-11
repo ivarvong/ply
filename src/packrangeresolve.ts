@@ -27,7 +27,7 @@ import { fail, plyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
 import { withDefaults, fromNullish, mapGet } from './absent.js';
-import type { LimitsInput } from './limits.js';
+import type { CheckedLimits, LimitsInput } from './limits.js';
 import { DEFAULT_LIMITS, LIMIT_WORK_RATIO, limitExceeded, parseLimits } from './limits.js';
 import type { Oid } from './sha1.js';
 import { fromHex, toOid } from './sha1.js';
@@ -515,15 +515,25 @@ function finish(s: State): ResolvedIndex {
   return resolvedIndexOf({ oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size }, { ...s.stats, work: s.work, workMax: s.workMax });
 }
 
-// Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
-export async function resolvePackRange(pack: ScannedPack, source: RangeSource, input: Partial<ResolveRangeOpts> = {}): Promise<Result<ResolvedIndex, PlyError>> {
+// The options a resolve runs under: each key read from the caller's record as input[key] (withDefaults), so an inherited
+// property or an accessor counts as an own one does, and the limits parsed. loadTransferPack (transferload.ts) holds a
+// saved index to this record's limits.maxDeltaChain and hands the record on to resolvePackRange, which reads it again.
+type CheckedOpts = Omit<ResolveRangeOpts, 'limits'> & { readonly limits: CheckedLimits };
+export function resolveOptsOf(input: Partial<ResolveRangeOpts>): Result<CheckedOpts, PlyError> {
   const opts = withDefaults(input, defaultOpts());
   const limits = parseLimits(opts.limits);
-  if (!limits.ok) return limits;
+  return limits.ok ? ok({ ...opts, limits: limits.value }) : limits;
+}
+
+// Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
+export async function resolvePackRange(pack: ScannedPack, source: RangeSource, input: Partial<ResolveRangeOpts> = {}): Promise<Result<ResolvedIndex, PlyError>> {
+  const parsed = resolveOptsOf(input);
+  if (!parsed.ok) return parsed;
+  const opts = parsed.value;
   if (source.size !== pack.bytes) return fail('bad_request', `range source is ${source.size} bytes, the index read ${pack.bytes}`);
   if (!Number.isFinite(opts.cacheBytes) || opts.cacheBytes < 0) return fail('bad_request', `cacheBytes must be a non-negative number, got ${opts.cacheBytes}`);
   const budget = opts.budget;
-  const l = limits.value;
+  const l = opts.limits;
   const workMax = budget.tag === 'work' ? Math.max(l.maxInflatedTotal, budget.ratio * pack.bytes) : l.maxInflatedTotal;
   const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, workMax });
   const roots = await fromRoots(s);

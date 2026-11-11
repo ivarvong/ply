@@ -5,7 +5,7 @@ import { fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, assertNever, getOrElse, mapOption } from './result.js';
 import { decideObjectFormat } from './closed.js';
-import type { Option, Result } from './result.js';
+import type { Err, Option, Result } from './result.js';
 import { td } from './bytes.js';
 import { pktInit, pktStep, pktFinish } from './pktline.js';
 import { coded, clientSpan, advertise, spanned } from './transport.js';
@@ -179,15 +179,25 @@ export async function pushWithOptions(t: CapsTransport, options: CheckedPushOpti
 // pushWithOptions for a pack the caller already has (push.ts PackPushOptions). A request that cannot be sent is refused
 // first: the advertisement GET and the pack are only touched for one that can.
 export type CheckedPackPushOptions = Omit<PackPushOptions, 'checked'> & PushWants;
-export async function pushPack(t: CapsTransport, options: CheckedPackPushOptions): Promise<Result<PushResult, PlyError>> {
+// pushPack's result beside the one fact that result cannot carry: whether a push request was made. `requested: false`
+// is a refusal here or a failed advertisement read, with nothing sent to receive-pack (the push cannot have landed);
+// `requested: true` is the push request and whatever it came to. transfer.ts reads this, never the error's code.
+export type PackPushOutcome =
+  | { readonly requested: false; readonly result: Err<PlyError> }
+  | { readonly requested: true; readonly result: Result<PushResult, PlyError> };
+export async function pushPackOutcome(t: CapsTransport, options: CheckedPackPushOptions): Promise<PackPushOutcome> {
   const { atomic: _atomic, pushOptions: _pushOptions, ...opts } = options;
   const { atomic, pushOptions } = withDefaults(options, noWants());
   const planned = planPackPush(opts, t.limits);
-  if (!planned.ok) return planned;
-  if (!atomic && pushOptions.length === 0) return pushPackChecked(t, opts);
+  if (!planned.ok) return { requested: false, result: planned };
+  if (!atomic && pushOptions.length === 0) return { requested: true, result: await pushPackChecked(t, opts) };
   const caps = await receiveCaps(t);
-  if (!caps.ok) return caps;
+  if (!caps.ok) return { requested: false, result: caps };
   const checked = checkPushCaps(caps.value, { atomic, pushOptions });
-  if (!checked.ok) return checked;
-  return pushPackChecked(t, { ...opts, checked: checked.value });
+  if (!checked.ok) return { requested: false, result: checked };
+  return { requested: true, result: await pushPackChecked(t, { ...opts, checked: checked.value }) };
+}
+export async function pushPack(t: CapsTransport, options: CheckedPackPushOptions): Promise<Result<PushResult, PlyError>> {
+  const sent = await pushPackOutcome(t, options);
+  return sent.result;
 }

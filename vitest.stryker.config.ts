@@ -43,6 +43,8 @@ const MUTATION_FILES = [
   'test/lsrefs-step.test.js',
   'test/path-trees-unit.test.js',
   'test/pullstream.test.js',
+  'test/inflate-codesets.test.js',
+  'test/inflate-pos.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {
