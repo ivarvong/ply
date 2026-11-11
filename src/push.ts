@@ -254,7 +254,7 @@ const unpackReasonMatches = (status: string, reason: string): boolean => {
 };
 const echoedFailure = (status: string, refs: readonly RefStatus[]): boolean => status !== 'ok' && refs.every(r => !r.ok && unpackReasonMatches(status, r.reason));
 // Artifacts' body cap, echoed on unpack and ng (observed 2026-11-10, #266, ray a58a707c0a76c98d-IAD).
-const TOO_LARGE = /^artifacts_git_receive_pack_request_too_large: push is ([0-9]+(?:\.[0-9]+)?) MiB, limit is ([0-9]+(?:\.[0-9]+)?) MiB$/u;
+const TOO_LARGE = /^artifacts_git_receive_pack_request_too_large: push is ([0-9]+[.]?[0-9]*) MiB, limit is ([0-9]+[.]?[0-9]*) MiB$/u;
 /* oxlint-disable no-magic-numbers -- 2^10 and 2^20, converting Artifacts' MiB figures to bytes */
 const KIB = 1024;
 const MIB = KIB * KIB;
