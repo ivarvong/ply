@@ -14,6 +14,7 @@ export const PARAMS = [
   { key: 'maxDeltaResult', limit: DEFAULT_LIMITS.maxDeltaResult, probe: 'parsePack with the cap around the largest delta git stored', later: false },
   { key: 'maxDeltaChain', limit: DEFAULT_LIMITS.maxDeltaChain, probe: 'resolvePack of a pack-objects chain', later: false },
   { key: 'maxInflatedTotal', limit: DEFAULT_LIMITS.maxInflatedTotal, probe: 'parsePack with the cap set around the inflated sum', later: false },
+  { key: 'maxResolveWork', limit: DEFAULT_LIMITS.maxResolveWork, probe: 'resolvePackRange of a pack-objects chain, at the default ceiling and at a ceiling of 0', later: false },
   { key: 'maxPackObjects', limit: DEFAULT_LIMITS.maxPackObjects, probe: 'parsePack around the verify-pack count; pushTree file count', later: false },
   { key: 'maxRefs', limit: DEFAULT_LIMITS.maxRefs, probe: 'lsRefs of N refs plus HEAD', later: false },
   { key: 'maxRebaseCommits', limit: DEFAULT_LIMITS.maxRebaseCommits, probe: 'rebaseBranch of a K-commit branch', later: false },

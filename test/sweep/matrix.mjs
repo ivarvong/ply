@@ -316,14 +316,23 @@ function build() {
   add({ id: 'inflate.under', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, expectFrom: 'inflated-under' });
   add({ id: 'inflate.zero', param: 'maxInflatedTotal', op: 'pack', pack: 'inflate', bytes: 8192, entries: 8, limits: { maxInflatedTotal: 0 }, expect: refused('limit_exceeded', { what: 'pack inflated bytes' }) });
 
+  // ---- maxResolveWork: resolvePackRange of the chain git packed (d1-ofs: 80 revisions of a 2 KiB file, every delta one
+  // deep). The two cells differ in this key alone; maxInflatedTotal is 0 in both because the bound applied is never
+  // below it. A ceiling of 0 refuses the first delta read back (a delta inflates at least one byte); the default ceiling
+  // (2 GiB) is four orders of magnitude past everything this pack declares.
+  add({ id: 'resolve.work.default', param: 'maxResolveWork', op: 'resolveRange', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, limits: { maxInflatedTotal: 0, maxResolveWork: DEFAULT_LIMITS.maxResolveWork }, expect: ok });
+  add({ id: 'resolve.work.zero', param: 'maxResolveWork', op: 'resolveRange', pack: 'd1-ofs', bytes: 80 * 2048, entries: 80, limits: { maxInflatedTotal: 0, maxResolveWork: 0 }, expect: refused('limit_exceeded', { what: 'resolve work bytes' }) });
+
   pass2(add);
   // ---- Every key, parsed where it enters (#156 parseLimits). A value that bounds nothing is refused when the client
   // is made, before any request, whichever operation would read it: lsRefs reads only maxRefs and maxLsRefsBytes, and
   // every key's cell is still refused there (the lazy read refused only the key the operation reached). A key left out
   // is the default: every other cell passes only the keys it sets (cell.mjs passes the record as written).
+  // One null parses: maxResolveWork: null means derived (8 x the record's maxInflatedTotal), the same as leaving it out.
   for (const key of Object.keys(DEFAULT_LIMITS)) {
     for (const [name, value] of [['negative', -1], ['null', null]]) {
-      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect: refused('bad_request', { what: key }) });
+      const expect = key === 'maxResolveWork' && value === null ? ok : refused('bad_request', { what: key });
+      add({ id: `parse.${key}.${name}`, param: key, op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: { [key]: value }, expect });
     }
   }
   add({ id: 'parse.none', param: 'maxRefs', op: 'lsRefs', repo: 'refs-1', bytes: 200, entries: 1, limits: {}, expect: ok });

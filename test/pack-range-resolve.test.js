@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { inflateSync } from 'node:zlib';
 import { scanPackIndex } from '../src/packscanindex.js';
 import { resolvePackRange, RESOLVED_ENTRY_BYTES, NO_BASE, THIN_BASE } from '../src/packrangeresolve.js';
 import { rangeFromBytes } from '../src/rangesource.js';
@@ -300,8 +301,117 @@ test('refusals at the read: work past the budget on a whole base, a member that 
   const typed = await resolved(thin, { bases: oid => (oid === zo ? { type: TYPE.OFS_DELTA, data: z } : null) });
   assert.equal(typed.error.code, 'pack_corrupt');
   assert.match(typed.error.message, /ref delta base [0-9a-f]{40} has type 6/);
+  // Two chains rest on z. The last result something rests on is pinned and never made again; the other is, with no
+  // cache, rebuilt from z, which is asked for a second time. (Before the pin, one chain was enough to ask twice.)
+  const a2 = concat([z, te.encode('gamma\n')]);
+  const b2 = concat([a2, te.encode('delta\n')]);
+  const forked = await packOf([{ data: editDelta(a, b, 10), baseOid: ao }, { data: editDelta(z, a, 10), baseOid: zo }, { data: editDelta(a2, b2, 10), baseOid: hashObject('blob', a2) }, { data: editDelta(z, a2, 10), baseOid: zo }]);
   let answered = 0;
-  const gone = await resolved(thin, { cacheBytes: 0, bases: oid => (oid === zo && answered++ === 0 ? { type: TYPE.BLOB, data: z } : null) });
+  const gone = await resolved(forked, { cacheBytes: 0, bases: oid => (oid === zo && answered++ === 0 ? { type: TYPE.BLOB, data: z } : null) });
   assert.equal(gone.error.code, 'pack_corrupt');
   assert.match(gone.error.message, /not found when asked again/);
+});
+
+// --- the work bound (review of ec337c5): what a resolve costs, counted by the test's own RangeSource ---
+const TYPE_OF = { [TYPE.COMMIT]: 'commit', [TYPE.TREE]: 'tree', [TYPE.BLOB]: 'blob', [TYPE.TAG]: 'tag' };
+// A source that counts the range reads made for each entry (by the offset its zlib member starts at).
+function countingSource(pack, idx) {
+  const memberAt = new Map();
+  for (let i = 0; i < idx.columns.offset.length; i++) memberAt.set(idx.columns.offset[i] + idx.columns.headerBytes[i], i);
+  const reads = new Map();
+  const inner = rangeFromBytes(pack);
+  return { reads, source: { size: inner.size, read: (offset, length) => { const i = memberAt.get(offset); reads.set(i, (reads.get(i) ?? 0) + 1); return inner.read(offset, length); } } };
+}
+
+test('one large file edited 80 times (real git history) resolves on default options: every oid, type and size is git\'s, and the work is within 2x the sum of object sizes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ply-range-history-'));
+  try {
+    const git = (args, input) => gitIn(dir, ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'core.compression=1', ...args], input);
+    git(['init', '-q', '.']);
+    // a lockfile-like text file of about 4.3 MB; each commit changes one line
+    const lines = Array.from({ length: 36000 }, (_, i) => `    "pkg-${i}": { "version": "1.0.${i}", "integrity": "sha512-${((i * 2654435761) >>> 0).toString(16).padStart(8, '0').repeat(8)}" },`);
+    for (let c = 0; c < 80; c++) {
+      lines[(c * 449) % lines.length] = `    "edited-${c}": { "version": "2.0.${c}" },`;
+      writeFileSync(join(dir, 'package-lock.json'), lines.join('\n'));
+      git(['add', 'package-lock.json']);
+      git(['commit', '-q', '-m', `edit ${c}`]);
+    }
+    const pack = new Uint8Array(git(['pack-objects', '--all', '--stdout', '-q', '--delta-base-offset'], ''));
+    // git's own list of the repository's objects: oid, type, size
+    const want = git(['cat-file', '--batch-all-objects', '--batch-check']).toString().trim().split('\n');
+    const sizeOf = new Map(want.map(l => { const [oid, , size] = l.split(' '); return [oid, Number(size)]; }));
+    const sum = [...sizeOf.values()].reduce((a, b) => a + b, 0);
+    // the defect needs a history whose objects sum past the old flat allowance (256 MiB) in a pack 32x smaller
+    assert.ok(sum > 256 * 1024 * 1024 && pack.length * 32 < 256 * 1024 * 1024, `history ${sum} bytes in a pack of ${pack.length}`);
+    const idx = must(await scan(pack));
+    const { reads, source } = countingSource(pack, idx);
+    const res = must(await resolvePackRange(idx, source));
+    const got = Array.from({ length: res.count }, (_, i) => `${res.oid(i).value} ${TYPE_OF[res.type(i).value]} ${res.columns.size[i]}`);
+    assert.deepEqual(got.toSorted(), want.toSorted());
+    assertMatchesGit(pack, idx, res);
+    // work, counted here: each read inflates its member (size by node:zlib) and, for a delta, produces its object (size by git)
+    const byOffset = verifyPack(pack);
+    let work = 0;
+    for (const [i, times] of reads) {
+      const at = idx.columns.offset[i];
+      const member = inflateSync(pack.subarray(at + idx.columns.headerBytes[i], at + idx.columns.headerBytes[i] + idx.columns.compressed[i])).length;
+      const g = byOffset.get(at);
+      work += times * (member + (g.base === null ? 0 : sizeOf.get(g.oid)));
+    }
+    console.log(`large-file history: pack ${pack.length} B, ${res.count} objects, sum of sizes ${sum}, work ${work} (${(work / sum).toFixed(3)}x sum, ${(work / pack.length).toFixed(1)}x pack), reads ${[...reads.values()].reduce((a, b) => a + b, 0)}`);
+    assert.ok(work <= 2 * sum, `work ${work} is over twice the sum of object sizes ${sum}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}, 600_000);
+
+test('a linear chain of objects larger than the cache: every entry is read once, not once per link above it', async () => {
+  const { entries, oids } = refChain(30);
+  const pack = await packOf(entries);
+  const idx = must(await scan(pack));
+  const { reads, source } = countingSource(pack, idx);
+  // each version is over 50 bytes, so none fits a 16-byte cache
+  const res = must(await resolvePackRange(idx, source, { cacheBytes: 16 }));
+  for (const oid of oids) assert.equal(res.find(oid).tag, 'some');
+  // by hand: 31 entries (the root and 30 deltas); the root is read to start the chain and each delta once, to be
+  // applied to the result made just before it
+  assert.equal([...reads.values()].reduce((a, b) => a + b, 0), 31);
+  assert.deepEqual([...new Set(reads.values())], [1]);
+});
+
+test('budget fields are checked where they enter: a ratio or work ceiling that is NaN, Infinity or negative is bad_request', async () => {
+  const pack = await packOf(refChain(3).entries);
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+    const ratio = await resolved(pack, { budget: { tag: 'work', ratio: bad, capObjects: false } });
+    assert.equal(ratio.ok, false, `ratio ${bad} was accepted`);
+    assert.equal(ratio.error.code, 'bad_request');
+    const ceiling = await resolved(pack, { limits: { maxResolveWork: bad } });
+    assert.equal(ceiling.ok, false, `maxResolveWork ${bad} was accepted`);
+    assert.equal(ceiling.error.code, 'bad_request');
+  }
+  // the ceiling is hard: a chain that needs more work than it allows is refused. The ceiling is never below the
+  // record's maxInflatedTotal, so both are lowered: max(10, 10) = 10
+  const low = await resolved(pack, { limits: { maxResolveWork: 10, maxInflatedTotal: 10 } });
+  assert.equal(low.error.code, 'limit_exceeded');
+  assert.equal(low.error.what, 'resolve work bytes');
+});
+
+test('a range source that throws, rejects or errors its stream mid-read is a coded error, not a rejection', async () => {
+  const pack = await packOf(refChain(3).entries);
+  const idx = must(await scan(pack));
+  const inner = rangeFromBytes(pack);
+  const sources = {
+    rejects: { size: inner.size, read: () => Promise.reject(new Error('connection reset')) },
+    throws: { size: inner.size, read: () => { throw new Error('connection reset'); } },
+    'errors its stream': { size: inner.size, read: async () => ok(new ReadableStream({ pull(c) { c.error(new Error('connection reset')); } })) },
+  };
+  for (const [name, source] of Object.entries(sources)) {
+    const r = await resolvePackRange(idx, source);
+    assert.equal(r.ok, false, name);
+    assert.equal(r.error.code, 'network', name);
+    assert.match(r.error.message, /connection reset/, name);
+  }
+  // a thin-base lookup that throws is the same kind of failure
+  const thin = await packOf([{ data: editDelta(te.encode('x'.repeat(50)), te.encode('y'.repeat(50))), baseOid: 'aa'.repeat(20) }]);
+  const t = await resolved(thin, { bases: () => { throw new Error('store down'); } });
+  assert.equal(t.ok, false);
+  assert.equal(t.error.code, 'network');
 });
