@@ -12,7 +12,7 @@ import { test, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { editFile, commitChanges, readCommit, createTransport, Tracer } from '../src/index.js';
+import { editFile, commitChanges, readCommit, checkoutTree, createTransport, Tracer } from '../src/index.js';
 import { filesFromDir, pushDir } from '../src/tree-node.js';
 import { operation } from '../src/operation.js';
 import { tmpRoot, makeBareRepo, git, commitFiles, startGitServer } from './server.js';
@@ -76,6 +76,20 @@ rows.forEach(([label, run, code, what, cls], n) => {
     if (cls === 'landed') assert.notEqual(head(), before, 'this row delivers the push before throwing: git says the ref moved, so only ambiguous is honest');
     else assert.equal(head(), before, 'git says the ref did not move');
   });
+});
+
+// operation() hands the body a view of the caller's transport (it records the push hand-over), and ply hands each
+// sub-exchange a further view (withParent(t, span)). A caller's frames() runs as a method of the view it was called on,
+// so `this.parent` is that exchange's span. Expected names are the spans a checkout opens, by the README's span table
+// and as on main: the root git.checkout (the tree listing) and git.checkout.blobs (the blob fetch).
+test("a caller transport's frames() is called on the exchange's view: this.parent is that exchange's span", async () => {
+  const made = createTransport(url, { tracer: new Tracer() }); assert.equal(made.ok, true);
+  const real = made.value; const parents = new Set();
+  const transport = { ...real, frames(service, body, span, hints) { parents.add(this.parent.name); return real.frames(service, body, span, hints); } };
+  const r = await checkoutTree(url, { ref: 'main' }, { transport });
+  assert.equal(r.ok, true);
+  for await (const f of r.value.files) void f;
+  assert.deepEqual([...parents].sort(), ['git.checkout', 'git.checkout.blobs']);
 });
 
 // The file system's own failures are not throws either (README: never a throw). The expected `cause.code` is node:fs's
