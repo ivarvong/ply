@@ -124,12 +124,13 @@ test('cherry-pick of a delete onto a branch that moved the file: git cherry-pick
 // says which of those are trees. The expected numbers are counted by hand from the shape (each tree named below); a
 // tree wanted twice is a tree fetched twice.
 async function wanted(base, ours, theirs) {
-  const wants = [];
+  const wants = []; const flights = [];
   const fetch = async (input, init) => {
     const body = init?.body;
     const text = typeof body === 'string' ? body : body instanceof Uint8Array ? Buffer.from(body).toString('latin1') : body instanceof ArrayBuffer || ArrayBuffer.isView(body) ? Buffer.from(body.buffer ?? body).toString('latin1') : '';
-    for (const m of text.matchAll(/want ([0-9a-f]{40})/g)) wants.push(m[1]);
-    return globalThis.fetch(input, init);
+    const mine = [...text.matchAll(/want ([0-9a-f]{40})/g)].map(m => m[1]);
+    wants.push(...mine); flights.push([mine, 1]);
+    try { return await globalThis.fetch(input, init); } finally { flights.push([mine, -1]); }
   };
   const cb = commit(tree(base), [], 'base'); const co = commit(tree(ours), [cb], 'ours'); const ct = commit(tree(theirs), [cb], 'theirs');
   const id = seq++;
@@ -137,9 +138,12 @@ async function wanted(base, ours, theirs) {
   const gm = sh(bare, ['-c', `attr.tree=${EMPTY_TREE}`, 'merge-tree', '--write-tree', '--name-only', co, ct]);
   const r = await mergeBranch(url, { ref: `refs/heads/o${id}`, from: `refs/heads/t${id}`, author }, { ...opts(), fetchImpl: fetch });
   const trees = wants.filter(oid => must(bare, ['cat-file', '-t', oid]) === 'tree');
-  return { r, git: { clean: gm.status === 0, tree: gm.stdout.split('\n')[0].trim() }, trees };
+  // the most tree requests ever open at once: a request is open from the call until its response headers arrive
+  const isTree = new Set(trees); let open = 0; let peak = 0;
+  for (const [oids, d] of flights) if (oids.some(oid => isTree.has(oid))) { open += d; peak = Math.max(peak, open); }
+  return { r, git: { clean: gm.status === 0, tree: gm.stdout.split('\n')[0].trim(), info: gm.stdout }, trees, peak };
 }
-const wide = (n, tag) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`pkg${i}/f`, `${tag} ${i}\n`]));
+const wide = (n, tag, pre = 'pkg') => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${pre}${i}/f`, `${tag} ${i}\n`]));
 const once = (name, trees) => assert.equal(new Set(trees).size, trees.length, `${name}: a tree was fetched twice (${trees.length} fetches of ${new Set(trees).size} trees)`);
 
 test('tree reads: 40 directories both sides changed identically, ordinary edits and nothing added or removed, read the three roots and nothing else', async () => {
@@ -165,6 +169,56 @@ test('tree reads: 40 shared directories and a file added on each side read base 
   assert.ok(r.ok && git.clean, 'clean on both'); assert.equal(r.value.tree, git.tree);
   once('40 dirs + adds', trees);
   assert.equal(trees.length, 83);
+});
+
+// The gate's cost when directories changed identically on both sides (shared) sit beside directories one side alone
+// changed (owner decision 4). G1 needs both a path lost on both sides inside a shared subtree and a path one side alone
+// added or removed, so one "no" settles it; the gate asks the question with fewer directories to read first: the shared
+// subtrees when they are fewer than the one-side-changed directories, the one-side-changed directories otherwise.
+// Every count below is derived by hand from that rule and the shape; main read 3 (the roots) in each of the first three.
+test('tree reads (COST-A): 40 shared directories beside 40 only ours edited read the roots and the 40 one-sided pairs, several at a time', async () => {
+  // 40 shared is not fewer than 40 one-sided, so the one-sided question is asked: 3 roots + base's and ours' copy of
+  // each own<i> (40 x 2) = 83. No add or removal there, so the shared pkg<i> are never read.
+  const { r, git, trees, peak } = await wanted({ ...K, ...wide(40, 'v1'), ...wide(40, 'o1', 'own') }, { ...K, ...wide(40, 'v2'), ...wide(40, 'o2', 'own') }, { ...K, ...wide(40, 'v2'), ...wide(40, 'o1', 'own') });
+  assert.ok(r.ok && git.clean, 'clean on both'); assert.equal(r.value.tree, git.tree);
+  once('COST-A', trees);
+  assert.equal(trees.length, 83);
+  // sibling directories are read 8 at a time, two trees each (base's and ours'): never more than 16 tree requests
+  // open, and more than the 3 a one-after-another descent has (the three roots; then 2 per directory)
+  assert.ok(peak > 3 && peak <= 16, `tree requests open at once: ${peak}`);
+});
+
+test('tree reads (COST-B): 1 shared directory beside 80 one side edited reads the roots and the shared pair', async () => {
+  // 1 shared is fewer than 80 one-sided, so the shared subtree is entered: 3 roots + base's sh + the one sh ours and
+  // theirs share = 5. Nothing was lost on both sides in it, so no one-sided directory is read.
+  const { r, git, trees } = await wanted({ ...K, 'sh/f': 'v1\n', ...wide(40, 'o1', 'own'), ...wide(40, 't1', 'thr') }, { ...K, 'sh/f': 'v2\n', ...wide(40, 'o2', 'own'), ...wide(40, 't1', 'thr') }, { ...K, 'sh/f': 'v2\n', ...wide(40, 'o1', 'own'), ...wide(40, 't2', 'thr') });
+  assert.ok(r.ok && git.clean, 'clean on both'); assert.equal(r.value.tree, git.tree);
+  once('COST-B', trees);
+  assert.equal(trees.length, 5);
+});
+
+test('tree reads (COST-C): no shared directory, 80 one side edited: the three roots, as main', async () => {
+  // no directory changed identically on both sides: the gate is not reached; each own<i> / thr<i> is taken from the
+  // side that changed it, unread
+  const { r, git, trees } = await wanted({ ...K, ...wide(40, 'o1', 'own'), ...wide(40, 't1', 'thr') }, { ...K, ...wide(40, 'o2', 'own'), ...wide(40, 't1', 'thr') }, { ...K, ...wide(40, 'o1', 'own'), ...wide(40, 't2', 'thr') });
+  assert.ok(r.ok && git.clean, 'clean on both'); assert.equal(r.value.tree, git.tree);
+  once('COST-C', trees);
+  assert.equal(trees.length, 3);
+});
+
+test('tree reads: C2 reads 5 trees and C3 reads 7, each once', async () => {
+  // C2: 1 shared (x), no one-sided directory, so the one-sided question is asked and the roots answer it (w1 is new on
+  // ours): nothing read. The shared x is then entered: 3 roots + base's x + the shared x = 5
+  const c2 = await wanted({ ...K, 'x/f': C, 'x/h': 'h\n' }, { ...K, 'x/h': 'h\n', w1: C }, { ...K, 'x/h': 'h\n', w2: C });
+  assert.match(c2.git.info, /CONFLICT \(rename\/rename\)/); assert.equal(c2.r.ok, false); assert.equal(c2.r.error.code, 'merge_conflict');
+  once('C2', c2.trees);
+  assert.equal(c2.trees.length, 5);
+  // C3: 1 shared (src) is not fewer than 1 one-sided (lib), so lib is read first (base's and ours': lib/util.js is new),
+  // then the shared src (base's and the shared one): 3 roots + 2 + 2 = 7
+  const c3 = await wanted({ ...K, 'src/util.js': C, 'src/main.js': 'main\n', 'lib/a.js': 'a\n' }, { ...K, 'src/main.js': 'main\n', 'lib/a.js': 'a\n', 'lib/util.js': C }, { ...K, 'src/main.js': 'main\n', 'lib/a.js': 'a\n' });
+  assert.match(c3.git.info, /CONFLICT \(rename\/delete\)/); assert.equal(c3.r.ok, false); assert.equal(c3.r.error.code, 'merge_conflict');
+  once('C3', c3.trees);
+  assert.equal(c3.trees.length, 7);
 });
 
 test('a directory both sides replaced with different files (git: add/add) is listed once, with the walk\'s reason', async () => {
