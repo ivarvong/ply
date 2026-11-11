@@ -293,6 +293,8 @@ function refuseNonCommit(expectType: number | null, type: number, oid: string): 
   return assertNever(found);
 }
 
+// characters of a refused acknowledgment line quoted in the error (JSON-quoted: control characters are escaped)
+const ACK_LINE_SHOWN = 60;
 // limits: a checked record (parseLimits; DEFAULT_LIMITS when none is given): v2Step reads its caps on every frame.
 export const v2Init = (limits: CheckedLimits = DEFAULT_LIMITS): V2State => Object.freeze({ limits,
   phase: 'sections', section: null, sections: [], shallow: [], unshallow: [], acks: [], ready: false,
@@ -346,6 +348,8 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
       if (st.section === 'acknowledgments') {
         if (st.acks.length >= maxLines) return err(limitExceeded('acknowledgment lines', st.acks.length + 1, maxLines));
         if (line === 'ready') return stepped({ ...st, ready: true });
+        // git reads NAK, ACK <oid> and ready, and dies on anything else ("unexpected acknowledgment line")
+        if (line !== 'NAK' && !line.startsWith('ACK ')) return proto(`v2: unexpected acknowledgment line ${JSON.stringify(line.slice(0, ACK_LINE_SHOWN))}`);
         return stepped({ ...st, acks: [...st.acks, line] });
       }
       if (st.otherLines >= maxLines) return err(limitExceeded('section lines', st.otherLines + 1, maxLines));
@@ -355,12 +359,18 @@ export function v2Step(st: V2State, frame: Frame): Result<V2Step, PlyError> {
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
   return assertNever(st.phase);
 }
-// The response is over: it ended with its flush, and it had a packfile section or (negotiation) acknowledgments.
+// The response is over: it ended with its flush, and it is the answer the request asked for. `done` is whether the
+// request carried `done`: then the only answer is a pack (git: "expected 'packfile', received 'acknowledgments'"), and
+// every caller says which request it sent, so an acknowledgments-only answer to a `done` fetch is never ok. Without
+// `done` a round may end on its acknowledgments, unless the server said `ready`: the packfile follows that in the same
+// response (git: "expected packfile to be sent after 'ready'").
 // A response with no section at all, not even its flush, carries reason 'empty_response': the answer git's upload-pack
 // gives when it dies on an argument (fetch.ts filterUnadvertised reads it).
-export function v2End(st: V2State): Result<V2State, ErrorOf<'protocol'>> {
+export function v2End(st: V2State, done: boolean): Result<V2State, ErrorOf<'protocol'>> {
   if (!st.done) return fail('protocol', 'v2: response ended without flush', st.sections.length === 0 ? { reason: 'empty_response' } : {});
-  if (st.phase !== 'pack' && !st.sections.includes('acknowledgments')) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
+  if (st.phase === 'pack') return ok(st);
+  if (done || !st.sections.includes('acknowledgments')) return proto(`v2: no packfile section (sections: ${st.sections.join(',') || 'none'})`);
+  if (st.ready) return proto('v2: the server said ready and sent no packfile section');
   return ok(st);
 }
 export const v2Attrs = (st: V2State): Attrs => ({
@@ -401,7 +411,7 @@ async function* v2Frames(t: Transport, opts: FetchOpts, span: Span): AsyncGenera
 export async function* packStream(t: Transport, opts: FetchOpts, span: Span): PackFetch {
   span.set(fetchAttrs(opts));
   const read = yield* v2Frames(t, opts, span);
-  const end = read.ok ? v2End(read.value) : read;
+  const end = read.ok ? v2End(read.value, opts.done !== false) : read;
   if (!end.ok) throw end.error;
   span.set(v2Attrs(end.value));
   return end.value;

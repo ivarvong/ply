@@ -106,7 +106,8 @@ export function verifyFetchAnswer(request: FetchRequest, answer: Uint8Array, giv
     st = r.value.state;
     if (r.value.pack) parts.push(r.value.pack);
   }
-  const end = v2End(st);
+  // a stored answer is a pack: the check a `done` request's answer gets
+  const end = v2End(st, true);
   if (!end.ok) return end;
   if (st.phase !== 'pack') return fail('protocol', 'answer: no packfile section');
   const opts = packParseOpts(limits);

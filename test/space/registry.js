@@ -130,6 +130,7 @@ export const SPACES = [
 
   // ---- curated, merged ----
   curated('hostile-server', ['test/adversarial.test.js'], 'safety invariants I1, I2, I4, I6 checked against git after every fault'),
+  curated('lying-server', ['test/fetch-lying-server.test.js'], 'real git fetch against the same proxy that replaces one upload-pack answer (git must fail, so must ply), and fetch-pack.c process_ack / do_fetch_pack_v2 for the acknowledgment lines and sections git dies on'),
   curated('commit-shapes', ['test/compliance.test.js', 'test/git-differential.test.js'], 'git cat-file / log on every commit shape git writes; fsck --strict on header variants'),
   curated('edges', ['test/edges.test.js', 'test/oracle.test.js', 'test/concurrency.test.js'], 'git state after each edit (ref, blob, fsck), concurrency convergence'),
   curated('host-reports', ['test/push-unpack-host.test.js'], 'receive-pack reports Cloudflare Artifacts writes (observed with cf-ray, #246, #266): each typed exactly, unpack refusals push_rejected, the 64 MiB body cap limit_exceeded with got/max in bytes, an empty 200 ambiguous and settled by read-back'),
@@ -482,6 +483,8 @@ export const DECISIONS = [
   { match: "src/fetch.ts#v2Step:limit_exceeded:section lines", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/fetch.ts#v2End:protocol:v2: response ended without flush", space: 'fetch-protocol', axisTag: 'deepen' },
   { match: "src/fetch.ts#v2End:protocol:v2: no packfile section (sections: …)", space: 'hostile-server', axisTag: 'case' },
+  { match: "src/fetch.ts#v2End:protocol:v2: the server said ready and sent no packfile section", space: 'lying-server', axisTag: 'case' },
+  { match: "src/fetch.ts#v2Step:protocol:v2: unexpected acknowledgment line …", space: 'lying-server', axisTag: 'case' },
   { match: "src/fetch.ts#parseSideband:export", space: 'unit', axisTag: 'case' },
   { match: "src/push.ts#parseReceivePackTooLarge:export", space: 'unit', axisTag: 'case' },
   { match: "src/fetch.ts#spHeader:pack_corrupt:pack: bad signature", space: 'pack-cut', axisTag: 'corrupt' },
