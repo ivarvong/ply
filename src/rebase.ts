@@ -47,6 +47,22 @@ export function carriedExtra(extra: readonly string[]): string[] {
   return out;
 }
 
+// Pure: the default message of a squash, from the replayed commits' messages oldest first: each without its trailing
+// newlines, the empty ones left out, joined by one blank line, ending in one newline. For messages git itself cleaned
+// up (`git commit`), that is the message `git rebase -i` writes for pick, squash, squash, ... byte for byte.
+// A message is written by whoever can push the branch, so the strip is a scan from the end, one step per newline
+// removed: `/\n+$/` retries a run of newlines from each newline in it, which is quadratic in a run that is not last.
+export function squashMessage(messages: ReadonlyArray<string | null>): string {
+  const parts: string[] = [];
+  for (const m of messages) {
+    if (m === null) continue;
+    let end = m.length;
+    while (end > 0 && m.charCodeAt(end - 1) === 10) end--;
+    if (end > 0) parts.push(m.slice(0, end));
+  }
+  return `${parts.join('\n\n')}\n`;
+}
+
 export type ChainCommit = Commit & { readonly oid: Oid };
 // Pure: the linear chain of commits from `base` (exclusive) to `tip`, oldest first; a merge commit in it is not_linear.
 // Over node names K, as bestBases: rebaseBranch walks mergeBase's Oids, and the chain's ids are those Oids.
@@ -226,7 +242,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const last = at(chain, chain.length - 1);
     if (squash && first.tag === 'some' && last.tag === 'some') {
       const authorLine = authorPerson.tag === 'some' ? ident(authorPerson.value) : ok(first.value.author); if (!authorLine.ok) return authorLine;
-      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorLine.value, committer: who, message: message === null ? `${chain.map(c => (c.message === null ? '' : c.message).replace(/\n+$/u, '')).filter(Boolean).join('\n\n')}\n` : message, encoding: null, extra: [] }, signer, out);
+      const r = await transplant(t, cache, { base: treeOf(base), ours: targetTree, theirs: last.value.tree }, { parent: target, author: authorLine.value, committer: who, message: message === null ? squashMessage(chain.map(c => c.message)) : message, encoding: null, extra: [] }, signer, out);
       if (!r.ok) return r;
       const w = r.value;
       if (w.kind === 'conflict') return fail('merge_conflict', `squash of ${short(ref)} onto ${short(onto)} conflicts: ${w.conflicts.slice(0, 8).join(', ')}`, { conflicts: w.conflicts, reasons: w.reasons } as ConflictDetail);

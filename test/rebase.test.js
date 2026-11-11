@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { git, tmpRoot, makeBareRepo, startGitServer, commitFiles, fsckProblems } from './server.js';
-import { rebaseBranch, cherryPick, revertCommit, linearChain, carriedExtra } from '../src/rebase.js';
+import { rebaseBranch, cherryPick, revertCommit, linearChain, carriedExtra, squashMessage } from '../src/rebase.js';
 import { mergeBranch } from '../src/merge.js';
 import { editFile } from '../src/edit.js';
 import { generateSigner } from '../src/sign.js';
@@ -208,4 +208,44 @@ test('end to end: edit on a branch, main moves, rebase, fast-forward land, delet
   assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:README.md'])), 'hello WORLD'); assert.equal(ok(sh(r.bare, ['cat-file', '-p', 'main:other.txt'])), 'o2');
   assert.equal(ok(sh(r.bare, ['log', '--format=%s', '-3', 'main'])).split('\n').join('|'), 'edit|main moved|base', 'linear history');
   assert.deepEqual(fsckProblems(r.bare), []);
+});
+
+// The default squash message is built from commit messages, which whoever can push to the branch writes.
+test('squash message: exact values worked by hand; interior blank lines are the commit\'s own and stay', () => {
+  // each message loses only its trailing newlines; null and all-newline messages contribute nothing; one blank line
+  // between the rest; one final newline
+  assert.equal(squashMessage(['a\n', 'b\n\n\n', null, '\n\n', '', 'c']), 'a\n\nb\n\nc\n');
+  assert.equal(squashMessage(['subject\n\nbody 1\n\n\n\nbody 2\n']), 'subject\n\nbody 1\n\n\n\nbody 2\n');
+  assert.equal(squashMessage(['\n\nlead\n', ' \n']), '\n\nlead\n\n \n');
+  assert.equal(squashMessage([]), '\n'); assert.equal(squashMessage([null, '\n']), '\n');
+  assert.equal(squashMessage(['x\r\n']), 'x\r\n', 'only LF is stripped: CR LF keeps its CR, then one LF is added');
+});
+
+test('squash message: time is linear in the message (64x the newlines costs under 300x the time, best of 5)', () => {
+  // 'feat' + N newlines + 'tail' + N newlines: the interior run is where `\n+$` went quadratic (the engine retries the
+  // run from every newline in it), the trailing run is the work a linear strip does. A quadratic step costs 4096x.
+  const msg = n => `feat${'\n'.repeat(n)}tail${'\n'.repeat(n)}`;
+  // by hand: each of the two copies keeps 'feat' + n newlines + 'tail' (n + 8 chars), '\n\n' between, '\n' after
+  const best = (n) => { const m = msg(n); let b = Infinity; for (let i = 0; i < 5; i++) { const t0 = performance.now(); const out = squashMessage([m, m]); b = Math.min(b, performance.now() - t0); assert.equal(out.length, 2 * (n + 8) + 3); } return b; };
+  for (let i = 0; i < 50; i++) squashMessage([msg(200), msg(200)]); // warm the JIT on a size neither measurement uses
+  const ts = best(500); const tb = best(32_000);
+  assert.ok(tb < 300 * ts, `64x the input cost ${(tb / ts).toFixed(0)}x the time (${ts.toFixed(4)} ms -> ${tb.toFixed(4)} ms)`);
+});
+
+test('squash message equals the one git rebase -i (pick, squash, squash) writes, byte for byte', async () => {
+  const r = repo();
+  commitFiles(r.work, r.bare, { 'a.txt': 'a\n' }, 'base');
+  commitOn(r, 'feat', 'main', { 'b.txt': 'b\n' }, 'feat 1: subject only');
+  commitOn(r, 'feat', 'feat', { 'c.txt': 'c\n' }, 'feat 2: with a body\n\nfirst paragraph\nsecond line\n\nsecond paragraph');
+  commitOn(r, 'feat', 'feat', { 'd.txt': 'd\n' }, 'feat 3');
+  commitOn(r, 'main', 'main', { 'e.txt': 'e\n' }, 'main moved');
+  // git's answer: squash every commit after the first into it; the editor accepts the prepared message as it is
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'feat']));
+  const rb = spawnSync('git', ['-C', d, 'rebase', '-q', '-i', 'origin/main'], { encoding: 'utf8', env: { ...ENV, GIT_SEQUENCE_EDITOR: 'sed -i.bak -e "2,\\$s/^pick/squash/"', GIT_EDITOR: 'true' } });
+  assert.equal(rb.status, 0, rb.stderr); assert.equal(ok(sh(d, ['rev-list', '--count', 'origin/main..HEAD'])), '1');
+  const body = (cwd, rev) => { const raw = sh(cwd, ['cat-file', 'commit', rev]); assert.equal(raw.status, 0, raw.stderr); return raw.stdout.slice(raw.stdout.indexOf('\n\n') + 2); };
+  const gitMessage = body(d, 'HEAD'); const gitTree = treeOf(d, 'HEAD'); rmSync(d, { recursive: true, force: true });
+  assert.equal(gitMessage, 'feat 1: subject only\n\nfeat 2: with a body\n\nfirst paragraph\nsecond line\n\nsecond paragraph\n\nfeat 3\n', 'what git writes (pinned so a git that words it otherwise is noticed)');
+  const s = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash: true }, T()));
+  assert.equal(s.outcome, 'squash'); assert.equal(body(r.bare, 'feat'), gitMessage); assert.equal(treeOf(r.bare, 'feat'), gitTree);
 });
