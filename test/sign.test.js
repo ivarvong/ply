@@ -74,3 +74,32 @@ test('withCommitData keeps trees/blob objects and recomputes identity; armor wra
   const a = armor(new Uint8Array(200)); for (const l of a.split('\n').slice(1, -2)) assert.ok(l.length <= 70);
   assert.throws(() => unwrap(withGpgsig(new TextEncoder().encode('tree x\n\nm'), 'sig')), e => e.code === 'bad_request');
 });
+
+// objects/signcommit-null-message-bad-signature: a commit with no body section (encodeCommit's default, message null)
+// ends after its last header line. What is signed is that commit, so the signed object with its gpgsig header taken
+// out again must be those bytes exactly, and git's own verdict on the signature (verify-commit) is the judge.
+test('signCommit on a commit with no body section: git verify-commit accepts it and the payload is the unsigned commit', async () => {
+  const { signer } = await generateSigner();
+  writeFileSync(signers, `${author.email} namespaces="git" ${signer.publicKeyLine}\n`);
+  const tree = git(bare, ['rev-parse', 'main^{tree}']).trim();
+  const who = `${author.name} <${author.email}> 1700000000 +0000`;
+  for (const [what, more] of [['no body section', {}], ['no body section, with an encoding', { encoding: 'ISO-8859-1' }], ['no body section, with an extra header', { extra: ['x-note 1'] }]]) {
+    const unsigned = unwrap(encodeCommit({ tree, author: who, ...more }));
+    const text = new TextDecoder().decode(unsigned);
+    assert.ok(text.endsWith('\n') && !text.includes('\n\n'), `${what}: the unsigned commit has no blank line`);
+    const signed = unwrap(await signCommit(unsigned, signer));
+    // the payload git verifies: the object without the gpgsig header and its continuation lines (taken out by hand)
+    const lines = new TextDecoder().decode(signed).split('\n');
+    const at = lines.findIndex(l => l.startsWith('gpgsig '));
+    let end = at + 1;
+    while (lines[end].startsWith(' ')) end++;
+    lines.splice(at, end - at);
+    assert.equal(lines.join('\n'), text, `${what}: the signed commit without its gpgsig header is the commit that was signed`);
+    const oid = execFileSync('git', ['-C', bare, 'hash-object', '-t', 'commit', '-w', '--stdin'], { input: signed, encoding: 'utf8' }).trim();
+    const v = verifyCommit(oid);
+    assert.ok(v.ok, `${what}: git verify-commit: ${v.out}`);
+    assert.match(v.out, /GOODSIG|Good "git" signature/);
+    // still no body section, as the unsigned commit had none
+    assert.equal(unwrap(parseCommit(signed)).message, null, what);
+  }
+});

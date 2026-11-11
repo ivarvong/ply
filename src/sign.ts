@@ -58,13 +58,17 @@ export function withGpgsig(commitBytes: Uint8Array, signatureText: string): Resu
   // decodeBytes/encodeBytes: a Latin-1 message or ident goes back out as its own bytes, and so is what was signed (#43)
   const text: string = decodeBytes(commitBytes);
   const nl = text.indexOf('\n\n');
-  const headers = (nl < 0 ? text : text.slice(0, nl)).split('\n');
+  // The header lines end at the blank line or, in a commit with no body section, at its final newline. Everything
+  // from there on goes back out as it came in: the object without its gpgsig header is the object that was signed.
+  const noBodyEnd = text.endsWith('\n') ? text.length - 1 : text.length;
+  const headEnd = nl < 0 ? noBodyEnd : nl;
+  const headers = text.slice(0, headEnd).split('\n');
   let i = headers.findIndex(l => l.startsWith(`${COMMIT_HEADER_COMMITTER} `));
   if (i < 0) return fail('bad_request', 'commit has no committer line');
   if (atOr(headers, i + 1, '').startsWith(`${COMMIT_HEADER_ENCODING} `)) i++;
   // the gpgsig header: the armored signature, its continuation lines prefixed by a space
   headers.splice(i + 1, 0, `gpgsig ${signatureText.replace(/\n$/u, '').split('\n').join('\n ')}`);
-  return encodeBytes(headers.join('\n') + (nl < 0 ? '\n' : text.slice(nl)), 'commit');
+  return encodeBytes(headers.join('\n') + text.slice(headEnd), 'commit');
 }
 
 // Sign an encoded (unsigned) commit: the signed commit bytes. The message signed is the unsigned commit. The signer is
