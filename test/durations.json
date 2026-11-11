@@ -62,6 +62,7 @@
   "test/push-budget.test.js": 4,
   "test/push-commands.test.js": 0,
   "test/push-pack.test.js": 5,
+  "test/push-repo-fs.test.js": 2,
   "test/push-repo.test.js": 7,
   "test/push-stream.test.js": 11,
   "test/push-tree.test.js": 12,
