@@ -75,7 +75,7 @@ export { encodeSavedIndex, decodeSavedIndex, describeRefusal as describeSavedInd
 export type { PackIdentity, SavedIndex, SavedIndexRefusal } from './packsaved.js';
 export { loadTransferPack } from './transferload.js';
 export type { Loaded as TransferPackLoaded, LoadedPack, LoadOpts as TransferLoadOpts } from './transferload.js';
-export type { TransferNext, TransferRun, RunOpts, SettleConfig, StepCommit } from './transfer.js';
+export type { TransferNext, TransferRun, LastPush, LastStep, RunOpts, SettleConfig, StepCommit } from './transfer.js';
 export { sidebandStep } from './fetch.js';
 export type { SidebandCounters, SidebandPiece, Sidebanded, SidebandError } from './fetch.js';
 export { Sha1, toHex, fromHex, streamingSha1 } from './sha1.js';
