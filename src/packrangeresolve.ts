@@ -515,10 +515,14 @@ function finish(s: State): ResolvedIndex {
   return resolvedIndexOf({ oid: s.oid, type: s.type, base: s.base, depth: s.depth, size: s.size }, { ...s.stats, work: s.work, workMax: s.workMax });
 }
 
+// The limits a resolve with these options runs under, parsed as resolvePackRange parses them. loadTransferPack
+// (transferload.ts) holds a saved index to the same record's maxDeltaChain and hands the record back as `limits`.
+export const resolveLimitsOf = (input: Partial<ResolveRangeOpts>): ReturnType<typeof parseLimits> => parseLimits(withDefaults(input, defaultOpts()).limits);
+
 // Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
 export async function resolvePackRange(pack: ScannedPack, source: RangeSource, input: Partial<ResolveRangeOpts> = {}): Promise<Result<ResolvedIndex, PlyError>> {
   const opts = withDefaults(input, defaultOpts());
-  const limits = parseLimits(opts.limits);
+  const limits = resolveLimitsOf(opts);
   if (!limits.ok) return limits;
   if (source.size !== pack.bytes) return fail('bad_request', `range source is ${source.size} bytes, the index read ${pack.bytes}`);
   if (!Number.isFinite(opts.cacheBytes) || opts.cacheBytes < 0) return fail('bad_request', `cacheBytes must be a non-negative number, got ${opts.cacheBytes}`);

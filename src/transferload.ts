@@ -23,9 +23,8 @@ import { withDefaults } from './absent.js';
 import type { ScanIndexOpts, ScannedPack } from './packscanindex.js';
 import { scanPackIndex } from './packscanindex.js';
 import type { ResolveRangeOpts } from './packrangeresolve.js';
-import { resolvePackRange } from './packrangeresolve.js';
+import { resolvePackRange, resolveLimitsOf } from './packrangeresolve.js';
 import type { RangeSource } from './rangesource.js';
-import { limitsOf } from './limits.js';
 import type { TransferPack } from './transferplan.js';
 import type { SavedIndex, SavedIndexRefusal } from './packsaved.js';
 import { decodeSavedIndex, encodeSavedIndex, describeRefusal, packIdentity } from './packsaved.js';
@@ -74,7 +73,7 @@ export async function loadTransferPack(dst: Transport, source: RangeSource, save
   const span0 = { parent: dst.parent, kind: KIND.INTERNAL, attrs: { 'git.transfer.load.saved_in': saved.tag === 'some' ? saved.value.length : 0, 'git.transfer.spool.bytes': source.size }, scrub: dst.scrub };
   const r = await spanned(dst, 'git.transfer.load', span0, async (span: Span): Promise<Result<LoadedPack, PlyError>> => {
     // the caller's limits, parsed once: the saved index is held to the chain limit its resolve would run under
-    const limits = limitsOf(input.resolve);
+    const limits = resolveLimitsOf(input.resolve);
     if (!limits.ok) return limits;
     const cfg: LoadConfig = { scan: input.scan, resolve: { ...input.resolve, limits: limits.value } };
     const id = await packIdentity(source);
