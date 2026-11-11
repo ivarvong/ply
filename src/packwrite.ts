@@ -174,7 +174,8 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
   const release = async (why: unknown = null): Promise<void> => {
     if (!open) return;
     open = false;
-    reader.cancel(why).catch(() => null);
+    // a cancel() that throws where it stands, or answers with something that is not a promise, changes nothing either
+    try { Promise.resolve(reader.cancel(why)).catch(() => null); } catch { /* the source's own failure to cancel: nothing waits on it */ }
   };
   const refuse = async (c: ReadableStreamDefaultController<Uint8Array>, e: PlyError): Promise<void> => { failed = e; c.error(e); await release(e); };
   const mismatch = (want: number): ErrorOf<'bad_request'> => plyError('bad_request', `pushPack: the pack stream yielded ${read} bytes where length said ${want}; it was not sent whole`, { what: 'push pack length', got: read, max: want });

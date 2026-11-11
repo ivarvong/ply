@@ -308,6 +308,24 @@ test('a source that fails to cancel changes nothing', async () => {
   assert.equal(r.ok, true, r.error?.message);
 });
 
+// The reader is the caller's too: its cancel() may throw where it stands, or answer with something that is not a
+// promise. The server reported the push as landed (reportResponse), so the outcome is ok either way: expected from the
+// protocol, not from the code. Bounded by event-loop turns (settledWithin, below), so a defect fails and does not hang.
+for (const [name, answer] of [['throws where it stands', () => { throw new Error('sync cancel'); }], ['returns undefined', () => undefined]]) {
+  test(`a reader whose cancel() ${name} changes nothing`, async () => {
+    const { url } = repo();
+    let cancels = 0;
+    class Odd extends ReadableStream {
+      getReader() { return { read: () => new Promise(() => {}), cancel(why) { cancels++; return answer(why); }, releaseLock() {}, closed: new Promise(() => {}) }; }
+    }
+    const pushed = pushPack(transport(url, { fetchImpl: routed(async () => reportResponse()) }), { ...create(), pack: new Odd(), sideband: false });
+    assert.equal(await settledWithin(pushed), 'settled');
+    const r = await pushed;
+    assert.equal(r.ok, true, r.error?.message);
+    assert.equal(cancels, 1, 'asked to cancel once');
+  });
+}
+
 // The pack stream is the caller's: its read() and its cancel() may never settle. pushPack's outcome waits for neither;
 // the source is asked to cancel once and not waited for. A hang is proved by a step counter, not a clock: `turns`
 // event-loop turns pass while the promise is still pending (nothing here does I/O: the transport is in process).
