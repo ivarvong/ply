@@ -167,3 +167,62 @@ test('describePack reports a 20,000-link chain without recursing, its base in th
   assert.ok(!refused.ok);
   assert.equal(refused.error.code, 'limit_exceeded');
 });
+
+// ---- the leftover-wait chain bound, at its boundary (wire packs through parsePack) ----
+// A thin pack: one REF_DELTA on content(0), which is not in the pack, and `ofsCount` OFS deltas in a chain on it. Depth
+// is counted in deltas above the base (the REF_DELTA 1, the k-th OFS delta k + 1), as `git verify-pack -v` prints it.
+function thinChain(ofsCount) {
+  const p = new Pack();
+  let prev = p.add(REF, replaceDelta(content(0).length, content(1)), { ref: sha1('blob', content(0)) });
+  for (let i = 2; i <= ofsCount + 1; i++) prev = p.add(OFS, replaceDelta(content(i - 1).length, content(i)), { ofs: prev });
+  return p.build();
+}
+const counting = lookup => { const asked = []; return { asked, external: oid => { asked.push(oid); return lookup(oid); } }; };
+const coded = r => [r.error.code, r.error.what, r.error.got, r.error.max];
+test('a thin REF root with maxDeltaChain OFS deltas on it is a missing base; one more OFS delta is past the chain limit before the base is asked for', () => {
+  const CHAIN = 64; // DEFAULT_LIMITS.maxDeltaChain
+  const base = sha1('blob', content(0)).toString('hex');
+  // Expected values are not read off the new resolver: they are what main at ec337c5 (the recursive resolver) returns
+  // for these same wire packs, and what the limit means by hand. Root + 64 OFS: the deepest delta is 65 above the base,
+  // one past the limit, so it can only be refused once the base is there to patch on; with the base withheld the pack's
+  // defect is the missing base (pack_corrupt 'not found'; describePack: ok, one missing base, depth 65 as verify-pack
+  // would print it). Root + 65 OFS: the deepest is 66 above the base, and its own OFS base (65 above) is already past
+  // the limit whatever the root turns out to be, so it is limit_exceeded 65/64 and the lookup is never called.
+  {
+    const pack = thinChain(CHAIN);
+    const parsed = parsePack(pack);
+    assert.ok(parsed.ok);
+    const withheld = counting(() => null);
+    const r = resolvePack(parsed.value, withheld.external);
+    assert.ok(!r.ok);
+    assert.equal(r.error.code, 'pack_corrupt');
+    assert.equal(r.error.message, `pack: ref delta base ${base} not found`);
+    assert.deepEqual(withheld.asked, [base]);
+    const d = describePack(pack);
+    assert.ok(d.ok, JSON.stringify(d.ok ? null : d.error));
+    assert.deepEqual(d.value.missingBases, [base]);
+    assert.equal(d.value.objects.length, CHAIN + 1);
+    assert.equal(d.value.objects.at(-1).depth, CHAIN + 1);
+    // the base given: the 65th delta is refused by the patch
+    const given = counting(oid => (oid === base ? { type: BLOB, data: new Uint8Array(content(0)) } : null));
+    const g = resolvePack(parsed.value, given.external);
+    assert.ok(!g.ok);
+    assert.deepEqual(coded(g), ['limit_exceeded', 'delta chain depth', CHAIN + 1, CHAIN]);
+    assert.deepEqual(given.asked, [base]);
+  }
+  {
+    const pack = thinChain(CHAIN + 1);
+    const parsed = parsePack(pack);
+    assert.ok(parsed.ok);
+    for (const lookup of [() => null, oid => (oid === base ? { type: BLOB, data: new Uint8Array(content(0)) } : null)]) {
+      const c = counting(lookup);
+      const r = resolvePack(parsed.value, c.external);
+      assert.ok(!r.ok);
+      assert.deepEqual(coded(r), ['limit_exceeded', 'delta chain depth', CHAIN + 1, CHAIN]);
+      assert.deepEqual(c.asked, []);
+    }
+    const d = describePack(pack);
+    assert.ok(!d.ok);
+    assert.deepEqual(coded(d), ['limit_exceeded', 'delta chain depth', CHAIN + 1, CHAIN]);
+  }
+});
