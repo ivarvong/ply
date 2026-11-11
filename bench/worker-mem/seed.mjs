@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createCipheriv, createHash } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { NO_MAINTENANCE } from '../../test/server.js';
 import { DATA, NAMESPACE, cfJson, cfRaw, remember, writeSecret, stamp, redact, sleep } from './lib.mjs';
 
 const MIB = 1024 * 1024;
@@ -82,7 +83,7 @@ async function seed() {
   rmSync(src, { recursive: true, force: true });
   mkdirSync(src, { recursive: true });
   git(src, ['init', '-q', '-b', 'main']);
-  for (const [k, v] of [['user.name', 'ply memlab'], ['user.email', 'memlab@example.invalid'], ['gc.auto', '0'], ['core.compression', '6']]) git(src, ['config', k, v]);
+  for (const [k, v] of [['user.name', 'ply memlab'], ['user.email', 'memlab@example.invalid'], ...NO_MAINTENANCE, ['core.compression', '6']]) git(src, ['config', k, v]);
   const date = { GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000' };
   const pushes = [];
   const push = async (sha, label) => {

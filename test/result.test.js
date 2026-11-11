@@ -124,7 +124,8 @@ test('limits: checkLimit/parseLimits accept exactly the finite non-negative numb
     assert.throws(() => unwrap(checkLimit(v, 'k')), x => x instanceof Error && x.code === 'bad_request' && x.what === 'k' && Object.is(x.got, v));
   }
   // parseLimits (#156): a key given is checked as checkLimit checks it; a key left out (or the missing value) is the
-  // default; null is a value, refused; keys it does not read are ignored; the record is total, frozen and checked.
+  // default; null is a value, refused (but maxResolveWork: null is left out: derived); keys it does not read are
+  // ignored; the record is total, frozen and checked.
   assert.equal(unwrap(parseLimits(DEFAULT_LIMITS)), DEFAULT_LIMITS, 'a checked record is returned as it is');
   assert.deepEqual({ ...unwrap(parseLimits({})) }, { ...DEFAULT_LIMITS });
   assert.deepEqual({ ...unwrap(parseLimits(null)) }, { ...DEFAULT_LIMITS });
@@ -133,9 +134,16 @@ test('limits: checkLimit/parseLimits accept exactly the finite non-negative numb
   assert.equal(Object.isFrozen(unwrap(parseLimits({ maxRefs: 3 }))), true);
   assert.deepEqual(shape(parseLimits({ maxRefs: null })), bad('maxRefs', null));
   for (const key of Object.keys(DEFAULT_LIMITS)) {
-    for (const v of [-1, Number.NaN, Infinity, '5', null]) assert.deepEqual(shape(parseLimits({ [key]: v })), bad(key, v), key);
+    for (const v of [-1, Number.NaN, Infinity, '5', null]) {
+      // the one key where null is not refused: maxResolveWork: null is derived, asserted below
+      if (key === 'maxResolveWork' && v === null) continue;
+      assert.deepEqual(shape(parseLimits({ [key]: v })), bad(key, v), key);
+    }
     assert.equal(unwrap(parseLimits({ [key]: 0 }))[key], 0, key);
   }
+  // by hand: 8 x maxInflatedTotal (256 MiB by default, 1 MiB given) = 2,147,483,648 and 8,388,608
+  assert.equal(unwrap(parseLimits({ maxResolveWork: null })).maxResolveWork, 2_147_483_648);
+  assert.equal(unwrap(parseLimits({ maxInflatedTotal: 1_048_576, maxResolveWork: null })).maxResolveWork, 8_388_608);
   // the first bad key in DEFAULT_LIMITS order is the refusal, whatever order the caller wrote
   const keys = Object.keys(DEFAULT_LIMITS);
   assert.equal(parseLimits({ [keys.at(-1)]: -1, [keys[0]]: -1 }).error.what, keys[0]);

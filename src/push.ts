@@ -1,7 +1,7 @@
 // v0 receive-pack: commands + thin pack in, report-status out. Planning the request, reading the response stream,
 // classifying the report and deciding the outcome are pure; `push` is the one effect. Any failure after the body is on
 // the wire is 'ambiguous' (the ref may have moved).
-import { fail, ambiguousAfterPush } from './errors.js';
+import { fail, ambiguousAfterPush, remoteText, REMOTE_TEXT_MAX } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { ok, err, assertNever, flatMapOption, getOrElse, mapOption } from './result.js';
 import type { Result } from './result.js';
@@ -13,7 +13,7 @@ import type { Oid } from './oid.js';
 import type { Refname } from './refname.js';
 import { measurePack, streamPack, streamSource } from './packwrite.js';
 import type { MeasuredPack, StreamedPack } from './packwrite.js';
-import { frames, coded, clientSpan, spanned, UA } from './transport.js';
+import { frames, coded, clientSpan, spanned, wrapNet, UA } from './transport.js';
 import { limitExceeded, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
 // oxlint-disable-next-line import/max-dependencies -- the push path: framing, pack writer, transport, limits, validation, the parsed brands, Result
@@ -74,13 +74,14 @@ export function parseCommands(raw: readonly RawCommand[]): Result<ParsedCommands
 }
 // A pkt-line frame as pktStep and the transports' frames() yield it.
 export type { Frame } from './transport.js';
-import type { Frame, RequestBody, Transport } from './transport.js';
+import type { Frame, RequestBody, Scrub, Transport } from './transport.js';
 import type { PktState } from './pktline.js';
 import type { PackInput, BuiltEntry } from './pack.js';
-import { WHOLE } from './pack.js';
+import { WHOLE, inputBase, typeNameOf } from './pack.js';
+import { hashObject } from './objects.js';
 import type { Span } from './otel.js';
 import type { Input } from './absent.js';
-import { at, atOr, field, fromNullish, mapGet, withDefaults } from './absent.js';
+import { at, atOr, field, fromNullish, isMissing, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import type { LsRefsResult } from './lsrefs.js';
 
@@ -253,15 +254,37 @@ const unpackReasonMatches = (status: string, reason: string): boolean => {
   return false;
 };
 const echoedFailure = (status: string, refs: readonly RefStatus[]): boolean => status !== 'ok' && refs.every(r => !r.ok && unpackReasonMatches(status, r.reason));
-// Artifacts' body cap, echoed on unpack and ng (observed 2026-11-10, #266, ray a58a707c0a76c98d-IAD).
-const TOO_LARGE = /^artifacts_git_receive_pack_request_too_large: push is ([0-9]+[.]?[0-9]*) MiB, limit is ([0-9]+[.]?[0-9]*) MiB$/u;
-/* oxlint-disable no-magic-numbers -- 2^10 and 2^20, converting Artifacts' MiB figures to bytes */
+// Artifacts' body cap, echoed on unpack and ng (observed 2026-11-10, #266, ray a58a707c0a76c98d-IAD):
+//   artifacts_git_receive_pack_request_too_large: push is 286.3 MiB, limit is 64.0 MiB
+// A reason is host-written, up to a pkt-line long, so it is parsed by hand in time linear in its length: the literal
+// parts are compared in place, one indexOf finds the middle, and each figure is matched against MIB_FIGURE: two
+// anchored alternatives, every quantifier bounded, the two digit runs separated by a required '.', so a digit run
+// matches one way only and a long one is refused within 10 characters. (The pattern this replaces,
+// `[0-9]+[.]?[0-9]*` twice, split a digit run every possible way: 12.9 s for a 2,492-byte reason.) No length cap:
+// the grammar itself admits at most 105 characters, so a cap could not change a result.
+const TOO_LARGE_HEAD = 'artifacts_git_receive_pack_request_too_large: push is ';
+const TOO_LARGE_MID = ' MiB, limit is ';
+const TOO_LARGE_TAIL = ' MiB';
+// At most 9 integer digits and 6 decimals: under 10^9 MiB, about 2^50 bytes, so the byte count is always a safe
+// integer (999999999.999999 MiB = 1,048,575,999,999,999 bytes, under 2^53) and needs no check of its own.
+const MIB_FIGURE = /^[0-9]{1,9}$|^[0-9]{1,9}[.][0-9]{1,6}$/u;
+// oxlint-disable-next-line no-magic-numbers -- 2^10; MIB is 2^20, converting Artifacts' MiB figures to bytes
 const KIB = 1024;
 const MIB = KIB * KIB;
-/* oxlint-enable no-magic-numbers */
+// One figure in bytes, or null: not a decimal figure, or not a positive exact byte count.
+const mibBytes = (figure: string): number | null => {
+  if (!MIB_FIGURE.test(figure)) return null;
+  const bytes = Math.round(Number(figure) * MIB);
+  return bytes > 0 ? bytes : null;
+};
+// With no middle, indexOf is -1 and the first slice stops one short of the end: it is empty or ends in the tail's
+// 'i', never a figure, so that case needs no branch. The head holds no ' MiB', so the search starts at 0.
 export const parseReceivePackTooLarge = (reason: string): { readonly got: number; readonly max: number } | null => {
-  const m = TOO_LARGE.exec(reason);
-  return m === null ? null : { got: Math.round(Number(m[1]) * MIB), max: Math.round(Number(m[2]) * MIB) };
+  if (!reason.startsWith(TOO_LARGE_HEAD) || !reason.endsWith(TOO_LARGE_TAIL)) return null;
+  const mid = reason.indexOf(TOO_LARGE_MID);
+  const got = mibBytes(reason.slice(TOO_LARGE_HEAD.length, mid));
+  const max = mibBytes(reason.slice(mid + TOO_LARGE_MID.length, reason.length - TOO_LARGE_TAIL.length));
+  return got === null || max === null ? null : { got, max };
 };
 const malformed = (why: string): Malformed => ({ tag: 'malformed', why });
 // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrayDeclaration: reportStep calls it on "ng <rest>" only; with no space or a leading one, every split names no commanded ref
@@ -435,7 +458,8 @@ export type PushReport = Exclude<ReportShape, Malformed>;
 export type PushError = ErrorOf<RejectionCode | 'push_partial' | 'ambiguous'>;
 // remote: band 3's message when the stream broke on one, else null (a JS caller's missing value reads as null).
 export type OutcomeContext = { readonly report: PushReport | null; readonly hookOutput: string; readonly remote: string | null; readonly commands: readonly Command[] };
-export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands }: OutcomeContext): Result<PushReport | null, PushError> {
+// scrub: the transport's credential scrubber (or null), applied to band 3's text before it is cut (errors.ts remoteText).
+export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands }: OutcomeContext, scrub: Scrub | null = null): Result<PushReport | null, PushError> {
   const extra = { report, hookOutput };
   switch (o.tag) {
     case 'landed': return ok(report);
@@ -446,7 +470,7 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
         // rejectionCode only returns limit_exceeded when every ng reason parsed
         const got = sizes === null ? 0 : sizes.got;
         const max = sizes === null ? 0 : sizes.max;
-        return fail('limit_exceeded', `push is too large: ${reason}`, { ...extra, what: 'receive-pack request', got, max });
+        return fail('limit_exceeded', `push is too large: ${remoteText(reason)}`, { ...extra, what: 'receive-pack request', got, max });
       }
       const message = `push rejected: ${reason}`;
       if (o.code !== 'cas_conflict') return fail(o.code, message, extra);
@@ -458,7 +482,7 @@ export function outcomeResult(o: Outcome, { report, hookOutput, remote, commands
     case 'partial': return fail('push_partial', `push partially applied: ${o.landed.join(', ')} updated; ${o.rejected.map(r => `${r.ref} (${r.reason})`).join(', ')} refused`, { ...extra, landed: o.landed, rejected: o.rejected });
     case 'ambiguous': {
       const said = fromNullish(remote);
-      return fail('ambiguous', `push outcome unknown: ${said.tag === 'none' ? '' : `remote: ${said.value}: `}${o.why}`, said.tag === 'none' ? extra : { ...extra, original: 'remote_error' });
+      return fail('ambiguous', `push outcome unknown: ${said.tag === 'none' ? '' : `remote: ${remoteText(said.value, REMOTE_TEXT_MAX, scrub)}: `}${o.why}`, said.tag === 'none' ? extra : { ...extra, original: 'remote_error' });
     }
   }
   // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
@@ -497,7 +521,7 @@ const pushDefaults = (): { -readonly [K in keyof PushConfig]: PushConfig[K] } =>
 export type PushResult = { readonly report: PushReport | null; readonly packBytes: number; readonly entries: readonly PackEntry[]; readonly hookOutput: string };
 
 // The request, planned before anything is built or sent (pure): every refusal here happens with nothing on the wire.
-export type PushPlan = { readonly commands: ParsedCommands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly pushOptions: readonly WireField[]; readonly needPack: boolean; readonly maxReportLines: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
+export type PushPlan = { readonly commands: ParsedCommands; readonly caps: readonly string[]; readonly checked: CheckedCaps | null; readonly pushOptions: readonly WireField[]; readonly needPack: boolean; readonly maxReportLines: number; readonly maxReportReason: number; readonly maxReportProgress: number; readonly maxPack: number; readonly objects: readonly PackObject[]; readonly sideband: boolean };
 // The capabilities a push asks for; atomic and push-options only from a CheckedCaps.
 export type PushRequestCap = 'report-status' | 'report-status-v2' | 'side-band-64k' | 'atomic' | 'delete-refs' | 'push-options';
 const requestCap = (cap: PushRequestCap): PushRequestCap => {
@@ -537,11 +561,76 @@ function checkBases(objects: readonly PackObject[]): Result<null, ErrorOf<'bad_r
   }
   return ok(null);
 }
+// Each object once: the one place every producer's list passes (commitChanges, pushTree, merge, rebase, editFile, a
+// caller's own). A pack that holds one object twice is refused by a strict receiver: git index-pack --strict says
+// "The same object <oid> appears twice in the pack", unpack-objects --strict "tried to add buffer twice!", and
+// receive-pack reports either as "unpacker error" (git 2.50). Two whole objects are one object when type and bytes
+// are equal, so only objects that share a type, a length and a fingerprint (below) with another are hashed, each at
+// most once, and two are one object when their ids are equal; a list with no such pair costs a fingerprint (at most
+// 256 bytes read) and a map insert per object and no SHA-1. The first of a pair is kept, in its place, and an
+// ofs base index is renumbered to the kept list (a base that was a repeat becomes the kept copy, which is earlier).
+// A delta entry is kept as given: its object id is not known without applying it. Runs in send, on a list planPush
+// passed (checkBases), before the pack is measured.
+// FNV-1a (32 bits) over at most FINGERPRINT_RUNS runs of FINGERPRINT_RUN bytes, evenly spaced from the first run to
+// the last: every byte of an object no longer than that. Runs, not single bytes at a stride: data with a period (a
+// record layout, a generator's low byte) is the same at every stride and differs inside a run. Equal bytes give equal
+// fingerprints; it decides only which objects are hashed, never which are equal.
+const FINGERPRINT_RUNS = 32;
+const FINGERPRINT_RUN = 8;
+const FNV_OFFSET = 0x81_1c_9d_c5;
+const FNV_PRIME = 0x01_00_01_93;
+const fingerprint = (data: Uint8Array): number => {
+  const whole = data.length <= FINGERPRINT_RUNS * FINGERPRINT_RUN;
+  const runs = whole ? 1 : FINGERPRINT_RUNS;
+  const run = whole ? data.length : FINGERPRINT_RUN;
+  // the last run ends at the object's end
+  const spread = (data.length - run) / Math.max(1, runs - 1);
+  let h = FNV_OFFSET;
+  for (let r = 0; r < runs; r++) {
+    const start = Math.floor(r * spread);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion, typescript/non-nullable-type-assertion-style -- start + run <= data.length: the read is in range (`as`, not the `!` src/ forbids)
+    for (let i = start; i < start + run; i++) h = Math.imul(h ^ (data[i] as number), FNV_PRIME);
+  }
+  return h >>> 0;
+};
+function oncePerObject(objects: readonly PackObject[]): readonly PackObject[] {
+  const buckets = new Map<string, { readonly first: number; byOid: Map<string, number> | null }>();
+  const out: PackObject[] = [];
+  const keptAt: number[] = [];
+  for (const [i, obj] of objects.entries()) {
+    const base = inputBase(obj);
+    const name = typeNameOf(obj.type);
+    if (base.tag !== 'none' || name === null || !(obj.data instanceof Uint8Array)) {
+      keptAt.push(out.length);
+      out.push(base.tag === 'ofs' && out.length !== i ? { ...obj, base: { tag: 'ofs', index: atOr(keptAt, base.index, base.index) } } : obj);
+      continue;
+    }
+    const key = `${obj.type}:${obj.data.length}:${fingerprint(obj.data)}`;
+    const bucket = mapGet(buckets, key);
+    if (bucket.tag === 'none') {
+      buckets.set(key, { first: out.length, byOid: null });
+      keptAt.push(out.length);
+      out.push(obj);
+      continue;
+    }
+    const held = bucket.value;
+    const firstObj = at(out, held.first);
+    const byOid = held.byOid === null ? new Map<string, number>(firstObj.tag === 'some' ? [[hashObject(name, firstObj.value.data), held.first]] : []) : held.byOid;
+    held.byOid = byOid;
+    const oid = hashObject(name, obj.data);
+    const seen = mapGet(byOid, oid);
+    if (seen.tag === 'some') { keptAt.push(seen.value); continue; }
+    byOid.set(oid, out.length);
+    keptAt.push(out.length);
+    out.push(obj);
+  }
+  return out.length === objects.length ? objects : out;
+}
 // limits: the transport's (checked), or a caller's record (any subset, a key left out is the default; null is the defaults).
 export function planPush(o: PushOptions, limits: LimitsInput | null): Result<PushPlan, PlyError> {
   const checkedLimits = parseLimits(limits);
   if (!checkedLimits.ok) return checkedLimits;
-  const { maxRefs, maxReportLines, maxPackBytes } = checkedLimits.value;
+  const { maxRefs, maxReportLines, maxReportReasonBytes, maxReportProgressBytes, maxPackBytes } = checkedLimits.value;
   const cfg = withDefaults(o, pushDefaults());
   if (cfg.checked === null && unchecked(o)) return fail('bad_request', 'push: unchecked atomic or push options');
   // the single-ref form's fields may be missing (null ref, '' oids): parseCommand refuses them as it refuses any other
@@ -562,7 +651,7 @@ export function planPush(o: PushOptions, limits: LimitsInput | null): Result<Pus
   const listed = nonEmpty(parsed.value);
   if (!listed.ok) return listed;
   const commands = listed.value;
-  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxPack: maxPackBytes, objects: cfg.objects, sideband: cfg.sideband });
+  return ok({ commands, caps: requestCaps(commands, cfg, cfg.checked), checked: cfg.checked, pushOptions, needPack: commands.some(c => c.newOid !== ZERO_OID), maxReportLines, maxReportReason: maxReportReasonBytes, maxReportProgress: maxReportProgressBytes, maxPack: maxPackBytes, objects: cfg.objects, sideband: cfg.sideband });
 }
 // The request body: commands, flush, then (push-options) the options and another flush, then the pack.
 const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>> => {
@@ -579,13 +668,68 @@ const requestBody = (plan: PushPlan, pack: Uint8Array | null): Result<Uint8Array
 // forced-update), so a push maxRefs allows is never cut off by its own honest report (#144: maxRefs commands read
 // maxRefs + 1 lines). A larger cap is for a proc-receive hook that reports one command as several refs.
 export const REPORT_V2_OPTION_LINES = 4;
+const honestReportLines = (plan: Pick<PushPlan, 'commands' | 'caps'>): number => 1 + plan.commands.length * (plan.caps.includes('report-status-v2') ? 1 + REPORT_V2_OPTION_LINES : 1);
 export const reportLineCap = (plan: Pick<PushPlan, 'maxReportLines' | 'commands' | 'caps'>): number =>
-  Math.max(plan.maxReportLines, 1 + plan.commands.length * (plan.caps.includes('report-status-v2') ? 1 + REPORT_V2_OPTION_LINES : 1));
+  Math.max(plan.maxReportLines, honestReportLines(plan));
+// The bytes kept of one reason: limits.maxReportReasonBytes, but never fewer than git's own longest status or reason, so
+// a reason git writes is never cut and its class (ngClass, isGitUnpackError) is read from the whole of it.
+const GIT_REASON_BYTES = Math.max(...[...GIT_UNPACK_ERROR_LIST, ...KNOWN_NG, UNPACKER_ERROR].map(s => s.length));
+export const reportReasonCap = (plan: Pick<PushPlan, 'maxReportReason'>): number => Math.max(plan.maxReportReason, GIT_REASON_BYTES);
+// One report line with its reason ("ng <ref> <reason>") or status ("unpack <status>") cut to its first `max` bytes. A cap
+// bounds what is kept, never the outcome: the line is cut only when it is one reportStep reads whole (it ends in LF and
+// the reason is printable ASCII to its end, so a character is a byte), and any other line is returned as it came, for
+// reportStep to refuse as it always did. The copy drops the frame the line arrived in.
+export const cutReportLine = (line: Uint8Array, max: number): Uint8Array => {
+  if (line.length - NG_REF.length - 1 <= max) return line;
+  const text = decodeBytes(line);
+  let start = 0;
+  if (text.startsWith(UNPACK)) start = UNPACK.length;
+  else if (text.startsWith(NG_REF)) start = text.indexOf(' ', NG_REF.length) + 1;
+  const reason = text.slice(start, text.length - 1);
+  if (start === 0 || reason.length <= max || !text.endsWith('\n') || !PRINTABLE.test(reason)) return line;
+  return concat([line.subarray(0, line.length - 1 - reason.length + max), line.subarray(line.length - 1)]);
+};
+// The reason of an "ng <ref> <reason>" line as it came, before any cut (reportStep's split: a ref holds no space).
+const wholeReason = (line: Uint8Array): string => {
+  const text = decodeBytes(line);
+  return text.slice(text.indexOf(' ', NG_REF.length) + 1, text.length - 1);
+};
+// The report as the read classifies it: reportStep's state, the unpack status whole (at most one pkt-line, held for this
+// read only), whether it was cut, and whether a line beside a cut is not that status repeated.
+type Classifying = { report: ReportState; status: string; statusCut: boolean; cutNoEcho: boolean };
+// Classifies lines[from..] once, where they lie: only a line over the cap is replaced, by its cut copy. The echo
+// (echoedFailure) is read from the whole lines, before the cut: where the unpack status or a ref's reason is cut,
+// anything but the status repeated whole is no unpack failure, however the kept parts compare.
+function classifyNew(c: Classifying, lines: Uint8Array[], from: number, max: number): void {
+  let { report } = c;
+  for (let i = from; i < lines.length; i += 1) {
+    const whole = lines[i];
+    // Stryker disable next-line ConditionalExpression: unreachable, i < lines.length
+    if (isMissing(whole)) break;
+    const line = cutReportLine(whole, max);
+    if (i === 0) {
+      const text = decodeBytes(whole);
+      c.status = text.slice(UNPACK.length, text.length - 1);
+      c.statusCut = line !== whole;
+    } else if ((c.statusCut || line !== whole) && wholeReason(whole) !== c.status) c.cutNoEcho = true;
+    if (line !== whole) lines[i] = line;
+    report = reportStep(report, line);
+  }
+  c.report = report;
+}
+// An unpack failure read only because a cut made two different lines agree is none: whole, that report is not git's.
+const classified = (c: Classifying): ReportShape => {
+  const shape = reportFinish(c.report);
+  return c.cutNoEcho && shape.tag === 'unpackFailed' ? malformed('no git unpack line first') : shape;
+};
+// A band-2 frame past limits.maxReportProgressBytes, as the stream reads it: its place in the answer, none of its text.
+const PROGRESS_DROPPED: Frame = { kind: 'data', payload: Uint8Array.of(SIDEBAND_PROGRESS) };
 
 // The read, the platform edge: whatever the transport throws (network, HTTP status, framing) and our own limits on the
 // response end the read as `lost`; the stream otherwise ends as a report or broken. `reading` is the last reading state.
 // `answered`: a frame of receive-pack's answer was read before the failure (false: the exchange failed at its status line).
-type Read = { readonly done: Broken | StreamReport; readonly reading: Reading } | { readonly cause: unknown; readonly answered: boolean };
+// `shape`: the report as the read classified it, line by line (decide() does not classify it again).
+type Read = { readonly done: Broken | StreamReport; readonly shape: ReportShape | Broken; readonly reading: Reading } | { readonly cause: unknown; readonly answered: boolean };
 // An HTTP refusal of the receive-pack request itself (401/403: receive-pack disabled or not for this credential; 404: no
 // such repository), seen before any frame of its answer. git's http-backend decides that at the status line, before it
 // runs receive-pack (http.receivepack false is a 403), but the request body was sent, and a middlebox that forwarded
@@ -608,21 +752,45 @@ async function readResponse(t: PushTransport, plan: PushPlan, body: RequestBody,
   let lost: { readonly cause: unknown } | null = null;
   let answered = false;
   const maxLines = reportLineCap(plan);
+  // The answer is classified as its lines arrive: the read ends, and leaving the loop cancels the response body, the
+  // moment the report cannot be git's (its first line is not an unpack line, a status for a ref not commanded or
+  // already answered). So what is kept is at most one line a command, its reason cut at reportReasonCap, and band 2's
+  // tail; what is read is held to maxPackBytes (keepalives and band 2 with it) and the transport's timers. A limit here
+  // ends the read only when the report itself cannot be read inside it (report bytes, report lines).
+  const reasonCap = reportReasonCap(plan);
+  let progressBytes = 0;
+  const report: Classifying = { report: reportInit(plan.commands), status: '', statusCut: false, cutNoEcho: false };
+  let unreadable = false;
+  let fed = 0;
   try {
     for await (const f of frames(t, 'git-receive-pack', body, span)) {
       answered = true;
-      reportBytes += f.kind === 'data' ? f.payload.length : 0;
+      const size = f.kind === 'data' ? f.payload.length : 0;
+      reportBytes += size;
       if (reportBytes > plan.maxPack) { lost = { cause: limitExceeded('report bytes', reportBytes, plan.maxPack) }; break; }
-      const stepped = streamStep(st, f);
+      let kept = f;
+      if (sideband && f.kind === 'data' && f.payload[0] === SIDEBAND_PROGRESS) {
+        progressBytes += size;
+        if (progressBytes > plan.maxReportProgress) kept = PROGRESS_DROPPED;
+      }
+      const stepped = streamStep(st, kept);
       if (!stepped.ok) { lost = { cause: stepped.error }; break; }
       st = stepped.value;
       // Stryker disable next-line ConditionalExpression: a broken state has no lines, so reading on fails the read: ambiguous either way
       if (st.tag !== 'reading') break;
       reading = st;
-      if (st.lines.length > maxLines) { lost = { cause: limitExceeded('report lines', st.lines.length, maxLines) }; break; }
+      const { lines } = st;
+      if (lines.length > maxLines) { lost = { cause: limitExceeded('report lines', lines.length, maxLines) }; break; }
+      classifyNew(report, lines, fed, reasonCap);
+      fed = lines.length;
+      unreadable = report.report.tag === 'malformed';
+      if (unreadable) break;
     }
   } catch (e) { lost = { cause: e }; }
-  return lost === null ? { done: streamFinish(st), reading } : { ...lost, answered };
+  if (lost !== null) return { ...lost, answered };
+  // a report that cannot be git's is that report, as far as it was read
+  const done: Broken | StreamReport = unreadable ? { tag: 'report', lines: reading.lines } : streamFinish(st);
+  return { done, shape: done.tag === 'report' ? classified(report) : done, reading };
 }
 
 // The span's view of the outcome, from the classified report (no second parser).
@@ -635,7 +803,7 @@ const outcomeAttrs = (done: Broken | StreamReport, report: PushReport | null, ou
   return {
     'git.push.report.lines': done.tag === 'report' ? done.lines.slice(0, REPORT_KEEP).map(p => decodeBytes(p).replace(/\n$/u, '')) : [],
     'git.push.unpack': unpackOf(report), 'git.push.ok': outcome.tag === 'landed', 'git.push.outcome': outcome.tag,
-    'git.push.ng.reason': getOrElse(mapOption(fromNullish(refs.find(x => !x.ok)), x => x.reason), ''), 'git.push.band2.frames': band2Frames, 'git.push.band2.tail': band2.slice(-BAND_ATTR),
+    'git.push.ng.reason': getOrElse(mapOption(fromNullish(refs.find(x => !x.ok)), x => x.reason), ''), 'git.push.band2.frames': band2Frames, 'git.push.band2.tail': remoteText(band2.slice(-BAND_ATTR), BAND_ATTR),
     'git.push.remote.messages': bandLines(band2), 'git.push.refs.ok': refs.filter(x => x.ok).length, 'git.push.refs.ng': refs.filter(x => !x.ok).length,
   };
 };
@@ -718,20 +886,21 @@ async function decide(base: FinishPush, r: Read, cut: PlyError | null): Promise<
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- ambiguousAfterPush returns a PlyError
     return finishPush(base, err(ambiguousAfterPush(r.cause) as PlyError));
   }
-  const { done, reading } = r;
+  const { done, shape, reading } = r;
   const band2 = reading.band2Carry.length > 0 ? (reading.band2 + td.decode(reading.band2Carry)).slice(-BAND_TAIL) : reading.band2;
-  const shape: ReportShape | Broken = done.tag === 'report' ? classifyReport(done.lines, plan.commands) : done;
   const outcome = decideOutcome(shape, { atomic: plan.checked !== null && plan.checked.atomic, pack: plan.needPack });
   const report = shape.tag === 'malformed' || shape.tag === 'broken' ? null : shape;
   span.set(outcomeAttrs(done, report, outcome, reading.band2Frames, band2));
   if (outcome.tag === 'ambiguous') span.set({ 'git.push.ambiguous': outcome.why });
-  const res = outcomeResult(outcome, { report, hookOutput: band2, remote: shape.tag === 'broken' ? shape.remote : null, commands: plan.commands });
+  const res = outcomeResult(outcome, { report, hookOutput: band2, remote: shape.tag === 'broken' ? shape.remote : null, commands: plan.commands }, t.scrub);
   return finishPush({ ...base, hookOutput: band2 }, res);
 }
 
 // The send, inside the span: measure the pack, refuse an oversized one before the first byte, send, read, decide.
 async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Result<PushResult, PlyError>> {
-  const packed = plan.needPack ? await measurePack(plan.objects) : null;
+  // each object once (oncePerObject), here and not in planPush: under the span, where an entry that cannot be read is
+  // the push's 'protocol' error as it is when the pack writer reads it
+  const packed = plan.needPack ? await measurePack(oncePerObject(plan.objects)) : null;
   const entries: readonly PackEntry[] = packed === null ? [] : packed.entries;
   const packBytes = packed === null ? 0 : packed.bytes;
   span.set({ 'git.push.pack.bytes': packBytes, 'git.push.pack.objects': entries.length, 'git.push.pack.thin': entries.some(e => Boolean(e.baseOid)), 'git.push.pack.compressed.bytes': entries.reduce((a, e) => a + e.compressed, 0), 'git.push.pack.raw.bytes': entries.reduce((a, e) => a + e.size, 0) });
@@ -745,10 +914,19 @@ async function send(t: PushTransport, plan: PushPlan, span: Span): Promise<Resul
   // exception is the server refusing the service itself (refusedBeforeReceivePack, confirmed by its advertisement).
   const body = bodyOf(plan, packed);
   if (!body.ok) return body;
+  // The caller's signal had fired before the request: none is made, so this is the definite 'aborted' (or 'timeout',
+  // by the signal's reason), not 'ambiguous'.
+  const signal = getOrElse<unknown>(field(t, 'signal'), null);
+  if (signal instanceof AbortSignal && signal.aborted) return err(wrapNet(signal.reason, signal));
   const r = await readResponse(t, plan, body.value.body, span, plan.sideband);
+  // The exchange failed with no answer and the transport never pulled the streamed body: the command list did not
+  // leave this process, so no ref can have moved, and the failure is its own cause, not 'ambiguous'. A body handed
+  // over as bytes cannot be seen leaving or not, so it stays under the rule above.
+  const { streamed } = body.value;
+  if ('cause' in r && !r.answered && streamed !== null && !streamed.pulled()) return err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null));
   // pass 2 refused to finish the pack: whatever the server answered (workerd ends an errored body as if it were whole),
   // it was not sent the pack that was measured
-  const cut = body.value.streamed === null ? null : body.value.streamed.failure();
+  const cut = streamed === null ? null : streamed.failure();
   return decide({ t, span, plan, packBytes, entries, hookOutput: '' }, r, cut);
 }
 
@@ -774,7 +952,9 @@ export function push(t: PushTransport, opts: PushOptions): Promise<Result<PushRe
 
 // ---- a pack the caller already has (#234) ----
 // `pack` is a complete pack: header, entries, trailer. It is read once and never retried. A refusal here leaves it
-// unread and unlocked; from the first request byte it is spent, and every failure is 'ambiguous'.
+// unread and unlocked, and so does a request that failed before the transport pulled the body's first chunk (a signal
+// already fired, a connect or DNS failure): that is the failure itself, definite. From the first pull the pack is
+// spent, and every failure is 'ambiguous'.
 // `length` is the pack's own length, without the commands, when the caller knows it (default null). It is checked against
 // maxPackBytes before anything is sent and against the bytes as they go. The request is chunked either way.
 export type PackPushOptions = Input<Omit<PushConfig, 'objects'> & { readonly length: number | null }> & { readonly pack: ReadableStream<Uint8Array> };
@@ -798,8 +978,20 @@ async function sendSource(t: PushTransport, p: PackPushPlan, span: Span): Promis
   const { plan } = p;
   const prefix = requestBody(plan, null);
   if (!prefix.ok) return prefix;
+  // The caller's signal had fired before the send: no request is made and the pack is not locked, read or cancelled,
+  // so this is the definite 'aborted' (or 'timeout', by the signal's reason), not 'ambiguous'.
+  const signal = getOrElse<unknown>(field(t, 'signal'), null);
+  if (signal instanceof AbortSignal && signal.aborted) return err(wrapNet(signal.reason, signal));
   const body = streamSource(p.pack, prefix.value, p.length, plan.maxPack);
   const r = await readResponse(t, plan, body, span, plan.sideband);
+  // The exchange failed with no answer and the transport never pulled the body: the command list did not leave this
+  // process, so no ref can have moved. The failure is its own cause (network, aborted, timeout, or the code of an HTTP
+  // answer that came with the body still unpulled: auth, not_found, rate_limited, upstream_5xx, http, not_git), not 'ambiguous', and
+  // the pack goes back to the caller unread, unlocked and uncancelled. 'ambiguous' starts at the first pull.
+  if ('cause' in r && !r.answered && !body.pulled()) {
+    body.giveBack();
+    return err(wrapNet(r.cause, signal instanceof AbortSignal ? signal : null));
+  }
   // read before release: abandoning the rest of a pack the server already answered is not a failure of the pack
   const cut = body.failure();
   await body.release();
