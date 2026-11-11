@@ -431,3 +431,80 @@ test('a sweep deleting the temp ref just before the final push: atomic off, publ
     }
   }
 });
+
+// A failure before any push request (REQ A): nothing was sent to receive-pack, so nothing can have landed and ply knows
+// it. It is reported as what it is, with no settle reads. Oracle: this wrapper's own counts of the runner's requests
+// (receive-pack POSTs, ls-refs reads, receive-pack advertisement GETs) and git's refs. `read(nth)` and `advert()` inject
+// the faults; `landed(nth)` runs once the nth read's whole answer is in.
+function counted({ read = () => 'pass', advert = () => 'pass', landed = async () => {} } = {}) {
+  const seen = { posts: 0, reads: 0, adverts: 0, postsAfterAdvert: 0, readsAfterAdvert: 0 };
+  let down = false;
+  const fetchImpl = async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url;
+    const method = init?.method ?? (typeof input === 'string' ? 'GET' : input.method);
+    if (isPush(input, init)) { seen.posts++; if (seen.adverts > 0) seen.postsAfterAdvert++; }
+    if (method === 'GET' && url.includes('service=git-receive-pack')) { seen.adverts++; if (advert() === 'down') down = true; }
+    if (method === 'POST' && url.endsWith('/git-upload-pack')) {
+      const nth = seen.reads++;
+      if (seen.adverts > 0) seen.readsAfterAdvert++;
+      if (down || read(nth) === 'fail') throw new TypeError('injected: read failed');
+      const res = await fetch(input, init);
+      await res.clone().arrayBuffer();
+      await landed(nth);
+      return res;
+    }
+    if (down) throw new TypeError('injected: host down');
+    return fetch(input, init);
+  };
+  return { fetchImpl, seen };
+}
+const codeOf = r => (r.ok ? `ok ${JSON.stringify(r.value)}` : r.error.code);
+
+test('a push refused here before any push request (the transport\'s maxPackBytes under the batch): limit_exceeded as it is, one read, no push request; never ambiguous, never a refused push', async () => {
+  const p = plan();
+  // every batch carries 40 KB blobs of random bytes, so 10 KB is under each: pushPack's plan refuses step 0 locally
+  const limits = { maxPackBytes: 10_000 };
+  // the refs readable
+  const a = counted();
+  const fine = repo({ fetchImpl: a.fetchImpl, limits });
+  const r1 = await runTransfer(fine.t, from, p, src.commit, { settle: FAST });
+  assert.equal(codeOf(r1), 'limit_exceeded', say(r1));
+  assert.deepEqual([a.seen.posts, a.seen.reads], [0, 1], 'no push request; the one status read before the step and no settle read');
+  assert.equal(refsOf(fine.bare), '');
+  // every read after the first failing: still the refusal, and no read was made to fail
+  const b = counted({ read: nth => (nth >= 1 ? 'fail' : 'pass') });
+  const unreadable = repo({ fetchImpl: b.fetchImpl, limits });
+  const r2 = await runTransfer(unreadable.t, from, p, src.commit, { settle: FAST });
+  assert.equal(codeOf(r2), 'limit_exceeded', say(r2));
+  assert.deepEqual([b.seen.posts, b.seen.reads], [0, 1]);
+  assert.equal(refsOf(unreadable.bare), '');
+  // another runner (a clean transport) lands step 0 right after this run's first read; maxSteps 1. This run made no
+  // push: it is not a pause counting one, and not `lastPush: 'refused'` (no server refused anything)
+  const other = { land: async () => {} };
+  const c = counted({ landed: async nth => { if (nth === 0) await other.land(); } });
+  const raced = repo({ fetchImpl: c.fetchImpl, limits });
+  const clean = unwrap(createTransport(raced.url, {}));
+  other.land = async () => { must(await transferStep(clean, from, p, 0, src.commit)); };
+  const r3 = await runTransfer(raced.t, from, p, src.commit, { maxSteps: 1, settle: FAST });
+  assert.equal(refsOf(raced.bare), `${p.tempRef} ${p.steps[0].temp}`, 'git shows the other runner landed step 0');
+  assert.equal(codeOf(r3), 'limit_exceeded', say(r3));
+  assert.deepEqual([c.seen.posts, c.seen.reads], [0, 1]);
+});
+
+test('the final push\'s advertisement GET failing (a real AbortSignal; the host down): aborted or network as it is, no push request for that step, no settle read', async () => {
+  const p = plan();
+  const n = p.steps.length;
+  assert.equal(p.atomic, true);
+  assert.ok(n >= 2 && p.steps[n - 2].kind === 'batch', 'the final step follows a batch: only it reads the advertisement');
+  for (const [fault, code] of [['abort', 'aborted'], ['down', 'network']]) {
+    const controller = new AbortController();
+    const c = counted({ advert: () => { if (fault === 'abort') controller.abort(); return fault === 'down' ? 'down' : 'pass'; } });
+    const { bare, t } = repo({ fetchImpl: c.fetchImpl, signal: controller.signal });
+    const r = await runTransfer(t, from, p, src.commit, { settle: FAST });
+    assert.equal(codeOf(r), code, `${fault}: ${say(r)}`);
+    assert.ok(c.seen.adverts >= 1, 'the fault was at the advertisement GET');
+    assert.equal(c.seen.posts, n - 1, `${fault}: the batch steps' pushes only`);
+    assert.deepEqual([c.seen.postsAfterAdvert, c.seen.readsAfterAdvert], [0, 0], `${fault}: no push request and no read after the failed GET`);
+    assert.equal(refsOf(bare), `${p.tempRef} ${p.steps[n - 2].temp}`, `${fault}: git shows the last batch and no published ref`);
+  }
+});

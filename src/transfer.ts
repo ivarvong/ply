@@ -31,7 +31,7 @@ import { ZERO_OID } from './oid.js';
 import type { TransferOpts, TransferPack, TransferPlan, TransferStepPlan, GeneratedObject } from './transferplan.js';
 import { checkTransferPlan, planTransfer, rootCommit, tempFor, transferKey, TRANSFER_REF_PREFIX } from './transferplan.js';
 import { packSubset } from './packsubset.js';
-import { pushPack, pushWithOptions } from './receivecaps.js';
+import { pushPackOutcome, pushWithOptions } from './receivecaps.js';
 import { lsRefs } from './lsrefs.js';
 import type { Span } from './otel.js';
 import { KIND } from './otel.js';
@@ -148,8 +148,10 @@ async function sendStep(dst: Transport, span: Span, { from, plan, step, commit }
   if (!subset.ok) return subset;
   span.set({ 'git.transfer.batch.bytes': subset.value.length, 'git.transfer.batch.objects': subset.value.count });
   const commands = commandsOf(plan, s);
-  const pushed = await pushPack(dst, { commands, pack: subset.value.stream, length: subset.value.length, atomic: commands.length > 1 && plan.atomic });
-  return ok({ pushed: pushed.ok ? ok({ step }) : pushed });
+  const sent = await pushPackOutcome(dst, { commands, pack: subset.value.stream, length: subset.value.length, atomic: commands.length > 1 && plan.atomic });
+  // pushPack says no push request was made (refused here, or the advertisement was not read): the failure as it is
+  if (!sent.requested) return sent.result;
+  return ok({ pushed: sent.result.ok ? ok({ step }) : sent.result });
 }
 
 // One push: step `step` of `plan`, its entries read from `from.source`. `commit` is the source commit's bytes (the
