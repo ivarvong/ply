@@ -523,6 +523,7 @@ export const DECISIONS = [
   { match: "src/fetchpack.ts#fetchPackFiltered:bad_request:fetchPackFiltered: wants must name at least one object", space: 'read', axisTag: 'case' },
   { match: "src/limits.ts#checkLimit:*", space: 'unit', axisTag: 'case' },
   { match: "src/limits.ts#parseLimits:export", space: 'unit', axisTag: 'case' },
+  { match: "src/limits.ts#parseLimits:bad_request:limits.… must be at most … ms (0 turns the timer off)", space: 'http-options', axisTag: 'case' },
   { match: "src/limits.ts#limitExceeded:*", space: 'hostile-server', axisTag: 'case' },
   { match: "src/lsrefs.ts#v2Refusal:unsupported:ls-refs: the server does not speak protocol v2*", space: 'mutant-kill', axisTag: 'case' },
   { match: "src/lsrefs.ts#parseLsRefLine:remote_error:remote: …", space: 'advertisement', axisTag: 'record' },

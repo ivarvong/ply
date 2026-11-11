@@ -264,6 +264,10 @@ export const checkLimit = (value: unknown, what: string): Result<number, ErrorOf
     ? ok(value)
     : err(plyError('bad_request', `limits.${what} must be a finite non-negative number`, { what, got: value }));
 
+// The largest delay a platform timer holds: a signed 32-bit count of ms (24.8 days). The exchange's three timeouts.
+export const MAX_TIMER_MS = 2_147_483_647;
+const TIMER_KEYS: ReadonlySet<string> = new Set(['requestTimeoutMs', 'firstByteTimeoutMs', 'idleTimeoutMs']);
+
 // The caller's limits record (any subset), or none (null), parsed once where it enters. A key it gives must pass
 // checkLimit (the refusal names the key, `got` is what was passed; keys are checked in DEFAULT_LIMITS order); a key it
 // leaves out, or passes as the missing value, is DEFAULT_LIMITS's (maxResolveWork: 8 x the record's maxInflatedTotal). Keys this version does not read are ignored. A
@@ -279,6 +283,8 @@ export function parseLimits(input: LimitsInput | null): Result<CheckedLimits, Er
   for (const [key, value] of Object.entries(filled)) {
     const checked = checkLimit(value, key);
     if (!checked.ok) return checked;
+    // a timer holds at most MAX_TIMER_MS: above it the platform's timer fires at once (Node: 1 ms, with a warning)
+    if (TIMER_KEYS.has(key) && checked.value > MAX_TIMER_MS) return err(plyError('bad_request', `limits.${key} must be at most ${MAX_TIMER_MS} ms (0 turns the timer off)`, { what: key, got: value }));
   }
   return ok(grant(filled));
 }

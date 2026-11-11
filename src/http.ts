@@ -276,7 +276,7 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number, 
 // A non-2xx answer: a prefix of the body for the message (credential-scrubbed), the rest cancelled. A truncating read
 // keeps a prefix: its only error is the body read failing, and that is the exchange's error.
 async function statusError(res: Response, service: string, scrub: Scrub | null, clock: ExchangeClock): Promise<PlyError> {
-  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal: clock.signal, progress: clock.progress });
+  const read = await readCapped(res.body, ERROR_PREVIEW, { what: 'response bytes', truncate: true, signal: clock.signal, progress: () => { clock.feed('body_chunk'); } });
   if (!read.ok) return read.error;
   const preview = td.decode(read.value);
   const quoted = (scrub ? scrub(preview) : preview).slice(0, ERROR_QUOTE);
@@ -551,7 +551,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     switch (body.tag) {
       case 'missing': return fail('protocol', `${service} advertisement: HTTP ${res.status} response has no body`);
       case 'body': {
-        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: clock.signal, progress: clock.progress });
+        const buf = await readCapped(body.stream, maxPackBytes, { what: 'advertisement bytes', truncate: false, signal: clock.signal, progress: () => { clock.feed('body_chunk'); } });
         if (buf.ok) span.set({ 'git.response.bytes': buf.value.length, 'http.response.body.size': buf.value.length, ...redirectAttrs() });
         return buf;
       }
@@ -595,7 +595,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
       try {
         const res = await fetchAdvertisement(asked, service, span, sig.signal);
         if (!res.ok) return res;
-        sig.phase('body');
+        sig.feed('headers');
         if (recordNames.length > 0) span.set(recordedHeaderAttrs(res.value, recordNames, scrub));
         // A stale memo: this GET is replayable, so the exchange starts over from the original base.
         if (memoUnconfirmed && isRedirect(res.value)) { await cancelBody(res.value.body); unsettle(service); continue; }
@@ -643,8 +643,9 @@ function transportOf(settings: HttpSettings): HttpTransport {
     const target = `${base}/${service}`;
     const bytes = body instanceof Uint8Array ? body : null;
     const sig = clock.signal;
-    // A streamed body's pulls are the upload's progress (idle timer); its end starts the wait for the headers.
-    if (bytes === null) clock.phase('upload');
+    // A streamed body's pulls by the platform are the clock's progress marks (what ply can see, not what reached the
+    // server); its end starts the wait for the headers, unless they are already here.
+    if (bytes === null) clock.feed('upload_started');
     const init: { readonly body: BodyInit } | { readonly body: BodyInit; readonly duplex: 'half' } = body instanceof Uint8Array ? { body: bufferSource(body) } : { body: watchedUpload(body.stream, clock), duplex: 'half' };
     const res = await send(target, { method: 'POST', headers: headers(service, extra), ...init }, sig, bytes === null ? settings.streamRedirect : 'manual');
     const stale = memoUnconfirmed && (res.ok ? isRedirect(res.value) : bytes === null);
@@ -656,7 +657,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     if (!ad.ok) return ad;
     const again = `${base}/${service}`;
     span.set({ 'url.full': redactUrl(again), 'server.address': hostOf(), ...redirectAttrs() });
-    clock.phase('first_byte');
+    clock.feed('request_sent');
     const retried = await send(again, { method: 'POST', headers: headers(service, extra), body: bufferSource(bytes) }, sig, 'manual');
     return retried.ok ? ok({ res: retried.value, target: again }) : retried;
   }
@@ -683,7 +684,7 @@ function transportOf(settings: HttpSettings): HttpTransport {
     try {
       const sent = await sendPost(service, body, extra, span, sig);
       if (!sent.ok) { yield sent; return; }
-      sig.phase('body');
+      sig.feed('headers');
       const res = sent.value.res;
       const posted = sent.value.target;
       memoUnconfirmed = false;
@@ -696,10 +697,13 @@ function transportOf(settings: HttpSettings): HttpTransport {
       // The body read: a platform failure mid-stream is the network error it is.
       const read = readAbortable(stream.value, sig.signal);
       try { for await (const chunk of read.chunks) {
-        sig.progress();
         if (chunks === 0) first = Date.now() - t0;
         bytes += chunk.length; chunks++; if (chunk.length > maxChunk) maxChunk = chunk.length;
+        // The chunk arrived and goes straight to the consumer (no await between): one event, no clock read. The
+        // consumer's time with it is not the server's silence: the idle wait starts again when it asks.
+        sig.feed('consumer_took');
         yield ok(chunk);
+        sig.feed('consumer_asked');
       } } catch (e) { yield err(wrapNet(e, sig.signal)); return; }
       // the exchange's signal ended the read: its reason is the error (a timeout names its limit)
       if (read.cut()) { yield err(wrapNet(sig.signal.reason, sig.signal)); return; }
