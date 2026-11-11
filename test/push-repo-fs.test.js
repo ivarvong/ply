@@ -9,9 +9,10 @@ import { mkdirSync, writeFileSync, readdirSync, statSync, truncateSync, chmodSyn
 import { git, tmpRoot, makeBareRepo, startGitServer } from './server.js';
 import { pushRepo } from '../src/repo-node.js';
 import { withLimits } from '../src/limits.js';
+import { constants } from 'node:buffer';
 
 // every read through node:fs/promises, as { path, bytes }: readFile (whole) and FileHandle.read / readFile
-const reads = vi.hoisted(() => ({ log: [] }));
+const reads = vi.hoisted(() => ({ log: [], statSize: new Map() }));
 vi.mock('node:fs/promises', async importOriginal => {
   const real = await importOriginal();
   const note = (path, bytes) => { reads.log.push({ path: String(path), bytes }); };
@@ -22,6 +23,9 @@ vi.mock('node:fs/promises', async importOriginal => {
       const fh = await real.open(path, ...rest);
       const read = fh.read.bind(fh);
       const readAll = fh.readFile.bind(fh);
+      const stat = fh.stat.bind(fh);
+      // a size the file system reports for this path (a test double: a file of that size cannot be made everywhere)
+      fh.stat = async (...a) => { const st = await stat(...a); const size = reads.statSize.get(String(path)); if (size !== undefined) st.size = size; return st; };
       fh.read = async (...a) => { const r = await read(...a); note(path, r.bytesRead); return r; };
       fh.readFile = async (...a) => { const b = await readAll(...a); note(path, b.length); return b; };
       return fh;
@@ -259,4 +263,40 @@ test('the config boundary: a file of exactly maxLsRefsBytes is read; one byte le
   assert.equal(under.error.max, size - 1);
   const exact = await pushRepo(dir, url, { refspecs: ['main'], dryRun: true }, { limits: withLimits({ maxLsRefsBytes: size }) });
   assert.equal(exact.ok, true, exact.ok ? '' : `${exact.error.code}: ${exact.error.message}`);
+});
+
+// ---- a file within the bound that the runtime cannot hold is limit_exceeded, never a throw ----
+// Hand-derived expected values: `got` is the size the file system reports (the stat double, or the truncate size),
+// `max` the limit passed in, `what` '<what> buffer bytes' as README states for these two cases.
+test('a local pack within a raised maxPackBytes that no buffer can hold (1 PiB reported by stat) is limit_exceeded, no byte read', async () => {
+  const PIB = 2 ** 50;
+  assert.throws(() => new Uint8Array(PIB), RangeError, 'precondition: this runtime has no 1 PiB buffer');
+  const dir = localRepo();
+  const big = join(packDir(dir), 'pack-big.pack');
+  writeFileSync(big, '');
+  reads.statSize.set(big, PIB);
+  reads.log.length = 0;
+  const r = await pushRepo(dir, remoteRepo(), { refspecs: ['main'], dryRun: true }, { limits: withLimits({ maxPackBytes: 2 * PIB }) });
+  reads.statSize.delete(big);
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'limit_exceeded', `${r.error.code}: ${r.error.message}`);
+  assert.equal(r.error.what, 'local pack buffer bytes');
+  assert.equal(r.error.got, PIB);
+  assert.equal(r.error.max, 2 * PIB);
+  assert.equal(largestRead(big), 0, 'no byte of the file was read');
+});
+
+test('a config within a raised maxLsRefsBytes but longer than the longest string the runtime makes is limit_exceeded', async () => {
+  const SIZE = 640 * MIB;
+  assert.ok(SIZE > constants.MAX_STRING_LENGTH, `precondition: ${SIZE} bytes of NUL is more UTF-16 units than ${constants.MAX_STRING_LENGTH}`);
+  const dir = localRepo();
+  const path = join(dir, '.git', 'config');
+  truncateSync(path, SIZE);
+  const r = await pushRepo(dir, remoteRepo(), { refspecs: ['main'], dryRun: true }, { limits: withLimits({ maxLsRefsBytes: 1024 * MIB }) });
+  truncateSync(path, 0);
+  assert.equal(r.ok, false);
+  assert.equal(r.error.code, 'limit_exceeded', `${r.error.code}: ${r.error.message}`);
+  assert.equal(r.error.what, 'local config buffer bytes');
+  assert.equal(r.error.got, SIZE);
+  assert.equal(r.error.max, 1024 * MIB);
 });
