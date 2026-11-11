@@ -375,6 +375,34 @@ test('verifyFetchAnswer: git\'s answers pass; a flipped byte, a cut, a missing w
   assert.equal(verifyFetchAnswer(blobReq, blobAns, { ...DEFAULT_LIMITS, maxPackBytes: 10 }).error.code, 'limit_exceeded');
 });
 
+test('verifyFetchAnswer judges an answer by the request that produced it: git\'s reply to a non-done request verifies when it has a pack', async () => {
+  // Every answer here is real git upload-pack's (git 2.50 behind http-backend, protocol v2), to a request without
+  // `done`. gitprotocol-v2, fetch: output = acknowledgments flush-pkt | [acknowledgments delim-pkt] ... packfile
+  // flush-pkt. For a have the server holds it sends ACK and ready, then the pack; for one it does not hold, NAK alone.
+  otherWriter({ 'answer-by-request.txt': 'one\n' }, 'non-done answer');
+  const head = headOf(), have = git(bare, ['rev-parse', 'main~1']).trim();
+  const body = fetchBody({ wants: [head], haves: [have], done: false });
+  const request = unwrap(parseUploadPackRequest(body));
+  assert.equal(request.done, false);
+  const answer = await post(`${srv.url}/pc.git`, body);
+  // the sections as bytes, written by hand: a pkt-line is 4 hex digits of length (itself included), 0001 is the delim
+  const lead = `0014acknowledgments\n0031ACK ${have}\n000aready\n0001000dpackfile\n`;
+  assert.equal(new TextDecoder('latin1').decode(answer.subarray(0, lead.length)), lead, 'git answers ACK and ready, then the pack');
+  // the pack is what git says the have does not reach
+  const beyond = git(bare, ['rev-list', '--objects', head, `^${have}`]).trim().split('\n').length;
+  assert.deepEqual(unwrap(verifyFetchAnswer(request, answer)), { objects: beyond });
+  // the same bytes after a request that sent done: git's fetch-pack dies "expected 'packfile', received 'acknowledgments'"
+  const sentDone = verifyFetchAnswer(unwrap(parseUploadPackRequest(fetchBody({ wants: [head], haves: [have] }))), answer);
+  assert.equal(sentDone.ok, false); assert.equal(sentDone.error.code, 'protocol'); assert.match(sentDone.error.message, /expected packfile/);
+  // a have git does not hold: the round ends on its acknowledgments, which is no answer to store
+  const stranger = 'f'.repeat(40);
+  const nakBody = fetchBody({ wants: [head], haves: [stranger], done: false });
+  const nak = await post(`${srv.url}/pc.git`, nakBody);
+  assert.equal(new TextDecoder('latin1').decode(nak), '0014acknowledgments\n0008NAK\n0000', 'git answers NAK and ends the round');
+  const noPack = verifyFetchAnswer(unwrap(parseUploadPackRequest(nakBody)), nak);
+  assert.equal(noPack.ok, false); assert.equal(noPack.error.code, 'protocol'); assert.match(noPack.error.message, /no packfile section/);
+});
+
 test('cachingFetch verifyBeforeStore: a blob fetch is cached; a tampered answer is never stored; a hit is byte-identical to the stored answer', async () => {
   const body = fetchBody({ wants: [blobOid()] });
   const pending = [];

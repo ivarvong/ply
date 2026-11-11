@@ -106,9 +106,11 @@ export function verifyFetchAnswer(request: FetchRequest, answer: Uint8Array, giv
     st = r.value.state;
     if (r.value.pack) parts.push(r.value.pack);
   }
-  // a stored answer is a pack: the check a `done` request's answer gets
-  const end = v2End(st, true);
+  // judged by the request that produced it: after `done` an acknowledgments section is refused; without it git sends
+  // one (ACK, ready) before the pack, and a round that ends on its acknowledgments is no answer to store
+  const end = v2End(st, request.done);
   if (!end.ok) return end;
+  if (st.phase !== 'pack') return fail('protocol', 'answer: no packfile section');
   const opts = packParseOpts(limits);
   if (!opts.ok) return opts;
   const parsed = parsePack(concat(parts), opts.value);
