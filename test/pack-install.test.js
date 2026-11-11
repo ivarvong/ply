@@ -48,3 +48,16 @@ test('examples/README.md documents one setup command before the example commands
   // scripts/pack-check.mjs (CI job `pack`) runs this command in a fresh export and then starts each example.
   assert.equal(examplesSetupCommand(readFileSync(new URL('../examples/README.md', import.meta.url), 'utf8')), 'npm install');
 });
+
+test('README Install states what npm, pnpm, yarn and bun each do with the git dependency, by measured version', () => {
+  // The judges are the package managers, not ply: `<pm> add github:ivarvong/ply#77048fb` into an empty project, with
+  // and without --ignore-scripts, then `import('ply')` (npm against a local clone of the same commit). Measured once:
+  // npm 11.16.0 and pnpm 8.15.9 run `prepare` and leave dist/ (158 files); yarn 1.22.22 and bun 1.2.18 exit 0 without
+  // running it and leave no dist/. That run needs the network and four package managers, so it is not repeated here;
+  // this test holds README to naming each one with the version it was measured on and the outcome that version showed.
+  const rows = Object.fromEntries(INSTALL.split('\n').filter(line => line.startsWith('| ')).map(line => [String(line.split('|')[1]).trim(), line]));
+  assert.match(rows['npm 11.16.0'] ?? '', /^\| npm 11\.16\.0 \| builds `dist\/`/);
+  assert.match(rows['pnpm 8.15.9'] ?? '', /^\| pnpm 8\.15\.9 \| builds `dist\/`/);
+  assert.match(rows['yarn 1.22.22'] ?? '', /^\| yarn 1\.22\.22 \| exits 0[^|]*no `dist\/`/);
+  assert.match(rows['bun 1.2.18'] ?? '', /^\| bun 1\.2\.18 \| exits 0[^|]*no `dist\/`/);
+});
