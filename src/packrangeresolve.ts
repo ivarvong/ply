@@ -20,8 +20,9 @@
 // its compressed size (delta-compressed history is legitimately hundreds of times its pack). The floor is every member
 // inflated once (the scan's sizes) plus every delta applied once (its header's result size, capped by maxDeltaResult).
 // A work budget allows LIMIT_RESOLVE_FACTOR x the floor reached so far (the factor is the room for rebuilds), never
-// less than maxInflatedTotal and never more than `maxWork` (LIMIT_RESOLVE_WORK): CPU is at most the factor times the
-// declared sizes and at most the ceiling. A retain budget allows maxInflatedTotal, flat.
+// less than maxInflatedTotal and never more than limits.maxResolveWork (8 x maxInflatedTotal unless the caller sets
+// it): CPU is at most the factor times the declared sizes and at most the ceiling, which is what stops a delta bomb
+// (every first-time result raises the floor). A retain budget allows maxInflatedTotal, flat.
 //
 // Verified: each member's zlib checksum, length and declared size; every delta against its base's size; every oid
 // computed from the bytes (never taken from the pack); a base read back a second time rehashed against the oid it had
@@ -39,7 +40,7 @@ import type { Option, Result } from './result.js';
 import { ok, err, some, none, assertNever } from './result.js';
 import { withDefaults, fromNullish, mapGet } from './absent.js';
 import type { LimitsInput } from './limits.js';
-import { DEFAULT_LIMITS, LIMIT_WORK_RATIO, LIMIT_RESOLVE_FACTOR, LIMIT_RESOLVE_WORK, checkLimit, limitExceeded, parseLimits } from './limits.js';
+import { DEFAULT_LIMITS, LIMIT_WORK_RATIO, LIMIT_RESOLVE_FACTOR, checkLimit, limitExceeded, parseLimits } from './limits.js';
 import type { Oid } from './sha1.js';
 import { fromHex, toOid } from './sha1.js';
 import type { ScannedPack, ScannedType, ScanIndexOpts } from './packscanindex.js';
@@ -67,11 +68,9 @@ export type ResolveRangeOpts = {
   // bytes of resolved bases kept for the deltas resting on them; a base not kept is rebuilt from its chain when needed
   readonly cacheBytes: number;
   readonly bases: ThinBaseLookup | null;
-  // the hard ceiling on work bytes under a work budget, whatever sizes the pack declares
-  readonly maxWork: number;
 };
 export const RESOLVE_CACHE_BYTES: number = 16 * 1024 * 1024;
-const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null, maxWork: LIMIT_RESOLVE_WORK });
+const defaultOpts = (): ResolveRangeOpts => ({ limits: DEFAULT_LIMITS, budget: WORK_BUDGET, cacheBytes: RESOLVE_CACHE_BYTES, bases: null });
 
 // oid 20 + type 1 + base 4 + depth 4 + size 8 + byOid 4
 export const RESOLVED_ENTRY_BYTES = 41;
@@ -575,11 +574,9 @@ export async function resolvePackRange(pack: ScannedPack, source: RangeSource, i
     const ratio = checkLimit(budget.ratio, 'workRatio');
     if (!ratio.ok) return ratio;
   }
-  const maxWork = checkLimit(opts.maxWork, 'maxWork');
-  if (!maxWork.ok) return maxWork;
   const l = limits.value;
   const flat = l.maxInflatedTotal;
-  const bound = work ? { flat, factor: LIMIT_RESOLVE_FACTOR, ceiling: maxWork.value } : { flat, factor: 0, ceiling: flat };
+  const bound = work ? { flat, factor: LIMIT_RESOLVE_FACTOR, ceiling: l.maxResolveWork } : { flat, factor: 0, ceiling: flat };
   const s = setup(pack, source, opts, { maxObject: l.maxObjectSize, maxDelta: l.maxDeltaResult, maxChain: l.maxDeltaChain, ...bound });
   const roots = await fromRoots(s);
   if (roots !== null) return err(roots);

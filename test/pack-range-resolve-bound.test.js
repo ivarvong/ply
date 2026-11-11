@@ -1,0 +1,106 @@
+// resolvePackRange's work bound and rebuild cost, on packs built here with node:zlib and node:crypto (no ply encoder):
+// a delta bomb is refused at limits.maxResolveWork under each preset, and a forked delta family larger than the cache
+// resolves within a small multiple of its object bytes.
+import { test } from 'vitest';
+import assert from 'node:assert/strict';
+import { deflateSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { scanPackIndex } from '../src/packscanindex.js';
+import { resolvePackRange } from '../src/packrangeresolve.js';
+import { rangeFromBytes } from '../src/rangesource.js';
+import { DEFAULT_LIMITS, WORKER_LIMITS, withLimits, parseLimits } from '../src/limits.js';
+import { RETAIN_BUDGET } from '../src/packstream.js';
+
+const MIB = 1 << 20;
+const cat = parts => { const o = new Uint8Array(parts.reduce((a, p) => a + p.length, 0)); let at = 0; for (const p of parts) { o.set(p, at); at += p.length; } return o; };
+const oidOf = data => createHash('sha1').update(`blob ${data.length}\0`).update(data).digest('hex');
+function entryHeader(type, size) { const out = []; let b = (type << 4) | (size & 15); size = Math.floor(size / 16); while (size > 0) { out.push(b | 0x80); b = size & 0x7f; size = Math.floor(size / 128); } out.push(b); return Uint8Array.from(out); }
+function ofsEnc(n) { const out = [n & 0x7f]; n = Math.floor(n / 128); while (n > 0) { n -= 1; out.unshift(0x80 | (n & 0x7f)); n = Math.floor(n / 128); } return Uint8Array.from(out); }
+function varint(n) { const out = []; while (n >= 128) { out.push((n & 0x7f) | 0x80); n = Math.floor(n / 128); } out.push(n); return out; }
+function copyOp(off, size) { const bytes = []; let cmd = 0x80; for (let i = 0; i < 4; i++) { const v = (off >>> (8 * i)) & 0xff; if (v) { cmd |= 1 << i; bytes.push(v); } } for (let i = 0; i < 3; i++) { const v = (size >>> (8 * i)) & 0xff; if (v) { cmd |= 0x10 << i; bytes.push(v); } } return [cmd, ...bytes]; }
+// entries: { data } (a blob) or { ofs: index of the base, delta }
+function buildPack(entries) {
+  const n = entries.length;
+  const parts = [Uint8Array.from([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, (n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255])];
+  let at = 12; const offs = [];
+  for (const e of entries) {
+    offs.push(at);
+    const body = deflateSync(e.ofs === undefined ? e.data : e.delta, { level: 1 });
+    const head = e.ofs === undefined ? entryHeader(3, e.data.length) : cat([entryHeader(6, e.delta.length), ofsEnc(at - offs[e.ofs])]);
+    parts.push(head, body); at += head.length + body.length;
+  }
+  const all = cat(parts);
+  return cat([all, createHash('sha1').update(all).digest()]);
+}
+const streamOf = bytes => new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
+
+// One `unit`-byte blob of zeros and `n` deltas on it, each a list of whole-blob copies declaring `result` bytes, the
+// last 4 naming the delta so every result is a distinct object.
+function bomb(n, unit, result) {
+  const entries = [{ data: new Uint8Array(unit) }];
+  for (let i = 0; i < n; i++) {
+    const ops = [];
+    for (let k = 0; k < result / unit - 1; k++) ops.push(...copyOp(0, unit));
+    ops.push(...copyOp(0, unit - 4), 4, i & 255, (i >> 8) & 255, 0x55, 0xaa);
+    entries.push({ ofs: 0, delta: Uint8Array.from([...varint(unit), ...varint(result), ...ops]) });
+  }
+  return buildPack(entries);
+}
+async function resolveBomb(pack, limits) {
+  const idx = await scanPackIndex(streamOf(pack), { limits });
+  assert.equal(idx.ok, true, idx.ok ? '' : idx.error.message);
+  return resolvePackRange(idx.value, rangeFromBytes(pack), { limits });
+}
+// The refusal: at the ceiling, having done at most one delta (its instructions and its result) more than the ceiling.
+function assertRefusedAt(r, ceiling, result) {
+  assert.equal(r.ok, false, 'the bomb resolved');
+  assert.equal(r.error.code, 'limit_exceeded');
+  assert.equal(r.error.what, 'resolve work bytes');
+  assert.equal(r.error.max, ceiling);
+  assert.ok(r.error.got <= ceiling + result + 1024, `work ${r.error.got} ran past ${ceiling} by more than one delta`);
+}
+
+test('a delta bomb under WORKER_LIMITS is refused at 512 MiB of work, whatever the pack declares', { timeout: 120_000 }, async () => {
+  // 40 deltas each declaring 16 MiB (WORKER_LIMITS.maxDeltaResult): 640 MiB of results from a pack of a few KB
+  const pack = bomb(40, MIB, 16 * MIB);
+  assert.ok(pack.length < 8192, `pack is ${pack.length} bytes`);
+  // by hand: 8 x maxInflatedTotal (64 MiB) = 536,870,912
+  assertRefusedAt(await resolveBomb(pack, WORKER_LIMITS), 536_870_912, 16 * MIB);
+});
+
+test('a delta bomb under DEFAULT_LIMITS is refused at 2 GiB of work', { timeout: 300_000 }, async () => {
+  // 40 deltas each declaring 64 MiB (DEFAULT_LIMITS.maxDeltaResult): 2.5 GiB of results
+  const pack = bomb(40, MIB, 64 * MIB);
+  // by hand: 8 x maxInflatedTotal (256 MiB) = 2,147,483,648
+  assertRefusedAt(await resolveBomb(pack, DEFAULT_LIMITS), 2_147_483_648, 64 * MIB);
+});
+
+test('the work ceiling follows the limits a caller gives: left out, it is 8 x their maxInflatedTotal', async () => {
+  const pack = bomb(40, 64 * 1024, MIB);
+  // by hand: 8 x 4 MiB = 33,554,432, for a partial record and for withLimits alike
+  const partial = { maxInflatedTotal: 4 * MIB, maxDeltaResult: MIB, maxObjectSize: MIB };
+  assertRefusedAt(await resolveBomb(pack, partial), 33_554_432, MIB);
+  assertRefusedAt(await resolveBomb(pack, withLimits(partial)), 33_554_432, MIB);
+  // given, it is what was given: 40 MiB of results pass under 64 MiB and are refused under 2 MiB
+  const roomy = await resolveBomb(pack, { ...partial, maxResolveWork: 64 * MIB });
+  assert.equal(roomy.ok, true);
+  assert.equal(roomy.value.stats.workMax, 64 * MIB);
+  assertRefusedAt(await resolveBomb(pack, { ...partial, maxResolveWork: 2 * MIB }), 2 * MIB, MIB);
+  assert.equal(DEFAULT_LIMITS.maxResolveWork, 2_147_483_648);
+  assert.equal(WORKER_LIMITS.maxResolveWork, 536_870_912);
+});
+
+test('maxResolveWork is a limits key like any other: NaN, Infinity or negative is bad_request under either budget, and the refusal names limits.maxResolveWork', async () => {
+  const pack = bomb(2, 1024, 1024);
+  const idx = await scanPackIndex(streamOf(pack), {});
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1, '100']) {
+    for (const budget of [RETAIN_BUDGET, { tag: 'work', ratio: 32, capObjects: false }]) {
+      const r = await resolvePackRange(idx.value, rangeFromBytes(pack), { limits: { maxResolveWork: bad }, budget });
+      assert.equal(r.ok, false, `maxResolveWork ${bad} was accepted under ${budget.tag}`);
+      assert.equal(r.error.code, 'bad_request');
+      assert.equal(r.error.message, 'limits.maxResolveWork must be a finite non-negative number');
+      assert.equal(r.error.what, 'maxResolveWork');
+    }
+    assert.equal(parseLimits({ maxResolveWork: bad }).ok, false);
+  }
+});
