@@ -78,9 +78,30 @@ export function learnFilter(t: Transport, advertised: boolean): void {
 // to the same question, and a server that stops taking a filter is relearned from its empty answer.
 export const QUIRKS_MEMO_MAX = 256;
 const quirksMemo = new Map<string, Quirks>();
-// The memo key of a parsed remote URL: origin and path, nothing else.
-// oxlint-disable-next-line require-unicode-regexp -- ASCII
-export const quirksKeyOf = (u: URL): string => `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+// The memo key of a parsed remote URL: origin and path, nothing else. The trailing slashes are dropped by walking back
+// from the end, one step per slash dropped: a pattern (`/\/+$/`) restarts at every slash of a run that does not end the
+// path, which is quadratic in a URL the caller's own user may have written.
+const SLASH = 0x2f;
+export const quirksKeyOf = (u: URL): string => {
+  const path = u.pathname;
+  let end = path.length;
+  while (end > 0 && path.codePointAt(end - 1) === SLASH) end -= 1;
+  return `${u.origin}${path.slice(0, end)}`;
+};
+// The same walk for the other pattern of that shape, `/[#;].*$/u` on each line of a stored .git/config (repo-node.ts):
+// where the line's `#` or `;` comment starts, or the line's length when it has none. The pattern cut at the first `#`
+// or `;` with no line end after it (`.` stops at LF, CR, U+2028 and U+2029, and `$` is only the end), and began again
+// at every `#` of a line that ends in CR: quadratic in one CRLF line of a config file. Walking back from the end visits
+// each character once and gives the same cut.
+export const configCommentStart = (line: string): number => {
+  let cut = line.length;
+  for (let i = line.length - 1; i >= 0; i -= 1) {
+    const c = line.charAt(i);
+    if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') break;
+    if (c === '#' || c === ';') cut = i;
+  }
+  return cut;
+};
 // The memo key of a remote URL, or null for a URL that does not parse (createTransport refuses it first).
 export function quirksKey(url: string | URL): string | null {
   try { return quirksKeyOf(new URL(url)); } catch { return null; }
