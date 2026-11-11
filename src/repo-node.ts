@@ -357,12 +357,16 @@ export type PushRepoResult = {
 
 // One wanted command: the ref, the local id (null: delete), forced or not, and the name it came from.
 type Wanted = { readonly dst: string; readonly src: string | null; readonly force: boolean; readonly from: string };
-const RULES = ['', 'refs/', 'refs/tags/', 'refs/heads/', 'refs/remotes/'];
-// git's ref_rev_parse_rules over the local refs: every full name the short one can mean that exists.
+// git's ref_rev_parse_rules, split as remote.c count_refspec_match splits a match: strong when the name was given in
+// full or from the top level (`refs/` + name), or is a branch or a tag; weak for the rest (refs/remotes/<name> and
+// refs/remotes/<name>/HEAD).
+const STRONG_RULES = ['', 'refs/', 'refs/tags/', 'refs/heads/'];
+const WEAK_RULES: readonly (readonly [string, string])[] = [['refs/remotes/', ''], ['refs/remotes/', '/HEAD']];
+// Every full name the short one can mean that exists, as git counts them: the strong matches, and the weak ones only
+// when there is no strong one, so a branch `foo` beside a remote `foo` is the branch and not an ambiguity.
 const localMatches = (repo: Repo, name: string): string[] => {
-  const found = RULES.map(p => `${p}${name}`).filter(n => n.startsWith('refs/') && repo.refs.has(n));
-  if (repo.refs.has(`refs/remotes/${name}/HEAD`)) found.push(`refs/remotes/${name}/HEAD`);
-  return found;
+  const strong = STRONG_RULES.map(p => `${p}${name}`).filter(n => n.startsWith('refs/') && repo.refs.has(n));
+  return strong.length > 0 ? strong : WEAK_RULES.map(([p, s]) => `${p}${name}${s}`).filter(n => repo.refs.has(n));
 };
 
 type RemoteRefs = ReadonlyMap<string, string>;

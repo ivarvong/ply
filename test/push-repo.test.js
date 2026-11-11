@@ -532,3 +532,29 @@ test('pushRepo vs git: a file under refs/ that is not a ref (Finder\'s .DS_Store
   assert.deepEqual((await sameAsGit(local, url, ['--all'], { all: true })).map(u => u.ref), ['refs/heads/main', 'refs/heads/topic']);
   assert.deepEqual((await sameAsGit(local, url, ['--tags'], { tags: true })).map(u => u.ref), ['refs/tags/v1']);
 });
+
+test('pushRepo vs git: a short source is ambiguous as git counts it (remote.c count_refspec_match): a branch or a tag wins over refs/remotes', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  // a branch named as a remote is (refs/remotes/foo/HEAD), a tag named as a remote-tracking ref, and a remote alone
+  git(local, ['branch', 'foo']);
+  git(local, ['update-ref', 'refs/remotes/foo/main', 'HEAD']);
+  git(local, ['symbolic-ref', 'refs/remotes/foo/HEAD', 'refs/remotes/foo/main']);
+  git(local, ['tag', 'bar']);
+  git(local, ['update-ref', 'refs/remotes/bar', 'HEAD']);
+  git(local, ['update-ref', 'refs/remotes/baz/main', 'HEAD']);
+  git(local, ['symbolic-ref', 'refs/remotes/baz/HEAD', 'refs/remotes/baz/main']);
+  assert.deepEqual((await sameAsGit(local, url, ['foo'], { refspecs: ['foo'] })).map(u => u.ref), ['refs/heads/foo']);
+  assert.deepEqual((await sameAsGit(local, url, ['bar'], { refspecs: ['bar'] })).map(u => u.ref), ['refs/tags/bar']);
+  assert.deepEqual((await sameAsGit(local, url, ['baz:refs/heads/from-baz'], { refspecs: ['baz:refs/heads/from-baz'] })).map(u => u.ref), ['refs/heads/from-baz']);
+  // two strong matches (a branch and a tag) stay ambiguous on both sides
+  git(local, ['branch', 'dup']);
+  git(local, ['tag', 'dup']);
+  const g = await gitDryRun(local, url, ['dup']);
+  assert.notEqual(g.status, 0);
+  assert.match(g.stderr, /src refspec dup matches more than one/);
+  const p = await plyDryRun(local, url, { refspecs: ['dup'] });
+  assert.equal(p.ok, false);
+  assert.equal(p.error.code, 'bad_request');
+  assert.match(p.error.message, /matches more than one ref \(refs\/tags\/dup, refs\/heads\/dup\)/);
+});
