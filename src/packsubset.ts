@@ -16,6 +16,13 @@
 // (packplan.ts) plans with the same two functions, so a batch it plans is one this module builds from the same
 // `resolved`.
 //
+// Base first. With `resolved`, a selected base is written before the first selected entry resting on it (through any
+// chain), whatever the selection's order; entries with no such tie keep the caller's order. Stock git refuses a thin
+// pack in which a REF_DELTA precedes its base when that base is itself a delta the receiver already holds (it appends
+// the base from its store, then meets it in the pack: "appears twice in the pack", measured against git 2.50
+// index-pack --strict --fix-thin). Without `resolved` a REF_DELTA's delta base cannot be told from a base outside the
+// pack, so the order is the caller's to get right (the planner's batches are base first).
+//
 // `extras` are small objects ply encodes itself (a commit, a generated tree), deflated before anything is streamed and
 // written after the selected entries. Their base may be none or a REF; an OFS base inside extras is refused.
 //
@@ -124,10 +131,30 @@ function headerOf(p: Plan, k: number): Uint8Array {
   }
 }
 
-async function plan(pack: ScannedPack, selection: readonly number[], opts: PackSubsetOpts): Promise<Result<Plan, PlyError>> {
-  const c = pack.columns;
-  const n = selection.length;
-  const total = n + opts.extras.length;
+// The selection with every selected base moved before the first entry that rests on it; otherwise the caller's order.
+// `queued` marks each entry once, so a base column that loops (a damaged index) still ends: at most one step an entry.
+function baseFirst(selection: readonly number[], selected: Uint8Array, resolved: ResolvedIndex): readonly number[] {
+  const base = resolved.columns.base;
+  const queued = new Uint8Array(selected.length);
+  const out: number[] = [];
+  const chain: number[] = [];
+  for (const i of selection) {
+    let u = i;
+    while (u >= 0 && u < selected.length && selected[u] === 1 && queued[u] !== 1) {
+      queued[u] = 1;
+      chain.push(u);
+      u = base[u] as number;
+    }
+    for (let j = chain.length - 1; j >= 0; j--) out.push(chain[j] as number);
+    chain.length = 0;
+  }
+  return out;
+}
+
+// The entries to write, checked and in write order, with the marks the layout fills in.
+type Order = { readonly selection: readonly number[]; readonly pos: Int32Array; readonly selected: Uint8Array };
+function ordered(pack: ScannedPack, selection: readonly number[], opts: PackSubsetOpts): Result<Order, PlyError> {
+  const total = selection.length + opts.extras.length;
   if (total > MAX_COUNT) return refuse('pack subset count', `${total} objects is more than a pack can count`);
   // where each source entry is written (position in the new pack), NOT_WRITTEN until it is
   const pos = new Int32Array(pack.count).fill(NOT_WRITTEN);
@@ -137,6 +164,17 @@ async function plan(pack: ScannedPack, selection: readonly number[], opts: PackS
     if (selected[i] === 1) return refuse('pack subset selection', `entry ${i} is selected twice`);
     selected[i] = 1;
   }
+  return ok({ selection: opts.resolved === null ? selection : baseFirst(selection, selected, opts.resolved), pos, selected });
+}
+
+
+// Each entry's kind, header and offset in the new pack, in write order; then the extras.
+async function plan(pack: ScannedPack, asked: readonly number[], opts: PackSubsetOpts): Promise<Result<Plan, PlyError>> {
+  const order = ordered(pack, asked, opts);
+  if (!order.ok) return order;
+  const { selection, pos, selected } = order.value;
+  const c = pack.columns;
+  const n = selection.length;
   const p: Plan = { pack, selection, resolved: opts.resolved, kind: new Uint8Array(n), basePos: new Int32Array(n).fill(NOT_WRITTEN), newOffset: new Float64Array(n), extras: [], body: 0 };
   let offset = PACK_HEADER_BYTES;
   for (let k = 0; k < n; k++) {

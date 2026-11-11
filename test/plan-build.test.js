@@ -111,6 +111,26 @@ test('blobs only, a few objects per push: every cut of the OFS chain is built an
   }
 }, 300_000);
 
+test('a REF_DELTA selected before its delta base is written after it: git, already holding the base, accepts the pack', async () => {
+  // the same objects REF-only (what Cloudflare Artifacts sends): pack-objects without --delta-base-offset
+  const head = git(work, ['rev-parse', 'HEAD']).trim();
+  const bytes = new Uint8Array(gitBuf(work, ['pack-objects', '--revs', '--stdout', '-q'], `${head}\n`));
+  const idx = unwrap(await scanPackIndex(streamOf(bytes)));
+  const resolved = unwrap(await resolvePackRange(idx, rangeFromBytes(bytes)));
+  const base = resolved.columns.base;
+  // C rests on B, B is itself a delta on A; A is left out, so the pack is thin
+  const cIdx = [...Array(idx.count).keys()].find(i => idx.columns.storedType[i] === TYPE.REF_DELTA && base[i] >= 0 && idx.columns.storedType[base[i]] === TYPE.REF_DELTA);
+  assert.ok(cIdx !== undefined, 'a REF delta on a REF delta');
+  const built = unwrap(await packSubset(rangeFromBytes(bytes), idx, [cIdx, base[cIdx]], { resolved }));
+  const out = await drain(built.stream);
+  assert.equal(out.length, built.length);
+  // the receiver already has every object (B included). Stock git refuses the pack when C precedes B: resolving C it
+  // appends B from its own store, then meets B in the pack ("The same object ... appears twice in the pack")
+  const dst = makeBareRepo(root, `o${n++}`);
+  gitBuf(dst, ['index-pack', '--stdin'], Buffer.from(bytes));
+  gitBuf(dst, ['index-pack', '--strict', '--fix-thin', '--stdin'], out);
+});
+
 test('a resolved index that cannot name a cut base fails the plan (nothing is pushed), as the builder refuses it', async () => {
   const type = src.resolved.columns.type;
   const blobs = [...Array(src.idx.count).keys()].filter(i => type[i] === TYPE.BLOB);
