@@ -416,7 +416,7 @@ export function cachingFetch(fetchImpl: FetchLike, cache: PackCache, options: Ca
       if (fate.kind === 'refused') refused(stats, fate.error);
       else { stats.putFailed++; stats.putError = `the store fell ${fate.bytes} bytes behind the client (window ${CACHE_LAG_BYTES})`; }
       // a failed delete is ignored, whether it rejects or throws before it returns a promise
-      await Promise.resolve().then(() => cache.delete(key)).catch(() => null);
+      await Promise.resolve().then(async () => { await cache.delete(key); return null; }).catch(() => null);
     };
     const put = store();
     if (waitUntil) waitUntil(put);
