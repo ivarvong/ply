@@ -522,16 +522,19 @@ test('a string with no byte form is refused naming the field: commit, tag, tree 
   errOf(utf8ToStr('\ud800'), 'bad_request', lone('path'));
 });
 
-test('treeSort: the first name the sort compares that has no byte form is the refusal, as when the comparison threw', async () => {
+test('treeSort: the first name in the caller\'s order that has no byte form is the refusal, compared or not', async () => {
   const { treeSort } = await import('../src/objects.js');
   const e = (name, mode = '100644') => ({ mode, name });
   assert.deepEqual(treeSort([e('b'), e('a', '40000'), e('a.c')]), { ok: true, value: [e('a.c'), e('a', '40000'), e('b')] });
-  // one entry is never compared: its name is never encoded
-  assert.deepEqual(treeSort([e('\ud800')]), { ok: true, value: [e('\ud800')] });
-  // the oracle: the same sort with a comparator that throws at the first name it cannot encode (the 0.1 treeSort)
+  // Deliberate change (perf/treesort-reencodes-keys-per-comparison): treeSort computes each key once, before the sort,
+  // so every name is encoded. One entry used to be returned unencoded because the sort never compared it; it is now
+  // refused like any other name with no byte form, which is what encodeTree does with the same entry.
+  errOf(treeSort([e('\ud800')]), 'bad_request', 'tree entry name: lone surrogate U+D800 is no byte sequence');
+  // the oracle: walk the entries in the order given and stop at the first name that cannot be encoded. It was "the
+  // first name a throwing comparator meets", which depended on the order the engine's sort compares in.
   const thrownBy = entries => {
     try {
-      [...entries].sort((a, b) => { unwrap(encodeBytes(a.mode === '40000' ? `${a.name}/` : a.name)); unwrap(encodeBytes(b.mode === '40000' ? `${b.name}/` : b.name)); return 0; });
+      for (const a of entries) unwrap(encodeBytes(a.mode === '40000' ? `${a.name}/` : a.name));
     } catch (x) { return x.message; }
     return null;
   };

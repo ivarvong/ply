@@ -208,7 +208,7 @@ export function isMode(mode: unknown): mode is Mode {
 }
 // A caller's value quoted in a refusal. The types say string, a JavaScript caller's value is whatever it is, and a
 // refusal must not throw: JSON.stringify throws on a BigInt and on a cycle, so only a string is quoted; a number, a
-// boolean, null and undefined are spelled, and anything else is named by its type.
+// boolean and null are spelled, and anything else (an absent value included) is named by its type.
 // An error never grows with a caller's text: at most QUOTE_UNITS UTF-16 units of a string are quoted (http.ts's
 // ERROR_QUOTE: 200), with the true length after it, and the `entry` field holds the same cut (cutName). A name over
 // TREE_MAX_NAME_BYTES is refused for its length, so without the cut that refusal alone is as large as the caller likes.
@@ -216,7 +216,7 @@ const QUOTE_UNITS = 200;
 const cutName = (name: string): string => (typeof name === 'string' && name.length > QUOTE_UNITS ? name.slice(0, QUOTE_UNITS) : name);
 function quoted(value: unknown): string {
   if (typeof value === 'string') return value.length > QUOTE_UNITS ? `${JSON.stringify(value.slice(0, QUOTE_UNITS))}… (${value.length} UTF-16 units)` : JSON.stringify(value);
-  return value === null || value === undefined || typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value;
+  return value === null || typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value;
 }
 // A caller's entry, parsed once: the mode is one of the five (`tree: entry "n": invalid mode`, what `mode`) and the oid
 // 40 lowercase hex (parseOid's refusal, what `oid`), each with the entry's name.
@@ -358,20 +358,23 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
 
 type Sortable = { readonly mode: string; readonly name: string };
 const sortKey = (e: Sortable): string => (e.mode === MODE_TREE ? `${e.name}/` : e.name);
-// git's tree order on the names' bytes. A name with no byte form is refused: the first one the sort compares (a sort
-// of one entry compares none). Once one is refused the rest of the sort is moot; the comparison it is in sees no bytes.
-const NO_BYTES = new Uint8Array(0);
+// git's tree order on the names' bytes (a directory sorts as its name and a `/`). A name with no byte form is refused.
+// Each key is computed once, before the sort: an entry's name and mode are read once and encoded once, where encoding
+// both keys inside the comparator cost two encodes (and, for a directory, two string concatenations) per comparison,
+// about 2 log2(n) per entry. The comparator and the keys are the ones the sort always used, and Array.prototype.sort
+// is stable, so the order is unchanged for every input. What changed with it: every name is encoded, compared or not,
+// so the refusal is the first entry in the caller's order with no byte form, and a list of one such entry is refused.
+type SortRow<T> = { readonly key: Uint8Array; readonly entry: T };
 export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], BadRequest> {
-  let refused: Result<null, BadRequest> = DONE;
-  const keyOf = (e: Sortable): Uint8Array => {
-    const k = encodeBytes(sortKey(e), 'tree entry name');
-    if (k.ok) return k.value;
-    if (refused.ok) refused = k;
-    return NO_BYTES;
-  };
-  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own copy; the spread keeps any iterable a caller passes working
-  const sorted = [...entries].sort((a, b) => cmpBytes(keyOf(a), keyOf(b)));
-  return refused.ok ? ok(sorted) : refused;
+  const rows: Array<SortRow<T>> = [];
+  for (const entry of entries) {
+    const key = encodeBytes(sortKey(entry), 'tree entry name');
+    if (!key.ok) return key;
+    rows.push({ key: key.value, entry });
+  }
+  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own array; any iterable a caller passes still works
+  rows.sort((a, b) => cmpBytes(a.key, b.key));
+  return ok(rows.map(row => row.entry));
 }
 
 // The one tree encoder: every tree ply writes (encodeTree, pushTree, commitChanges, merge, memtree, buildTree) is built
