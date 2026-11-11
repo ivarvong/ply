@@ -154,7 +154,8 @@ export function streamPack(m: MeasuredPack, prefix: Uint8Array): StreamedPack {
 // The last chunk is released only once the source has ended and its length has passed, and a chunk that would go over
 // `length` or `maxPack` is never released, so a refused pack never reaches the server whole, whatever the runtime does
 // with an errored request body (undici aborts the request; workerd ends it as if complete, measured: streamPack above).
-// `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish.
+// `failure` is null until the pack is refused or the source fails; `release` cancels a source the request did not finish
+// (asked once, not waited for).
 export type SourcedPack = {
   readonly stream: ReadableStream<Uint8Array>; readonly length: number;
   readonly failure: () => PlyError | null; readonly sent: () => number; readonly release: () => Promise<void>;
@@ -167,10 +168,13 @@ export function streamSource(source: ReadableStream<Uint8Array>, prefix: Uint8Ar
   let held: Uint8Array | null = null;
   let read = 0;
   let sent = 0;
+  // The source is the caller's: it is asked to cancel and never waited for, so a cancel() that never settles cannot hold
+  // the push past its outcome (its report, its abort, its timeout). A source that fails to cancel changes nothing.
+  // oxlint-disable-next-line eslint/require-await -- async for the callers that await it; nothing here waits
   const release = async (why: unknown = null): Promise<void> => {
     if (!open) return;
     open = false;
-    await reader.cancel(why).catch(() => null); // the pack is already abandoned: a source that fails to cancel changes nothing
+    reader.cancel(why).catch(() => null);
   };
   const refuse = async (c: ReadableStreamDefaultController<Uint8Array>, e: PlyError): Promise<void> => { failed = e; c.error(e); await release(e); };
   const mismatch = (want: number): ErrorOf<'bad_request'> => plyError('bad_request', `pushPack: the pack stream yielded ${read} bytes where length said ${want}; it was not sent whole`, { what: 'push pack length', got: read, max: want });

@@ -7,7 +7,7 @@
 //   - refusals before the request leave the stream unread and unlocked
 //   - a source the request did not finish is cancelled
 //   - memory: a pack far larger than what is held (child process, --expose-gc)
-import { test, beforeAll as before, afterAll as after } from 'vitest';
+import { test, vi, beforeAll as before, afterAll as after } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { MEMORY_CELL_FLAGS } from './memcell.js';
@@ -307,6 +307,88 @@ test('a source that fails to cancel changes nothing', async () => {
   const r = await pushPack(transport(url, { fetchImpl: routed(async () => reportResponse()) }), { ...create(), pack: stream, sideband: false });
   assert.equal(r.ok, true, r.error?.message);
 });
+
+// The pack stream is the caller's: its read() and its cancel() may never settle. pushPack's outcome waits for neither;
+// the source is asked to cancel once and not waited for. A hang is proved by a step counter, not a clock: `turns`
+// event-loop turns pass while the promise is still pending (nothing here does I/O: the transport is in process).
+const settledWithin = async (promise, turns = 200) => {
+  let state = 'pending';
+  promise.then(() => { state = 'settled'; }, () => { state = 'settled'; });
+  for (let i = 0; i < turns && state === 'pending'; i++) await new Promise(r => setImmediate(r));
+  return state;
+};
+// `native`: a ReadableStream that serves `serve` bytes, then a pull that never returns, and a cancel() that never
+// settles. `deaf`: a stream whose reader answers nothing at all, not even a read() that was pending when it is cancelled.
+const stuck = (kind, bytes, serve) => {
+  const state = { reads: 0, cancelled: 0 };
+  let reached;
+  const parked = new Promise(r => { reached = r; });
+  const never = () => new Promise(() => {});
+  if (kind === 'native') {
+    const stream = new ReadableStream({
+      pull(c) { if (state.reads++ === 0 && serve > 0) { c.enqueue(bytes.subarray(0, serve)); return undefined; } reached(); return never(); },
+      cancel() { state.cancelled++; return never(); },
+    }, { highWaterMark: 0 });
+    return { stream, state, parked };
+  }
+  class Deaf extends ReadableStream {
+    getReader() { return { read() { state.reads++; reached(); return never(); }, cancel() { state.cancelled++; return never(); }, releaseLock() {}, closed: never() }; }
+  }
+  return { stream: new Deaf(), state, parked };
+};
+// A transport that reads the request body as a server would and never answers. Like fetch it rejects when its signal
+// aborts; unlike undici it does not cancel the body it was given, so only pushPack's own release reaches the source.
+const silent = () => (url, init) => {
+  const reader = init.body.getReader();
+  (async () => { for (;;) { const r = await reader.read(); if (r.done) return; } })().catch(() => null);
+  return new Promise((resolve, reject) => { init.signal.addEventListener('abort', () => { reject(init.signal.reason); }); });
+};
+const packPush = (stream, length) => ({ ...create(), pack: stream, length, sideband: false });
+
+for (const kind of ['native', 'deaf']) {
+  test(`a source whose read() and cancel() never settle (${kind}): the server's report is the outcome, not waited past`, async () => {
+    const src = stuck(kind, source.pack, 0);
+    const t = transport('https://h/r', { fetchImpl: async () => reportResponse() });
+    const pushed = pushPackChecked(t, packPush(src.stream, null));
+    assert.equal(await settledWithin(pushed), 'settled', 'pushPack with the report in hand');
+    const r = await pushed;
+    // the server's report is `unpack ok`, `ok refs/heads/main` (reportResponse): by the protocol the push landed
+    assert.equal(r.ok, true, r.error?.message);
+    assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
+  });
+
+  test(`a source whose read() and cancel() never settle (${kind}): the caller's abort returns ambiguous`, async () => {
+    const src = stuck(kind, source.pack, 1000);
+    const ac = new AbortController();
+    const pushed = pushPackChecked(transport('https://h/r', { fetchImpl: silent(), signal: ac.signal }), packPush(src.stream, source.pack.length));
+    await src.parked;
+    assert.equal(await settledWithin(pushed, 20), 'pending', 'the request is under way, waiting for the source');
+    ac.abort(new Error('caller gave up'));
+    assert.equal(await settledWithin(pushed), 'settled', 'the abort ends it');
+    // request bytes were on the wire and no report came back: what the server did is not known to the client
+    assertAmbiguous(await pushed, 'aborted');
+    assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
+  });
+
+  test(`a source whose read() and cancel() never settle (${kind}): the idle timeout returns ambiguous`, async () => {
+    // the exchange's clock is the fake one: 1000 ms of no bytes pass by advancing it, not by waiting
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const src = stuck(kind, source.pack, 1000);
+      const limits = withLimits({ firstByteTimeoutMs: 5000, idleTimeoutMs: 1000 });
+      const pushed = pushPackChecked(transport('https://h/r', { fetchImpl: silent(), limits }), packPush(src.stream, source.pack.length));
+      await src.parked;
+      await vi.advanceTimersByTimeAsync(999);
+      assert.equal(await settledWithin(pushed, 20), 'pending', 'one millisecond short of limits.idleTimeoutMs');
+      await vi.advanceTimersByTimeAsync(1);
+      assert.equal(await settledWithin(pushed), 'settled', 'limits.idleTimeoutMs ends it');
+      const r = await pushed;
+      assertAmbiguous(r, 'timeout');
+      assert.match(r.error.message, /1000 ms \(limits\.idleTimeoutMs\)/);
+      assert.equal(src.state.cancelled, 1, 'the source is asked to cancel, once');
+    } finally { vi.useRealTimers(); }
+  });
+}
 
 test('the body cancelled by the transport cancels the source', async () => {
   const { url } = repo();
