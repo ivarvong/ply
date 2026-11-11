@@ -306,3 +306,29 @@ test('filesFromDir/pushDir (Node): exec bit, symlinks as 120000, nested dirs, .g
   await assert.rejects(unwrapAsync(filesFromDir(src)), e => e.code === 'bad_request' && e.path === 'pipe');
   await assert.rejects(unwrapAsync(filesFromDir(src, { limits: withLimits({ maxObjectSize: 8 }), filter: p => p !== 'pipe' })), e => e.code === 'limit_exceeded' && e.what === 'object size');
 });
+
+// macOS only (skipped by name elsewhere: Linux keeps a name's bytes, and git there does too). A name created decomposed
+// (NFD) stays decomposed on APFS; `git add` under the configuration `git init` writes there (core.precomposeunicode =
+// true, compat/precompose_utf8.c) records it precomposed. The oracle is git on a copy of the same directory with no
+// global or system configuration: its ls-files names and its write-tree. Nothing expected comes from ply.
+test.skipIf(process.platform !== 'darwin')('filesFromDir/pushDir on macOS [darwin only]: a decomposed (NFD) name is recorded as git add records it (precomposed)', async () => {
+  const src = join(root, `nfd${n++}`);
+  // Latin e + combining acute, a decomposed directory holding a decomposed file, Hangul jamo, kana + combining dakuten
+  const names = ['é.txt', 'Å/ö.txt', '한.txt', 'が.txt', 'plain.txt'];
+  for (const name of names) { mkdirSync(join(src, name, '..'), { recursive: true }); writeFileSync(join(src, name), `${name}\n`); }
+  assert.ok(readdirSync(src).includes('é.txt'), 'the file system kept the decomposed name');
+  const wt = join(root, `nfdgit${n++}`);
+  execFileSync('cp', ['-R', src, wt]);
+  const plain = { env: { PATH: process.env.PATH, HOME: wt, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } };
+  git(wt, ['init', '-q'], plain);
+  assert.equal(git(wt, ['config', 'core.precomposeunicode'], plain).trim(), 'true', 'git init\'s own default on this file system');
+  git(wt, ['add', '-A'], plain);
+  const gitNames = git(wt, ['ls-files', '-z'], plain).split('\0').filter(Boolean).sort();
+  assert.ok(gitNames.includes('é.txt'), 'git recorded e-acute precomposed');
+  const files = await unwrapAsync(filesFromDir(src));
+  assert.deepEqual(files.map(f => f.path).sort(), gitNames);
+  const r = emptyRepo();
+  const res = await unwrapAsync(pushDir(r.url, { dir: src, author: A, message: 'nfd' }, { tracer: new Tracer() }));
+  assert.equal(res.newTree, git(wt, ['write-tree'], plain).trim(), 'same tree as git add -A');
+  fsck(r.bare);
+});
