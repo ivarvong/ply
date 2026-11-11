@@ -402,6 +402,12 @@ export function parseHttpOptions(url: string | URL, options: HttpOptions = {}): 
   const offeredOrigin = u.origin;
   const approved = useAllowed(allowUrl, u);
   if (!approved.ok) return approved;
+  // Only http: and https: are ever fetched, and the rule is held on the URL that will be requested: after allowUrl,
+  // so a caller's own scheme that allowUrl maps to https still works and a caller's refusal is still the answer as
+  // given (useAllowed holds an allowUrl result to http(s) itself; without an allowUrl the URL here is the base).
+  // Anything else (file:, data:, blob:, ssh:, git:, ext::) is refused before any I/O and before the fetch
+  // implementation sees it, as a definite failure and not a retry-shaped `network`. The message is fixed text.
+  if (approved.value.protocol !== 'http:' && approved.value.protocol !== 'https:') return fail('bad_request', 'invalid url: only http: and https: remotes are supported', { what: 'url' });
   // The explicit credential, checked before anything is built from it.
   // urlCredential reads the URL only when there is no auth, so a URL credential implies auth === null
   const explicit = auth === null ? ok<[string | null, Basic | null]>([null, null]) : explicitAuth(given);
