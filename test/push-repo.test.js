@@ -559,6 +559,28 @@ test('pushRepo vs git: a short source is ambiguous as git counts it (remote.c co
   assert.match(p.error.message, /matches more than one ref \(refs\/tags\/dup, refs\/heads\/dup\)/);
 });
 
+test('pushRepo vs git: a ref directly under refs/ (refs/stash) is not a match for a short source (remote.c one_local_ref): the branch of that name is the source', async () => {
+  const local = smallLocal();
+  const { url } = remoteRepo(false);
+  // a repository that has run git stash and has a branch named stash: refs/stash is the stash commit, the branch is main's
+  writeFileSync(join(local, 'f'), 'stashed\n');
+  git(local, [...ID, 'stash']);
+  git(local, ['branch', 'stash']);
+  const [stashed, head] = [rev(local, 'refs/stash'), rev(local, 'refs/heads/main')];
+  assert.notEqual(stashed, head);
+  // every expected oid below is git's: sameAsGit compares with git push's own source, and the literal is rev-parse's
+  assert.deepEqual(await sameAsGit(local, url, ['stash'], { refspecs: ['stash'] }), [{ ref: 'refs/heads/stash', newOid: head, kind: 'create' }]);
+  assert.deepEqual(await sameAsGit(local, url, ['stash:refs/heads/s2'], { refspecs: ['stash:refs/heads/s2'] }), [{ ref: 'refs/heads/s2', newOid: head, kind: 'create' }]);
+  // the same for any one-level ref: refs/x (the stash commit) beside a branch x
+  git(local, ['update-ref', 'refs/x', stashed]);
+  git(local, ['branch', 'x']);
+  assert.deepEqual(await sameAsGit(local, url, ['x'], { refspecs: ['x'] }), [{ ref: 'refs/heads/x', newOid: head, kind: 'create' }]);
+  // git still reads a one-level ref as the source when it is named in full, or when nothing git counts matches the name
+  assert.deepEqual(await sameAsGit(local, url, ['refs/x:refs/heads/from-x'], { refspecs: ['refs/x:refs/heads/from-x'] }), [{ ref: 'refs/heads/from-x', newOid: stashed, kind: 'create' }]);
+  git(local, ['update-ref', 'refs/lone', stashed]);
+  assert.deepEqual(await sameAsGit(local, url, ['lone:refs/heads/from-lone'], { refspecs: ['lone:refs/heads/from-lone'] }), [{ ref: 'refs/heads/from-lone', newOid: stashed, kind: 'create' }]);
+});
+
 test('pushRepo vs git: a loose ref that is a symbolic link is the file it points at; a link that points nowhere is not a ref', async () => {
   const local = smallLocal();
   const { url } = remoteRepo(false);

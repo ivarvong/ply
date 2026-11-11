@@ -427,10 +427,16 @@ type Wanted = { readonly dst: string; readonly src: string | null; readonly forc
 const STRONG_RULES = ['', 'refs/', 'refs/tags/', 'refs/heads/'];
 const weakNames = (name: string): string[] => [`refs/remotes/${name}`, `refs/remotes/${name}/HEAD`];
 // Every full name the short one can mean that exists, as git counts them: the strong matches, and the weak ones only
-// when there is no strong one, so a branch `foo` beside a remote `foo` is the branch and not an ambiguity.
+// when there is no strong one, so a branch `foo` beside a remote `foo` is the branch and not an ambiguity. A ref
+// directly under refs/ (refs/stash) is not counted at all (remote.c one_local_ref drops a one-level name), so a branch
+// `stash` beside it is the branch; it is the source only when nothing counted matches, which is where git reads the
+// name as an object name instead (try_explicit_object_name). At most one such ref exists for a name.
 const localMatches = (repo: Repo, name: string): string[] => {
   const strong = STRONG_RULES.map(p => `${p}${name}`).filter(n => n.startsWith('refs/') && repo.refs.has(n));
-  return strong.length > 0 ? strong : weakNames(name).filter(n => repo.refs.has(n));
+  const counted = strong.filter(n => n.includes('/', 5));
+  if (counted.length > 0) return counted;
+  const weak = weakNames(name).filter(n => repo.refs.has(n));
+  return weak.length > 0 ? weak : strong;
 };
 
 type RemoteRefs = ReadonlyMap<string, string>;
