@@ -45,9 +45,11 @@ export type MergeLinesResult =
 export type Undecided = { readonly undecided: true; readonly detail: string };
 type Diffed<T> = Result<T, Undecided>;
 const DONE: Diffed<null> = ok(null);
-// The work bound. Every loop of the diff adds its primitive steps (a line scanned, a candidate tried, a diagonal
-// advanced) to one counter per merge; past `max` the diff stops and the merge is refused. `max` is a multiple of the
-// input's line count (limits.ts: LIMIT_MERGE_STEPS_PER_LINE), so the work is linear in the input whatever its content.
+// The work bound. The histogram scan and the classic-Myers fallback add every inner-loop iteration (a line scanned, a
+// candidate tried, a diagonal advanced, a neighbour looked at) and compaction its slides to one counter per merge;
+// past `max` the diff stops and the merge is refused. `max` is a multiple of the input's line count (limits.ts:
+// LIMIT_MERGE_STEPS_PER_LINE), so the counted steps are at most linear in the input whatever its content. A step is
+// not one fixed amount of CPU: the two paths differ about 2x (measured at classicDiff).
 // The counter is the module's own, made per call and starting at zero: nothing a caller passes is read to decide a
 // refusal. A caller's meter is written once, when the call returns, with that call's total.
 export type Meter = { steps: number };
@@ -243,6 +245,11 @@ type Box = [off1: number, lim1: number, off2: number, lim2: number, needMin: boo
 // false: the step budget was spent before the diff finished, and nothing was marked.
 // Every loop below adds its iterations to the budget: the class counts, the trim, the cleanup and its neighbour scans,
 // each diagonal and snake of the search, the heuristics' passes over the diagonals, and the boxes' trims and marks.
+// What a counted step costs, measured at babb1b0 on a loaded 16-core machine (process.cpuUsage, median of 9 runs of
+// diffScript, rediff skip): 12.4-15.4 ns per step on this path (two unrelated random a/b/c files of 10,000 / 20,000 /
+// 40,000 lines: 5,370,282 / 10,811,747 / 34,481,049 steps in 79 / 135 / 532 ms) against 6.3-7.3 ns per step on the
+// histogram path (every adjacent pair of lines swapped, 2,000 / 4,000 lines: 3,005,997 / 9,240,577 steps in 22 /
+// 58 ms). So one budget buys about twice the CPU here that it buys on the histogram path.
 export function classicDiff(A: Int32Array, B: Int32Array, line1: number, count1: number, line2: number, count2: number, CH1: Uint8Array, CH2: Uint8Array, budget: Budget = unbounded()): boolean {
   budget.steps += count1 + count2; // the class counts: one pass over each range
   if (spent(budget)) return false;

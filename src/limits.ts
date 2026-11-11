@@ -25,8 +25,10 @@ export const LIMIT_MERGE_BLOB: number = 8 * MIB;
  * across everything one merge runs (both histogram diffs, the classic-diff fallbacks, group compaction, conflict
  * refinement). git's histogram diff rescans the rest of the region on every split (xhistogram.c find_lcs), so a file
  * whose splits peel a line or two at a time costs O(n²) however short its hash chains are; the byte cap does not
- * bound that. With the budget the work is linear in the input: a merge that would pass it is refused as
- * `too large to merge`, never guessed. 1024 lets a merge with ~500 scattered hunks rescan the whole file for each.
+ * bound that. With the budget the counted steps are at most linear in the input: a merge that would pass it is
+ * refused as `too large to merge`, never guessed. A step is ~6-7 ns of CPU on the histogram path and ~12-15 ns on the
+ * classic fallback (measured: linemerge.ts, classicDiff), so the CPU bound is the fallback's rate times the budget.
+ * 1024 lets a merge with ~500 scattered hunks rescan the whole file for each.
  */
 export const LIMIT_MERGE_STEPS_PER_LINE = 1024;
 /** Lines added to the count before multiplying, so a small file's budget (~1M steps) never binds on ordinary input. */
