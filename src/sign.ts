@@ -4,9 +4,10 @@
 // The signed message is the commit object exactly as it would be stored *without* the gpgsig header; the gpgsig header
 // is then inserted after `committer` (where git puts it), its continuation lines prefixed by a space. Pure except
 // crypto.subtle.sign; verified by `git verify-commit` with an allowed-signers file in test/sign.test.js.
-import { fail } from './errors.js';
+import { callbackFailed, fail } from './errors.js';
 import type { ErrorOf } from './errors.js';
 import type { Result } from './result.js';
+import { err } from './result.js';
 import { te, bufferSource, concat, decodeBytes, encodeBytes } from './bytes.js';
 import { COMMIT_HEADER_COMMITTER, COMMIT_HEADER_ENCODING } from './format.js';
 import { atOr } from './absent.js';
@@ -68,9 +69,13 @@ export function withGpgsig(commitBytes: Uint8Array, signatureText: string): Resu
 }
 
 // Sign an encoded (unsigned) commit: the signed commit bytes. The message signed is the unsigned commit. The signer is
-// the caller's: its rejection is the caller's own and passes through as it is.
+// the caller's: what it throws or rejects with (or a signature that is not a string) is an Err naming 'signer' with the
+// thrown value as `cause`, never a throw. Callers sign while building the commit, before the push request exists.
 export async function signCommit(commitBytes: Uint8Array, signer: Signer, namespace = 'git'): Promise<Result<Uint8Array<ArrayBuffer>, ErrorOf<'bad_request'>>> {
-  return withGpgsig(commitBytes, await signer.sign(commitBytes, namespace));
+  let signature: unknown;
+  try { signature = await signer.sign(commitBytes, namespace); } catch (e) { return err(callbackFailed('signer', e)); }
+  if (typeof signature !== 'string') return fail('bad_request', 'caller-supplied signer returned a signature that is not a string', { what: 'signer', got: typeof signature });
+  return withGpgsig(commitBytes, signature);
 }
 
 // Convenience for node/tests: a fresh Ed25519 key pair as a signer.

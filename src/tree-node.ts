@@ -13,7 +13,7 @@
 import { readdir, readFile, readlink, lstat } from 'node:fs/promises';
 // oxlint-disable-next-line unicorn/import-style -- `path` names a file's path in the tree throughout this file
 import { join } from 'node:path';
-import { fail } from './errors.js';
+import { callbackFailed, fail } from './errors.js';
 import type { ErrorOf, PlyError } from './errors.js';
 import { DEFAULT_LIMITS, LIMIT_OBJECT_OVERHEAD, limitExceeded, limitsOf, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
@@ -63,7 +63,10 @@ export async function filesFromDir(dir: string, options: FilesFromDirOptions | n
       const path = rel ? `${rel}/${name}` : name;
       const full = join(dir, path);
       const st = await lstat(full);
-      if (filter !== null && !filter(path, { directory: st.isDirectory(), symlink: st.isSymbolicLink() })) continue;
+      // the caller's filter: what it throws is an Err naming 'filter' (definite: the walk precedes any request)
+      let wanted = true;
+      if (filter !== null) { try { wanted = filter(path, { directory: st.isDirectory(), symlink: st.isSymbolicLink() }); } catch (e) { return err(callbackFailed('filter', e)); } }
+      if (!wanted) continue;
       let kept: Result<null, DirError>;
       if (st.isDirectory()) kept = await walk(path);
       else if (st.isSymbolicLink()) kept = keep(await readlink(full, { encoding: 'buffer' }), path, MODE_LINK);
