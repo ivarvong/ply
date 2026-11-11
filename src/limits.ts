@@ -250,8 +250,10 @@ const resolveWorkOf = (maxInflatedTotal: number): number => Math.min(Number.MAX_
 // maxResolveWork: null is left out too (a spread of a preset, or a JSON record, has no other way to ask for the derived value)
 const derived = (maxResolveWork: unknown): boolean => maxResolveWork === null || isMissing(maxResolveWork);
 export const withLimits = (o: Partial<Limits> = {}): Limits => {
-  const filled: Limits = { ...DEFAULT_LIMITS, ...o };
-  return Object.freeze(derived(o.maxResolveWork) ? { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) } : filled);
+  // null from an untyped caller is no overrides, as the missing value is: the frozen defaults, not a throw
+  const given = getOrElse<Partial<Limits>>(fromNullish(o), {});
+  const filled: Limits = { ...DEFAULT_LIMITS, ...given };
+  return Object.freeze(derived(given.maxResolveWork) ? { ...filled, maxResolveWork: resolveWorkOf(filled.maxInflatedTotal) } : filled);
 };
 
 // Absent, NaN, Infinity, or negative: the check would not bound anything. Fail before any allocation.
