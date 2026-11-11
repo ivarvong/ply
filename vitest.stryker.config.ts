@@ -23,8 +23,11 @@ const MUTATION_FILES = [
   'test/mutant-kill-tree.test.js',
   'test/mutant-kill-packs.test.js',
   'test/packstream.test.js',
+  'test/pack-resolve-linear.test.js',
+  'test/delta-bound.test.js',
   'test/packwrite.test.js',
   'test/push-commands.test.js',
+  'test/push-unpack-host.test.js',
   'test/http-options.test.js',
   'test/describe-pack.test.js',
   'test/packindex.test.js',
@@ -42,6 +45,8 @@ const MUTATION_FILES = [
   'test/lsrefs-step.test.js',
   'test/path-trees-unit.test.js',
   'test/pullstream.test.js',
+  'test/inflate-codesets.test.js',
+  'test/inflate-pos.test.js',
 ];
 const config = mergeConfig(base, defineConfig({
   test: {

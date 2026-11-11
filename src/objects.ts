@@ -1,16 +1,16 @@
 // Git object encoding/decoding. All pure. Every function that can refuse returns a Result.
 import { fail } from './errors.js';
 import type { Err, Ok, Option, Result } from './result.js';
-import { ok, err, map, none, some, assertNever } from './result.js';
+import { ok, err, none, some, assertNever } from './result.js';
 import type { ErrorOf } from './errors.js';
 import { Sha1, toOid, fromHex } from './sha1.js';
 import { parseOid, type Oid } from './oid.js';
-import { te, concat, shortRead, decodeBytes, encodeBytes } from './bytes.js';
+import { te, shortRead, decodeBytes, encodeBytes } from './bytes.js';
 import { isDotGitName, isDotFileName, isValidatedIdent, validateRef } from './validate.js';
 import type { ValidatedIdent } from './validate.js';
 import { DEFAULT_LIMITS, limitError, parseLimits } from './limits.js';
 import type { LimitsInput } from './limits.js';
-import { atOr, type Input } from './absent.js';
+import { atOr, isMissing, type Input } from './absent.js';
 import type { ObjType, ObjectTypeName, PackKind } from './format.js';
 import {
   OID_BYTES, OID_HEX_CHARS, TREE_MODE_SEP, TREE_NUL, MODE_TREE, MODE_BLOB, MODE_EXEC, MODE_LINK, MODE_COMMIT, IDENT_TZ_DIGITS, IDENT_TIMESTAMP_MAX,
@@ -206,13 +206,33 @@ export function isMode(mode: unknown): mode is Mode {
       return false;
   }
 }
+// A caller's value quoted in a refusal. The types say string, a JavaScript caller's value is whatever it is, and a
+// refusal must not throw: JSON.stringify throws on a BigInt and on a cycle, so only a string is quoted; a number, a
+// boolean and null are spelled, and anything else (an absent value included) is named by its type.
+// An error never grows with a caller's text: at most QUOTE_UNITS UTF-16 units of a string are quoted (http.ts's
+// ERROR_QUOTE: 200), with the true length after it, and the `entry` field holds the same cut (cutName). A name over
+// TREE_MAX_NAME_BYTES is refused for its length, so without the cut that refusal alone is as large as the caller likes.
+// The cut never ends on the first half of a surrogate pair (a unit in d800..dbff): it stops one unit earlier, so what is
+// quoted of a well-formed name is well-formed, and an error about a name with a byte form holds no string without one.
+const QUOTE_UNITS = 200;
+const HIGH_SURROGATE_FIRST = 0xd8_00;
+const HIGH_SURROGATE_LAST = 0xdb_ff;
+function cut(text: string): string {
+  const last = text.charCodeAt(QUOTE_UNITS - 1); // oxlint-disable-line unicorn/prefer-code-point -- the unit itself: codePointAt would pair it with the next one
+  return text.slice(0, last >= HIGH_SURROGATE_FIRST && last <= HIGH_SURROGATE_LAST ? QUOTE_UNITS - 1 : QUOTE_UNITS);
+}
+const cutName = (name: string): string => (typeof name === 'string' && name.length > QUOTE_UNITS ? cut(name) : name);
+function quoted(value: unknown): string {
+  if (typeof value === 'string') return value.length > QUOTE_UNITS ? `${JSON.stringify(cut(value))}… (${value.length} UTF-16 units)` : JSON.stringify(value);
+  return value === null || typeof value === 'number' || typeof value === 'boolean' ? String(value) : typeof value;
+}
 // A caller's entry, parsed once: the mode is one of the five (`tree: entry "n": invalid mode`, what `mode`) and the oid
 // 40 lowercase hex (parseOid's refusal, what `oid`), each with the entry's name.
 export function treeEntryOf(e: TreeEntryInput): Result<EntryOf, BadRequest> {
   const { mode, name } = e;
-  if (!isMode(mode)) return fail('bad_request', `tree: entry ${JSON.stringify(name)}: invalid mode ${JSON.stringify(mode)}`, { what: 'mode', entry: name });
+  if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: cutName(name) });
   const oid = parseOid(e.oid);
-  if (!oid.ok) return fail('bad_request', `tree: entry ${JSON.stringify(name)}: ${oid.error.message}`, { what: 'oid', entry: name });
+  if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(name)}: ${oid.error.message}`, { what: 'oid', entry: cutName(name) });
   return ok({ mode, name, oid: oid.value });
 }
 
@@ -345,42 +365,102 @@ export function parseTree(data: Uint8Array, limits: LimitsInput = DEFAULT_LIMITS
 }
 
 type Sortable = { readonly mode: string; readonly name: string };
-const sortKey = (e: Sortable): string => (e.mode === MODE_TREE ? `${e.name}/` : e.name);
-// git's tree order on the names' bytes. A name with no byte form is refused: the first one the sort compares (a sort
-// of one entry compares none). Once one is refused the rest of the sort is moot; the comparison it is in sees no bytes.
-const NO_BYTES = new Uint8Array(0);
+// git's tree order on the names' bytes (a directory sorts as its name and a `/`). A name with no byte form is refused.
+// Each key is computed once, before the sort: an entry's name and mode are read once and encoded once, where encoding
+// both keys inside the comparator cost two encodes (and, for a directory, two string concatenations) per comparison,
+// about 2 log2(n) per entry. The comparator and the keys are the ones the sort always used, and Array.prototype.sort
+// is stable, so the order is unchanged for every input. What changed with it: every name is encoded, compared or not,
+// so the refusal is the first entry in the caller's order with no byte form, and a list of one such entry is refused.
+type SortRow<T> = { readonly key: Uint8Array; readonly entry: T };
 export function treeSort<T extends Sortable>(entries: Iterable<T>): Result<T[], BadRequest> {
-  let refused: Result<null, BadRequest> = DONE;
-  const keyOf = (e: Sortable): Uint8Array => {
-    const k = encodeBytes(sortKey(e), 'tree entry name');
-    if (k.ok) return k.value;
-    if (refused.ok) refused = k;
-    return NO_BYTES;
-  };
-  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own copy; the spread keeps any iterable a caller passes working
-  const sorted = [...entries].sort((a, b) => cmpBytes(keyOf(a), keyOf(b)));
-  return refused.ok ? ok(sorted) : refused;
+  const rows: Array<SortRow<T>> = [];
+  for (const entry of entries) {
+    // The entry's type is not checked at run time. An entry that is no object (null, or the missing value) has no name,
+    // and a name that is not a string (null, missing, a Symbol, an object whose toString throws) is never concatenated:
+    // the `/` is added to a string only, and anything else goes to encodeBytes as it is, which refuses it (`tree entry
+    // name must be a string`). So the refusal is the same at every list length, and nothing here can throw on a name.
+    const given: unknown = entry;
+    const name: unknown = given === null || isMissing(given) ? null : entry.name;
+    const key = encodeBytes(typeof name === 'string' && entry.mode === MODE_TREE ? `${name}/` : name, 'tree entry name');
+    if (!key.ok) return key;
+    rows.push({ key: key.value, entry });
+  }
+  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own array; any iterable a caller passes still works
+  rows.sort((a, b) => cmpBytes(a.key, b.key));
+  return ok(rows.map(row => row.entry));
 }
 
-// git fsck `duplicateEntries`: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort
-// next to each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and
-// `readme`) are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
-// Each entry's line is encoded (in the caller's order) before the sort: a name that is no byte sequence is refused there,
-// and the sort's own encoding of the same name cannot fail.
-// encodeTree of parsed entries: ply's own trees (merge, memtree, buildTree) start here.
+// The one tree encoder: every tree ply writes (encodeTree, pushTree, commitChanges, merge, memtree, buildTree) is built
+// here, and none of them can write a tree `git fsck --strict` refuses. Each entry is held to fsck.c fsck_tree's rules,
+// the ones parseTree reads by, before a byte is written: an empty name (git: `empty filename in tree entry`, badTree),
+// a NUL (it would end the name field early: the rest of the name would be read as an object id and further entries)
+// or a `/` in a name (fullPathname), `.` (hasDot), `..` (hasDotdot), any spelling of `.git` git checks (hasDotgit: case
+// folded, NTFS short and stream forms, HFS ignorable code points, after a backslash), a name over TREE_MAX_NAME_BYTES
+// (largePathname), the null id (nullSha1), `.gitmodules` as a symlink (gitmodulesSymlink) or as a tree or gitlink
+// (gitmodulesBlob, gitmodulesMissing), and `.gitattributes` as a tree or gitlink (gitattributesBlob).
+// duplicateEntries: one name twice in one tree, whatever the modes. A file `a` and a directory `a` do not sort next to
+// each other (`a` < `a.b` < `a/`), so the check is by name, not by neighbour. Case-only twins (`README` and `readme`)
+// are two names to git and to fsck; they collide only on a case-insensitive checkout, and are accepted here too.
+// treeNotSorted cannot happen: the entries are sorted here, in fsck verify_ordered's order (cmpTreeKeys), on name bytes
+// encoded once per entry. zeroPaddedFilemode and badFilemode cannot happen either: the encoder checks every field
+// itself, whatever the entry's type says. The name must be a string with a byte form, the mode one of the five git
+// writes (isMode) and the id 40 lowercase hex (parseOid); anything else is bad_request (what `tree entry name`, `mode`,
+// `oid`), never a throw and never a written byte. A mode that is not one of the five has no fixed width (a fullwidth
+// digit is one UTF-16 unit and three bytes), so it is refused before the output is sized.
+const NULL_OID = '0'.repeat(OID_HEX_CHARS);
+type TreeRow = { readonly mode: Mode; readonly name: Uint8Array; readonly oid: Oid };
+// Why fsck refuses one entry (parseTree's words for it), or null: the entry and its name's bytes
+// oxlint-disable-next-line eslint/complexity -- fsck_tree's checks in fsck's order, as in parseTree
+function entryRefusal(e: EntryOf, name: Uint8Array): string | null {
+  const { mode } = e;
+  if (name.length === 0) return 'empty name';
+  if (name.includes(TREE_NUL)) return 'NUL in name';
+  if (name.includes(TREE_SORT_SLASH)) return 'full pathname';
+  if (e.name === '.' || e.name === '..' || isDotGitName(name)) return 'bad name';
+  if (name.length > TREE_MAX_NAME_BYTES) return 'large pathname';
+  if (e.oid === NULL_OID) return 'null sha1';
+  const notBlob = mode === MODE_TREE || mode === MODE_COMMIT;
+  if (isDotFileName(name, 'gitmodules')) {
+    if (mode === MODE_LINK) return '.gitmodules is a symbolic link';
+    if (notBlob) return '.gitmodules is not a blob';
+  }
+  if (notBlob && isDotFileName(name, 'gitattributes')) return '.gitattributes is not a blob';
+  return null;
+}
 export function encodeEntries(entries: readonly EntryOf[]): Result<Uint8Array, BadRequest> {
   const names = new Set<string>();
+  const rows: TreeRow[] = [];
+  let size = 0;
   for (const e of entries) {
-    if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${JSON.stringify(e.name)}`, { what: 'tree entry', entry: e.name });
+    const { mode } = e;
+    const encoded = encodeBytes(e.name, 'tree entry name');
+    if (!encoded.ok) return encoded;
+    const name = encoded.value;
+    if (!isMode(mode)) return fail('bad_request', `tree: entry ${quoted(e.name)}: invalid mode ${quoted(mode)}`, { what: 'mode', entry: cutName(e.name) });
+    const oid = parseOid(e.oid);
+    if (!oid.ok) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${oid.error.message}`, { what: 'oid', entry: cutName(e.name) });
+    const why = entryRefusal(e, name);
+    if (why !== null) return fail('bad_request', `tree: entry ${quoted(e.name)}: ${why}`, { what: 'tree entry', entry: cutName(e.name) });
+    if (names.has(e.name)) return fail('bad_request', `tree: duplicate entry ${quoted(e.name)}`, { what: 'tree entry', entry: cutName(e.name) });
     names.add(e.name);
+    rows.push({ mode, name, oid: e.oid });
+    size += mode.length + 1 + name.length + 1 + OID_BYTES;
   }
-  const lines: Array<EntryOf & { readonly line: Uint8Array }> = [];
-  for (const e of entries) {
-    const line = encodeBytes(`${e.mode} ${e.name}\0`, 'tree entry name');
-    if (!line.ok) return line;
-    lines.push({ mode: e.mode, name: e.name, oid: e.oid, line: line.value });
+  // oxlint-disable-next-line unicorn/no-array-sort -- sorts its own array
+  rows.sort((a, b) => cmpTreeKeys(a.name, a.mode === MODE_TREE, b.name, b.mode === MODE_TREE));
+  const out = new Uint8Array(size);
+  let p = 0;
+  for (const row of rows) {
+    // the mode is ASCII digits: one byte each
+    p += te.encodeInto(row.mode, out.subarray(p)).written;
+    out[p] = TREE_MODE_SEP;
+    out.set(row.name, p + 1);
+    p += row.name.length + 1;
+    out[p] = TREE_NUL;
+    out.set(fromHex(row.oid), p + 1);
+    p += OID_BYTES + 1;
   }
-  return map(treeSort(lines), sorted => concat(sorted.flatMap(e => [e.line, fromHex(e.oid)])));
+  return ok(out);
 }
 
 // A caller's entries, each parsed once (treeEntryOf, in the caller's order), then encoded.
@@ -447,6 +527,8 @@ function oidLine(s: string, p: number, kind: string, msgId: string, what: string
 // newline]. The checks and their order are git's: a leading '<', a '>' before the '<', no '<', no space before '<',
 // no '>' after the email, no space after '>', then spaces or tabs, a digit, no leading zero unless the date is "0",
 // no overflow past git's timestamp range, one space, a sign, IDENT_TZ_DIGITS digits, and the newline.
+// The digits of the greatest timestamp fsck accepts (2^63 - 1: 19).
+const IDENT_TIMESTAMP_DIGITS = String(IDENT_TIMESTAMP_MAX).length;
 // oxlint-disable-next-line eslint/complexity -- fsck_ident line for line, inline: a helper costs bytes on every entry
 function fsckIdent(s: string, p: number, kind: string, role: string): Result<readonly [ident: string, next: number], Corrupt> {
   const eol = s.indexOf('\n', p);
@@ -469,8 +551,11 @@ function fsckIdent(s: string, p: number, kind: string, role: string): Result<rea
   if (!DIGIT.test(s.charAt(q))) return bad('badDate', 'bad date');
   if (s[q] === '0' && s[q + 1] !== ' ') return bad('zeroPaddedDate', 'zero-padded date');
   const start = q;
-  while (DIGIT.test(s.charAt(q))) q++;
-  if (BigInt(s.slice(start, q)) > IDENT_TIMESTAMP_MAX) return bad('badDateOverflow', 'date causes integer overflow');
+  // By length first: the run has no leading zero (above), so more digits than the limit has is past the limit, and
+  // fsck reports the overflow before it reads what follows the digits. The run is the remote's and as long as the
+  // object, so it is read one digit past the limit's and no further, and BigInt (superlinear) only ever sees a short one.
+  while (q - start <= IDENT_TIMESTAMP_DIGITS && DIGIT.test(s.charAt(q))) q++;
+  if (q - start > IDENT_TIMESTAMP_DIGITS || BigInt(s.slice(start, q)) > IDENT_TIMESTAMP_MAX) return bad('badDateOverflow', 'date causes integer overflow');
   if (s[q] !== ' ') return bad('badDate', 'bad date');
   q++;
   if (s[q] !== '+' && s[q] !== '-') return bad('badTimezone', 'bad time zone');
@@ -677,6 +762,12 @@ function headerOid(value: string, what: 'tree' | 'parent'): Result<Oid, BadReque
   const id = parseOid(value.toLowerCase());
   return id.ok ? id : fail('bad_request', `commit: ${what}: ${id.error.message}`, { what, got: value });
 }
+const COMMIT_FIELDS = ['tree', 'parents', 'author', 'committer', 'encoding', 'extra', 'message'] as const;
+// A commit field read back against the one given: a string or null, or a list of strings, element for element.
+function sameField(back: string | null | readonly string[], given: string | null | readonly string[]): boolean {
+  if (typeof back === 'string' || back === null || typeof given === 'string' || given === null) return back === given;
+  return back.length === given.length && back.every((line, i) => line === given[i]);
+}
 export function encodeCommitOf({ tree, parents, author, committer = author, encoding = null, message = null, extra = [] }: CommitIds): Result<Uint8Array<ArrayBuffer>, BadRequest> {
   const values: Array<readonly [unknown, string]> = [[author, 'author'], [committer, 'committer']];
   if (encoding !== null) values.push([encoding, 'encoding']);
@@ -693,7 +784,20 @@ export function encodeCommitOf({ tree, parents, author, committer = author, enco
   ];
   if (encoding !== null) lines.push(`${COMMIT_HEADER_ENCODING} ${encoding}`);
   lines.push(...extra);
-  return encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
+  const bytes = encodeBytes(`${lines.join('\n')}\n${message === null ? '' : `\n${message}`}`, 'commit');
+  if (!bytes.ok) return bytes;
+  // Held to the reader, as encodeTag is: what parseCommit refuses (an ident fsck refuses, an extra line that shadows
+  // tree, parent, author, committer or encoding) is the caller's bad request, and so is a commit that would read back
+  // as another one (an empty extra line ends the header; an `encoding ` extra line is the encoding). The parent bound
+  // is the reader's own choice, so it is not applied here. Every message below is fixed text.
+  const parsed = parseCommit(bytes.value, parents.length > DEFAULT_LIMITS.maxCommitParents ? { maxCommitParents: parents.length } : DEFAULT_LIMITS);
+  if (!parsed.ok) return fail('bad_request', parsed.error.message, { what: 'commit' });
+  const back = parsed.value;
+  const given: Commit = { tree, parents: [...parents], author, committer, encoding, extra: [...extra], message };
+  for (const field of COMMIT_FIELDS) {
+    if (!sameField(back[field], given[field])) return fail('bad_request', `commit: ${field} would not read back as given`, { what: field });
+  }
+  return bytes;
 }
 
 // A caller's commit, its ids parsed once: the tree and parent header values are checked first (a NUL or newline is that

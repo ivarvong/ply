@@ -76,6 +76,7 @@ import { children, missing, popped, reachable } from './packwalk.js';
 import type { Walk as PackWalk } from './packwalk.js';
 import type { Span } from './otel.js';
 import { decodeBytes } from './bytes.js';
+import { configCommentStart } from './transport.js';
 import type { Input } from './absent.js';
 import { at, mapGet, readKey, withDefaults } from './absent.js';
 import { err, getOrElse, ok } from './result.js';
@@ -197,7 +198,7 @@ export function readConfig(text: string): Map<string, string> {
   const out = new Map<string, string>();
   let section = '';
   for (const raw of text.split('\n')) {
-    const line = raw.replace(/[#;].*$/u, '').trim();
+    const line = raw.slice(0, configCommentStart(raw)).trim();
     const head = /^\[([^\]\s"]+)(\s+"([^"]*)")?\]$/u.exec(line);
     if (head !== null) {
       const sub = at(head, 3);

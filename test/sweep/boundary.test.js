@@ -64,9 +64,13 @@ test('every Limits key is parsed where it enters (#156): a CI cell per key refus
       assert.ok(isCi(c), c.id);
       assert.equal(c.op, 'lsRefs', c.id);
       assert.deepEqual(Object.keys(c.limits), [key], c.id);
-      assert.deepEqual(c.expect, { status: 'refused', code: 'bad_request', what: key }, c.id);
+      // the one null that parses: maxResolveWork: null means derived, the same as leaving the key out (README Limits)
+      const expected = c.id === 'parse.maxResolveWork.null' ? { status: 'ok' } : { status: 'refused', code: 'bad_request', what: key };
+      assert.deepEqual(c.expect, expected, c.id);
     }
   }
+  const work = cells.filter(c => c.id.startsWith('parse.maxResolveWork.'));
+  assert.deepEqual(work.map(c => [c.id, c.limits.maxResolveWork, c.expect.status]), [['parse.maxResolveWork.negative', -1, 'refused'], ['parse.maxResolveWork.null', null, 'ok']]);
   assert.deepEqual(cells.find(c => c.id === 'parse.none').expect, { status: 'ok' });
 });
 

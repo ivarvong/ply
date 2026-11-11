@@ -5,6 +5,7 @@ a first-class API; `test/examples.test.js` runs all three, as a user would, agai
 `PATH` holding only `node`.
 
 ```sh
+npm install                   # once, in a clone: builds dist/, which the examples import as `ply` (no build, no examples)
 export PLY_TOKEN=…            # Basic auth (user PLY_USER, default x-access-token); or PLY_BEARER for Bearer
 node examples/push-tree.mjs ./site https://host/repo.git --ref main --message "deploy"
 node examples/checkout-tree.mjs https://host/repo.git ./out --ref main

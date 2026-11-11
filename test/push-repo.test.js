@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync, symlinkSync, chmodSync, rmSync, appendFileSyn
 import { execFileSync } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { readBody } from './body.js';
-import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, fsckProblems } from './server.js';
+import { git, gitBuf, gitAsync, tmpRoot, makeBareRepo, startGitServer, fsckProblems, initRepo } from './server.js';
 import { pushRepo, readConfig } from '../src/repo-node.js';
 import { encodeDelta, planDeltas } from '../src/delta.js';
 import { applyDelta, buildPack, encodeOfsDistance, parsePack, resolvePack, readOfsDelta } from '../src/pack.js';
@@ -74,7 +74,7 @@ function indexPack(pack, into = null) {
 const lines = (seed, count) => Array.from({ length: count }, (_, i) => `export const v${i} = ${(i * 2654435761 + seed) >>> 0}; // line ${i}`);
 function makeLocal(name = `local${n++}`) {
   const dir = join(root, name);
-  git(root, ['init', '-q', '-b', 'main', dir]);
+  initRepo(dir);
   const src = lines(1, 300);
   const commit = (msg, edit) => {
     edit();
@@ -394,7 +394,7 @@ test('pushRepo refspecs: git\'s syntax and resolution, and what it refuses', asy
 test('pushRepo fails closed: limits, a missing or corrupt object, a tree entry of the wrong type', async () => {
   // loose objects only, so the store's own bounds decide
   const loose = join(root, `loose${n++}`);
-  git(root, ['init', '-q', '-b', 'main', loose]);
+  initRepo(loose);
   writeFileSync(join(loose, 'big.txt'), 'x'.repeat(5000));
   writeFileSync(join(loose, 'small.txt'), 'small\n');
   git(loose, ['add', '-A']); git(loose, [...ID, 'commit', '-q', '-m', 'one']);
@@ -421,7 +421,7 @@ test('pushRepo fails closed: limits, a missing or corrupt object, a tree entry o
   assert.match(r.error.message, /bad header or hash/);
   // a tree entry that says tree and names a blob
   const wrong = join(root, `wrong${n++}`);
-  git(root, ['init', '-q', '-b', 'main', wrong]);
+  initRepo(wrong);
   const b = git(wrong, ['hash-object', '-w', '--stdin'], { input: 'blob\n' }).trim();
   const tree = gitBuf(wrong, ['hash-object', '-t', 'tree', '-w', '--stdin', '--literally'], Buffer.concat([Buffer.from('40000 dir\0'), Buffer.from(b, 'hex')])).toString().trim();
   const c = git(wrong, [...ID, 'commit-tree', tree, '-m', 'wrong']).trim();
