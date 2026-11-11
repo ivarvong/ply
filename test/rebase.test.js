@@ -257,6 +257,35 @@ test('limits: maxRebaseCommits governs a rebase above maxMergeDepth too: a chain
   assert.deepEqual(fsckProblems(r.bare), []);
 });
 
+// git rebase leaves out a commit whose patch id equals an upstream commit's before it replays anything (its default,
+// --no-reapply-cherry-picks). ply has no patch ids: it replays every commit and drops the ones that come out empty.
+// The two agree while the upstream copy is in place and differ once upstream has reverted it; this pins both, each
+// against the git command it equals, so the day patch ids are ported the second half changes knowingly.
+test('rebase of a commit whose patch is already upstream: dropped as git rebase drops it while the copy stands; after an upstream revert ply is git rebase --reapply-cherry-picks', async () => {
+  const r = repo();
+  commitFiles(r.work, r.bare, { f: 'base\n' }, 'base');
+  const t1 = commitOn(r, 'topic', 'main', { f: 'base\nfeature\n' }, 'T1');
+  ok(sh(r.work, ['push', '-q', r.bare, `${t1}:refs/heads/topic2`]));
+  commitOn(r, 'main', 'main', { g: 'g\n' }, 'unrelated');
+  ok(sh(r.work, ['cherry-pick', t1])); ok(sh(r.work, ['push', '-q', r.bare, 'HEAD:refs/heads/main']));
+  assert.notEqual(ok(sh(r.work, ['rev-parse', 'HEAD'])), t1, 'the upstream copy is another commit, so the branch is not simply behind');
+  const gitRebase = (branch, flags) => { const d = clone(r.bare); ok(sh(d, ['checkout', '-q', branch])); ok(sh(d, ['rebase', '-q', ...flags, 'origin/main'])); const out = { tree: treeOf(d, 'HEAD'), commits: log(d, 'origin/main..HEAD') }; rmSync(d, { recursive: true, force: true }); return out; };
+  // the copy stands: git rewrites nothing and the branch is main
+  const g1 = gitRebase('topic', []); assert.deepEqual(g1.commits, []);
+  const p1 = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/topic', onto: 'refs/heads/main', committer }, T()));
+  assert.equal(p1.outcome, 'rebase'); assert.deepEqual(p1.dropped, [t1]); assert.deepEqual(p1.replayed, []);
+  assert.equal(treeOf(r.bare, 'topic'), g1.tree); assert.deepEqual(log(r.bare, 'main..topic'), g1.commits); assert.equal(p1.oid, ok(sh(r.bare, ['rev-parse', 'main'])));
+  // upstream reverts the copy and moves on
+  ok(sh(r.work, ['revert', '--no-edit', 'HEAD'])); ok(sh(r.work, ['push', '-q', r.bare, 'HEAD:refs/heads/main'])); commitOn(r, 'main', 'main', { h: 'h\n' }, 'later');
+  const gDefault = gitRebase('topic2', []); const gReapply = gitRebase('topic2', ['--reapply-cherry-picks']);
+  assert.deepEqual(gDefault.commits, [], 'git by default: T1 is left out (its patch id is upstream)'); assert.equal(gReapply.commits.length, 1);
+  const p2 = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/topic2', onto: 'refs/heads/main', committer }, T()));
+  assert.deepEqual(p2.dropped, []); assert.deepEqual(p2.replayed.map(x => x.from), [t1]);
+  assert.equal(treeOf(r.bare, 'topic2'), gReapply.tree); assert.deepEqual(log(r.bare, 'main..topic2'), gReapply.commits);
+  assert.notEqual(gReapply.tree, gDefault.tree, 'the known difference from git\'s default (README: rebase)');
+  assert.deepEqual(fsckProblems(r.bare), []);
+});
+
 test('squash message equals the one git rebase -i (pick, squash, squash) writes, byte for byte', async () => {
   const r = repo();
   commitFiles(r.work, r.bare, { 'a.txt': 'a\n' }, 'base');
