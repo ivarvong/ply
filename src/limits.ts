@@ -30,17 +30,21 @@ export const LIMIT_MERGE_BLOB: number = 8 * MIB;
  * classicDiff), so the CPU bound is the fallback's rate times the budget.
  * Sized at 7cfa0b7, on a 16-core machine running about 25 other test processes (process.cpuUsage medians; the cases
  * are pinned in test/linemerge.test.js, which asserts the counts, not the times):
- * - Default 2^31: what git itself merges cleanly in about 5 s is merged. git merge-file (2.50) takes 3.4 s on 40,000
- *   lines of swapped pairs (0.75 n² = 1.2e9 steps here) and 7.9 s on 60,000 (2.7e9), about 2.9 ns a step, so its 5 s
- *   is ~1.7e9 steps; 2^30 refused the first of those. It is also 5.9 times the 361,702,266 steps of the 70,000-line /
- *   3,500-hunk bulk edit (1.75 s here, 0.76 s in git). A refusal at this budget costs ~13 s of CPU.
+ * - Default 2^32: what git itself merges cleanly in about 5 s is merged, on both shapes measured. git merge-file
+ *   (2.50) takes 3.4 s on 40,000 lines of swapped pairs (0.75 n² = 1.2e9 steps here) and 7.9 s on 60,000 (2.7e9),
+ *   about 2.9 ns a step, so its 5 s is ~1.7e9 steps there; 2^30 refused the first of those. A bulk edit costs git
+ *   less per step (about 1.7 ns), so its 5 s is more steps: 130,000 lines with every 10th changed is 4.1 s in git and
+ *   2,451,130,516 steps here, 143,000 lines 5.0 s and 2,965,798,566, so ~3e9; 2^31, sized from the swaps alone,
+ *   refused the first of those (measured at 1b9f578). It is also 11.9 times the 361,702,266 steps of the 70,000-line
+ *   / 3,500-hunk bulk edit (1.75 s here, 0.76 s in git). A refusal at this budget costs ~25 s of CPU (131,074 lines
+ *   of swapped pairs: 24,920 ms, one run, 5.8 ns a step).
  * - Worker 2^26: the worst inputs found under WORKER_LIMITS.maxMergeBlobBytes are refused in 1.04 s (250,000 swapped
  *   lines, histogram), 1.40 s (1,048,576 random a/b/c lines, classic fallback) and 1.74 s (60 copies each of 8,733
  *   lines, shuffled); at 2^27 the first two took 1.45 s and 1.48 s and the third ran to its end in 2.27 s. The budget
  *   does not cover splitting the three sides into records (0.43 s for 3 x 250,000 lines, 0.89 s for 3 x 1,048,576),
  *   so a budget of 0 still costs 0.55 s and 1.06 s on those inputs: the rest of the second is maxMergeBlobBytes'.
  */
-export const LIMIT_MERGE_WORK: number = 2 ** 31;
+export const LIMIT_MERGE_WORK: number = 2 ** 32;
 export const LIMIT_MERGE_WORK_WORKER: number = 2 ** 26;
 /**
  * Inflated size of any single non-streamed object (trees, commits, tags, metadata blobs).

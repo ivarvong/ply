@@ -308,6 +308,26 @@ test('work bound: 40,000 lines of swapped pairs, which git merges cleanly in und
   assert.equal(m.clean, true, `ply: ${m.reason} after ${meter.steps} steps of ${DEFAULT_LIMITS.maxMergeWork}`);
   assert.ok(Buffer.from(m.data).equals(g.stdout), `merged bytes are git's (${m.data.length} against ${g.stdout.length})`);
 });
+// The same promise on the other shape, a bulk edit, where a step is cheaper for git (about 1.7 ns against the swaps'
+// 2.9), so git's 5 s is more steps. 130,000 lines, ours changes every 10th (13,000 one-line hunks), theirs changes
+// line 6: `git merge-file` exits 0 in 4.1 s on this machine (143,000 lines: 5.0 s, 2,965,798,566 steps) and the merge
+// counts 2,451,130,516 steps, which is over 2^31: a default of 2^31, sized from the swaps alone, refused it. The
+// expected bytes are git's.
+test('work bound: the 130,000-line / 13,000-hunk bulk edit, which git merges cleanly in under 5 s, merges under DEFAULT_LIMITS byte for byte', () => {
+  const N = 130000, EVERY = 10;
+  const L = Array.from({ length: N }, (_, i) => `line ${i} of the file`), o = [...L], t = [...L];
+  for (let i = EVERY - 1; i < N; i += EVERY) o[i] = `changed ${i}`;
+  t[5] = 'theirs edit';
+  const [B, O, T] = [L, o, t].map(l => enc(l.join('\n') + '\n'));
+  for (const [name, bytes] of [['bulk10-base', B], ['bulk10-ours', O], ['bulk10-theirs', T]]) writeFileSync(join(dir, name), bytes);
+  const g = spawnSync(process.env.GIT_BIN ?? 'git', ['merge-file', '-p', '--diff-algorithm=histogram', join(dir, 'bulk10-ours'), join(dir, 'bulk10-base'), join(dir, 'bulk10-theirs')], { maxBuffer: 1 << 26 });
+  assert.equal(g.status, 0, `git merge-file merges it cleanly: ${g.stderr}`);
+  assert.ok(Math.max(B.length, O.length, T.length) <= DEFAULT_LIMITS.maxMergeBlobBytes, 'under the default blob cap: only the work budget could refuse it');
+  const meter = { steps: 0 };
+  const m = mergeLines(B, O, T, { rediff, maxBytes: DEFAULT_LIMITS.maxMergeBlobBytes, maxWork: DEFAULT_LIMITS.maxMergeWork, meter });
+  assert.equal(m.clean, true, `ply: ${m.reason} after ${meter.steps} steps of ${DEFAULT_LIMITS.maxMergeWork}`);
+  assert.ok(Buffer.from(m.data).equals(g.stdout), `merged bytes are git's (${m.data.length} against ${g.stdout.length})`);
+});
 
 // ---- the meter write-out (re-review REQ 4 and REQ 5): it cannot throw, and every return path writes ----
 // Oracles: git for the result (the five-line merge is git's clean merge; the base -> ours script is one line for one
