@@ -50,6 +50,7 @@ export const INVENTORY = [
   row('src/packindex.ts', String.raw`/^[0-9a-f]{40}$/u`, 'stored', FIXED, run('a', '')),
   row('src/packrangeresolve.ts', String.raw`/^[0-9a-f]{40}$/u`, 'caller', FIXED, run('a', '')),
   row('src/packsaved.ts', String.raw`/^[0-9a-f]{40}$/u`, 'stored', FIXED, run('a', '')),
+  row('src/packsubset.ts', String.raw`/^[0-9a-f]{40}$/u`, 'caller', FIXED, run('a', '')),
   row('src/push.ts', String.raw`/ .*/u`, 'internal', 'applied to the UA constant; nothing follows the run that can fail', undefined, { count: 2 }),
   row('src/push.ts', String.raw`/^[ -~]+$/u`, 'remote', ONE_START, run('a', '\0')),
   row('src/push.ts', String.raw`/^[0-9]{1,9}$|^[0-9]{1,9}[.][0-9]{1,6}$/u`, 'remote',
