@@ -62,8 +62,16 @@ function assertMatchesGit(pack, idx, res) {
     assert.equal(res.find(g.oid).value, i);
   }
 }
+// This repository's history up to a fixed commit, not HEAD: the work a pack costs to resolve grows with the history
+// packed while the default work limit (256 MiB) does not, so a pack of HEAD turns these tests red at some length of
+// history. Measured with git 2.50: at this commit (318 commits, 3846 objects) the 64 KiB cache below does 239.8 MB of
+// work and the default cache 69.2 MB; 17 commits later (3969 objects) they do 272.5 MB, past the limit, and 71.5 MB.
+// Every full clone has the commit. A clone without it (a shallow one) packs its tip commit alone, which is all a
+// depth-1 clone holds and does not grow with the history either.
+const PACKED_COMMIT = 'ec337c5258839576e354ca9ea12d4f2404a3a75f';
 const repoPack = args => {
-  const objects = gitIn(process.cwd(), ['rev-list', '--objects', 'HEAD']);
+  const held = gitIn(process.cwd(), ['cat-file', '--batch-check'], `${PACKED_COMMIT}\n`).toString().startsWith(`${PACKED_COMMIT} commit `);
+  const objects = gitIn(process.cwd(), ['rev-list', '--objects', ...(held ? [PACKED_COMMIT] : ['--max-count=1', 'HEAD'])]);
   return new Uint8Array(gitIn(process.cwd(), ['pack-objects', '--stdout', '-q', '--depth=50', ...args], objects));
 };
 
