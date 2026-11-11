@@ -19,7 +19,7 @@ import type { ErrorOf, Extra, Miss, PlyError } from './errors.js';
 import type { Option, Result } from './result.js';
 import type { Input } from './absent.js';
 import type { Rediff } from './linemerge.js';
-import type { AttributeSource, Author, Commit, MergeBlob, OpContext, PackObject, Parents, Signer, Transport, TreeCache, Trees } from './merge.js';
+import type { AttributeSource, Author, Commit, MergeBase, MergeBlob, OpContext, PackObject, Parents, Search, Signer, Transport, TreeCache, Trees } from './merge.js';
 import { parseOid, type Oid } from './oid.js';
 import { fail } from './errors.js';
 import { assertNever, err, getOrElse, map, mapOption, none, ok, some } from './result.js';
@@ -27,7 +27,7 @@ import { at, mapGet, withDefaults } from './absent.js';
 import { lsRefs } from './lsrefs.js';
 import { push } from './push.js';
 import { operation } from './operation.js';
-import { mergeBaseOf, mergeTreesOf, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
+import { ancestors, searchStep, mergeTreesOf, blobMerger, uniqueObjects, attributeTree, attributeDrivers, validateAttributes, operationOpts, refOid, NO_TREES } from './merge.js';
 import { encodeCommitOf, hashObject, ident, TYPE } from './objects.js';
 import { validatePushRef, validateMessage } from './validate.js';
 import { signCommit } from './sign.js';
@@ -61,6 +61,57 @@ export function squashMessage(messages: ReadonlyArray<string | null>): string {
     if (end > 0) parts.push(m.slice(0, end));
   }
   return `${parts.join('\n\n')}\n`;
+}
+
+// a walk that reached every parent it names: deepening it fetches nothing new
+const whole = (m: ReadonlyMap<Oid, Commit>): boolean => { for (const c of m.values()) for (const p of c.parents) if (!m.has(p)) return false; return true; };
+// Effect: the merge base of a rebase. Two walks, each under its own limit: the branch walk (from the tip) is the chain
+// walk, to maxRebaseCommits + 2 commits (the base of a chain of n commits is n + 1 from the tip, and one more shows a
+// chain one over the limit); the onto walk is the merge-base search, to maxMergeDepth, as mergeBranch's. Both double
+// from 8; a walk that is whole or at its cap is not fetched again. When neither walk can go deeper and the graph is
+// still cut: a branch walk holding more than maxRebaseCommits single-parent commits from the tip that the onto walk
+// did not reach is `rebase chain` (got = max + 1: the search stops one past the limit, it does not count the chain);
+// anything else is `merge-base search depth` against maxMergeDepth. Every max is a field of the caller's limits.
+export async function rebaseBaseOf(t: Transport, tip: Oid, target: Oid): Promise<Result<MergeBase, PlyError>> {
+  const { maxRebaseCommits, maxMergeDepth } = t.limits;
+  const capA = Math.floor(maxRebaseCommits) + 2;
+  const capB = Math.floor(maxMergeDepth);
+  // maxMergeDepth under 1 allows no search, as in mergeBase: refused before any fetch
+  if (capB < 1) return err(limitError('merge-base search depth', 1, maxMergeDepth));
+  const top = Math.max(capA, capB);
+  let A = new Map<Oid, Commit>(); let B = new Map<Oid, Commit>();
+  let atA = 0; let atB = 0;
+  let s: Search<Oid> = { tag: 'searching', depth: Math.min(8, top) };
+  let commits = new Map<Oid, Commit>();
+  while (s.tag === 'searching') {
+    const depth: number = s.depth;
+    const wantA = Math.min(depth, capA); const wantB = Math.min(depth, capB);
+    const heldA = A; const heldB = B;
+    // oxlint-disable-next-line eslint/no-await-in-loop -- each round deepens from what the last one found
+    const [ra, rb] = await Promise.all([
+      wantA === atA || (atA > 0 && whole(heldA)) ? ok(heldA) : ancestors(t, tip, wantA),
+      wantB === atB || (atB > 0 && whole(heldB)) ? ok(heldB) : ancestors(t, target, wantB),
+    ]);
+    if (!ra.ok) return ra;
+    if (!rb.ok) return rb;
+    A = ra.value; B = rb.value; atA = wantA; atB = wantB;
+    commits = new Map([...B, ...A]);
+    s = searchStep(depth, top, commits, tip, target);
+  }
+  switch (s.tag) {
+    case 'capped': {
+      let over = 0;
+      let id: Oid = tip;
+      for (let c = mapGet(A, id); c.tag === 'some' && c.value.parents.length === 1 && !B.has(id) && over <= maxRebaseCommits; over++) { id = getOrElse(at(c.value.parents, 0), id); c = mapGet(A, id); }
+      if (over > maxRebaseCommits) return err(limitError('rebase chain', over, maxRebaseCommits));
+      return err(limitError('merge-base search depth', capB * 2, maxMergeDepth));
+    }
+    case 'found': return ok({ base: s.base, bases: s.bases, depth: s.depth, commits, verdict: s });
+    case 'criss-cross':
+    case 'unrelated': return ok({ base: null, bases: s.bases, depth: s.depth, commits, verdict: s });
+  }
+  // Stryker disable next-line ConditionalExpression: unreachable, the compiler's exhaustiveness check
+  return assertNever(s);
 }
 
 export type ChainCommit = Commit & { readonly oid: Oid };
@@ -201,11 +252,7 @@ export async function rebaseBranch(url: string, spec: RebaseSpec, options: Rebas
     const target = targetAt.value;
     if (ontoOid.tag === 'some') { const c = await assertCommit(t, ontoOid.value, 'onto'); if (!c.ok) return c; }
     root.set({ 'git.rebase.tip': tip, 'git.rebase.target': target });
-    // maxRebaseCommits is the bound on a rebase's chain, so the base search must be able to see a chain that long:
-    // under maxMergeDepth alone the chain limit could never fire above it (the defaults: 1024 against 10 000) and a
-    // branch git rebases was refused whatever maxRebaseCommits said. The base of a chain of n commits is n + 1 commits
-    // from the tip; + 2 so a chain one over the limit is found and refused by its own name (linearChain).
-    const found = await mergeBaseOf(t, tip, target, { maxDepth: Math.max(limits.maxMergeDepth, limits.maxRebaseCommits + 2) });
+    const found = await rebaseBaseOf(t, tip, target);
     if (!found.ok) return found;
     const { bases, commits, verdict } = found.value;
     // several merge bases mean the branch contains a merge of its own (the commit joining the bases is not in onto),

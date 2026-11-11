@@ -303,3 +303,54 @@ test('squash message equals the one git rebase -i (pick, squash, squash) writes,
   const s = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer, squash: true }, T()));
   assert.equal(s.outcome, 'squash'); assert.equal(body(r.bare, 'feat'), gitMessage); assert.equal(treeOf(r.bare, 'feat'), gitTree);
 });
+
+// A linear branch of `n` commits above a one-commit base, and main moved one commit, by fast-import (commitOn costs
+// four git processes a commit). Each branch commit rewrites one file in a directory, so a replay reads the commit's
+// root tree and that directory's tree.
+const longBranch = (r, n) => {
+  const L = []; let at = 1_700_000_000;
+  const commit = (ref, mark, msg, from, path, body) => [`commit ${ref}`, `mark :${mark}`, `committer s <s@x> ${at++} +0000`, `data ${msg.length}`, msg, ...(from ? [`from :${from}`] : []), `M 100644 inline ${path}`, `data ${body.length}`, body];
+  L.push(...commit('refs/heads/main', 1, 'base', 0, 'a.txt', 'a'));
+  for (let i = 2; i <= n + 1; i++) L.push(...commit('refs/heads/feat', i, `f${i}`, i - 1, 'd/f.txt', `${i}`));
+  L.push(...commit('refs/heads/main', n + 2, 'moved', 1, 'e.txt', 'e'));
+  ok(sh(r.bare, ['fast-import', '--quiet'], `${L.join('\n')}\n`));
+};
+// the transport's requests, counted where they leave: every HTTP request of the operation
+const counting = () => { const c = { n: 0, fetchImpl: (u, i) => { c.n++; return fetch(u, i); } }; return c; };
+
+test('limits: a chain over maxRebaseCommits is refused as the rebase chain (max the limit, got one past it) however far over, at no more requests than the merge-base search cost before; maxMergeDepth still bounds the onto walk', async () => {
+  const { DEFAULT_LIMITS } = await import('../src/limits.js');
+  const r = repo(); longBranch(r, 30);
+  const tip = ok(sh(r.bare, ['rev-parse', 'feat']));
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..feat'])), '30'); // git: the chain is 30 commits
+  const run = async (limits) => { const c = counting(); const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: c.fetchImpl, limits: { ...DEFAULT_LIMITS, ...limits } })).then(() => null, x => x); return { code: e?.code, what: e?.what, got: e?.got, max: e?.max, requests: c.n }; };
+  // ten over the limit, the merge depth below, at and above it: the chain limit is the one named, and max is the
+  // caller's own number. Requests, by hand: ls-refs, the branch walk at 8, 16 and 22 (the limit + 2), and the onto
+  // walk once (main is two commits: whole at the first depth). Before: ls-refs + two walks at each of 8, 16, 22 = 7.
+  for (const maxMergeDepth of [16, 20, 1024]) assert.deepEqual(await run({ maxMergeDepth, maxRebaseCommits: 20 }), { code: 'limit_exceeded', what: 'rebase chain', got: 21, max: 20, requests: 5 }, `maxMergeDepth ${maxMergeDepth}`);
+  // maxMergeDepth 0 allows no merge-base search: refused after ls-refs alone, as mergeBranch is
+  assert.deepEqual(await run({ maxMergeDepth: 0, maxRebaseCommits: 40 }), { code: 'limit_exceeded', what: 'merge-base search depth', got: 1, max: 0, requests: 1 });
+  assert.equal(ok(sh(r.bare, ['rev-parse', 'feat'])), tip, 'a refused rebase leaves the branch');
+});
+
+test('limits: WORKER_LIMITS.maxRebaseCommits is a chain one Worker request can replay: at the limit the rebase equals git and takes at most 800 requests; one commit over is refused as the rebase chain', async () => {
+  const { WORKER_LIMITS } = await import('../src/limits.js');
+  const N = WORKER_LIMITS.maxRebaseCommits;
+  assert.ok(N <= 800, `WORKER_LIMITS.maxRebaseCommits is ${N}: a replay costs at least one request a commit`);
+  const r = repo(); longBranch(r, N + 1);
+  ok(sh(r.bare, ['update-ref', 'refs/heads/atlimit', 'feat~1']));
+  assert.equal(ok(sh(r.bare, ['rev-list', '--count', 'main..atlimit'])), String(N));
+  const over = counting();
+  const e = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/feat', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: over.fetchImpl, limits: WORKER_LIMITS })).then(() => null, x => x);
+  assert.deepEqual({ code: e?.code, what: e?.what, got: e?.got, max: e?.max }, { code: 'limit_exceeded', what: 'rebase chain', got: N + 1, max: N });
+  // 17: ls-refs + two walks at each of 8 depths (8 … 1024), what the search cost before the chain limit governed it
+  assert.ok(over.n <= 17, `refusing took ${over.n} requests`);
+  // git's answer for the chain at the limit
+  const d = clone(r.bare); ok(sh(d, ['checkout', '-q', 'atlimit'])); ok(sh(d, ['rebase', '-q', 'origin/main'])); const gitTree = treeOf(d, 'HEAD'); const gitCount = ok(sh(d, ['rev-list', '--count', 'origin/main..HEAD'])); rmSync(d, { recursive: true, force: true });
+  const at = counting();
+  const res = await unwrapAsync(rebaseBranch(r.url, { ref: 'refs/heads/atlimit', onto: 'refs/heads/main', committer }, { ...T(), fetchImpl: at.fetchImpl, limits: WORKER_LIMITS }));
+  assert.equal(res.outcome, 'rebase'); assert.equal(String(res.commits), gitCount); assert.equal(treeOf(r.bare, 'atlimit'), gitTree);
+  // a Worker request may make 1,000 subrequests (standard plan); 800 leaves the caller room for its own
+  assert.ok(at.n <= 800, `a ${N}-commit rebase took ${at.n} requests`);
+  console.log(`WORKER_LIMITS rebase: ${N} commits, ${at.n} requests; refusing ${N + 1}: ${over.n} requests`);
+}, 300_000);

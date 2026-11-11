@@ -61,8 +61,8 @@ export const LIMIT_INFLATED_TOTAL: number = LIMIT_OBJECT * LIMIT_INFLATED_OBJECT
  */
 export const LIMIT_PACK_OBJECTS = 100_000;
 /**
- * ls-refs lines, and the rebase chain walked from them. rebaseBranch searches for the merge base as deep as this
- * chain bound needs (max(maxMergeDepth, maxRebaseCommits + 2)), so it, not LIMIT_MERGE_DEPTH, bounds a rebase.
+ * ls-refs lines, and the rebase chain walked from them. rebaseBranch walks the branch as deep as this chain bound
+ * needs (maxRebaseCommits + 2) and `onto` to LIMIT_MERGE_DEPTH (rebaseBaseOf, src/rebase.ts): each walk has its limit.
  */
 export const LIMIT_REFS = 10_000;
 export const LIMIT_REBASE_COMMITS: number = LIMIT_REFS;
@@ -222,6 +222,10 @@ export const WORKER_LIMITS: CheckedLimits = grant({
   maxHarvestBytes: 8 * MIB,
   maxMergeBlobBytes: 2 * MIB,
   maxTreeEntries: 32_768,
+  // A rebase replays one commit at a time and reads each commit's changed trees one request each, and a Worker request
+  // may make 1,000 subrequests (standard plan). 256 commits, each changing a file one directory down, measured at or
+  // under 800 requests with a counting transport (test/rebase.test.js, the WORKER_LIMITS test).
+  maxRebaseCommits: 256,
 });
 /* oxlint-enable no-magic-numbers */
 

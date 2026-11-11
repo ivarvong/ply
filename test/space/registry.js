@@ -623,6 +623,7 @@ export const DECISIONS = [
   { match: "src/read.ts#flush:<rethrown or pack_corrupt>:<e>", excluded: 'unreachable: pump.catch aborts the inflater, so the verify transform flush never runs on a pump rejection; await pump there only observes a pump that has already resolved' },
   { match: "src/read.ts#flush:pack_corrupt:inflated … != declared …", space: 'streamed-body', axisTag: 'shape' },
   { match: "src/rebase.ts#linearChain:not_linear:… has … parents; only linear branches are rebased", space: 'merge', axisTag: 'case' },
+  { match: "src/rebase.ts#rebaseBaseOf:*", space: 'merge', axisTag: 'case' },
   { match: "src/rebase.ts#rebaseBranch:not_linear:… and … have … merge bases (criss-cross history); rebase…", space: 'merge', axisTag: 'case' },
   { match: "src/rebase.ts#rebaseBranch:merge_conflict:replaying … onto … conflicts: …", space: 'merge', axisTag: 'case' },
   { match: "src/rebase.ts#emptyPolicy:bad_request:empty must be 'stop' or 'keep'", space: 'merge', axisTag: 'case' },
