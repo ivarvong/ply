@@ -536,6 +536,9 @@ function finish(s: State): ResolvedIndex {
 // Resolve every entry of `pack` (scanPackIndex's index of the bytes `source` serves). See the top of this file.
 export async function resolvePackRange(pack: ScannedPack, source: RangeSource, input: Partial<ResolveRangeOpts> = {}): Promise<Result<ResolvedIndex, PlyError>> {
   const opts = withDefaults(input, defaultOpts());
+  // aborted before the call: nothing is asked of the storage. A pack of whole objects needs no read, so no later await
+  // would see the abort.
+  if (opts.signal.aborted) return err(stopped());
   const limits = parseLimits(opts.limits);
   if (!limits.ok) return limits;
   if (source.size !== pack.bytes) return fail('bad_request', `range source is ${source.size} bytes, the index read ${pack.bytes}`);

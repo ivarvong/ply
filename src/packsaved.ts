@@ -89,6 +89,8 @@ async function readAll(stream: ReadableStream<Uint8Array>, max: number, halt: Ha
 // The spool's identity: its length and its last 20 bytes, read through the source. `signal` aborts the read: the call
 // settles `aborted` at once even when the source never answers.
 export async function packIdentity(source: RangeSource, signal: AbortSignal = UNCANCELLABLE): Promise<Result<PackIdentity, PlyError>> {
+  // aborted before the call: nothing is asked of the storage, not even a range to cancel
+  if (signal.aborted) return err(aborted('pack identity'));
   if (!Number.isSafeInteger(source.size) || source.size < 32) return fail('bad_request', `saved index: a spool of ${source.size} bytes holds no pack`, { what: 'spool' });
   const halt = haltOn(signal);
   try {

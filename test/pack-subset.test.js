@@ -652,6 +652,39 @@ for (const [name, stalledRead, run] of ABORTABLE) {
   }
 }
 
+// A signal that aborted before the call: the operation is `aborted` and the storage is not asked for anything. The
+// expected values are the contract's, not ply's output: the error code `aborted` (errors.ts), and 0 on the test's own
+// counters (no read issued, so no range opened and none to cancel). One test for each entry point that takes a signal
+// and a source.
+const abortedBefore = () => { const ac = new AbortController(); ac.abort(new Error('before')); return ac.signal; };
+test('packIdentity: a signal aborted before the call is aborted before any storage read', async () => {
+  const source = countingSource(packs.ofs);
+  const op = packIdentity(source, abortedBefore());
+  assert.equal(await settledWithin(op), 'settled');
+  const r = await op;
+  assert.deepEqual({ code: r.ok ? 'ok' : r.error.code, ...source.state }, { code: 'aborted', reads: 0, cancelled: 0 });
+});
+test('resolvePackRange: a signal aborted before the call is aborted before any storage read, a pack of whole objects included', async () => {
+  // git's own pack of the same history with the delta search off: every object is stored whole, so resolving it needs
+  // no read at all and only a check at the entry can see the abort. verify-pack says which pack has deltas.
+  const whole = new Uint8Array(gitBuf(work, ['pack-objects', '--revs', '--stdout', '-q', '--window=0'], `${packs.head}\n`));
+  assert.equal(verifyPack(whole).filter(r => r.base !== null).length, 0, 'the whole-object pack has no delta');
+  assert.ok(verifyPack(packs.ofs).some(r => r.base !== null), 'the other pack has deltas');
+  const seen = {};
+  for (const [name, bytes] of [['deltas', packs.ofs], ['whole objects', whole]]) {
+    const idx = await scan(bytes);
+    const source = countingSource(bytes);
+    const op = resolvePackRange(idx, source, { signal: abortedBefore() });
+    assert.equal(await settledWithin(op), 'settled', name);
+    const r = await op;
+    seen[name] = { code: r.ok ? 'ok' : r.error.code, ...source.state };
+  }
+  assert.deepEqual(seen, {
+    deltas: { code: 'aborted', reads: 0, cancelled: 0 },
+    'whole objects': { code: 'aborted', reads: 0, cancelled: 0 },
+  });
+});
+
 test('scanPackIndex: an abort settles it while its stream, or its iterator, never yields; the source is asked to stop', async () => {
   // a ReadableStream that serves 100 bytes and then nothing
   const src = stallingSource(packs.ofs, { open: 'stall', serve: 100 });
